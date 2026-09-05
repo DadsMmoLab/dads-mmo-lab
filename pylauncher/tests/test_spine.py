@@ -2314,6 +2314,11 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "counts what a tool produced; a listing it cannot make is logged and counts as short, "
         "which re-runs the tool rather than skipping it"
     ),
+    ("catalog/families/extract.py", "doodad_placements"): (
+        "lists the `Buildings/` this app's own extractor just filled, to count how many of the "
+        "models the index places; its `except OSError` logs and answers None, which is 'no "
+        "check ran' and warns about nothing - nothing is written on the strength of it"
+    ),
     ("catalog/families/sqlplan.py", "_listing"): (
         "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "
         "directory) and every other OSError stops the install regardless of `on_error`"

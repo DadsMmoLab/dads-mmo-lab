@@ -1,11 +1,12 @@
-# doodad lane, second pass -- 2026-09-05, m910q
+# doodad lane, second and third pass -- 2026-09-05, m910q
 
-Raw captures behind three defects and one measurement. Nothing here is a summary;
+Raw captures behind four defects and two measurements. Nothing here is a summary;
 each file is what the box printed.
 
 | file | what it settles |
 |---|---|
 | `apply-check.txt` | `git apply --check` of the issue doc's fenced diff, before and after, against `mangos-classic 8ec338a1` and `mangos-tbc f82e7d67` -- the two commits the catalog pins and the doc names. The pre-lane fence exits 1 on both. |
+| `fence-eol-apply-check.txt` | The third pass: the same fence in both line endings against four checkouts (the two pinned revs and each clone's newest `origin/master`). CRLF -- what a Windows checkout held before the `.gitattributes` pin -- exits 1 on all four; LF exits 0 on all four. |
 | `insertion-only-presses.txt` | Three presses of an insertion-only hunk through `families/patch.py`, before and after the ordering fix. Before: three copies of the inserted line. |
 | `state-files-m910q.txt` | Every `.yulon-install.json` on the box, and what each install's `data/.yulon-extract.json` vouches for. None records `patch-sources`; three record `build`. |
 | `pre-lane-resume.txt` | A press on a state file in that shape, driven through `CmangosInstaller.run()`. Before: patched, then `skipping the compile`, then "installed and running". After: refused, nothing changed -- and the two neighbouring cases (images deleted, Docker silent) still patch. |

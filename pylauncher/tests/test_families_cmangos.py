@@ -2174,7 +2174,7 @@ def test_a_press_on_an_install_built_before_the_patch_refuses_and_says_what_to_p
         list(engine(rec)._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
     message = str(caught.value)
     assert cmangos.REBUILD_ACTION in message, message
-    assert "install it again" in message, message
+    assert "install again" in message, message
     assert "nothing was changed" in message.lower(), message
     assert {n: extractor_file(server_dir, n).read_bytes() for n in EXTRACTOR_FILES} == pre
 
@@ -2184,6 +2184,229 @@ def test_the_refusal_names_an_action_the_server_tab_actually_offers() -> None:
     from yulon.ui import controller_view
 
     assert cmangos.REBUILD_ACTION == controller_view.REMOVE_IDLE
+
+
+def finished_extraction(rec: Recorder, server_dir: Path, client: Path) -> Path:
+    """Run the extract and mmaps stages once, so `data/` carries the evidence and the files.
+
+    A finished install has more than a state file: `data/.yulon-extract.json`
+    vouching for four tools, and the folders they filled. Driving the two
+    stages is how this fixture gets an evidence file the module's own rules
+    call satisfied -- writing one by hand would be a fixture agreeing with
+    itself about `plan_hash`, the client facts and the argv digests, which are
+    exactly the four things the skip turns on.
+
+    Returns the evidence file, which is the thing the remedy tells a user to
+    delete.
+    """
+    list(engine(rec)._extract(context(server_dir, client)))
+    list(engine(rec)._mmaps(context(server_dir, client)))
+    evidence = server_dir / cmangos.DATA_DIR / extract.EVIDENCE_FILE
+    assert evidence.is_file()
+    return evidence
+
+
+def remedy_steps(message: str, server_dir: Path) -> tuple[tuple[str, ...], Path]:
+    """What a user following this refusal would type and delete -- read out of the sentence.
+
+    Parsed rather than restated, so a remedy that stops naming an image, stops
+    naming a file, or goes back to naming the install folder cannot be followed
+    by this test at all.
+    """
+    images = re.search(r"`docker image rm ([^`]+)`", message)
+    delete = re.search(r"and delete (\S+), then install", message)
+    assert images is not None and delete is not None, message
+    # The FOLDER, not a path inside it -- the remedy names a file under it, and
+    # `delete <server_dir>/data/...` is the sentence working as intended.
+    folder = re.escape(f"delete {server_dir}") + r"(?![/\\])"
+    for hit in re.finditer(folder, message):
+        assert message[: hit.start()].endswith("Do not "), (
+            "the remedy tells the user to delete the install folder, which is where "
+            f"the database password lives: {message}"
+        )
+    return tuple(images.group(1).split()), Path(delete.group(1))
+
+
+def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
+    tmp_path: Path,
+) -> None:
+    """Follow the sentence, verbatim, and land on a patched, rebuilt install with its characters.
+
+    The BLOCKER this replaced, re-derived on m910q 2026-09-05 before the
+    rewrite (`run()` driven twice around the old sentence, this same fixture):
+    press 1 refused with "use “Stop and remove containers…” on the Server tab,
+    delete .../srv, and install it again"; the containers went (no `-v` --
+    `docker.remove_staged()` keeps the volume by design) and so did the folder,
+    taking `.db_password` with it, since that file lives inside it; the volume
+    `yulon-wow-tbc-ffb3ef7e_db-data` was still there, and `install_id()`
+    hashes the ABSOLUTE path, so the reinstall came back to the same volume
+    name (ffb3ef7e before and after the `rmtree`); press 2 stopped at
+    `_db_password` -- "that database cannot be opened again: `docker volume rm
+    ...` deletes it, and every character in it". `_db_password`'s own docstring
+    had already refused to send anyone round that loop.
+
+    What is asserted here is the whole of the replacement: the two things the
+    sentence names are taken away, and the next press compiles, patches,
+    extracts again and finishes, with the password file byte-identical, the
+    volume untouched and the import left alone.
+    """
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    volume = f"{composegen.project_name(ENTRY.id, server_dir, platform_id=lambda: 'linux')}_db-data"
+    rec = Recorder(volumes={volume}, probe_answers=[IMPORTED], db_started=True)
+    old_install(rec, server_dir)
+    password = server_dir / ".db_password"
+    password.write_text("hunter2\n", encoding="utf-8")
+    evidence = finished_extraction(rec, server_dir, client)
+
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    images, doomed = remedy_steps(str(caught.value), server_dir)
+    ctx = context(server_dir, client, completed=OLD_TWELVE_STAGE_COMPLETED)
+    assert images == engine(rec).built_image_refs(ctx), str(caught.value)
+    assert doomed == evidence, str(caught.value)
+
+    # Exactly the remedy, and nothing else: the containers go, the images the
+    # sentence named go, the file it named goes. The folder stays.
+    rec.containers.clear()
+    rec.images = False
+    doomed.unlink()
+    rec.calls.clear()
+    rec.container_runs.clear()
+
+    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    assert "build" in rec.calls, said
+    assert [run.argv[0].rsplit("/", 1)[-1] for run in rec.container_runs] == [
+        "ad",
+        "vmap_extractor",
+        "vmap_assembler",
+        "MoveMapGen",
+    ], "the maps were not extracted again, so the fix is still not in the vmaps"
+    assert all(
+        extractor_file(server_dir, name).read_bytes()
+        == (VMAP_FIXTURE / "patched" / name).read_bytes()
+        for name in EXTRACTOR_FILES
+    )
+    assert said[-1].endswith(f"installed and running in {server_dir}"), said[-1]
+    assert password.read_text(encoding="utf-8") == "hunter2\n", "the password file was rewritten"
+    assert rec.volumes == {volume}, "the database volume was removed or replaced"
+    assert "They are already imported; leaving them alone." in said, said
+
+
+def test_the_refusal_says_why_the_install_folder_is_the_one_thing_not_to_delete(
+    tmp_path: Path,
+) -> None:
+    """The loop is named in the sentence, not left for the user to walk into.
+
+    `remedy_steps` refuses a message that tells anyone to delete the folder;
+    this asserts the other half -- that the reason is spelled out, with the
+    file and the volume named, so a user who was about to do it anyway knows
+    what it costs. The three facts it rests on were each read out of this tree
+    on 2026-09-05: `.db_password` is `install.password.file`, which is a path
+    under the server directory; `docker.remove_staged()` passes no `-v`; and
+    `composegen.install_id()` digests the absolute path, so the same folder
+    comes back to the same volume.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec)._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
+    message = str(caught.value)
+    plan = ENTRY.install.password
+    assert plan.file is not None and plan.file in message, message
+    assert f"Do not delete {server_dir}" in message, message
+    assert engine(rec)._db_volume(server_dir) in message, message
+    assert "Removing the containers keeps that volume" in message, message
+
+
+def test_a_fixed_password_entry_is_told_the_other_true_thing_about_deleting_the_folder(
+    tmp_path: Path,
+) -> None:
+    """No `.db_password` to lose, and still not a fresh start -- the volume comes back.
+
+    Unreachable from shipped data (every CMaNGOS entry carrying a patch has a
+    `generated` password), so it is driven here rather than left as a branch
+    nobody has read. The wording must not name a password file that does not
+    exist, which is the mistake the branch is there to avoid.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    fixed = entry_with_password(
+        PasswordPlan.model_construct(mode="fixed", value="password", file=None, prefix="")
+    )
+    with pytest.raises(InstallerError) as caught:
+        list(
+            engine_for(fixed, rec)._patch_sources(
+                context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+            )
+        )
+    message = str(caught.value)
+    assert ".db_password" not in message, message
+    assert "comes straight back to" in message, message
+    assert engine_for(fixed, rec)._db_volume(server_dir) in message, message
+
+
+def test_removing_only_the_image_rebuilds_but_leaves_the_old_maps_where_they_were(
+    tmp_path: Path,
+) -> None:
+    """Why the remedy names the evidence file as well as the image.
+
+    The control for the test above. Take away the image and nothing else, and
+    the press does compile the patched source -- and then skips the extraction,
+    because that skip is `data/.yulon-extract.json`'s to make and not the state
+    file's, so the maps the new binary would have written are not written and
+    the doodads are still missing. One press, two halves, and only the first
+    one is bought by `docker image rm`.
+    """
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    rec = Recorder(probe_answers=[IMPORTED], db_started=True)
+    old_install(rec, server_dir)
+    (server_dir / ".db_password").write_text("hunter2\n", encoding="utf-8")
+    finished_extraction(rec, server_dir, client)
+
+    rec.images = False
+    rec.calls.clear()
+    rec.container_runs.clear()
+    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    assert "build" in rec.calls, said
+    assert all(
+        extractor_file(server_dir, name).read_bytes()
+        == (VMAP_FIXTURE / "patched" / name).read_bytes()
+        for name in EXTRACTOR_FILES
+    )
+    assert [run.argv[0].rsplit("/", 1)[-1] for run in rec.container_runs] == []
+    assert sum("already extracted" in line for line in said) == 3, said
+
+
+def test_the_images_the_refusal_says_to_remove_are_the_ones_it_asked_the_daemon_about(
+    tmp_path: Path,
+) -> None:
+    """A `docker image rm` on a tag this install does not have is worse than no advice.
+
+    The message and the skip decision both come from
+    `built_image_refs()` -- the relationship, not the value, is what this
+    asserts: whatever the daemon was asked about is what the user is told to
+    remove. Two call sites each spelling `composegen.built_image_refs(...)`
+    would pass every value test and still be able to drift.
+    """
+    asked: list[tuple[str, ...]] = []
+
+    def images_built(refs: Sequence[str]) -> bool:
+        asked.append(tuple(refs))
+        return True
+
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    eng = engine(rec, images_built=images_built)
+    with pytest.raises(InstallerError) as caught:
+        list(eng._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
+    named, _ = remedy_steps(str(caught.value), server_dir)
+    assert asked == [named], (asked, named)
+    assert named, "the refusal named no image at all"
 
 
 def test_the_whole_press_stops_at_patch_sources_and_never_reaches_the_build(

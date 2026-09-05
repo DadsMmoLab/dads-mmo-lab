@@ -405,12 +405,48 @@ class CmangosInstaller(StagedInstaller):
         patch up. And it runs before anything is written: the dry resolution
         touches no file, and this method is called before the first `apply()`.
 
+        **The remedy, and the one it replaced.** Until the review of
+        2026-09-05 this sentence ended "use “Stop and remove containers…” on
+        the Server tab, delete {server_dir}, and install it again", and that
+        sequence is a loop that ends in lost characters. Driven twice around
+        its own instructions on m910q that day (`CmangosInstaller.run()`, a
+        state file in the `~/tbc-7.4c` shape): press 1 refused; the remedy
+        removed the containers, which by `docker.remove_staged()`'s design
+        passes no `-v` and keeps the database volume, and deleted the folder --
+        taking `.db_password`, which lives inside it, with it; `install_id()`
+        is a digest of the ABSOLUTE path, so the reinstall came back to the
+        same volume name (ffb3ef7e before and after the `rmtree`) and press 2
+        stopped at `_db_password` with "that database cannot be opened again:
+        `docker volume rm ...` deletes it, and every character in it". That
+        method's own docstring had already refused to send anyone down this
+        road: "nothing in this app deletes a named volume, and sending the user
+        there would send them round a loop that ends at this same message".
+
+        What is named instead takes away exactly the two pieces of evidence
+        that make this press skip, and touches nothing else: the built IMAGE
+        (`built_image_refs()`, the same strings `built_images()` asked the
+        daemon about, so the command cannot name a tag this install does not
+        have) and `data/.yulon-extract.json`. Removing the image turns
+        `build_would_be_skipped()` False, so the compile runs and picks the
+        patch up; removing the evidence file is what makes the fix visible,
+        because `extract.run_plan()` skips a tool that has a record and
+        `run_mmaps()` reads its record out of that same file -- so one deletion
+        re-runs the extraction (`empty_out_dirs()` clears each `produces`
+        folder first) and the movement maps built from it. The install folder,
+        `.db_password` and the database volume are all left alone, and
+        `stage_import()` leaves an already-imported database alone, so the
+        characters survive.
+
+        The price is stated rather than hidden, and it is smaller than the
+        price the old sentence hid: hours of compiling and extracting, against
+        a reinstall that loses the world.
+
         **What it does not cover, said rather than implied.** A press that
-        DOES rebuild still skips the extraction, because that skip is
-        `data/.yulon-extract.json`'s to make and not the state file's -- a new
-        image with the fix, over vmaps written by the old one. That case is
-        audible rather than silent: `_extract()` runs `DoodadCheck` on every
-        press, and stale `Buildings/` is exactly what its warning is for.
+        DOES rebuild -- because the user removed the image and not the
+        evidence, or because Docker would not answer -- still skips the
+        extraction. That case is audible rather than silent: `_extract()` runs
+        `DoodadCheck` on every press, and stale `Buildings/` is exactly what
+        its warning is for.
         """
         if not self.build_would_be_skipped(ctx):
             return
@@ -425,6 +461,8 @@ class CmangosInstaller(StagedInstaller):
         if not stale:
             return
         named = ", ".join(spec.file for spec in stale)
+        images = " ".join(self.built_image_refs(ctx))
+        evidence = ctx.server_dir / DATA_DIR / extract.EVIDENCE_FILE
         raise InstallerError(
             f"{self.entry.name} in {ctx.server_dir} was built before this app carried "
             f"{named}, and this press would skip the compile: the build is recorded and its "
@@ -432,8 +470,47 @@ class CmangosInstaller(StagedInstaller):
             "a fix that the built server does not have and cannot get, because the extractor "
             "runs from the image and the maps it already wrote would not be rebuilt either. "
             "Nothing was changed, and the server you have goes on working exactly as it did. "
-            f"To get the fix, use “{REBUILD_ACTION}” on the Server tab, delete "
-            f"{ctx.server_dir}, and install it again."
+            f"To get the fix, keep this folder and take away the two things this press would "
+            f"skip: use “{REBUILD_ACTION}” on the Server tab, then `docker image rm {images}` "
+            f"and delete {evidence}, then install again into the same folder with the same "
+            "client. That recompiles the server and extracts the maps a second time, which "
+            "takes hours, and it leaves the install folder, its database and the characters in "
+            f"it alone. {self._why_not_to_delete_the_folder(ctx)}"
+        )
+
+    def _why_not_to_delete_the_folder(self, ctx: StageContext) -> str:
+        """Why "delete it and install again" is the one repair not to reach for here.
+
+        Split out because it is an argument about THIS install's database and
+        not about patches: the same loop is waiting for any advice that treats
+        the server directory as disposable while the volume beside it is not.
+
+        Two wordings, because the trap has two sizes. A `generated` password is
+        a secret that exists in exactly one place -- a file inside the folder --
+        and deleting the folder makes the volume unopenable; a `fixed` one is in
+        the catalog, so the same deletion merely fails to give the fresh start
+        it looks like, because `install_id()` hashes the path and the reinstall
+        lands back on the same volume. Neither branch names a file that is not
+        there. Every CMaNGOS entry that ships a patch today is `generated`
+        (`wow-tbc`, `wow-vanilla`, both `.db_password`); `wow-tortoise` is the
+        one with no patches at all, so the refusal above cannot reach it, and
+        the second wording is unreachable from shipped data.
+        """
+        plan = self.entry.install.password
+        if plan.mode != "generated" or plan.file is None:
+            return (
+                f"Do not delete {ctx.server_dir} looking for a fresh start either: this "
+                f"install's database is in the Docker volume {self._db_volume(ctx.server_dir)}, "
+                "which removing the containers keeps and which a fresh install into the same "
+                "folder comes straight back to."
+            )
+        volume = self._db_volume(ctx.server_dir)
+        return (
+            f"Do not delete {ctx.server_dir} instead: {plan.file} is inside it and is the only "
+            f"copy of the password this install's database volume {volume} was created with. "
+            "Removing the containers keeps that volume, so a fresh install into the same folder "
+            "would stop for a lost password, and the only way past that stop deletes the volume "
+            "and every character in it."
         )
 
     def _db_password(self, ctx: StageContext) -> Iterator[str]:

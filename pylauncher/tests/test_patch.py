@@ -241,11 +241,22 @@ def test_a_hunk_with_more_lines_than_its_header_says_is_refused_not_truncated(
 # -- the copy that leaves this repository ------------------------------------
 
 
-def fenced_diff(doc: str) -> str:
-    """The one ```diff block in the issue text; more than one and this test is wrong."""
-    fences = re.findall(r"^```diff\n(.*?)^```", doc, re.S | re.M)
+def fenced_bytes(doc: bytes) -> bytes:
+    """The one ```diff block in the issue text, in the bytes the file holds.
+
+    Bytes and not text since 2026-09-05: `read_text()` translates line endings
+    on the way in, so a fence compared that way is line-for-line and the
+    difference between a patch that applies and one that does not is exactly a
+    line ending. See `test_the_issue_doc_is_pinned_to_lf...` below.
+    """
+    fences = re.findall(rb"^```diff\r?\n(.*?)^```", doc, re.S | re.M)
     assert len(fences) == 1, f"{len(fences)} diff fences in {ISSUE_DOC.name}"
     return fences[0]
+
+
+def fenced_diff(doc: str) -> str:
+    """The fence as text, for the callers that compare structure rather than bytes."""
+    return fenced_bytes(doc.encode("utf-8")).decode("utf-8")
 
 
 def test_the_issue_docs_fenced_diff_is_the_shipped_patch_byte_for_byte() -> None:
@@ -264,10 +275,53 @@ def test_the_issue_docs_fenced_diff_is_the_shipped_patch_byte_for_byte() -> None
 
     Equality, not "applies too": the fence is what a stranger copies out, and
     two diffs that both apply can still differ in a comment or an index line.
+
+    BYTES since the review of 2026-09-05, which is when this assertion started
+    being about the thing in its own name. Read through `read_text()` both
+    sides went through Python's universal-newline translation, and the fence on
+    a Windows checkout was 4,017 CRLF bytes against the patch's 3,943 LF ones
+    -- equal to this test and refused by `git apply`.
     """
-    doc = ISSUE_DOC.read_text(encoding="utf-8")
-    assert SHIPPED_REL in doc, "the doc no longer names the file it claims to quote"
-    assert fenced_diff(doc) == text()
+    doc = ISSUE_DOC.read_bytes()
+    assert SHIPPED_REL.encode() in doc, "the doc no longer names the file it claims to quote"
+    assert fenced_bytes(doc) == SHIPPED.read_bytes()
+
+
+def test_the_issue_doc_is_pinned_to_lf_so_the_fence_is_a_patch_and_not_a_near_miss() -> None:
+    """A CRLF fence is refused by `git apply` on every tree this patch was measured against.
+
+    Measured on m910q 2026-09-05, the same fence extracted from this file in
+    both line endings, `git apply --check` in four checkouts -- the two revs
+    `catalog.json` pins (`mangos-classic` 8ec338a1, `mangos-tbc` f82e7d67) and
+    both trees' current `origin/master` (9b682be6, 46d9a78d):
+
+        LF    exit 0, all four
+        CRLF  exit 1, all four, `error: patch failed:
+              contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24`
+
+    The committed blob has always been LF, so what GitHub serves has always
+    applied. The CRLF copy is the one a Windows checkout under
+    `core.autocrlf=true` puts in front of the owner -- who is the person who
+    posts it, from that machine -- and until the `.gitattributes` pin below,
+    that is what this file was on his disk (13,780 bytes, 246 CRLF; 13,534 and
+    none after).
+
+    Two assertions, because either alone is a story: the pin is DECLARED in
+    `.gitattributes`, and the working copy this test is reading has actually
+    arrived LF. A declaration nobody checked out is not a line ending.
+    """
+    attributes = (ISSUE_DOC.parents[1] / ".gitattributes").read_text(encoding="utf-8")
+    rel = ISSUE_DOC.relative_to(ISSUE_DOC.parents[1]).as_posix()
+    pins = [
+        line
+        for line in attributes.splitlines()
+        if line.split("#", 1)[0].strip().startswith(rel) and "eol=lf" in line
+    ]
+    assert len(pins) == 1, f"{rel} is pinned to LF {len(pins)} times in .gitattributes, not once"
+    assert b"\r" not in ISSUE_DOC.read_bytes(), (
+        "the checkout of the issue doc carries CR bytes, so the fence copied out of it is a "
+        "patch `git apply` refuses"
+    )
 
 
 def test_the_fenced_diff_parses_into_the_same_hunks_the_shipped_file_does() -> None:
@@ -319,6 +373,94 @@ def test_an_insertion_only_hunk_applies_once_however_often_it_is_pressed(
         results = patch.apply(body, tmp_path, name="p")
         assert [(r.applied, r.present) for r in results] == [(0, 1)], press
         assert target.read_text() == once, press
+
+
+def test_a_tail_insertion_already_applied_at_an_offset_is_still_only_applied_once(
+    tmp_path: Path,
+) -> None:
+    """The shape that needs the second `removals == 0` branch, and nothing else does.
+
+    An insertion at the edge of its own context leaves that context contiguous,
+    and a file with a line added above it puts the applied copy OFF the hinted
+    line -- so neither "post-image at the hint" nor the pre-image check at the
+    hint sees it, and the fall-through would find the pre-image and write a
+    second copy.
+
+    Measured on m910q 2026-09-05: with the offset branch removed (`if False:`)
+    this file goes to `X/int a;/int b;/int c;/int d;/int d;` on press 2 while
+    every other test in this file and in `test_families_cmangos.py` stays
+    green. None of the five hunks the shipped patch carries has this shape --
+    four are already-applied AT the hint and the fifth inserts into the MIDDLE
+    of its context, which breaks the pre-image up -- so without this test the
+    branch is unreachable from any fixture the repository has.
+    """
+    target = tmp_path / "x.c"
+    target.write_text("X\nint a;\nint b;\nint c;\n")
+    assert [(r.applied, r.present) for r in patch.apply(INSERT_AT_TAIL, tmp_path, name="p")] == [
+        (1, 0)
+    ]
+    assert target.read_text() == "X\nint a;\nint b;\nint c;\nint d;\n"
+    for press in (2, 3):
+        results = patch.apply(INSERT_AT_TAIL, tmp_path, name="p")
+        assert [(r.applied, r.present) for r in results] == [(0, 1)], press
+        assert target.read_text() == "X\nint a;\nint b;\nint c;\nint d;\n", press
+
+
+def test_an_insertion_is_applied_at_the_hinted_line_even_when_the_fix_is_already_lower_down(
+    tmp_path: Path,
+) -> None:
+    """The order fix's own defect, found by the review of 2026-09-05 and measured here.
+
+    The first version of the `removals == 0` branch asked `_find` for the
+    post-image, and `_find` searches the WHOLE file once the hint misses. So a
+    file carrying the fix ANYWHERE answered "already carries" for a hunk whose
+    named site was still unpatched: nothing was written, `applied` stayed 0,
+    and `_patch_sources()` printed `<file> already carries the fix in <patch>;
+    leaving it.`
+
+    Driven on m910q 2026-09-05 against `git show HEAD:...patch.py` and the
+    fixed module, same hunk and same input
+    (`'int a;/int b;/int c;/ZZZ/int a;/int b;/int c;/int d;'`, hint line 1):
+
+        before  -> [(0, 1)], file unchanged
+        after   -> [(1, 0)], `int d;` inserted after the FIRST `int c;`
+
+    It also voided two guarantees the module states in its own words -- `_find`'s
+    "the hinted position is tried first and wins outright", and the module
+    docstring's "a pre-image that matches in two places is ambiguous and
+    refuses" -- for exactly the hunk class the shipped patch is made of. Not
+    reachable by today's cargo (no duplicated six-line context in those four
+    files); the next patch is what would have paid.
+    """
+    target = tmp_path / "x.c"
+    target.write_text("int a;\nint b;\nint c;\nZZZ\nint a;\nint b;\nint c;\nint d;\n")
+    results = patch.apply(INSERT_AT_TAIL, tmp_path, name="p")
+    assert [(r.applied, r.present) for r in results] == [(1, 0)]
+    assert (
+        target.read_text()
+        == "int a;\nint b;\nint c;\nint d;\nZZZ\nint a;\nint b;\nint c;\nint d;\n"
+    )
+    # and the second press is still a no-op: the hinted site now carries it.
+    assert [(r.applied, r.present) for r in patch.apply(INSERT_AT_TAIL, tmp_path, name="p")] == [
+        (0, 1)
+    ]
+
+
+def test_a_site_that_already_carries_the_fix_at_the_hinted_line_is_present_not_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """The other half of the same ordering: the hint is patched, a raw copy sits below.
+
+    Without this the fix for the test above could be "ask the pre-image first
+    at the hint", which brings the doubling straight back for a file whose
+    hinted site is done and whose context repeats.
+    """
+    target = tmp_path / "x.c"
+    target.write_text("int a;\nint b;\nint c;\nint d;\nSEP\nint a;\nint b;\nint c;\n")
+    before = target.read_text()
+    results = patch.apply(INSERT_AT_TAIL, tmp_path, name="p")
+    assert [(r.applied, r.present) for r in results] == [(0, 1)]
+    assert target.read_text() == before
 
 
 def test_every_hunk_the_shipped_patch_carries_inserts_and_removes_nothing() -> None:

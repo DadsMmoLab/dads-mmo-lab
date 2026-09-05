@@ -1,0 +1,66 @@
+# fence line endings vs git apply --check -- m910q, 2026-09-05T12:36:50Z (UTC)
+# fence extracted from pyplan/upstream-cmangos-doodad-issue.md with the regex test_patch.fenced_bytes uses
+#   fence_raw = the Windows working copy as it was before the .gitattributes pin (CRLF)
+#   fence_lf  = the same bytes with CRLF -> LF
+#   fence_now = re-extracted from the pinned working copy after the fix
+
+f24324b00a64eefcd9a5dd362ab75e86  /tmp/fence_lf.patch
+04711a63ac97906d231f5ac3904f2afe  /tmp/fence_raw.patch
+f24324b00a64eefcd9a5dd362ab75e86  /tmp/fence_now.patch
+f24324b00a64eefcd9a5dd362ab75e86  /home/pk/yulon-runs/fix-doodad/pylauncher/catalog/installers/shared/cmangos/patches/vmap-extractor-doodad-name-case.patch
+/tmp/fence_lf.patch: 3943 bytes, 0 CRLF lines
+/tmp/fence_raw.patch: 4017 bytes, 74 CRLF lines
+/tmp/fence_now.patch: 3943 bytes, 0 CRLF lines
+
+--- https://github.com/cmangos/mangos-classic.git @ 8ec338a1704e7dcb1c0213eb7ed58f9231ade40f  (0 local changes)
+    $ git apply --check fence_raw.patch   -> exit 1
+        error: patch failed: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24
+        error: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/model.cpp:257
+        error: contrib/vmap_extractor/vmapextract/model.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.cpp:72
+        error: contrib/vmap_extractor/vmapextract/vmapexport.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.h:42
+        error: contrib/vmap_extractor/vmapextract/vmapexport.h: patch does not apply
+    $ git apply --check fence_lf.patch   -> exit 0
+--- https://github.com/cmangos/mangos-tbc.git @ f82e7d679c283b66bc2adc1b751aa1275e655673  (0 local changes)
+    $ git apply --check fence_raw.patch   -> exit 1
+        error: patch failed: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24
+        error: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/model.cpp:257
+        error: contrib/vmap_extractor/vmapextract/model.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.cpp:72
+        error: contrib/vmap_extractor/vmapextract/vmapexport.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.h:42
+        error: contrib/vmap_extractor/vmapextract/vmapexport.h: patch does not apply
+    $ git apply --check fence_lf.patch   -> exit 0
+--- https://github.com/cmangos/mangos-classic.git @ 9b682be617ac61c127c23aa60d7b4ffbc0ce37e6  (0 local changes)
+    $ git apply --check fence_raw.patch   -> exit 1
+        error: patch failed: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24
+        error: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/model.cpp:257
+        error: contrib/vmap_extractor/vmapextract/model.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.cpp:72
+        error: contrib/vmap_extractor/vmapextract/vmapexport.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.h:42
+        error: contrib/vmap_extractor/vmapextract/vmapexport.h: patch does not apply
+    $ git apply --check fence_lf.patch   -> exit 0
+--- https://github.com/cmangos/mangos-tbc.git @ 46d9a78d7e1b3249cf19955bb530c515bd8d2d3a  (0 local changes)
+    $ git apply --check fence_raw.patch   -> exit 1
+        error: patch failed: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24
+        error: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/model.cpp:257
+        error: contrib/vmap_extractor/vmapextract/model.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.cpp:72
+        error: contrib/vmap_extractor/vmapextract/vmapexport.cpp: patch does not apply
+        error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.h:42
+        error: contrib/vmap_extractor/vmapextract/vmapexport.h: patch does not apply
+    $ git apply --check fence_lf.patch   -> exit 0
+
+# what the two master refs above are, stated rather than implied:
+#   mangos-classic origin/master = 9b682be617ac61c127c23aa60d7b4ffbc0ce37e6, committed 2026-08-19T22:33:34+02:00
+#     FETCH_HEAD last written none; no fetch was run for this capture,
+#     so this is the newest master THIS CLONE holds, not proof of what upstream tip is today.
+#   mangos-tbc origin/master = 46d9a78d7e1b3249cf19955bb530c515bd8d2d3a, committed 2026-08-26T17:04:39+02:00
+#     FETCH_HEAD last written none; no fetch was run for this capture,
+#     so this is the newest master THIS CLONE holds, not proof of what upstream tip is today.

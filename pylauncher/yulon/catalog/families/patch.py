@@ -39,6 +39,16 @@ the head or the tail of its own block applies again on every press. Measured
 three copies of `int d;`. Every hunk of the patch this module ships removes
 nothing, so this is the ordinary path here rather than a corner of it.
 
+"First" is AT THE HINTED LINE, and the distinction is not pedantry -- it was a
+defect for six hours the same day. Asked of the whole file, a post-image that
+occurs anywhere beats a pre-image sitting exactly where the patch said, and the
+site the patch named is reported as already carrying the fix and never touched
+(measured: `int a;/int b;/int c;/ZZZ/int a;/int b;/int c;/int d;` came back
+`(0, 1)` and unchanged). The whole-file question is still asked, and still
+answers "present" -- but only after the hinted line has been ruled out as an
+unpatched site, which is what keeps an already-applied hunk at an OFFSET (a
+second hunk in a file whose first one inserted lines above it) from doubling.
+
 What "found once" costs: a pre-image that matches in two places is ambiguous
 and refuses, even though `patch(1)` would take the first. The hunks this ships
 carry six lines of context and there is no second `fixedName =
@@ -237,7 +247,8 @@ def apply(text: str, root: Path, *, name: str, dry_run: bool = False) -> tuple[F
         lines = [ln[:-1] if ln.endswith("\r") else ln for ln in lines]
         applied = present = 0
         for hunk in file_hunks:
-            if hunk.removals == 0 and _find(lines, hunk.after, hint=hunk.start - 1) is not None:
+            at_hint = hunk.start - 1
+            if hunk.removals == 0 and _at(lines, hunk.after, at_hint):
                 # ORDER, and it is the whole of this branch. A hunk with no `-`
                 # lines has a pre-image made only of context, and applying it
                 # does not disturb that context -- so when the insertion sits at
@@ -262,16 +273,47 @@ def apply(text: str, root: Path, *, name: str, dry_run: bool = False) -> tuple[F
                 # the MIDDLE of its context, which is a fact about where
                 # upstream put its blank lines and not a property anyone chose.
                 #
+                # AT THE HINT, not anywhere, since the review of 2026-09-05.
+                # The first version of this branch asked `_find`, which searches
+                # the WHOLE file after the hint misses -- so a post-image that
+                # happened to occur elsewhere beat a pre-image sitting exactly
+                # where the patch said, and the site the patch named was
+                # reported as "already carries the fix" and never touched.
+                # Measured that day with this module, `@@ -1,3 +1,4 @@` /
+                # ` int a; int b; int c; +int d;`:
+                #   'int a;/int b;/int c;/int d;/SEP/int a;/int b;/int c;'
+                #     -> (0, 1), file unchanged; the unpatched half stayed
+                #        unpatched and nothing said so.
+                # It voided `_find`'s own guarantee -- "the hinted position is
+                # tried first and wins outright" -- for exactly the hunk class
+                # this module ships. The whole-file question is still asked, two
+                # branches down, where it belongs: after the pre-image has been
+                # looked for and not found.
+                present += 1
+                continue
+            if (
+                hunk.removals == 0
+                and not _at(lines, hunk.before, at_hint)
+                and _find(lines, hunk.after, hint=at_hint) is not None
+            ):
+                # Already applied at an OFFSET: an earlier hunk of the same file
+                # inserted lines above this one, so the post-image is no longer
+                # at `start - 1` (which `parse()` takes from the `-` side of the
+                # header and never adjusts). The pre-image is intact and
+                # findable here too -- that is the doubling case again -- so the
+                # post-image has to win, and it may only win once the hinted
+                # line has been ruled out as an unpatched site.
+                #
                 # A post-image found more than once (`_find` -> -1) counts as
-                # present here, exactly as it does in the branch below: if the
-                # lines this hunk would write are already somewhere in the file,
+                # present, exactly as it does in the branch below: if the lines
+                # this hunk would write are already somewhere in the file,
                 # writing another copy is the one outcome that is certainly
                 # wrong.
                 present += 1
                 continue
-            where = _find(lines, hunk.before, hint=hunk.start - 1)
+            where = _find(lines, hunk.before, hint=at_hint)
             if where is None:
-                if _find(lines, hunk.after, hint=hunk.start - 1) is not None:
+                if _find(lines, hunk.after, hint=at_hint) is not None:
                     present += 1
                     continue
                 raise PatchError(
@@ -312,6 +354,19 @@ def _inside(root: Path, rel: str, name: str) -> Path:
     if posix.is_absolute() or ".." in posix.parts or "\\" in rel:
         raise PatchError(f"{name} names {rel!r}, which is not a path inside the checkout")
     return root.joinpath(*posix.parts)
+
+
+def _at(lines: list[str], block: tuple[str, ...], index: int) -> bool:
+    """Is `block` exactly at `index`? The hinted position asked ALONE, with no fallback.
+
+    `_find` answers "here, or anywhere else it is", which is the right question
+    for a pre-image that may have moved and the wrong one for "is this site
+    already patched?" -- the difference the review of 2026-09-05 measured, where
+    a post-image found elsewhere in the file beat a pre-image sitting exactly at
+    the hinted line.
+    """
+    n = len(block)
+    return bool(n) and 0 <= index <= len(lines) - n and lines[index : index + n] == list(block)
 
 
 def _find(lines: list[str], block: tuple[str, ...], *, hint: int) -> int | None:

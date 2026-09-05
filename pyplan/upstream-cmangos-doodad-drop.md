@@ -503,7 +503,8 @@ applied" is an answer and not a prompt, the outcome is the same on every platfor
 names the file and the line and writes nothing (every hunk of every file is resolved before the
 first byte is written). Tolerant in two ways only: a hunk found at an offset from its stated
 line applies; a hunk whose post-image is already present is skipped — and for a hunk that
-removes nothing, the post-image is the question asked FIRST (defect 2 below). The record in the state
+removes nothing, the post-image is the question asked FIRST, at its hinted line (defect 2
+below, and §12). The record in the state
 file is NOT what skips it — a deleted checkout is re-cloned on disk evidence while the record
 survives — so the body reads the files on every press. The catalog names the patch per entry
 (`CmangosData.patches`, `SourcePatch{file, source, reason}`), and `CatalogEntry` refuses a
@@ -529,14 +530,15 @@ applying.
    commits the issue itself names, while the shipped file exits 0 on both (`apply-check.txt`).
    A maintainer's first act on an issue is to apply the patch. The fence is now the shipped
    bytes and `test_the_issue_docs_fenced_diff_is_the_shipped_patch_byte_for_byte` holds them
-   equal.
+   equal — through `read_text()`, which was the half of this that survived; see §12.
 
 2. *An insertion-only hunk re-applied on every press.* `patch.apply()` asked "is the pre-image
    here?" first, and a hunk with no `-` lines has a pre-image of pure context that survives its
    own application — so an insertion at the head or the tail of that context applied again, and
    again (`insertion-only-presses.txt`: three presses, three copies of the inserted line). Every
    hunk this patch ships removes nothing; they escaped only because each `+` block happens to
-   land mid-context. For a hunk with no removals the post-image is now asked about first.
+   land mid-context. For a hunk with no removals the post-image is now asked about first — of
+   the hinted line, which took a third pass to get right (§12).
 
 3. *A resume of a pre-lane install patched a source nobody rebuilds.* Every CMaNGOS state file
    on `m910q` records twelve stages and not `patch-sources` (`state-files-m910q.txt`), so the
@@ -549,14 +551,88 @@ applying.
    refusal rather than an invalidation, because invalidating the recorded build and extraction
    turns a resume into an unasked-for multi-hour recompile that rewrites `data/` under a running
    server, while refusing changes nothing on disk and leaves Start, Stop and Repair working. The
-   price, stated: the install button stops working for that folder until the user removes the
-   install and installs it again, which the sentence tells them to do.
+   price, stated: the install button stops working for that folder until the user acts on the
+   sentence. What that sentence SAID was wrong, and is §12.
+
+## 12. The third pass (2026-09-05, same lane): the remedy, the line endings, and the hint
+
+A second review read the round above and sent it back. Two of its findings are the two halves of
+one habit — a fix that is right, wearing a sentence nobody followed — and both were re-derived
+here before anything was changed.
+
+**BLOCKER: the refusal's remedy dead-ended at the database.** Defect 3's sentence ended "use
+“Stop and remove containers…” on the Server tab, delete {server_dir}, and install it again".
+Followed verbatim, on `m910q` 2026-09-05, driving `CmangosInstaller.run()` twice around it
+against a state file in the real `~/tbc-7.4c` shape: press 1 refused; removing the containers
+kept the database volume (`docker.remove_staged()` passes no `-v`, and its own armed warning says
+so); deleting the folder took `.db_password` with it, because that file lives inside it;
+`composegen.install_id()` is a digest of the ABSOLUTE path, so the reinstall came back to the
+same volume name (`ffb3ef7e` before and after the `rmtree`); and press 2 stopped at
+`_db_password` — "*that database cannot be opened again: `docker volume rm …` deletes it, and
+every character in it*". `_db_password`'s own docstring had refused to send anyone down that
+road four days earlier, for exactly this reason.
+
+**The remedy now names the two things this press would skip, and keeps everything else.** Stop
+and remove the containers, `docker image rm <this install's image>`, delete
+`<server_dir>/data/.yulon-extract.json`, install again. Removing the image turns
+`build_would_be_skipped()` False so the compile runs; removing the evidence file is what makes
+the fix visible, since `extract.run_plan()` skips a tool that has a record and `run_mmaps()`
+reads its own record out of that same file — one deletion re-runs the extraction (each `produces`
+folder emptied first) and the movement maps built from it. Measured by FOLLOWING THE SENTENCE:
+the test parses the image reference and the file path out of the message, does those two things
+and nothing else, and presses again — the compile runs, the four extraction tools and MoveMapGen
+run, the checkout ends byte-identical to the patched fixture, the install finishes "installed and
+running", `.db_password` is unchanged, the volume set is unchanged, and the import stage says
+"They are already imported; leaving them alone." The control beside it removes ONLY the image:
+the compile runs, and the maps are skipped with three `already extracted` lines — which is why
+the sentence names both.
+
+**What this costs, and the recommendation the owner asked for.** The owner said "do what you
+recommend". The recommendation is the refusal as it now stands, and the argument is the price:
+the old sentence cost a world (a reinstall into the same folder cannot open the old volume, and
+the only way past it deletes every character), while the new one costs a recompile plus an
+extraction — hours on the box, nothing on disk that anyone made. It is also proportionate to
+where the refusal fires: stage 2 of 13, on a folder whose ONLY missing stage is `patch-sources`.
+The alternative the round above rejected (invalidate the record and rebuild automatically) is
+still rejected, and now for a second reason: the user pressing Install is not asking for four
+hours of compiling, and the remedy is the same work done deliberately. What is NOT offered is a
+way to keep the old maps and skip the patch: there is no override, and adding one is a design
+question this lane did not open.
+
+**The upstream draft's patch is refused by `git apply` — as a CRLF file, on every tree.** The
+second pass fixed the fence's CONTENT and asserted it through `read_text()`, which translates
+line endings; so the assertion went on holding while this repository's Windows checkout held the
+doc as 13,780 CRLF bytes against the patch's 3,943 LF ones. The fence extracted from that copy
+exits 1 on all four trees measured — `mangos-classic 8ec338a1`, `mangos-tbc f82e7d67`, and each
+clone's newest `origin/master` (`9b682be6`, `46d9a78d`) — with `error: patch failed:
+contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24`, while the LF form exits 0 on all
+four (`fence-eol-apply-check.txt`). The committed blob was always LF, so what GitHub serves has
+always applied; the copy in front of the person who posts it had not. The doc is now pinned
+`text eol=lf` in `.gitattributes` — the pin its neighbour `*.patch` has carried since the second
+pass, for the same reason spelled out beside it — the equality is asserted on BYTES, and a second
+test asserts both halves: that the pin is declared, and that the checkout it is reading actually
+arrived without a CR in it. Recommendation: the draft is postable now; nothing in this lane posts
+it.
+
+**And the order fix of defect 2 had a defect of its own, found the same day.** It asked `_find` for
+the post-image, and `_find` searches the whole file once the hint misses — so a post-image
+occurring anywhere beat a pre-image sitting exactly at the line the patch named, and that site
+was reported as "already carries the fix" and never touched (measured against
+`git show HEAD:…patch.py` and the fixed module: `int a;/int b;/int c;/ZZZ/int a;/int b;/int c;/
+int d;` → `(0, 1)` and unchanged, against `(1, 0)` and patched). It voided `_find`'s own written
+guarantee for exactly the hunk class this patch is made of. The question is now asked AT THE
+HINT, with the whole-file question kept one branch lower, after the hinted line has been ruled
+out as an unpatched site — which is what keeps an already-applied insertion at an OFFSET from
+doubling. That second branch survived its first mutation (`if False:` left the suite green),
+because no shipped hunk and no fixture had the shape that needs it: four of the five are applied
+AT their hint and the fifth inserts mid-context, which breaks its own pre-image up. It has a test
+of its own now, and the mutation kills it.
 
 **The report** is `pyplan/upstream-cmangos-doodad-issue.md`, not posted.
 
 **Not done, said plainly.** No existing Linux install was retro-fitted (§10 cost 3), and after
 defect 3 above an existing install is not quietly half-retro-fitted either: it is refused, with
-the two-step remedy in the sentence. No gate
+a remedy in the sentence that keeps its database. No gate
 re-ran a whole Vanilla or TBC install through the new stage on a VM — the stage was proved on
 the pinned trees' bytes through the Python applier, and the extractor's behaviour was proved
 on `m910q` with the same patch through `git apply`; the two were shown to produce identical

@@ -2261,16 +2261,26 @@ class StagedInstaller:
                 "server refuses to start under SELinux, run `chcon -Rt container_file_t` on it."
             )
 
+    def built_image_refs(self, ctx: StageContext) -> tuple[str, ...]:
+        """The image references this install's build produces, fully qualified.
+
+        Split out of `built_images()` on 2026-09-05 so that a refusal telling a
+        user to REMOVE those images names the same strings the skip decision was
+        made of. Two callers each spelling `composegen.built_image_refs(...)`
+        would be two chances to name an image this install does not have, and a
+        `docker image rm` on the wrong tag either does nothing or removes
+        somebody else's build -- neither of which says which happened.
+        """
+        return composegen.built_image_refs(
+            self.entry, ctx.server_dir, platform_id=self._seams.platform_id
+        )
+
     def built_images(self, ctx: StageContext) -> bool | None:
         """Does the daemon hold every image this install's build produces?
 
         `None` is "the daemon would not say", which is not "no".
         """
-        return self._seams.images_built(
-            composegen.built_image_refs(
-                self.entry, ctx.server_dir, platform_id=self._seams.platform_id
-            )
-        )
+        return self._seams.images_built(self.built_image_refs(ctx))
 
     def build_would_be_skipped(self, ctx: StageContext) -> bool:
         """Will `stage_build` skip the compile on this press?
