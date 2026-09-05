@@ -1584,7 +1584,7 @@ entry's heading is the compose-service defect, not this): `test_no_bash_installe
 mutation-proven: rename the installers root and it passes while its two siblings in the same file
 fail. Inconsistent with the guard F.2 deliberately added two files over.
 
-### 27. One platform question, two answerers — the import-bound SELinux seams — 2026-09-01, OPEN in `native.Seams` only
+### 27. One platform question, two answerers — the import-bound SELinux seams — 2026-09-01, **CLOSED 2026-09-05**
 
 **Three of the four sites are fixed. `native.Seams` is not, and it is the one a real install reaches
 most.** The heading and the text below were rewritten on 2026-09-05 because what stood here was a
@@ -1629,7 +1629,26 @@ resolved inside the call, which is `extract.run_plan()`'s shape:
   proven one default at a time with `__pycache__` purged between (`selinux rebound -> 1 failed`,
   `fs_type rebound -> 1 failed`).
 
-**STILL OPEN — `native.Seams`, and here it is live rather than latent.** `Seams.selinux_enforcing`,
+**CLOSED 2026-09-05, the same day, once the lane that owned `native.py` had landed.**
+`Seams.selinux_enforcing` and `Seams.fs_type` now default to `None` and resolve against `platform`
+inside `Seams.ask_selinux()` / `ask_fs()` — the shape `docker.bind_mount_ok()`, `preflight.gather()`,
+`git.ContainerGit` and `extract.run_plan()` already had. The one call site (`native.py`'s
+`generate-compose` stage) reads through the resolvers, and `families/cmangos.py:505` now hands
+`extract.run_plan()` the resolver rather than the import-bound field, which had been defeating
+`run_plan`'s own correct default.
+
+The guard the two withdrawn identity asserts owed is paid:
+`test_one_patch_of_a_platform_probe_gets_one_answer_out_of_the_whole_install` patches both `platform`
+attributes, drives a bare `Seams()` AND `preflight.gather()`, and asserts each fake was CALLED and
+that one patch produced one answer. Proven RED against the import-bound shape rather than assumed:
+restoring `= platform.selinux_enforcing` on the field gives
+`AssertionError: Seams did not reach the patched probe / assert False is True` (m910q, 2026-09-05);
+restoring the resolver passes. Full gate on the combined tree that day: 2536 passed, 4 skipped, mypy
+clean on linux/win32/darwin, ruff and black clean.
+
+`Seams.relabel` stays import-bound, deliberately: nothing else in the app asks the host whether a
+folder was relabelled, so there is no second answerer and no split — the latent trap is recorded here
+rather than changed for no measured defect. What was open when this section was last written: `Seams.selinux_enforcing`,
 `Seams.fs_type` and `Seams.relabel` are still the `platform` functions bound at class-definition time,
 so the split this entry is named for now sits between `Seams` and the three modules above. Measured on
 m910q, 2026-09-05, with ONE `monkeypatch` of each attribute and the two consumers a single install

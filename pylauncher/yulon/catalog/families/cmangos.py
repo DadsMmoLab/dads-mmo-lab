@@ -502,7 +502,7 @@ class CmangosInstaller(StagedInstaller):
                 cancel=ctx.cancel,
                 required_file=data.client.required_file,
                 client_build=self.entry.client.build,
-                selinux_enforcing=self._seams.selinux_enforcing,
+                selinux_enforcing=self._seams.ask_selinux,
             ),
             cancel=ctx.cancel,
         )

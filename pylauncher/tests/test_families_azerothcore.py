@@ -214,6 +214,55 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     assert real.file_unmodified(Path("/nowhere-at-all"), "docker-compose.yml") is None
 
 
+def test_one_patch_of_a_platform_probe_gets_one_answer_out_of_the_whole_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The guard the two withdrawn identity asserts owed (bug-checklist §27).
+
+    Paid 2026-09-05, once `Seams.selinux_enforcing`/`fs_type` stopped being
+    bound at import. What the withdrawn asserts could not tell apart, measured
+    on m910q that day against the import-bound shape:
+
+        gather(...).selinux_enforcing  -> True        (the fake)
+        Seams().selinux_enforcing()    -> False       (the host)
+
+    One patch, two answers, inside one install. This drives both consumers a
+    real install reaches and asserts the fake was ASKED by each of them — the
+    thing an identity assert cannot say, since it passes on the broken shape
+    and fails on the fixed one.
+    """
+    asked: list[str] = []
+
+    def fake_selinux() -> bool | None:
+        asked.append("selinux")
+        return True
+
+    def fake_fs(path: Path) -> str | None:
+        asked.append(f"fs:{path}")
+        return "btrfs"
+
+    monkeypatch.setattr(platform, "selinux_enforcing", fake_selinux)
+    monkeypatch.setattr(platform, "filesystem_type", fake_fs)
+
+    seams = native.Seams()
+    facts = preflight.gather(
+        load_catalog().get("wow-wotlk"),
+        tmp_path,
+        platform_id=lambda: "linux",
+        docker_ready=lambda: True,
+    )
+
+    # Both consumers, one patch, one answer each.
+    assert seams.ask_selinux() is True, "Seams did not reach the patched probe"
+    assert seams.ask_fs(tmp_path) == "btrfs", "Seams did not reach the patched fs probe"
+    assert facts.selinux_enforcing is True, "preflight.gather did not reach the patched probe"
+    assert facts.server_fs_type == "btrfs", "preflight.gather did not reach the patched fs probe"
+    # and the fakes were CALLED by both, which is what the identity asserts
+    # could never establish.
+    assert asked.count("selinux") >= 2, f"only one caller asked about SELinux: {asked}"
+    assert any(a.startswith("fs:") for a in asked), f"nobody asked about the filesystem: {asked}"
+
+
 # -- the happy path ---------------------------------------------------------
 
 

@@ -632,8 +632,32 @@ class Seams:
     # relabels nothing, and looks exactly like a working one until the
     # worldserver cannot read the config it was just handed.
     relabel: Callable[[Path], bool] = platform.relabel_for_containers
-    selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing
-    fs_type: Callable[[Path], str | None] = platform.filesystem_type
+    selinux_enforcing: Callable[[], bool | None] | None = None
+    fs_type: Callable[[Path], str | None] | None = None
+    """The two platform questions this class is NOT the only answerer of.
+
+    `None` and a late lookup, rather than `= platform.selinux_enforcing` bound
+    at import, and the difference was measured rather than argued. Bound at
+    import, ONE `monkeypatch` of `platform.selinux_enforcing` and
+    `platform.filesystem_type` got two different answers out of a single
+    install (m910q, 2026-09-05): `preflight.gather(...)` returned the fake's
+    `True` and `btrfs` while `Seams().selinux_enforcing()` and
+    `Seams().fs_type()` returned the host's `False` and `ext2/ext3`, and the
+    fake counted one caller where two had asked. That is bug-checklist §27,
+    and this was its last live site: `docker.bind_mount_ok()`,
+    `preflight.gather()` and `git.ContainerGit` were moved to this same shape
+    on 2026-09-04/05, which is `extract.run_plan()`'s shape and always was.
+
+    Read through `ask_selinux()` / `ask_fs()` below, never directly: a caller
+    that reads the field gets `None` and a crash, which is the loud version of
+    the quiet bug this replaced.
+
+    Every other seam here stays import-bound on purpose. `relabel` is the
+    closest call and is deliberately left alone: nothing else in the app asks
+    the host whether a folder was relabelled, so there is no second answerer
+    and no split to fix -- only the same latent trap, recorded in §27 rather
+    than changed for no measured defect.
+    """
     keep_awake: Callable[[], AbstractContextManager[None]] = platform.keep_awake
     lan_ip: Callable[[], str | None] = platform.detect_lan_ip
     """This machine's LAN address, for the realm row the install ends by setting.
@@ -673,6 +697,23 @@ class Seams:
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
     volume_exists: Callable[[str], bool] = docker.volume_exists
+
+    def ask_selinux(self) -> bool | None:
+        """Is SELinux enforcing — through the seam if one was given, else the host.
+
+        The resolution happens HERE, on the call, which is what makes a
+        `monkeypatch` of `platform.selinux_enforcing` reach this class as well
+        as `preflight.gather()`. Reading `self.selinux_enforcing` directly gets
+        `None` and a TypeError; see the field's docstring for the measurement
+        that made that deliberate.
+        """
+        ask = self.selinux_enforcing
+        return (ask if ask is not None else platform.selinux_enforcing)()
+
+    def ask_fs(self, path: Path) -> str | None:
+        """The filesystem under `path`, through the seam if one was given, else the host."""
+        ask = self.fs_type
+        return (ask if ask is not None else platform.filesystem_type)(path)
 
 
 class StagedInstaller:
@@ -1572,7 +1613,7 @@ class StagedInstaller:
         # question went unanswered). Collapsing it here to a bool would make
         # the two indistinguishable everywhere downstream.
         label = platform.bind_label(
-            enforcing=self._seams.selinux_enforcing(), fs_type=self._seams.fs_type(ctx.server_dir)
+            enforcing=self._seams.ask_selinux(), fs_type=self._seams.ask_fs(ctx.server_dir)
         )
         # `render()` INSIDE a `try`, not beside one. It was called bare until
         # 2026-09-02, and `ComposeGenError` is not an `InstallerError` - both
