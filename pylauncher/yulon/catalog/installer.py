@@ -362,7 +362,10 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     and the 40-shape sweep
     `test_no_folder_shape_is_offered_adoption_and_deletion_at_once`, whose
     marked-override/no-record shape lands here. 2576 tests were collected;
-    nothing among the other 2574 reaches this branch.
+    nothing among the other 2574 reaches this branch. Run twice: once on the
+    content this paragraph was written against, and once on `e4fcc17e` — the
+    commit that carries it, minus this sentence — which is the checkout to
+    reproduce it from, and gave the same three numbers and the same two names.
 
     That paragraph said "the single entrant was the test written for it" and
     quoted `1 failed, 2562 passed, 9 skipped` until 2026-09-05 — a run taken
