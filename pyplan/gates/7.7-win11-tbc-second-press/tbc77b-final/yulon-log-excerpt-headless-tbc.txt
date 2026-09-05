@@ -1,0 +1,85 @@
+2026-09-05 05:11:46 INFO [__main__] install harness: game=wow-tbc server_dir=C:\gate\tbc-server client_dir=C:\gate\client\WoW-Client-2.4.3
+2026-09-05 05:11:46 INFO [__main__] Installing WoW TBC into C:\gate\tbc-server
+2026-09-05 05:11:46 INFO [__main__] You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage ƒ?" that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt ƒ?" the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+2026-09-05 05:11:46 INFO [__main__] Checking Docker.
+2026-09-05 05:12:14 INFO [__main__] [pass] Docker: the daemon answered
+2026-09-05 05:12:14 INFO [__main__] [pass] memory: Docker's VM has 11.7 GB
+2026-09-05 05:12:14 INFO [__main__] [pass] compiler jobs vs memory: 2 parallel jobs against about 5 the memory affords
+2026-09-05 05:12:14 INFO [__main__] [warn] free space on Docker's disk and the server folder: 42 GB free; 60 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+2026-09-05 05:12:14 INFO [__main__] [pass] the server folder: C:\gate\tbc-server looks usable
+2026-09-05 05:12:14 INFO [__main__] [pass] sharing the folder with Docker: a container can read C:\gate\tbc-server
+2026-09-05 05:12:14 INFO [__main__] [pass] SELinux: not a Linux host, so it does not apply
+2026-09-05 05:12:14 INFO [__main__] [pass] the server's ports: nothing else is using them
+2026-09-05 05:12:14 INFO [__main__] [pass] the client folder: C:\gate\client\WoW-Client-2.4.3 has a Data directory
+2026-09-05 05:12:14 INFO [__main__] [pass] the client's expansion data: Data/expansion.MPQ is there
+2026-09-05 05:12:14 INFO [__main__] [pass] the client's archives: 12 MPQ archives anywhere under C:\gate\client\WoW-Client-2.4.3\Data
+2026-09-05 05:12:14 INFO [__main__] [pass] the client's locale: locale archives in enGB
+2026-09-05 05:12:14 INFO [__main__] [pass] the client's origin: nothing suggests a repack
+2026-09-05 05:12:14 INFO [__main__] [pass] free space next to the client: 42 GB free on the drive holding the client
+2026-09-05 05:12:14 INFO [__main__] [pass] sharing the client with Docker: a container can read the client folder
+2026-09-05 05:12:16 INFO [__main__] Using C:\gate\tbc-server (resuming)
+2026-09-05 05:12:16 INFO [__main__] Already finished: clone-sources, write-dockerfile, generate-compose, build, extract, mmaps, conf, import
+2026-09-05 05:12:16 WARNING [yulon.catalog.native] not holding this machine awake: keep_awake() must run on the worker thread doing the install: Windows scopes the assertion to the thread that set it, so holding it on the GUI thread would claim a guarantee the install does not have.
+2026-09-05 05:12:16 INFO [__main__] This machine may go to sleep during the build; leave it awake, and leave the lid open on a laptop.
+2026-09-05 05:12:16 INFO [__main__] Step 1 of 12 (8%): clone-sources
+2026-09-05 05:12:16 INFO [__main__] --- clone-sources
+2026-09-05 05:12:16 INFO [yulon.git] containerized git: `run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only -v C:\gate\tbc-server\src\mangos-tbc:/git:ro -w /git alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 --no-optional-locks --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.attributesFile=/dev/null -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into C:\gate\tbc-server\src\mangos-tbc
+2026-09-05 05:12:18 INFO [__main__] cmangos/mangos-tbc is already in src/mangos-tbc; leaving it exactly as it is.
+2026-09-05 05:12:18 INFO [yulon.git] containerized git: `run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only -v C:\gate\tbc-server\src\mangos-tbc\src\modules\Bots:/git:ro -w /git alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 --no-optional-locks --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.attributesFile=/dev/null -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into C:\gate\tbc-server\src\mangos-tbc\src\modules\Bots
+2026-09-05 05:12:20 INFO [__main__] cmangos/playerbots is already in src/mangos-tbc/src/modules/Bots; leaving it exactly as it is.
+2026-09-05 05:12:20 INFO [yulon.git] containerized git: `run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only -v C:\gate\tbc-server\src\tbc-db:/git:ro -w /git alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 --no-optional-locks --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.attributesFile=/dev/null -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into C:\gate\tbc-server\src\tbc-db
+2026-09-05 05:12:22 INFO [__main__] cmangos/tbc-db is already in src/tbc-db; leaving it exactly as it is.
+2026-09-05 05:12:22 INFO [__main__] Sources are in place.
+2026-09-05 05:12:22 INFO [__main__] Step 2 of 12 (16%): db-password
+2026-09-05 05:12:22 INFO [__main__] --- db-password
+2026-09-05 05:12:22 INFO [__main__] The database password is already in .db_password; keeping it.
+2026-09-05 05:12:22 INFO [__main__] Step 3 of 12 (25%): write-dockerfile
+2026-09-05 05:12:22 INFO [__main__] --- write-dockerfile
+2026-09-05 05:12:22 INFO [__main__] Dockerfile is already exactly what this install needs.
+2026-09-05 05:12:22 INFO [__main__] .dockerignore is already exactly what this install needs.
+2026-09-05 05:12:22 INFO [__main__] Step 4 of 12 (33%): generate-compose
+2026-09-05 05:12:22 INFO [__main__] --- generate-compose
+2026-09-05 05:12:22 INFO [__main__] Wrote .env
+2026-09-05 05:12:22 INFO [__main__] Step 5 of 12 (41%): build
+2026-09-05 05:12:22 INFO [__main__] --- build
+2026-09-05 05:12:22 INFO [__main__] Stopping now leaves Docker finishing the build step it is already on, in the background. That is deliberate: the work it has done is kept, and starting this install again picks up from there instead of compiling it all a second time.
+2026-09-05 05:12:22 INFO [__main__] The server is already built; skipping the compile.
+2026-09-05 05:12:22 INFO [__main__] Step 6 of 12 (50%): extract
+2026-09-05 05:12:22 INFO [__main__] --- extract
+2026-09-05 05:12:22 INFO [__main__] Finished tools are kept; only the tool that was interrupted runs again.
+2026-09-05 05:12:22 INFO [__main__] Extracting server data from C:\gate\client\WoW-Client-2.4.3 into C:\gate\tbc-server\data (the client is read-only).
+2026-09-05 05:12:24 INFO [__main__] dbc and maps: already extracted (dbc: 185 files, maps: 3586 files)
+2026-09-05 05:12:27 INFO [__main__] vmap extract: already extracted (Buildings: 5431 files)
+2026-09-05 05:12:31 INFO [__main__] vmap assemble: already extracted (vmaps: 8607 files)
+2026-09-05 05:12:31 INFO [__main__] Extraction finished.
+2026-09-05 05:12:31 INFO [__main__] Step 7 of 12 (58%): mmaps
+2026-09-05 05:12:31 INFO [__main__] --- mmaps
+2026-09-05 05:12:31 INFO [__main__] Map generation restarts from the beginning; the extracted maps it reads are kept.
+2026-09-05 05:12:31 INFO [__main__] Generating movement maps (this can take an hour or more).
+2026-09-05 05:12:33 INFO [__main__] mmaps: already generated (mmaps: 2820 files)
+2026-09-05 05:12:33 INFO [__main__] Map generation finished.
+2026-09-05 05:12:33 INFO [__main__] Step 8 of 12 (66%): conf
+2026-09-05 05:12:33 INFO [__main__] --- conf
+2026-09-05 05:12:33 INFO [__main__] The configuration files already say what this install needs.
+2026-09-05 05:12:33 INFO [__main__] Step 9 of 12 (75%): start-db
+2026-09-05 05:12:33 INFO [__main__] --- start-db
+2026-09-05 05:12:33 INFO [__main__] Starting the database, which the import writes into.
+2026-09-05 05:12:33 INFO [yulon.docker] start_database(): starting tbc-db alone
+2026-09-05 05:12:46 INFO [__main__] The database is up.
+2026-09-05 05:12:46 INFO [__main__] Step 10 of 12 (83%): import
+2026-09-05 05:12:46 INFO [__main__] --- import
+2026-09-05 05:12:46 INFO [__main__] Databases left half-written are detected and cleared before the import is run again, so nothing here has to be undone by hand.
+2026-09-05 05:12:49 INFO [__main__] The databases read as imported: mangos.yulon_install records a finished import
+2026-09-05 05:12:49 INFO [__main__] They are already imported; leaving them alone.
+2026-09-05 05:12:49 INFO [__main__] Step 11 of 12 (91%): up
+2026-09-05 05:12:49 INFO [__main__] --- up
+2026-09-05 05:12:49 INFO [__main__] Starting the server.
+2026-09-05 05:12:49 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tbc-db tbc-realmd tbc-mangosd` in C:\gate\tbc-server
+2026-09-05 05:12:51 INFO [__main__] Step 12 of 12 (100%): ready
+2026-09-05 05:12:51 INFO [__main__] --- ready
+2026-09-05 05:12:51 INFO [__main__] Waiting for the database.
+2026-09-05 05:12:51 INFO [__main__] Waiting for the world server. A first boot loads the whole world and can take many minutes; this waits as long as the server keeps printing, and calls it stuck after 30 minutes with nothing new.
+2026-09-05 05:22:33 INFO [__main__] The server is up.
+2026-09-05 05:22:34 INFO [__main__] The realm now advertises 172.30.52.119, so players on other machines can reach this server: 172.30.52.119 is the address they set in their client's realmlist. The server was already running when this was set, so if a client is still sent to the old address, stop and start it again on the Server tab.
+2026-09-05 05:22:34 INFO [yulon.catalog.native] install of wow-tbc finished
+2026-09-05 05:22:34 INFO [__main__] WoW TBC is installed and running in C:\gate\tbc-server

@@ -1,0 +1,15 @@
+==== captured Sat 09/05/2026  6:08:31.35 box-local, box shows PST 
+0 
+==== install start Sat 09/05/2026  5:04:10.97 source=745307ad second press on the finished 09-04 folder 
+==== install end Sat 09/05/2026  5:04:53.89 errorlevel 1 
+==== install start Sat 09/05/2026  5:11:45.21 source=745307ad second press on the finished 09-04 folder 
+==== install end Sat 09/05/2026  5:22:34.35 errorlevel 0 
+tbc-realmd	Up 55 minutes	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+tbc-mangosd	Up 55 minutes	0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
+tbc-db	Up 55 minutes (healthy)	127.0.0.1:3306->3306/tcp
+/tbc-db StartedAt=2026-09-05T12:12:34.696201657Z RestartCount=0 Status=running
+/tbc-realmd StartedAt=2026-09-05T12:12:50.658145835Z RestartCount=0 Status=running
+/tbc-mangosd StartedAt=2026-09-05T12:12:50.669207588Z RestartCount=0 Status=running
+2026-09-04T19:40:49.708826001Z       CMANGOS: World initialized       
+2026-09-04T19:45:58.040691949Z Avg Diff: 5139. Sessions online: 0.
+2026-09-04T19:47:32.166819930Z Avg Diff: 3354. Sessions online: 0.

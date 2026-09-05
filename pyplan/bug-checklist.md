@@ -2848,7 +2848,7 @@ Deliberately not started on 2026-09-05: `networking.py` was mid-flight in §39 r
 `catalog/native.py` in the §40/§21 lane, and two collisions that night came from editing a file
 another lane owned. Decision recorded in `phase7-decisions.md` Appendix D.
 
-### 42. A headless install writes no log at all — 2026-09-05, OPEN
+### 42. A headless install writes no log at all — 2026-09-05, FIXED 2026-09-05 on `lane/headlesslog` (merged at `9254b60a`), **CLOSED on the Windows TBC second press**
 
 Found while trying to satisfy a 7.1 clause that asked for a count out of `yulon.log`, on a box that
 had just completed a full 7.2 install. There is no such file, and the reason is in the code rather
@@ -2869,7 +2869,32 @@ It also quietly falsified a gate criterion for six hours: 7.1's realm clause, re
 morning, asked for `ready`'s UPDATE "counted in `yulon.log`" — a measurement no headless run could
 ever produce. Corrected the same day to read the database and the transcript instead.
 
-- [ ] `install_wiring` configures file logging the way `main.py` does, or says in its own words why a
-      CLI install deliberately does not.
-- [ ] A test that fails if one entry point writes a log and the other does not.
-- [ ] The gate: run the CLI installer headlessly, then find the log and the stage lines in it.
+- [x] `install_wiring` configures file logging the way `main.py` does, or says in its own words why a
+      CLI install deliberately does not. — `install_wiring.py` calls `configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)` after `parse_args`, with the argument for the level and for not adding a second reporter written beside it (`lane/headlesslog`, merged `9254b60a`).
+- [x] A test that fails if one entry point writes a log and the other does not. — `tests/test_install_wiring.py::test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind` runs every module the app can be started as and fails on the disagreement; `test_the_harness_puts_the_stage_lines_it_streamed_into_the_log` pins the stage lines.
+- [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `pyplan/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
+
+### 43. `keep_awake()` refuses the headless harness's own thread — 2026-09-05, OPEN
+
+Found in the first headless log §42 produced, `yulon-win11-gate` 2026-09-05 05:12:16 box-local,
+the TBC second press at `745307ad`:
+
+    WARNING [yulon.catalog.native] not holding this machine awake: keep_awake() must run on the
+    worker thread doing the install: Windows scopes the assertion to the thread that set it, so
+    holding it on the GUI thread would claim a guarantee the install does not have.
+
+The guard is right for the app: `SetThreadExecutionState` holds only while the calling thread
+lives, so the GUI thread taking it on a worker's behalf would promise nothing. `install_wiring`
+has no GUI thread. Its main thread IS the thread doing the install and lives exactly as long, so
+the assertion would hold there — and `platform.keep_awake()` refuses the main thread by identity
+rather than by role (`native.py` `_held_awake()` catches the `RuntimeError` and warns, by design:
+"wrong to abort a command-line run over"). The install was not affected on a VM that never
+sleeps; a laptop running a scripted Windows install is not held awake, and the log says so once.
+
+- [ ] `keep_awake()` decides by whether the calling thread is the one doing the install, not by
+      whether it is the main thread — or the harness runs the engine on a worker of its own and
+      says why.
+- [ ] A test that drives `install_wiring` on Windows (`platform.detect` pinned) and asserts the
+      assertion was taken, and one that still refuses the GUI thread's claim on a worker's behalf.
+- [ ] The gate: a headless run on `yulon-win11-gate` whose `yulon.log` carries no `not holding
+      this machine awake` line.

@@ -1,6 +1,6 @@
 # Where things stand, 2026-09-05 09:45 — written before a compact
 
-`yulon-phase7` is at **0cc637c7**, pushed, CI green (py3.11, py3.13, integration) on PR **#143 → Yulon**.
+`yulon-phase7` was at **0cc637c7** when this note was first written (see `git log` for the tip), pushed, CI green (py3.11, py3.13, integration) on PR **#143 → Yulon**.
 The working tree is **clean**: every piece of in-flight work is on a `lane/*` branch, so nothing lives
 only in a conversation.
 
@@ -22,8 +22,9 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 * **7.7** — Tortoise PASSED on `yulon-win11-gate` at 00:43:19 box-local (exit 0, banner `Loading time:
   59 minutes 18 seconds`, `RestartCount=0`). Widened to `["linux", "windows"]` and the ready budget
   moved 3600 → 10800 s at `eb5f3b3f` (the stage measured 3702 s wall; evidence in
-  `pyplan/gates/7.7-win11-tortoise/`). All four games are now proven on native Windows. Still owed:
-  WotLK's transcript on that box.
+  `pyplan/gates/7.7-win11-tortoise/`). TICKED the same afternoon: WotLK's fresh run exit 0 (2 h 34 min, `7.7-win11-wotlk/`)
+  and TBC's second press exit 0 under the quiet budget (`7.7-win11-tbc-second-press/`), so all
+  four games carry an exit-0 transcript on native Windows.
 
 ## The eight lane branches, and what each owes
 
@@ -59,6 +60,6 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 
 ## Bug checklist
 
-Closed: §21, §27, §29 (both halves, `bdee23f5`), §30, §33, §40. Open: §39 (round 5 committed, two
+Closed: §21, §27, §29 (both halves, `bdee23f5`), §30, §33, §40, §42 (headless log, `745307ad`, gate met on the Windows TBC second press). Filed: §43 (`keep_awake()` refuses the headless harness's own thread). Open: §39 (round 5 committed, two
 measured lockout routes left — **the LAN button is not done**), §41 (loopback realm), §42 (a headless
 install writes no log).

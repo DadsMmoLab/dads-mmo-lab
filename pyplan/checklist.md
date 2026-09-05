@@ -1529,7 +1529,7 @@
     volume (`yulon-wow-tbc-1cbfa4ac_db-data`) and three containers (the exited TBC set), checked
     after the fact. **The 428 MB the removal reclaimed was read at the time and cannot be
     re-measured** now that the volumes are deleted; it is recorded as reported, not as re-verified.
-- [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from **`yulon-win11-gate`**'s clean checkpoint (this line said `yulon-win11`, which is the working box and has carried an install since 2026-09-03; the clean-checkpoint box is the `-gate` one); 9p extract/mmaps throughput recorded; `platforms` widened per entry
+- [x] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from **`yulon-win11-gate`**'s clean checkpoint (this line said `yulon-win11`, which is the working box and has carried an install since 2026-09-03; the clean-checkpoint box is the `-gate` one); 9p extract/mmaps throughput recorded; `platforms` widened per entry
   - **A WotLK server is ALREADY installed and running on `yulon-win11-gate`, and its schemas match
     every other platform byte for byte** (found 2026-09-04, not by a fresh run). `C:\gate\wotlk-server`,
     all three containers up, `ac-db-import` **Exited (0)** and `ac-client-data-init` Exited (0) —
@@ -1638,6 +1638,22 @@
     into a 0 and this box into four for four with four transcripts. Also to state honestly at the
     tick: only the first (failed) WotLK attempt ran from the `clean-ssh` checkpoint; Vanilla, TBC,
     Tortoise and this WotLK each ran from an empty folder on the box those installs accumulated on.
+  - **TICKED 2026-09-05 — TBC's exit code became a 0, and the four games have four exit-0 transcripts.**
+    A second Install press on the finished 09-04 TBC folder (`C:\gate\tbc-server`) under the
+    merged engine at `745307ad` (which carries `lane/readybudget`'s quiet budget): **exit 0** at
+    05:22:34 box-local, 10 min 49 s after its 05:11:45 start; steps 1–10 all found done, `up` at
+    12:12:50Z, `CMANGOS: World initialized` 12:22:24Z, first `Avg Diff: 138` 12:22:33Z, `The server
+    is up.` the same second; three containers up with `RestartCount=0`. A warm boot, so 9 min 34 s
+    says nothing about the 46-minute first boot; what it says is that the engine now reports a
+    complete install as complete. Evidence: `pyplan/gates/7.7-win11-tbc-second-press/`. The line's
+    clauses, as they stand: *WotLK first, closes the 6.3 blocker* — MET on the 2026-09-05 fresh run
+    (exit 0, `ac-db-import` Exited (0), transcript kept); *then TBC, Vanilla, Tortoise* — MET, exit 0
+    each (TBC on this second press, Vanilla 09-04, Tortoise 2026-09-05); *from `yulon-win11-gate`'s
+    clean checkpoint* — MET only for the first (failed) WotLK attempt; every other run started from
+    an empty folder on the box those installs accumulated on, stated rather than hidden; *9p
+    extract/mmaps throughput recorded* — MET (`7.7-win11-gate/ninep.csv`, the TBC/Vanilla stage
+    tables, Tortoise's stage walls); *`platforms` widened per entry* — MET (`2f39a6d9`, `eb5f3b3f`).
+    Not met and not claimed: a client login on native Windows (7.1's clause, not this line's).
   - **Windows Vanilla, started 2026-09-04 04:20** into `C:\gate\vanilla-server` against the 5.14 GB
     1.12.1 client at `C:\gate\client`. Numbers already in hand from setting it up, since 7.7 asks
     for throughput: the client zip came down from `wow.baerthe.com` at about **13 MB/s** (5.33 GB,
