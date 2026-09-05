@@ -505,19 +505,116 @@ def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
     assert str(tmp_path) in told[0][1]
     assert "NOT been remembered as an install" in told[0][1]
     assert "build cache" in told[0][1]
-    # It used to have to promise the OPPOSITE of this. Pressing Install again on
-    # a folder with no built images made the bash installer answer "n" to "Remove
-    # it and start fresh?" and exit 0, which the view read as a finished install,
-    # so the copy had to warn that resuming would not work. 7.2 deleted that
-    # engine: the native one resumes from `native.STATE_FILE` and re-checks the
-    # disk before skipping a stage, so the honest advice inverted with it. The
-    # assertion is kept, inverted, because the copy is the only thing standing
-    # between a stopped install and a user deleting a folder they could resume.
-    assert "carry on" in told[0][1], "the cancel copy no longer offers the resume"
+    # This installer writes nothing, so the folder is empty and the advice for an
+    # empty folder is the only advice there is: press Install again. It used to
+    # be worded "carry on", asserted here and true of nothing -- an empty folder
+    # has nothing to carry on FROM, and the folder that does was measured
+    # refused (`..._does_not_offer_what_the_engine_will_refuse` below). The
+    # pre-7.2 warning must still stay gone: the bash installer answered "n" to
+    # "Remove it and start fresh?" and exited 0, which the view read as a
+    # finished install, so the copy had to warn that resuming would not work.
+    assert "start over" in told[0][1], "the cancel copy no longer says what to press"
     assert "will not pick up" not in told[0][1], "the pre-7.2 warning came back"
     assert told[0][1] == events[0][3]
     assert panel.status_text() == "cancelled"
     assert view.button_for("wow-wotlk").isEnabled() is True  # and the tiles come back
+
+
+def test_a_cancel_during_the_clone_does_not_offer_what_the_engine_will_refuse(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cancel modal, on the folder a real stopped clone leaves. Clicked, not called.
+
+    Shaped after the driver that found this,
+    `pyplan/gates/7.2-ubuntu-2026-09-05/widget_cancel_driver.py`: a real
+    `CatalogView` over a real `LogPanel`, Install pressed with
+    `QTest.mouseClick` on the tile's own button and Stop pressed the same way
+    on the panel's. Everything that run drove for real is real here except the
+    engine, and the engine is a double for one reason -- the run it copies took
+    five and a half minutes of clone -- so the double leaves the folder in the
+    exact state that run measured
+    (`widget-cancel-folder-after.txt`, 2026-09-05): a `.git`, upstream's own
+    git-tracked `docker-compose.yml`, and no `.yulon-install.json`.
+
+    That run passed 15 of 15 checks and still showed a modal saying two things
+    that were not true of that folder. It said the source was there and to
+    press "Use existing...", on the strength of a compose file the clone stage
+    brings down on every install of every game. And it said to press Install
+    again to carry on, which was then driven and refused: "there is no record
+    here of an install this app made"
+    (`cycle2-pressA2-refused-existing-checkout.log`). A message that sends a
+    user at a button the app then refuses is worse than no message, because
+    the folder it tells them to keep is the reason for the refusal.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: told.append((a[1], a[2])))  # type: ignore[attr-defined]
+
+    class _ClonesThenWaitsToBeStopped(_CancellableInstaller):
+        """Writes what `clone-core` leaves behind, then waits for Stop the way the spine does."""
+
+        def run(
+            self,
+            options: InstallOptions | None = None,
+            *,
+            cancel: threading.Event | None = None,
+            ask: object = None,
+        ) -> Iterator[str]:
+            server_dir = (options or InstallOptions()).server_dir or tmp_path
+            (server_dir / ".git").mkdir(exist_ok=True)
+            (server_dir / "docker-compose.yml").write_text(
+                "# docker-compose.yml for AzerothCore.\nservices: {}\n", encoding="utf-8"
+            )
+            yield "Cloning mod-playerbots/azerothcore-wotlk into " + str(server_dir)
+            self.streaming.set()
+            while cancel is not None and not cancel.is_set():
+                time.sleep(JOB_PACE)
+
+    panel = LogPanel()
+    made: list[_ClonesThenWaitsToBeStopped] = []
+
+    def factory(entry: CatalogEntry) -> InstallEngine:
+        inst = _ClonesThenWaitsToBeStopped(entry)
+        made.append(inst)
+        return inst
+
+    view = CatalogView(
+        CATALOG,
+        factory,
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        platform_id=lambda: "linux",
+    )
+    # Shown and sized before the click: `QTest.mouseClick` aims at the centre of
+    # the widget's rect, and a button that has never been laid out has none, so
+    # the release lands outside it and `clicked` never fires.
+    view.resize(900, 700)
+    view.show()
+    process_events()
+
+    install_button = view.button_for("wow-wotlk")
+    assert install_button.text() == "Install" and install_button.isEnabled()
+    QTest.mouseClick(install_button, Qt.MouseButton.LeftButton)
+    pump_until(lambda: bool(made) and made[0].streaming.is_set(), "the installer began streaming")
+
+    stop_button = next(b for b in panel.findChildren(QPushButton) if b.text() == "Stop")
+    assert stop_button.isEnabled(), "Stop was dead while an install was running"
+    QTest.mouseClick(stop_button, Qt.MouseButton.LeftButton)
+    wait_for_panel(panel)
+
+    assert (tmp_path / "docker-compose.yml").is_file()  # the folder is the measured one
+    assert not (tmp_path / ".yulon-install.json").exists()
+    assert told and told[0][0] == "Install cancelled"
+    note = told[0][1]
+    assert str(tmp_path) in note
+    assert "Use existing" not in note, "the copy offered to adopt a folder holding no server"
+    assert "the app will refuse it" in note, "the copy still points at the button that refuses"
+    assert f"Delete {tmp_path}" in note
+    assert "carries on" not in note and "carry on" not in note
 
 
 def test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt(

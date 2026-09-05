@@ -23,8 +23,8 @@ import pytest
 
 from tests.support_bash import bash_available
 from yulon import platform, runner
+from yulon.catalog import composegen, native
 from yulon.catalog import installer as installer_module
-from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
@@ -167,6 +167,7 @@ MODULE_SURFACE_AFTER_7_2 = {
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",
+    "generated_compose_files",
     "installer_for",
     "logger",
     "platform_names",
@@ -183,6 +184,7 @@ MODULE_SURFACE_AFTER_7_2 = {
     "dataclass",
     "Path",
     "Protocol",
+    "composegen",
     "docker",
     "platform",
     "resources",
@@ -383,41 +385,143 @@ def test_installer_for_hands_the_probe_and_reset_to_the_engine() -> None:
 
 
 def test_the_cancel_copy_tells_the_truth_about_resuming(tmp_path: Path) -> None:
-    """Stop leaves a folder the engine can carry on from; the copy must say so.
+    """Three folders, three different things Install does next, and the copy says which.
 
     Until 7.2 both halves had to warn that Install would NOT resume, because
     the bash installer found the folder, offered to wipe it, the app declined,
-    and it exited 0 having done nothing. The engine records every finished
-    stage in `native.STATE_FILE` and re-checks the disk before skipping one, so
-    the honest advice is now the opposite. "Use existing…" keeps its half
-    because it answers a different question — adopting a build that had in fact
-    finished — which is why it is still absent from the other.
+    and it exited 0 having done nothing. 7.2's engine records every finished
+    stage in `native.STATE_FILE` and re-checks the disk before skipping one --
+    measured on yulon-ubuntu 2026-09-05, "Using /home/pk/gate72-cycle2
+    (resuming)" followed by "Already finished: clone-core, clone-modules,
+    generate-compose"
+    (`pyplan/gates/7.2-ubuntu-2026-09-05/cycle2-pressB.log:26`) -- so the copy
+    promised the resume from then on.
+
+    It promised it on every folder, and that is what this now pins. The record
+    is what buys the resume, and a folder can hold source without holding one:
+    `native.STATE_FILE` is written before stage one, and `git.py`'s clone
+    `shutil.rmtree`s the destination it is about to clone into, so a Stop
+    during `clone-core` leaves the checkout and takes the record with it. On
+    that folder the engine refuses the next press rather than carrying on
+    (`test_the_engine_refuses_the_folder_a_cancelled_clone_leaves`), so the
+    copy must not send the user back to the Install button.
     """
     nothing_there = cancelled_install_message("WoW WotLK", tmp_path)
     assert "Use existing" not in nothing_there
-    assert "carry on" in nothing_there
-    assert "clean start" in nothing_there
+    assert "start over" in nothing_there
+    assert "carries on" not in nothing_there and "refuse" not in nothing_there
     assert "will not pick up" not in nothing_there and "nothing to resume" not in nothing_there
 
-    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-    source_there = cancelled_install_message("WoW WotLK", tmp_path)
-    assert "Use existing" in source_there
-    assert str(tmp_path / native.STATE_FILE) in source_there
-    assert "carries on" in source_there
-    assert "will NOT carry on" not in source_there
+    (tmp_path / "src").mkdir()
+    no_record = cancelled_install_message("WoW WotLK", tmp_path)
+    assert "the app will refuse it" in no_record
+    assert f"Delete {tmp_path}" in no_record
+    assert "carries on" not in no_record, "the copy promised a resume the engine refuses"
+
+    native.write_state(tmp_path, native.InstallState(game_id="wow-wotlk", install_id="cafef00d"))
+    resumable = cancelled_install_message("WoW WotLK", tmp_path)
+    assert str(tmp_path / native.STATE_FILE) in resumable
+    assert "Press Install again" in resumable and "carries on" in resumable
+    assert "refuse" not in resumable and "will NOT carry on" not in resumable
+    assert "If it had not" not in resumable, "a conditional with no sentence to refer back to"
+
+    # The one folder that gets both halves, and they have to read as one choice.
+    for name in composegen.COMPOSE_FILES:
+        (tmp_path / name).write_text(f"{composegen.GENERATED_MARKER}\n", encoding="utf-8")
+    both = cancelled_install_message("WoW WotLK", tmp_path)
+    assert "Use existing" in both
+    assert "If it had not, press Install again" in both
 
 
-def test_the_cancel_copy_reads_the_folder_the_way_compose_does(tmp_path: Path) -> None:
-    """`compose.yml` is an install too, and it is what two of the four games write.
+def test_the_cancel_copy_does_not_read_upstreams_compose_file_as_its_own(
+    tmp_path: Path,
+) -> None:
+    """The clone brings a `docker-compose.yml` down; it is not evidence of a build.
 
-    The advice differs on whether there is source on disk, so a check stricter
-    than Compose's own sends a finished TBC or Vanilla install down the "there
-    is nothing there" branch — the same class of bug `COMPOSE_FILENAMES` exists
-    for. Asserted by naming the branch's own sentence, not by string equality
-    with the other call, so the two halves may be reworded independently.
+    This test used to be `..._reads_the_folder_the_way_compose_does` and
+    asserted the opposite: that the split answers on `compose_file()`, so on
+    any of the four names Compose itself accepts. That reading was measured
+    wrong on yulon-ubuntu 2026-09-05. A real WotLK install was started from the
+    tile's Install and stopped 20 s into `clone-core`; the folder it left held
+    a 2.2 GB checkout whose only compose file was upstream's own -- git-tracked
+    and unmodified, first line `# docker-compose.yml for AzerothCore.` -- and
+    the modal told the user the source was there and to press "Use existing..."
+    (`pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel.log`, with
+    `widget-cancel-folder-after.txt` for the folder). Pressing "Use existing..."
+    there adopts a folder holding no server, because `attach_existing()` asks
+    that same `compose_file()` question.
+
+    `COMPOSE_FILENAMES` is not wrong; it answers a different question. It
+    exists so a FINISHED pre-7.2 install called `compose.yml` stays adoptable,
+    and this message is about a folder this run has just written into, where
+    nothing is called that. What this split needs is whether the engine's own
+    compose stage ran, and the engine marks every file it writes.
     """
+    (tmp_path / "docker-compose.yml").write_text(
+        "# docker-compose.yml for AzerothCore.\nservices: {}\n", encoding="utf-8"
+    )
+    upstreams = cancelled_install_message("WoW WotLK", tmp_path)
+    assert "Use existing" not in upstreams, "upstream's own compose file was read as ours"
+
     (tmp_path / "compose.yml").write_text("services: {}\n", encoding="utf-8")
-    assert "Use existing" in cancelled_install_message("WoW TBC", tmp_path)
+    assert "Use existing" not in cancelled_install_message("WoW WotLK", tmp_path)
+
+    (tmp_path / composegen.BASE_FILE).write_text(
+        f"{composegen.GENERATED_MARKER}\nservices: {{}}\n", encoding="utf-8"
+    )
+    ours = cancelled_install_message("WoW WotLK", tmp_path)
+    assert "Use existing" in ours
+    assert composegen.BASE_FILE in ours, "the copy names no file the user can go and look for"
+
+
+def test_the_engine_refuses_the_folder_a_cancelled_clone_leaves(tmp_path: Path) -> None:
+    """What "press Install again" actually does on a checkout with no record of ours.
+
+    The copy's promise is worth exactly what the engine does, so the engine is
+    asked here rather than described. Both refusals are pure filesystem reads
+    and neither needs a daemon, which is why the promise can be pinned in a
+    unit test at all.
+
+    Driven for real first: `python -m yulon.install_wiring wow-wotlk
+    --server-dir /home/pk/gate72-cancel-install` against the folder the
+    cancelled widget run left, yulon-ubuntu 2026-09-05, exited 1 with "is
+    already a git checkout of ... and there is no record here of an install
+    this app made"
+    (`pyplan/gates/7.2-ubuntu-2026-09-05/cycle2-pressA2-refused-existing-checkout.log`).
+    """
+    # The probe and reset are what `install_wiring` passes; an engine built
+    # without them refuses in preflight before it looks at the folder at all.
+    engine = installer_for(
+        WOTLK,
+        platform_id=lambda: "linux",
+        import_probe=lambda: None,  # type: ignore[arg-type,return-value]
+        reset_unfinished=lambda *_a, **_k: (),  # type: ignore[arg-type]
+    )
+    url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
+    ctx = native.StageContext(
+        server_dir=tmp_path,
+        client_dir=None,
+        state=native.InstallState(game_id=WOTLK.id, install_id="cafef00d", family=engine.family),
+        cancel=None,
+        secrets=engine.resolve_secrets(tmp_path),
+    )
+
+    (tmp_path / ".git").mkdir()
+    with pytest.raises(InstallerError) as caught:
+        engine.refuse_unowned_checkout(ctx, tmp_path, url, url)
+    assert "no record here of an install this app made" in str(caught.value)
+
+    # ...and the same folder without the `.git`, which never reaches a stage:
+    # `_claim_folder()` refuses it before preflight says a word about Docker.
+    (tmp_path / ".git").rmdir()
+    (tmp_path / "src").mkdir()
+    with pytest.raises(InstallerError) as refused:
+        engine.preflight(InstallOptions(server_dir=tmp_path))
+    assert "not empty and was not created by this app" in str(refused.value)
+
+    # Which is what the copy for that folder tells the user, in their words.
+    note = cancelled_install_message("WoW WotLK", tmp_path)
+    assert "the app will refuse it" in note and f"Delete {tmp_path}" in note
 
 
 def test_compose_file_answers_in_composes_own_order(tmp_path: Path) -> None:

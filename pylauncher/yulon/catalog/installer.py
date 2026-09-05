@@ -15,7 +15,10 @@ preflight words its off-platform refusal with them; `docker_unavailable()` and
 `provision_lines()` stay because the engine reports provisioning with them, and
 they live here rather than in `native.py` so that the sentence a user reads
 about Docker has one author; `cancelled_install_message()` stays because
-`catalog_view.py` shows it after Stop.
+`catalog_view.py` shows it after Stop, and `generated_compose_files()` beside
+it because that copy's "Use existing…" half turns on which compose files the
+engine itself wrote — a different question from `compose_file()`'s, and one
+this module was answering with `compose_file()` until 2026-09-05.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from pathlib import Path
 from typing import Protocol
 
 from yulon import docker, platform, resources, runner
+from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
 
@@ -260,8 +264,38 @@ def unsupported_platform_message(entry: CatalogEntry, platform_id: str) -> str:
     )
 
 
+def generated_compose_files(server_dir: Path) -> tuple[str, ...]:
+    """The compose files in `server_dir` that THIS app wrote, by name, in `-f` order.
+
+    Not `compose_file()`, and the difference is the whole point. That one asks
+    "could Compose bring something up here?", which is the right question for
+    "Use existing…" adopting a folder of unknown provenance, and it answers on
+    any of the four filenames Compose itself accepts. This asks "did the
+    engine's own compose stage run?", and on a cancelled install the two
+    disagree: the emulator repository ships a `docker-compose.yml` at its root,
+    so `clone-core` lays one down on every install of every game before
+    `composegen` writes a byte (`composegen.write_plan()`'s `replaceable`
+    argument exists for exactly that file).
+
+    Measured on yulon-ubuntu 2026-09-05: a WotLK install stopped 20 s into
+    `clone-core` left a folder whose only compose file was upstream's own,
+    git-tracked and unmodified
+    (`pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`).
+
+    `composegen.is_ours()` is the marker rule and is reused rather than
+    respelled, but it cannot be called alone here: it answers True for a file
+    that is not there, which is right for "may I write this?" and exactly
+    backwards for "is this here and mine?". Hence the `is_file()` first.
+    """
+    return tuple(
+        name
+        for name in composegen.COMPOSE_FILES
+        if (server_dir / name).is_file() and composegen.is_ours(server_dir / name)
+    )
+
+
 def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
-    """What Stop actually did, and what it did not (roadmap 6.5 "honest cancel copy").
+    """What Stop actually did, what it did not, and which button to press next.
 
     Three things are easy to imply and all three are false. The app has not
     remembered the folder — which it did until this existed. Stopping undoes
@@ -280,33 +314,55 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     the folder and lets the user look, rather than asserting a state it cannot
     know (install gate, 2026-08-23).
 
-    The recovery advice is split on the compose file, and until 7.2 both halves
-    had to refuse to promise resumption. The bash installer's line 961 found no
-    built worldserver image, took the existing-folder branch, asked "Remove it
-    and start fresh? (y/n):" — and `PROMPT_RULES` answered "n", because
-    `InstallOptions.reinstall` was False and nothing in the GUI ever set it. The
-    script printed "Keeping existing install — exiting." and exited 0, which the
-    view read as a SUCCESS: it pinned a compose project name into a half-cloned
-    folder and remembered a server that did not exist.
+    **The advice below is two independent halves, and each is decided by the
+    thing that actually gates it.** They were one split on `compose_file()`
+    until the 7.10 widget-cancel run drove the whole path with real clicks
+    (yulon-ubuntu 2026-09-05, `pyplan/gates/7.2-ubuntu-2026-09-05/`): 15 checks
+    green, and a modal that got both halves wrong on the folder in front of it.
 
-    7.2 deleted that engine. `native.StagedInstaller` records every finished
-    stage by name in `native.STATE_FILE` and re-checks what is on disk before it
-    skips one, so pressing Install again on the same folder carries on rather
-    than doing nothing — and the copy now says that, in both halves. "Use
-    existing…" keeps its half because it answers a different question: it adopts
-    a build that had in fact FINISHED, without resuming anything, which is the
-    case where Stop threw away hours (review, 2026-08-23; rewritten 7.2).
+    *"Use existing…"* is offered when the engine's OWN compose files are there
+    (`generated_compose_files()`), because that is what makes a folder something
+    Compose can bring up. The old split asked `compose_file()` and so fired on
+    the `docker-compose.yml` the clone stage brings down with the source: the
+    cancelled folder in `widget-cancel-folder-after.txt` held that file and
+    nothing built, and the modal told the user to adopt it — which
+    `attach_existing()` would have done, growing a tab for a server that did not
+    exist.
 
-    The compose file is looked up through `compose_file()` rather than by the
-    one name: TBC and Vanilla installs are called `compose.yml`, and a check
-    stricter than Compose's own reported "nothing there" for a finished install
-    of two of the four games.
+    *"Press Install again"* is offered when `native.STATE_FILE` is there, and
+    that record is not implied by source on disk. It is written before stage
+    one, and `git.py`'s clone `shutil.rmtree`s the destination it is about to
+    clone into — so a Stop during `clone-core` leaves the checkout and takes the
+    record with it. That is not a guess: the folder that run left had no
+    `.yulon-install.json`, and pressing on
+    (`python -m yulon.install_wiring wow-wotlk --server-dir …`) exited 1 with
+    "there is already a git checkout of … and there is no record here of an
+    install this app made"
+    (`cycle2-pressA2-refused-existing-checkout.log`). A folder with no record
+    and anything in it is refused either way: with a `.git` by
+    `refuse_unowned_checkout()`, without one by `_claim_folder()`'s "is not
+    empty and was not created by this app". So the copy says the app will refuse
+    it and names the one action that works — delete the folder — rather than
+    sending the user at a button that stops them.
+
+    With the record there the resume is real and was measured the same night:
+    "Using /home/pk/gate72-cycle2 (resuming)", "Already finished: clone-core,
+    clone-modules, generate-compose" (`cycle2-pressB.log:26`).
+
+    The pre-7.2 wording is gone for good and must not come back. The bash
+    installer's line 961 found no built worldserver image, took the
+    existing-folder branch, asked "Remove it and start fresh? (y/n):" — and
+    `PROMPT_RULES` answered "n", because `InstallOptions.reinstall` was False and
+    nothing in the GUI ever set it. The script printed "Keeping existing install
+    — exiting." and exited 0, which the view read as a SUCCESS: it pinned a
+    compose project name into a half-cloned folder and remembered a server that
+    did not exist. 7.2 deleted that engine.
     """
     # Local import: `native.py` imports this module for the options and the
     # errors, so naming it at module scope would be a cycle.
     from yulon.catalog import native
 
-    lead = (
+    parts = [
         f"Stop was pressed, so {entry_name} has NOT been remembered as an install and the app "
         f"will not show a tab for it. Stopping undoes nothing and tidies nothing away — look "
         f"in {server_dir} to see what the installer had got to (a download it was in the "
@@ -314,23 +370,52 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
         "the build had started, Docker keeps finishing the step it was on in the background — "
         "that is deliberate, and the finished pieces are what make a second attempt much "
         "faster, so do not clear Docker's build cache to tidy up."
-    )
-    if compose_file(server_dir) is not None:
-        return (
-            f"{lead} The source is there. If the build had already finished, the server may "
-            f'be built and even running: press "Use existing…", choose '
-            f"{server_dir}, and the app will manage it from a tab — nothing is lost. If it "
-            f"had not, press Install again and choose {server_dir}: the installer carries on "
-            f"from the last stage recorded in {server_dir / native.STATE_FILE}, and a stage is "
-            "only skipped after what it left on disk has been checked."
+    ]
+    record = server_dir / native.STATE_FILE
+    ours = generated_compose_files(server_dir)
+    try:
+        leftovers = server_dir.is_dir() and any(
+            child.name != native.STATE_FILE for child in server_dir.iterdir()
         )
-    return (
-        f"{lead} The installer had not got as far as writing a compose file "
-        f"(compose.yml or docker-compose.yml), so there is nothing there for the app to "
-        f"manage yet. Press Install again and choose {server_dir} to carry on — a source "
-        f"clone that finished is updated, not fetched again. Delete {server_dir} only if you "
-        "want a clean start."
-    )
+    except OSError:
+        # A folder this app cannot list is a folder `_claim_folder()` cannot
+        # list either, and it refuses on the `OSError` — so the refusal branch
+        # is the true answer here, not the fallback it looks like.
+        leftovers = True
+
+    if ours:
+        parts.append(
+            f"The compose files this app writes are there ({', '.join(ours)}), so if the build "
+            f'had already finished the server may be built and even running: press "Use '
+            f'existing…", choose {server_dir}, and the app will manage it from a tab — nothing '
+            "is lost."
+        )
+    if record.is_file():
+        # "If it had not" only when the sentence before it is the one that said
+        # "if the build had already finished": the two halves are decided
+        # separately, and a dangling conditional on a folder with no compose
+        # files of ours would refer to a sentence that is not there.
+        opener = "If it had not, press Install again" if ours else "Press Install again"
+        parts.append(
+            f"{opener} and choose {server_dir}: the installer carries on from the "
+            f"last stage recorded in {record}, and a stage is only skipped after what it left "
+            "on disk has been checked."
+        )
+    elif leftovers:
+        parts.append(
+            f"Do not press Install again on this folder — the app will refuse it. There is no "
+            f"{native.STATE_FILE} in {server_dir}: a clone that was still running when you "
+            "pressed Stop takes that record with it, and without it the app cannot tell its "
+            "own half-finished download from a checkout you made yourself, so it stops rather "
+            f"than run `git fetch` and `git reset --hard` over your work. Delete {server_dir}, "
+            "then press Install again to start over."
+        )
+    else:
+        parts.append(
+            f"There is nothing in {server_dir} to carry on from. Press Install again and "
+            "choose it to start over."
+        )
+    return " ".join(parts)
 
 
 # `docker_available()` used to live here as `runner.run(["docker", "info"])`,
