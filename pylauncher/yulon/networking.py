@@ -280,16 +280,35 @@ _INITIAL_PID_NAMESPACE_INO = 0xEFFFFFFC
 """`PROC_PID_INIT_INO`: the inode the kernel gives the INITIAL pid namespace.
 
 A compile-time constant in `include/linux/proc_ns.h`, not an allocation, which
-is what makes it usable as an identity. Measured on 2026-09-04, uid 1000 and
-root, on two boxes and in four environments:
+is what makes it usable as an identity. Every row below is m910q unless it says
+otherwise, and every m910q row was read by me on 2026-09-05 in one sitting; the
+yulon-ubuntu row is 2026-09-04's and is kept for its `ns/net`, which is the
+point it makes. The last column is `/proc/1/comm`, and it is the column round 8
+did not have:
 
-    environment                          ns/pid       ns/net       pid 1's ns/net
-    m910q, uid 1000                      4026531836   4026531840   (EACCES)
-    m910q, root                          4026531836   4026531840   4026531840
-    yulon-ubuntu, uid 1000               4026531836   4026531833   (EACCES)
-    m910q, `unshare --net`               4026531836   4026533034   4026531840
-    m910q, `unshare --net --pid --fork`  4026533089   4026533090   4026533090
-    m910q, `docker run busybox`          4026533037   4026533039   4026533039
+    environment                                 ns/pid       ns/net       pid 1's ns/net  /proc/1
+    uid 1000                                    4026531836   4026531840   (EACCES)        systemd
+    root                                        4026531836   4026531840   4026531840      systemd
+    yulon-ubuntu, uid 1000 (2026-09-04)         4026531836   4026531833   (EACCES)        systemd
+    `unshare --net`                             4026531836   4026533509   4026531840      systemd
+    `unshare --pid --fork`                      4026533509   4026531840   4026531840      systemd
+    `unshare --pid --fork --mount-proc`         4026533510   4026531840   4026531840      the probe
+    `unshare --net --pid --fork`                4026533509   4026533510   4026531840      systemd
+    `unshare --net --pid --fork --mount-proc`   4026533621   4026533622   4026533622      the probe
+    `docker run --rm busybox`                   4026533512   4026533514   4026533514      sh
+
+"the probe" is whatever command `unshare` was given (`nsprobe.sh` and `python`
+in my two runs); it is there when `/proc` has been remounted for the new pid
+namespace, and `systemd` when it has not. That is what `--mount-proc` decides,
+and round 8's table left it off: labelled `unshare --net --pid --fork`, its row
+showed pid 1's `ns/net` equal to the NEW namespace, which only the
+`--mount-proc` spelling produces. Without it the caller's `/proc` is inherited,
+`/proc/1` is still this machine's init, and pid 1's `ns/net` is the host's.
+Both spellings are listed above rather than one, because `/proc/self/ns/pid`
+reads the same in both and no question this module asks can tell them apart.
+Every container runtime measured here remounts `/proc`, which is why the
+`docker` row looks like the `--mount-proc` rows and not like its own kernel
+flags.
 
 0xEFFFFFFC is 4026531836, and it is the ns/pid value on both real boxes and on
 neither namespace. The NET namespace has no such constant and must not be given
@@ -402,15 +421,19 @@ def in_host_network_namespace(
     Two halves, because one namespace escape hides the other:
 
     * `/proc/self/ns/pid` must be the INITIAL pid namespace
-      (`_INITIAL_PID_NAMESPACE_INO`). Otherwise `/proc/1` is not the machine's
-      init but the namespace's own, and comparing against it compares a thing
-      to itself — which is exactly what rows five and six of that table do.
-      This half is free and needs no privilege.
+      (`_INITIAL_PID_NAMESPACE_INO`). Otherwise `/proc/1` MAY be the
+      namespace's own init rather than the machine's, and comparing against it
+      would compare a thing to itself — which is what the two `--mount-proc`
+      rows and the `docker` row of that table do. It may also still be this
+      machine's `systemd`, as the un-remounted `unshare` rows are; this read
+      cannot tell the two apart, and this half refuses both. What that costs is
+      measured in `in_initial_pid_namespace()`. This half is free and needs no
+      privilege.
     * `/proc/self/ns/net` must be pid 1's. That is the reading `unshare --net`
       breaks while leaving pid 1 the host's.
 
     The price, measured on 2026-09-04: a launcher running INSIDE a container
-    (`docker run`, row six of `_INITIAL_PID_NAMESPACE_INO`'s table) is not in
+    (`docker run`, the last row of `_INITIAL_PID_NAMESPACE_INO`'s table) is not in
     the initial pid namespace and gets False here. What that sentence went on
     to claim — "that is a refusal on a deployment shape nothing in this product
     ships" — was refuted on 2026-09-05 by `docker run --pid=host
@@ -441,16 +464,46 @@ def in_host_network_namespace(
 
 
 def in_initial_pid_namespace() -> bool | None:
-    """Is `/proc/1` this MACHINE's init? True, False, or None for "could not tell".
+    """Is this the INITIAL pid namespace? True, False, or None for "could not tell".
 
     The precondition both namespace comparisons rest on, asked as its own
-    question because it has its own answer for the user. In a pid namespace of
-    its own a process still has a `/proc/1` — the namespace's init — so
-    `_same_namespace_as_pid1()` compares that namespace against itself and can
-    answer True about a machine it has never touched (measured in
-    `in_host_network_namespace()`, `docker run --network=host`: self mnt
-    4026533509 == `/proc/1/ns/mnt` 4026533509, while the host's was
-    4026531841).
+    question because it has its own answer for the user. True is the only value
+    under which `/proc/1` is certainly this machine's init; False says the pid
+    namespace is somebody's own, and NOT — this is round 8's overreach — that
+    `/proc/1` is that namespace's init. Which of the two it is depends on
+    whether `/proc` was remounted, and both were measured on m910q on
+    2026-09-05:
+
+        `docker run --rm busybox`       /proc/1 is the container's `sh`, and
+                                        its ns/net 4026533514 is the process's
+                                        own — a comparison against it compares
+                                        the namespace with itself
+        `unshare --pid --fork`          /proc/1 is this machine's `systemd`,
+                                        ns/net 4026531840 and ns/mnt
+                                        4026531841 exactly as read on the host
+                                        the same minute — both comparisons
+                                        would have been right
+
+    `/proc/self/ns/pid` reads a non-initial inode in both, so this function
+    cannot separate them and `where_the_reading_came_from()` refuses both. In
+    the second shape that is a FALSE refusal of a healthy reading, and the
+    price is paid on purpose:
+
+    * `/proc/1/ns/pid` would separate them, and it is not free. Measured at uid
+      1000 on m910q that day, `os.stat` of all three of `/proc/1/ns/pid`,
+      `/proc/1/ns/net` and `/proc/1/ns/mnt` raised `EACCES`; only `sudo -n stat
+      -L -c %i /proc/1/ns/pid` answered (4026531836). So the read costs the
+      same elevation fallback the network and mount questions already pay, and
+      where no prefix is available it answers None — turning today's refusal,
+      which carries a remedy the user can act on, into `"unknown"`, whose
+      remedy is "give the launcher sudo".
+    * What it would buy is one shape: a process in its own pid namespace that
+      did not remount `/proc` and is otherwise the host's. `unshare --pid
+      --fork` from a shell is that shape; every container runtime measured here
+      remounts `/proc` and is not.
+    * What today's refusal costs that shape is a sentence telling the user to
+      run the step outside `unshare --pid`, which is correct advice in both
+      shapes and costs them one shell.
 
     Free — one `stat` of `/proc/self/ns/pid`, no subprocess, no privilege, no
     elevation fallback. None only where `/proc/self/ns` is not there at all
@@ -540,17 +593,22 @@ READ_ELSEWHERE = {
         "appimagetool build's `/proc/self/ns/mnt` was pid 1's"
     ),
     "other-pid-namespace": (
-        "`/proc/1` here is not this machine's init but the init of a pid namespace of its "
-        "own, so neither namespace question could be answered: both compare against that "
-        "`/proc/1` and would compare the namespace with itself. Measured on m910q, "
-        "2026-09-05, inside `docker run --rm --network=host` of a Fedora image: "
-        "`/proc/self/ns/pid` 4026533512 against the initial namespace's 4026531836, and "
-        "from in there BOTH `/proc/1/ns/net` (4026531840) and `/proc/1/ns/mnt` (4026533509) "
-        "matched this process — while the host's own mount namespace was 4026531841 and the "
-        "`/etc/firewalld` on offer was the image's. Run the LAN step from the host's own "
-        "shell, outside `unshare --pid` and outside the container. If it has to run from a "
-        "container, add `--pid=host` so `/proc/1` is this machine's — the probe can answer "
-        "then, and will still refuse a container that writes its own `/etc`"
+        "this process is in a pid namespace of its own, so neither namespace question could "
+        "be trusted: both are answered by comparing against `/proc/1`, and whether `/proc/1` "
+        "here is this machine's init or the namespace's own depends on something this probe "
+        "cannot read without privilege. Both shapes were measured on m910q, 2026-09-05. "
+        "Inside a container (`docker run --rm busybox`) `/proc` is remounted, `/proc/1` is "
+        "the container's own `sh`, and its `/proc/1/ns/net` (4026533514) is this process's "
+        "own — comparing them compares the namespace with itself and answers `same` about a "
+        "machine that was never touched. Under `sudo unshare --pid --fork`, which does not "
+        "remount `/proc`, `/proc/1` is still this machine's `systemd` with the host's "
+        "4026531840 and 4026531841 — there the comparisons would have been right, and this "
+        "refusal is a false one. `/proc/self/ns/pid` reads a non-initial inode in both, and "
+        "`/proc/1/ns/pid`, which would tell them apart, was `EACCES` at uid 1000 alongside "
+        "the other two. Run the LAN step from the host's own shell, outside `unshare --pid` "
+        "and outside the container. If it has to run from a container, add `--pid=host` so "
+        "`/proc/1` is this machine's — the probe can answer then, and will still refuse a "
+        "container that writes its own `/etc`"
     ),
     "unknown": (
         "whether the socket table came from this machine could not be established — pid 1's "
@@ -612,11 +670,14 @@ def where_the_reading_came_from(
       and measured on m910q 2026-09-05 at uid 1000 with `backend="firewalld"`
       (a box with no `/etc/firewalld`) that cost one `sudo -n stat -L -c %i
       /proc/1/ns/net` before the free decisive question was reached.
-    * the pid namespace — is `/proc/1` this machine's init at all
+    * the pid namespace — is this the initial one at all
       (`in_initial_pid_namespace()`). Free as well, and asked BEFORE the two
-      comparisons because it is the precondition for both of them: in a pid
-      namespace of its own, `/proc/1` is that namespace's init and comparing
-      against it compares a namespace with itself. Round 7 folded this into
+      comparisons because it is the precondition for both of them: outside the
+      initial pid namespace, `/proc/1` may be that namespace's own init and
+      comparing against it compares a namespace with itself. May, not is —
+      measured both ways on m910q on 2026-09-05, and the refusal covers both
+      because separating them is not free; see `in_initial_pid_namespace()`.
+      Round 7 folded this into
       `in_host_network_namespace()`'s False and so named the network namespace
       as the cause for a process whose network namespace was pid 1's own.
       Measured on m910q, 2026-09-05, `docker run --rm --network=host` of a
@@ -1296,9 +1357,17 @@ def machine_made_zones(*listings: str | None) -> tuple[str, ...]:
     makes this docstring's own promise reachable: a zone the permanent listing
     only NAMES is judged on the listing that binds it.
 
-    A zone whose every reading binds nothing stays out — it never enters the
-    vote at all — which is the default zone's case, and the default zone is
-    exactly where an unbound interface lands.
+    A zone whose every reading binds nothing stays out without a vote being
+    taken on it, which on that box is the case of the thirteen zones of fifteen
+    that neither listing binds. It is NOT the default zone's case, and round
+    8's docstring said it was: measured on m910q on 2026-09-05, feeding that box's own two
+    listings to this function, `machine_made_zones(permanent)` is `()` — in the
+    permanent listing alone nothing binds anything — but the active listing
+    binds `FedoraWorkstation` to `eth0`, so on the reading
+    `detect_firewalld_zones()` actually builds, out of both,
+    `machine_made_zones(permanent, active)` is `('docker',)` and the default
+    zone was voted on and lost. What keeps it out is the rule two paragraphs
+    up: `eth0` is not a container bridge.
     """
     bound: dict[str, list[tuple[tuple[str, ...], tuple[str, ...]]]] = {}
     for text in listings:
@@ -1640,19 +1709,25 @@ def detect_firewalld_zones(
             flush_all_on_reload=flush,
             default_zone=configured,
             configured_default_zone=configured,
-            # `machine_made` is computed here and can never have anything to
-            # do: `firewall-offline-cmd --list-all-zones` is the permanent
-            # config, where Docker's bridges are not bound, so an unbound
-            # `docker` zone is dropped by `bound_only=True` before it can reach
-            # `permanent` or `write` and no breadth note can name it. Measured
-            # on yulon-fedora 2026-09-05, daemon running, offline tool read
-            # read-only: all fifteen zones came back with `interfaces:` and
-            # `sources:` empty, `zones_from_listing(..., bound_only=True)` gave
+            # `machine_made` had nothing to do on the one box this was read
+            # on, and round 8 wrote that up as "can never". It can. Measured on
+            # m910q, 2026-09-05, on yulon-fedora's own
+            # `firewall-offline-cmd --list-all-zones` (257 lines, byte-identical
+            # that day to its `--permanent --list-all-zones`): as it stands all
+            # fifteen zones carry `interfaces:` and `sources:` empty,
+            # `zones_from_listing(..., bound_only=True)` is
             # `('FedoraWorkstation',)` — the `(default)` tag alone — and
-            # `machine_made_zones(offline)` gave `()`. Inert, and harmlessly
-            # so; it is filled rather than left empty because the field means
-            # "what this reading could tell", and a reading that told nothing
-            # is `()`.
+            # `machine_made_zones(offline)` is `()`. Change one field in those
+            # 257 lines, the `docker` block's `interfaces: ` to
+            # `interfaces: docker0` (which is what
+            # `firewall-cmd --permanent --zone=docker --add-interface=docker0`
+            # writes, and a widely copied Docker workaround), and this branch
+            # returns `permanent` and `write` `('FedoraWorkstation', 'docker')`
+            # with `machine_made` `('docker',)` — the gate doing exactly the
+            # work it exists for. So: inert on an untouched Fedora install,
+            # live on one that has bound a bridge permanently, and filled
+            # rather than left empty because the field means "what this reading
+            # could tell".
             machine_made=machine_made_zones(offline),
         )
     listing = _listing(do, prefix, _FIREWALLD_PERMANENT_ZONES_ARGV)

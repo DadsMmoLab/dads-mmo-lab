@@ -4030,6 +4030,15 @@ docker
 """
 """`firewall-cmd --get-active-zones` on the same box the same minute, all four lines.
 
+The bridge ORDER is not reproducible and is not asserted on. Round 8 wrote
+"copied" of a line whose order changes per boot: this fixture has
+`br-2ec281b6c57a br-85289dddc52d br-db9be8196055 br-eebe26d3f624 docker0`, and
+the same command on the same box on 2026-09-05 at 15:12 UTC, after a reboot,
+printed `br-db9be8196055 br-eebe26d3f624 br-2ec281b6c57a br-85289dddc52d
+docker0`. `_zone_bindings()` splits on whitespace and `machine_made_zones()`
+asks the same question of every interface, so nothing here rides on it; the
+four lines and the two zone names are the byte-true part.
+
 This is where Docker's bridges are, and the whole of round 7's blocker.
 Measured beside it on yulon-fedora, 2026-09-05:
 
@@ -4371,8 +4380,25 @@ in that table, and `/etc/firewalld` was present — the image's."""
 _UNSHARE_PID_NS = 4026533509
 """`sudo unshare --pid --fork stat …` on m910q, 2026-09-05: pid 4026533509, net
 4026531840, mnt 4026531841 — a pid namespace of its own and pid 1's own network
-AND mount namespace. Nothing about the firewall differs there; only `/proc/1`
-does."""
+AND mount namespace.
+
+`/proc/1` does not differ there either, which is what round 8 got wrong: with
+no `--mount-proc` the caller's `/proc` is inherited, so `/proc/1` is this
+machine's `systemd` and its `ns/net` (4026531840) and `ns/mnt` (4026531841) are
+the ones I read on the host in the same minute. Nothing differs but
+`/proc/self/ns/pid`, and the module refuses anyway, because that one read
+cannot tell this shape from a container — see `in_initial_pid_namespace()`.
+This fixture is the FALSE-refusal shape, and its `/proc/1` answers are left at
+the host's on purpose."""
+
+_UNSHARE_MOUNTPROC_PID_NS = 4026533510
+_UNSHARE_MOUNTPROC_MNT_NS = 4026533509
+"""The same command WITH `--mount-proc`, m910q, 2026-09-05: pid 4026533510, net
+4026531840 (still the host's), mnt 4026533509, and `/proc/1` is the probe
+itself — pid 4026533510 and mnt 4026533509, the process's own. This is the
+shape `READ_ELSEWHERE["other-pid-namespace"]` describes, one `unshare` flag
+away from the fixture above and indistinguishable from it through
+`/proc/self/ns/pid`."""
 
 _UNSHARE_NET_NS = 4026533509
 """`sudo unshare --net stat …` on m910q, 2026-09-05: pid 4026531836 (the
@@ -4393,12 +4419,20 @@ def _namespaced(
     pid1_mnt: int = _HOST_MNT_NS,
     pid: int = _HOST_PID_NS,
     net: int = _HOST_NET_NS,
+    pid1_pid: int = _HOST_PID_NS,
 ) -> object:
-    """`os.stat` for a process in `net`'s network namespace and `mnt`'s mount namespace."""
+    """`os.stat` for a process in `net`'s network namespace and `mnt`'s mount namespace.
+
+    `pid1_pid` is answerable and unread: no code path stats `/proc/1/ns/pid`,
+    and `test_the_pid_question_refuses_both_shapes_without_reading_pid_1` is
+    what holds that decision in place. It is in the table so that implementing
+    the read fails on the answer it would get rather than on a missing key.
+    """
     answers = {
         "/proc/self/ns/pid": pid,
         "/proc/self/ns/net": net,
         "/proc/1/ns/net": _HOST_NET_NS,
+        "/proc/1/ns/pid": pid1_pid,
         "/proc/self/ns/mnt": mnt,
         "/proc/1/ns/mnt": pid1_mnt,
     }
@@ -4634,6 +4668,69 @@ def test_the_cause_is_the_namespace_that_actually_differs() -> None:
 def _no_proc_ns(path: str, *args: object, **kwargs: object) -> object:
     """`os.stat` on a machine whose `/proc/self/ns` is not there — the None branch."""
     raise OSError(2, "No such file or directory", path)
+
+
+def test_the_pid_question_refuses_both_shapes_without_reading_pid_1() -> None:
+    """Round 8's sentence was true of one pid namespace and false of the other.
+
+    `where_the_reading_came_from()` returns `"other-pid-namespace"` whenever
+    `/proc/self/ns/pid` is not the initial inode, and round 8's sentence for it
+    said `/proc/1` there "is not this machine's init but the init of a pid
+    namespace of its own". Measured by me on m910q, 2026-09-05, both spellings
+    one minute apart, with `/proc/1/comm` read in each:
+
+        `unshare --pid --fork`                self 4026533509 / 4026531840 /
+                                              4026531841, `/proc/1` systemd,
+                                              pid 1's ns 4026531836 /
+                                              4026531840 / 4026531841
+        `unshare --pid --fork --mount-proc`   self 4026533510 / 4026531840 /
+                                              4026533509, `/proc/1` the probe,
+                                              pid 1's ns 4026533510 /
+                                              4026531840 / 4026533509
+
+    The first is the sentence's counterexample: `/proc/1` IS this machine's
+    init, both comparisons would have answered correctly, and the refusal is a
+    false one. Both are refused all the same, and this test pins that they are
+    refused ALIKE — the two signatures differ in every `/proc/1` answer and
+    reach the same cause — and, in the same breath, that the module does not
+    buy the difference. `/proc/1/ns/pid` would separate them and is not free:
+    at uid 1000 on m910q that day `os.stat` raised `EACCES` for all three of
+    `/proc/1/ns/{pid,net,mnt}` and only `sudo -n stat -L -c %i
+    /proc/1/ns/pid` answered (4026531836), so reading it would cost the
+    elevation fallback the other two questions pay and answer `"unknown"`
+    without a prefix. `_namespaced()` hands out `/proc/1/ns/pid` anyway: if
+    anyone spends that read, the first signature stops being
+    `"other-pid-namespace"` and this assertion is what says so.
+    """
+
+    def never(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"spawned {argv} for a question one free stat had already answered")
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os.path, "isdir", lambda path: True)
+
+        # `/proc` inherited: `/proc/1` is this machine's systemd, host net and mnt.
+        patched.setattr(
+            networking.os,
+            "stat",
+            _namespaced(pid=_UNSHARE_PID_NS, mnt=_HOST_MNT_NS, pid1_mnt=_HOST_MNT_NS),
+        )
+        assert networking.in_initial_pid_namespace() is False
+        assert networking.where_the_reading_came_from("ufw", run=never) == "other-pid-namespace"
+
+        # `/proc` remounted: `/proc/1` is the namespace's own, with its own mnt.
+        patched.setattr(
+            networking.os,
+            "stat",
+            _namespaced(
+                pid=_UNSHARE_MOUNTPROC_PID_NS,
+                mnt=_UNSHARE_MOUNTPROC_MNT_NS,
+                pid1_mnt=_UNSHARE_MOUNTPROC_MNT_NS,
+                pid1_pid=_UNSHARE_MOUNTPROC_PID_NS,
+            ),
+        )
+        assert networking.in_initial_pid_namespace() is False
+        assert networking.where_the_reading_came_from("ufw", run=never) == "other-pid-namespace"
 
 
 def test_a_table_that_never_settled_does_not_blame_the_machine_it_was_read_on() -> None:

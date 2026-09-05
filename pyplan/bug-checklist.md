@@ -2853,11 +2853,13 @@ command, in `pyplan/gates/bug39-ssh-lockout/round8-2026-09-05.md`.
   4026533509, and `where_the_reading_came_from('firewalld')` -> `other-network-namespace`, whose
   remedy ends *"apply them with the firewall tool inside it"* — which writes the container's
   `/etc/firewalld`, the outcome `other-mount-namespace` exists to prevent. **Fixed:**
-  `in_initial_pid_namespace()` is asked as its own free question, before either comparison, and its
-  own cause `other-pid-namespace` says what is actually true — that `/proc/1` there is the
-  container's init, so both comparisons compare a namespace with itself (self mnt 4026533509 ==
-  `/proc/1/ns/mnt` 4026533509, while the host's is 4026531841) — and its remedy is to run the step
-  from the host's shell, or to add `--pid=host` so the probe can answer. After, all four shapes
+  `in_initial_pid_namespace()` is asked as its own free question, before either comparison, and it
+  gets its own cause, `other-pid-namespace`, whose remedy is to run the step from the host's shell
+  or to add `--pid=host` so the probe can answer. The SENTENCE round 8 wrote for that cause was true
+  of the container it was measured in — `/proc/1` there is the container's init, so both comparisons
+  compare a namespace with itself (self mnt 4026533509 == `/proc/1/ns/mnt` 4026533509, while the
+  host's is 4026531841) — and false of the other shape the same cause fires on; round 9 measured
+  that and rewrote it. After, all four shapes
   measured on m910q with the fixed module: host -> `this-machine`; `sudo unshare --net` ->
   `other-network-namespace` (round 6's case, unchanged); `sudo unshare --pid --fork` ->
   `other-pid-namespace`; `docker run --network=host` -> `other-pid-namespace`; `docker run
@@ -2872,24 +2874,108 @@ command, in `pyplan/gates/bug39-ssh-lockout/round8-2026-09-05.md`.
   test derives the zoning through `detect_firewalld_zones()` instead of hand-feeding
   `machine_made=('docker',)` past it.
 * **The stopped-daemon branch.** `machine_made` there is computed from `firewall-offline-cmd
-  --list-all-zones`, the permanent config, where Docker's bridges are never bound — so it is inert,
-  and harmlessly: measured on yulon-fedora the same day, all fifteen zones came back with both
-  fields empty, `bound_only=True` kept only `('FedoraWorkstation',)`, and an unbound `docker` zone
-  cannot reach `permanent` or `write` for a breadth note to name. One sentence in the code, no
-  change to the path.
+  --list-all-zones`, the permanent config. On yulon-fedora that day it had nothing to do: all
+  fifteen zones came back with both fields empty, `bound_only=True` kept only
+  `('FedoraWorkstation',)`, and an unbound `docker` zone did not reach `permanent` or `write` for a
+  breadth note to name. Round 8 wrote that up as **"can never"**; round 9 refuted the generalisation
+  on the same listing and rewrote the comment. One sentence in the code, no change to the path.
 
 Six mutations, one at a time, `__pycache__` purged on both sides of each and the substitution
 asserted present-on-disk and the original absent before every run; baseline and restore both
 `237 passed`, 0 survivors. Fedora is not called the "flagship platform" any more: the owner's order
 is Ubuntu -> Fedora -> Arch -> Windows, and this defect fires on every Linux box with Docker.
 
-What keeps this section OPEN is what round 5 recorded and rounds 7 and 8 did not change:
+**ROUND 9, 2026-09-05 — no behaviour changed; four sentences that were true of one shape and false
+of another were rewritten, and one of them got a test. Still OPEN.** Round 8's own review and its
+meta both said the two behavioural repairs held on real boxes and that what blocked the merge was
+text. The lane was rebased onto `c6b28547` (`ee361035` -> `ef022b3a` -> `cd827c0f`, clean, no
+conflicts) and everything below was measured by me on 2026-09-05: namespaces on **m910q**, firewalld
+listings read-only on **yulon-fedora** (Fedora 44, already Running when I arrived; left Running).
+No firewall command was applied anywhere. Evidence, command by command, in
+`pyplan/gates/bug39-ssh-lockout/round9-2026-09-05.md`.
+
+* **`other-pid-namespace` claimed `/proc/1` was the namespace's own init, and half the time it is
+  this machine's `systemd`.** Both spellings on m910q, one minute apart, `/proc/1/comm` read in
+  each: `sudo unshare --pid --fork` gave self `4026533509 / 4026531840 / 4026531841` with `/proc/1`
+  = `systemd` and pid 1's namespaces `4026531836 / 4026531840 / 4026531841` — byte-identical to the
+  host's own reading; `sudo unshare --pid --fork --mount-proc` gave self `4026533510 / 4026531840 /
+  4026533509` with `/proc/1` = the probe and pid 1's namespaces its own. `--mount-proc` is what
+  decides it, and `/proc/self/ns/pid` — the only read the module makes — is non-initial in both.
+  **Rewritten, not re-implemented:** the sentence now says the process is in a pid namespace of its
+  own, that whether `/proc/1` is this machine's init or the namespace's cannot be told without
+  privilege, gives both measured shapes, and says outright that in the second the refusal is a false
+  one. The remedy is unchanged and is correct in both. The same false precondition was in
+  `in_host_network_namespace()`'s docstring, in `in_initial_pid_namespace()`'s, and in
+  `where_the_reading_came_from()`'s second bullet; all three now say "may be", with the measurement.
+* **The separating read was costed and declined.** `/proc/1/ns/pid` would tell the two shapes apart.
+  At uid 1000 on m910q, `os.stat` raised `EACCES` for all three of `/proc/1/ns/{pid,net,mnt}` and
+  only `sudo -n stat -L -c %i /proc/1/ns/pid` answered (`4026531836`) — so it costs the same
+  elevation fallback the network and mount questions already pay, and answers `"unknown"` with no
+  prefix. It buys one shape (`unshare --pid --fork` from a shell, which no container runtime
+  measured here produces, all of them remounting `/proc`), and it would trade a refusal carrying an
+  actionable remedy for `"unknown"`, whose remedy is "give the launcher sudo". Declined, with the
+  numbers, in `in_initial_pid_namespace()`'s docstring.
+  `test_the_pid_question_refuses_both_shapes_without_reading_pid_1` holds the decision: it drives
+  both signatures through `where_the_reading_came_from()`, hands the fake `os.stat` a truthful
+  `/proc/1/ns/pid` answer, and fails if anyone spends it. Two mutations, killed: `if initial is
+  False:` -> `if initial is False and os.stat("/proc/1/ns/pid").st_ino != _INITIAL_PID_NAMESPACE_INO:`
+  reddened `assert … == "other-pid-namespace"` with `'other-network-namespace'`, and
+  `os.stat("/proc/self/ns/pid")` -> `os.stat("/proc/1/ns/pid")` inside `in_initial_pid_namespace()`
+  reddened `assert networking.in_initial_pid_namespace() is False` with `assert True is False`.
+* **Row five of the `_INITIAL_PID_NAMESPACE_INO` table was labelled with a command that does not
+  produce it.** The row read `m910q, unshare --net --pid --fork: 4026533089 4026533090 4026533090` —
+  pid 1's `ns/net` equal to the new net namespace. Re-measured: that spelling gives self
+  `4026533509 / 4026533510 / 4026531841` with pid 1's `ns/net` `4026531840`, the HOST's, and
+  `/proc/1` = `systemd`; only `unshare --net --pid --fork --mount-proc` gives self `4026533621 /
+  4026533622` with pid 1's `ns/net` `4026533622`. The table is now nine rows, every m910q row read
+  in this sitting, each labelled by the exact command, with a `/proc/1` column — the column that
+  makes the difference visible. `docker run --rm busybox` reproduced its row's shape (self
+  `4026533512 / 4026533514`, pid 1's `ns/net` `4026533514`, `/proc/1` = `sh`).
+* **"`machine_made` … can never have anything to do" in the stopped-daemon branch.** Refuted on that
+  box's own bytes. yulon-fedora's `firewall-offline-cmd --list-all-zones` was byte-identical that
+  day to its `--permanent --list-all-zones` (257 lines, `md5 d05ef29403b14511b0f1f3541336efaf`).
+  As-is, `machine_made_zones(offline)` = `()` and `zones_from_listing(offline, bound_only=True)` =
+  `('FedoraWorkstation',)`. Changing exactly one field in those 257 lines — the `docker` block's
+  `interfaces: ` to `interfaces: docker0`, the anchor asserted to occur once, which is what
+  `firewall-cmd --permanent --zone=docker --add-interface=docker0` writes — gave `machine_made`
+  `('docker',)` and `detect_firewalld_zones(daemon="stopped")` `write` and `permanent`
+  `('FedoraWorkstation', 'docker')`. The code was right; the comment was a guarantee. It now records
+  both readings.
+* **"…which is the default zone's case" in `machine_made_zones()`'s docstring.** On the reading
+  `detect_firewalld_zones()` actually builds, the default zone enters the vote and loses on the
+  rule, not on absence: `machine_made_zones(permanent)` = `()`, `machine_made_zones(active)` =
+  `('docker',)`, `machine_made_zones(permanent, active)` = `('docker',)`, and `_zone_bindings` of
+  the active listing binds `FedoraWorkstation` to `('eth0',)`. Rewritten to name the thirteen zones
+  of fifteen that neither listing binds, which is the case that sentence actually describes.
+* **Two record repairs.** `_YULON_FEDORA_ACTIVE`'s docstring said its bridge list was "copied"; the
+  order is per-boot (`br-2ec281b6c57a br-85289dddc52d br-db9be8196055 br-eebe26d3f624 docker0` in
+  the fixture, `br-db9be8196055 br-eebe26d3f624 br-2ec281b6c57a br-85289dddc52d docker0` from the
+  same command on the same box at 15:12 UTC after a reboot), and the docstring now says so and says
+  nothing rides on it. The round-8 meta also flagged `route: SshRoute(connected=True, …,
+  listeners_readable=True)` in round 8's gate file as unreproducible under `sudo -n`; measured on
+  m910q, that pair is not a contradiction but an environment: as the ssh user, `connected` True and
+  `listeners_readable` False; under `sudo -n`, False and True; under `sudo -n -E`, True and True.
+  Round 8's probe ran python as the ssh user and prefixed each command with `sudo -n`, which is the
+  first field of each pair — the line stands, and round 9's gate file records why.
+
+Two mutations, one at a time, in my own copy on m910q (`~/yulon-runs/fix9-bug39`, a `--shared`
+clone, venv symlinked, deleted afterwards): each anchor asserted to occur exactly once in the file
+bytes, the substitution asserted present-on-disk and the original absent before the run,
+`__pycache__` purged on both sides of every run, and the file byte-compared to the original
+(`sha256 34f37a78…`, 184325 bytes) after each restore. Baseline `238 passed`, restore `238 passed`,
+0 survivors. `tests/test_networking.py` went 237 -> 238: round 9 added
+`test_the_pid_question_refuses_both_shapes_without_reading_pid_1` and removed none, and changed no
+existing test's assertions — only `_namespaced()` gained a `pid1_pid` parameter and an answer for
+`/proc/1/ns/pid` that nothing reads.
+
+What keeps this section OPEN is what round 5 recorded and rounds 7, 8 and 9 did not change:
 `enable_firewall`
 occurs in `pylauncher/yulon/networking.py` and `pylauncher/tests/test_networking.py` and nowhere
 else, so no view, service or controller can ask for the enable, and the owner's "click a button and
 the server's ports get forwarded" still ends at a plan the GUI cannot drive. The RELOAD half is on
 the path users hit today and is guarded; the ENABLE half is what must already be true before a
-control for it exists.
+control for it exists. Nothing in rounds 7, 8 or 9 ran `apply()` on any box, and no firewall command
+has been applied on any box in any of the three rounds.
 
 ### 40. Abandoning `logs_source()` aborts the interpreter at exit — 2026-09-04, **CLOSED 2026-09-05 at `d2b963d5`**
 
