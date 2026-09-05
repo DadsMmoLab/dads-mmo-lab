@@ -295,6 +295,31 @@ class DockerfileError(RuntimeError):
     """A template could not be rendered, or a file in the way is not ours to replace."""
 
 
+class CarriedSecretError(DockerfileError):
+    """A token value carried a declared secret — the one refusal a CALLER can say more about.
+
+    A subclass and not a flag, so `_write_dockerfile` can catch this case ahead of every
+    other `DockerfileError` and append the one sentence `render()` cannot write: WHERE
+    this install's password came from. `render()` is handed a `Secrets` and never a path,
+    which is right — it renders for any `template_dir` any entry ever names — but it means
+    the remedy it can offer covers only one of the two ways this fires.
+
+    **Both ways, measured on m910q 2026-09-05 over the three shipped `_public_tokens()`
+    mappings** (`server_dir=/tmp/fixedsrv/srv`): 19 of the 34 distinct values are at or
+    above the floor, and their substrings give 1031 distinct passwords of 8 characters or
+    more that this rule refuses; the 15 values below the floor give 15 more by equality.
+    1046 strings in total, `characters`, `mariadb:11`, `tw_logon`, `vanilla-`, `/opt/mangos`
+    among them. A user whose `.db_password` holds one of those is refused with nothing
+    leaked and nothing they did wrong — and until 2026-09-05 the message told them to
+    "drop the key", about a key (`CHAR_DB`, `IMAGE_PREFIX`) this app puts in the mapping
+    itself and they cannot touch. The rule is right and stays; the sentence was wrong.
+
+    The surface is unchanged by that fix — it is the same 1046 strings before and after,
+    because narrowing the rule to spare them is what would open the hole. What changed is
+    that the refusal now names the other possibility and the caller names the file.
+    """
+
+
 def render(template_dir: Path, tokens: Mapping[str, str], *, secrets: Secrets) -> tuple[str, str]:
     """(Dockerfile text, .dockerignore text), each beginning with the marker as a `#` comment.
 
@@ -380,10 +405,12 @@ def render(template_dir: Path, tokens: Mapping[str, str], *, secrets: Secrets) -
 
     Raises:
         DockerfileError: a template could not be read, a placeholder was left unfilled, a
-            template names a `SECRET_TOKENS` placeholder such as `{{DB_PASSWORD}}`, the
-            mapping files a secret-sounding value under a name no `Secrets` field
-            declares, or the mapping carries a declared secret's VALUE under a key this
-            module does not drop.
+            template names a `SECRET_TOKENS` placeholder such as `{{DB_PASSWORD}}`, or the
+            mapping files a secret-sounding value under a name no `Secrets` field declares.
+        CarriedSecretError: the mapping carries a declared secret's VALUE under a key this
+            module does not drop. A `DockerfileError`, caught separately by
+            `_write_dockerfile` so that the file the password lives in can be named — see
+            that class.
         TypeError: `secrets` was not passed. Deliberate, and see above.
     """
     # The VALUE rule runs FIRST, and the order is a decision about the sentence a reader
@@ -404,14 +431,18 @@ def render(template_dir: Path, tokens: Mapping[str, str], *, secrets: Secrets) -
         if named:
             carrying.append(f"{key} (the value declared as {', '.join(named)})")
     if carrying:
-        raise DockerfileError(
+        raise CarriedSecretError(
             f"{'; '.join(carrying)} — and this mapping is rendered into the build context, "
             "where a Dockerfile is copied into an image layer that `docker history` prints "
-            "long after the file is deleted. A secret may only ride in this mapping under a "
-            "token this renderer drops "
-            f"({', '.join(sorted(SECRET_TOKENS))}), and only towards a consumer that needs "
-            "it — `_secret_tokens()`, whose conf files are written 0600. Drop the key, or "
-            "file the value under its declared token. The value itself is not printed here."
+            "long after the file is deleted. Nothing was written. If one of those keys was "
+            "added by hand, that is the leak: drop it, or file the value under a token this "
+            f"renderer drops ({', '.join(sorted(SECRET_TOKENS))}), which goes only towards a "
+            "consumer that needs it — `_secret_tokens()`, whose conf files are written 0600. "
+            "If none of them was — every key above may be one this app puts in the mapping "
+            "itself, and then there is nothing here to drop — then the match is a coincidence: "
+            "the password is the same as, or part of, a value this install renders, and the "
+            "string to change is the PASSWORD and not the key. The value itself is not "
+            "printed here."
         )
     undeclared = sorted(
         key for key in tokens if key not in SECRET_TOKENS and announces_a_secret(key)

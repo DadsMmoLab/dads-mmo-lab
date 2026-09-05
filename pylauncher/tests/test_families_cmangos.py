@@ -1052,6 +1052,58 @@ def test_the_write_dockerfile_stage_refuses_a_bland_key_carrying_the_install_pas
     assert not (server_dir / ".dockerignore").exists()
 
 
+def test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the_password_file(
+    tmp_path: Path,
+) -> None:
+    """The false positive, driven through the stage, and the remedy it has to name.
+
+    Nothing is planted in the mapping here. The user's own `.db_password` holds
+    `mariadb:11`, which IS the shipped `DB_IMAGE` value for this entry — so
+    `carries_a_secret()` fires on a key this app puts in the mapping itself, `render()`
+    refuses, and nothing has leaked. Measured on m910q 2026-09-05 over the three shipped
+    `_public_tokens()` mappings: 1046 distinct password strings do this (1031 by
+    containment over the 19 values at or above the floor, 15 by equality below it),
+    `characters`, `tw_logon`, `vanilla-` and `/opt/mangos` among them.
+
+    That surface is the same before and after this test existed — the rule is not narrowed
+    to spare them, because narrowing it is what would open the hole §29 closed. What was
+    wrong was the SENTENCE: until 2026-09-05 it said "Drop the key, or file the value
+    under its declared token", about `DB_IMAGE`, which the user did not write and cannot
+    drop, while the one thing that clears it — their own password — went unnamed. So the
+    assertions here are about the remedy: the file is named with its full path, and the
+    cost of changing it (the database volume) is named too.
+
+    `render()` cannot say any of that: it is handed a `Secrets` and never a path, for any
+    `template_dir` any entry names. The stage can, which is why `CarriedSecretError` is a
+    subclass caught ahead of the rest and why this test drives `_write_dockerfile` rather
+    than `render()`.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    collides = eng._public_tokens(server_dir)["DB_IMAGE"]
+    assert len(collides) >= dockerfile.MIN_CONTAINED_SECRET, "premise: the containment route"
+    plan = ENTRY.install.password
+    assert plan.file, "premise: this entry keeps its password in a file the user owns"
+    (server_dir / plan.file).write_text(f"{collides}\n", encoding="utf-8")
+    ctx = replace(context(server_dir), secrets=eng.resolve_secrets(server_dir))
+    assert ctx.secrets.db_password == collides, (
+        "premise: the install's real password, read the way the spine reads it, is the "
+        "same string as a value this app renders — nothing was planted in the mapping"
+    )
+
+    with pytest.raises(InstallerError, match="DB_IMAGE") as caught:
+        list(eng._write_dockerfile(ctx))
+    said = str(caught.value)
+    assert collides not in said, "the refusal a user reads must not print the password"
+    assert str(server_dir / plan.file) in said, "it names the file the password is in"
+    remedy = "it says whose the password is and that changing it — not the key — is the remedy"
+    assert "yours" in said, remedy
+    assert "the PASSWORD and not the key" in said, remedy
+    assert eng._db_volume(server_dir) in said, "and what changing it costs"
+    assert not (server_dir / "Dockerfile").exists(), "and nothing was laid down"
+
+
 @pytest.mark.parametrize(
     "password",
     [DB_PASSWORD, "password"],
@@ -1182,6 +1234,19 @@ def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(
         eng = engine_for(no_file, Recorder(), volume_exists=refuse_to_answer)
         list(eng._db_password(context(server_dir)))
     said["_db_password"] = str(from_password.value)
+    # NOT a raise: `_password_origin_note` RETURNS the sentence appended to
+    # `render()`'s carried-secret refusal. It spends the tail in the branch where
+    # the password is the catalog's own — a collision between that and a rendered
+    # value is an app defect, not something the user can change — so it belongs in
+    # this set, and driving it here is also the only test of that branch.
+    fixed = engine_for(
+        entry_with_password(
+            PasswordPlan.model_construct(mode="fixed", value="password", file=None, prefix="")
+        ),
+        Recorder(),
+        volume_exists=refuse_to_answer,
+    )
+    said["_password_origin_note"] = fixed._password_origin_note(context(server_dir))
 
     assert set(said) == functions_spending("CATALOG_ERROR_TAIL"), (
         "a function spends the catalog tail that this test does not drive, or drives one "

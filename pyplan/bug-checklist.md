@@ -1872,7 +1872,24 @@ under another key, so the shape that has actually happened is caught at any leng
   reading what `db-password` wrote one stage earlier) rather than by a literal.
 * The rule must not refuse a real install —
   `test_no_shipped_public_mapping_collides_with_a_password_the_catalog_can_declare`, all three games
-  × {generated shape, `password`}, through the real shipped templates.
+  × {generated shape, `password`}, through the real shipped templates. That covers the two passwords
+  the CATALOG can produce, and the catalog is not the only source: a user's own `.db_password` is
+  read as written, and **1046 distinct strings collide** with a shipped public token value —
+  measured on m910q 2026-09-05, `server_dir=/tmp/fixedsrv/srv`, 1031 by containment over the 19
+  values at or above the floor plus 15 by equality over the values below it, `characters`,
+  `mariadb:11`, `tw_logon`, `vanilla-`, `/opt/mangos` among them. **That surface is unchanged by
+  anything here and deliberately so** — narrowing the rule to spare those is what would reopen the
+  hole. What was wrong was the SENTENCE. Until 2026-09-05 such a user read
+  `DB_IMAGE (the value declared as DB_PASSWORD) … Drop the key, or file the value under its
+  declared token`, about a key this app puts in the mapping itself, which they cannot drop, while
+  the one remedy that works — their own password — went unnamed. `render()` cannot name it: it
+  holds a `Secrets` and never a path. So the refusal is now a `CarriedSecretError`, caught by
+  `_write_dockerfile` ahead of every other `DockerfileError`, which appends
+  `_password_origin_note()`: the full path of the password file, that the password is theirs, and
+  what changing it costs (the `db-data` volume was created with the old one). Held by
+  `test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the_password_file`,
+  which plants nothing in the mapping — it writes `mariadb:11` into `.db_password` and lets the
+  shipped `DB_IMAGE` do the colliding.
 
 **Ten mutations, each killed, m910q 2026-09-05** (`__pycache__` purged on both sides of every one;
 the two files are 211 tests at baseline). The value refusal deleted → 11 failed. Containment

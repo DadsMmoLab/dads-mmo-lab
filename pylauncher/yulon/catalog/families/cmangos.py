@@ -327,6 +327,40 @@ class CmangosInstaller(StagedInstaller):
         )
         return f"{project}_{DB_DATA_VOLUME}"
 
+    def _password_origin_note(self, ctx: StageContext) -> str:
+        """Where this install's database password came from — the half `render()` cannot know.
+
+        Appended to `CarriedSecretError` only. `dockerfile.render()` compares values
+        against a `Secrets` and is handed no path, so the remedies it can name are both
+        about the KEY ("drop it", "file it under `DB_PASSWORD`"). Measured on m910q
+        2026-09-05 over the three shipped `_public_tokens()` mappings: 1046 distinct
+        password strings collide with a value in them (1031 by containment, 15 by
+        equality), among them `characters`, `mariadb:11`, `tw_logon` and `vanilla-`. A
+        user holding one of those is refused for a key this app put in the mapping
+        itself — `CHAR_DB`, `DB_IMAGE` — so "drop the key" is advice they cannot act on,
+        and the one thing that clears it, changing their own password, went unnamed.
+
+        The volume is named because changing that password is not free once a database
+        exists: the same fact `_db_password` refuses on, said before the user acts rather
+        than after. Neither this note nor the refusal it joins ever prints the password.
+        """
+        plan = self.entry.install.password
+        if plan.mode != "generated" or plan.file is None:
+            return (
+                "This server's database password comes from its catalog entry rather than from "
+                "a file on this machine, so a collision between it and a value this app renders "
+                f"is a bug in the app. {CATALOG_ERROR_TAIL}"
+            )
+        volume = self._db_volume(ctx.server_dir)
+        return (
+            "This install's database password is yours: it is the contents of "
+            f"{ctx.server_dir / plan.file}. If you did not add the key named above, changing "
+            "that password is the only thing that clears this. It is not free — the database "
+            f"volume {volume}, if it already exists, was created with the current password, so "
+            f"changing it means starting that database over (`docker volume rm {volume}` "
+            "deletes it, and every character in it)."
+        )
+
     def _write_dockerfile(self, ctx: StageContext) -> Iterator[str]:
         """Render `Dockerfile` + `.dockerignore` from the entry's template dir, marker rule applied.
 
@@ -399,6 +433,18 @@ class CmangosInstaller(StagedInstaller):
                 secrets=ctx.secrets,
             )
             written = dockerfile.write(ctx.server_dir, text, ignore)
+        except dockerfile.CarriedSecretError as exc:
+            # AHEAD of the `DockerfileError` arm below, which it subclasses.
+            # `render()` proved a token value carries this install's password and
+            # can name two remedies; the third — that the password is the user's
+            # own and is the thing to change — needs the FILE, which `render()`
+            # is never handed and this body has. See `_password_origin_note`.
+            # Widened to the base class on purpose ONCE, as a mutation on
+            # 2026-09-05: the note is then appended to "that file is not ours to
+            # replace" as well, and the test below named
+            # `test_write_dockerfile_passes_the_modules_sentence_through_and_...`
+            # is the one that fails.
+            raise InstallerError(f"{exc} {self._password_origin_note(ctx)}") from exc
         except dockerfile.DockerfileError as exc:
             # Already the sentence a user reads. A class name in front of
             # "that file was not written by Yu'lon" would be noise, not evidence.
