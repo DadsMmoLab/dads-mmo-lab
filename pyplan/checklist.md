@@ -1360,6 +1360,34 @@
     hot-added from the host and mounted as `D:`; then Docker could not see `D:` until the
     docker-desktop distro had it mounted by hand (`mount -t drvfs`, not persistent). Server folder
     is therefore `D:\gate\tortoise-server`, client still on `C:`. The TBC stack was stopped first.
+  - **WOW TORTOISE IS INSTALLED AND RUNNING ON NATIVE WINDOWS, 2026-09-05 — the fourth of four.**
+    That run ended `install of wow-tortoise finished` at **00:43:19 box-local (09:43 CEST), exit 0**,
+    10 h 24 min after its 14:18:59 start; `tortoise-realmd` (3724), `tortoise-mangosd` (8090) and
+    `tortoise-db` (3306 on loopback, healthy) up with `RestartCount=0` on every one, realm
+    advertising `172.30.52.119`, and the worldserver's own banner — re-read from the live container
+    with `docker logs -t`, not from the transcript — `07:41:17Z World server is up and running!
+    Loading time: 59 minutes 18 seconds`. Evidence: `pyplan/gates/7.7-win11-tortoise/` (transcript,
+    exit codes, the container captures, and a README that walks the stamps). Stage walls from the
+    transcript's own timestamps: clone 6 min; build **1h17m**; extract **2h47m** (dbc 158, maps 2805,
+    Buildings 5367, vmaps 6921); mmaps **5h08m** (2133 files — the same 2133 the 7.6 Linux run
+    produced, so the mmaps side of the TBC counts question does not recur here); conf + start-db +
+    import 4 min; up → ready **61m42s**.
+    **The widening is now earned for all three CMaNGOS entries** — `wow-tortoise` reads
+    `["linux", "windows"]` with this commit, `CMANGOS_PLATFORMS` in `test_catalog.py` records the run
+    that did it — and it could not be committed alone. The ready stage measured **3702 s** wall
+    (23:41:37 `start_staged()` → 00:43:19 finished) against the **3600 s** the repo carried for
+    Tortoise; the run was reported as a success only because the box's copy had 10800 s. Shipping
+    `windows` at 3600 would ship a Windows install measured to expire 102 s before it sees its own
+    banner and to repeat TBC's `never reported ready` verdict, so the budget moved to **10800 s** in
+    the same commit and `test_tortoise_boot_facts.py` now holds the 3702 s floor beside the Linux
+    one — the value it pins is the measured stage wall, not the number typed. The "decision, not a
+    number" note two bullets up still stands: 10800 is the third data point for that decision
+    (Vanilla 24.6 min, TBC 46.0 min, Tortoise 61.7 min, all over 9p), not the end of it.
+    One confound, kept: the box's `dml-tortoise-dl` task fired a second time at 23:59 and re-fetched
+    the 9.98 GB client at 6.6 MB/s until 00:23 — inside the 59-minute load — and its `unpack` twin
+    stopped on `MD5 MISMATCH` (that is the `2` in `tortoise-unpack.exitcode`; the client the install
+    used was verified at 14:06). The boot may be quicker on a quiet box; the budget covers the boot
+    that was measured. Still owed before this line ticks: WotLK's transcript on this box.
   - **Windows Vanilla, started 2026-09-04 04:20** into `C:\gate\vanilla-server` against the 5.14 GB
     1.12.1 client at `C:\gate\client`. Numbers already in hand from setting it up, since 7.7 asks
     for throughput: the client zip came down from `wow.baerthe.com` at about **13 MB/s** (5.33 GB,

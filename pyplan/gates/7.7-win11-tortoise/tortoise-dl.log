@@ -1,0 +1,8 @@
+==== download start Fri 09/04/2026 13:39:30.55 expected_bytes=9981655040 expected_md5=5bca6fa452c7a381948d88383712c01c 
+==== attempt 1 at Fri 09/04/2026 13:39:30.55 
+curl_exit_ok size=9981655040 speed=9013674 code=200
+==== download end Fri 09/04/2026 13:57:58.36 errorlevel 0 
+==== download start Fri 09/04/2026 23:59:00.99 expected_bytes=9981655040 expected_md5=5bca6fa452c7a381948d88383712c01c 
+==== attempt 1 at Fri 09/04/2026 23:59:01.01 
+curl_exit_ok size=9981655040 speed=6667054 code=200
+==== download end Sat 09/05/2026  0:23:58.42 errorlevel 0 

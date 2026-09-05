@@ -812,7 +812,8 @@
       },
       "install": {
         "platforms": [
-          "linux"
+          "linux",
+          "windows"
         ],
         "default_server_dir": "tortoise-wow-server",
         "requires_client_dir": true,
@@ -846,7 +847,7 @@
             "auth": null,
             "fatal": "Correct \\*.map files not found|Could not open (?!.*Logging to it is off for this run)|Database .* not found",
             "regex": true,
-            "timeout_s": 3600,
+            "timeout_s": 10800,
             "restart_loop": 4
           },
           "cmangos": {

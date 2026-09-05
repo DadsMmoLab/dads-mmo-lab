@@ -1,0 +1,400 @@
+[0 ms] SQL: SELECT variableType, value FROM character_variables WHERE lowGuid = '485'
+[0 ms] SQL: SELECT id,messageType,sender,receiver,subject,itemTextId,expire_time,deliver_time,money,cod,checked,stationery,mailTemplateId,has_items,isDeleted FROM mail WHERE receiver = '203' ORDER BY id DESC
+[0 ms] SQL: SELECT creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, transmogrifyId, durability, text, mail_id, item_guid, itemEntry, generated_loot FROM mail_items JOIN item_instance ON item_guid = guid WHERE receiver = '203'
+[0 ms] SQL: SELECT itemLowGuid, itemEntry, itemCount, action, timestamp FROM character_item_logs WHERE playerLowGuid = '485' ORDER BY timestamp DESC
+[0 ms] SQL: SELECT friend,flags FROM character_social WHERE guid = '210' LIMIT 255
+[1 ms] SQL: SELECT skill, value FROM character_forgotten_skills WHERE guid = '203'
+[1 ms] SQL: SELECT map,zone,position_x,position_y,position_z FROM character_homebind WHERE guid = '210'
+[0 ms] SQL: SELECT guid, spell, spec FROM `character_spell_dual_spec` WHERE guid = '485'
+[0 ms] SQL: SELECT variableType, value FROM character_variables WHERE lowGuid = '203'
+[1 ms] SQL: SELECT spell,item,time,cattime FROM character_spell_cooldown WHERE guid = '210'
+[0 ms] SQL: SELECT guildid,`rank` FROM guild_member WHERE guid = '210'
+[0 ms] SQL: SELECT instance_id, team, join_x, join_y, join_z, join_o, join_map FROM character_battleground_data WHERE guid = '210'
+[1 ms] SQL: SELECT itemLowGuid, itemEntry, itemCount, action, timestamp FROM character_item_logs WHERE playerLowGuid = '203' ORDER BY timestamp DESC
+[1 ms] SQL: SELECT skill, value, max FROM character_skills WHERE guid = '210'
+[0 ms] SQL: SELECT guid, spell, spec FROM `character_spell_dual_spec` WHERE guid = '203'
+[0 ms] SQL: SELECT id,messageType,sender,receiver,subject,itemTextId,expire_time,deliver_time,money,cod,checked,stationery,mailTemplateId,has_items,isDeleted FROM mail WHERE receiver = '210' ORDER BY id DESC
+[0 ms] SQL: SELECT creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, transmogrifyId, durability, text, mail_id, item_guid, itemEntry, generated_loot FROM mail_items JOIN item_instance ON item_guid = guid WHERE receiver = '210'
+[0 ms] SQL: SELECT skill, value FROM character_forgotten_skills WHERE guid = '210'
+[1 ms] SQL: SELECT guid, account, name, race, class, gender, level, xp, money, playerBytes, playerBytes2, playerFlags, position_x, position_y, position_z, map, orientation, taximask, cinematic, totaltime, leveltime, rest_bonus, logout_time, is_logout_resting, resettalents_multiplier, resettalents_time, trans_x, trans_y, trans_z, trans_o, transguid, extra_flags, stable_slots, at_login, zone, online, death_expire_time, taxi_path, honorRankPoints, honorHighestRank, honorStanding, honorLastWeekHK, honorLastWeekCP, honorStoredHK, honorStoredDK, watchedFaction, drunk, health, power1, power2, power3, power4, power5, exploredZones, equipmentCache, ammoId, actionBars, world_phase_mask, customFlags, city_protector, ignore_titles, mortality_status, total_deaths, xp_gain, extraBonusTalentCount FROM characters WHERE guid = '563'
+[0 ms] SQL: SELECT variableType, value FROM character_variables WHERE lowGuid = '210'
+[0 ms] SQL: SELECT itemLowGuid, itemEntry, itemCount, action, timestamp FROM character_item_logs WHERE playerLowGuid = '210' ORDER BY timestamp DESC
+[1 ms] SQL: SELECT groupId FROM group_member WHERE memberGuid ='563'
+[1 ms] SQL: SELECT guid, spell, spec FROM `character_spell_dual_spec` WHERE guid = '210'
+[0 ms] SQL: SELECT guid, account, name, race, class, gender, level, xp, money, playerBytes, playerBytes2, playerFlags, position_x, position_y, position_z, map, orientation, taximask, cinematic, totaltime, leveltime, rest_bonus, logout_time, is_logout_resting, resettalents_multiplier, resettalents_time, trans_x, trans_y, trans_z, trans_o, transguid, extra_flags, stable_slots, at_login, zone, online, death_expire_time, taxi_path, honorRankPoints, honorHighestRank, honorStanding, honorLastWeekHK, honorLastWeekCP, honorStoredHK, honorStoredDK, watchedFaction, drunk, health, power1, power2, power3, power4, power5, exploredZones, equipmentCache, ammoId, actionBars, world_phase_mask, customFlags, city_protector, ignore_titles, mortality_status, total_deaths, xp_gain, extraBonusTalentCount FROM characters WHERE guid = '378'
+[0 ms] SQL: SELECT groupId FROM group_member WHERE memberGuid ='378'
+[1 ms] SQL: SELECT id, permanent, map, resettime FROM character_instance LEFT JOIN instance ON instance = id WHERE guid = '563'
+[0 ms] SQL: SELECT id, permanent, map, resettime FROM character_instance LEFT JOIN instance ON instance = id WHERE guid = '378'
+[0 ms] SQL: SELECT caster_guid,item_guid,spell,stackcount,remaincharges,basepoints0,basepoints1,basepoints2,periodictime0,periodictime1,periodictime2,maxduration,remaintime,effIndexMask FROM character_aura WHERE guid = '378'
+[1 ms] SQL: SELECT caster_guid,item_guid,spell,stackcount,remaincharges,basepoints0,basepoints1,basepoints2,periodictime0,periodictime1,periodictime2,maxduration,remaintime,effIndexMask FROM character_aura WHERE guid = '563'
+[0 ms] SQL: SELECT spell,active,disabled FROM character_spell WHERE guid = '378'
+[1 ms] SQL: SELECT spell,active,disabled FROM character_spell WHERE guid = '563'
+[0 ms] SQL: SELECT quest,status,rewarded,explored,timer,mobcount1,mobcount2,mobcount3,mobcount4,itemcount1,itemcount2,itemcount3,itemcount4,reward_choice FROM character_queststatus WHERE guid = '563'
+[0 ms] SQL: SELECT victimType,victim,cp,date,type FROM character_honor_cp WHERE guid = '563'
+[2 ms] SQL: SELECT quest,status,rewarded,explored,timer,mobcount1,mobcount2,mobcount3,mobcount4,itemcount1,itemcount2,itemcount3,itemcount4,reward_choice FROM character_queststatus WHERE guid = '378'
+[0 ms] SQL: SELECT victimType,victim,cp,date,type FROM character_honor_cp WHERE guid = '378'
+[0 ms] SQL: SELECT honor,conquest,weekly_honor,week_begin_day FROM character_pvp_currency WHERE guid = '563'
+[1 ms] SQL: SELECT honor,conquest,weekly_honor,week_begin_day FROM character_pvp_currency WHERE guid = '378'
+[1 ms] SQL: SELECT faction,standing,flags FROM character_reputation WHERE guid = '378'
+[0 ms] SQL: SELECT itemId FROM character_transmogs WHERE guid = '378'
+[1 ms] SQL: SELECT * FROM (SELECT creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, transmogrifyId, durability, text, bag, slot, item, itemEntry, generated_loot FROM character_inventory JOIN item_instance ON character_inventory.item = item_instance.guid WHERE character_inventory.guid = '378') as t ORDER BY bag,slot
+[3 ms] SQL: SELECT faction,standing,flags FROM character_reputation WHERE guid = '563'
+[1 ms] SQL: SELECT guid,itemid,amount,property FROM item_loot WHERE owner_guid = '378'
+[0 ms] SQL: SELECT button,action,type FROM character_action WHERE guid = '378' ORDER BY button
+[0 ms] SQL: SELECT itemId FROM character_transmogs WHERE guid = '563'
+[0 ms] SQL: SELECT friend,flags FROM character_social WHERE guid = '378' LIMIT 255
+[0 ms] SQL: SELECT map,zone,position_x,position_y,position_z FROM character_homebind WHERE guid = '378'
+[1 ms] SQL: SELECT spell,item,time,cattime FROM character_spell_cooldown WHERE guid = '378'
+[0 ms] SQL: SELECT guildid,`rank` FROM guild_member WHERE guid = '378'
+[0 ms] SQL: SELECT instance_id, team, join_x, join_y, join_z, join_o, join_map FROM character_battleground_data WHERE guid = '378'
+[1 ms] SQL: SELECT skill, value, max FROM character_skills WHERE guid = '378'
+[0 ms] SQL: SELECT id,messageType,sender,receiver,subject,itemTextId,expire_time,deliver_time,money,cod,checked,stationery,mailTemplateId,has_items,isDeleted FROM mail WHERE receiver = '378' ORDER BY id DESC
+[2 ms] SQL: SELECT * FROM (SELECT creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, transmogrifyId, durability, text, bag, slot, item, itemEntry, generated_loot FROM character_inventory JOIN item_instance ON character_inventory.item = item_instance.guid WHERE character_inventory.guid = '563') as t ORDER BY bag,slot
+[0 ms] SQL: SELECT creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, transmogrifyId, durability, text, mail_id, item_guid, itemEntry, generated_loot FROM mail_items JOIN item_instance ON item_guid = guid WHERE receiver = '378'
+[1 ms] SQL: SELECT skill, value FROM character_forgotten_skills WHERE guid = '378'
+[0 ms] SQL: SELECT variableType, value FROM character_variables WHERE lowGuid = '378'
+[1 ms] SQL: SELECT guid,itemid,amount,property FROM item_loot WHERE owner_guid = '563'
+[0 ms] SQL: SELECT itemLowGuid, itemEntry, itemCount, action, timestamp FROM character_item_logs WHERE playerLowGuid = '378' ORDER BY timestamp DESC
+[0 ms] SQL: SELECT guid, spell, spec FROM `character_spell_dual_spec` WHERE guid = '378'
+[1 ms] SQL: SELECT button,action,type FROM character_action WHERE guid = '563' ORDER BY button
+[0 ms] SQL: SELECT guid, account, name, race, class, gender, level, xp, money, playerBytes, playerBytes2, playerFlags, position_x, position_y, position_z, map, orientation, taximask, cinematic, totaltime, leveltime, rest_bonus, logout_time, is_logout_resting, resettalents_multiplier, resettalents_time, trans_x, trans_y, trans_z, trans_o, transguid, extra_flags, stable_slots, at_login, zone, online, death_expire_time, taxi_path, honorRankPoints, honorHighestRank, honorStanding, honorLastWeekHK, honorLastWeekCP, honorStoredHK, honorStoredDK, watchedFaction, drunk, health, power1, power2, power3, power4, power5, exploredZones, equipmentCache, ammoId, actionBars, world_phase_mask, customFlags, city_protector, ignore_titles, mortality_status, total_deaths, xp_gain, extraBonusTalentCount FROM characters WHERE guid = '630'
+[0 ms] SQL: SELECT groupId FROM group_member WHERE memberGuid ='630'
+[0 ms] SQL: SELECT id, permanent, map, resettime FROM character_instance LEFT JOIN instance ON instance = id WHERE guid = '630'
+[1 ms] SQL: SELECT caster_guid,item_guid,spell,stackcount,remaincharges,basepoints0,basepoints1,basepoints2,periodictime0,periodictime1,periodictime2,maxduration,remaintime,effIndexMask FROM character_aura WHERE guid = '630'
+[0 ms] SQL: SELECT spell,active,disabled FROM character_spell WHERE guid = '630'
+[1 ms] SQL: SELECT friend,flags FROM character_social WHERE guid = '563' LIMIT 255
+[1 ms] SQL: SELECT map,zone,position_x,position_y,position_z FROM character_homebind WHERE guid = '563'
+[1 ms] SQL: SELECT quest,status,rewarded,explored,timer,mobcount1,mobcount2,mobcount3,mobcount4,itemcount1,itemcount2,itemcount3,itemcount4,reward_choice FROM character_queststatus WHERE guid = '630'
+[1 ms] SQL: SELECT victimType,victim,cp,date,type FROM character_honor_cp WHERE guid = '630'
+[1 ms] SQL: SELECT spell,item,time,cattime FROM character_spell_cooldown WHERE guid = '563'
+[0 ms] SQL: SELECT honor,conquest,weekly_honor,week_begin_day FROM character_pvp_currency WHERE guid = '630'
+[0 ms] SQL: SELECT guildid,`rank` FROM guild_member WHERE guid = '563'
+[1 ms] SQL: SELECT faction,standing,flags FROM character_reputation WHERE guid = '630'
+[0 ms] SQL: SELECT instance_id, team, join_x, join_y, join_z, join_o, join_map FROM character_battleground_data WHERE guid = '563'
+[1 ms] SQL: SELECT itemId FROM character_transmogs WHERE guid = '630'
+[2 ms] SQL: SELECT skill, value, max FROM character_skills WHERE guid = '563'
+[1 ms] SQL: SELECT id,messageType,sender,receiver,subject,itemTextId,expire_time,deliver_time,money,cod,checked,stationery,mailTemplateId,has_items,isDeleted FROM mail WHERE receiver = '563' ORDER BY id DESC
+[2 ms] SQL: SELECT * FROM (SELECT creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, transmogrifyId, durability, text, bag, slot, item, itemEntry, generated_loot FROM character_inventory JOIN item_instance ON character_inventory.item = item_instance.guid WHERE character_inventory.guid = '630') as t ORDER BY bag,slot
+[0 ms] SQL: SELECT creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, transmogrifyId, durability, text, mail_id, item_guid, itemEntry, generated_loot FROM mail_items JOIN item_instance ON item_guid = guid WHERE receiver = '563'
+[1 ms] SQL: SELECT skill, value FROM character_forgotten_skills WHERE guid = '563'
+[0 ms] SQL: SELECT guid,itemid,amount,property FROM item_loot WHERE owner_guid = '630'
+[1 ms] SQL: SELECT variableType, value FROM character_variables WHERE lowGuid = '563'
+[2 ms] SQL: SELECT button,action,type FROM character_action WHERE guid = '630' ORDER BY button
+[1 ms] SQL: SELECT itemLowGuid, itemEntry, itemCount, action, timestamp FROM character_item_logs WHERE playerLowGuid = '563' ORDER BY timestamp DESC
+[0 ms] SQL: SELECT guid, spell, spec FROM `character_spell_dual_spec` WHERE guid = '563'
+[1 ms] SQL: SELECT friend,flags FROM character_social WHERE guid = '630' LIMIT 255
+[2 ms] SQL: SELECT map,zone,position_x,position_y,position_z FROM character_homebind WHERE guid = '630'
+[1 ms] SQL: SELECT spell,item,time,cattime FROM character_spell_cooldown WHERE guid = '630'
+[0 ms] SQL: SELECT guildid,`rank` FROM guild_member WHERE guid = '630'
+[0 ms] SQL: SELECT instance_id, team, join_x, join_y, join_z, join_o, join_map FROM character_battleground_data WHERE guid = '630'
+[1 ms] SQL: SELECT skill, value, max FROM character_skills WHERE guid = '630'
+[3 ms] SQL: SELECT id,messageType,sender,receiver,subject,itemTextId,expire_time,deliver_time,money,cod,checked,stationery,mailTemplateId,has_items,isDeleted FROM mail WHERE receiver = '630' ORDER BY id DESC
+[1 ms] SQL: SELECT creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, transmogrifyId, durability, text, mail_id, item_guid, itemEntry, generated_loot FROM mail_items JOIN item_instance ON item_guid = guid WHERE receiver = '630'
+[1 ms] SQL: SELECT skill, value FROM character_forgotten_skills WHERE guid = '630'
+[1 ms] SQL: SELECT variableType, value FROM character_variables WHERE lowGuid = '630'
+[1 ms] SQL: SELECT itemLowGuid, itemEntry, itemCount, action, timestamp FROM character_item_logs WHERE playerLowGuid = '630' ORDER BY timestamp DESC
+[0 ms] SQL: SELECT guid, spell, spec FROM `character_spell_dual_spec` WHERE guid = '630'
+[2 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '885' AND event = 'sellmultiplier'
+[13 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '885', '1788594212', '56850', 'sellmultiplier', '248')
+[2 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '121' AND event = 'sellmultiplier'
+[23 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '121', '1788594212', '86228', 'sellmultiplier', '126')
+[1 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (123, 0, 0, 0, 20698)
+[4 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 123
+Unit::HandleProcTriggerSpell: Spell 19556 have 0 in EffectTriggered[0], not handled custom case?
+[2 ms] SQL: SELECT `target_guid`, `time` FROM `whisper_targets` WHERE `account` = 66
+[1 ms] SQL: INSERT INTO character_homebind (guid,map,zone,position_x,position_y,position_z) VALUES ('119', '0', '1', '-6240.319824', '331.032990', '382.757996')
+[2 ms] SQL: SELECT `title`, `active` FROM `character_titles` WHERE `guid` = '119'
+[1 ms] SQL: SELECT username FROM account WHERE id = '66'
+WaypointMovementGenerator::LoadPath: GUID 2561544 Entry 81030 doesn't have waypoint path
+[1 ms] SQL: SELECT action_line FROM ai_playerbot_custom_strategy WHERE name = 'say' and owner = '119' order by idx
+[1 ms] SQL: SELECT action_line FROM ai_playerbot_custom_strategy WHERE name = 'say' and owner = '0' order by idx
+[0 ms] SQL: SELECT 1 FROM character_social WHERE flags='1' and friend='119'
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'level'
+[0 ms] SQL: DELETE FROM character_queststatus WHERE guid = '119'
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'firstSkill'
+[0 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'secondSkill'
+SPECROLL: factory picked fire for class 8 (3 paths, weight 300)
+Could not open bot log file ../logs/bot_events.csv (No such file or directory). Logging to it is off for this run.
+[11 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '119', '1788594215', '1296000', 'level', '40')
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'specNo'
+[2 ms] SQL: select `account`, `guid` from `characters`
+[1 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[21 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '119', '1788594215', '1296000', 'firstSkill', '186')
+[21 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '119', '1788594215', '1296000', 'secondSkill', '393')
+[0 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'specLink'
+[3 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '129' LIMIT 1
+[1 ms] SQL: DELETE FROM `ai_playerbot_db_store` WHERE `guid` = '119' AND `preset` = ''
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '7' AND `bt`.`isInferno` = '0'
+[1 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '7' AND `isInferno`= '0' AND `stamp` >= 1787989415 ORDER BY stamp
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '7' AND `bt`.`isInferno` = '1'
+[2 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '7' AND `isInferno`= '1' AND `stamp` >= 1787989415 ORDER BY stamp
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '7' AND `bt`.`isInferno` = '0'
+[0 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '7' AND `isInferno`= '0' AND `stamp` >= 1787989415 ORDER BY stamp
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '7' AND `bt`.`isInferno` = '1'
+[1 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '7' AND `isInferno`= '1' AND `stamp` >= 1787989415 ORDER BY stamp
+Random Guild <Blood Intrigue>, GM: Gnimibluk
+[2 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[1 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '276' LIMIT 1[22 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'specNo'
+[26 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '119', '1788594215', '1296000', 'specNo', '2')
+
+[0 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[2 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '227' LIMIT 1
+[1 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[3 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '63' LIMIT 1
+[1 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[2 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '133' LIMIT 1
+Total Random Guilds: 7
+[27 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '119', '1788594215', '1296000', 'specNo', '2')
+[1 ms] SQL: DELETE FROM guild_member WHERE guildid='7'
+[1 ms] SQL: INSERT INTO guild (guildid,name,leaderguid,info,motd,createdate,EmblemStyle,EmblemColor,BorderStyle,BorderColor,BackgroundColor) VALUES('7','Blood Intrigue','119', '', 'No message set.','1788594215','0','0','0','0','0')
+[0 ms] SQL: DELETE FROM guild_rank WHERE guildid='7'
+[1 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('7', '0', 'Guild Master', '1044991')
+[0 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('7', '1', 'Officer', '1044991')
+[1 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('7', '2', 'Veteran', '67')
+[0 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('7', '3', 'Member', '67')
+[1 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('7', '4', 'Initiate', '67')
+[0 ms] SQL: INSERT INTO guild_member (guildid,guid,`rank`,pnote,offnote) VALUES ('7', '119', '0','','')
+[0 ms] SQL: UPDATE guild SET EmblemStyle=48, EmblemColor=1, BorderStyle=2, BorderColor=15, BackgroundColor=42 WHERE guildid = 7
+[0 ms] SQL: UPDATE guild SET info='28' WHERE guildid='7'
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'randomize'
+[19 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '119', '1788594215', '53602', 'randomize', '1')
+[0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (119, 0, 0, 0, 20698)
+[1 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 119
+[6 ms] SQL: INSERT IGNORE INTO game_event_status (event) VALUES (83)
+[7 ms] SQL: INSERT IGNORE INTO game_event_status (event) VALUES (16)
+[5 ms] SQL: DELETE FROM game_event_status WHERE event = 47
+[7 ms] SQL: DELETE FROM game_event_status WHERE event = 20
+[7 ms] SQL: INSERT IGNORE INTO game_event_status (event) VALUES (50)
+[1 ms] SQL: SELECT `ip`, `unbandate`, `bandate` FROM `ip_banned` WHERE (`unbandate` > UNIX_TIMESTAMP() OR `bandate` = `unbandate`)
+[2 ms] SQL: DELETE FROM game_event_status WHERE event = 83
+StaticMapTree::UnloadMapTile(): Trying to unload non-loaded tile. Map:0 X:34 Y:24
+[2 ms] SQL: SELECT guid, deleteInfos_Account FROM characters WHERE deleteDate IS NOT NULL AND deleteDate < '1780818247' LIMIT 0,2
+[1 ms] SQL: SELECT `id`, `messageType`, `sender`, `receiver`, `itemTextId`, `has_items`, `expire_time`, `cod`, `checked`, `mailTemplateId` FROM `mail` WHERE `expire_time` < '1788594247' AND isDeleted = 0 LIMIT 300
+[2 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '0' AND event = 'current_time'
+[15 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '0', '1788594249', '1296000', 'current_time', '1788594249')
+[0 ms] SQL: UPDATE character_homebind SET map = '0', zone = '20', position_x = '-11016.000000', position_y = '1487.040039', position_z = '43.533199' WHERE guid = '125'
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '125' AND event = 'teleport'
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '125' AND event = 'change_strategy'
+[11 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '125', '1788594270', '30167', 'teleport', '1')
+[21 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '125', '1788594270', '2673', 'change_strategy', '1')
+[19 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '125', '1788594270', '700', 'update', '1')
+[22 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '125' AND event = 'update'
+[24 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'login'
+[2 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (125, 0, 0, 0, 20698)
+[1 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 125
+[1 ms] SQL: UPDATE character_homebind SET map = '0', zone = '1519', position_x = '-8971.000000', position_y = '1029.900024', position_z = '101.487000' WHERE guid = '119'
+[0 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'teleport'
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'change_strategy'
+[2 ms] SQL: SELECT `id`, `command` FROM `pending_commands` WHERE `realm_id`=1 && `run_at_time` <= 1788594273
+[94 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '119', '1788594273', '15308', 'teleport', '1')
+[0 ms] SQL: SELECT 1
+[103 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '119', '1788594273', '5393', 'change_strategy', '1')
+[103 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '119' AND event = 'update'
+[101 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '119', '1788594273', '1098', 'update', '1')
+Unit::HandleProcTriggerSpell: Spell 19556 have 0 in EffectTriggered[0], not handled custom case?
+[1 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (123, 0, 0, 0, 20698)
+[0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 123
+[0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (122, 0, 0, 0, 20698)
+[0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 122
+[0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (885, 0, 0, 0, 20698)
+[0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 885
+[1 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (121, 0, 0, 0, 20698)
+[0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 121
+[0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (120, 0, 0, 0, 20698)
+[1 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 120
+Could not open bot log file ../logs/bot_events.csv (No such file or directory). Logging to it is off for this run.
+[1 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (125, 0, 0, 0, 20698)
+[0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 125
+[2 ms] SQL: SELECT `target_guid`, `time` FROM `whisper_targets` WHERE `account` = 65
+[1 ms] SQL: INSERT INTO character_homebind (guid,map,zone,position_x,position_y,position_z) VALUES ('889', '0', '12', '-8949.950195', '-132.492996', '83.531197')
+[1 ms] SQL: SELECT `title`, `active` FROM `character_titles` WHERE `guid` = '889'
+[2 ms] SQL: SELECT username FROM account WHERE id = '65'
+[2 ms] SQL: SELECT action_line FROM ai_playerbot_custom_strategy WHERE name = 'say' and owner = '889' order by idx
+[1 ms] SQL: SELECT action_line FROM ai_playerbot_custom_strategy WHERE name = 'say' and owner = '0' order by idx
+[1 ms] SQL: SELECT 1 FROM character_social WHERE flags='1' and friend='889'
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '889' AND event = 'level'
+[0 ms] SQL: DELETE FROM character_queststatus WHERE guid = '889'
+[0 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '889' AND event = 'secondSkill'
+[16 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '889', '1788594276', '1296000', 'level', '60')
+SPECROLL: factory picked holy for class 2 (3 paths, weight 300)
+Could not open bot log file ../logs/bot_events.csv (No such file or directory). Logging to it is off for this run.
+[7 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '889' AND event = 'firstSkill'
+[0 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '889' AND event = 'specNo'
+[8 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '889', '1788594276', '1296000', 'firstSkill', '164')
+[11 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '889', '1788594276', '1296000', 'secondSkill', '202')
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '889' AND event = 'specLink'
+[1 ms] SQL: DELETE FROM `ai_playerbot_db_store` WHERE `guid` = '889' AND `preset` = ''
+[3 ms] SQL: select `account`, `guid` from `characters`
+[1 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[2 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '178' LIMIT 1
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '8' AND `bt`.`isInferno` = '0'
+[20 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '889', '1788594276', '1296000', 'specNo', '1')
+[1 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '8' AND `isInferno`= '0' AND `stamp` >= 1787989476 ORDER BY stamp
+[20 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '889' AND event = 'specNo'
+[0 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '8' AND `bt`.`isInferno` = '1'
+[1 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '8' AND `isInferno`= '1' AND `stamp` >= 1787989476 ORDER BY stamp
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '8' AND `bt`.`isInferno` = '0'
+[1 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '8' AND `isInferno`= '0' AND `stamp` >= 1787989476 ORDER BY stamp
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '8' AND `bt`.`isInferno` = '1'
+[1 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '8' AND `isInferno`= '1' AND `stamp` >= 1787989476 ORDER BY stamp
+Random Guild <Wrath of the Forest>, GM: Eleny
+[22 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '889', '1788594276', '1296000', 'specNo', '1')
+[2 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[4 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '48' LIMIT 1
+[1 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[1 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '385' LIMIT 1
+[1 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[1 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '214' LIMIT 1
+[1 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[3 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '91' LIMIT 1
+Total Random Guilds: 8
+[2 ms] SQL: DELETE FROM guild_member WHERE guildid='8'
+[1 ms] SQL: INSERT INTO guild (guildid,name,leaderguid,info,motd,createdate,EmblemStyle,EmblemColor,BorderStyle,BorderColor,BackgroundColor) VALUES('8','Wrath of the Forest','889', '', 'No message set.','1788594276','0','0','0','0','0')
+[1 ms] SQL: DELETE FROM guild_rank WHERE guildid='8'
+[0 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('8', '0', 'Guild Master', '1044991')
+[1 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('8', '1', 'Officer', '1044991')
+[0 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('8', '3', 'Member', '67')
+[1 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('8', '2', 'Veteran', '67')
+[1 ms] SQL: INSERT INTO guild_member (guildid,guid,`rank`,pnote,offnote) VALUES ('8', '889', '0','','')
+[1 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('8', '4', 'Initiate', '67')
+[0 ms] SQL: UPDATE guild SET EmblemStyle=176, EmblemColor=11, BorderStyle=3, BorderColor=15, BackgroundColor=25 WHERE guildid = 8
+[0 ms] SQL: UPDATE guild SET info='11' WHERE guildid='8'
+[204 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '889', '1788594276', '75137', 'randomize', '1')
+[0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (889, 0, 0, 0, 20698)
+[0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 889
+[258 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '889' AND event = 'randomize'
+[3 ms] SQL: SELECT `target_guid`, `time` FROM `whisper_targets` WHERE `account` = 66
+[1 ms] SQL: INSERT INTO character_homebind (guid,map,zone,position_x,position_y,position_z) VALUES ('118', '0', '85', '1676.349976', '1677.449951', '121.669998')
+[1 ms] SQL: SELECT `title`, `active` FROM `character_titles` WHERE `guid` = '118'
+[2 ms] SQL: SELECT username FROM account WHERE id = '66'
+WaypointMovementGenerator::LoadPath: GUID 2561542 Entry 81030 doesn't have waypoint path
+[1 ms] SQL: SELECT action_line FROM ai_playerbot_custom_strategy WHERE name = 'say' and owner = '118' order by idx
+[1 ms] SQL: SELECT action_line FROM ai_playerbot_custom_strategy WHERE name = 'say' and owner = '0' order by idx
+[3 ms] SQL: SELECT 1 FROM character_social WHERE flags='1' and friend='118'
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '118' AND event = 'level'
+[0 ms] SQL: DELETE FROM character_queststatus WHERE guid = '118'
+[0 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '118' AND event = 'firstSkill'
+[0 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '118' AND event = 'secondSkill'
+SPECROLL: factory picked fire for class 8 (3 paths, weight 300)
+Could not open bot log file ../logs/bot_events.csv (No such file or directory). Logging to it is off for this run.
+[3 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '118' AND event = 'specNo'
+[2 ms] SQL: select `account`, `guid` from `characters`
+[16 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '118', '1788594291', '1296000', 'level', '36')
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '118' AND event = 'specLink'
+[1 ms] SQL: DELETE FROM `ai_playerbot_db_store` WHERE `guid` = '118' AND `preset` = ''
+[2 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[1 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '372' LIMIT 1
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '9' AND `bt`.`isInferno` = '0'
+[0 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '9' AND `isInferno`= '0' AND `stamp` >= 1787989491 ORDER BY stamp
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '9' AND `bt`.`isInferno` = '1'
+[1 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '9' AND `isInferno`= '1' AND `stamp` >= 1787989491 ORDER BY stamp
+[0 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '9' AND `bt`.`isInferno` = '0'
+[1 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '9' AND `isInferno`= '0' AND `stamp` >= 1787989491 ORDER BY stamp
+[1 ms] SQL: SELECT `tabs`, `money`, `name1`, `name2`, `name3`, `name4`, `name5`, `icon1`, `icon2`, `icon3`, `icon4`, `icon5`, `withdrawal1`, `withdrawal2`, `withdrawal3`, `withdrawal4`, `withdrawal5`, `minrank1`, `minrank2`, `minrank3`, `minrank4`, `minrank5` FROM guild_bank_tabs bt JOIN guild_bank_money bm ON `bt`.`guildid` = `bm`.`guildid` AND `bt`.`isInferno` = `bm`.`isInferno` WHERE `bt`.`guildid` = '9' AND `bt`.`isInferno` = '1'
+[1 ms] SQL: SELECT `log_id`, `player`, `action`, `tab`, `item`, `randomPropertyId`, `enchant`, `count`, `stamp` FROM guild_bank_log WHERE `guildid` = '9' AND `isInferno`= '1' AND `stamp` >= 1787989491 ORDER BY stamp
+Random Guild <Grey Party>, GM: Cunolando
+[0 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[15 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '118', '1788594291', '1296000', 'specNo', '2')
+[19 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '118', '1788594291', '1296000', 'specNo', '2')
+[18 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '118' AND event = 'specNo'
+[2 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '134' LIMIT 1
+[0 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[12 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '359' LIMIT 1
+[1 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[4 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '25' LIMIT 1
+[1 ms] SQL: SELECT MAX(name_id) FROM ai_playerbot_guild_names
+[2 ms] SQL: SELECT n.name FROM ai_playerbot_guild_names n LEFT OUTER JOIN guild e ON e.name = n.name WHERE e.guildid IS NULL AND n.name_id >= '344' LIMIT 1
+Total Random Guilds: 9
+[0 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('9', '0', 'Guild Master', '1044991')
+[1 ms] SQL: DELETE FROM guild_member WHERE guildid='9'
+[0 ms] SQL: DELETE FROM guild_rank WHERE guildid='9'
+[0 ms] SQL: INSERT INTO guild (guildid,name,leaderguid,info,motd,createdate,EmblemStyle,EmblemColor,BorderStyle,BorderColor,BackgroundColor) VALUES('9','Grey Party','118', '', 'No message set.','1788594291','0','0','0','0','0')
+[1 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('9', '2', 'Veteran', '67')
+[1 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('9', '1', 'Officer', '1044991')
+[0 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('9', '3', 'Member', '67')
+[1 ms] SQL: INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES ('9', '4', 'Initiate', '67')
+[0 ms] SQL: INSERT INTO guild_member (guildid,guid,`rank`,pnote,offnote) VALUES ('9', '118', '0','','')
+[1 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '118' AND event = 'randomize'
+[1 ms] SQL: UPDATE guild SET EmblemStyle=114, EmblemColor=4, BorderStyle=7, BorderColor=2, BackgroundColor=22 WHERE guildid = 9
+[1 ms] SQL: UPDATE guild SET info='28' WHERE guildid='9'
+[19 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '118', '1788594291', '70299', 'randomize', '1')
+[1 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (118, 0, 0, 0, 20698)
+[1 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 118
+[2 ms] SQL: INSERT IGNORE INTO game_event_status (event) VALUES (83)
+[1 ms] SQL: SELECT `ip`, `unbandate`, `bandate` FROM `ip_banned` WHERE (`unbandate` > UNIX_TIMESTAMP() OR `bandate` = `unbandate`)
+[1 ms] SQL: DELETE FROM game_event_status WHERE event = 83
+[1 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, `conquest`, `weekly_honor`, `week_begin_day`) VALUES (118, 0, 0, 0, 20698)
+[0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, `honorStanding` = 0, `honorHighestRank` = 0, `honorLastWeekHK` = 0, `honorLastWeekCP` = 0.0, `honorStoredHK` = 0, `honorStoredDK` = 0 WHERE `guid` = 118
+[3 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[17 ms] SQL: DELETE FROM ai_playerbot_random_bots WHERE owner = 0 AND bot = '0' AND event = 'current_time'
+[31 ms] SQL: INSERT INTO ai_playerbot_random_bots (owner, bot, `time`, validIn, event, `value`) VALUES ('0', '0', '1788594322', '1296000', 'current_time', '1788594322')

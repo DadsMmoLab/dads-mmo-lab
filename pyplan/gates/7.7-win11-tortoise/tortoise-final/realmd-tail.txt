@@ -1,0 +1,100 @@
+Accepting connection from '172.22.0.1'
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT id, value FROM config
+[2 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[5 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT id, value FROM config
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[3 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[4 ms] SQL: SELECT id, value FROM config
+[2 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[3 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT id, value FROM config
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT id, value FROM config
+[6 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[3 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[14 ms] SQL: SELECT 1
+[6 ms] SQL: SELECT id, value FROM config
+[6 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[7 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT id, value FROM config
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[3 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT id, value FROM config
+[4 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT id, value FROM config
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT id, value FROM config
+[3 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[3 ms] SQL: SELECT id, value FROM config
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[4 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT id, value FROM config
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[3 ms] SQL: SELECT id, value FROM config
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT id, value FROM config
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[5 ms] SQL: SELECT id, value FROM config
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[6 ms] SQL: SELECT id, value FROM config
+[1 ms] SQL: SELECT 1
+[2 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT 1
+[0 ms] SQL: SELECT 1
+[1 ms] SQL: SELECT id, value FROM config

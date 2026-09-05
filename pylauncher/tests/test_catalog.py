@@ -729,14 +729,20 @@ CMANGOS_GAMES = ("wow-tbc", "wow-vanilla", "wow-tortoise")
 CMANGOS_PLATFORMS = {
     "wow-tbc": ("linux", "windows"),
     "wow-vanilla": ("linux", "windows"),
-    "wow-tortoise": ("linux",),
+    "wow-tortoise": ("linux", "windows"),
 }
 """Where each CMaNGOS entry is installable, and every widening was earned by a run.
 
 All three said `("linux",)` until 2026-09-04. Vanilla completed all twelve stages on
 native Windows that morning -- the first CMaNGOS install on Windows -- and TBC finished
 the same evening with `tbc-realmd`, `tbc-mangosd` and `tbc-db` up on `yulon-win11-gate`.
-Tortoise has not been attempted there, so it keeps Linux alone.
+Tortoise followed on the same box overnight: install exit 0 at 2026-09-05 00:43 box-local
+after 10 h 24 min, `tortoise-realmd`/`tortoise-mangosd`/`tortoise-db` up with
+`RestartCount=0`, and the worldserver's own banner `World server is up and running!
+Loading time: 59 minutes 18 seconds` (transcript and captures in
+`pyplan/gates/7.7-win11-tortoise/`). That run only finished because the ready budget on
+the box was 10800 s, not the 3600 s the repo carried, which is why the widening and the
+budget moved in one commit -- `test_tortoise_boot_facts.py` holds the measurement.
 
 The order is the awkward part and is worth knowing before anyone edits this: 7.7 measured
 that a Windows install refuses BEFORE preflight while `platforms` is Linux-only

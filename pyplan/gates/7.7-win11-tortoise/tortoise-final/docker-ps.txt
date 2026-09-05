@@ -1,0 +1,14 @@
+tortoise-realmd	Up About an hour	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+tortoise-mangosd	Up About an hour	0.0.0.0:8090->8090/tcp, [::]:8090->8090/tcp
+tortoise-db	Up About an hour (healthy)	127.0.0.1:3306->3306/tcp
+tbc-realmd	Exited (0) 11 hours ago	
+tbc-mangosd	Exited (137) 11 hours ago	
+tbc-db	Exited (0) 11 hours ago	
+vanilla-mangosd	Exited (0) 19 hours ago	
+vanilla-realmd	Exited (0) 19 hours ago	
+vanilla-db	Exited (0) 19 hours ago	
+ac-worldserver	Exited (0) 31 hours ago	
+ac-authserver	Exited (0) 31 hours ago	
+ac-database	Exited (137) 31 hours ago	
+ac-db-import	Exited (0) 4 days ago	
+ac-client-data-init	Exited (0) 4 days ago	

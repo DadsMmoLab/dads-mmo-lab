@@ -269,6 +269,44 @@ def test_the_ready_budget_covers_a_measured_first_boot_not_a_round_number() -> N
         ), f"{game} does not pay Tortoise's equip-cache cost and should not carry its budget"
 
 
+def test_the_ready_budget_also_covers_the_windows_first_boot_measured_over_9p() -> None:
+    """3702 seconds from `up` to `finished` on native Windows, against a budget of 3600.
+
+    The Linux floor above is not the largest one this entry has been measured to
+    need. On `yulon-win11-gate` (2026-09-05, `pyplan/gates/7.7-win11-tortoise/`)
+    the same first boot -- same 500 bots, same equip cache -- read its world over
+    Docker Desktop's 9p share instead of a native disk, and the worldserver printed
+
+        World server is up and running! Loading time: 59 minutes 18 seconds
+
+    3558 s of loading, 3559 s after the container's `StartedAt`, `RestartCount=0`.
+    The `ready` stage's own wall clock is what the budget is spent against, and
+    the transcript brackets it exactly: `start_staged()` logged at 23:41:37 and
+    `install of wow-tortoise finished` at 00:43:19 box-local, **3702 s** -- the
+    banner plus the health wait before it and the poll that noticed it after.
+
+    The repo's budget at the time was 3600 s. That run finished only because the
+    copy on the box had been given 10800 s beforehand, on the TBC measurement
+    that 9p roughly doubles a boot (7.7's note); under 3600 the stage would have
+    expired 102 s before it observed the banner and reported a complete, correct
+    install as `never reported ready` -- the TBC verdict of the night before,
+    repeated. So the number asserted here is the measured stage wall, not the
+    loading time and not the value that happens to be shipped; a smaller budget
+    that fits Linux fails this test in front of whoever shrinks it.
+
+    One confound, recorded rather than hidden: a 9.98 GB client re-download
+    (`tortoise-dl.log`, second entry, 23:59-00:23 box-local at 6.6 MB/s) ran on
+    the same box during 24 of those 59 minutes. The boot may be faster without
+    it; the budget still has to cover the boot that was measured.
+    """
+    ready = _native().ready
+    windows_stage_wall = 3702  # 23:41:37 -> 00:43:19, from the transcript's own stamps
+    assert ready.timeout_s >= windows_stage_wall, (
+        f"the ready budget is {ready.timeout_s}s; the Windows first boot's ready stage was "
+        f"measured at {windows_stage_wall}s wall over 9p (7.7, 2026-09-05)"
+    )
+
+
 def test_the_fatal_pattern_does_not_fire_on_a_line_that_says_it_is_harmless() -> None:
     r"""`Could not open` matched 4,854 lines that end "Logging to it is off for this run."
 
@@ -411,8 +449,8 @@ def test_both_boot_patterns_are_read_as_regular_expressions_not_literal_text() -
 
     * `ready.world` is four alternatives -- three of them from before the banner
       was measured -- so as literal text it matches a line containing a `|`
-      character, which nothing prints. A healthy server would wait out the full
-      3600 seconds and be reported as never ready, which is the original defect.
+      character, which nothing prints. A healthy server would wait out the whole
+      ready budget and be reported as never ready, which is the original defect.
     * `ready.fatal` is an alternation carrying a negative lookahead. Escaped, it
       stops matching `Correct *.map files not found` at all, so an install with
       no maps runs its whole timeout instead of failing in seconds -- and the
@@ -443,5 +481,5 @@ def test_both_boot_patterns_are_read_as_regular_expressions_not_literal_text() -
     ), "the no-maps line is the one fatal this entry can hit in its first seconds"
     assert not re.search(re.escape(ready.fatal), "Correct *.map files not found"), (
         "read literally the fatal pattern misses the failure it exists for, and the install "
-        "spends its whole 3600-second budget before saying so"
+        "spends its whole ready budget before saying so"
     )
