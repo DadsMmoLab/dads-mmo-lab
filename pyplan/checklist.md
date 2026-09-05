@@ -568,8 +568,33 @@
         `ControllerServices` the same way `YULON` (id 101) was, so the account half and the login
         half are one chain rather than two records. Client side: `COP_AUTHENTICATE AUTH_OK` and
         `COP_GET_CHARACTERS code=44 result=TRUE`. Server side, read back out of `acore_auth`:
-        `last_login 2026-09-05 05:31:40, online 1, failed_logins 0` (05:31 UTC = 07:31 CEST, the
+        `last_login 2026-09-05 05:31:40, failed_logins 0` (05:31 UTC = 07:31 CEST, the
         same one-hour-plus-DST offset the 09-04 record carries).
+        **Where the capture is — added 2026-09-05, because when this bullet was first written the
+        numbers in it were filed nowhere and it did not say so.** It was written from the run
+        report; `grep -rl GATELOGIN pyplan/` then returned `pyplan/checklist.md` and nothing else,
+        while the bullet it contrasts itself with is backed by a 17-file folder. The capture now
+        exists, committed on `yulon-phase7` at **`a0cc9dc0`**, and this record cites it by path and
+        line instead of by recollection:
+        * `pyplan/gates/7.1-client-login/LOGIN-2026-09-05.md` — the write-up; the route is its
+          lines 18-42, the account its lines 12-15, the two limits its lines 69-73.
+        * `pyplan/gates/7.1-client-login/client-connection-20260905-0731.log` — twelve lines, the
+          whole client-side trace. Line **6**: `9/5 07:31:41.385  GRUNT: state:
+          LOGIN_STATE_AUTHENTICATED result: LOGIN_OK`. Line **10**: `9/5 07:31:41.902
+          ClientConnection Completed: COP_AUTHENTICATE code=AUTH_OK result=TRUE`. Line **12**:
+          `9/5 07:31:42.568  ClientConnection Completed: COP_GET_CHARACTERS code=44 result=TRUE`.
+        * `pyplan/gates/7.1-client-login/server-side-20260905.txt` — read-only `docker exec` +
+          `SELECT`, captured `2026-09-05T08:17:56Z` (line **1**). Line **11** is the account row:
+          `| 102 | GATELOGIN | 2026-09-05 05:31:40 | 172.18.0.1 | 0 | 0 | 2026-09-05 05:28:33 |`.
+          Line **10** is `YULON` id 101 with `last_login NULL` — the 09-04 account exists on this
+          install and was never logged in on it, which is why the 09-04 login could not answer this
+          clause.
+        **One number in this bullet was wrong and is corrected here:** it said `online 1`. The
+        filed row reads `online 0`, because the readback was taken at 08:17 UTC / 10:17 CEST, hours
+        after the client was closed (`LOGIN-2026-09-05.md:52-56` says so and gives the reason).
+        `online` was never the evidence either way; `last_login 2026-09-05 05:31:40` with
+        `failed_logins 0` is. The 09-04 record's `online 1` is a different install and a different
+        capture moment and is not affected.
         **The transport, stated because it is the clause's own weak point.** The client reached the
         realm over an `ssh -L` tunnel with the realmlist at `127.0.0.1` — **not** over Tailscale,
         which did not survive the `clean-ssh` restore. That is a deliberate difference from the
@@ -873,7 +898,10 @@
         do is done and filed; this box ticks when those are settled on the 7.1 line.
         **Updated 2026-09-05: clause 14 IS now met** — a real client authenticated against THIS
         install at 07:31:41 that morning, account `GATELOGIN` id 102, over an `ssh -L` tunnel; the
-        numbers are on the 7.1 line. **10-12 (owner decision) and 15 (§39) remain**, so this box
+        numbers are on the 7.1 line and the capture is
+        `pyplan/gates/7.1-client-login/LOGIN-2026-09-05.md` with
+        `client-connection-20260905-0731.log:10` and `server-side-20260905.txt:11`
+        (committed at `a0cc9dc0`; before that it was cited from the run report alone). **10-12 (owner decision) and 15 (§39) remain**, so this box
         stays `- [ ]` — on two clauses now rather than three. Note that the PARENT 7.2 line was
         ticked the same day on its own nine clauses; that tick says nothing about this gate, and
         this gate is not evidence for it.
