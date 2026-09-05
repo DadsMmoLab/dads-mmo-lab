@@ -2758,6 +2758,65 @@ A repair was in flight in this tree the same night; this entry records the defec
 Every line number above is pinned to `4c959d70` for that reason: `networking.py` was being edited
 while this was written, and by morning they will point at something else.
 
+**ROUND 7, 2026-09-05 — round 6's review, re-derived and closed. Still OPEN as a bug, because
+`enable_firewall=True` still has no caller.** Round 6 (`9b0eb089`) closed the DefaultZone blocker
+and was reviewed as needing another pass. Four findings; all four hold, all four were re-derived on
+`m910q` against the committed round-6 module BEFORE anything was changed, and none of them is a new
+lockout. The evidence, command by command, is in `pyplan/gates/bug39-ssh-lockout/round7-2026-09-05.md`.
+
+* **A refusal named a cause that was not the cause.** `reads_this_machine()` collapsed three
+  questions into one tri-state, so `False` had one sentence and it had to name every way of being
+  False at once. Driving the round-6 module inside `sudo unshare --net` on m910q:
+  `/proc/self/ns/net` 4026533453 against pid 1's 4026531840 — the cause — while
+  `in_host_mount_namespace()` was `True` (self mnt 4026531841 == pid 1's) and
+  `os.path.isdir('/etc/ufw')` was `True`, and the refusal still read *"this process is in a
+  different mount namespace from pid 1, or the directory the firewall backend writes does not
+  exist"*. Both disjuncts false; the network namespace named nowhere. That is the same defect
+  `SshRoute.read_elsewhere` was added to fix, one cause over. **Fixed:**
+  `where_the_reading_came_from()` returns the cause, `READ_ELSEWHERE` has one sentence per cause,
+  and every one of them ends with a REMEDY.
+* **The zone-breadth warning fired on every ordinary Linux box.** Round 6 gated it on
+  `len(zones) > 1`, and Docker — required by every Yu'lon Linux install — creates a firewalld zone
+  named `docker` bound to `docker0`. Round 6's own clean run on yulon-fedora read
+  `('FedoraWorkstation', 'docker')`. Rebuilt for real on 2026-09-05 in a `fedora:41` container on
+  m910q with a `docker` zone (`target: ACCEPT`, `interfaces: docker0`), `eth0` in
+  `FedoraWorkstation` and `DefaultZone=FedoraWorkstation`: the committed module told that
+  single-NIC box *"the game ports (3724, 8085) are allowed in `FedoraWorkstation`, `docker` …
+  including any of them that faces the internet"* and offered a `--remove-port` for Docker's own
+  zone. **Fixed:** `machine_made_zones()` — a zone bound to at least one interface, no source, and
+  nothing but `docker0` / `br-*` / `veth*` (19 of m910q's 23 links, `ip -br link`, 2026-09-05) is
+  not breadth. The ports still go to every zone; only the GATE changed. Same container after the
+  fix: `machine_made=('docker',)`, both zones written, and no breadth sentence.
+* **`reads_this_machine()` said "cheapest first" and asked the free question second.** Measured at
+  uid 1000 on m910q with `backend="firewalld"` (a box with no `/etc/firewalld`): one
+  `sudo -n stat -L -c %i /proc/1/ns/net` spent before the free, decisive `isdir` was reached.
+  After: 0 subprocesses.
+* **The breadth sentence said the ports "are allowed in" zones where nothing had put them.**
+  Measured with the reload refused and with the daemon stopped alike: permanent writes only, and
+  the same word. It now says WRITTEN unless the plan is about to reload a running daemon.
+
+**And the decision is a function now.** Every earlier round's guard was a branch inside
+`_guard_the_way_back_in()` that also edited the command list, so a test that wanted the DECISION had
+to build a whole plan — which is why the review could only reach these two states through `plan()`,
+and why they could not be varied one at a time. `decide_lockout(LockoutQuestion) -> LockoutVerdict`
+is that decision: one frozen input carrying BOTH firewalld default-zone readings and the zone shape,
+one reason token out of `LOCKOUT_REASONS`, a refusal that names a remedy, and the notes the user is
+owed whatever the verdict. Driven on m910q with only `zoning` changing: readings agree ->
+`ssh-preserved`, allowed, no note; readings diverge -> `ssh-preserved`, allowed, the breadth note
+naming `work`; the file unread -> `default-zone-unreadable`, refused; zones unread ->
+`zones-unreadable`, refused, a different sentence.
+
+Nine mutations, each killed by the test that owed it (table in the gate file); baseline and restore
+both `235 passed`. The production path is unchanged: m910q, ufw, `enable_firewall=True`, plan only —
+`ufw allow 3724/tcp`, `ufw allow 8085/tcp`, `ufw allow 22/tcp`, `ufw --force enable`, refusals 0.
+
+What keeps this section OPEN is what round 5 recorded and round 7 did not change: `enable_firewall`
+occurs in `pylauncher/yulon/networking.py` and `pylauncher/tests/test_networking.py` and nowhere
+else, so no view, service or controller can ask for the enable, and the owner's "click a button and
+the server's ports get forwarded" still ends at a plan the GUI cannot drive. The RELOAD half is on
+the path users hit today and is guarded; the ENABLE half is what must already be true before a
+control for it exists.
+
 ### 40. Abandoning `logs_source()` aborts the interpreter at exit — 2026-09-04, **CLOSED 2026-09-05 at `d2b963d5`**
 
 **What was done.** `runner.stream()` is now a plain function that builds the generator, registers it

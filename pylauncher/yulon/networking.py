@@ -119,6 +119,45 @@ a container given the host's own pid and network namespaces:
   filesystem it would have written, and the plan emitted `ufw allow 22/tcp`
   and `ufw --force enable` with 0 refusals. See `reads_this_machine()`.
 
+Round 7, 2026-09-05, is round 6's review, re-derived on m910q before anything
+was changed. Nothing here is a new lockout: two are sentences that named the
+wrong thing, and one is a warning that fires where there is nothing to warn
+about.
+
+* A REFUSAL NAMED A CAUSE THAT WAS NOT THE CAUSE. `reads_this_machine()`
+  collapsed three questions into one tri-state, so `False` had one sentence and
+  it had to name every way of being False at once. Driving the round-6 module
+  from inside `sudo unshare --net`: `/proc/self/ns/net` 4026533453 against pid
+  1's 4026531840 — the cause — while `in_host_mount_namespace()` was True and
+  `os.path.isdir('/etc/ufw')` was True, and the refusal read "this process is
+  in a different mount namespace from pid 1, or the directory the firewall
+  backend writes does not exist on the filesystem it can see". Both disjuncts
+  false, the true one named nowhere. The cause is carried now, one sentence and
+  one REMEDY each — see `where_the_reading_came_from()` and `READ_ELSEWHERE`.
+* THE ZONE-BREADTH WARNING FIRED ON EVERY ORDINARY LINUX BOX. Round 6 gated it
+  on `len(zones) > 1`, and Docker — which every Yu'lon Linux install requires —
+  creates a firewalld zone named `docker` bound to `docker0`. Round 6's own
+  clean run on yulon-fedora read `('FedoraWorkstation', 'docker')`; rebuilt for
+  real in a fedora:41 container shaped the same way, the committed module told
+  a healthy single-NIC box its game ports might face the internet and handed it
+  a `--remove-port` for Docker's zone. The gate is the zones this machine did
+  NOT make for its own containers — see `machine_made_zones()`.
+* THE DECISION WAS NOT REACHABLE WITHOUT A PLAN. Every earlier round's guard
+  was a branch inside `_guard_the_way_back_in()` that also edited the command
+  list, so the two states this bug has cost the most — the daemon's default
+  zone against the file's, and a second zone that is only Docker's — could not
+  be varied one at a time. `decide_lockout()` is that decision as one function
+  of one frozen `LockoutQuestion`, returning a reason token, a refusal that
+  names a remedy, and the notes the user is owed whatever the verdict.
+
+Two smaller ones from the same review: `reads_this_machine()` said "cheapest
+first" and asked the free question second (measured at uid 1000 with
+`backend="firewalld"` on m910q: one `sudo -n stat -L -c %i /proc/1/ns/net`
+spent before the missing `/etc/firewalld` answered — now zero), and the breadth
+sentence said the ports "are allowed in" zones where no reload had put them
+(measured with the daemon stopped: eight offline writes, no reload, and the
+same word) — it says WRITTEN unless the plan is about to put them in effect.
+
 `enable_firewall=True` HAS NO CALLER as of 2026-09-04. The only production path
 into `plan()` is `ui/controller_view.py`'s `network_plan=lambda mode:
 networking.plan(entry, mode, bindings=...)`, which does not pass it, and no UI
@@ -426,46 +465,82 @@ def _same_namespace_as_pid1(kind: str, run: Runner | None, prefix: tuple[str, ..
         return None
 
 
+THIS_MACHINE = "this-machine"
+"""`where_the_reading_came_from()`'s one accepting answer."""
+
+
 READ_ELSEWHERE = {
-    False: (
-        "the socket table was read somewhere that is not this machine — this process is in "
-        "a different mount namespace from pid 1, or the directory the firewall backend "
-        "writes does not exist on the filesystem it can see. Measured on m910q, 2026-09-05: "
-        "`docker run --privileged --pid=host --network=host` of a Fedora image on an Ubuntu "
-        "host read the host's sshd on port 22 and named it, while `/etc/ufw` was absent from "
-        "its own filesystem — so the rules would have been written to the container's config "
-        "and the policy they were meant to change is the host's"
+    "other-network-namespace": (
+        "the socket table belongs to another network namespace — `ss` listed the sockets of "
+        "the namespace this process is in, and the firewall configuration these commands "
+        "write is the one pid 1's namespace is governed by. Measured on m910q, 2026-09-05: "
+        "inside `sudo unshare --net` with one listener of its own, `/proc/self/ns/net` was "
+        "4026533453 against pid 1's 4026531840, while `/proc/self/ns/mnt` WAS pid 1's and "
+        "`/etc/ufw` was there to write. Run the LAN step from the host's own shell — not "
+        "from inside `unshare --net`, `ip netns exec`, or a container with a network "
+        "namespace of its own; if the rules are meant for that namespace, apply them with "
+        "the firewall tool inside it"
     ),
-    None: (
+    "no-backend-config-here": (
+        "the directory this backend writes its rules to does not exist on the filesystem "
+        "this process can see, so the rules would be written somewhere the machine whose "
+        "sockets were just read never reads. Measured on m910q, 2026-09-05: `docker run "
+        "--privileged --pid=host --network=host` of a Fedora image on an Ubuntu host named "
+        "the host's sshd on port 22 while `/etc/ufw` was absent from its own filesystem. Run "
+        "the LAN step on the machine that owns the firewall, or install that firewall's "
+        "package here"
+    ),
+    "other-mount-namespace": (
+        "the socket table was read in this machine's network namespace but the filesystem "
+        "these rules would be written to is not pid 1's — a sandbox with a mount namespace "
+        "of its own (a unit with `PrivateTmp=yes`, a flatpak, a container started "
+        "`--network=host`) writes its own `/etc`, and the policy the rules were meant to "
+        "change is the host's. Run the LAN step outside the sandbox. A Yu'lon AppImage is "
+        "NOT a sandbox for this purpose: measured on m910q, 2026-09-05, an appimagetool "
+        "build's `/proc/self/ns/mnt` was pid 1's"
+    ),
+    "unknown": (
         "whether the socket table came from this machine could not be established — pid 1's "
         "namespaces are unreadable to an unprivileged probe (EACCES on m910q and on "
         "yulon-ubuntu, measured 2026-09-04) and no elevation prefix was available to ask "
-        "with"
+        "with. Give the launcher a passwordless `sudo` (or run it as root) so the probe can "
+        "read `/proc/1/ns/net`, or open the ports by hand with the commands below"
     ),
 }
-"""Why a reading was not accepted as this machine's, by what `reads_this_machine()` said.
+"""Why a reading was not accepted as this machine's, keyed by what failed.
 
-Two sentences rather than one, because False and None are different claims: the
-first says the reading IS of somewhere else, the second says nobody could tell.
-Carried on `SshRoute.read_elsewhere` so the refusal names the reason it was
-actually dropped for, instead of the socket table's holes — which, in the
-measurement above, it did not have.
+One sentence per CAUSE, and this is round 7's correction. Round 6 keyed it on
+`reads_this_machine()`'s tri-state, so `False` had to name every way of being
+False at once — "a different mount namespace from pid 1, or the directory the
+firewall backend writes does not exist" — and the refusal then said that on a
+box where BOTH halves were true. Measured on m910q, 2026-09-05, inside `sudo
+unshare --net`: `in_host_mount_namespace()` True (self mnt 4026531841 == pid
+1's), `os.path.isdir('/etc/ufw')` True, and the round-6 refusal still read
+"this process is in a different mount namespace from pid 1, or the directory
+the firewall backend writes does not exist on the filesystem it can see." The
+real cause, the network namespace, was named nowhere. That is the same defect
+`SshRoute.read_elsewhere` was added to fix, one cause over.
+
+Every sentence ends with a REMEDY the reader can act on, because a refusal is
+the only thing this step gives a user who cannot have the button: naming the
+namespace without naming the way out leaves them where the lockout would have.
 """
 
 
-def reads_this_machine(
+def where_the_reading_came_from(
     backend: platform.FirewallBackend | None = None,
     run: Runner | None = None,
     prefix: tuple[str, ...] = (),
-) -> bool | None:
-    """Do the sockets this probe reads and the config these commands write belong to one machine?
+) -> str:
+    """Whose machine the socket table is of: `THIS_MACHINE`, or a `READ_ELSEWHERE` key.
 
-    Round 5 asked only the first half of that (`in_host_network_namespace()`)
-    and shipped the sentence "a table read in another namespace is a true
-    statement about the wrong machine" — which is right, and is also true of a
-    table read in the RIGHT network namespace by a process whose `/etc` is
-    somebody else's. Measured on m910q, 2026-09-05, `docker run --privileged
-    --pid=host --network=host` (fedora:41 image, Ubuntu host):
+    Do the sockets this probe reads and the config these commands write belong
+    to one machine? Round 5 asked only the network-namespace half and shipped
+    the sentence "a table read in another namespace is a true statement about
+    the wrong machine" — which is right, and is also true of a table read in the
+    RIGHT network namespace by a process whose `/etc` is somebody else's.
+    Measured on m910q, 2026-09-05, `docker run --privileged --pid=host
+    --network=host` (fedora:41 image, Ubuntu host):
 
         in_host_network_namespace()  True
         /proc/self/ns/mnt            4026533518   vs pid 1's 4026531841
@@ -474,29 +549,59 @@ def reads_this_machine(
                                      `ufw allow 22/tcp`, `ufw --force enable`
                                      refusals=0, warnings=1 (the enable's own)
 
-    Three questions, cheapest first, and the first that answers not-True is the
-    answer:
+    Three questions, and the FIRST that answers not-this-machine is the answer
+    returned — so the caller gets the cause, not a disjunction of every cause.
+    Genuinely cheapest first, which round 6 claimed and did not do:
 
-    * the network namespace — whose sockets are these (round 5's question);
     * the backend's config directory — does the file these commands edit even
-      exist here (`_BACKEND_CONFIG_DIR`; free, no subprocess, and it is what
-      the Fedora-image-on-Ubuntu case fails);
+      exist here (`_BACKEND_CONFIG_DIR`). Free: one `isdir`, no subprocess, no
+      privilege. Round 6 asked it SECOND while its docstring called it free,
+      and measured on m910q 2026-09-05 at uid 1000 with `backend="firewalld"`
+      (a box with no `/etc/firewalld`) that cost one `sudo -n stat -L -c %i
+      /proc/1/ns/net` before the free decisive question was reached.
+    * the network namespace — whose sockets are these (round 5's question,
+      unchanged and still correct);
     * the mount namespace — is that directory pid 1's copy of it, which is the
       question `/etc/firewalld` existing inside a Fedora container cannot
       answer for itself.
 
     `backend=None` skips the config question and asks only the namespaces. It
-    is the default so that every existing caller of `detect_ssh_route()` keeps
-    working, and `plan()` never uses it — it passes the backend it is planning
-    for, which is the only reading that can be judged.
+    is the default so that a caller with no backend in hand keeps working, and
+    `plan()` never uses it — it passes the backend it is planning for, which is
+    the only reading that can be judged.
     """
-    where = in_host_network_namespace(run, prefix)
-    if where is not True:
-        return where
     directory = _BACKEND_CONFIG_DIR.get(backend or "")
     if directory is not None and not os.path.isdir(directory):
-        return False
-    return in_host_mount_namespace(run, prefix)
+        return "no-backend-config-here"
+    where = in_host_network_namespace(run, prefix)
+    if where is False:
+        return "other-network-namespace"
+    if where is None:
+        return "unknown"
+    mounted = in_host_mount_namespace(run, prefix)
+    if mounted is False:
+        return "other-mount-namespace"
+    if mounted is None:
+        return "unknown"
+    return THIS_MACHINE
+
+
+def reads_this_machine(
+    backend: platform.FirewallBackend | None = None,
+    run: Runner | None = None,
+    prefix: tuple[str, ...] = (),
+) -> bool | None:
+    """`where_the_reading_came_from()` as True / False / None.
+
+    Kept because "may this reading be used" is a different question from "why
+    not", and every caller that only decides wants the first. None is
+    `"unknown"` — nobody could tell — and False is any named cause; the cause
+    itself is what `READ_ELSEWHERE` is keyed on.
+    """
+    where = where_the_reading_came_from(backend, run, prefix)
+    if where == THIS_MACHINE:
+        return True
+    return None if where == "unknown" else False
 
 
 @dataclass(frozen=True)
@@ -547,9 +652,9 @@ class SshRoute:
       is empty: a port from `SSH_CONNECTION` is proof of one way in and no
       evidence at all that it is the only one.
     * `read_elsewhere` — set when `listeners_readable` is False BECAUSE the
-      reading was not this machine's (`reads_this_machine()` said False or
-      could not tell), carrying the sentence that says so. None when the table
-      itself was the problem. Its own field because the two are dropped for
+      reading was not this machine's (`where_the_reading_came_from()` named a
+      cause), carrying the sentence for THAT cause and the remedy for it. None
+      when the table itself was the problem. Its own field because the two are dropped for
       opposite reasons and the refusal used to name only the first: in the
       `--pid=host --network=host` measurement the table had no holes at all —
       15 lines, every one named, sshd on 22 — so "this machine's listening
@@ -588,7 +693,7 @@ def detect_ssh_route(
     *,
     prefix: tuple[str, ...] = (),
     backend: platform.FirewallBackend | None = None,
-    in_host_namespace: Callable[[], bool | None] | None = None,
+    where_read: Callable[[], str] | None = None,
 ) -> SshRoute:
     """Which ports must keep admitting SSH, and whether this session came in over it.
 
@@ -619,19 +724,22 @@ def detect_ssh_route(
     `prefix` is the authority the `ss` probe runs with, from `probe_prefix()`:
     without it, uid 1000 reads root's sshd as an unnamed line and every plan
     refuses (see `probe_prefix()` for the measurement on both boxes).
-    `in_host_namespace` is the other half of what makes a table evidence, and
-    defaults to `reads_this_machine()` bound to the same `run`, the same
-    `prefix` and `backend` — one authority for every question this function
-    asks, and one machine. `backend` is what lets it ask whether the config
+    `where_read` is the other half of what makes a table evidence, and
+    defaults to `where_the_reading_came_from()` bound to the same `run`, the
+    same `prefix` and `backend` — one authority for every question this
+    function asks, and one machine. It answers with a CAUSE rather than a
+    bool so the refusal can name the one that fired; round 6 passed a
+    tri-state and the sentence had to name every cause at once (see
+    `READ_ELSEWHERE`). `backend` is what lets it ask whether the config
     these rules will be written to exists here; `plan()` always passes it, and
     a caller that does not gets the namespace half only.
     """
     env = os.environ if environ is None else environ
     do = run if run is not None else (lambda argv: runner.run(argv, timeout=_SS_TIMEOUT_SECONDS))
     here = (
-        in_host_namespace
-        if in_host_namespace is not None
-        else (lambda: reads_this_machine(backend, run=do, prefix=prefix))
+        where_read
+        if where_read is not None
+        else (lambda: where_the_reading_came_from(backend, run=do, prefix=prefix))
     )
     # `SSH_CONNECTION` = "client-ip client-port server-ip server-port";
     # `SSH_CLIENT` = "client-ip client-port server-port". Both end with the
@@ -644,12 +752,12 @@ def detect_ssh_route(
         if len(said) > field:
             with suppress(ValueError):
                 ports.add(int(said[field]))
-    listening, settled, machine = _sshd_listening_ports(do, prefix, in_host_namespace=here)
+    listening, settled, machine = _sshd_listening_ports(do, prefix, where_read=here)
     return SshRoute(
         connected=connected,
         ports=tuple(sorted(ports | listening)),
-        listeners_readable=settled and machine is True,
-        read_elsewhere=None if machine is True else READ_ELSEWHERE[machine],
+        listeners_readable=settled and machine == THIS_MACHINE,
+        read_elsewhere=None if machine == THIS_MACHINE else READ_ELSEWHERE[machine],
     )
 
 
@@ -687,15 +795,15 @@ def _sshd_listening_ports(
     run: Runner,
     prefix: tuple[str, ...] = (),
     *,
-    in_host_namespace: Callable[[], bool | None] | None = None,
-) -> tuple[set[int], bool, bool | None]:
+    where_read: Callable[[], str] | None = None,
+) -> tuple[set[int], bool, str]:
     """(ports an SSH daemon is listening on, whether the TABLE settled, whose MACHINE it is).
 
     The second and third halves are the load-bearing ones, and the caller must
-    have BOTH true to use the ports. They are returned apart because they are
-    dropped for opposite reasons and a caller that has to explain the drop
-    cannot reconstruct which one it was: the third is `in_host_namespace()`'s
-    answer when the table settled, and a documented `True` — "not the reason"
+    have BOTH before it uses the ports. They are returned apart because they
+    are dropped for opposite reasons and a caller that has to explain the drop
+    cannot reconstruct which one it was: the third is `where_read()`'s answer
+    when the table settled, and a documented `THIS_MACHINE` — "not the reason"
     — when it did not, since the question is asked last and an already-unsettled
     table never spends the subprocess it can cost.
 
@@ -777,9 +885,9 @@ def _sshd_listening_ports(
     genuinely no listener loses a refusal that names two commands.
     """
     here = (
-        in_host_namespace
-        if in_host_namespace is not None
-        else (lambda: reads_this_machine(run=run, prefix=prefix))
+        where_read
+        if where_read is not None
+        else (lambda: where_the_reading_came_from(run=run, prefix=prefix))
     )
     try:
         proc = run([*prefix, *_SS_ARGV])
@@ -791,9 +899,9 @@ def _sshd_listening_ports(
         # refusal. `runner.run()` converts its own timeout into rc 124, which is
         # why this went unseen: the default seam never raised it, and an
         # injected runner or a direct `subprocess.run` does.
-        return set(), False, True
+        return set(), False, THIS_MACHINE
     if proc.returncode != 0:
-        return set(), False, True
+        return set(), False, THIS_MACHINE
     ports: set[int] = set()
     lines = 0
     holes = 0
@@ -826,11 +934,11 @@ def _sshd_listening_ports(
     # it could not place, at least one line, and a reading of the machine whose
     # sockets the firewall config about to be written governs. The last is
     # asked LAST so a table that is already unsettled never spends the
-    # subprocess `reads_this_machine()` may need at uid 1000 — which is why the
-    # third element is `True` when it was not asked: it means "not the reason",
-    # and the caller reports the table instead.
+    # subprocess `where_the_reading_came_from()` may need at uid 1000 — which
+    # is why the third element is `THIS_MACHINE` when it was not asked: it
+    # means "not the reason", and the caller reports the table instead.
     settled = lines > 0 and holes == 0
-    return ports, settled, here() if settled else True
+    return ports, settled, here() if settled else THIS_MACHINE
 
 
 FirewalldDaemon = Literal["running", "stopped", "unknown"]
@@ -1050,6 +1158,107 @@ def zones_from_listing(text: str, *, bound_only: bool) -> tuple[str, ...]:
     return tuple(name for name, wanted in zones if wanted or not bound_only)
 
 
+_CONTAINER_BRIDGE_INTERFACES = ("docker0", "br-", "veth")
+"""Interface names a container runtime creates on the box it runs on.
+
+Measured on m910q, 2026-09-05, `ip -br link` on an ordinary Ubuntu box that
+runs this project's own compose stacks — 23 links: `lo`, two real NICs
+(`enp0s31f6`, `wlp2s0`), `tailscale0`, and 19 of Docker's — `docker0`, ten
+`br-<12 hex>` (one per user-defined network) and eight `veth<hex>@if2`.
+`tailscale0` is deliberately NOT in this list: a tailnet interface is a way in
+from other machines, which is exactly what the breadth warning is about.
+
+Nothing here is a guess at another runtime's names. podman, libvirt and LXD
+create zones of their own on the boxes that run them; their interface names
+were NOT measured here, so a zone of theirs is treated as breadth and warned
+about. That is the safe direction — an extra warning costs a sentence, a
+missing one costs the user the fact that their game ports are in a zone facing
+somewhere they did not name.
+"""
+
+
+def machine_made_zones(*listings: str | None) -> tuple[str, ...]:
+    """Zones bound only to interfaces this machine created for its own containers.
+
+    The gate the zone-breadth warning needs, and round 6 did not have. Round 6
+    warned on `len(zones) > 1`, and Docker — which every Yu'lon Linux install
+    requires — creates a firewalld zone named `docker` bound to `docker0` on
+    every box it runs on. Measured 2026-09-05, firewalld 2.2.3 in a fedora:41
+    container on m910q with a `docker` zone bound to a `docker0` link and eth0
+    bound to `FedoraWorkstation`: the round-6 plan read zones
+    `('FedoraWorkstation', 'docker', 'public')` and warned "the game ports
+    (3724, 8085) are allowed in `FedoraWorkstation`, `docker`, `public` — every
+    zone this machine binds, including any of them that faces the internet", on
+    a healthy single-NIC box, handing the user a `--remove-port` for a zone
+    Docker owns. The same shape is in round 6's own clean run on yulon-fedora,
+    which read `('FedoraWorkstation', 'docker')` with refusals 0.
+
+    A zone qualifies only when it binds at least one interface, binds NO
+    source, and every interface it binds is one of
+    `_CONTAINER_BRIDGE_INTERFACES`. A source is an address range — remote
+    machines by definition — and a zone carrying one is never this machine's
+    own bridge, whatever else is in it.
+
+    Takes several listings because the permanent and the runtime one can bind
+    different interfaces, and a zone has to look machine-made in EVERY reading
+    that mentions it to count; a zone named in one listing and absent from the
+    other is judged on the listing that has it.
+    """
+    bound: dict[str, list[tuple[tuple[str, ...], tuple[str, ...]]]] = {}
+    for text in listings:
+        if text is None:
+            continue
+        for zone, interfaces, sources in _zone_bindings(text):
+            bound.setdefault(zone, []).append((interfaces, sources))
+    return tuple(
+        zone
+        for zone, readings in bound.items()
+        if all(
+            interfaces and not sources and all(_is_container_bridge(name) for name in interfaces)
+            for interfaces, sources in readings
+        )
+    )
+
+
+def _is_container_bridge(interface: str) -> bool:
+    """One interface name against `_CONTAINER_BRIDGE_INTERFACES`.
+
+    `docker0` is exact — it is Docker's default bridge and nothing else is
+    called that — while `br-` and `veth` are prefixes, since the rest of those
+    names is the network's or the container's hex id.
+    """
+    return interface == "docker0" or interface.startswith(("br-", "veth"))
+
+
+def _zone_bindings(text: str) -> list[tuple[str, tuple[str, ...], tuple[str, ...]]]:
+    """`(zone, interfaces, sources)` for every zone header in a listing.
+
+    The same shape `zones_from_listing()` reads, kept apart from it because that
+    one answers "which zones" and this one answers "bound to what", and folding
+    the second into the first would make every caller of the first carry a
+    field it does not use. Reads `--get-active-zones` and `--list-all-zones`
+    alike: a header is a line with no leading whitespace, and its bindings are
+    the indented `interfaces:` and `sources:` lines under it.
+    """
+    zones: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            zones.append((line.partition(" ")[0], (), ()))
+        elif zones:
+            key, _, value = line.strip().partition(":")
+            if key in ("interfaces", "sources"):
+                zone, interfaces, sources = zones[-1]
+                named = tuple(value.split())
+                zones[-1] = (
+                    zone,
+                    named if key == "interfaces" else interfaces,
+                    named if key == "sources" else sources,
+                )
+    return zones
+
+
 def default_zone_from_listing(text: str) -> str | None:
     """The zone tagged `(default)` in a listing, or None when nothing carries the tag.
 
@@ -1190,6 +1399,15 @@ class FirewalldZoning:
     """The daemon's LIVE default zone, from the `(default)` tag it prints."""
     configured_default_zone: str | None = None
     """`DefaultZone` in firewalld.conf — the one a reload installs. None if unread."""
+    machine_made: tuple[str, ...] = ()
+    """Zones bound only to this machine's own container bridges (`machine_made_zones()`).
+
+    NOT subtracted from `write` — the ports go to every zone either way, for the
+    reason the breadth note gives — but subtracted from the count that decides
+    whether there is breadth worth a warning. The default is empty because a
+    zoning built by hand has no listing to read it from;
+    `detect_firewalld_zones()` always fills it.
+    """
 
     @property
     def moved_at_runtime(self) -> tuple[str, ...]:
@@ -1324,6 +1542,7 @@ def detect_firewalld_zones(
             flush_all_on_reload=flush,
             default_zone=configured,
             configured_default_zone=configured,
+            machine_made=machine_made_zones(offline),
         )
     listing = _listing(do, prefix, _FIREWALLD_PERMANENT_ZONES_ARGV)
     if listing is None:
@@ -1331,7 +1550,12 @@ def detect_firewalld_zones(
     permanent = zones_from_listing(listing, bound_only=True) or None
     if permanent is None:
         return None
-    runtime = _zone_listing(do, prefix, _FIREWALLD_ACTIVE_ZONES_ARGV, bound_only=False)
+    # The active listing is read as TEXT and turned into names here, rather
+    # than through `_zone_listing()`, because `machine_made_zones()` needs the
+    # interfaces under each header and a second read of it is a second chance
+    # for two answers from different states of the same daemon.
+    active = _listing(do, prefix, _FIREWALLD_ACTIVE_ZONES_ARGV)
+    runtime = None if active is None else (zones_from_listing(active, bound_only=False) or None)
     extra = tuple(zone for zone in (runtime or ()) if zone not in permanent)
     flush, configured = _firewalld_conf(do, prefix)
     if configured is None:
@@ -1351,6 +1575,7 @@ def detect_firewalld_zones(
         flush_all_on_reload=flush,
         default_zone=default_zone_from_listing(listing),
         configured_default_zone=configured,
+        machine_made=machine_made_zones(listing, active),
     )
 
 
@@ -1624,12 +1849,269 @@ def _ssh_allow_commands(
     return [["ufw", "allow", f"{port}/tcp"]]
 
 
+ALLOWED_NOTHING_AT_RISK = "nothing-at-risk"
+ALLOWED_SSH_PRESERVED = "ssh-preserved"
+REFUSED_NO_SSH_ROUTE = "no-ssh-route"
+REFUSED_ZONES_UNREADABLE = "zones-unreadable"
+REFUSED_DEFAULT_ZONE_UNREADABLE = "default-zone-unreadable"
+
+LOCKOUT_REASONS = (
+    ALLOWED_NOTHING_AT_RISK,
+    ALLOWED_SSH_PRESERVED,
+    REFUSED_NO_SSH_ROUTE,
+    REFUSED_ZONES_UNREADABLE,
+    REFUSED_DEFAULT_ZONE_UNREADABLE,
+)
+"""Every answer `decide_lockout()` can give, in the order it can give them."""
+
+
+@dataclass(frozen=True)
+class LockoutQuestion:
+    """Everything the ALLOW/REFUSE decision is allowed to look at.
+
+    A dataclass and not seven parameters so a test can build one state and
+    change one field of it (`dataclasses.replace`), which is what asking "does
+    the Docker zone change the verdict" and "does the divergent DefaultZone
+    change it" actually take.
+
+    `ports` are the GAME ports being opened — the request — and are here for the
+    breadth note rather than for the verdict; `route.ports` are the SSH ones.
+    """
+
+    backend: platform.FirewallBackend
+    route: SshRoute
+    enables: bool
+    reloads: bool
+    ports: tuple[int, ...] = ()
+    firewalld_daemon: FirewalldDaemon | None = None
+    zones: tuple[str, ...] | None = None
+    zoning: FirewalldZoning | None = None
+
+
+@dataclass(frozen=True)
+class LockoutVerdict:
+    """What `decide_lockout()` decided, why, and what the user is owed either way.
+
+    `refusal` empty is what ALLOW means, so the two cannot drift apart: there is
+    no way to return a refusal sentence and an allow, or an allow with nothing
+    to say. `reason` is a token from `LOCKOUT_REASONS` — a test names the branch
+    it means instead of matching a paragraph of prose, and a test that matched
+    prose is a test that changes when the wording does.
+
+    `notes` are said whatever the verdict, because the ports are written on both
+    paths — only the commands that can cut the session are dropped — so what was
+    written and where is true of a refusal too.
+    """
+
+    reason: str
+    refusal: str = ""
+    notes: tuple[str, ...] = ()
+
+    @property
+    def allowed(self) -> bool:
+        return not self.refusal
+
+
+def decide_lockout(question: LockoutQuestion) -> LockoutVerdict:
+    """May the commands that can cut this machine's SSH run, and what is the user told?
+
+    The whole of §39's decision, as one function of one frozen input, and
+    round 7's answer to a review that could only reach it through `plan()`.
+    Every earlier round's guard was a branch inside `_guard_the_way_back_in()`
+    that also edited the command list, so a test that wanted the DECISION had to
+    build a plan, and the two states that have cost this bug the most — the
+    daemon's default zone against the file's, and a second zone that is only
+    Docker's — could not be varied one at a time. They can now:
+    `dataclasses.replace(question, zoning=...)`.
+
+    The order of the tests is the order of what is unknown, and each returns the
+    sentence for its own gap:
+
+    * nothing at risk — the table settled, no SSH daemon on it, no
+      `SSH_CONNECTION`. There is no way in to preserve, so the guide's commands
+      run and a machine that is fine is told nothing. An EMPTY table does not
+      reach here: `_sshd_listening_ports()` reports it unsettled.
+    * no SSH route — no port, or a table that did not settle.
+      `listeners_readable` is read on BOTH sides of that test: a port from
+      `SSH_CONNECTION` is proof of ONE way in and no evidence it is the only
+      one.
+    * the zones could not be read (firewalld only) — a `--permanent` write with
+      no `--zone` goes to the default zone, and the default zone is not where
+      the traffic is on a box whose admin bound the interface elsewhere.
+    * `DefaultZone` could not be read on a daemon that is not stopped — every
+      `firewall-cmd` listing tags the DAEMON's default, and the reload installs
+      the file's.
+    * otherwise ALLOW, with the SSH ports the caller must write first.
+
+    The refusal always names a remedy: the sentences come from `_ssh_refusal()`,
+    `_zone_refusal()` and `_default_zone_refusal()`, and each ends with the
+    commands that do by hand what was refused.
+    """
+    named = "firewalld" if question.backend == "firewalld" else "ufw"
+    asked = question.route
+    zones = question.zones
+    if not question.enables and not question.reloads:
+        # Nothing left that can cut a session: nothing to guard, and no port to
+        # open for a guard that is not there.
+        return LockoutVerdict(ALLOWED_NOTHING_AT_RISK, notes=_lockout_notes(question, allowed=True))
+    if not asked.ports and not asked.connected and asked.listeners_readable:
+        return LockoutVerdict(ALLOWED_NOTHING_AT_RISK, notes=_lockout_notes(question, allowed=True))
+    if not asked.ports or not asked.listeners_readable:
+        # Measured on m910q as an ordinary desktop uid: SSH_CONNECTION supplied
+        # port 22, `ss` contributed nothing because sshd's lines are ownerless
+        # to uid 1000, and the plan allowed 22 and enabled ufw. On a box also
+        # running sshd on 2222 — a port being migrated, a key-only admin port —
+        # 2222 dies, and the probe that would have found it is the one that
+        # could not read the table.
+        return LockoutVerdict(
+            REFUSED_NO_SSH_ROUTE,
+            _ssh_refusal(
+                asked,
+                named=named,
+                enables=question.enables,
+                reloads=question.reloads,
+                backend=question.backend,
+                firewalld_daemon=question.firewalld_daemon,
+            ),
+            _lockout_notes(question, allowed=False),
+        )
+    if question.backend == "firewalld" and zones is None:
+        return LockoutVerdict(
+            REFUSED_ZONES_UNREADABLE,
+            _zone_refusal(
+                asked,
+                enables=question.enables,
+                reloads=question.reloads,
+                firewalld_daemon=question.firewalld_daemon,
+            ),
+            _lockout_notes(question, allowed=False),
+        )
+    if (
+        question.backend == "firewalld"
+        and question.firewalld_daemon != "stopped"
+        and (question.zoning is None or question.zoning.configured_default_zone is None)
+    ):
+        # The zones are known and the one the reload will install is not. Every
+        # `firewall-cmd` reading agrees in exactly that state, so there is
+        # nothing else here that can catch it.
+        #
+        # `unknown` is held to the running daemon's rule rather than the stopped
+        # one: the reload is in the command list for both (see
+        # `_firewalld_port_commands()`), and a permanent zone listing that
+        # answered at all means there IS a daemon whose live default can diverge
+        # from the file. A STOPPED daemon cannot reach this state — its zones
+        # were read from the very files the reload installs.
+        return LockoutVerdict(
+            REFUSED_DEFAULT_ZONE_UNREADABLE,
+            _default_zone_refusal(
+                asked,
+                enables=question.enables,
+                reloads=question.reloads,
+                zoning=question.zoning,
+            ),
+            _lockout_notes(question, allowed=False),
+        )
+    return LockoutVerdict(ALLOWED_SSH_PRESERVED, notes=_lockout_notes(question, allowed=True))
+
+
+def _lockout_notes(question: LockoutQuestion, *, allowed: bool) -> tuple[str, ...]:
+    """What the user is told about WHERE the ports went, whatever the verdict."""
+    note = _zone_breadth_note(question, allowed=allowed)
+    return (note,) if note is not None else ()
+
+
+def _zone_breadth_note(question: LockoutQuestion, *, allowed: bool) -> str | None:
+    """firewalld wrote the game ports to more than one zone the machine did not make.
+
+    DEFECT 2 of round 6's review, and the decision it is closed with.
+    `FirewalldZoning.write` is every zone this machine binds, so on a multi-homed
+    box the game ports land in the WAN-facing zone as well as the LAN one.
+    Measured on 2026-09-05 (firewalld 2.2.3, fedora:41 on m910q) with eth1 bound
+    to a custom `wanzone` that allowed nothing: 6 permanent writes plus the
+    reload, apply 7/7, refusals 0, warnings 0, `wanzone` afterwards listing
+    2222, 3724 and 8085 — and the word `wanzone` appearing nowhere in the plan.
+
+    The narrowing was rejected, twice measured: ports written only to the
+    default zone were unreachable on a box whose interface was bound to
+    `internal` (round 3, 2026-09-04), and in `internet` mode the zone the
+    clients arrive on IS the WAN-facing one, so "LAN zones only" breaks the mode
+    this feature exists for. A port opened in one zone too many is one line to
+    take back; a game port in no zone at all is a feature that does not work and
+    says nothing. What was wrong was not the breadth, it was that the breadth
+    was silent — so the zones are named here, with the command that removes one.
+
+    What round 6 got wrong is the GATE. It warned on `len(zones) > 1`, and
+    Docker — required by every Yu'lon Linux install — creates a `docker` zone
+    bound to `docker0`, so on the flagship platform the count is two on a
+    healthy single-NIC box. Round 6's own clean run on yulon-fedora read
+    `('FedoraWorkstation', 'docker')`, and re-derived on 2026-09-05 in a
+    fedora:41 container shaped the same way the committed module warned "the
+    game ports (3724, 8085) are allowed in `FedoraWorkstation`, `docker`,
+    `public` — every zone this machine binds, including any of them that faces
+    the internet" and offered a `--remove-port` for Docker's own zone. The gate
+    is now the zones this machine did NOT make for its own containers
+    (`machine_made_zones()`); one of those is no breadth, and "a machine that is
+    fine is told nothing" survives on the platform it was written for.
+
+    And it says WRITTEN, not "allowed", unless the plan is about to put them in
+    effect. Measured 2026-09-05 in a fedora:41 container with the daemon
+    stopped: eight `firewall-offline-cmd --add-port` writes, no reload, the
+    enable withheld — and round 6 still said the ports "are allowed in `dmz`,
+    `public`, `trusted`, `wanzone`". Nothing was: the rules load when firewalld
+    starts. The same wording stood on every refusal that strips the reload.
+    """
+    zones = question.zones
+    if question.backend != "firewalld" or not zones:
+        return None
+    machine_made = question.zoning.machine_made if question.zoning is not None else ()
+    exposed = tuple(zone for zone in zones if zone not in machine_made)
+    if len(exposed) < 2:
+        return None
+    where = ", ".join(f"`{zone}`" for zone in exposed)
+    said = ", ".join(str(port) for port in question.ports)
+    in_effect = allowed and question.reloads and question.firewalld_daemon == "running"
+    lead = (
+        f"firewalld: the game ports ({said}) are allowed in {where}"
+        if in_effect
+        else (
+            f"firewalld: the game ports ({said}) have been WRITTEN to {where} — and are not in "
+            "effect until firewalld loads them"
+        )
+    )
+    parts = [
+        f"{lead} — every zone this machine binds that it did not make for its own "
+        "containers, including any of them that faces the internet. Nothing here can tell "
+        "which zone is which, and writing the ports anywhere narrower was measured to break "
+        "the feature in silence: on a box whose interface was bound to `internal`, ports "
+        "written to the default zone alone left the game unreachable and the plan said "
+        "nothing (firewalld 2.2.3, fedora:41, 2026-09-04). Take one back with `sudo "
+        "firewall-cmd --permanent --zone=<zone> --remove-port=<port>/tcp`, then `sudo "
+        "firewall-cmd --reload`."
+    ]
+    if machine_made:
+        also = ", ".join(f"`{zone}`" for zone in machine_made)
+        parts.append(
+            f"{also} got the ports too and is not counted above: every interface it binds is "
+            "one this machine created for its own containers (docker0, br-*, veth*), so it "
+            "faces nothing the machine did not already reach."
+        )
+    if allowed and question.route.ports:
+        said_ssh = ", ".join(str(port) for port in question.route.ports)
+        parts.append(
+            f"SSH (port {said_ssh}) is in all of them deliberately: the reload can move an "
+            "interface between zones, and a rule missing from the zone it lands in ends the "
+            "session."
+        )
+    return " ".join(parts)
+
+
 def _guard_the_way_back_in(
     commands: list[list[str]],
     *,
     backend: platform.FirewallBackend,
     enable_firewall: bool,
     route: SshRoute | None,
+    ports: tuple[int, ...] = (),
     firewalld_daemon: FirewalldDaemon | None = None,
     zones: tuple[str, ...] | None = None,
     zoning: FirewalldZoning | None = None,
@@ -1748,71 +2230,29 @@ def _guard_the_way_back_in(
         commands = [c for c in commands if not _turns_a_firewall_on(c)]
         refusals.append(withheld)
         warnings.append(withheld)
-    enables = any(_turns_a_firewall_on(c) for c in commands)
-    reloads = any(_reloads_firewalld(c) for c in commands)
-    if not enables and not reloads:
-        # Nothing left that can cut a session: nothing to guard, and no port
-        # to open for a guard that is not there.
+    # --- 2. the decision, made in one place and read here.
+    question = LockoutQuestion(
+        backend=backend,
+        route=route if route is not None else SshRoute(listeners_readable=False),
+        enables=any(_turns_a_firewall_on(c) for c in commands),
+        reloads=any(_reloads_firewalld(c) for c in commands),
+        ports=ports,
+        firewalld_daemon=firewalld_daemon,
+        zones=zones,
+        zoning=zoning,
+    )
+    verdict = decide_lockout(question)
+    warnings.extend(verdict.notes)
+    if not verdict.allowed:
+        refusals.append(verdict.refusal)
+        warnings.append(verdict.refusal)
+        return [c for c in commands if not _can_lock_out(c)], (), refusals, warnings
+    asked = question.route
+    if verdict.reason == ALLOWED_NOTHING_AT_RISK:
+        # Either nothing in the list can cut a session, or the table settled and
+        # carried no SSH daemon. Both run the guide's commands unchanged, and
+        # both open no port for a guard that is not there.
         return commands, (), refusals, warnings
-    # --- 2. what the running system says about SSH, read ONCE for both.
-    asked = route if route is not None else SshRoute(listeners_readable=False)
-    if not asked.ports and not asked.connected and asked.listeners_readable:
-        # The socket table had listeners on it, every one of them was placed,
-        # and none was an SSH daemon's or an init that could be fronting one:
-        # there is no way in to preserve, so the guide's commands run exactly
-        # as they always did — and a machine that is fine is told nothing.
-        # An EMPTY table does not reach here: `_sshd_listening_ports()`
-        # reports it unsettled (see its docstring for the `unshare --net`
-        # measurement), so it takes the refusal below.
-        return commands, (), refusals, warnings
-    if not asked.ports or not asked.listeners_readable:
-        # `listeners_readable` is read on BOTH sides of this test, and it used
-        # to be read only on the empty-`ports` side. Measured on m910q as an
-        # ordinary desktop uid: SSH_CONNECTION supplied port 22, `ss`
-        # contributed nothing because sshd's lines are ownerless to uid 1000,
-        # and the plan allowed 22 and enabled ufw. On a box also running sshd on
-        # 2222 — a port being migrated, a key-only admin port — 2222 dies, and
-        # the probe that would have found it is the one that could not read the
-        # table. A supplied port is proof of one way in, never proof that it is
-        # the only one, and "the only one" is exactly what an unread table
-        # leaves unknown.
-        refusal = _ssh_refusal(
-            asked,
-            named=named,
-            enables=enables,
-            reloads=reloads,
-            backend=backend,
-            firewalld_daemon=firewalld_daemon,
-        )
-        refusals.append(refusal)
-        warnings.append(refusal)
-        return [c for c in commands if not _can_lock_out(c)], (), refusals, warnings
-    if backend == "firewalld" and zones is None:
-        refusal = _zone_refusal(
-            asked, enables=enables, reloads=reloads, firewalld_daemon=firewalld_daemon
-        )
-        refusals.append(refusal)
-        warnings.append(refusal)
-        return [c for c in commands if not _can_lock_out(c)], (), refusals, warnings
-    if (
-        backend == "firewalld"
-        and firewalld_daemon != "stopped"
-        and (zoning is None or zoning.configured_default_zone is None)
-    ):
-        # The zones are known and the one the reload will install is not. Every
-        # `firewall-cmd` reading agrees in exactly that state, so there is
-        # nothing else here that can catch it.
-        #
-        # `unknown` is held to the running daemon's rule rather than the
-        # stopped one: the reload is in the command list for both (see
-        # `_firewalld_port_commands()`), and a permanent zone listing that
-        # answered at all means there IS a daemon whose live default can
-        # diverge from the file. A STOPPED daemon cannot reach this state — its
-        # zones were read from the very files the reload installs.
-        refusal = _default_zone_refusal(asked, enables=enables, reloads=reloads, zoning=zoning)
-        refusals.append(refusal)
-        warnings.append(refusal)
-        return [c for c in commands if not _can_lock_out(c)], (), refusals, warnings
     wanted = [
         c
         for port in asked.ports
@@ -1826,7 +2266,7 @@ def _guard_the_way_back_in(
     # standing between this line and that exception.
     first = next((i for i, c in enumerate(commands) if _can_lock_out(c)), len(commands))
     guarded = commands[:first] + new + commands[first:]
-    if enables:
+    if question.enables:
         said = ", ".join(str(port) for port in asked.ports)
         where = f" in every active zone ({', '.join(zones)})" if zones else ""
         warnings.append(
@@ -2483,6 +2923,7 @@ def plan(
             fw_cmds,
             backend=backend,
             enable_firewall=enable_firewall,
+            ports=tuple(ports),
             route=ask_ssh() if enable_firewall or reloads else None,
             firewalld_daemon=firewalld_daemon,
             zones=firewalld_zones,
@@ -2490,51 +2931,11 @@ def plan(
         )
         refusals.extend(guard_refusals)
         warnings.extend(guard_warnings)
-    if backend == "firewalld" and firewalld_zones and len(firewalld_zones) > 1:
-        # DEFECT 2, and the decision it was closed with. `FirewalldZoning.write`
-        # is every zone this machine binds, so on a multi-homed box the game
-        # ports land in the WAN-facing zone as well as the LAN one. Measured on
-        # 2026-09-05 (firewalld 2.2.3, fedora:41 on m910q) with eth1 bound to a
-        # custom `wanzone` that allowed nothing: 6 permanent writes plus the
-        # reload, apply 7/7, refusals 0, warnings 0, `wanzone` afterwards
-        # listing 2222, 3724 and 8085 — and the word `wanzone` appearing
-        # nowhere in the plan.
-        #
-        # The narrowing was rejected, twice measured: ports written only to the
-        # default zone were unreachable on a box whose interface was bound to
-        # `internal` (round 3, 2026-09-04), and in `internet` mode the zone the
-        # clients arrive on IS the WAN-facing one, so "LAN zones only" breaks
-        # the mode this feature exists for. A port opened in one zone too many
-        # is one line to take back; a game port in no zone at all is a feature
-        # that does not work and says nothing. What was wrong was not the
-        # breadth, it was that the breadth was silent — so the zones are named
-        # here, in the plan's own words, with the command that removes one.
-        #
-        # Only when there IS breadth: on a box with one zone the ports go to
-        # the only zone there is, nothing was over-opened, and "a machine that
-        # is fine is told nothing" is a property this module holds on purpose
-        # and three tests assert. The sentence appears exactly when a second
-        # zone means a rule the user did not ask for by name.
-        where = ", ".join(f"`{zone}`" for zone in firewalld_zones)
-        said = ", ".join(str(port) for port in ports)
-        parts = [
-            f"firewalld: the game ports ({said}) are allowed in {where} — every zone this "
-            "machine binds, including any of them that faces the internet. Nothing here can "
-            "tell which zone is which, and writing the ports anywhere narrower was measured "
-            "to break the feature in silence: on a box whose interface was bound to "
-            "`internal`, ports written to the default zone alone left the game unreachable "
-            "and the plan said nothing (firewalld 2.2.3, fedora:41, 2026-09-04). Take one "
-            "back with `sudo firewall-cmd --permanent --zone=<zone> "
-            "--remove-port=<port>/tcp`, then `sudo firewall-cmd --reload`."
-        ]
-        if ssh_ports:
-            said_ssh = ", ".join(str(port) for port in ssh_ports)
-            parts.append(
-                f"SSH (port {said_ssh}) is in all of them deliberately: the reload can move "
-                "an interface between zones, and a rule missing from the zone it lands in "
-                "ends the session."
-            )
-        warnings.append(" ".join(parts))
+    # The zone-breadth note used to be built here, on `len(firewalld_zones) >
+    # 1`. It moved into `decide_lockout()` on 2026-09-05 with the gate that
+    # closes round 6's DEFECT 2 — see `_zone_breadth_note()` — because what it
+    # says depends on whether the reload survived the verdict, and only the
+    # decision knows that.
     alf_state: platform.AlfState | None = None
     if backend == "alf":
         # macOS gets a state, not a command list: its firewall is
