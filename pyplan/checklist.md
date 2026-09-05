@@ -883,10 +883,14 @@
       (`7.1-spine-azerothcore-linux.md` is 13 of 141 and stays out of scope while 7.1 is open.)
       The whole gate over the same copy: `run-tests-vm.sh --checks` → **2537 passed, 4 skipped**,
       mypy ×3 clean (71 source files, this platform / win32 / darwin), ruff `All checks passed!`,
-      black 136 unchanged, `ALL GREEN`, exit 0 — the branch baseline after the rebase onto
-      `a0cc9dc0`, which brought in one test (`eb5f3b3f`'s
-      `test_the_ready_budget_also_covers_the_windows_first_boot_measured_over_9p`); this lane touches
-      no test file, and the 2536 an earlier version of this line quoted was the pre-rebase count.
+      black 136 unchanged, `ALL GREEN`, exit 0. That is the branch baseline: the rebase onto
+      `a0cc9dc0` brought in one test (`eb5f3b3f`'s
+      `test_the_ready_budget_also_covers_the_windows_first_boot_measured_over_9p`), and the later
+      rebase onto `0586d9ba` brought in none — that commit changes only `pyplan/checklist.md`.
+      This lane touches no test file, and the 2536 an earlier version of this line quoted was the
+      pre-rebase count. Every figure in this bullet was re-run on m910q on 2026-09-05 at
+      `88072267`, the commit before this one: 4 passed, the same two-plan widening, 44/0 and
+      219/0, and the same 2537 / 4 skipped with mypy ×3, ruff and black green.
   - [ ] Gate: full checks green; 7.1's Ubuntu gate re-run from the same checkpoint with no other change
     - **Static half PASSED, 2026-09-02, overnight run.** `yulon-phase7` at `0e394d9b`: **1974 passed,
       3 skipped** on yulon-ubuntu (`-m "not integration"`), mypy `Success: no issues found in 48 source
