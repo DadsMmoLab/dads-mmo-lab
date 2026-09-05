@@ -698,15 +698,34 @@
         `platforms: ["linux"]`"*. True of all three on the day it was written; false for two of
         them since `2f39a6d9`, 2026-09-04.
       * **From 2026-09-05:** *"the three CMaNGOS entries keep a non-empty `platforms` — the
-        deletion empties no entry and changes where no game can be installed"*. **MET, and never at
-        risk:** no entry has ever been emptied, and the values today are `["linux","windows"]`,
-        `["linux","windows"]`, `["linux"]`. The fact underneath moved at **`2f39a6d9`**, and its
+        deletion empties no entry and changes where no game can be installed"*. **MET, both halves
+        measured** — the values today are `["linux","windows"]`, `["linux","windows"]`, `["linux"]`,
+        no revision of `catalog.json` has ever carried an empty one, and the deletion commit itself
+        left all four entries' `platforms` and `native` blocks byte-for-byte as it found them. The
+        commands and their output are in the audit row below; the second half of this wording was
+        asserted rather than shown when it was first written, and that is what the row now fixes.
+        The fact underneath moved at **`2f39a6d9`**, four days AFTER the deletion, and its
         evidence lives on the **7.7** line and in the gate folders that line names — not here.
       **Why this is not the failure this checklist exists to prevent.** A criterion bent until it
-      passes is one that can no longer be falsified. This one can: emptying any entry's `platforms`
-      breaks it, in a `grep` of `catalog.json`, and that is exactly the thing 7.2 was asked not to
-      do. The argument for the meaning is above, both older wordings are legible, and the commit
-      that moved the underlying value is named with the line that owns its evidence.
+      passes is one that can no longer be falsified. **The falsifier this record offered on
+      2026-09-05 was not one, and is replaced here (2026-09-05, same day, after review).** It read
+      *"emptying any entry's `platforms` breaks it, in a `grep` of `catalog.json`"* — but the audit
+      row below says, in the same edit, that `min_length=1` on `platforms` refuses that value
+      (`catalog.py:743`, pinned by `test_an_entry_installable_nowhere_is_refused`,
+      `tests/test_catalog.py:187`, which asserts the `ValidationError` at
+      `('games', 0, 'install', 'platforms')` type `too_short`). A tree with an emptied entry is not
+      a tree this repo can be in: the catalog stops loading. Offering a test whose failing case
+      cannot occur is the shape of a claim that cannot be falsified, which is the thing this
+      paragraph was written to rule out.
+      **The falsifier the clause's own subject supplies.** The clause is about a commit — the
+      deletion, `2fddaa0e` — so it is falsified by reading the four entries on both sides of it: if
+      any entry's `platforms` were shorter after the deletion than before, or if an entry lost the
+      `native` block its engine needs, then the deletion took an install path away and the clause is
+      false. That state is entirely reachable — it is what a careless deletion produces — and it is
+      what the clause forbids. The comparison was run in this lane and came back identical on both
+      sides; the commands and the output are in the audit row below. The argument for the meaning is
+      above, both older wordings are legible, and the commit that moved the underlying value is
+      named with the line that owns its evidence.
   - **The line's own clauses, re-audited from scratch 2026-09-05 at `fe3c1ae0` — all nine rows
     MET, each with the file and line that answers it.** Nine rows: the eight criteria the previous
     audit counted, plus the size figure, which that audit set aside as "not a criterion" and which
@@ -722,7 +741,7 @@
     | `installer.Installer`, `PROMPT_RULES`, `make_responder`, `bash_available` | **MET.** `grep -rn "^class Installer\b\|^PROMPT_RULES\|^def make_responder\|^def bash_available" yulon/` returns nothing. **Three** past-tense prose mentions survive, not the two the earlier audit named — `catalog/families/__init__.py:10` (*"`Installer` such an entry used to fall back to; G.7 deleted the …"*), `catalog/installer.py:286`, `runner.py:221` — which is this repo's own convention. The remaining live hits are a `catalog.json` description string, `platform.py:3177`'s `Docker Desktop Installer.exe`, and `ui/catalog_view.py:377`'s user-facing *"Installer needs …"* copy. What is left in `installer.py` is the shared surface: `compose_file()` :61, `InstallerError` :92, `InstallOptions` :228, `InstallEngine` :345, `installer_for()` :370 |
     | script tests | **MET.** `tests/test_installer.py:1` is the post-7.2 docstring — *"options, errors, copy, dispatch"* — and the file holds **15** test functions; the `interact()` transport pair runs against a throwaway script through `tests/support_bash.py:24::bash_available`, where F.1 copied the probe when the engine that needed it went |
     | `Install.script*` fields | **MET.** `Install` in `yulon/catalog/catalog.py` carries exactly five fields — `default_server_dir` :698, `password` :699, `requires_client_dir` :702, `platforms` :743, `native` :755 — and nothing else. `grep -oE '"script[a-zA-Z_]*"' yulon/catalog/catalog.json` returns **zero** keys. (A plain `grep script catalog.json` returns four hits and all four are the word `description`, which contains it; the earlier audit's phrasing "no key containing `script`" would have been read that way.) |
-    | the three CMaNGOS entries keep a non-empty `platforms` (**reworded**) | **MET, and never at risk.** `wow-tbc ["linux","windows"]`, `wow-vanilla ["linux","windows"]`, `wow-tortoise ["linux"]`, read out of `catalog.json` 2026-09-05; no entry has ever been emptied, and `min_length=1` on `platforms` (`catalog.py:743`) means none can be. The reword, the two earlier wordings and the argument for the meaning are in the bullet above; the widening of two of the three is `2f39a6d9`, evidenced on the **7.7** line |
+    | the three CMaNGOS entries keep a non-empty `platforms` — the deletion empties no entry and changes where no game can be installed (**reworded**) | **MET — and this row is in three parts because the clause makes three claims, the second and third of which were asserted rather than measured when the box was first ticked.** *(a) Non-empty today:* `wow-tbc ["linux","windows"]`, `wow-vanilla ["linux","windows"]`, `wow-tortoise ["linux"]`, read out of `catalog.json` 2026-09-05. *(b) No entry has ever been emptied:* `git log --follow -- pylauncher/yulon/catalog/catalog.json` names **35** revisions; every one was fetched with `git show <rev>:<path>`, parsed with `json.load`, and checked for `install.platforms == []` — **zero occurrences**, in this lane on 2026-09-05. `min_length=1` on `platforms` (`catalog.py:743`) is why: it makes the empty list a parse failure rather than a configuration, and `tests/test_catalog.py:187::test_an_entry_installable_nowhere_is_refused` pins that refusal. *(c) The deletion changed where nothing can be installed:* `git show 2fddaa0e^:pylauncher/yulon/catalog/catalog.json` and `git show 2fddaa0e:pylauncher/yulon/catalog/catalog.json`, each piped through `json.load` and printed as `id / platforms / native-present`, answer **identically on both sides** — `wow-wotlk ["linux","macos","windows"] native`, `wow-tbc ["linux"] native`, `wow-vanilla ["linux"] native`, `wow-tortoise ["linux"] native`. All four already carried a `native` block before the eight files went, so the deletion removed no platform and no engine: it is the load-bearing half of the reworded clause, and it is now shown rather than claimed. The reword, the two earlier wordings and the argument for the meaning are in the bullet above; the widening of two of the three is `2f39a6d9` on 2026-09-04, four days after `2fddaa0e`, evidenced on the **7.7** line |
     | gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh` | **MET.** `git ls-files pylauncher/catalog/installers/` returns 13 paths: this one `.sh` and twelve `*.tmpl` templates. It is the only shell script left in the tree's installer directory |
     | `contribution.md` harness paragraph rewritten | **MET and guarded.** `tests/test_docs_pins.py:12::test_the_contribution_harness_is_the_engine_not_the_scripts` requires `python -m yulon.install_wiring wow-wotlk` and forbids `python -m yulon.catalog.installer`, `sudo -v`, `bash-script path` and `dml-start.sh` |
     | style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py` | **MET and guarded.** `tests/test_docs_pins.py:21::test_the_style_guide_rows_describe_the_post_7_2_modules`, which also covers the `catalog/native.py` row — added 2026-09-02 after that row went on describing *"the same `run()` contract as `Installer`"* for as long as F.3 had deleted the class |
@@ -734,8 +753,11 @@
     1. *"The `platforms` clause no longer reads true."* **Settled** — by establishing what it meant
        (`12116341`, the plan's own *"until their own gates"*, and the shape of the rest of the
        line) and rewording it to that, with both earlier wordings kept and dated above. The test
-       the previous reading applied was the right one and the reworded clause still passes it: a
-       reader can falsify it in one `grep` of `catalog.json` by emptying any entry.
+       the previous reading applied was the right one and the reworded clause still passes it — but
+       not by the falsifier first written here. A reader falsifies it by reading `catalog.json` on
+       both sides of `2fddaa0e`: a shorter `platforms` or a missing `native` block after the
+       deletion breaks the clause. That comparison is in the audit row above, with its commands;
+       emptying an entry is not a falsifier, because `min_length=1` makes it unreachable.
     2. *"The gate box below is open on 7.1's clauses 14 and 15."* **Not overturned, and not blurred
        into this tick.** The gate below is still `- [ ]` and stays so on its own terms. What is
        said here is only that the two boxes carry different claims — this line's claim is the nine rows
