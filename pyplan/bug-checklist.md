@@ -1910,14 +1910,15 @@ substitution before it was allowed to believe a green.
 
 **Re-derived at `dd8b863f`, m910q 2026-09-05**, five commits after `75bce609` (`git rev-list --count
 75bce609..dd8b863f` = 5) and with two tests added to them since. `dd8b863f` is the commit whose
-tree the numbers describe; the paragraph itself was written at `4bee5fdc` and re-read once more at
-the commit that fixed this sentence:
-a record cannot hold its own SHA, and `9bff3e81` resolved that by labelling its numbers for a
-DIFFERENT commit. This one changes nothing but this paragraph — `git diff dd8b863f..HEAD -- pylauncher`
-is empty — so the numbers hold here as well. Command, at each end:
+tree the numbers describe: a record cannot hold its own SHA, and `9bff3e81` resolved that by
+labelling its numbers for a DIFFERENT commit. Between `dd8b863f` and `4bee5fdc` `pylauncher/` did
+not change (`git diff --stat dd8b863f 4bee5fdc -- pylauncher` is empty); `fa223a4b` changed one
+docstring in `tests/test_dockerfile.py`, and the round-3c review re-ran the two-file baseline there:
+213. Nothing in this paragraph is claimed of any later commit. Command, at each end:
 `.venv/bin/python -m pytest tests/test_dockerfile.py tests/test_families_cmangos.py -q` — at
-`75bce609` in a throwaway checkout of that commit, and at `dd8b863f`'s tree in
-`~/yulon-runs/fix3b-dockerfile-value`; `__pycache__` purged on both sides of every mutation, every
+`75bce609` in a throwaway checkout of that commit, and at `dd8b863f`'s tree in a lane copy on
+m910q since deleted (the SHA and the command are the record; lane copies are ephemeral);
+`__pycache__` purged on both sides of every mutation, every
 edit asserted present on disk before its result was believed, every file restored and compared byte
 for byte after. Baseline 213 (was 211). The value refusal deleted → 13 failed (was 11). The floor
 deleted → 3 (was 2). The call site's `Secrets("")` → 3 (was 2).
