@@ -700,9 +700,10 @@
       2026-09-04 (`2e8ae66c`) and again when the 7.2 box was ticked, and the rebase onto
       `a0cc9dc0` made it false: the Windows Tortoise install finished 00:43 box-local that morning
       and `eb5f3b3f` widened the entry. All three CMaNGOS entries now read `["linux","windows"]`,
-      and all three widenings are 7.7's, after `2fddaa0e`. The same sentence survives in 7.7's own
-      record further down this file and is NOT corrected here — see the tick record's
-      "deliberately NOT done" note.
+      and all three widenings are 7.7's, after `2fddaa0e`. 7.7's own record further down this file
+      carried a sentence with the same fault — *"Tortoise stays `["linux"]` in the repo until its
+      Windows run earns it"* — and this lane deliberately did not touch it; `0586d9ba` fixed it on
+      the branch instead, which is what the tick record's "deliberately NOT done" note now records.
     - **WHAT THE CLAUSE MEANT — decided 2026-09-05 from the record rather than assumed, because the
       reword turns entirely on it.** Two readings were open: **(a)** *the bash deletion must not
       change where these games can be installed* — a statement about the deletion, which the
@@ -785,11 +786,11 @@
     | the line says | what answers it, re-derived |
     |---|---|
     | six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` gone | **MET.** `git ls-files \| grep -E "install-.*\.sh\|dml-start\.sh\|wow-manage\.sh"` returns five paths, all under `archive/guides/` (MapleStory, Mu Online, RuneScape, two Wrath-Unbound addon scripts) and none of them one of the eight. Deleted at `2fddaa0e`, *"chore: delete the six bash installers, dml-start.sh and wow-manage.sh"* |
-    | (eight files, **21,880** lines) | **MET as now written.** Re-counted in this lane off `2fddaa0e^`, per file: `wow-tbc/install-wow-tbc.sh` 2603, `wow-tortoise/install-tortoise-wow-wsl.sh` 1417, `wow-vanilla/install-wow-vanilla.sh` 2837, `wow-wotlk/dml-start.sh` 122, `install-wow-wotlk-fedora.sh` 2290, `install-wow-wotlk-ubuntu.sh` 2104, `install-wow-wotlk.sh` 2244, `wow-manage.sh` 8263 = **21,880** (`git show --stat` says 21,881; `dml-start.sh` has no trailing newline). The line and `phase7-decisions.md:10,177` said **19,451**, the plan's pre-deletion figure from `phase7-plans/7.2-retire-bash.md:603`; **all three of those, plus this line, are corrected in this lane**, so the "all three or in none" note the previous audit left is discharged. A fourth occurrence exists that the previous audit did not name — the plan's Step 6 tick template, `7.2-retire-bash.md:1807` — and it is left as the plan's own instruction text; see the tick record below. It is a size, not a criterion |
+    | (eight files, **21,880** lines) | **MET as now written.** Re-counted in this lane off `2fddaa0e^`, per file: `wow-tbc/install-wow-tbc.sh` 2603, `wow-tortoise/install-tortoise-wow-wsl.sh` 1417, `wow-vanilla/install-wow-vanilla.sh` 2837, `wow-wotlk/dml-start.sh` 122, `install-wow-wotlk-fedora.sh` 2290, `install-wow-wotlk-ubuntu.sh` 2104, `install-wow-wotlk.sh` 2244, `wow-manage.sh` 8263 = **21,880** (`git show --stat` says 21,881; `dml-start.sh` has no trailing newline). The line and `phase7-decisions.md:10,177` said **19,451**, the plan's pre-deletion figure, on the `- Delete:` line of that page's Task F.2 (cited by name because this lane's edits to that page move its line numbers — see the tick record below); **all three of those, plus this line, are corrected in this lane**, so the "all three or in none" note the previous audit left is discharged. A fourth occurrence exists that the previous audit did not name — the plan's Step 6 tick template under Task F.7, also cited by name — and it is left as the plan's own instruction text; see the tick record below. It is a size, not a criterion |
     | `installer.Installer`, `PROMPT_RULES`, `make_responder`, `bash_available` | **MET.** `grep -rn "^class Installer\b\|^PROMPT_RULES\|^def make_responder\|^def bash_available" yulon/` returns nothing. **Three** past-tense prose mentions survive, not the two the earlier audit named — `catalog/families/__init__.py:10` (*"`Installer` such an entry used to fall back to; G.7 deleted the …"*), `catalog/installer.py:286`, `runner.py:221` — which is this repo's own convention. The remaining live hits are a `catalog.json` description string, `platform.py:3177`'s `Docker Desktop Installer.exe`, and `ui/catalog_view.py:377`'s user-facing *"Installer needs …"* copy. What is left in `installer.py` is the shared surface: `compose_file()` :61, `InstallerError` :92, `InstallOptions` :228, `InstallEngine` :345, `installer_for()` :370 |
     | script tests | **MET.** `tests/test_installer.py:1` is the post-7.2 docstring — *"options, errors, copy, dispatch"* — and the file holds **15** test functions; the `interact()` transport pair runs against a throwaway script through `tests/support_bash.py:24::bash_available`, where F.1 copied the probe when the engine that needed it went |
     | `Install.script*` fields | **MET.** `Install` in `yulon/catalog/catalog.py` carries exactly five fields — `default_server_dir` :698, `password` :699, `requires_client_dir` :702, `platforms` :743, `native` :755 — and nothing else. `grep -oE '"script[a-zA-Z_]*"' yulon/catalog/catalog.json` returns **zero** keys. (A plain `grep script catalog.json` returns four hits and all four are the word `description`, which contains it; the earlier audit's phrasing "no key containing `script`" would have been read that way.) |
-    | the three CMaNGOS entries keep a non-empty `platforms` — the deletion empties no entry and changes where no game can be installed (**reworded**) | **MET — and this row is in three parts because the clause makes three claims, the second and third of which were asserted rather than measured when the box was first ticked.** *(a) Non-empty today:* `wow-tbc ["linux","windows"]`, `wow-vanilla ["linux","windows"]`, `wow-tortoise ["linux","windows"]`, read out of `catalog.json` 2026-09-05 at `ccc88462`, after this lane was rebased onto `a0cc9dc0`. Tortoise read `["linux"]` when this row was first written and was widened by `eb5f3b3f` the same day, on the native-Windows run recorded two sections down; the row is re-read here rather than carried forward, because a values list is exactly the kind of sentence that goes stale under a rebase. *(b) No entry has ever been emptied:* `git log --follow -- pylauncher/yulon/catalog/catalog.json` names **35** revisions; 33 were fetched with `git show <rev>:<path>` and two (`5129149e`, `f2ddcaec`) under the earlier paths `--follow` crossed (`py-launcher/yulon/catalog/catalog.json`, `py-launcher/py/catalog/catalog.json`), where `games` is `[]`; every one parsed with `json.load` and checked for `install.platforms == []` — **zero occurrences**, in this lane on 2026-09-05. `min_length=1` on `platforms` (`catalog.py:743`) is why: it makes the empty list a parse failure rather than a configuration, and `tests/test_catalog.py:187::test_an_entry_installable_nowhere_is_refused` pins that refusal. *(c) The deletion changed where nothing can be installed:* `git show 2fddaa0e^:pylauncher/yulon/catalog/catalog.json` and `git show 2fddaa0e:pylauncher/yulon/catalog/catalog.json`, each piped through `json.load` and printed as `id / platforms / native-present`, answer **identically on both sides** — `wow-wotlk ["linux","macos","windows"] native`, `wow-tbc ["linux"] native`, `wow-vanilla ["linux"] native`, `wow-tortoise ["linux"] native`. All four already carried a `native` block before the eight files went, so the deletion removed no platform and no engine: it is the load-bearing half of the reworded clause, and it is now shown rather than claimed. The reword, the two earlier wordings and the argument for the meaning are in the bullet above; the widening is `2f39a6d9` on 2026-09-04 for TBC and Vanilla and `eb5f3b3f` on 2026-09-05 for Tortoise — both AFTER `2fddaa0e` — three and four calendar days after it by author date (2026-09-01T23:10, 2026-09-04T22:25, 2026-09-05T10:11) — and both evidenced on the **7.7** line |
+    | the three CMaNGOS entries keep a non-empty `platforms` — the deletion empties no entry and changes where no game can be installed (**reworded**) | **MET — and this row is in three parts because the clause makes three claims, the second and third of which were asserted rather than measured when the box was first ticked.** *(a) Non-empty today:* `wow-tbc ["linux","windows"]`, `wow-vanilla ["linux","windows"]`, `wow-tortoise ["linux","windows"]`, read out of `catalog.json` 2026-09-05 at `ccc88462`, after this lane was rebased onto `a0cc9dc0`. Tortoise read `["linux"]` when this row was first written and was widened by `eb5f3b3f` the same day, on the native-Windows run recorded two sections down; the row is re-read here rather than carried forward, because a values list is exactly the kind of sentence that goes stale under a rebase. *(b) No entry has ever been emptied:* `git log --follow -- pylauncher/yulon/catalog/catalog.json` names **35** revisions; 33 resolve at that path and two (`5129149e`, `f2ddcaec`) under the earlier paths `--follow` crossed (`py-launcher/yulon/catalog/catalog.json`, `py-launcher/py/catalog/catalog.json`); every one was fetched with `git show <rev>:<path>`, parsed with `json.load` and checked for `install.platforms == []` — **zero occurrences**, re-run in this lane on 2026-09-05 at `35e9c7fc`. Three of the 35 hold no entries at all (`games` is `[]`): the two crossed-path revisions AND `5032494d`, the rename into `pylauncher/`, which is one of the 33 at the new path. An earlier wording attached the empty `games` to the crossed paths alone, which told a reader that 33 of the 35 had entries to check when 32 did. `min_length=1` on `platforms` (`catalog.py:743`) is why: it makes the empty list a parse failure rather than a configuration, and `tests/test_catalog.py:187::test_an_entry_installable_nowhere_is_refused` pins that refusal. *(c) The deletion changed where nothing can be installed:* `git show 2fddaa0e^:pylauncher/yulon/catalog/catalog.json` and `git show 2fddaa0e:pylauncher/yulon/catalog/catalog.json`, each piped through `json.load` and printed as `id / platforms / native-present`, answer **identically on both sides** — `wow-wotlk ["linux","macos","windows"] native`, `wow-tbc ["linux"] native`, `wow-vanilla ["linux"] native`, `wow-tortoise ["linux"] native`. All four already carried a `native` block before the eight files went, so the deletion removed no platform and no engine: it is the load-bearing half of the reworded clause, and it is now shown rather than claimed. The reword, the two earlier wordings and the argument for the meaning are in the bullet above; the widening is `2f39a6d9` on 2026-09-04 for TBC and Vanilla and `eb5f3b3f` on 2026-09-05 for Tortoise — both AFTER `2fddaa0e` — three and four calendar days after it by author date (2026-09-01T23:10, 2026-09-04T22:25, 2026-09-05T10:11) — and both evidenced on the **7.7** line |
     | gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh` | **MET.** `git ls-files pylauncher/catalog/installers/` returns 13 paths: this one `.sh` and twelve `*.tmpl` templates. It is the only shell script left in the tree's installer directory |
     | `contribution.md` harness paragraph rewritten | **MET and guarded.** `tests/test_docs_pins.py:12::test_the_contribution_harness_is_the_engine_not_the_scripts` requires `python -m yulon.install_wiring wow-wotlk` and forbids `python -m yulon.catalog.installer`, `sudo -v`, `bash-script path` and `dml-start.sh` |
     | style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py` | **MET and guarded.** `tests/test_docs_pins.py:21::test_the_style_guide_rows_describe_the_post_7_2_modules`, which also covers the `catalog/native.py` row — added 2026-09-02 after that row went on describing *"the same `run()` contract as `Installer`"* for as long as F.3 had deleted the class |
@@ -825,21 +826,30 @@
        For the record on the gate's own terms: clause 14 is **now met**
        (a real client authenticated against the 09-05 install at 07:31:41 — see the 7.1 line),
        and clause 15 is not, so that box would still be open on the old reading too.
-    - **What was deliberately NOT done, so nobody hunts for it.** The plan's Step 6
-      (`phase7-plans/7.2-retire-bash.md:1807`) gives a template for this tick that appends
-      *"CMaNGOS entries `platforms: []`"* and ticks the gate box in the same commit. Neither was
-      followed: `[]` was never applied and must not be (see above), and the gate box is left open.
-      That template (`7.2-retire-bash.md:1807`) is also a fourth place the 19,451 figure appears,
-      which the previous audit's "three places" did not count; it is left as the plan's own
-      instruction text, and the three places that audit did name are corrected.
-      **Also not done, and measured rather than assumed (2026-09-05, after the rebase onto
-      `a0cc9dc0`):** the 7.7 record further down this file still says *"Tortoise stays
-      `["linux"]` in the repo until its Windows run earns it"* (written at `dfd21396`). It is
-      false as of `eb5f3b3f` — `git show 384b1a87:pylauncher/yulon/catalog/catalog.json` reads
-      `wow-tortoise ["linux"]` and `git show eb5f3b3f:...` reads `["linux","windows"]`. It is left
-      alone because it is 7.7's record, not this line's, and a docs lane editing another line's
-      dated record is how two lanes collide. Flagged here so the next pass over 7.7 has the
-      measurement instead of the surprise.
+    - **What was deliberately NOT done, so nobody hunts for it.** The plan's Step 6 under Task F.7
+      gives a template for this tick that appends *"CMaNGOS entries `platforms: []`"* and ticks the
+      gate box in the same commit. Neither was followed: `[]` was never applied and must not be
+      (see above), and the gate box is left open. That template is also a fourth place the 19,451
+      figure appears, which the previous audit's "three places" did not count; it is left as the
+      plan's own instruction text, and the three places that audit did name are corrected. **Cited
+      by name here rather than by line**, because this lane's own edits to that page move its line
+      numbers: `git show <rev>:pyplan/phase7-plans/7.2-retire-bash.md | grep -n '19,451'` answers
+      603 and 1807 at `3b7fe339`, 620 and 1824 at `cbb5360b`, and 624 and 1828 at `35e9c7fc` (the
+      commit before this one) — and this bullet went on printing 603 and 1807 through all three.
+      **What this bullet flagged as not done, and what became of it (measured 2026-09-05 after the
+      rebase onto `0586d9ba`):** it said the 7.7 record further down this file *still said*
+      *"Tortoise stays `["linux"]` in the repo until its Windows run earns it"* (written at
+      `dfd21396`), and left it alone as 7.7's record rather than this line's. That was true at
+      `a0cc9dc0`, this lane's base until today — `git show a0cc9dc0:pyplan/checklist.md | grep -n
+      'Tortoise stays'` answers 644 and 1358 — and it stopped being true at `0586d9ba`, the commit
+      this lane is now rebased onto, whose entire content is a two-line change to that paragraph.
+      The same grep at `0586d9ba` answers 644 only, and its line 1358 now reads *"Tortoise
+      **stayed** `["linux"]` in the repo until its Windows run earned it — which it did at
+      `eb5f3b3f`, the bullet after next"*. So the flag is spent: nothing is left for a later pass
+      to correct, and what is kept here is why this lane did not make that edit itself — a docs
+      lane editing another line's dated record is how two lanes collide — together with the
+      measurement it was handing on: `git show 384b1a87:pylauncher/yulon/catalog/catalog.json`
+      reads `wow-tortoise ["linux"]` and `git show eb5f3b3f:...` reads `["linux","windows"]`.
     - **The citation pass the tick costs, paid in the same commit.**
       `test_docs_pins.py::test_every_test_these_pages_name_by_hand_actually_exists` widens to
       `phase7-plans/7.2-retire-bash.md` the moment this box reads `- [x] 7.2 `. **Before:** that
@@ -849,12 +859,17 @@
       line, just further from the name than the guard's 60-character window reaches), or never
       written under that name, with the live test that carries the property named by file and line.
       The pass is written up under a dated `CITATIONS` heading on the plan. What it changed on
-      that page, measured with a fence-tracking diff of `a0cc9dc0..HEAD` on 2026-09-05 after two
-      versions of this sentence had claimed less: seven `def test_...` signature lines inside
-      fenced `python` blocks (a trailing marker comment each) and ten lines outside the fences —
-      prose claims and three instructions (F.2's delete-size line, Step 1's "replace" reworded to
-      "delete … and put in their place", Step 2's `Run:` command broken into its three selectors
-      as bullets). **Two findings that were not wording:** F.3's instructed
+      that page: **79 lines added and 17 removed** — `git diff --numstat a0cc9dc0 35e9c7fc --
+      pyplan/phase7-plans/7.2-retire-bash.md`, both endpoints pinned to SHAs and the range ending
+      at the commit before this one. Two earlier versions of this sentence said "seventeen lines"
+      with no side named; seventeen is the removed side alone. Split by fence state: 7 of the 17
+      removed and 7 of the 79 added are the same seven `def test_...` signature lines, each given
+      a trailing marker comment and nothing else, and they sit in **five** distinct fenced blocks,
+      not the seven an earlier version claimed. The other 10 removed lines are all outside the
+      fences and all directive — eight imperative instructions and two rows of F.2's disposition
+      table — where an earlier version called them "prose claims and three instructions". The
+      plan's `CITATIONS` section carries the old-side line numbers and the fence walk that settle
+      both counts. **Two findings that were not wording:** F.3's instructed
       rename never happened — `test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_script`
       is alive at `tests/test_families_azerothcore.py:84`, rewritten in place, and the replacement
       name the plan gave it has never existed — and F.5's bundle test specified an assertion
