@@ -1069,9 +1069,14 @@ def test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the
     to spare them, because narrowing it is what would open the hole §29 closed. What was
     wrong was the SENTENCE: until 2026-09-05 it said "Drop the key, or file the value
     under its declared token", about `DB_IMAGE`, which the user did not write and cannot
-    drop, while the one thing that clears it — their own password — went unnamed. So the
-    assertions here are about the remedy: the file is named with its full path, and the
-    cost of changing it (the database volume) is named too.
+    drop, while the remedy in their hands — their own password — went unnamed. So the
+    assertions here are about the remedy: the file is named with its full path, the words
+    it is offered in, and the cost of changing it (the database volume).
+
+    The two wording assertions below are here because `9bff3e81` rewrote that sentence and
+    left it held by nothing: measured on m910q 2026-09-05, reverting it to
+    "changing that password is the only thing that clears this … was created with the
+    current password" kept all 213 tests in the two files green.
 
     `render()` cannot say any of that: it is handed a `Secrets` and never a path, for any
     `template_dir` any entry names. The stage can, which is why `CarriedSecretError` is a
@@ -1100,7 +1105,16 @@ def test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the
     remedy = "it says whose the password is and that changing it — not the key — is the remedy"
     assert "yours" in said, remedy
     assert "the PASSWORD and not the key" in said, remedy
+    assert "the thing to change is that password" in said, (
+        "and it is offered as the remedy in the user's hands, not as the only one there "
+        "is — a different install folder also clears a collision with `IMAGE_TAG` or "
+        "`PROJECT_NAME`, which is why the absolute wording had to go"
+    )
     assert eng._db_volume(server_dir) in said, "and what changing it costs"
+    assert "held at the time" in said, (
+        "the volume's password is stated in the past tense: it was created with whatever "
+        "the file held then, which need not be what the file holds now"
+    )
     assert not (server_dir / "Dockerfile").exists(), "and nothing was laid down"
 
 

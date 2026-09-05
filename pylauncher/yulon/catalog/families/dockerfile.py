@@ -213,14 +213,20 @@ contained in every one of them, and 31 of the 36 single alphanumeric characters 
 contained in at least one — `a` alone is in 14 (`/opt/mangos`, `characters`, …). A rule
 that refused those would not be strict, it would be an install that can never run.
 
-**The server directory is named because those two counts move with it.** Three of the 34
-values carry an 8-hex digest of the install path (`IMAGE_TAG` = `native-f33d5256`,
-`PROJECT_NAME` = `yulon-wow-tbc-f33d5256`, …), so a count over the values' CHARACTERS
+**The server directory is named because those two counts move with it.** FOUR of the 34
+values carry an 8-hex digest of the install path — two per mapping, `IMAGE_TAG`
+(`native-f33d5256`, the same in all three) and `PROJECT_NAME` (`yulon-wow-tbc-f33d5256`
+and its `-vanilla-` / `-tortoise-` siblings) — so a count over the values' CHARACTERS
 answers differently in another folder. This paragraph said "30 of the 36" and "`a` alone
 is in 16" until 2026-09-05, from a run under per-game temporary directories; the numbers
-above are the same probe with the directory fixed. Nothing the floor rests on moves — 34
-distinct values, `""` in all 34, `mangos` in five, `password` in none — and these two
-counts are here to show that a floor is needed at all, not to decide where it goes.
+above are the same probe with the directory fixed. It said "Three of the 34" until
+2026-09-05 as well, which was neither the per-mapping count (2) nor the union's (4);
+re-derived that day on m910q by filtering each shipped `_public_tokens(Path("/tmp/fixedsrv/srv"))`
+on `[0-9a-f]{8}`, which returns `['IMAGE_TAG', 'PROJECT_NAME']` for each of the three.
+
+Nothing the floor rests on moves — 34 distinct values, `""` in all 34, `mangos` in five,
+`password` in none — and these counts are here to show that a floor is needed at all, not
+to decide where it goes.
 
 **Why 8: a lower bound that is measured, an upper bound that is a promise.** The lower
 bound is a real collision in the shipped mapping: `mangos`, six characters, is contained

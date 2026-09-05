@@ -868,6 +868,20 @@ def test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_si
     this mapping have had — is still refused, and the buried one (`--db-pass=abc …`) is
     NOT seen. That second assertion is the honest half; it is what would have to change if
     the floor were ever made to depend on the file.
+
+    **Where below-floor acceptance through `render()` is pinned, and why not here.**
+    `9bff3e81` added a second, unguarded `render()` call to this test on the buried value,
+    with a comment saying the floor's deletion would make it raise. Measured on m910q
+    2026-09-05 at that commit: with the `len(secret) < MIN_CONTAINED_SECRET` branch deleted
+    from `carries_a_secret()` the two files ran `3 failed, 210 passed` and this test died on
+    the `assert not dockerfile.carries_a_secret(...)` above the added call; deleting the
+    added call and re-running the same mutation gave the same 3 failures with the same ids,
+    so it killed nothing, and the comment's claim was refuted by the code it sat in. The
+    seam at below-floor length was already pinned before that commit, by
+    `test_a_one_character_secret_is_matched_only_where_it_is_the_whole_value` in this file:
+    a one-character secret, contained in `CORE_DIR`, driven through `render()` and asserted
+    to come back rendered (`/opt/mangos` in the text). Cited by name and not by line,
+    because this file's line numbers move.
     """
     entry = load_catalog().get("wow-tbc")
     plan = entry.install.password
@@ -885,20 +899,10 @@ def test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_si
         "buried in a longer value it is NOT — the floor exists because containment on a "
         "three-character string would refuse every install, and this is what that costs"
     )
-    # The same limit through render() itself, not only through the predicate it calls.
-    # Review of `67128792` noted the predicate was pinned and the seam was not. What is
-    # pinned is that the seam ACCEPTS the buried value: with the floor deleted (containment
-    # at every length) this call raises DockerfileError, so a floor that quietly moved to
-    # the file would fail here. The fixture template does not spell BUILD_ARG, so the
-    # rendered text is not where the leak would show; acceptance is.
-    tpl = templates(tmp_path)  # mkdir inside; built once for both calls below
-    _accepted, _ = dockerfile.render(
-        tpl,
-        {**TOKENS, "BUILD_ARG": f"--db-pass={secret} --verbose"},
-        secrets=native.Secrets(secret),
-    )
     with pytest.raises(dockerfile.DockerfileError, match="BUILD_ARG"):
-        dockerfile.render(tpl, {**TOKENS, "BUILD_ARG": secret}, secrets=native.Secrets(secret))
+        dockerfile.render(
+            templates(tmp_path), {**TOKENS, "BUILD_ARG": secret}, secrets=native.Secrets(secret)
+        )
 
 
 def test_no_value_that_carries_a_secret_reaches_the_substitution(

@@ -338,10 +338,23 @@ class CmangosInstaller(StagedInstaller):
         equality), among them `characters`, `mariadb:11`, `tw_logon` and `vanilla-`. A
         user holding one of those is refused for a key this app put in the mapping
         itself — `CHAR_DB`, `DB_IMAGE` — so "drop the key" is advice they cannot act on,
-        and the remedy in their hands, changing their own password, went unnamed. (Three
-        rendered values carry a digest of the install folder — the image tag, the project
-        name, the container prefix — so for a collision with one of those a different
-        folder clears it too; measured 2026-09-05, review of `67128792`.)
+        and the remedy in their hands, changing their own password, went unnamed.
+
+        **A second route exists and this note deliberately does not offer it.** TWO values
+        per mapping carry an 8-hex digest of the install folder, not three: measured on
+        m910q 2026-09-05 by calling `_public_tokens(Path("/tmp/fixedsrv/srv"))` for the
+        three shipped entries and filtering on `[0-9a-f]{8}`, each mapping's 18 keys give
+        `['IMAGE_TAG', 'PROJECT_NAME']` and four such values across the 34-value union.
+        `9bff3e81` said three and named `CONTAINER_PREFIX` as the third; that key is
+        `tbc-` / `vanilla-` / `tortoise-` and carries no digest, so a user whose password
+        is literally `tbc-` would have been sent to a folder that changes nothing. A
+        different folder does clear a collision with the other two — and it is not cheaper
+        than the remedy below: `PROJECT_NAME` is what `_db_volume()` is built from, and the
+        same probe at `/tmp/othersrv/srv` returned `yulon-wow-tbc-85a2c58f_db-data` against
+        `/tmp/fixedsrv/srv`'s `yulon-wow-tbc-f33d5256_db-data`. Moving the install
+        abandons the database exactly as changing the password does, while clearing only 2
+        of the 18 keys, so the sentence a user reads names the password and stays one
+        sentence long.
 
         The volume is named because changing that password is not free once a database
         exists: the same fact `_db_password` refuses on, said before the user acts rather

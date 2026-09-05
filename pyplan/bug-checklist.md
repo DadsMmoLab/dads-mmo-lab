@@ -1888,7 +1888,7 @@ under another key, so the shape that has actually happened is caught at any leng
   hole. What was wrong was the SENTENCE. Until 2026-09-05 such a user read
   `DB_IMAGE (the value declared as DB_PASSWORD) … Drop the key, or file the value under its
   declared token`, about a key this app puts in the mapping itself, which they cannot drop, while
-  the one remedy that works — their own password — went unnamed. `render()` cannot name it: it
+  the remedy in their hands — their own password — went unnamed. `render()` cannot name it: it
   holds a `Secrets` and never a path. So the refusal is now a `CarriedSecretError`, caught by
   `_write_dockerfile` ahead of every other `DockerfileError`, which appends
   `_password_origin_note()`: the full path of the password file, that the password is theirs, and
@@ -1898,9 +1898,7 @@ under another key, so the shape that has actually happened is caught at any leng
   shipped `DB_IMAGE` do the colliding.
 
 **Ten mutations, each killed, m910q 2026-09-05, taken at `75bce609`** (`__pycache__` purged on both sides
-of every one; the two files were 211 tests at that commit). The three follow-up commits moved the
-numbers a reader would re-derive at `67128792`: 213 tests, the value refusal deleted → 13, the floor
-deleted → 3, the call site's `Secrets("")` → 3 — the two new tests join each kill. At `75bce609`: the
+of every one; the two files were 211 tests at that commit). At `75bce609`: the
 value refusal deleted → 11 failed. Containment
 weakened to equality → 2. The empty-secret guard deleted → 1. The floor deleted → 2. `secrets` made
 optional with a `Secrets("")` default → 1. The two rules' order swapped → 1. The exemption widened
@@ -1908,6 +1906,32 @@ to every token the instance declares → 1. The floor moved to 4 → 1; to 20 �
 `secrets=ctx.secrets` replaced with `Secrets("")` → 2. Two of those "survived" on the first pass and
 neither was a survivor: the edits had not applied, and the script was then made to assert its own
 substitution before it was allowed to believe a green.
+
+**Re-derived against the two files as this commit ships them, m910q 2026-09-05**, four commits after
+`75bce609` and with two tests added to them since. Command, at each end:
+`.venv/bin/python -m pytest tests/test_dockerfile.py tests/test_families_cmangos.py -q` — at
+`75bce609` in `~/yulon-runs/fix3b-at-75bce609`, and at this commit's tree in
+`~/yulon-runs/fix3b-dockerfile-value`; `__pycache__` purged on both sides of every mutation, every
+edit asserted present on disk before its result was believed, every file restored and compared byte
+for byte after. Baseline 213 (was 211). The value refusal deleted → 13 failed (was 11). The floor
+deleted → 3 (was 2). The call site's `Secrets("")` → 3 (was 2).
+
+`9bff3e81` wrote those four numbers, labelled them "what a reader would re-derive at `67128792`" — a
+commit that is neither where they were taken nor where they were written — and explained them with
+"the two new tests join each kill", which is true of one kill in three. The failing ids say where
+each lands. The value refusal's 13 is the 75bce609 11 plus BOTH new tests, +2:
+`test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence` and
+`test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the_password_file`. The
+floor deletion's 3 adds only the first, +1 — the other two, `test_a_one_character_secret_…` and
+today's `test_the_containment_floor_is_at_or_below_…`, both fail at `75bce609` too, the latter under
+its name of that day, `test_the_containment_floor_is_the_shortest_secret_the_shipped_catalog_declares`.
+The
+call-site replacement's 3 adds only the second, +1 (`test_neither_the_context_secrets_…` and
+`test_the_write_dockerfile_stage_refuses_…` are the other two). A third number `9bff3e81` wrote from
+memory was that commit's own: the `render()` call it added to the below-floor test was said to die
+with the floor deleted, and under that mutation the test dies on the `carries_a_secret()` assertion
+above it — removing the added call left the same 3 ids. It is gone, and the below-floor seam is
+cited where it was already held.
 
 **Rejected, with the measurement: also scanning the rendered TEXT for the secret values.** `render()`
 now holds them, so it could, and `write()`'s docstring had only rejected the NAME-scanning version.
