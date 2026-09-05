@@ -27,7 +27,7 @@ import pytest
 from yulon import resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.families import dockerfile
+from yulon.catalog.families import dockerfile, family_for
 
 TOKENS = {"CORE_DIR": "/opt/mangos", "MAKE_JOBS": "2", "CLIENT_BUILD": "8606"}
 """`CLIENT_BUILD` is deliberately unused by the stand-in templates: `fill()` refuses an
@@ -788,36 +788,103 @@ def test_a_one_character_secret_is_matched_only_where_it_is_the_whole_value(
         dockerfile.render(templates(tmp_path / "again"), {**TOKENS, "BUILD_ARG": "a"}, secrets=tiny)
 
 
-def test_the_containment_floor_is_the_shortest_secret_the_shipped_catalog_declares() -> None:
-    """`MIN_CONTAINED_SECRET` is answerable to `catalog.json`, not to a number in a head.
+def test_the_containment_floor_is_at_or_below_every_secret_this_app_itself_produces(
+    tmp_path: Path,
+) -> None:
+    """`MIN_CONTAINED_SECRET` is answerable to `resolve_secrets()`, not to `catalog.json`.
 
-    The floor is 8 because `wow-wotlk`'s fixed `password` is the shortest secret VALUE
-    anything in the shipped catalog declares; every other entry's is `<prefix><16 hex>`,
-    twenty characters or more. That is what makes containment cover every secret this app
-    can hand `render()`. A shorter fixed password added to the catalog tomorrow would
-    silently fall through to equality-only, so this test reads the catalog and goes red
-    instead — the floor is a claim about the data and has to fail with the data.
+    **Why this test was rewritten on 2026-09-05.** It used to read the entries whose
+    `install.password.mode == "fixed"` straight out of the catalog and assert the floor
+    EQUALLED the shortest of them. Two things were wrong with that. `catalog.json` is not
+    where the live secret comes from: every entry that renders a Dockerfile is
+    `mode: generated`, and the only `fixed` entry in the shipped catalog is `wow-wotlk`,
+    whose family is `azerothcore` and never calls `render()` — so the value that test
+    inspected was one production never hands the renderer (measured on m910q 2026-09-05:
+    `family_for(wow-wotlk)` is `AzerothCoreInstaller`, and `dockerfile.render` is called
+    from one place in `yulon/`, `CmangosInstaller._write_dockerfile`). And `==` is not the
+    invariant: the floor must not EXCEED the shortest secret it has to cover, so
+    lengthening `wow-wotlk`'s password would have turned this red and pointed the reader
+    at raising the floor, which `MIN_CONTAINED_SECRET`'s own docstring argues buys
+    nothing.
 
-    Measured on m910q 2026-09-05: `password` is contained in none of the 34 distinct
-    shipped public token values, while `mangos` — six characters, below the floor — is
-    contained in five of them. So the floor is above a real collision and below the real
-    secret, and both halves are asserted here rather than described.
+    **What it measures instead.** The secret is produced by `resolve_secrets()`, so this
+    calls it, through the real family dispatch, on an empty server dir — the mint route
+    for a `generated` entry, the catalog value for a `fixed` one. Measured that way on
+    m910q 2026-09-05: `wow-tbc` 20, `wow-vanilla` 24, `wow-tortoise` 25, `wow-wotlk` 8.
+    Only the LENGTHS are asserted, because a minted password is 16 random hex digits and
+    the value differs on every call while its length does not — this answers the same the
+    second time.
+
+    The floor's lower bound is asserted here too, and it is the half that is about the
+    data being rendered rather than about the data being declared: `mangos` is six
+    characters and is contained in five shipped token values, so a floor at or below 6
+    would refuse every CMaNGOS install outright.
+
+    What this does NOT cover is a password the USER wrote, which `resolve_secrets()`
+    returns as written and which has no floor at all —
+    `test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence`.
     """
-    fixed = [
-        entry.install.password.value
-        for entry in load_catalog().games
-        if entry.install.password.mode == "fixed" and entry.install.password.value
-    ]
-    assert fixed, "no entry declares a fixed password; this test would pass vacuously"
-    assert min(len(value) for value in fixed) == dockerfile.MIN_CONTAINED_SECRET, (
-        f"the shortest fixed password in the catalog is {min(len(v) for v in fixed)} characters "
-        f"and the floor is {dockerfile.MIN_CONTAINED_SECRET}; one of the two moved, and a secret "
-        "shorter than the floor is compared by equality only. Re-read MIN_CONTAINED_SECRET's "
-        "measurements before changing either number."
+    produced: dict[str, int] = {}
+    for entry in load_catalog().games:
+        folder = tmp_path / entry.id
+        folder.mkdir()
+        produced[entry.id] = len(family_for(entry)(entry).resolve_secrets(folder).db_password)
+    assert produced, (
+        "the shipped catalog produced no entry at all, so this test would pass vacuously; "
+        "load_catalog() is what to look at, not the floor"
+    )
+    shortest = min(produced, key=lambda game: produced[game])
+    assert dockerfile.MIN_CONTAINED_SECRET <= produced[shortest], (
+        f"{shortest}'s password is {produced[shortest]} characters and the floor is "
+        f"{dockerfile.MIN_CONTAINED_SECRET}, so that install's real secret is compared by "
+        "EQUALITY only and a leak that buries it inside a longer value passes. Lower the "
+        "floor to cover it — do not raise that entry's password to suit the floor — and "
+        "re-read MIN_CONTAINED_SECRET's lower bound first: at or below 6 it refuses every "
+        "CMaNGOS install."
     )
     assert dockerfile.carries_a_secret("prefix-password-suffix", "password"), "at the floor"
     assert not dockerfile.carries_a_secret("/opt/mangos", "mangos"), "below it, equality only"
     assert dockerfile.carries_a_secret("mangos", "mangos"), "and equality still fires"
+
+
+def test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence(
+    tmp_path: Path,
+) -> None:
+    """The route the floor cannot cover, measured rather than promised.
+
+    `resolve_secrets()` takes an existing `<server_dir>/<password.file>` AS WRITTEN, so
+    the secret handed to `render()` on a returning install is whatever that file holds —
+    any length, including shorter than the floor. §29's residue said "no shipped entry
+    declares one, and the floor test goes red the day one is added", which is true of the
+    catalog route and says nothing about this one. This is the fixture that violates the
+    floor's premise: a password of three characters, arriving the way production's does.
+
+    What is asserted is the consequence and its limit, not a hope. Below the floor the
+    comparison is equality: the verbatim leak — the shape all four measured leaks into
+    this mapping have had — is still refused, and the buried one (`--db-pass=abc …`) is
+    NOT seen. That second assertion is the honest half; it is what would have to change if
+    the floor were ever made to depend on the file.
+    """
+    entry = load_catalog().get("wow-tbc")
+    plan = entry.install.password
+    assert plan.mode == "generated" and plan.file, "premise: this entry's secret comes from a file"
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    (server_dir / plan.file).write_text("abc\n", encoding="utf-8")
+
+    secret = family_for(entry)(entry).resolve_secrets(server_dir).db_password
+    assert secret == "abc", "the file is what production reads, and it was read"
+    assert len(secret) < dockerfile.MIN_CONTAINED_SECRET, "and it is below the floor"
+
+    assert dockerfile.carries_a_secret(secret, secret), "verbatim under another key is refused"
+    assert not dockerfile.carries_a_secret(f"--db-pass={secret} --verbose", secret), (
+        "buried in a longer value it is NOT — the floor exists because containment on a "
+        "three-character string would refuse every install, and this is what that costs"
+    )
+    with pytest.raises(dockerfile.DockerfileError, match="BUILD_ARG"):
+        dockerfile.render(
+            templates(tmp_path), {**TOKENS, "BUILD_ARG": secret}, secrets=native.Secrets(secret)
+        )
 
 
 def test_no_value_that_carries_a_secret_reaches_the_substitution(

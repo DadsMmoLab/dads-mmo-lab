@@ -207,37 +207,65 @@ MIN_CONTAINED_SECRET = 8
 """At this length a secret is looked for INSIDE a token value; below it, only as the whole.
 
 **Why a floor at all.** Containment against a very short secret refuses everything.
-Measured on m910q 2026-09-05 over the 34 distinct values the three shipped CMaNGOS
-`_public_tokens()` mappings produce: the empty string is contained in every one of them,
-and 30 of the 36 single alphanumeric characters are contained in at least one — `a` alone
-is in 16 (`/opt/mangos`, `characters`, …). A rule that refused those would not be strict,
-it would be an install that can never run.
+Measured on m910q 2026-09-05 with `server_dir=/tmp/fixedsrv/srv`, over the 34 distinct
+values the three shipped CMaNGOS `_public_tokens()` mappings produce: the empty string is
+contained in every one of them, and 31 of the 36 single alphanumeric characters are
+contained in at least one — `a` alone is in 14 (`/opt/mangos`, `characters`, …). A rule
+that refused those would not be strict, it would be an install that can never run.
 
-**Why 8, with the two measurements that bound it.** Below it there is a real collision in
-the shipped mapping: `mangos`, six characters, is contained in five shipped token values,
-so a six-character password spelled that way would refuse every CMaNGOS install. At 8
-there is none — `password`, which is the shortest secret VALUE the shipped catalog
-declares anywhere (`wow-wotlk`'s `install.password.mode == "fixed"`), is contained in no
-shipped token value. Every other declared password is `<prefix><16 hex>`, so 20
-characters or more. 8 is therefore the smallest number that covers every secret this app
-can hand `render()` today while colliding with nothing it renders.
+**The server directory is named because those two counts move with it.** Three of the 34
+values carry an 8-hex digest of the install path (`IMAGE_TAG` = `native-f33d5256`,
+`PROJECT_NAME` = `yulon-wow-tbc-f33d5256`, …), so a count over the values' CHARACTERS
+answers differently in another folder. This paragraph said "30 of the 36" and "`a` alone
+is in 16" until 2026-09-05, from a run under per-game temporary directories; the numbers
+above are the same probe with the directory fixed. Nothing the floor rests on moves — 34
+distinct values, `""` in all 34, `mangos` in five, `password` in none — and these two
+counts are here to show that a floor is needed at all, not to decide where it goes.
+
+**Why 8: a lower bound that is measured, an upper bound that is a promise.** The lower
+bound is a real collision in the shipped mapping: `mangos`, six characters, is contained
+in five shipped token values, so a six-character password spelled that way would refuse
+every CMaNGOS install. The floor has to be above 6. The upper bound is coverage — the
+floor must be at or below every secret THIS APP ITSELF produces, or containment silently
+degrades to equality for a real install. Measured on m910q 2026-09-05 by calling
+`resolve_secrets()` on an empty server dir through `families.family_for()` for every
+shipped entry: `wow-tbc` 20, `wow-vanilla` 24, `wow-tortoise` 25 (`<prefix><16 hex>`), and
+`wow-wotlk` 8 — its fixed `password`, the shortest anything in `catalog.json` yields, and
+contained in none of the 34 values. 8 is the largest number that clears both bounds.
+
+**What the floor is NOT answerable to — the correction of 2026-09-05.** This paragraph
+used to say 8 "covers every secret this app can hand `render()`", read off `catalog.json`.
+On the live path `resolve_secrets()` does not read `catalog.json` at all: every entry that
+renders a Dockerfile is `mode: generated`, and for one of those it returns
+`Secrets(<server_dir>/<password.file> read and stripped)` TAKEN AS WRITTEN when the file
+is already there. Measured through `CmangosInstaller.resolve_secrets()` on m910q
+2026-09-05: a `.db_password` holding `abc` yields a three-character secret and drops this
+comparison to equality; one holding `characters` yields a ten-character one and
+containment. So the values the app MINTS have a floor and the file the user owns has none,
+and no number here can give it one.
+`test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence`
+measures that route rather than describing it.
 
 **And why not a larger number, which is the tempting answer.** Because raising it buys
 nothing measurable. The collision surface does not empty out with length: same box, same
-day, the shipped values yield 98 distinct 8-character substrings, 78 distinct
-12-character ones, and the longest value is 29 characters
+day, same fixed server dir, the shipped values yield 102 distinct 8-character substrings,
+78 distinct 12-character ones, and the longest value is 29 characters
 (`yulon.local/cmangos-tortoise-`), so a containment collision remains *possible* at every
-length a password can have. What makes 8 safe is not that collisions stop, it is that the
-strings which collide are catalog-derived fragments — `mariadb:`, `/opt/man`, `haracter`
-— and none of them is a password anybody sets. A bigger floor would drop coverage of
-`wow-wotlk`'s real declared secret in exchange for that same non-guarantee.
+length a password can have. (The substring counts move with the server dir for the same
+reason as above; that a collision exists at every length does not.) What makes 8 safe is
+not that collisions stop, it is that the strings which collide are catalog-derived
+fragments — `mariadb:`, `/opt/man`, `haracter` — and none of them is a password anybody
+sets. A bigger floor would drop coverage of `wow-wotlk`'s real declared secret in exchange
+for that same non-guarantee.
 
 **Below the floor it is equality, not silence.** All four leaks ever measured into this
 mapping put the password in VERBATIM under some other key — M15 and M-R2
 (`CmangosInstaller._public_tokens`'s docstring), §29's `SOAP_PASSWORD` probe, and the
 `BUILD_ARG` probe above — so equality still catches the shape that has actually happened,
 even for a one-character password. What equality cannot see is a short secret embedded in
-a longer value, and that is stated rather than fixed: no shipped entry declares one.
+a longer value, and that is stated rather than fixed. No entry DECLARES one; a user who
+writes a short password into their own `.db_password` has one, and that is the case the
+test named above pins.
 
 An EMPTY secret matches nothing at all, by either test. It is in every string, so
 containment would refuse every install; and equality on it would refuse any empty token

@@ -1815,22 +1815,27 @@ remedy ("rename it, or declare it") is the wrong advice for a key holding the re
 
 **What a "match" is, and the measurements behind it.** `carries_a_secret(value, secret)` is
 containment at or above `MIN_CONTAINED_SECRET = 8`, equality below it, and never true for an empty
-secret. Measured on m910q 2026-09-05 over the 34 distinct values the three shipped CMaNGOS
-`_public_tokens()` mappings produce:
+secret. Measured on m910q 2026-09-05, `server_dir=/tmp/fixedsrv/srv`, over the 34 distinct values the
+three shipped CMaNGOS `_public_tokens()` mappings produce (the directory is named because three of
+those values carry an 8-hex digest of it, so any count over their CHARACTERS moves with it — this
+list said 30, 16 and 98 until 2026-09-05, from a run under per-game temporary directories):
 
-* the empty string is contained in all 34, and 30 of the 36 single alphanumeric characters are
-  contained in at least one (`a` alone in 16 — `/opt/mangos`, `characters`, …). Containment with no
+* the empty string is contained in all 34, and 31 of the 36 single alphanumeric characters are
+  contained in at least one (`a` alone in 14 — `/opt/mangos`, `characters`, …). Containment with no
   floor is not a strict rule, it is an install that can never run.
-* `mangos`, six characters, is contained in five of them — so the floor has to be above 6.
-* `password`, eight, is contained in none. It is also the shortest secret VALUE the shipped catalog
-  declares anywhere (`wow-wotlk`, `mode: fixed`); every other entry's is `<prefix><16 hex>`, twenty
-  or more. So 8 is the smallest number that covers every secret this app can hand `render()` while
-  colliding with nothing it renders, and
-  `test_the_containment_floor_is_the_shortest_secret_the_shipped_catalog_declares` reads that out of
-  `catalog.json`, so a shorter fixed password added later turns it red instead of falling silently
-  through to equality.
+* `mangos`, six characters, is contained in five of them — so the floor has to be above 6. That is
+  the lower bound, and it does not move with the directory.
+* The upper bound is coverage: the floor must be at or below every secret the app itself PRODUCES,
+  or containment degrades to equality for a real install. Measured the same day by calling
+  `resolve_secrets()` on an empty server dir through `families.family_for()` for all four shipped
+  entries: `wow-tbc` 20, `wow-vanilla` 24, `wow-tortoise` 25 (`<prefix><16 hex>`), `wow-wotlk` 8
+  (its fixed `password`, contained in none of the 34). 8 is the largest number clearing both bounds,
+  and `test_the_containment_floor_is_at_or_below_every_secret_this_app_itself_produces` asserts it
+  as `floor <= min(...)` over what that function returns — not as `==` over `catalog.json`, which
+  is what it did until 2026-09-05 and which measured a value production never renders: the only
+  `mode: fixed` entry is `wow-wotlk`, whose family is `azerothcore` and never calls `render()`.
 * **A larger floor buys nothing measurable**, and this is the claim worth writing down because it is
-  the tempting one: the collision surface does not empty out with length. The same values yield 98
+  the tempting one: the collision surface does not empty out with length. The same values yield 102
   distinct 8-character substrings and 78 distinct 12-character ones, and the longest value is 29
   characters (`yulon.local/cmangos-tortoise-`), so a containment collision is *possible* at any
   length a password can have. What makes 8 safe is not that collisions stop but that the strings
@@ -1897,8 +1902,16 @@ mapping, under any key.* What is still true, and is the boundary rather than a r
   invisible to this rule as it was to the last one.** The comparison is against the declaration, and
   a value that was never declared is not in it. This entry has said so since 2026-09-02 and it
   remains the honest limit of any by-declaration guard.
-* **A declared secret shorter than 8 characters, embedded in a longer value, passes** — equality
-  cannot see it. No shipped entry declares one, and the floor test goes red the day one is added.
+* **A secret shorter than 8 characters, embedded in a longer value, passes** — equality cannot see
+  it. Two routes reach that state and only one of them is watched. No shipped entry DECLARES such a
+  password, and `test_the_containment_floor_is_at_or_below_every_secret_this_app_itself_produces`
+  goes red the day the app produces one. But a user's own `<server_dir>/.db_password` is read AS
+  WRITTEN and has no floor at all: measured on m910q 2026-09-05, a file holding `abc` makes
+  `resolve_secrets()` return a three-character secret, and `--db-pass=abc --verbose` under a bland
+  key then renders. That is a limit of the floor and not a bug the floor can fix — containment on a
+  three-character string refuses every install — and
+  `test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence` is where it is
+  measured rather than promised. This bullet said only the first half until 2026-09-05.
 * **The build CONTEXT still holds the plaintext**, and has since K.3: `.db_password` at the root,
   `DB_ROOT_PASSWORD=` in `.env`, and `etc/*.conf` after the `conf` stage. Only the leading `*` in
   each `dockerignore.tmpl` keeps them out of what the daemon receives, and `_public_tokens()`'s
