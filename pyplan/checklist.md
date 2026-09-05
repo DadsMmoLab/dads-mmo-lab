@@ -695,7 +695,14 @@
       line ends *"`platforms` widened per entry"* and carries the evidence. 7.7 also established
       the order it has to take: `Install.supports()` is `platform_id in platforms`, so a Windows
       install refuses BEFORE preflight while the list is Linux-only, and the widening cannot follow
-      the run that justifies it. Tortoise stays `["linux"]`: never attempted on Windows.
+      the run that justifies it. **Tortoise too, since `eb5f3b3f` on 2026-09-05** — this sentence
+      read *"Tortoise stays `["linux"]`: never attempted on Windows"* when it was written on
+      2026-09-04 (`2e8ae66c`) and again when the 7.2 box was ticked, and the rebase onto
+      `a0cc9dc0` made it false: the Windows Tortoise install finished 00:43 box-local that morning
+      and `eb5f3b3f` widened the entry. All three CMaNGOS entries now read `["linux","windows"]`,
+      and all three widenings are 7.7's, after `2fddaa0e`. The same sentence survives in 7.7's own
+      record further down this file and is NOT corrected here — see the tick record's
+      "deliberately NOT done" note.
     - **WHAT THE CLAUSE MEANT — decided 2026-09-05 from the record rather than assumed, because the
       reword turns entirely on it.** Two readings were open: **(a)** *the bash deletion must not
       change where these games can be installed* — a statement about the deletion, which the
@@ -729,10 +736,17 @@
         not a value the model accepts at all.
       * **2026-09-02 → 2026-09-05 (`12116341`):** *"the three CMaNGOS entries KEEP
         `platforms: ["linux"]`"*. True of all three on the day it was written; false for two of
-        them since `2f39a6d9`, 2026-09-04.
+        them since `2f39a6d9`, 2026-09-04, and false for **all three** since `eb5f3b3f` later on
+        2026-09-05, which widened `wow-tortoise` on the Windows run that finished at 00:43 that
+        morning. Re-measured in this lane after rebasing onto `a0cc9dc0`: `384b1a87` (`eb5f3b3f`'s
+        parent) still reads `wow-tortoise ["linux"]` and `eb5f3b3f` reads `["linux","windows"]`.
+        So the wording this clause carried until 2026-09-05 is now false of every entry it names
+        — which is the reword's own argument arriving a third time, from a commit written after
+        it.
       * **From 2026-09-05:** *"the three CMaNGOS entries keep a non-empty `platforms` — the
         deletion empties no entry and changes where no game can be installed"*. **MET, both halves
-        measured** — the values today are `["linux","windows"]`, `["linux","windows"]`, `["linux"]`,
+        measured** — all three read `["linux","windows"]` on this branch (`wow-tortoise` since
+        `eb5f3b3f`, which the rebase onto `a0cc9dc0` brought in),
         no revision of `catalog.json` has ever carried an empty one, and the deletion commit itself
         left all four entries' `platforms` and `native` blocks byte-for-byte as it found them. The
         commands and their output are in the audit row below; the second half of this wording was
@@ -774,7 +788,7 @@
     | `installer.Installer`, `PROMPT_RULES`, `make_responder`, `bash_available` | **MET.** `grep -rn "^class Installer\b\|^PROMPT_RULES\|^def make_responder\|^def bash_available" yulon/` returns nothing. **Three** past-tense prose mentions survive, not the two the earlier audit named — `catalog/families/__init__.py:10` (*"`Installer` such an entry used to fall back to; G.7 deleted the …"*), `catalog/installer.py:286`, `runner.py:221` — which is this repo's own convention. The remaining live hits are a `catalog.json` description string, `platform.py:3177`'s `Docker Desktop Installer.exe`, and `ui/catalog_view.py:377`'s user-facing *"Installer needs …"* copy. What is left in `installer.py` is the shared surface: `compose_file()` :61, `InstallerError` :92, `InstallOptions` :228, `InstallEngine` :345, `installer_for()` :370 |
     | script tests | **MET.** `tests/test_installer.py:1` is the post-7.2 docstring — *"options, errors, copy, dispatch"* — and the file holds **15** test functions; the `interact()` transport pair runs against a throwaway script through `tests/support_bash.py:24::bash_available`, where F.1 copied the probe when the engine that needed it went |
     | `Install.script*` fields | **MET.** `Install` in `yulon/catalog/catalog.py` carries exactly five fields — `default_server_dir` :698, `password` :699, `requires_client_dir` :702, `platforms` :743, `native` :755 — and nothing else. `grep -oE '"script[a-zA-Z_]*"' yulon/catalog/catalog.json` returns **zero** keys. (A plain `grep script catalog.json` returns four hits and all four are the word `description`, which contains it; the earlier audit's phrasing "no key containing `script`" would have been read that way.) |
-    | the three CMaNGOS entries keep a non-empty `platforms` — the deletion empties no entry and changes where no game can be installed (**reworded**) | **MET — and this row is in three parts because the clause makes three claims, the second and third of which were asserted rather than measured when the box was first ticked.** *(a) Non-empty today:* `wow-tbc ["linux","windows"]`, `wow-vanilla ["linux","windows"]`, `wow-tortoise ["linux"]`, read out of `catalog.json` 2026-09-05. *(b) No entry has ever been emptied:* `git log --follow -- pylauncher/yulon/catalog/catalog.json` names **35** revisions; every one was fetched with `git show <rev>:<path>`, parsed with `json.load`, and checked for `install.platforms == []` — **zero occurrences**, in this lane on 2026-09-05. `min_length=1` on `platforms` (`catalog.py:743`) is why: it makes the empty list a parse failure rather than a configuration, and `tests/test_catalog.py:187::test_an_entry_installable_nowhere_is_refused` pins that refusal. *(c) The deletion changed where nothing can be installed:* `git show 2fddaa0e^:pylauncher/yulon/catalog/catalog.json` and `git show 2fddaa0e:pylauncher/yulon/catalog/catalog.json`, each piped through `json.load` and printed as `id / platforms / native-present`, answer **identically on both sides** — `wow-wotlk ["linux","macos","windows"] native`, `wow-tbc ["linux"] native`, `wow-vanilla ["linux"] native`, `wow-tortoise ["linux"] native`. All four already carried a `native` block before the eight files went, so the deletion removed no platform and no engine: it is the load-bearing half of the reworded clause, and it is now shown rather than claimed. The reword, the two earlier wordings and the argument for the meaning are in the bullet above; the widening of two of the three is `2f39a6d9` on 2026-09-04, four days after `2fddaa0e`, evidenced on the **7.7** line |
+    | the three CMaNGOS entries keep a non-empty `platforms` — the deletion empties no entry and changes where no game can be installed (**reworded**) | **MET — and this row is in three parts because the clause makes three claims, the second and third of which were asserted rather than measured when the box was first ticked.** *(a) Non-empty today:* `wow-tbc ["linux","windows"]`, `wow-vanilla ["linux","windows"]`, `wow-tortoise ["linux","windows"]`, read out of `catalog.json` 2026-09-05 at `ccc88462`, after this lane was rebased onto `a0cc9dc0`. Tortoise read `["linux"]` when this row was first written and was widened by `eb5f3b3f` the same day, on the native-Windows run recorded two sections down; the row is re-read here rather than carried forward, because a values list is exactly the kind of sentence that goes stale under a rebase. *(b) No entry has ever been emptied:* `git log --follow -- pylauncher/yulon/catalog/catalog.json` names **35** revisions; every one was fetched with `git show <rev>:<path>`, parsed with `json.load`, and checked for `install.platforms == []` — **zero occurrences**, in this lane on 2026-09-05. `min_length=1` on `platforms` (`catalog.py:743`) is why: it makes the empty list a parse failure rather than a configuration, and `tests/test_catalog.py:187::test_an_entry_installable_nowhere_is_refused` pins that refusal. *(c) The deletion changed where nothing can be installed:* `git show 2fddaa0e^:pylauncher/yulon/catalog/catalog.json` and `git show 2fddaa0e:pylauncher/yulon/catalog/catalog.json`, each piped through `json.load` and printed as `id / platforms / native-present`, answer **identically on both sides** — `wow-wotlk ["linux","macos","windows"] native`, `wow-tbc ["linux"] native`, `wow-vanilla ["linux"] native`, `wow-tortoise ["linux"] native`. All four already carried a `native` block before the eight files went, so the deletion removed no platform and no engine: it is the load-bearing half of the reworded clause, and it is now shown rather than claimed. The reword, the two earlier wordings and the argument for the meaning are in the bullet above; the widening is `2f39a6d9` on 2026-09-04 for TBC and Vanilla and `eb5f3b3f` on 2026-09-05 for Tortoise — both AFTER `2fddaa0e`, four and five days after it, and both evidenced on the **7.7** line |
     | gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh` | **MET.** `git ls-files pylauncher/catalog/installers/` returns 13 paths: this one `.sh` and twelve `*.tmpl` templates. It is the only shell script left in the tree's installer directory |
     | `contribution.md` harness paragraph rewritten | **MET and guarded.** `tests/test_docs_pins.py:12::test_the_contribution_harness_is_the_engine_not_the_scripts` requires `python -m yulon.install_wiring wow-wotlk` and forbids `python -m yulon.catalog.installer`, `sudo -v`, `bash-script path` and `dml-start.sh` |
     | style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py` | **MET and guarded.** `tests/test_docs_pins.py:21::test_the_style_guide_rows_describe_the_post_7_2_modules`, which also covers the `catalog/native.py` row — added 2026-09-02 after that row went on describing *"the same `run()` contract as `Installer`"* for as long as F.3 had deleted the class |
@@ -817,6 +831,14 @@
       That template (`7.2-retire-bash.md:1807`) is also a fourth place the 19,451 figure appears,
       which the previous audit's "three places" did not count; it is left as the plan's own
       instruction text, and the three places that audit did name are corrected.
+      **Also not done, and measured rather than assumed (2026-09-05, after the rebase onto
+      `a0cc9dc0`):** the 7.7 record further down this file still says *"Tortoise stays
+      `["linux"]` in the repo until its Windows run earns it"* (written at `dfd21396`). It is
+      false as of `eb5f3b3f` — `git show 384b1a87:pylauncher/yulon/catalog/catalog.json` reads
+      `wow-tortoise ["linux"]` and `git show eb5f3b3f:...` reads `["linux","windows"]`. It is left
+      alone because it is 7.7's record, not this line's, and a docs lane editing another line's
+      dated record is how two lanes collide. Flagged here so the next pass over 7.7 has the
+      measurement instead of the surprise.
     - **The citation pass the tick costs, paid in the same commit.**
       `test_docs_pins.py::test_every_test_these_pages_name_by_hand_actually_exists` widens to
       `phase7-plans/7.2-retire-bash.md` the moment this box reads `- [x] 7.2 `. **Before:** that
