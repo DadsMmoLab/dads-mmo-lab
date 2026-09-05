@@ -1,0 +1,27 @@
+=== press B: build finished; SIGKILL before the next stage, 2026-09-05T01:55:53+02:00
+--- last stage lines
+39:--- generate-compose
+41:Step 4 of 9 (44%): build
+42:--- build
+2294:The build finished.
+2295:Step 5 of 9 (55%): client-data
+2296:--- client-data
+--- kill: systemctl --user kill --signal=SIGKILL gate72-c2-pressB at 2026-09-05T01:55:53+02:00
+exit 0
+Result=signal
+ExecMainStatus=9
+ActiveState=failed
+--- survivors
+no install_wiring process
+no systemd-inhibit left behind
+--- containers (the throwaway must not have started any)
+ac-client-data-init yulon.local/ac-wotlk-client-data:native-846544ff Created
+--- images (the throwaway's four carry a different install id)
+yulon.local/ac-wotlk-db-import:native-846544ff 1.57GB
+yulon.local/ac-wotlk-worldserver:native-846544ff 1.03GB
+yulon.local/ac-wotlk-authserver:native-846544ff 336MB
+yulon.local/ac-wotlk-client-data:native-846544ff 147MB
+yulon.local/ac-wotlk-db-import:native-243c46e3 1.57GB
+yulon.local/ac-wotlk-worldserver:native-243c46e3 1.03GB
+yulon.local/ac-wotlk-authserver:native-243c46e3 336MB
+yulon.local/ac-wotlk-client-data:native-243c46e3 147MB

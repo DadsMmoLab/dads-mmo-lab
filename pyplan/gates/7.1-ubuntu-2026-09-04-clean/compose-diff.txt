@@ -1,0 +1,20 @@
+=== compose diff, 7.1 clean run capture (2026-09-04 19:31 press 2, ~/wowserver on yulon-ubuntu) vs tests/data/wotlk-compose-config.json
+run on PK-M910q at 2026-09-04T23:56:10+02:00, lane copy ~/lanes/gate-71-72 (tip 2f39a6d9 files), capture md5 5ec739cc005cbbbf72e28c01cc2de2ee
+--- BOTH vars set (the route the test documents)
+...........................................................              [100%]
+59 passed in 0.54s
+exit=0
+--- the one test alone, verbose
+
+tests/test_compose_fixture.py::test_a_captured_compose_config_matches_the_fixture PASSED [100%]
+
+============================== 1 passed in 0.23s ===============================
+--- TRAP: only YULON_COMPOSE_ROOT set (checklist.md:498) -- reads like a pass unless -rs is on
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_compose_fixture.py:289: set YULON_COMPOSE_CONFIG=<compose config json> to diff a live install
+1 skipped in 0.17s
+--- the seam by hand: compare() and compare_stack() counts, raw capture with root, as the test calls them
+capture project name: yulon-wow-wotlk-243c46e3 | services: ['ac-authserver', 'ac-client-data-init', 'ac-database', 'ac-db-import', 'ac-worldserver']
+service differences: 0 []
+stack differences: 0 []
+control -- WITHOUT root (absolute binds left in place): 3 service differences

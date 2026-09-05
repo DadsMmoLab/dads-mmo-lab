@@ -1,0 +1,67 @@
+=== cache-mount diagnostic 2 (no --no-cache anywhere), lane gate-71-72, 2026-09-05T01:17:46+02:00
+
+=== A3. a RUN completes; the next build reads the same id (control, without --no-cache)
+#5 0.418 drwxr-xr-x    2 root     root          4096 Sep  4 23:17 .
+#5 0.418 drwxr-xr-x    1 root     root          4096 Sep  4 23:17 ..
+#5 0.418 -rw-r--r--    1 root     root            19 Sep  4 23:17 marker
+--- probe
+#5 0.324 total 12
+#5 0.324 drwxr-xr-x    2 root     root          4096 Sep  4 23:17 .
+#5 0.324 drwxr-xr-x    1 root     root          4096 Sep  4 23:17 ..
+#5 0.324 -rw-r--r--    1 root     root            19 Sep  4 23:17 marker
+#5 0.325 written-1788563866
+--- records for diag-a3
+Size:         8.192kB
+Description:  cached mount /diagcache ... with id "/diag-a3"
+Usage count:  2
+
+=== A4. a RUN writes, its client is SIGKILLed 15 s in; the next build reads the same id (no --no-cache)
+#5 0.572 drwxr-xr-x    1 root     root          4096 Sep  4 23:17 ..
+#5 0.572 -rw-r--r--    1 root     root      52428800 Sep  4 23:17 blob
+#5 0.572 -rw-r--r--    1 root     root            31 Sep  4 23:17 marker
+--- SIGKILL the client (pid 82903) at 2026-09-05T01:18:08+02:00; sleep-120 in container before: 1
+/home/pk/cachemount-diag2.sh: line 70: 82903 Killed                  docker build --progress plain --build-arg NONCE=$N -f "$D/Dockerfile.a4" "$D" > "$D/a4-writer.log" 2>&1
+--- after: sleep-120 processes: 0
+--- probe
+--- records for diag-a4
+Size:         52.44MB
+Description:  cached mount /diagcache ... with id "/diag-a4"
+Usage count:  1
+
+=== T2'. the engine's own /ccache mount, read WITHOUT --no-cache (nonce forces the RUN)
+#6 0.322 probe-1788563866
+#6 0.331 Local storage:
+#6 0.331   Cache size (GiB): 0.0 / 5.0 ( 0.00%)
+#6 0.331 --- du
+#6 0.333 4.0K	/ccache
+--- every exec.cachemount record now
+ID:           j139sd21vsbz1n1nmzuiqjlv1
+Size:         4.096kB
+Description:  cached mount /diagcache ... with id "/diag-a"
+Usage count:  2
+Last used:    2 minutes ago
+ID:           nqdvt8lmkoybkuv24ynb1no1x
+Size:         4.096kB
+Description:  cached mount /ccache ... with id "//ccache"
+Usage count:  3
+Last used:    1 second ago
+ID:           saa4hxsghdkbceph2rceyao20
+Size:         4.096kB
+Description:  cached mount /diagcache2 ... with id "//diagcache2"
+Usage count:  2
+Last used:    2 minutes ago
+ID:           wmbnk5jrnp45f4i559iw9laq3
+Size:         4.096kB
+Description:  cached mount /diagcache ... with id "/diag-a2"
+Usage count:  2
+Last used:    2 minutes ago
+ID:           8i78rqwa66ht0d3urfyebrr2k
+Size:         8.192kB
+Description:  cached mount /diagcache ... with id "/diag-a3"
+Usage count:  3
+Last used:    25 seconds ago
+ID:           6e6xfkk6raj6eevxq0i02wsk3
+Size:         52.44MB
+Description:  cached mount /diagcache ... with id "/diag-a4"
+Usage count:  2
+Last used:    3 seconds ago

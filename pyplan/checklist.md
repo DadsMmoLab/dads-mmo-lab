@@ -343,6 +343,50 @@
       they are continuations of one accumulating install, with free disk falling 75 → 67 → 53 GB
       across them. One useful consequence: a proper 7.2 re-run would naturally produce the second,
       independent compose capture that removes the circularity above. Sequence it that way.
+    - **RUN FROM A GENUINELY CLEAN CHECKPOINT, TWICE — 2026-09-04 (the 7.1 lane) and 2026-09-05
+      (the 7.2 re-run, lane gate-71-72) — and clauses 1, 2, 8 and 9 are now on evidence.** Both
+      runs restored `yulon-ubuntu` to `clean-ssh` (2026-08-28) and the driver's own before-probe
+      read `docker --version: NOT INSTALLED (no such executable)`, `id -Gn` without `docker`, no
+      `~/wowserver`, 75-78 GB free — the sentence the 08-31 logs could not produce.
+      `pyplan/gates/7.1-ubuntu-2026-09-04-clean/` (press 1 + press 2, `ready` at
+      `gate71-press2.log:6045`, 20:13:05) and `pyplan/gates/7.2-ubuntu-2026-09-05/` (press 1, a
+      kill at edge 1226/1834, press 3 to `ready`, plus a second kill+resume cycle — its `README.md`
+      answers all fifteen clauses in a table). What the second run adds to THIS line:
+      * **Clause 9, `docker compose config` against a fixture from a different run: MET.**
+        `docker compose config --format json`, in `~/wowserver` with no `-f`, from the 09-04 clean
+        install (core `413bea61a`; the fixture's run was `47960183b`), diffed on m910q with BOTH
+        `YULON_COMPOSE_CONFIG` and `YULON_COMPOSE_ROOT` set: `test_compose_fixture.py` **59
+        passed**, `compare()` 0 service differences, `compare_stack()` 0 stack differences; the
+        ROOT-only trap reproduced on purpose reads `SKIPPED [1]`. The 09-05 run's own capture was
+        byte-identical (md5 `5ec739cc…`). `7.1-ubuntu-2026-09-04-clean/compose-diff.txt` and
+        `COMPOSE-CAPTURE.md`.
+      * **Clause 8, the ccache recovery, MET on the same box — but not on the first try, and the
+        reason is worth more than the number.** Press 2 was SIGKILLed at edge 1226/1834 (BuildKit
+        stage clock 366.1 s; `kill-record.txt`) and press 3 then compiled all 1834 edges from
+        nothing, *slower* than press 2 at every edge (`edge-rate.txt`). Three busybox builds
+        (`cachemount-diag*.txt`) found why: **a `docker build --no-cache` that names a cache mount
+        RESETS it** on this daemon (BuildKit v0.26.2 in docker 29.1.3) — a marker written by a
+        normal build is gone after a `--no-cache` build lists the mount — and the lane's ccache
+        probe, run with `--no-cache` between the kill and the resume, had emptied the mount the
+        clause is about. The kill loses nothing (a SIGKILLed writer kept its 52 MB). So the cycle
+        was run again on a throwaway folder with a probe that has no `--no-cache`: SIGKILL at edge
+        **605/1834** (210.7 s), `ccache -s` **590 misses / 340 MB**, the resume replayed the first
+        590 edges in **~5 s** (edge 500 at 14.2 s against 168.2 s cold, knee at ~590), build
+        **1078.1 s** against 1189.7 s cold, `ccache -s` afterwards **590 hits of 2400**.
+        `cycle2-edge-rate.txt`, `ccache-stats.txt:63-91`. Add to the caveat above: the mechanism is
+        evicted by `docker builder prune` AND by any `--no-cache` build naming `target=/ccache`.
+      * **Clauses 3-7 and 13 re-earned on the 09-05 run** (consent asked once, re-login refusal
+        verbatim with `id -Gn` unchanged after it, press 2 under `sg docker -c`, `ready` on press
+        3, the kill above, account `YULON` id 101 GM 3 through `ControllerServices.create_account`
+        with the second call converging). **Not touched by either clean run: 10-12** (the auth log
+        was captured — `Added realm "AzerothCore" at 127.0.0.1:8085.` at `docker logs` line 42 —
+        but the "no `UPDATE`" reading is the owner's call, as recorded above), **14** (no client on
+        the box; the 09-04 run's login is in `pyplan/gates/7.1-client-login/`), and **15** (the
+        LAN step is bug-checklist §39 and was not run; the realm row reads `172.30.55.119` because
+        the engine's `ready` stage wrote it).
+      * **A note on the edge count.** Every earlier record says 1829 ninja edges; core `413bea61a`
+        has **1834**. A watcher written for `/1829]` never fired, which is why the first kill
+        landed at 1226 rather than ~900. Pin the total from the log, not from a previous run.
   - [ ] Gate: packaged artifact on clean Fedora 44 (SELinux, password sudo, moby-engine + buildx) and clean Arch (pacman + buildx)
     - **ARCH, 2026-09-04: the artifact does not start on a clean Arch box, and the app underneath it
       is fine.** Evidence: `pyplan/gates/7.1-arch/71-arch-appimage.log`. Same artifact as the Fedora
@@ -440,6 +484,46 @@
       22 passed / 1 skipped, `pyplan/gates/7.3-yulon-ubuntu.log`. The correction filed there stands
       and is what made a fresh run necessary: the 2026-09-01 record under 7.1 could not stand in,
       because `test_sqlplan_live.py` postdates it entirely (21 test functions then, 23 now).
+    - **THE LIVE HALF WAS RUN ON 2026-09-05, from `clean-ssh`, with zero bash on the path — and
+      the box stays unticked because "7.1's Ubuntu gate" is not itself fully earned.**
+      `pyplan/gates/7.2-ubuntu-2026-09-05/README.md`, every clause with a file and a line. The
+      short form, so this line can be read without it:
+      * **"Full checks green" — MET at this code.** `run-tests-vm.sh --checks` on m910q against
+        `lane/gate-71-72` = `2f39a6d9`'s `pylauncher/`: **2341 passed, 4 skipped**, mypy ×3 clean
+        (71 files), ruff clean, black 136 unchanged, `ALL GREEN`, exit 0
+        (`full-checks-m910q.txt`). The 09-04 Windows record above (2291 passed at `badee625`) stands
+        beside it.
+      * **"Re-run from the same checkpoint with no other change" — the run itself: MET.** The box
+        was restored to `clean-ssh` at 23:57:34 (`state-before-restore.txt` holds what was there
+        first; `state-as-restored.txt` reads no docker, no docker group, no `~/wowserver`, 78 GB,
+        up 0 min). One change was made before press 1 and is recorded as such: `apt-get install
+        python3.12-venv`, because `clean-ssh` cannot make a venv without it
+        (`box-preparation.txt`); the 09-04 lane had the same need. Press 1 (consent, Docker
+        installed, re-login refusal), press 2 under `sg docker -c` SIGKILLed at edge 1226/1834,
+        press 3 to `--- ready` and exit 0 at 01:09:56 — 37 min 37 s from the press, of which the
+        build ≈ 22 min, client-data ≈ 4, import 7.2, up-and-ready 4.6. Schemas **22 / 111 / 315 /
+        30**, the same four numbers as every other platform; 500/500 bots online; ports as
+        designed (`final-state.txt`).
+      * **Zero bash, three ways.** No `install-*.sh` / `dml-start.sh` / `wow-manage.sh` exists
+        under `$HOME` outside `archive/`; `~/dads-mmo-lab-install-*.log` never appeared; a
+        sampler polled every 15 s for two hours — 466 samples, 465 with no lineage-shaped
+        process and the one exception a recorder seeing another recorder's argv
+        (`zero-bash-sampler.log:490`). The `.sh` processes it did see are the lane's own helpers
+        and two inside containers (`docker-entrypoint.sh mysqld`; the client-data init reading
+        upstream's `functions.sh` with `sed`). The transcripts' only `.sh` is the AzerothCore
+        image's `entrypoint.sh`.
+      * **Its own compose capture**, the "second, independent capture" the 7.1 audit asked this
+        run to produce: taken at 01:58:59, byte-identical (md5 `5ec739cc…`) to the 09-04 clean
+        run's, which passed the fixture diff (59 passed, 0/0 differences).
+      * **Why not ticked.** The clause names 7.1's gate, and 7.1's clauses 10-12 (owner
+        decision), 14 (client login, needs the owner's laptop; the 09-04 run has one in
+        `7.1-client-login/`) and 15 (LAN step, bug-checklist §39, not run on purpose) are not part
+        of what this run could re-earn. Everything a machine on its own could do is done and
+        filed; the line ticks when those three are settled on the 7.1 line.
+      * **Two things learned that were not on the sheet**, both in the README: a `--no-cache`
+        build naming a cache mount resets it (it cost this run its first ccache measurement), and
+        a second install cannot even build on a box that holds another one's containers, because
+        AzerothCore pins `container_name` and the engine refuses at the name.
 - [x] 7.3 CMaNGOS data model + pure stage kinds — catalog 7.3 models (`Source.rev`, `dockerfile_dir`, `CmangosData`: `ClientSpec`, `DockerfileSpec`, `ExtractPlan`, `MmapPlan`, `ConfPatchTable`, `SqlPlan`); `families/cmangos.py`; `clientdir`/`dockerfile`/`extract`/`conf`/`sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four entries validate; WotLK templates byte-identical; static catalog invariants test
   - **TICKED 2026-09-04, by auditing the parent line's own five claims rather than by running
     anything new.** The box had been left open with nothing written about why, while its only
@@ -1396,6 +1480,29 @@
     more than one network path can hand out the wrong one — worth an explicit choice rather than
     a detection, whenever networking is revisited.
 - [ ] 7.10 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.9 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed (was 7.4)
+  - **The honest-cancel copy was seen arriving from a REAL cancelled install, 2026-09-05, through
+    the widgets** — the one install-half item `pyplan/gates/7.10-gaps/README.md` (2026-09-04) said
+    could not be produced on a box that refuses every install at preflight. On `yulon-ubuntu`
+    after 7.2's press 1 (Docker installed, no server, 76 GB free), `widget_cancel_driver.py`
+    built the real `CatalogView` over a real `LogPanel`, clicked the WotLK tile's `Install`
+    (`QTest.mouseClick`, folder picker injected, throwaway folder), waited for the engine's own
+    `Cloning mod-playerbots/azerothcore-wotlk` line (7.1 s after the click), clicked the panel's
+    `Stop` 20 s later, and **320.4 s afterwards** `install_finished(ok=False)` arrived with a modal
+    titled *Install cancelled* whose text **is** `cancelled_install_message()` for the folder as it
+    then stood — compared as strings, not eyeballed. 15 OK / 0 FAIL, the tile still reads
+    `Install`. `pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel.log`.
+    **Two things the run showed that the copy does not know, filed as findings and not fixed
+    here:** (1) the copy's compose-file split fired on **upstream's own `docker-compose.yml`**,
+    which the clone brings in git-tracked and unmodified — generate-compose had never run, and the
+    user was pointed at *Use existing…*; (2) the copy's other half, "press Install again and
+    choose <folder>: the installer carries on from the last stage recorded in
+    `.yulon-install.json`", was **refused** when tried on that folder — no state file existed
+    after the cancel, and the engine said *"already a git checkout … no record here of an
+    install this app made … Install into an empty folder instead"*
+    (`cycle2-pressA2-refused-existing-checkout.log:31`). The refusal is right; the promise is
+    not. Also measured: a Stop during clone-core cannot interrupt the containerized `git`
+    (`docker ps` 5 s after Stop still showed the `alpine/git` container), so five minutes between
+    Stop and the dialog is what a user pays for stopping there.
 - [ ] **Phase 7 exit criteria met** — all four v1 servers install through one Python engine with zero shell interaction and are managed by the app on Linux and native Windows, and on macOS once a machine exists; no `install-*.sh` remains. **Phase 8 does not start until this is fully met.**
 
 ---

@@ -1,0 +1,20 @@
+=== A5: does a --no-cache build RESET a cache mount, or merely not see it? 2026-09-05T01:19:00+02:00
+--- 1. normal build writes marker
+#5 0.440 drwxr-xr-x    1 root     root          4096 Sep  4 23:19 ..
+#5 0.440 -rw-r--r--    1 root     root            16 Sep  4 23:19 marker
+--- 2. a --no-cache build lists the same mount
+#5 0.391 nocache-probe-1788563940
+#5 0.392 total 8
+#5 0.392 drwxr-xr-x    2 root     root          4096 Sep  4 23:19 .
+#5 0.392 drwxr-xr-x    1 root     root          4096 Sep  4 23:19 ..
+--- 3. a normal build reads the marker again: present = the --no-cache build only IGNORED the contents; absent = it RESET them
+#5 0.314 drwxr-xr-x    2 root     root          4096 Sep  4 23:19 .
+#5 0.314 drwxr-xr-x    1 root     root          4096 Sep  4 23:19 ..
+#5 0.316 cat: can't open '/diagcache/marker': No such file or directory
+#5 ERROR: process "/bin/sh -c sh -c \"echo normal-probe-$NONCE && ls -la /diagcache && cat /diagcache/marker\"" did not complete successfully: exit code: 1
+ERROR: failed to build: failed to solve: process "/bin/sh -c sh -c \"echo normal-probe-$NONCE && ls -la /diagcache && cat /diagcache/marker\"" did not complete successfully: exit code: 1
+--- records for diag-a5
+ID:           39essleyji1m3ct169wtod4jo
+Size:         4.096kB
+Usage count:  2
+Last used:    Less than a second ago

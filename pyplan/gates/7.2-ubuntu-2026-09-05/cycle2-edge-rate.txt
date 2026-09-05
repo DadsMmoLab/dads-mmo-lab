@@ -1,0 +1,41 @@
+=== edge rate, press 2 vs press 3, 2026-09-05T01:56:02+02:00; edges total 1834
+--- BuildKit stage clock (s) at the same edge
+edge     press2(cold)   press3(resume)
+1        7.197          8.786         
+100      18.87          8.944         
+200      37.75          10.23         
+300      74.53          12.63         
+400      123.3          13.59         
+500      168.2          14.21         
+600      209.2          29.69         
+700                     54.09         
+800                     79.48         
+900                     105.1         
+1000                    132.5         
+1100                    157.2         
+1200                    196.9         
+1226                    230.9         
+1300                    337.7         
+1400                    469.4         
+1500                    602.1         
+1600                    736.3         
+1700                    864.9         
+1800                    1010.0        
+1834                    1078.1        
+--- the edge press 2 died at, and its clock
+#25 210.7 [605/1834]
+--- press 3: first edge and last edge, with clocks
+#25 8.786 [1/1834]
+#25 1078.1 [1834/1834]
+--- press 3: Building edges reported (a replay from ccache still reports every edge)
+1810
+--- press 3: the engine's own line, if it skipped the build (a re-press of a COMPLETE install says this; a resume after a kill does not)
+(not said: the build step was re-entered)
+--- wall clock of the build step on each press, from the harness's own INFO stamps
+/home/pk/gate72-c2-pressA3.log
+2026-09-05 01:29:10
+2026-09-05 01:29:10 INFO [yulon.docker] build_staged(): `docker compose -f docker-compose.yml -f docker-compose.override
+/home/pk/gate72-c2-pressB.log
+2026-09-05 01:36:43
+2294:The build finished.
+2026-09-05 01:36:43 INFO [yulon.docker] build_staged(): `docker compose -f docker-compose.yml -f docker-compose.override
