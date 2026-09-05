@@ -510,11 +510,13 @@ def test_a_pytest_this_suite_starts_still_knows_which_log_is_the_users_own() -> 
     loadfile` is the suite's normal spelling on the boxes that have `xdist`,
     so this is not a hypothetical worker.
 
-    Driven as a real child rather than by calling
-    `conftest._the_users_own_config_dir({...})` with a dict, because the claim
-    is about what SURVIVES a process boundary: the hand-down has to be written
-    into the child's environment by one half and read back by the other, and a
-    dict tests neither.
+    Driven as a real child, because the claim is about what SURVIVES a process
+    boundary: the hand-down has to be written into the child's environment by
+    one half and read back by the other, and neither half is exercised by a
+    call inside this process. `conftest._the_users_own_config_dir()` takes no
+    argument -- it carried an `env: Mapping | None` parameter that no caller
+    ever passed, deleted 2026-09-05 -- so there is no in-process spelling of
+    this test left to write even for a reader who wanted one.
     """
     proc = subprocess.run(
         [sys.executable, "-c", _A_CHILD_THAT_IS_ITSELF_A_TEST_RUN],
@@ -577,7 +579,7 @@ running; the route census answers about all four on every box.
 """
 
 
-def test_a_child_handed_a_partial_env_has_every_route_closed(
+def test_a_child_handed_a_partial_env_gets_all_four_routes_pointed_at_the_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A caller that names none of the four must not thereby be handed all four OPEN.
@@ -606,10 +608,38 @@ def test_a_child_handed_a_partial_env_has_every_route_closed(
                      'HOME': None, 'USERPROFILE': None}
         config_dir  /home/pk/.local/share/yulon        <- the user's own
 
-    Both assertions are kept, because they answer different questions: the
-    route census says no door was closed, `config_dir()` says which room that
-    let the child into. The census is the one that travels -- it is about all
-    four variables, not about the one this OS happens to read.
+    The census asks what ARRIVED, not whether anything did. Each of the four
+    values the child reports is compared against the scratch home this process
+    hands out, because a route that is SET and points somewhere the guard did
+    not choose is as open as one that is unset. It asked `value is None` until
+    2026-09-05 (review, round 4), which was this commit's own subject in
+    miniature: the message said the guard "blocked no route" while the
+    predicate only asked whether a variable existed. Measured on m910q
+    2026-09-05, with `conftest`'s rewrite line replaced by `given[var] =
+    "/home/pk" if var == "HOME" else str(CHILD_SCRATCH_HOME)` -- every child
+    handed the box user's own home, which is what an inherited `HOME` is in a
+    run started by a person, and on macOS is the only input `config_dir()`
+    reads:
+
+        presence census   this file 25 passed; every test in the tree
+                          (`-n auto --dist loadfile`, no marker filter, so
+                          a superset of what `--checks` selects)
+                          2575 passed, 9 skipped
+        arrival census    1 failed, 24 passed, on `assert not
+                          arrived_elsewhere`: `reached the OS with
+                          {'HOME': '/home/pk'}`
+
+    `config_dir()` could not have caught that one on the box it was measured
+    on: `XDG_DATA_HOME` still held the scratch, so the child landed in the
+    scratch and only the census saw the open door. It is asserted anyway,
+    because the two answer different questions -- the census about all four
+    inputs on every box, `config_dir()` about the room the one THIS OS reads
+    let the child into -- and both were measured load-bearing on m910q
+    2026-09-05 with the round-3 condition restored: the census red naming all
+    four (`{'APPDATA': None, 'HOME': None, 'USERPROFILE': None,
+    'XDG_DATA_HOME': None}`), and, with the census assertion softened to
+    `assert True` on the remote copy only, `config_dir()` red on its own
+    (`/home/pk/.local/share/yulon, which is the user's own`).
 
     Before the premise below was set explicitly, this was red only under
     `xdist`: serially the box's own `XDG_DATA_HOME` was unset, so that single
@@ -638,12 +668,19 @@ def test_a_child_handed_a_partial_env_has_every_route_closed(
 
     assert proc.returncode == 0, f"the child died: {proc.stderr}"
     report = json.loads(proc.stdout)
-    dropped = sorted(var for var, value in report["routes"].items() if value is None)
-    assert not dropped, (
-        f"a child handed a partial env reached the OS with {dropped} unset, so the guard "
-        "blocked no route through them at all. An unset HOME is not a closed one: on POSIX "
-        "Path.home() falls back to the passwd database, and on macOS that is config_dir()'s "
-        "only input."
+    the_scratch_the_guard_hands_out = str(conftest.CHILD_SCRATCH_HOME)
+    arrived_elsewhere = {
+        var: value
+        for var, value in sorted(report["routes"].items())
+        if value != the_scratch_the_guard_hands_out
+    }
+    assert not arrived_elsewhere, (
+        f"a child handed a partial env reached the OS with {arrived_elsewhere}, and not "
+        f"with the scratch home {the_scratch_the_guard_hands_out} the guard exists to hand "
+        "it. `None` is a route left unset, which on POSIX is not a route closed -- "
+        "Path.home() falls back to the passwd database. Any other value is a route left "
+        "pointing at a directory the guard did not choose, and on macOS HOME is the only "
+        "input config_dir() reads."
     )
     assert not conftest.is_the_users_own_config_dir(report["config_dir"]), (
         f"a child handed a partial env resolved config_dir() to {report['config_dir']}, "
@@ -715,10 +752,13 @@ def test_a_child_pointed_at_the_users_own_directory_is_refused(
     rewriting it under the test would hide the mistake instead of reporting it.
     The refusal happens in `Popen.__init__`, so no child is started at all.
 
-    `delenv` first so the premise holds on any box: "named by the caller" is
-    "differs from what this process would have handed down", and on a machine
-    whose own `XDG_DATA_HOME` already said this, the value would be an
-    inherited one rather than a named one.
+    `delenv` first so the premise holds on any box. "Named by the caller" is
+    `var in given` AND a value differing from what this process would have
+    handed down, and it is the second half that is at risk here: the dict
+    below names `XDG_DATA_HOME`, so the first half holds everywhere, but on a
+    machine whose own `XDG_DATA_HOME` already held this directory the caller's
+    value would compare equal to the inherited one, be read as not named, and
+    be rewritten to the scratch home instead of refused.
     """
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
 
