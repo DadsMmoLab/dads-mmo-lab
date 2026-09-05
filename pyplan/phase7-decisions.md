@@ -7,7 +7,10 @@
 > returned 46 findings (all edits to this page and its companions, none reopening a decision).
 >
 > Method, the same one `phase6-decisions.md` used: the four games' bash installers were mapped
-> stage by stage (eight files, 19,451 lines, read in full), the native engine was inventoried for
+> stage by stage (eight files, 19,451 lines, read in full — that figure is the plan's and was
+> wrong: re-counted 2026-09-05 off `2fddaa0e^`, the eight files held **21,880** lines. Corrected
+> here rather than in place because what this sentence records is what the design pass believed on
+> 2026-08-26), the native engine was inventoried for
 > what is generic and what is AzerothCore-shaped, three architectures were designed
 > independently from three angles, and three judges with different priorities (a maintainer, an
 > operator who runs the live gates, and a skeptic hunting the fatal flaw) scored them. The owner
@@ -171,8 +174,10 @@ password inside `_run_steps()`. `catalog.py` gains the 7.1 subset of the models 
 `composegen.py` takes its image prefix, built-service list and extra tokens from the entry
 instead of module constants, and reads `password.value` where it read `db_root_password`.
 
-Deleted in 7.2: the six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, 19,451
-lines of bash); `installer.Installer`, `PromptRule`, `PROMPT_RULES`, `make_responder`,
+Deleted in 7.2: the six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, **21,880**
+lines of bash — this read 19,451, the plan's figure, until it was re-counted per file off
+`2fddaa0e^` on 2026-09-05; the same correction is on `pyplan/checklist.md`'s 7.2 line and in
+`phase7-plans/7.2-retire-bash.md`); `installer.Installer`, `PromptRule`, `PROMPT_RULES`, `make_responder`,
 `bash_available`, `host_package_manager`, `NO_BASH_HELP`; `Install.script`, `script_platforms`,
 `script_variants` (`db_root_password`/`db_root_password_file` go earlier, in 7.1, the moment
 `password` replaces them); the script-path tests including

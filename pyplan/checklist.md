@@ -402,7 +402,10 @@
         back by a different route (`SELECT id, username … WHERE username='YULON'` → `101 YULON`),
         `account_access` → `101 3 -1`, and the same call again converging rather than duplicating
         (`created=False`, `COUNT(*)` → 1). Not typed at a console.
-      * **"client login" — MET in substance, and the audit's "Absent" is answered.**
+      * **"client login" — MET in substance, and the audit's "Absent" is answered.** (Superseded
+        2026-09-05, and kept because it is the 09-04 install's own record: the clause is now met
+        outright against the 09-05 install — `GATELOGIN`, id 102, 07:31:41 — see the clause-14
+        bullet further down this line.)
         `pyplan/gates/7.1-client-login/client-connection-20260904-2030.log`, quoted at
         `LOGIN-2026-09-04.md:41,:43`: `20:30:22.955 GRUNT: state: LOGIN_STATE_AUTHENTICATED result:
         LOGIN_OK` and `20:30:24.125 ClientConnection Completed: COP_GET_CHARACTERS code=44
@@ -548,9 +551,26 @@
         with the second call converging). **Not touched by either clean run: 10-12** (the auth log
         was captured — `Added realm "AzerothCore" at 127.0.0.1:8085.` at `docker logs` line 42 —
         but the "no `UPDATE`" reading is the owner's call, as recorded above), **14** (no client on
-        the box; the 09-04 run's login is in `pyplan/gates/7.1-client-login/`), and **15** (the
+        the box at the time; **since MET — see the bullet below**), and **15** (the
         LAN step is bug-checklist §39 and was not run; the realm row reads `172.30.55.119` because
         the engine's `ready` stage wrote it).
+      * **CLAUSE 14 IS MET, 2026-09-05 at 07:31:41, against THIS install rather than a sibling.**
+        A real 3.3.5a client authenticated against the 09-05 clean-checkpoint install — the one
+        the two bullets above describe — on account **`GATELOGIN`, id 102**, created through
+        `ControllerServices` the same way `YULON` (id 101) was, so the account half and the login
+        half are one chain rather than two records. Client side: `COP_AUTHENTICATE AUTH_OK` and
+        `COP_GET_CHARACTERS code=44 result=TRUE`. Server side, read back out of `acore_auth`:
+        `last_login 2026-09-05 05:31:40, online 1, failed_logins 0` (05:31 UTC = 07:31 CEST, the
+        same one-hour-plus-DST offset the 09-04 record carries).
+        **The transport, stated because it is the clause's own weak point.** The client reached the
+        realm over an `ssh -L` tunnel with the realmlist at `127.0.0.1` — **not** over Tailscale,
+        which did not survive the `clean-ssh` restore. That is a deliberate difference from the
+        09-04 login (`pyplan/gates/7.1-client-login/`, account `YULON`, over Tailscale, against a
+        different install), and it is what makes this one answer the clause: the 09-04 login could
+        not, because its install was not this one. What a loopback tunnel still does not speak to
+        is the LAN step — that is clause **15**, and it stays open on bug-checklist §39. The two
+        are recorded apart on purpose: 14 asks that a client can log in, 15 asks that another
+        machine on the network can reach the realm the launcher advertises.
       * **A note on the edge count.** Every earlier record says 1829 ninja edges; core `413bea61a`
         has **1834**. A watcher written for `/1829]` never fired, which is why the first kill
         landed at 1226 rather than ~900. Pin the total from the log, not from a previous run.
@@ -620,7 +640,7 @@
     - **A skip can no longer read as a pass.** `YULON_REQUIRE_DOCKER=1` turns an unreachable daemon into a failure; without it the skip reason names what did not run. All three branches exercised. CI is stronger still: the `integration (live Docker)` job runs `docker info` before pytest.
     - **`docker rm -f` was leaking a volume every run.** `mariadb:11` declares `VOLUME /var/lib/mysql`, so each gate stranded ~200 MB under a 64-hex name `docker ps -a` cannot show. Now `rm -f -v`, and the teardown asserts on survivors so a leak is an error naming the volume.
 
-- [ ] 7.2 Delete the bash lineage — six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, 19,451 lines), `installer.Installer`/`PROMPT_RULES`/`make_responder`/`bash_available`, script tests, `Install.script*` fields; the three CMaNGOS entries KEEP `platforms: ["linux"]` (see the note below); gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh`; `contribution.md` harness paragraph rewritten; style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py`
+- [x] 7.2 Delete the bash lineage — six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, **21,880 lines** — this line said 19,451 until 2026-09-05; see the audit row), `installer.Installer`/`PROMPT_RULES`/`make_responder`/`bash_available`, script tests, `Install.script*` fields; the three CMaNGOS entries keep a **non-empty** `platforms` — the deletion empties no entry and changes where no game can be installed (**reworded 2026-09-05**; the two wordings this clause had before, and the argument for the reword, are below); gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh`; `contribution.md` harness paragraph rewritten; style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py` — **ticked 2026-09-05, see the audit and the tick record below**
   - **The `platforms: []` half of that list was NOT applied, and must not be.** The 7.2 plan was
     written for an order in which 7.2 ran BEFORE 7.3; the owner's ruling reversed it, so by the time
     F.4 landed the three entries already had a family engine, and K.8 registered `cmangos` in
@@ -633,58 +653,128 @@
     `catalog.json`, so those three Install buttons are **live on Linux** — which is exactly the state
     bug-checklist §32 puts to the owner. This line said the opposite until 2026-09-02, and §32 is read
     while deciding it.
-    - **That 2026-09-02 verification went stale two days later, and the clause above with it.**
-      Measured 2026-09-05 at `6546b190`, straight out of `catalog.json`:
+    - **That 2026-09-02 verification went stale two days later, and the fact that moved belongs to
+      7.7.** Measured 2026-09-05 at `6546b190`, straight out of `catalog.json`:
       `wow-tbc -> ["linux","windows"]`, `wow-vanilla -> ["linux","windows"]`,
       `wow-tortoise -> ["linux"]`. TBC and Vanilla were widened at `2f39a6d9` (2026-09-04), each on
-      a Windows install that finished on `yulon-win11-gate` — Vanilla all twelve stages that
-      morning, TBC's three containers up that evening — and 7.7 established the order the widening
-      has to take: `Install.supports()` is `platform_id in platforms`, so a Windows install refuses
-      BEFORE preflight while the list is Linux-only, and the widening cannot follow the run that
-      justifies it. Tortoise stays `["linux"]`: never attempted on Windows.
-      **So this clause is met in the sense that decided it and not as it is written.** What 7.2 owed
-      was *do not empty the list* — the plan's Step 6 template still says `platforms: []`, which is
-      the value that would have greyed out three of the four Install buttons — and no entry has
-      ever been emptied. What it says, "KEEP `platforms: ["linux"]`", stopped being the value on
-      2026-09-04 for two of the three, by a later phase's evidence. The clause is left as written
-      rather than edited to match the tree: rewriting a criterion so it passes is the failure this
-      checklist exists to prevent. Whoever ticks 7.2 states it in that form.
-  - **The line's own clauses, audited 2026-09-05 at `6546b190` — seven of eight met outright, and
-    the box is left OPEN on the eighth plus the gate.** Same method as 7.3's tick: read the line's
-    claims against the tree rather than run anything new.
+      a Windows install that FINISHED on `yulon-win11-gate` — Vanilla all twelve stages that
+      morning, TBC's three containers up that evening — and that widening is **7.7's**, whose own
+      line ends *"`platforms` widened per entry"* and carries the evidence. 7.7 also established
+      the order it has to take: `Install.supports()` is `platform_id in platforms`, so a Windows
+      install refuses BEFORE preflight while the list is Linux-only, and the widening cannot follow
+      the run that justifies it. Tortoise stays `["linux"]`: never attempted on Windows.
+    - **WHAT THE CLAUSE MEANT — decided 2026-09-05 from the record rather than assumed, because the
+      reword turns entirely on it.** Two readings were open: **(a)** *the bash deletion must not
+      change where these games can be installed* — a statement about the deletion, which the
+      deletion satisfies; or **(b)** *these three entries stay Linux-only for the life of Phase 7* —
+      a standing constraint, which 7.7 has deliberately overtaken and which would therefore be a
+      real disagreement for the owner to settle rather than a wording problem. It is **(a)**, on
+      three things that are in the history and not in the reading:
+      * **The clause's ORIGINAL wording was time-limited on its face.** From `2850ad70` (2026-08-27), the commit that
+        added this line, until 2026-09-02 it read *"the three CMaNGOS entries set `platforms: []` **until
+        their own gates**"*, and the 7.2 plan's Architecture paragraph
+        (`phase7-plans/7.2-retire-bash.md:7`) says the same words. A clause that names the entries'
+        own gates as its own expiry cannot also be a promise that nothing changes at those gates —
+        and 7.7's Windows runs ARE those gates, for TBC and for Vanilla.
+      * **The 2026-09-02 rewrite corrected a VALUE; it did not change the subject.** `12116341`,
+        titled *"The record said three Install buttons were gated when they are live on Linux"*,
+        replaced *"set `platforms: []`"* with *"KEEP `platforms: ["linux"]`"* for the reason its own
+        message gives: "the checklist went on describing the plan rather than the tree". The
+        *"until their own gates"* half went with the sentence it was part of, not as a decision to
+        make the clause permanent. Nothing in that commit, its message, or the bullet it added
+        argues for a freeze; the bullet's whole subject is which value F.4 wrote.
+      * **Every other clause on this line is an artefact of the deletion**, and the line's verb is
+        *Delete*: eight files gone, four names gone, script tests, `Install.script*` gone, one
+        script extracted, two docs rewritten. A clause forbidding a LATER phase from widening a
+        data field would be the only forward-looking constraint on the line — and it would sit
+        against a sibling line, 7.7, that names the same field as its own deliverable.
+    - **So the clause is REWORDED to what it meant, and every wording it has had is kept here.**
+      * **2026-08-27 → 2026-09-02, as first written** (`2850ad70`, the commit that added this line)**:** *"the three CMaNGOS entries set
+        `platforms: []` until their own gates"*. Never applied, and correctly so — see the bullet
+        above; `Install.platforms` carries `min_length=1`, pinned by
+        `test_an_entry_installable_nowhere_is_refused` (`tests/test_catalog.py:187`), so `[]` is
+        not a value the model accepts at all.
+      * **2026-09-02 → 2026-09-05 (`12116341`):** *"the three CMaNGOS entries KEEP
+        `platforms: ["linux"]`"*. True of all three on the day it was written; false for two of
+        them since `2f39a6d9`, 2026-09-04.
+      * **From 2026-09-05:** *"the three CMaNGOS entries keep a non-empty `platforms` — the
+        deletion empties no entry and changes where no game can be installed"*. **MET, and never at
+        risk:** no entry has ever been emptied, and the values today are `["linux","windows"]`,
+        `["linux","windows"]`, `["linux"]`. The fact underneath moved at **`2f39a6d9`**, and its
+        evidence lives on the **7.7** line and in the gate folders that line names — not here.
+      **Why this is not the failure this checklist exists to prevent.** A criterion bent until it
+      passes is one that can no longer be falsified. This one can: emptying any entry's `platforms`
+      breaks it, in a `grep` of `catalog.json`, and that is exactly the thing 7.2 was asked not to
+      do. The argument for the meaning is above, both older wordings are legible, and the commit
+      that moved the underlying value is named with the line that owns its evidence.
+  - **The line's own clauses, re-audited from scratch 2026-09-05 at `fe3c1ae0` — all nine rows
+    MET, each with the file and line that answers it.** Nine rows: the eight criteria the previous
+    audit counted, plus the size figure, which that audit set aside as "not a criterion" and which
+    is now simply correct. Not a re-reading of the 09-05 audit above it:
+    every row below was re-derived against the tree in this lane, and two of them came back with
+    more than that audit had. Same method as 7.3's tick — read the line's claims against the tree
+    rather than run anything new.
 
-    | the line says | what answers it |
+    | the line says | what answers it, re-derived |
     |---|---|
-    | six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` gone | **MET.** `git ls-files` matches none of the eight outside `archive/guides/` (which holds four non-catalog installers no entry references). Deleted at `2fddaa0e`, *"chore: delete the six bash installers, dml-start.sh and wow-manage.sh"* |
-    | (eight files, 19,451 lines) | **the count is the plan's, not the deletion's.** Measured 2026-09-05 off `2fddaa0e^`: 2603 + 1417 + 2837 + 122 + 2290 + 2104 + 2244 + 8263 = **21,880** lines (`git show --stat` says 21,881; `dml-start.sh` has no trailing newline). 19,451 comes from `7.2-retire-bash.md:567` and is repeated in `phase7-decisions.md:10,174`. Nothing turns on it — it is a size, not a criterion — but it is wrong in three places and should be corrected in all three or in none |
-    | `installer.Installer`, `PROMPT_RULES`, `make_responder`, `bash_available` | **MET.** No definition of any of the four survives in `yulon/`; the only occurrences are two past-tense mentions in comments (`catalog/installer.py:286`, `runner.py:221`), which is this repo's own convention. What is left in `installer.py` is the shared surface: `compose_file()`, the error types, the copy, `InstallOptions`, `InstallEngine`, `installer_for()` |
-    | script tests | **MET.** `tests/test_installer.py` is the post-7.2 file and says so in its first line — options, errors, copy, dispatch, 15 tests; the `interact()` transport pair runs against a throwaway script through `tests/support_bash.py::bash_available`, which is where F.1 copied the probe when the engine that needed it was deleted |
-    | `Install.script*` fields | **MET.** The `Install` model carries `default_server_dir`, `password`, `requires_client_dir`, `platforms`, `native` and nothing else; no entry in `catalog.json` has a key containing `script` |
-    | the three CMaNGOS entries KEEP `platforms: ["linux"]` | **NOT as written — see the bullet above.** Never emptied, which is what the clause was for; two of the three read `["linux","windows"]` since `2f39a6d9` |
-    | gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh` | **MET.** `pylauncher/catalog/installers/steam-deck/setup-gaming-mode.sh` is tracked; that directory otherwise holds only templates |
-    | `contribution.md` harness paragraph rewritten | **MET and guarded.** `test_docs_pins.py::test_the_contribution_harness_is_the_engine_not_the_scripts` requires `python -m yulon.install_wiring wow-wotlk` and forbids `python -m yulon.catalog.installer`, `sudo -v`, `bash-script path` and `dml-start.sh` |
-    | style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py` | **MET and guarded.** `…::test_the_style_guide_rows_describe_the_post_7_2_modules`, which also covers the `catalog/native.py` row — added 2026-09-02 after that row went on describing *"the same `run()` contract as `Installer`"* for as long as F.3 had deleted the class |
+    | six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` gone | **MET.** `git ls-files \| grep -E "install-.*\.sh\|dml-start\.sh\|wow-manage\.sh"` returns five paths, all under `archive/guides/` (MapleStory, Mu Online, RuneScape, two Wrath-Unbound addon scripts) and none of them one of the eight. Deleted at `2fddaa0e`, *"chore: delete the six bash installers, dml-start.sh and wow-manage.sh"* |
+    | (eight files, **21,880** lines) | **MET as now written.** Re-counted in this lane off `2fddaa0e^`, per file: `wow-tbc/install-wow-tbc.sh` 2603, `wow-tortoise/install-tortoise-wow-wsl.sh` 1417, `wow-vanilla/install-wow-vanilla.sh` 2837, `wow-wotlk/dml-start.sh` 122, `install-wow-wotlk-fedora.sh` 2290, `install-wow-wotlk-ubuntu.sh` 2104, `install-wow-wotlk.sh` 2244, `wow-manage.sh` 8263 = **21,880** (`git show --stat` says 21,881; `dml-start.sh` has no trailing newline). The line and `phase7-decisions.md:10,177` said **19,451**, the plan's pre-deletion figure from `phase7-plans/7.2-retire-bash.md:603`; **all three of those, plus this line, are corrected in this lane**, so the "all three or in none" note the previous audit left is discharged. A fourth occurrence exists that the previous audit did not name — the plan's Step 6 tick template, `7.2-retire-bash.md:1807` — and it is left as the plan's own instruction text; see the tick record below. It is a size, not a criterion |
+    | `installer.Installer`, `PROMPT_RULES`, `make_responder`, `bash_available` | **MET.** `grep -rn "^class Installer\b\|^PROMPT_RULES\|^def make_responder\|^def bash_available" yulon/` returns nothing. **Three** past-tense prose mentions survive, not the two the earlier audit named — `catalog/families/__init__.py:10` (*"`Installer` such an entry used to fall back to; G.7 deleted the …"*), `catalog/installer.py:286`, `runner.py:221` — which is this repo's own convention. The remaining live hits are a `catalog.json` description string, `platform.py:3177`'s `Docker Desktop Installer.exe`, and `ui/catalog_view.py:377`'s user-facing *"Installer needs …"* copy. What is left in `installer.py` is the shared surface: `compose_file()` :61, `InstallerError` :92, `InstallOptions` :228, `InstallEngine` :345, `installer_for()` :370 |
+    | script tests | **MET.** `tests/test_installer.py:1` is the post-7.2 docstring — *"options, errors, copy, dispatch"* — and the file holds **15** test functions; the `interact()` transport pair runs against a throwaway script through `tests/support_bash.py:24::bash_available`, where F.1 copied the probe when the engine that needed it went |
+    | `Install.script*` fields | **MET.** `Install` in `yulon/catalog/catalog.py` carries exactly five fields — `default_server_dir` :698, `password` :699, `requires_client_dir` :702, `platforms` :743, `native` :755 — and nothing else. `grep -oE '"script[a-zA-Z_]*"' yulon/catalog/catalog.json` returns **zero** keys. (A plain `grep script catalog.json` returns four hits and all four are the word `description`, which contains it; the earlier audit's phrasing "no key containing `script`" would have been read that way.) |
+    | the three CMaNGOS entries keep a non-empty `platforms` (**reworded**) | **MET, and never at risk.** `wow-tbc ["linux","windows"]`, `wow-vanilla ["linux","windows"]`, `wow-tortoise ["linux"]`, read out of `catalog.json` 2026-09-05; no entry has ever been emptied, and `min_length=1` on `platforms` (`catalog.py:743`) means none can be. The reword, the two earlier wordings and the argument for the meaning are in the bullet above; the widening of two of the three is `2f39a6d9`, evidenced on the **7.7** line |
+    | gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh` | **MET.** `git ls-files pylauncher/catalog/installers/` returns 13 paths: this one `.sh` and twelve `*.tmpl` templates. It is the only shell script left in the tree's installer directory |
+    | `contribution.md` harness paragraph rewritten | **MET and guarded.** `tests/test_docs_pins.py:12::test_the_contribution_harness_is_the_engine_not_the_scripts` requires `python -m yulon.install_wiring wow-wotlk` and forbids `python -m yulon.catalog.installer`, `sudo -v`, `bash-script path` and `dml-start.sh` |
+    | style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py` | **MET and guarded.** `tests/test_docs_pins.py:21::test_the_style_guide_rows_describe_the_post_7_2_modules`, which also covers the `catalog/native.py` row — added 2026-09-02 after that row went on describing *"the same `run()` contract as `Installer`"* for as long as F.3 had deleted the class |
 
-  - **Why the box is still `- [ ]` after that audit, said plainly so the next reader does not redo
-    it.** Two things, neither of them the deletion:
-    1. **The `platforms` clause no longer reads true**, and the fix is an owner-facing wording
-       change rather than a measurement — see the bullet above. Ticking over it would put a `- [x]`
-       next to a sentence a reader can falsify in one `grep` of `catalog.json`.
-    2. **The gate box below is open on 7.1's clauses 14 and 15**, which the 2026-09-05 re-run could
-       not re-earn (client login needs the owner's laptop; the LAN step is blocked on
-       bug-checklist §39), and 7.1's own box is open for the same reasons. The previous reading of
-       this line set that condition explicitly — *"the line ticks when those three are settled on
-       the 7.1 line"* — and it is not overturned here.
-
-    **What ticking will cost, measured 2026-09-05 on m910q so it is not a surprise later.**
-    `test_docs_pins.py::test_every_test_these_pages_name_by_hand_actually_exists` widens to
-    `phase7-plans/7.2-retire-bash.md` the moment this box reads `- [x] 7.2 `, and that page cites
-    **58** test names as live, of which **19** resolve to nothing in `pylauncher/tests/` — mostly
-    names of tests the plan told a task to write or delete. (`7.1-spine-azerothcore-linux.md`: 13
-    of 141, unchanged since 2026-09-02. `7.3-cmangos-family.md`: **0 of 219**, its pass done.) With
-    this box left open the guard stays scoped as it was: **4 passed** against this edit
-    (`~/dads-mmo-lab/pylauncher/.venv/bin/python -m pytest tests/test_docs_pins.py -q` on m910q,
-    run over a copy of these files).
+  - **TICKED 2026-09-05, and what the tick does NOT claim.** The box reads `- [x]` because the nine rows
+    above — eight criteria and the size figure — are each answered by a file and a line, re-derived in this lane
+    rather than inherited, and because the one clause that had gone stale now says what it was
+    written to say. The two reasons the box was last left open, and what became of each:
+    1. *"The `platforms` clause no longer reads true."* **Settled** — by establishing what it meant
+       (`12116341`, the plan's own *"until their own gates"*, and the shape of the rest of the
+       line) and rewording it to that, with both earlier wordings kept and dated above. The test
+       the previous reading applied was the right one and the reworded clause still passes it: a
+       reader can falsify it in one `grep` of `catalog.json` by emptying any entry.
+    2. *"The gate box below is open on 7.1's clauses 14 and 15."* **Not overturned, and not blurred
+       into this tick.** The gate below is still `- [ ]` and stays so on its own terms. What is
+       said here is only that the two boxes carry different claims — this line's claim is the nine rows
+       audited above, the gate's is a live re-run of 7.1's gate — and this file already treats
+       parent and sub-box independently in both directions (the 7.1 primitives gate above is
+       `- [x]` under an open 7.1). For the record on the gate's own terms: clause 14 is **now met**
+       (a real client authenticated against the 09-05 install at 07:31:41 — see the 7.1 line),
+       and clause 15 is not, so that box would still be open on the old reading too.
+    - **What was deliberately NOT done, so nobody hunts for it.** The plan's Step 6
+      (`phase7-plans/7.2-retire-bash.md:1807`) gives a template for this tick that appends
+      *"CMaNGOS entries `platforms: []`"* and ticks the gate box in the same commit. Neither was
+      followed: `[]` was never applied and must not be (see above), and the gate box is left open.
+      That template (`7.2-retire-bash.md:1807`) is also a fourth place the 19,451 figure appears,
+      which the previous audit's "three places" did not count; it is left as the plan's own
+      instruction text, and the three places that audit did name are corrected.
+    - **The citation pass the tick costs, paid in the same commit.**
+      `test_docs_pins.py::test_every_test_these_pages_name_by_hand_actually_exists` widens to
+      `phase7-plans/7.2-retire-bash.md` the moment this box reads `- [x] 7.2 `. **Before:** that
+      page presented **58** test names as live, of which **19** resolved to nothing, across **24**
+      sites. Each was re-derived against the tree and marked with what actually became of it —
+      deleted where the page had told a task to delete it (the word was usually already on the
+      line, just further from the name than the guard's 60-character window reaches), or never
+      written under that name, with the live test that carries the property named by file and line.
+      The pass is written up under a dated `CITATIONS` heading on the plan; it changed no
+      instruction and no code-block body. **Two findings that were not wording:** F.3's instructed
+      rename never happened — `test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_script`
+      is alive at `tests/test_families_azerothcore.py:84`, rewritten in place, and the replacement
+      name the plan gave it has never existed — and F.5's bundle test specified an assertion
+      against `build/pylauncher.spec` that no test in `pylauncher/tests/` makes.
+    - **Measured on m910q, 2026-09-05, over the synced copy of these files** (`YULON_TEST_BOX=m910q
+      run-tests-vm.sh tests/test_docs_pins.py -v`): **4 passed**, `test_every_test_…` among them.
+      Four passing tests look the same whether the guard widened or not, so the widening was
+      asserted rather than assumed — `_plans_whose_phase_the_checklist_ticks()` run against the
+      same synced `pyplan/` answered `['7.2-retire-bash.md', '7.3-cmangos-family.md']`, and over
+      those two: 7.2 **44 live-cited, 0 unresolved**; 7.3 **219 live-cited, 0 unresolved**.
+      (`7.1-spine-azerothcore-linux.md` is 13 of 141 and stays out of scope while 7.1 is open.)
+      The whole gate over the same copy: `run-tests-vm.sh --checks` → **2536 passed, 4 skipped**,
+      mypy ×3 clean (71 source files, this platform / win32 / darwin), ruff `All checks passed!`,
+      black 136 unchanged, `ALL GREEN`, exit 0 — the branch baseline, unmoved by this edit.
   - [ ] Gate: full checks green; 7.1's Ubuntu gate re-run from the same checkpoint with no other change
     - **Static half PASSED, 2026-09-02, overnight run.** `yulon-phase7` at `0e394d9b`: **1974 passed,
       3 skipped** on yulon-ubuntu (`-m "not integration"`), mypy `Success: no issues found in 48 source
@@ -737,12 +827,15 @@
         run to produce: taken at 01:58:59, byte-identical (md5 `5ec739cc…`) to the 09-04 clean
         run's, which passed the fixture diff (59 passed, 0/0 differences).
       * **Why not ticked.** The clause names 7.1's gate, and 7.1's clauses 10-12 (owner
-        decision), 14 (client login, needs the owner's laptop; the 09-04 run has one in
-        `7.1-client-login/`) and 15 (LAN step, bug-checklist §39, not run on purpose) are not part
-        of what this run could re-earn. Everything a machine on its own could do is done and
-        filed; the line ticks when those three are settled on the 7.1 line.
-        **Re-checked 2026-09-05 by the doc pass below: unchanged. Clauses 14 and 15 are still
-        unrun, 7.1's own box is still `- [ ]`, and nothing in this folder moves either.**
+        decision), 14 (client login) and 15 (LAN step, bug-checklist §39, not run on purpose) were
+        not part of what this run could re-earn on its own. Everything a machine on its own could
+        do is done and filed; this box ticks when those are settled on the 7.1 line.
+        **Updated 2026-09-05: clause 14 IS now met** — a real client authenticated against THIS
+        install at 07:31:41 that morning, account `GATELOGIN` id 102, over an `ssh -L` tunnel; the
+        numbers are on the 7.1 line. **10-12 (owner decision) and 15 (§39) remain**, so this box
+        stays `- [ ]` — on two clauses now rather than three. Note that the PARENT 7.2 line was
+        ticked the same day on its own nine clauses; that tick says nothing about this gate, and
+        this gate is not evidence for it.
       * **The record was corrected on 2026-09-05, and one of the five corrections matters to a
         clause.** A doc pass over `pyplan/gates/7.2-ubuntu-2026-09-05/` against the box (read-only
         over ssh) found four citations that read as fact and one capture that had gone stale
