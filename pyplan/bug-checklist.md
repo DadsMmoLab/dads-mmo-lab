@@ -1765,63 +1765,223 @@ shortcut itself. Choosing is owner work.
 the bundle first, and why. That is a warning, not a fix — a user who does not read the header still
 hits it, and per §1 nothing outside `pyplan/` points a user at the header at all.
 
-### 29. The Dockerfile refusal covers declared FIELD NAMES, not secrets — 2026-09-02, the NAME half FIXED 2026-09-04 at `d2b963d5`, **the VALUE half still OPEN**
+### 29. The Dockerfile refusal covers declared FIELD NAMES, not secrets — 2026-09-02, the NAME half FIXED 2026-09-04 at `d2b963d5`, the VALUE half FIXED 2026-09-05 at `75bce609`, **CLOSED with the residue named below**
 
-**Not ticked, and the reason is measurable.** A second rule landed —
-`dockerfile.SECRET_NAME_WORDS` plus `announces_a_secret()`, read on the MAPPING before anything is
-rendered — and it closes the case this entry was filed for. It does not close the entry's title.
-Probed against the real module on m910q 2026-09-05, on a copy of the tree at `6546b190`, `Secrets`
-declaring one field (`db_password`, so `SECRET_TOKENS == {'DB_PASSWORD'}`):
+`75bce609` is on `lane/dockerfile-value` and unpushed as this is written, and so are the review
+follow-ups that corrected this entry — `da34fb86` (what the containment floor is answerable to) and
+`fd947b1c` (the false-positive refusal). The SHA is cited rather than the branch because the branch
+is disposable and the neighbouring entries cite SHAs; whoever merges this rewrites it to the merged
+one, which upstream's squash habit means will be a single new SHA.
+
+**Both halves are now built, and the RED for each was re-derived rather than quoted.**
+
+*The NAME half* landed 2026-09-04: `dockerfile.SECRET_NAME_WORDS` plus `announces_a_secret()`, read
+on the MAPPING before anything is rendered. *The VALUE half* landed 2026-09-05: `render()` takes a
+required keyword-only `secrets: Secrets` and refuses any key carrying one of its values, whatever
+that key is called. The RED that separated them, probed against the shipped module on m910q
+2026-09-05 on a copy of the tree at `0cc637c7`, `Secrets` declaring one field:
 
 ```
 SOAP_PASSWORD  -> REFUSED: "SOAP_PASSWORD: each of those reads as a secret and matches no field of ..."
 BUILD_ARG      -> ACCEPTED, secret in text: True
+                  write() accepted it: ['Dockerfile', '.dockerignore']
+                  Dockerfile on disk contains the secret: True
+                  the line it wrote: ['ENV BUILD_ARG=tbc-0123456789abcdef']
+EXTRA          -> ACCEPTED, secret in text: True
+FOO            -> ACCEPTED, secret in text: True
 ```
 
-The same probe against the pre-fix module (`git show d2b963d5^:…/dockerfile.py`) answered
-`SOAP_PASSWORD -> ACCEPTED, secret in text: True`, which is the RED, re-derived rather than quoted.
-So: the three leaks that have ever been measured here were all filed under a `*PASSWORD` name and
-are all refused now; a secret filed under a name that announces nothing still reaches the Dockerfile
-on disk, exactly as before. The refusal covers declared field names **and** secret-sounding names.
-It still does not cover secrets.
+The same probe against the FIXED module, same box, same day:
 
-**What of this entry's three recommendations landed:**
+```
+SOAP_PASSWORD    -> REFUSED: SOAP_PASSWORD (the value declared as DB_PASSWORD) - and this mapping ...
+BUILD_ARG        -> REFUSED: BUILD_ARG (the value declared as DB_PASSWORD) - ...
+EXTRA            -> REFUSED  |  FOO -> REFUSED
+BUILD_ARG_BURIED -> REFUSED   (value `--db-pass=<the password> --verbose`; containment, not equality)
+secret echoed in the refusal: False   (each of the five)
+a caller that forgets the argument:
+  TypeError: render() missing 1 required keyword-only argument: 'secrets'
+```
 
-* *The refusal itself* — landed, and the fix's own docstring says what it is: "a price on the
-  careless spelling, not a wall". Held by
-  `test_dockerfile.py::test_render_refuses_a_secret_bearing_token_the_declaration_never_named`
-  (this entry's probe, run as a test),
-  `…::test_render_refuses_the_undeclared_secret_name_even_when_no_template_spells_it` (the rule
-  reads the mapping, not the rendered text — the LOCATION-shaped protection this module has already
-  watched fail twice), `…::test_the_case_of_a_key_is_not_a_way_past_the_name_rule`, and
-  `…::test_the_secret_name_vocabulary_spells_every_word_and_the_measured_leaks`, which names each
-  word as a literal *outside* the parametrize — because a per-word test generated FROM the set
-  shrinks silently with it (measured: six words cut to three gave `58 passed` against `61 passed`,
-  zero failures).
-* *The docstring that stated a convention in the voice of a guarantee* — fixed. `secret_tokens()`
-  no longer says "reading the dataclass IS reading the declaration"; it says what the set covers and
-  points here.
-* *The enumerating guard by VALUE* — **NOT landed, and rejected at the level this entry proposed
-  it.** An optional `secrets=` parameter on `render()` was considered and refused in writing: it
-  would default to "none declared", because since 7.3 the only production caller passes
-  `_public_tokens(server_dir)` and `ctx.secrets` is one scope above — a guard no caller invokes,
-  which is [[guards-that-prove-declarations]] a fifth time. That argument is sound and the hole it
-  leaves is still a hole.
+**The closing condition said "at the call site rather than in `render()`", and what landed is not
+quite that — deliberately.** The comparison is IN `render()`; the VALUES come FROM the call site.
+`_write_dockerfile` passes `secrets=ctx.secrets`, which it holds one frame above the
+`_public_tokens(server_dir)` it passes as the mapping, so 7.3's capability split is untouched: the
+secret is named as the thing that must NOT be emitted, never added to the mapping. Putting the
+comparison itself in `_write_dockerfile` would protect that call site and nothing else, and this
+module has twice watched a LOCATION-shaped protection lose — a template planted in
+`shared/cmangos/`, then `--installers-root` pointing the engine at a tree no glob walks. `render()`
+is where every mapping passes, so that is where the property lives.
 
-**What stands in for it today, and what that is worth.** The value comparison exists as a TEST, not
-as a runtime guard: `test_families_cmangos.py::test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_rendered_mapping`
-builds a `Secrets` from `dataclasses.fields()` with one sentinel per field, drives the real
-`_write_dockerfile` stage, and asserts no sentinel appears under ANY key of the mapping or in either
-file on disk — which is stronger than the by-name check this entry asked for. Its own docstring
-states the set it cannot close: a value cached outside the call, or read from some other file under
-`server_dir` that a stage writes a password into. So the shape today is a runtime rule that catches
-careless NAMES and a test that catches the three known VALUE routes on the shipped path. A secret
-minted inside `_public_tokens` under a bland name is caught by neither.
+**What each half is worth, and why neither subsumes the other.** The name rule reads a key and so
+catches a careless spelling around a value nobody here has ever seen. The value rule reads a value
+and so catches a careless key around a value that is provably the install's own secret. A key that
+trips both is reported by the value rule, because that one has *proved* something; the name rule's
+remedy ("rename it, or declare it") is the wrong advice for a key holding the real password.
 
-**This entry stays open on that gap**, and the closing condition is unchanged: something that
-compares by VALUE where `ctx.secrets` is in scope, at the call site rather than in `render()`. Until
-then the title is still literally true, and ticking it would be the fourth guarantee in this section
-to be refuted by execution.
+**What a "match" is, and the measurements behind it.** `carries_a_secret(value, secret)` is
+containment at or above `MIN_CONTAINED_SECRET = 8`, equality below it, and never true for an empty
+secret. Measured on m910q 2026-09-05, `server_dir=/tmp/fixedsrv/srv`, over the 34 distinct values the
+three shipped CMaNGOS `_public_tokens()` mappings produce (the directory is named because four of
+those values — two per mapping, `IMAGE_TAG` and `PROJECT_NAME` — carry an 8-hex digest of it, so any
+count over their CHARACTERS moves with it — this
+list said 30, 16 and 98 until 2026-09-05, from a run under per-game temporary directories):
+
+* the empty string is contained in all 34, and 31 of the 36 single alphanumeric characters are
+  contained in at least one (`a` alone in 14 — `/opt/mangos`, `characters`, …). Containment with no
+  floor is not a strict rule, it is an install that can never run.
+* `mangos`, six characters, is contained in five of them — so the floor has to be above 6. That is
+  the lower bound, and it does not move with the directory.
+* The upper bound is coverage: the floor must be at or below every secret the app itself PRODUCES,
+  or containment degrades to equality for a real install. Measured the same day by calling
+  `resolve_secrets()` on an empty server dir through `families.family_for()` for all four shipped
+  entries: `wow-tbc` 20, `wow-vanilla` 24, `wow-tortoise` 25 (`<prefix><16 hex>`), `wow-wotlk` 8
+  (its fixed `password`, contained in none of the 34). 8 is the largest number clearing both bounds,
+  and `test_the_containment_floor_is_at_or_below_every_secret_this_app_itself_produces` asserts it
+  as `floor <= min(...)` over what that function returns — not as `==` over `catalog.json`, which
+  is what it did until 2026-09-05 and which measured a value production never renders: the only
+  `mode: fixed` entry is `wow-wotlk`, whose family is `azerothcore` and never calls `render()`.
+* **A larger floor buys nothing measurable**, and this is the claim worth writing down because it is
+  the tempting one: the collision surface does not empty out with length. The same values yield 102
+  distinct 8-character substrings and 78 distinct 12-character ones, and the longest value is 29
+  characters (`yulon.local/cmangos-tortoise-`), so a containment collision is *possible* at any
+  length a password can have. What makes 8 safe is not that collisions stop but that the strings
+  which collide are catalog fragments — `mariadb:`, `/opt/man`, `haracter` — that nobody sets as a
+  password.
+
+Below the floor it is equality and not silence: all four leaks ever measured into this mapping (M15,
+M-R2, §29's `SOAP_PASSWORD` probe, this entry's `BUILD_ARG` probe) put the password in VERBATIM
+under another key, so the shape that has actually happened is caught at any length.
+
+**The traps, each answered by a test rather than by this paragraph.**
+
+* A refusal must never echo the secret —
+  `test_the_refusal_about_a_carried_secret_never_prints_the_secret`, over the message, its `repr`
+  and the exception's `args`. Not decoration: `_write_dockerfile` re-raises as
+  `InstallerError(str(exc))` and `StagedInstaller.run()` hands that to `_record_error()`, which
+  writes it into the state file as `last_error`. `native._without()`, the redaction that does exist,
+  is spent on one unrelated path.
+* The same secret under its DECLARED key is legitimate —
+  `test_the_declared_token_may_carry_its_own_secret_and_nothing_else_may`. The exemption is the
+  tokens `render()` DROPS (`SECRET_TOKENS`), NOT the tokens the instance declares: a subclass's
+  extra secret has no token in `SECRET_TOKENS`, so exempting it would have opened a hole rather than
+  closed one, and `test_a_secret_declared_only_on_a_subclass_is_refused_under_its_own_token_too` is
+  what fails when the exemption is widened.
+* A second caller who forgets the argument must FAIL — required and keyword-only, so it is a
+  `TypeError` at the call.
+  `test_a_caller_that_forgets_the_secrets_argument_fails_instead_of_losing_the_guard`, written as a
+  runtime test because a `# type: ignore` is one line and mypy is not what runs in a user's install.
+  An OPTIONAL `secrets=` is still rejected, for the reason this entry gave.
+* The guard has to reach the PRODUCTION path, not just the function
+  ([[reviews-check-functions-not-call-sites]]) —
+  `test_the_write_dockerfile_stage_refuses_a_bland_key_carrying_the_install_password` drives the
+  stage, and reaches the password by the route this entry measured (`resolve_secrets(server_dir)`
+  reading what `db-password` wrote one stage earlier) rather than by a literal.
+* The rule must not refuse a real install —
+  `test_no_shipped_public_mapping_collides_with_a_password_the_catalog_can_declare`, all three games
+  × {generated shape, `password`}, through the real shipped templates. That covers the two passwords
+  the CATALOG can produce, and the catalog is not the only source: a user's own `.db_password` is
+  read as written, and **1046 distinct strings collide** with a shipped public token value —
+  measured on m910q 2026-09-05, `server_dir=/tmp/fixedsrv/srv`, 1031 by containment over the 19
+  values at or above the floor plus 15 by equality over the values below it, `characters`,
+  `mariadb:11`, `tw_logon`, `vanilla-`, `/opt/mangos` among them. **That surface is unchanged by
+  anything here and deliberately so** — narrowing the rule to spare those is what would reopen the
+  hole. What was wrong was the SENTENCE. Until 2026-09-05 such a user read
+  `DB_IMAGE (the value declared as DB_PASSWORD) … Drop the key, or file the value under its
+  declared token`, about a key this app puts in the mapping itself, which they cannot drop, while
+  the remedy in their hands — their own password — went unnamed. `render()` cannot name it: it
+  holds a `Secrets` and never a path. So the refusal is now a `CarriedSecretError`, caught by
+  `_write_dockerfile` ahead of every other `DockerfileError`, which appends
+  `_password_origin_note()`: the full path of the password file, that the password is theirs, and
+  what changing it costs (the `db-data` volume was created with the old one). Held by
+  `test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the_password_file`,
+  which plants nothing in the mapping — it writes `mariadb:11` into `.db_password` and lets the
+  shipped `DB_IMAGE` do the colliding.
+
+**Ten mutations, each killed, m910q 2026-09-05, taken at `75bce609`** (`__pycache__` purged on both sides
+of every one; the two files were 211 tests at that commit). At `75bce609`: the
+value refusal deleted → 11 failed. Containment
+weakened to equality → 2. The empty-secret guard deleted → 1. The floor deleted → 2. `secrets` made
+optional with a `Secrets("")` default → 1. The two rules' order swapped → 1. The exemption widened
+to every token the instance declares → 1. The floor moved to 4 → 1; to 20 → 1. The call site's
+`secrets=ctx.secrets` replaced with `Secrets("")` → 2. Two of those "survived" on the first pass and
+neither was a survivor: the edits had not applied, and the script was then made to assert its own
+substitution before it was allowed to believe a green.
+
+**Re-derived at `dd8b863f`, m910q 2026-09-05**, five commits after `75bce609` (`git rev-list --count
+75bce609..dd8b863f` = 5) and with two tests added to them since. `dd8b863f` is the commit whose
+tree the numbers describe: a record cannot hold its own SHA, and `9bff3e81` resolved that by
+labelling its numbers for a DIFFERENT commit. Between `dd8b863f` and `4bee5fdc` `pylauncher/` did
+not change (`git diff --stat dd8b863f 4bee5fdc -- pylauncher` is empty); `fa223a4b` changed one
+docstring in `tests/test_dockerfile.py`, and the round-3c review re-ran the two-file baseline there:
+213. Nothing in this paragraph is claimed of any later commit. Command, at each end:
+`.venv/bin/python -m pytest tests/test_dockerfile.py tests/test_families_cmangos.py -q` — at
+`75bce609` in a throwaway checkout of that commit, and at `dd8b863f`'s tree in a lane copy on
+m910q since deleted (the SHA and the command are the record; lane copies are ephemeral);
+`__pycache__` purged on both sides of every mutation, every
+edit asserted present on disk before its result was believed, every file restored and compared byte
+for byte after. Baseline 213 (was 211). The value refusal deleted → 13 failed (was 11). The floor
+deleted → 3 (was 2). The call site's `Secrets("")` → 3 (was 2).
+
+`9bff3e81` wrote those four numbers, labelled them "what a reader would re-derive at `67128792`" — a
+commit that is neither where they were taken nor where they were written — and explained them with
+"the two new tests join each kill", which is true of one kill in three. The failing ids say where
+each lands. The value refusal's 13 is the 75bce609 11 plus BOTH new tests, +2:
+`test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence` and
+`test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the_password_file`. The
+floor deletion's 3 adds only the first, +1 — the other two, `test_a_one_character_secret_…` and
+today's `test_the_containment_floor_is_at_or_below_…`, both fail at `75bce609` too, the latter under
+its name of that day, `test_the_containment_floor_is_the_shortest_secret_the_shipped_catalog_declares`.
+The
+call-site replacement's 3 adds only the second, +1 (`test_neither_the_context_secrets_…` and
+`test_the_write_dockerfile_stage_refuses_…` are the other two). A third number `9bff3e81` wrote from
+memory was that commit's own: the `render()` call it added to the below-floor test was said to die
+with the floor deleted, and under that mutation the test dies on the `carries_a_secret()` assertion
+above it — removing the added call left the same 3 ids. It is gone, and the below-floor seam is
+cited where it was already held.
+
+**Rejected, with the measurement: also scanning the rendered TEXT for the secret values.** `render()`
+now holds them, so it could, and `write()`'s docstring had only rejected the NAME-scanning version.
+What it would add is a template that hard-codes a real secret, and that set is empty in both
+directions: a generated password is minted per install, so no committed template can contain one,
+and the only fixed password in the shipped catalog is `wow-wotlk`'s literal `password` — belonging
+to an entry whose family does not call this function. Against that, containment over a whole
+Dockerfile is a far larger false-positive surface than over one token value: a future template line
+reading `# the password file is mounted at run time` would refuse that entry's install outright. No
+shipped Dockerfile or dockerignore template spells the word today — and the scope matters, because
+unscoped that sentence is false: measured on m910q 2026-09-05,
+`grep -ril 'password\|passwd' catalog/installers --include=Dockerfile.tmpl --include=dockerignore.tmpl`
+returns nothing, while the same grep over the whole installers tree returns
+`shared/cmangos/base.yml.tmpl` and `wow-wotlk/native/base.yml.tmpl`, compose templates `render()`
+never opens. Reconsider it the day a family with a short fixed password renders a Dockerfile.
+
+**Ticked, and here is the residue, because the title's general form is not what closed.** What is
+closed: *a value this app DECLARES as a secret cannot reach a generated Dockerfile through the token
+mapping, under any key.* What is still true, and is the boundary rather than a regression:
+
+* **A secret MINTED inside `_public_tokens` — never a field of anything, never in `ctx.secrets` — is
+  invisible to this rule as it was to the last one.** The comparison is against the declaration, and
+  a value that was never declared is not in it. This entry has said so since 2026-09-02 and it
+  remains the honest limit of any by-declaration guard.
+* **A secret shorter than 8 characters, embedded in a longer value, passes** — equality cannot see
+  it. Two routes reach that state and only one of them is watched. No shipped entry DECLARES such a
+  password, and `test_the_containment_floor_is_at_or_below_every_secret_this_app_itself_produces`
+  goes red the day the app produces one. But a user's own `<server_dir>/.db_password` is read AS
+  WRITTEN and has no floor at all: measured on m910q 2026-09-05, a file holding `abc` makes
+  `resolve_secrets()` return a three-character secret, and `--db-pass=abc --verbose` under a bland
+  key then renders. That is a limit of the floor and not a bug the floor can fix — containment on a
+  three-character string refuses every install — and
+  `test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence` is where it is
+  measured rather than promised. This bullet said only the first half until 2026-09-05.
+* **The build CONTEXT still holds the plaintext**, and has since K.3: `.db_password` at the root,
+  `DB_ROOT_PASSWORD=` in `.env`, and `etc/*.conf` after the `conf` stage. Only the leading `*` in
+  each `dockerignore.tmpl` keeps them out of what the daemon receives, and `_public_tokens()`'s
+  docstring records which tests hold that line and which do not (`etc/*.conf` is asserted by
+  nothing). **That is the larger hole of the two, and it is a different entry's shape** — nothing
+  about token mappings touches it.
+* **It is not a defence against deliberate code.** A caller can construct `Secrets("")`, exactly as
+  one can construct a `_Rendered`. The guard is against the careless key, which is what every leak
+  measured here has been.
 
 ---
 
