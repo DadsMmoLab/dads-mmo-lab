@@ -1,6 +1,6 @@
-=== edge rate, press 2 vs press 3, 2026-09-05T01:56:02+02:00; edges total 1834
+=== edge rate, press A3 (cold) vs press B (resume) -- CYCLE 2, 2026-09-05T01:56:02+02:00; edges total 1834
 --- BuildKit stage clock (s) at the same edge
-edge     press2(cold)   press3(resume)
+edge     pressA3(cold)  pressB(resume)
 1        7.197          8.786         
 100      18.87          8.944         
 200      37.75          10.23         
@@ -22,14 +22,14 @@ edge     press2(cold)   press3(resume)
 1700                    864.9         
 1800                    1010.0        
 1834                    1078.1        
---- the edge press 2 died at, and its clock
+--- the edge press A3 died at, and its clock
 #25 210.7 [605/1834]
---- press 3: first edge and last edge, with clocks
+--- press B: first edge and last edge, with clocks
 #25 8.786 [1/1834]
 #25 1078.1 [1834/1834]
---- press 3: Building edges reported (a replay from ccache still reports every edge)
+--- press B: Building edges reported (a replay from ccache still reports every edge)
 1810
---- press 3: the engine's own line, if it skipped the build (a re-press of a COMPLETE install says this; a resume after a kill does not)
+--- press B: the engine's own line, if it skipped the build (a re-press of a COMPLETE install says this; a resume after a kill does not)
 (not said: the build step was re-entered)
 --- wall clock of the build step on each press, from the harness's own INFO stamps
 /home/pk/gate72-c2-pressA3.log
@@ -39,3 +39,16 @@ edge     press2(cold)   press3(resume)
 2026-09-05 01:36:43
 2294:The build finished.
 2026-09-05 01:36:43 INFO [yulon.docker] build_staged(): `docker compose -f docker-compose.yml -f docker-compose.override
+
+
+--- CORRECTED 2026-09-05 (doc pass over this gate folder, nothing measured changed)
+Every heading above said "press 2" / "press 3" because `edge-rate.sh` was re-run for cycle 2
+with its labels untouched. The file records cycle 2 and always did: its two source logs are
+gate72-c2-pressA3.log and gate72-c2-pressB.log, named above, and the kill line reads
+#25 210.7 [605/1834] -- press A3. Press 2 died at [1226/1834] at 366.4 s, which is the real
+press-2/press-3 file, edge-rate.txt. The original wording was, verbatim:
+  line 1  === edge rate, press 2 vs press 3, 2026-09-05T01:56:02+02:00; edges total 1834
+  line 3  edge     press2(cold)   press3(resume)
+  line 25 --- the edge press 2 died at, and its clock
+  and four "--- press 3:" section headings.
+Only those headings were rewritten. Every figure is as the script printed it.
