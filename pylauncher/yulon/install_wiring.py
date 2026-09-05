@@ -207,9 +207,12 @@ def main(argv: list[str] | None = None) -> int:
     product surface: it lets a gate point the engine at a checkout's templates
     instead of a packaged bundle's.
 
-    Writes the same `yulon.log` as `main.py`, into the same `config_dir()`, and
-    the two are held to that by a test that fails on the disagreement rather
-    than on either missing call — see the `configure()` call below.
+    Writes the same `yulon.log` as `main.py`, into the same `config_dir()`.
+    What holds them to that is a test that RUNS every module this app can be
+    started as — three of them since `python -m yulon` became a driven row on
+    2026-09-05, not the two this sentence used to name — and fails on the
+    disagreement rather than on either missing call; see the `configure()`
+    call below.
     """
     # Before ANY output. Windows hands a redirected stream cp1252, and this
     # harness prints whatever the engine yields -- which includes real arrows.
