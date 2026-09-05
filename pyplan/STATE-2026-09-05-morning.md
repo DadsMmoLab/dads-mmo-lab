@@ -34,8 +34,8 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 | `lane/readybudget` | bbe6cdf4 | round 3 running — 2 blockers: a WSL cross-daemon read, and the `restarting` alive-status no test owns |
 | `lane/cancelcopy` | 2a4f0cab | round 3 running — the copy ignores the state file the app itself wrote |
 | `lane/headlesslog` | a20dae99 | round 3 running — the no-write rule is in-process only; the suite spawns children |
-| `lane/bug39-r6` | 9b0eb089 | needs another pass: a zone-breadth warning that fires on every ordinary Linux box (Docker makes a second firewalld zone) |
-| `lane/doodad` | 961230e1 | needs another pass: BLOCKER — the new refusal's remedy dead-ends and points the user at deleting their characters |
+| `lane/bug39-r6` | 380ef4ed | MERGED at `0bdbc4e3` after round 10 — owner: "stop at 10" (2026-09-05). Guard ALLOWs on the production path; Docker's zone judged machine-made on the real Fedora listings; the LAN button itself is still never pressed end to end on a real remote box (§39 stays OPEN on that) |
+| `lane/doodad` | 851d0ca9 | MERGED at `5a57164d` after round 10 (same decision). The wedge is unreachable; the refused press launches no container; the issue draft's patch now applies (`doodad-2026-09-05/apply-check.txt`, doc-v2 exit 0 on both pinned revisions) |
 | `lane/clause72` | ed3102b6 | MERGED into `yulon-phase7` at `bdee23f5`; worktree and branch deleted |
 | `lane/dockerfile-value` | c1baabea | MERGED at `bdee23f5` — §29's value half closed; `render()` refuses a public value that carries the secret |
 
@@ -55,8 +55,9 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 
 1. **7.8 macOS** — rent a Mac, or mark it deferred and ship at 11 of 12. `ci/macos-intel-dmg` is
    unmerged and has no PR; it was deliberately kept in the branch cleanup.
-2. **The upstream CMaNGOS issue must NOT be posted yet** — the text on `lane/doodad` still carries a
-   patch that `git apply --check` refuses on the commit it names.
+2. **Whether to post the upstream CMaNGOS issue.** Its patch now applies on both pinned revisions
+   (`pyplan/gates/doodad-2026-09-05/apply-check.txt`: doc-v2 exit 0, byte-identical to the shipped
+   patch). Nothing has been posted; that is the owner's call.
 
 ## Bug checklist
 

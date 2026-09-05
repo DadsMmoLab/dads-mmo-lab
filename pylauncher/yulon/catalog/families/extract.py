@@ -1446,7 +1446,8 @@ def blocked_message(tool: ExtractTool, folder: Path) -> str:
     compose files, `.env`, `.yulon-install.json`, and `.db_password` -- the
     fixture carries none, so the press mints one; an earlier count said 11 and
     omitted it); the modern one left 1 (`.yulon-install.json`). Re-measured by
-    the round-10 review (`pyplan/gates/doodad-2026-09-05/round10-press-probe.txt`). Neither launched an extraction container and
+    the round-10 review (`pyplan/gates/doodad-2026-09-05/round10-press-probe.txt`).
+    Neither launched an extraction container and
     neither changed a byte under `data/`, which is what the narrower sentence
     claims and what
     `test_a_refused_extraction_ran_nothing_and_changed_nothing_as_its_sentence_says`
