@@ -650,15 +650,26 @@ class Runner:
     proved against a real `cp -rs`, not against this class.
 
     `vmap_extractor` is the one program this double knows anything about, and
-    it knows the two things the pinned sources say (m910q 2026-09-05,
-    `cmangos/mangos-classic` 8ec338a1 and `cmangos/mangos-tbc` f82e7d67, quoted
-    in `extract.DIRTY_MARKERS`): the files it leaves in `Buildings/` include
-    `dir` and `dir_bin`, and it exits 1 without writing anything when either is
-    already there. Both are needed to reach the state the review of 2026-09-05
-    measured on a real install — a finished `data/` whose evidence file has
-    been deleted — and a double that produced only anonymous files could not
-    put a test in it at all.
+    it knows the two things the pinned sources say (`cmangos/mangos-classic`
+    8ec338a1 and `cmangos/mangos-tbc` f82e7d67, re-read on yulon-fedora
+    2026-09-05 in `~/cmangos-probe9`, quoted in `extract.DIRTY_MARKERS`):
+
+    * the files it leaves in `Buildings/` include `dir_bin` and
+      `temp_gameobject_models` — and NOT `dir`, which nothing under `contrib`
+      writes at either revision and which no real install on m910q has. What
+      the tool STATS and what it WRITES are different lists, and a double that
+      conflated them fabricated the marker the guard was then tested on;
+    * it exits 1 without writing anything when either STATTED name is already
+      there.
+
+    Both are needed to reach the state the review of 2026-09-05 measured on a
+    real install — a finished `data/` whose evidence file has been deleted —
+    and a double that produced only anonymous files could not put a test in it
+    at all.
     """
+
+    FINISHED: tuple[str, ...] = (extract.DIR_BIN, extract.GAMEOBJECT_MODELS)
+    """What a completed `vmap_extractor` leaves in `Buildings/`, by the names it uses."""
 
     def __init__(
         self,
@@ -686,7 +697,7 @@ class Runner:
                 sink(words)
                 return docker.AttachedRun(1, (words,))
         for folder, count in self.writes.get(program, {}).items():
-            marked = extract.DIRTY_MARKERS if extractor and folder == extract.BUILDINGS_DIR else ()
+            marked = self.FINISHED if extractor and folder == extract.BUILDINGS_DIR else ()
             fill(out, folder, count, first=marked)
         if program in self.fail:
             code, words = self.fail.pop(program)
@@ -834,14 +845,14 @@ def named_folder(message: str) -> Path:
 def test_evidence_for_another_client_forces_a_full_re_extract(tmp_path: Path) -> None:
     """And stops first, because a full re-extract is what `vmap_extractor` refuses.
 
-    The second half was measured rather than assumed, on m910q 2026-09-05: the
-    extractor exits 1 on `Buildings/dir` or `Buildings/dir_bin`, both of which
-    the FIRST extraction wrote, so "extract everything again" over a `data/`
-    that has been extracted into once cannot start. Until the double learned
-    those two files (2026-09-05) this test passed by fabricating a folder no
-    real extraction leaves. What the code owes here is the folder's name, once,
-    before any container runs -- and then the re-extract the assertions below
-    always claimed.
+    The second half was read rather than assumed: the extractor exits 1 on
+    `Buildings/dir` or `Buildings/dir_bin`, and the FIRST extraction leaves
+    `dir_bin` (appended from its first tile), so "extract everything again"
+    over a `data/` that has been extracted into once cannot start. Until the
+    double learned that file this test passed over a folder no real extraction
+    leaves. What the code owes here is the folder's name, once, before any
+    container runs -- and then the re-extract the assertions below always
+    claimed.
     """
     run(PLAN, Runner(FULL), tmp_path)
     data = tmp_path / "server" / "data"
@@ -854,15 +865,17 @@ def test_evidence_for_another_client_forces_a_full_re_extract(tmp_path: Path) ->
     blocked = Runner(FULL)
     said, message = run_until_refused(PLAN, blocked, tmp_path)
     assert any("another client" in line for line in said), said
-    assert blocked.names() == ["ad"], "the extractor was started into a folder it refuses"
+    assert blocked.names() == [], "a container ran in a press that says nothing was run"
     assert named_folder(message) == data / extract.BUILDINGS_DIR
     shutil.rmtree(data / extract.BUILDINGS_DIR)
 
-    # The three tools run across the two presses, not one each: `ad` re-ran and
-    # was recorded before the refusal, which is why it is skipped here.
+    # All three run in the press that follows the sentence, because the refused
+    # one ran none of them: the guard is asked over the whole plan before the
+    # first container, so `ad` was never started and has no record to be
+    # skipped by.
     runner = Runner(FULL)
     run(PLAN, runner, tmp_path)
-    assert runner.names() == ["vmap_extractor", "vmap_assembler"]
+    assert runner.names() == ["ad", "vmap_extractor", "vmap_assembler"]
     fresh = extract.read_evidence(data)
     assert fresh is not None and fresh.client_path == str((tmp_path / "client").resolve())
     assert [record.name for record in fresh.tools] == [AD.name, VMAP.name, ASSEMBLE.name]
@@ -876,11 +889,11 @@ def test_an_edited_plan_forces_a_full_re_extract_too(tmp_path: Path) -> None:
     first = Runner(FULL)
     said, message = run_until_refused(edited, first, tmp_path)
     assert any("another client or plan" in line for line in said), said
-    assert first.names() == ["ad"]
+    assert first.names() == []
     shutil.rmtree(named_folder(message))
     runner = Runner(FULL)
     run(edited, runner, tmp_path)
-    assert runner.names() == ["vmap_extractor", "vmap_assembler"]
+    assert runner.names() == ["ad", "vmap_extractor", "vmap_assembler"]
     assert data.is_dir()
 
 
@@ -902,14 +915,16 @@ def test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_t
     the only way to learn one was to read `vmapexport.cpp`.
 
     Three presses here, in that order. The first is the deletion. The second is
-    the one that used to die in the container: it now stops before it, names
-    `Buildings/`, and leaves the records it did write. The third follows the
-    sentence and finishes, which is the half a wedge does not have.
+    the one that used to die in the container: it now stops before it and names
+    `Buildings/`. The third follows the sentence and finishes, which is the
+    half a wedge does not have.
     """
     run(PLAN, Runner(FULL), tmp_path)
     data = tmp_path / "server" / "data"
     buildings = data / extract.BUILDINGS_DIR
     assert (buildings / extract.DIR_BIN).is_file(), "the double left no finished extraction"
+    assert (buildings / extract.GAMEOBJECT_MODELS).is_file(), "the extraction never finished"
+    assert not (buildings / extract.DIR_INDEX).exists(), "a real extraction leaves no `dir`"
     (data / extract.EVIDENCE_FILE).unlink()
 
     blocked = Runner(FULL)
@@ -917,7 +932,7 @@ def test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_t
         run(PLAN, blocked, tmp_path)
     message = str(caught.value)
     assert named_folder(message) == buildings
-    assert blocked.names() == ["ad"], "the extractor was launched into a folder it refuses"
+    assert blocked.names() == [], "a container ran in a press that says nothing was run"
     assert "polluted" in message, "the tool's own words are quoted, so the log matches the advice"
     assert str(data / "vmaps") not in message and str(data / "dbc") not in message
 
@@ -930,12 +945,71 @@ def test_deleting_the_evidence_file_of_a_finished_data_folder_names_the_folder_t
 
     shutil.rmtree(buildings)
     finished = Runner(FULL)
-    said = run(PLAN, finished, tmp_path)
-    assert finished.names() == ["vmap_extractor", "vmap_assembler"]
-    assert any("already extracted" in line for line in said), said
+    run(PLAN, finished, tmp_path)
+    assert finished.names() == ["ad", "vmap_extractor", "vmap_assembler"]
     evidence = extract.read_evidence(data)
     assert evidence is not None
     assert [record.name for record in evidence.tools] == [AD.name, VMAP.name, ASSEMBLE.name]
+
+
+def _data_snapshot(data_dir: Path) -> dict[str, bytes]:
+    """Every file under `data/` by relative name AND by content — one press's worth of state."""
+    return {
+        path.relative_to(data_dir).as_posix(): path.read_bytes()
+        for path in sorted(data_dir.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_a_refused_press_really_ran_nothing_and_changed_nothing_as_its_sentence_says(
+    tmp_path: Path,
+) -> None:
+    """The refusal's last claim about the PRESS, asserted as words and as fact.
+
+    Both halves are here because for one round they disagreed. `blocking_output()`
+    was asked per tool inside `run_plan()`'s loop, so the shipped `ad`-first
+    order meant the refused press had already run an `ad` container to
+    completion — tens of minutes on a real client — under a message reading
+    "Nothing was run and nothing was changed." Measured through `run_plan()` on
+    yulon-fedora 2026-09-05, this exact scenario twice: with the check in the
+    loop the press launched `["ad"]` and rewrote `data/.yulon-extract.json`,
+    the very file the remedy had told the user to delete; with the check
+    hoisted it launched `[]` and left `data/` byte-identical. And nothing in
+    the suite could see the difference, because the sentence was asserted
+    nowhere.
+
+    Two presses, because the snapshot is by CONTENT and only the second shows
+    why. In the first the evidence file was DELETED, so its return would show
+    in a set of names as well. In the second it is PRESENT and holds another
+    plan's hash, which `run_plan()` overwrites IN PLACE before the loop — no
+    file appears or disappears, and a set of paths would have called that press
+    unchanged while the record of what the folder holds had been replaced.
+    """
+    run(PLAN, Runner(FULL), tmp_path)
+    data = tmp_path / "server" / "data"
+    (data / extract.EVIDENCE_FILE).unlink()
+    before = _data_snapshot(data)
+
+    blocked = Runner(FULL)
+    with pytest.raises(InstallerError) as caught:
+        run(PLAN, blocked, tmp_path)
+    message = str(caught.value)
+    assert "Nothing was run and nothing was changed." in message, message
+    assert blocked.names() == [], "the sentence says nothing was run"
+    assert _data_snapshot(data) == before, "the sentence says nothing was changed"
+    assert not (data / extract.EVIDENCE_FILE).exists(), "the deleted evidence file came back"
+
+    other = tmp_path / "edited"
+    run(PLAN, Runner(FULL), other)
+    kept = other / "server" / "data"
+    was = _data_snapshot(kept)
+    edited = ExtractPlan(image="server", tools=(AD, VMAP, ASSEMBLE), ulimit_stack_unlimited=True)
+    second = Runner(FULL)
+    with pytest.raises(InstallerError) as again:
+        run(edited, second, other)
+    assert "Nothing was run and nothing was changed." in str(again.value), str(again.value)
+    assert second.names() == [], "the sentence says nothing was run"
+    assert _data_snapshot(kept) == was, "the evidence file was rewritten under that sentence"
 
 
 def test_only_the_binary_the_check_was_read_out_of_is_stopped_by_an_old_buildings_folder(
@@ -972,40 +1046,65 @@ def test_only_the_binary_the_check_was_read_out_of_is_stopped_by_an_old_building
 def test_the_refusal_names_the_marker_that_is_actually_on_the_disk(tmp_path: Path) -> None:
     """The tool's condition is an OR, so the message cannot be a list of both.
 
-    `vmap_extractor` writes `Buildings/dir` as it goes and `dir_bin` at the
-    end, so a Stop, a crash or a full disk leaves the first without the second
-    — and a refusal that named both would send somebody looking for a file that
-    is not there. Neither double can produce that state (both write the pair
-    together), so it is driven here.
+    The FIRST case here is the only one the world produces, and for a round it
+    was the one nothing drove. `vmap_extractor` stats `Buildings/dir` and
+    `Buildings/dir_bin` and writes only the second — appended from its first
+    tile (`adtfile.cpp:118`, `wdtfile.cpp:51`), while `dir` has no writer under
+    `contrib` at either pinned revision. Every real `Buildings/` on m910q
+    (`~/tbc-7.4c`, `~/vanilla-75b`, `~/vanilla-75`) holds `dir_bin` and no
+    `dir`, so a refusal that listed both would send every real user looking for
+    a file that is not there.
+
+    The second case is the one the tool's OR still allows and nothing writes: a
+    folder that holds a `dir` as well. It is driven because the guard mirrors
+    the tool's condition rather than the tool's output, and a `dir` that
+    arrives from anywhere at all is refused by the real binary too.
     """
     data = tmp_path / "data"
     buildings = data / extract.BUILDINGS_DIR
     buildings.mkdir(parents=True)
-    (buildings / extract.DIR_INDEX).write_bytes(b"x")
+    (buildings / extract.DIR_BIN).write_bytes(b"x")
     assert extract.blocking_output(VMAP, data) == buildings
     alone = extract.blocked_message(VMAP, buildings)
-    assert f"holds {extract.DIR_INDEX} from" in alone, alone
-    assert extract.DIR_BIN not in alone, alone
+    assert f"holds {extract.DIR_BIN} from" in alone, alone
+    assert f"{extract.DIR_INDEX} and" not in alone, alone
 
-    (buildings / extract.DIR_BIN).write_bytes(b"x")
+    (buildings / extract.DIR_INDEX).write_bytes(b"x")
     both = extract.blocked_message(VMAP, buildings)
     assert f"holds {extract.DIR_INDEX} and {extract.DIR_BIN} from" in both, both
+
+    (buildings / extract.DIR_BIN).unlink()
+    index_only = extract.blocked_message(VMAP, buildings)
+    assert f"holds {extract.DIR_INDEX} from" in index_only, index_only
+    assert extract.DIR_BIN not in index_only, index_only
 
 
 def test_the_only_folder_a_second_extraction_has_to_be_given_is_buildings(tmp_path: Path) -> None:
     """`clear_before_rerun()` enumerates the plan; three of the four folders never appear.
 
-    The negative is the half that costs something if it is wrong: `ad`,
-    `vmap_assembler` and `MoveMapGen` overwrite (read at both pinned CMaNGOS
-    revisions on m910q 2026-09-05 -- `extract.DIRTY_MARKERS` cites the files
-    and lines), so a remedy naming `dbc/`, `maps/`, `vmaps/` or `mmaps/` would
-    be charging a user for work no tool asks for.
+    The negative is the half that costs something if it is wrong, and it is
+    three different facts rather than one (all re-read at both pinned CMaNGOS
+    revisions on yulon-fedora 2026-09-05 -- `extract.DIRTY_MARKERS` cites the
+    files and lines). `ad` and `vmap_assembler` overwrite: every output goes
+    through `fopen(.., "wb")`. `MoveMapGen` does NOT overwrite --
+    `MapBuilder::shouldSkipTile` reads the header of an existing `.mmtile` and
+    skips that tile when the magic and both versions match -- but it does not
+    REFUSE either, and the mmaps stage wipes `mmaps/` itself when no finished
+    record vouches for it. What none of the three does is stop, so a remedy
+    naming `dbc/`, `maps/`, `vmaps/` or `mmaps/` would be charging a user for
+    work no tool asks for.
+
+    The removal below is of what the double actually left, not of
+    `DIRTY_MARKERS`: only `dir_bin` is ever written, and unlinking the tool's
+    other statted name would be unlinking a file no extraction creates.
     """
     run(PLAN, Runner(FULL), tmp_path)
     data = tmp_path / "server" / "data"
-    assert extract.clear_before_rerun(PLAN, data) == (data / extract.BUILDINGS_DIR,)
-    for marker in extract.DIRTY_MARKERS:
-        (data / extract.BUILDINGS_DIR / marker).unlink()
+    buildings = data / extract.BUILDINGS_DIR
+    assert extract.clear_before_rerun(PLAN, data) == (buildings,)
+    present = [name for name in extract.DIRTY_MARKERS if (buildings / name).exists()]
+    assert present == [extract.DIR_BIN], f"the double left {present} in {buildings}"
+    (buildings / extract.DIR_BIN).unlink()
     assert extract.clear_before_rerun(PLAN, data) == (), "an emptied folder is still named"
 
 
@@ -1134,9 +1233,10 @@ def test_a_cancel_keeps_finished_tools_and_says_so(tmp_path: Path) -> None:
     a claim about the RECORDS, and the last press below is what holds it: `ad`
     is not run a second time. What the note cannot promise is that the
     interrupted tool starts straight away. A Stop taken while `vmap_extractor`
-    was writing leaves `Buildings/dir` behind, and that is one of the two files
-    the tool refuses to start beside (read from the pinned sources on m910q
-    2026-09-05 -- see `extract.DIRTY_MARKERS`). Before the refusal in
+    was writing leaves `Buildings/dir_bin` behind -- it is appended from the
+    first tile on, not written at the end -- and that is one of the two files
+    the tool refuses to start beside (read from the pinned sources on
+    yulon-fedora 2026-09-05 -- see `extract.DIRTY_MARKERS`). Before the refusal in
     `run_plan()` existed that press died inside the container on "Your output
     directory seems to be polluted, please use an empty directory!" with no
     folder named anywhere, and every press after it died the same way. It now
@@ -2085,7 +2185,7 @@ def test_a_tool_that_really_exits_ninety_one_is_still_the_tool_failing(tmp_path:
     halves together are not enough without `stage_client`.
 
     A `data/` each, and not one shared between the three: a failed
-    `vmap_extractor` still leaves `Buildings/dir` behind, so the second and
+    `vmap_extractor` still leaves `Buildings/dir_bin` behind, so the second and
     third presses into one folder would be stopped by `blocking_output()`
     before their own tool ever ran, and each would assert the wrong refusal.
     """

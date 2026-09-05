@@ -2291,7 +2291,14 @@ def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
     assert images == engine(rec).built_image_refs(ctx), str(caught.value)
     buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
     assert doomed == (evidence, buildings), str(caught.value)
+    # The shape a real one is in, not a shape only this suite can make: `dir_bin`
+    # is appended from the extractor's first tile and `temp_gameobject_models` is
+    # written by the last call in its `main()`, while `dir` -- the other name the
+    # tool STATS -- has no writer under `contrib` at either pinned revision and is
+    # on none of the three real installs measured on m910q.
     assert (buildings / extract.DIR_BIN).is_file(), "the fixture is not a finished extraction"
+    assert (buildings / extract.GAMEOBJECT_MODELS).is_file(), "the extraction never finished"
+    assert not (buildings / extract.DIR_INDEX).exists(), "no extraction writes a `dir`"
 
     # Exactly the remedy, and nothing else: the containers go, the images the
     # sentence named go, and each path it named goes. The folder stays, and so

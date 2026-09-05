@@ -888,18 +888,25 @@ def run_plan(
     `required_file` is the client spec's; `client_build` is only spoken, in the
     shortfall refusal, because the count gate is the real check of the build.
 
-    A tool the evidence does not vouch for is asked one question before it is
-    run (`blocking_output()`): would it refuse to start into the folder that is
-    there? Only `vmap extract` can answer yes, and only over a `Buildings/`
-    that still holds `dir` or `dir_bin`. That state is not hypothetical -- it
-    is what a finished install looks like the moment its evidence file is
-    deleted, which is what `cmangos.py`'s patch refusal used to tell people to
-    do. Measured on m910q 2026-09-05 through this function: without the
-    question the press died at the container with "Your output directory seems
-    to be polluted, please use an empty directory!", the re-created evidence
-    recorded `dbc and maps` alone, and every later press died the same way with
-    no folder ever named. Nothing is deleted for the user here; the refusal
-    names `data/Buildings` and stops before the container.
+    Every tool the evidence does not vouch for is asked one question
+    (`blocking_output()`) in a single pass BEFORE the first of them is run:
+    would it refuse to start into the folder that is there? Only `vmap extract`
+    can answer yes, and only over a `Buildings/` that still holds `dir` or
+    `dir_bin`. That state is not hypothetical -- it is what a finished install
+    looks like the moment its evidence file is deleted, which is what
+    `cmangos.py`'s patch refusal used to tell people to do. Measured on m910q
+    2026-09-05 through this function: without the question the press died at
+    the container with "Your output directory seems to be polluted, please use
+    an empty directory!", the re-created evidence recorded `dbc and maps`
+    alone, and every later press died the same way with no folder ever named.
+    Nothing is deleted for the user here; the refusal names `data/Buildings`
+    and stops before the container.
+
+    The pass is what makes the refusal's own last claim true. Asked per tool
+    inside the loop, as it was when the check was first written, the plans'
+    `ad`-first order meant a refused press had already run a container to
+    completion and rewritten the evidence file -- under a sentence saying
+    nothing was run and nothing was changed.
 
     Two of the plan's fields are fallbacks, and both are said out loud rather
     than done quietly, because "it needed help" and "it went fine" are different
@@ -940,6 +947,36 @@ def run_plan(
     if current is not None and not same_stage(current, expected):
         yield "the extracted data is for another client or plan; extracting everything again"
         current = None
+    # Every tool this press would run, asked in ONE pass before any of them
+    # runs and before a single byte under `data/` is written -- the evidence
+    # file below included. Only `vmap extract` can answer, and only over a
+    # `Buildings/` that still holds `dir` or `dir_bin`. That state is not
+    # hypothetical: it is what a finished install looks like the moment its
+    # evidence file is deleted, which is what `cmangos.py`'s patch refusal used
+    # to tell people to do.
+    #
+    # In the loop below instead -- where this check lived until 2026-09-05 --
+    # the refusal was correct and its own sentence was not. The shipped
+    # `wow-tbc` and `wow-vanilla` plans order `dbc and maps` first, so a press
+    # that stopped at `vmap extract` had already run an `ad` container to
+    # completion, under a message reading "Nothing was run and nothing was
+    # changed." Measured through this function on yulon-fedora 2026-09-05, the
+    # same press twice: with the check in the loop it launched `["ad"]` and
+    # rewrote `data/.yulon-extract.json`; with it here it launched `[]` and
+    # `data/` came out byte-identical. On a real client the difference is a
+    # full `ad` -- tens of minutes, and every file under `dbc/` and `maps/`
+    # opened `"wb"` and written again.
+    #
+    # `tool_satisfied` cannot flip from False to True except by the tool
+    # running (it demands a record for that tool's own argv), so this pass sees
+    # exactly the tools the loop below would run. The retry pass does not come
+    # through here; it empties first.
+    for tool in plan.tools:
+        if tool_satisfied(tool, data_dir, current, expected):
+            continue
+        blocked = blocking_output(tool, data_dir)
+        if blocked is not None:
+            raise InstallerError(blocked_message(tool, blocked))
     if current is None:
         current = expected
         write_evidence(data_dir, current)
@@ -962,16 +999,6 @@ def run_plan(
             seen = counts(tool.produces, data_dir)
             yield f"{tool.name}: already extracted ({_counts_text(seen)})"
             continue
-        # Before the folders are made and before the container, because the
-        # tool is about to exit 1 on its first breath and say only that a
-        # directory is polluted. A tool the evidence vouches for never reaches
-        # this -- the skip above is what a finished `Buildings/` buys -- so
-        # this fires exactly where the old behaviour wedged: an unsatisfied
-        # `vmap extract` over a `Buildings/` a finished extraction left. The
-        # retry pass below does not come through here; it empties first.
-        blocked = blocking_output(tool, data_dir)
-        if blocked is not None:
-            raise InstallerError(blocked_message(tool, blocked))
         make_out_dirs(tool.produces, data_dir)
         yield f"{tool.name}: running {' '.join(tool.argv)}"
         run = run_container(spec_for(tool), sink=sink, cancel=cancel)
@@ -1184,10 +1211,46 @@ reads, and a folder name that is data is one edit from being somewhere else.
 """
 
 DIR_BIN = "dir_bin"
-"""The placement index inside `Buildings/`: one record per placed model, its file name inside."""
+"""The placement index inside `Buildings/`: one record per placed model, its file name inside.
+
+The one marker a real `Buildings/` actually carries, and it is there from the
+FIRST tile, not the last. Read at both revisions `catalog.json` pins
+(yulon-fedora 2026-09-05, `~/cmangos-probe9`, fetched `--depth 1` by SHA):
+`adtfile.cpp:116-118` and `wdtfile.cpp:49-51` build the name as
+`std::string(szWorkDirWmo) + "/dir_bin"` and open it with `fopen(dirname.c_str(),
+"ab")` -- append, per ADT and per WDT, `fclose`d at the end of each tile
+(`adtfile.cpp:215`, `wdtfile.cpp:115`). So a Stop, a crash or a full disk
+taken any time after the first tile leaves `dir_bin` behind, which is why
+every real install measured on m910q (`~/tbc-7.4c`, `~/vanilla-75b`,
+`~/vanilla-75`) holds it.
+"""
 
 DIR_INDEX = "dir"
-"""The text placement index beside `dir_bin`, and the extractor's other dirty-output marker."""
+"""The extractor's other dirty-output marker -- and a file no pinned revision writes.
+
+`DIRTY_MARKERS` mirrors the tool's condition, and the tool's condition is an OR
+over `dir` and `dir_bin`, so a `Buildings/` that holds a file called `dir` for
+any reason is refused by the real binary and has to be refused here. But
+nothing under `contrib` creates it: at both pinned revisions
+`git grep -nE '"/dir"' -- contrib` returns exactly ONE hit, the stat check
+itself (`vmapexport.cpp:474` at 8ec338a1, `:524` at f82e7d67), and no real
+install on m910q has one. Kept because the tool keeps it; never treated as
+evidence that an extraction happened.
+"""
+
+GAMEOBJECT_MODELS = "temp_gameobject_models"
+"""What a FINISHED `Buildings/` has that a half-written one does not.
+
+Not a dirty marker -- the stat check above names two paths and this is not one
+of them -- and recorded here because it is the file that separates the two
+states this module keeps having to tell apart. `ExtractGameobjectModels()`
+opens it `fopen((basepath + "temp_gameobject_models").c_str(), "wb")` with
+`basepath = szWorkDirWmo + "/"` (`gameobject_extract.cpp:58` at both pinned
+revisions), and `main()` calls it LAST, after `ExtractWmo()` and after
+`ParsMapFiles()` -- the loop that appends `dir_bin`. So `dir_bin` without
+`temp_gameobject_models` is an interrupted extraction and both together are a
+complete one, which is the pair the doubles in `tests/` write.
+"""
 
 DIRTY_MARKERS: tuple[str, ...] = (DIR_INDEX, DIR_BIN)
 r"""The two names `vmap_extractor`'s `main()` stats before it will start at all.
@@ -1212,19 +1275,45 @@ eleven lines, and the condition is an OR over exactly these two paths::
 recipe in the catalog can reach it (`wow-tbc` has none; `wow-vanilla`'s fires
 on `Segmentation fault|core dumped` and returncode 139).
 
+The condition is a CHECK and nothing here writes either path: see `DIR_BIN`
+and `DIR_INDEX` for who writes what, re-read on yulon-fedora 2026-09-05 at
+both revisions. `dir_bin` is appended from the first tile; `dir` has no writer
+under `contrib` at all.
+
 It is the ONLY one of the four tools that refuses a non-empty output folder,
-and that was read the same day rather than assumed. `contrib/extractor`'s
-`ad` creates with `CreateDir()` and overwrites (`System.cpp:98-103`, and its
-`FileExists()` calls are all about the CLIENT's files); `vmap_assembler`'s
-`main()` is thirty lines with two `return 1`s, both for a bad argv or a failed
-`convertWorld2()`, and `TileAssembler` opens every output with `fopen(..,
-"wb")` (`src/game/vmap/TileAssembler.cpp:110,158,329,338`); `contrib/mmap`'s
-`MoveMapGen` has no such check either -- a `git grep -i` for "polluted",
-"dirty" and "empty directory" over `contrib/mmap`, `contrib/extractor` and
-`contrib/vmap_assembler` at both revisions returns nothing. So `vmaps/`,
-`mmaps/`, `dbc/` and `maps/` need no emptying for a second extraction, and a
-remedy that told a user to delete them would be charging for work the tools do
-not ask for.
+and that was read again rather than assumed, on yulon-fedora 2026-09-05 at
+both pinned revisions (`~/cmangos-probe9`). None of the other three refuses,
+and none of them REBUILDS everything either, which are different facts:
+
+* `contrib/extractor`'s `ad` creates its folders with `CreateDir()`
+  (`System.cpp:109-116` at 8ec338a1, `:98-105` at f82e7d67) and overwrites
+  what it writes -- `.map` files and every extracted client file go through
+  `fopen(.., "wb")` (`System.cpp:783` and `:890` at 8ec338a1, `:772` and
+  `:879` at f82e7d67). It has ONE output-path `FileExists()`, on
+  `Cameras/` (`:972` at 8ec338a1, `:973` at f82e7d67), and it `continue`s past
+  a camera file that is already there. Its other `FileExists()` calls are
+  about the CLIENT's MPQs;
+* `vmap_assembler`'s `main()` is a couple of dozen lines with two `return 1`s,
+  both for a bad argv or a failed `convertWorld2()`
+  (`contrib/vmap_assembler/vmap_assembler.cpp:30` and `:44` at 8ec338a1, `:30`
+  and `:43` at f82e7d67 -- the same two branches, one line apart because TBC's
+  assembler is not heap-allocated), and `TileAssembler` opens every output with
+  `fopen(.., "wb")` (`src/game/vmap/TileAssembler.cpp:111,162,338`, those three
+  line numbers identical at both revisions);
+* `contrib/mmap`'s `MoveMapGen` has no such check either, and it does not
+  overwrite: `MapBuilder::shouldSkipTile` (`MapBuilder.cpp:1186` at 8ec338a1,
+  `:1204` at f82e7d67) opens the existing `mmaps/<map><y><x>.mmtile`, reads its
+  header, and returns true -- SKIPPING the tile at `:603`/`:610` -- when the
+  magic, the Detour version and the mmap version all match. A tile that is
+  missing, short or stale is rebuilt; a matching one is kept. No user of this
+  module sees the difference, because the mmaps stage wipes `mmaps/` itself
+  when no finished record vouches for it.
+
+A `git grep -i` for "polluted", "dirty" and "empty directory" over
+`contrib/mmap`, `contrib/extractor` and `contrib/vmap_assembler` at both
+revisions returns nothing. So `vmaps/`, `mmaps/`, `dbc/` and `maps/` need no
+emptying for a second extraction, and a remedy that told a user to delete them
+would be charging for work the tools do not ask for.
 """
 
 DIRTY_OUTPUT_TOOL = "vmap_extractor"
@@ -1311,9 +1400,22 @@ def blocked_message(tool: ExtractTool, folder: Path) -> str:
     """The refusal, with the folder named -- the sentence the tool's own last words are not.
 
     The markers are the ones actually THERE, read again here rather than
-    listed: the tool's condition is an OR, a Stop taken mid-extraction leaves
-    `dir` without `dir_bin`, and a message that named both would be telling
-    somebody about a file they will not find.
+    listed. The tool's condition is an OR over two paths and only one of them
+    has a writer: `dir_bin` is appended from the first tile and `dir` is
+    written by nothing under `contrib` at either pinned revision (see
+    `DIR_BIN`, `DIR_INDEX`). So the message a real install gets names `dir_bin`
+    alone -- every `Buildings/` measured on m910q 2026-09-05 holds `dir_bin`
+    and no `dir` -- and listing both would be telling somebody about a file
+    they will not find.
+
+    "Nothing was run and nothing was changed" is a claim about the PRESS, not
+    about this tool, and it is why `run_plan()` asks every unsatisfied tool
+    this question in one pass before it runs any of them. Asked inside the loop
+    instead, the sentence was false in the one scenario the refusal exists for:
+    the shipped plans put `ad` first, so a press that refused `vmap extract`
+    had already run an `ad` container to completion -- tens of minutes on a
+    real client -- and rewritten the evidence file the user had just been told
+    to delete.
     """
     present = [marker for marker in DIRTY_MARKERS if (folder / marker).exists()]
     held = " and ".join(present)

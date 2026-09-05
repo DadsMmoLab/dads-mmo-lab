@@ -1,0 +1,17 @@
+extract.py md5: 6b7a9c5602f656c9cd9e545e30545059
+----- AS SHIPPED (guard hoisted over the whole plan)
+REFUSED: vmap extract cannot run into /tmp/tmpxjxn0gi6/server/data/Buildings: it already holds dir_bin from an earlier extraction, and this tool refu
+CONTAINERS RUN IN THE REFUSED PRESS: []
+FILES UNDER data/ BEFORE: 9  AFTER: 9
+CREATED-OR-REWRITTEN: 0
+FIRST TEN: []
+
+extract.py md5 un-hoisted: ef63a91fbd6af6c79c692864a4ce828d
+----- UN-HOISTED (the guard asked per tool inside the loop)
+REFUSED: vmap extract cannot run into /tmp/tmp0qzqtzjd/server/data/Buildings: it already holds dir_bin from an earlier extraction, and this tool refu
+CONTAINERS RUN IN THE REFUSED PRESS: ['ad']
+FILES UNDER data/ BEFORE: 9  AFTER: 10
+CREATED-OR-REWRITTEN: 1
+FIRST TEN: ['.yulon-extract.json']
+
+restored, md5 re-checked: 6b7a9c5602f656c9cd9e545e30545059

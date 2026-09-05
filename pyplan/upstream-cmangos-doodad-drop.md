@@ -607,11 +607,20 @@ shape: `~/tbc-7.4c/data/Buildings` 7,171 files including a 50,938,121-byte `dir_
 `~/vanilla-75b` 5,076 including 31,072,203.
 
 Three folders are NOT named, and that is a reading rather than a hope: `ad` creates with
-`CreateDir()` and overwrites (`contrib/extractor/System.cpp:98-103`), `vmap_assembler`'s `main()`
-has two `return 1`s and neither is about the destination while `TileAssembler` opens every output
-`fopen(.., "wb")` (`src/game/vmap/TileAssembler.cpp:110,158,329,338`), and `contrib/mmap`'s
-`MoveMapGen` has no such check either — a `git grep -i` for "polluted", "dirty" and "empty
-directory" over those three trees at both revisions returns nothing. `wow-tortoise` is excluded
+`CreateDir()` (`contrib/extractor/System.cpp:109-116` at 8ec338a1, `:98-105` at f82e7d67 — the
+round that first wrote this paragraph gave TBC's line numbers for both) and overwrites what it
+writes through `fopen(.., "wb")`; `vmap_assembler`'s `main()` has two `return 1`s and neither is
+about the destination while `TileAssembler` opens every output `fopen(.., "wb")`
+(`src/game/vmap/TileAssembler.cpp:111,162,338`, identical at both revisions — the
+`110,158,329,338` first written here matches neither); and `contrib/mmap`'s `MoveMapGen` has no
+such check either — a `git grep -i` for "polluted", "dirty" and "empty directory" over those three
+trees at both revisions returns nothing. It does not OVERWRITE either, which this paragraph used
+to say it did: `MapBuilder::shouldSkipTile` (`contrib/mmap/src/MapBuilder.cpp:1186` at 8ec338a1,
+`:1204` at f82e7d67) reads an existing `.mmtile`'s header and skips that tile when the magic, the
+Detour version and the mmap version all match, so it keeps matching tiles and rebuilds the rest.
+Nothing downstream sees the difference, because the mmaps stage wipes `mmaps/` itself when no
+finished record vouches for it — but "no refusal" and "overwrites" are separate claims and only
+the first was read. `wow-tortoise` is excluded
 for the opposite reason: its `vmap extract` produces `Buildings` too but runs
 `/opt/tortoise/bin/vmapextractor`, whose `main()` goes from `processArgv` straight to `mkdir`
 with no check at all — read at `Shyalya/tortoise-wow` **7c0fb278**, the rev `catalog.json` pins
@@ -622,16 +631,52 @@ this paragraph is in `pyplan/gates/doodad-2026-09-05/extractor-dirty-output.txt`
 output of the script beside it.
 
 **The engine now says the folder's name instead of the tool saying nothing.** `run_plan()` asks
-`blocking_output()` before it makes any folder or starts any container, and refuses with
-`data/Buildings` named and the fix stated ("Delete … and press Install again"). It does not
-delete anything: `empty_out_dirs()` on a first run is the obvious fix and the wrong one, because
-what is under `data/Buildings` is hours of somebody's extraction and nobody asked for it to go.
+`blocking_output()` of every unsatisfied tool in one pass, before it makes any folder, starts any
+container or rewrites the evidence file, and refuses with `data/Buildings` named and the fix
+stated ("Delete … and press Install again"). It does not delete anything: `empty_out_dirs()` on a
+first run is the obvious fix and the wrong one, because what is under `data/Buildings` is hours of
+somebody's extraction and nobody asked for it to go.
 Three further presses reach the same wall and now say the same thing, none of which anyone had
 noticed: a `data/` whose evidence names ANOTHER CLIENT, one whose PLAN HASH changed, and a
-press after a Stop taken while `vmap extract` was running (that one leaves `Buildings/dir`
-behind, so the cancel note's "only the tool that was interrupted runs again" was true of the
+press after a Stop taken while `vmap extract` was running (that one leaves `Buildings/dir_bin`
+behind — the extractor appends it from the first tile, `adtfile.cpp:118` and `wdtfile.cpp:51` open
+it `"ab"` — so the cancel note's "only the tool that was interrupted runs again" was true of the
 records and not of the next press). Each has a test in `tests/test_extract.py` that follows the
 refusal and finishes.
+
+**The marker the guard is really about is `dir_bin`, and for one round the tests said otherwise.**
+`vmapexport.cpp`'s check is an OR over `Buildings/dir` and `Buildings/dir_bin`, and the round that
+wrote the guard read the CHECK without reading the WRITERS: six places then stated that the
+extractor writes `dir` as it goes and `dir_bin` at the end. The sources say the inverse. Re-read on
+yulon-fedora 2026-09-05 at both pinned revisions (`~/cmangos-probe9`, fetched `--depth 1` by SHA),
+`git grep -nE '"/dir"' -- contrib` returns exactly one hit at each — `vmapexport.cpp:474` at
+8ec338a1 and `:524` at f82e7d67, the stat check itself — while `dir_bin` is
+`fopen(dirname.c_str(), "ab")` per ADT and per WDT, and `temp_gameobject_models` is written last,
+by the `ExtractGameobjectModels()` call that ends `main()`. All three real installs on m910q hold
+`dir_bin` and `temp_gameobject_models` and exactly zero files named `dir`
+(`gates/doodad-2026-09-05/real-installs-m910q.txt`) — and two of the three were already listed
+that way, with a `dir_bin` and no `dir`, in `extractor-dirty-output.txt` §5 lines 147-151, beneath
+a paragraph claiming the opposite. Both test doubles were writing a `dir` no extraction produces,
+so the half of the guard that fires in the world was asserted by nothing. The pair that measures
+that, on the gate's suite (`mutations-round5.txt`): keying `blocking_output()` on `dir` alone —
+the marker nothing writes — is 10 RED now, and 4 with both doubles put back to writing `dir`. The
+six that go quiet under the fabrication are exactly the tests that drive the guard through
+`run_plan()` over a `Buildings/` in the shape the world's are in. The doubles now write
+`dir_bin` and `temp_gameobject_models` only, and `dir` stays in `DIRTY_MARKERS` for the one reason
+that survives — the tool stats it, so a folder that holds one is refused by the real binary
+whoever put it there.
+
+**The refusal now runs nothing before it refuses.** `blocking_output()` used to be asked per tool
+inside `run_plan()`'s loop, and the shipped plans put `dbc and maps` first, so the press that
+refused `vmap extract` had already run an `ad` container to completion — under a sentence reading
+"Nothing was run and nothing was changed." Driven through `run_plan()` twice on yulon-fedora
+2026-09-05, same scenario, only the guard's position changed: in the loop it launched `["ad"]` and
+rewrote `data/.yulon-extract.json`, the file the remedy had just told the user to delete; hoisted
+over the whole plan it launched `[]` and left `data/` byte-identical. On a real client that
+difference is tens of minutes of `ad` and every file under `dbc/` and `maps/` written again, since
+`ad` opens each output `"wb"`. The question is now asked over every unsatisfied tool in one pass
+before the first container and before the evidence file is rewritten, and a test asserts the
+sentence's words together with its truth.
 
 **What this costs, and the recommendation the owner asked for.** The owner said "do what you
 recommend". The recommendation is the refusal as it now stands, and the argument is the price:

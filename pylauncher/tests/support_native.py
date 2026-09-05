@@ -353,17 +353,24 @@ class Recorder:
         would make every "the tool failed" test pass for the wrong reason.
 
         `vmap_extractor` gets two rules of its own, both transcribed from the
-        pinned sources on m910q 2026-09-05 (`cmangos/mangos-classic` 8ec338a1
-        and `cmangos/mangos-tbc` f82e7d67, `contrib/vmap_extractor/vmapextract/
-        vmapexport.cpp`, and `extract.DIRTY_MARKERS` carries the quotation):
+        pinned sources (`cmangos/mangos-classic` 8ec338a1 and
+        `cmangos/mangos-tbc` f82e7d67, `contrib/vmap_extractor/vmapextract/`),
+        re-read on yulon-fedora 2026-09-05 in `~/cmangos-probe9`;
+        `extract.DIRTY_MARKERS` carries the quotation:
 
-        * a successful run writes `Buildings/dir` and `Buildings/dir_bin`, so a
-          `data/` this double calls finished has the same two files a real one
-          has. Without them no fixture in the suite could be in the state the
-          review of 2026-09-05 measured on a real install, and the blocker
-          under it was invisible for exactly that reason;
-        * a run that meets either of those files exits 1 with the tool's own
-          last words and writes nothing, which is `main()`'s first `if`.
+        * a successful run leaves `Buildings/dir_bin` and
+          `Buildings/temp_gameobject_models`, and NOT `Buildings/dir` -- the
+          shape every real install measured on m910q is in. `dir_bin` is
+          appended per tile (`adtfile.cpp:118`, `wdtfile.cpp:51`, `fopen(..,
+          "ab")`), `temp_gameobject_models` is written last by
+          `ExtractGameobjectModels()` (`gameobject_extract.cpp:58`), and `dir`
+          has no writer under `contrib` at either revision: it is the second
+          half of the tool's stat check and nothing else. A double that wrote
+          `dir` would put every fixture in a state no extraction can produce,
+          and would hide the half of the guard that fires in the world;
+        * a run that meets either of the two CHECKED names exits 1 with the
+          tool's own last words and writes nothing, which is `main()`'s first
+          `if`.
 
         Keyed on `argv[0]`'s basename, like `extract.DIRTY_OUTPUT_TOOL` and for
         its reason: `wow-tortoise`'s `vmapextractor` is a different binary with
@@ -388,8 +395,8 @@ class Recorder:
                 for index in range(count):
                     (folder / f"{index:05d}.bin").write_bytes(b"x")
             if extractor and buildings is not None:
-                for marker in extract.DIRTY_MARKERS:
-                    (buildings / marker).write_bytes(b"\x00Model001.m2\x00")
+                for name in (extract.DIR_BIN, extract.GAMEOBJECT_MODELS):
+                    (buildings / name).write_bytes(b"\x00Model001.m2\x00")
         return self.run_result
 
     def copy_from_image(self, image: str, src: str, dest: Path) -> None:
