@@ -1822,8 +1822,9 @@ remedy ("rename it, or declare it") is the wrong advice for a key holding the re
 **What a "match" is, and the measurements behind it.** `carries_a_secret(value, secret)` is
 containment at or above `MIN_CONTAINED_SECRET = 8`, equality below it, and never true for an empty
 secret. Measured on m910q 2026-09-05, `server_dir=/tmp/fixedsrv/srv`, over the 34 distinct values the
-three shipped CMaNGOS `_public_tokens()` mappings produce (the directory is named because three of
-those values carry an 8-hex digest of it, so any count over their CHARACTERS moves with it — this
+three shipped CMaNGOS `_public_tokens()` mappings produce (the directory is named because four of
+those values — two per mapping, `IMAGE_TAG` and `PROJECT_NAME` — carry an 8-hex digest of it, so any
+count over their CHARACTERS moves with it — this
 list said 30, 16 and 98 until 2026-09-05, from a run under per-game temporary directories):
 
 * the empty string is contained in all 34, and 31 of the 36 single alphanumeric characters are
@@ -1907,13 +1908,15 @@ to every token the instance declares → 1. The floor moved to 4 → 1; to 20 �
 neither was a survivor: the edits had not applied, and the script was then made to assert its own
 substitution before it was allowed to believe a green.
 
-**Re-derived at `dd8b863f`, m910q 2026-09-05**, four commits after `75bce609` and with two tests
-added to them since. `dd8b863f` is the commit before this one, which is why it can be named at all:
+**Re-derived at `dd8b863f`, m910q 2026-09-05**, five commits after `75bce609` (`git rev-list --count
+75bce609..dd8b863f` = 5) and with two tests added to them since. `dd8b863f` is the commit whose
+tree the numbers describe; the paragraph itself was written at `4bee5fdc` and re-read once more at
+the commit that fixed this sentence:
 a record cannot hold its own SHA, and `9bff3e81` resolved that by labelling its numbers for a
 DIFFERENT commit. This one changes nothing but this paragraph — `git diff dd8b863f..HEAD -- pylauncher`
 is empty — so the numbers hold here as well. Command, at each end:
 `.venv/bin/python -m pytest tests/test_dockerfile.py tests/test_families_cmangos.py -q` — at
-`75bce609` in `~/yulon-runs/fix3b-at-75bce609`, and at this commit's tree in
+`75bce609` in a throwaway checkout of that commit, and at `dd8b863f`'s tree in
 `~/yulon-runs/fix3b-dockerfile-value`; `__pycache__` purged on both sides of every mutation, every
 edit asserted present on disk before its result was believed, every file restored and compared byte
 for byte after. Baseline 213 (was 211). The value refusal deleted → 13 failed (was 11). The floor

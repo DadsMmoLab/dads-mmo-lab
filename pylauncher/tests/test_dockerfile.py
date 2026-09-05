@@ -775,8 +775,9 @@ def test_a_one_character_secret_is_matched_only_where_it_is_the_whole_value(
     `server_dir=/tmp/fixedsrv/srv`: 31 of the 36 single alphanumeric characters are
     contained in at least one, and `a` alone is in 14 of them (`/opt/mangos`,
     `characters`, …). Containment at that length is not a strict rule, it is an install
-    that can never run. The directory is named because three of those values carry an
-    8-hex digest of it and both counts move with it — this docstring said 30 and 16 until
+    that can never run. The directory is named because four of those values (two per
+    mapping, `IMAGE_TAG` and `PROJECT_NAME`) carry an 8-hex digest of it and both counts
+    move with it — this docstring said 30 and 16 until
     2026-09-05, from a run under per-game temporary directories. What does not move is
     that some single character is in some value, which is the whole argument.
 
