@@ -32,3 +32,13 @@ STILL UNVERIFIED: that a real sshd listener prints as "sshd" (or "sshd-session"
 on OpenSSH >= 9.8) in that column - this distro has no sshd. If that token is
 ever wrong the probe finds no port, which lands on the REFUSE branch, not on a
 silent enable.
+
+--- APPENDED 2026-09-04, AFTER THE CAPTURE ABOVE; the capture itself is unedited ---
+Point 4 and the STILL UNVERIFIED paragraph are both WRONG, and m910q refuted them
+the same day: an unprivileged ss DOES print a users:(( column for a socket the
+user owns (one gnome-remote-desktop listener, uid 1000), while root-owned sshd
+prints none - so "no owner column at all" was a property of dml-arch, which has
+no user-owned listeners, not of an unprivileged ss. And a wrong owner token does
+NOT land on the REFUSE branch: with a readable table and no SSH_CONNECTION it
+lands on the silent enable. See CORRECTION-2026-09-04.md beside this file and
+bug-checklist.md section 39.

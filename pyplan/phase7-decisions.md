@@ -1135,3 +1135,52 @@ review of the reviews: 46 findings, all confirmed as edits to this page, `README
 scripts, eight bind lines, `DB_PASSWORD` in templates), two numbering schemes for one set of
 steps, a field move that contradicted the not-touched list, the two-press first run, sudo asked
 once, buildx absent from two package lists, and per-tool completion records. All are folded in.
+
+## Appendix C — the LAN button opens the ports (owner decision, 2026-09-04)
+
+Asked after three rounds of repair on bug-checklist §39 had each been refuted by measurement.
+Two options were put to the owner: (1) *conservative* — Yu'lon never runs `ufw enable`,
+`systemctl enable firewalld` or `firewall-cmd --reload` on the user's behalf; it stages the port
+rules and prints the two commands that finish, SSH port first; (2) *keep going* — repair the guard
+so the button does the whole thing and never takes the operator's own SSH away doing it.
+
+**The owner chose (2), and said why in one sentence: "I want it so they can just click a button
+then the server's ports get forwarded."** Staging-and-print is therefore rejected as the product,
+not merely deferred. Round 4 (the placed/unplaced rule, an empty socket table as unresolved,
+firewalld active zones) started the same evening.
+
+Scope pinned in the same exchange: *forwarded* means the machine's own firewall — 3724/8085
+open in ufw or firewalld so players on the LAN connect. Forwarding on the **router** (the app's
+`internet` mode, today a list of manual router steps) was named as a possible later feature —
+UPnP/NAT-PMP mapping from the app with a refusal that says why when the router declines — and
+is **not scheduled**; it needs a router to test against and is a feature, not a fix.
+
+## Appendix D — the realm must be settable to 127.0.0.1 on purpose (owner decision, 2026-09-05)
+
+Asked immediately after Appendix C's reword. Rewording the 7.1 clause blessed `ready`'s automatic
+`UPDATE` to a reachable address; the owner's next sentence was **"but make it possible to set it to
+127.0.0.1"**. So the reword stands and it is not the whole story: a user must be able to say *this
+server is for this computer only*, and have that stick.
+
+**Why it does not stick today, measured in the code rather than assumed.** `ready`'s realm step
+(`catalog/native.py:1969-2005`) reads the stored row and rewrites it unless
+`networking.advertisable()` accepts EVERY column. `advertisable()` refuses the loopback by design —
+that refusal is the whole of bug-checklist §35, where a realm advertising `127.0.0.1` told every
+client the world server was on the CLIENT's machine and the client hung at "Connecting" saying
+nothing. So a user who sets `127.0.0.1` by hand gets it overwritten by the next install press or
+resume, and the log line even says "players on other machines can reach this server".
+
+**What this needs, and the hard part is not the SQL.** `networking.Mode` is
+`Literal["lan", "internet"]`; a third value that writes the loopback is a small change. The real
+requirement is that the choice is REMEMBERED, because the failure mode is a resume silently undoing
+it. `ready` must be able to tell "this row is loopback because nobody has set it yet" from "this row
+is loopback because the owner chose that", and only the first may be overwritten. Recorded intent,
+not the row's value, is the thing to read.
+
+**Not started, and deliberately.** `networking.py` is mid-flight in bug-checklist §39 round 5 with
+three refuters reading it, and `catalog/native.py` is mid-flight in the §40/§21 lane. Two collisions
+tonight came from editing a file another lane owned. This lands as its own lane once those merge.
+
+**When it is built, the gate is:** set the realm to loopback through the app; press Install again on
+the finished install; the row is still `127.0.0.1` and the log says why it was left alone — and the
+same run on a server whose loopback was never chosen still advertises a reachable address.

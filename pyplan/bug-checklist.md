@@ -2267,6 +2267,67 @@ class of harm and is not covered by that rule's wording.
 
 Until it is decided, the step should refuse on a box where `SSH_CONNECTION` is set, and say why.
 
+**THE FIX WENT IN THE SAME NIGHT AND DID NOT CLOSE THIS, 2026-09-04.** An adversarial review
+reproduced the original lockout against the committed code on `m910q`, with no mutation, and the
+probe was re-derived a second time from that box's own `ss` output while writing this entry. The
+fix has two halves and only one of them holds:
+
+* **Withholding the enable — correct, and it is what closes the bug for every caller that exists
+  today.** `plan()` defaults to `enable_firewall=False`, and that branch drops every command
+  `_turns_ufw_on()` matches and returns `UFW_ENABLE_WITHHELD` on both `refusals` and `warnings`
+  (`networking.py:247-253` at `4c959d70`). `ufw allow` lands whether ufw is on or off, so nothing
+  the user asked for is lost.
+* **The guard behind `enable_firewall=True` — wrong, and wrong in a way that re-arms the exact
+  lockout.** `_sshd_listening_ports()` computes its second return value from *"did any socket carry
+  an owner"* rather than *"could this probe have seen a **root-owned** socket"*: `attributed = True`
+  is set on the first line that carries `users:(` at all — `networking.py:136-170` at `4c959d70`,
+  the assignment itself at `:158` — whatever owns it. One listener owned by an ordinary user is therefore enough to make an unprivileged probe
+  report "this table is readable, and there is no sshd on this box."
+
+**Measured on `m910q`, read-only, as `pk`.** `ss --no-header --listening --tcp --numeric
+--processes` there prints exactly one owner column — `LISTEN 0 10 *:3389 *:*
+users:(("gnome-remote-de",pid=1067,fd=8))` — and pid 1067 runs as `pk`, uid 1000. sshd's own
+`0.0.0.0:22` and `[::]:22` lines print with **no** owner column, because sshd is root's. Feeding
+that real output through the partition in `_sshd_listening_ports()` returns `ports = []` and
+`listeners_readable = True`. With `SSH_CONNECTION` unset — a GUI session, which is what this
+launcher is, and also `sudo`, `tmux` and any systemd unit — `_guard_the_way_back_in()` takes
+`if not asked.connected and asked.listeners_readable` (`networking.py:256-261` at `4c959d70`) and
+returns the three commands **unchanged**, with `refusals` and `warnings` both empty. That is `ufw --force
+enable` with only 3724 and 8085 allowed, and the same four empty reports this section opened with:
+`report.done` carrying the enable, `report.skipped`, `report.manual_steps`, `warnings` all empty.
+
+**The second route, which needs no ordinary-user listener at all.** A socket-activated sshd
+(`ssh.socket`, the default on current Ubuntu and Fedora) shows its listener owned by **systemd,
+pid 1** — `users:(("systemd",pid=1,fd=150))` — and `'"sshd'` does not match that, so even a probe
+running as **root** reads the box as having no sshd: `ports = ()` with `listeners_readable = True`,
+which is the same silent-enable branch. The shape is visible in this night's own gate capture,
+`pyplan/gates/7.1-ubuntu-2026-09-04-clean/gate71-realm-and-account.log`, where `sudo ss -lntp` on
+`yulon-ubuntu` prints `users:(("sshd",pid=17501,fd=3),("systemd",pid=1,fd=150))` — sshd there had
+already been triggered, so both halves appear; on a box where it has not been, only the systemd
+half is there.
+
+**Neither route reached a user.** `enable_firewall` occurs in exactly two files —
+`pylauncher/yulon/networking.py` and `pylauncher/tests/test_networking.py` — so no view, service or
+controller can pass `True` today, and every production call takes the withholding branch. That is
+what makes this a latent defect rather than a second outage, and it is also why the guard's tests
+could all pass while the guard was wrong: the tests are the only caller that drives it.
+
+**One claim filed with the fix is false, and was corrected beside the artifact.**
+`pyplan/gates/bug39-ssh-lockout/README.txt` and `ss-format-live.txt` both end with "if that token
+is ever wrong the probe finds no port, which lands on the REFUSE branch, not on a silent enable."
+It does not: the REFUSE branch is reached only when `listeners_readable` is False or
+`SSH_CONNECTION` is set. A wrong owner token with a readable table and no `SSH_CONNECTION` lands on
+the enable. `ss-format-live.txt`'s other generalisation — "as a normal user there is NO
+`users:((` column at all" — was measured on `dml-arch`, a WSL2 Arch box that happens to have zero
+user-owned listeners; `m910q` refutes it. See `pyplan/gates/bug39-ssh-lockout/CORRECTION-2026-09-04.md`.
+
+**What this section still wants**, stated as what was found rather than as a promise: a readability
+test that asks whether a **root-owned** socket was visible to this probe (an owner column on a
+socket the probe could not otherwise attribute), and an sshd match that survives socket activation.
+A repair was in flight in this tree the same night; this entry records the defect, not its outcome.
+Every line number above is pinned to `4c959d70` for that reason: `networking.py` was being edited
+while this was written, and by morning they will point at something else.
+
 ### 40. Abandoning `logs_source()` aborts the interpreter at exit — 2026-09-04, OPEN
 
 Found by 7.10's sweep. A `logs_source()` generator that is dropped without being closed makes the
@@ -2277,3 +2338,30 @@ Evidence in `pyplan/gates/7.10-ubuntu-2026-09-04/`.
 It matters because the Server tab's log panel is exactly a caller that starts a stream and may stop
 caring about it, and an abort at exit is the kind of thing that looks like "the app crashed on
 close" in a bug report and gets attributed to whatever the user did last.
+
+### 41. A realm cannot be set to loopback on purpose — 2026-09-05, OPEN
+
+Found by the owner, reading Appendix C's reword: *"but make it possible to set it to 127.0.0.1"*.
+Not a regression — the behaviour is deliberate and argued — but the deliberate half has no way out.
+
+`ready`'s realm step (`catalog/native.py:1969-2005`) rewrites the realmlist row unless
+`networking.advertisable()` accepts every column, and `advertisable()` refuses the loopback by
+design (§35: a realm advertising `127.0.0.1` tells every client the world server is on the CLIENT's
+machine, and the client hangs at "Connecting"). So the value a §35 fix exists to prevent by accident
+is also unreachable on purpose: set `127.0.0.1` by hand and the next install press or resume
+overwrites it, printing "players on other machines can reach this server".
+
+`networking.Mode` is `Literal["lan", "internet"]`. The missing third mode is the small half. The
+load-bearing half is that the choice must be REMEMBERED: `ready` has to distinguish a row that is
+loopback because nobody set it from one that is loopback because the owner chose it, and only
+overwrite the first. That is recorded intent, not a value read back out of the database.
+
+- [ ] A mode that writes the loopback, reachable from the Networking tab.
+- [ ] Intent persisted where a resume can read it, and `ready` reading it before it decides.
+- [ ] The gate: choose loopback through the app, press Install again on the finished install, and the
+      row is still `127.0.0.1` with a log line saying why it was left alone — while a server whose
+      loopback was never chosen still ends up advertising a reachable address.
+
+Deliberately not started on 2026-09-05: `networking.py` was mid-flight in §39 round 5 and
+`catalog/native.py` in the §40/§21 lane, and two collisions that night came from editing a file
+another lane owned. Decision recorded in `phase7-decisions.md` Appendix D.

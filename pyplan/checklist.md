@@ -279,13 +279,155 @@
 > re-verified here is the geometry, the detached state, and the bytes that arrived.
 
 - [ ] 7.1 Spine + `AzerothCoreInstaller`, Linux native — `StagedInstaller`/`Stage` extracted from `native.py`, WotLK stage names unchanged and pinned; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); `ask` forwarded to `ensure_docker`; once-only sudo password (`SudoSession`, `sudo -S`) in provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` on every host bind line + relabel; `systemd-inhibit`; `install_wiring.py` (probe wiring + the CLI harness); `wait_ready(ReadySpec)`; the proven install's `docker compose config` committed as `tests/data/wotlk-compose-config.json`; wow-wotlk dispatches native on Linux
-  - [ ] Gate: yulon-ubuntu clean checkpoint — **starting state captured** (`docker --version; systemctl is-active docker; id -Gn; ls -d ~/wowserver`, before press 1); press 1: consent dialog + re-login report; re-login; a later press reaches `ready`; kill mid-build, and the resume **recovers the finished objects from the ccache mount** rather than compiling them again; `docker compose config` matches a fixture minted from a DIFFERENT run; auth log `127.0.0.1:8085` with no `UPDATE`, read from the authserver container's log; account + client login from the host after the LAN step
+  - [ ] Gate: yulon-ubuntu clean checkpoint — **starting state captured** (`docker --version; systemctl is-active docker; id -Gn; ls -d ~/wowserver`, before press 1); press 1: consent dialog + re-login report; re-login; a later press reaches `ready`; kill mid-build, and the resume **recovers the finished objects from the ccache mount** rather than compiling them again; `docker compose config` matches a fixture minted from a DIFFERENT run; auth log `127.0.0.1:8085` read from the authserver container's log, then the realm left advertising an address another machine can REACH (`ready`'s own `UPDATE`, counted in `yulon.log`); account + client login from the host after the LAN step
     - **Three clauses were reworded on 2026-09-04, after an audit of a recovered run showed the old wording could not be satisfied by anything that actually happens.** Kept here rather than silently swapped:
       * "**two presses**" → "a later press reaches `ready`". The recovered run took FOUR presses (exit 1, 137, 0, 0) and that is the honest shape of a gate that includes a kill-mid-build: the kill costs a press. Counting presses was never the property worth pinning.
       * "**resume skips the compile**" → the ccache clause. The engine's own `The server is already built; skipping the compile.` fires on a re-press of a COMPLETE install, not on a resume after a kill — a resume re-enters the build step and re-issues every ninja edge, because BuildKit does not cache a partial `RUN`. What it really buys was measured: ~1,315 of 1,829 edges came back from the `--mount=type=cache,target=/ccache` mount in **13.9 s**, and the build finished in **610.7 s** instead of hours. 7.4a's entry made the same correction for its own line on 2026-09-02 ("describing the effect, not the mechanism"); this line had not caught up. Note the mechanism is evictable: a `docker builder prune` between the kill and the resume costs a full compile.
       * "`docker compose config` **matches the fixture**" now says the fixture must come from a different run. `tests/data/wotlk-compose-config.json` was minted FROM the 2026-08-31 capture and committed 2h31m after it, byte-identical at 8,658 bytes — so that run could not have failed its own check. The fixture is doing its job; it just cannot be both the subject and the standard.
       * **The starting-state capture is new**, and is the audit's one-line remedy for a "clean checkpoint" claim that no artifact could support.
     - **"sudo dialog once" was REMOVED from this line, and moved rather than dropped.** `pk` on `yulon-ubuntu` has `NOPASSWD: ALL`, so `SudoSession.verify()` is unreachable there — `_needs_password()` only fires on sudo's own "password is required" after a `sudo -n` step. The clause could never be ticked on the box its own line names. It is already satisfied on Fedora, where the 2026-08-31 record calls it "the first time `SudoSession` has ever been exercised", both other Linux boxes being passwordless. Recorded there; if the owner would rather prove it on Ubuntu too, the E.3 brief's own staging (move `/etc/sudoers.d/pk` aside, re-press) takes minutes.
+    - **THE CLEAN RE-RUN HAPPENED ON 2026-09-04 AND THE BOX STILL DOES NOT TICK: nine of the
+      thirteen clauses on this line are now earned on artifacts, four are not.** The run answers
+      most of what the audit above found missing — the starting state, the account, the client
+      login, and a `ready` that is not a continuation of a killed press. Evidence, all committed at
+      `4c959d70`: `pyplan/gates/7.1-ubuntu-2026-09-04-clean/gate71-press1.log`,
+      `…/gate71-press2.log`, `…/gate71-realm-and-account.log`,
+      `pyplan/gates/7.1-client-login/LOGIN-2026-09-04.md` and
+      `…/client-connection-20260904-2030.log`. Graded clause by clause, in the order this line
+      states them:
+      * **"yulon-ubuntu clean checkpoint" — MET, and falsifiable for the first time.**
+        `pyplan/gates/7.1-client-login/checkpoint-clean-ssh-as-restored.txt:1-5` names the
+        checkpoint (`clean-ssh`, taken 2026-08-28) and records `up 0 min`, `docker: command not
+        found`, and no `/home/pk/wowserver`. Press 1's own probes agree from inside the run:
+        `gate71-press1.log:30` `docker --version: NOT INSTALLED (no such executable)`, `:31-32`
+        `systemctl is-active docker: exit 4 / inactive`, `:34` `id -Gn: | pk adm cdrom sudo dip
+        plugdev users lpadmin` — **no docker group** — and `:35-36` `ls -ld /home/pk/wowserver:
+        exit 2`. The audit's "unfalsifiable from these files" is answered.
+      * **"starting state captured … before press 1" — MET.** `gate71-press1.log:29-40`, five
+        read-only probes (the four the line names plus `df -h`), printed before the harness ran.
+        Read past the first block: `:1-26` is a first invocation that died on
+        `ModuleNotFoundError: No module named 'yulon'` — wrong working directory, `answered group
+        x0`, nothing on the box changed (`:16-26` state-after is identical to `:3-14`
+        state-before). The real press 1 starts at `:27`.
+      * **"press 1: consent dialog" — MET.** `gate71-press1.log:53` `Add 'pk' to the docker group
+        (grants root-equivalent access)? (y/n):`, answered `y`, and `:55` `docker group consent for
+        pk: granted`. Asked once in the run (`:60` `answered group x1`).
+      * **"+ re-login report" — MET, and better than 2026-08-31's.** `gate71-press1.log:56` names
+        what provisioning did (`apt-get update; apt-get install -y docker.io docker-compose-v2
+        docker-buildx; systemctl enable --now docker; usermod -aG docker pk`), and `:57-59` is the
+        refusal: `Docker is installed and set up. It cannot be used from this session yet: your
+        account was added to the docker group, and a session that was already open does not pick up
+        a new group.` Exit 1 (`:60`).
+      * **"re-login" — MET in effect; the act itself is still not in a log.** The pair the
+        2026-08-31 set could not produce: `gate71-press1.log:67` state-AFTER press 1 still reads
+        `pk adm cdrom sudo dip plugdev users lpadmin` — Docker 29.1.3 installed and active
+        (`:62-65`), the group **not** in effect — and `gate71-press2.log:9` state-BEFORE press 2
+        reads `docker adm cdrom sudo dip plugdev users lpadmin pk`. Press 2 was run under
+        `sg docker -c`, which is the `newgrp docker` the product's own message offers; no line of
+        either log spells the `sg`, so the act is inferred and only the effect is captured.
+      * **"a later press reaches `ready`" — MET, and it was the very next press.**
+        `gate71-press2.log:6044` `Step 9 of 9 (100%): ready`, `:6045` `--- ready`, `:6049` `The
+        server is up.`, `:6051` `install of wow-wotlk finished`, `:6053` `exit status 0`. Nine
+        stages in the pinned order from `:29` `--- clone-core` (19:31) to `:6045` (20:13), build
+        1834 edges from cold, client data 1140 MB in 2m03s (`:5010-5011`). Free disk 74 GB → 53 GB
+        (`:14`, `:6065`).
+      * **"kill mid-build, and the resume recovers the finished objects from the ccache mount" —
+        NOT MET BY THIS RUN.** Nothing was killed on 2026-09-04; press 2 ran straight through. The
+        clause is carried only by the 2026-08-31 set — `7.1-ubuntu-2026-08-31/gate-press2.log:4103`
+        SIGKILL at edge 1314 of 1829, `:4105` `COMMAND_EXIT_CODE="137"`, then
+        `gate-press3.log:1622-1626` (edges 1312-1315 back at `#25 13.69`-`18.65`, real compilation
+        resuming at edge 1316 at `#25 28.41`) and `:2174` `#25 DONE 610.7s`. Both runs are
+        committed and either can be re-derived; what does not exist is one run that carries every
+        clause, and no `ccache -s` capture exists in either.
+      * **"`docker compose config` matches a fixture minted from a DIFFERENT run" — NOT MET.** No
+        capture was taken on 2026-09-04: `grep -n "compose config"` over both press logs returns
+        nothing, and the gate directory holds no `.yml` or diff artifact. This run is exactly the
+        different run the clause asks for — the fixture was minted from the 2026-08-31 capture —
+        so the missing artifact is one command (`docker compose config` from the server directory,
+        **no `-f`**, per the Arch capture trap recorded below) plus
+        `test_a_captured_compose_config_matches_the_fixture`.
+      * **"auth log `127.0.0.1:8085` … read from the authserver container's log" — MET.**
+        `gate71-realm-and-account.log`, closing addendum: `docker logs --tail 3 ac-authserver` →
+        `Added realm "AzerothCore" at 127.0.0.1:8085.` The authserver container started at 20:08
+        (`gate71-press2.log:6043`, `compose up -d` at 20:08:34), so it read the row AzerothCore
+        ships before anything changed it.
+      * **"with no `UPDATE`" — the CLAUSE was wrong, and was reworded 2026-09-05 (owner decision).**
+        The old wording asked for behaviour the product deliberately dropped. The plan's definition is
+        `phase7-plans/7.1-spine-azerothcore-linux.md:6561`: `grep -c "UPDATE"
+        ~/.local/share/yulon/yulon.log` → 0 and `SELECT address,port FROM acore_auth.realmlist` →
+        `127.0.0.1 8085` at `ready`, the first and only UPDATE coming later from the Networking tab
+        (`:6576`). What was measured instead: the install itself issued it. `gate71-press2.log:6050`
+        `The realm now advertises 172.30.55.119, so players on other machines can reach this
+        server`, and the row read `172.30.55.119 / 172.30.55.119` at 20:21:36
+        (`gate71-realm-and-account.log`, TASK 1's first `SELECT`) before any hand edit. That line
+        is `catalog/native.py:1990-2001`, the tail of `ready`, and its docstring at `:1955-1968`
+        argues the design on purpose (a 2026-09-03 review: the question is whether the row is
+        REACHABLE, not whether it equals the LAN address). So this half is not a re-run away — it
+        is an owner decision to reword the clause to what the engine does now, and no
+        `yulon.log` UPDATE count was captured either way.
+      * **What the reworded clause asks for, and why (owner decision, 2026-09-05).** The gate now
+        reads: the auth log's `127.0.0.1:8085` line, *then* the realm left advertising an address
+        another machine can REACH, with `ready`'s own `UPDATE` counted in `yulon.log`. The two
+        options put to the owner were to reword the clause or to revert the engine; he chose the
+        reword, on the recommendation that a fresh install should be reachable from another
+        machine the moment it finishes rather than localhost-only until the user finds the
+        Networking tab. The engine's argument is already written down where the behaviour lives
+        (`catalog/native.py:1955-1968`): equality with the LAN address is the WRONG question,
+        because `networking.apply()` exists so a user can advertise a PUBLIC address for internet
+        play, and every ordinary resume runs `ready` again — comparing against the LAN address
+        overwrote that public address and printed 'players on other machines can reach this
+        server', which was the opposite of what had happened (review, 2026-09-03).
+        **Still owed, and not earned by the reword:** no `yulon.log` UPDATE count has ever been
+        captured, under either wording. The clause is met when a run records
+        `grep -c 'UPDATE' ~/.local/share/yulon/yulon.log` together with the realmlist row at
+        `ready`, and shows the count is exactly the one `ready` issues rather than zero or many.
+      * **"account" — MET, through the GUI's own seam.** `gate71-realm-and-account.log`, TASK 2:
+        `ControllerServices.for_entry` → `services.create_account('yulon', <password>, 3)` →
+        `AccountResult(username='YULON', account_id=101, created=True, gm_level=3)`, the row read
+        back by a different route (`SELECT id, username … WHERE username='YULON'` → `101 YULON`),
+        `account_access` → `101 3 -1`, and the same call again converging rather than duplicating
+        (`created=False`, `COUNT(*)` → 1). Not typed at a console.
+      * **"client login" — MET in substance, and the audit's "Absent" is answered.**
+        `pyplan/gates/7.1-client-login/client-connection-20260904-2030.log`, quoted at
+        `LOGIN-2026-09-04.md:41,:43`: `20:30:22.955 GRUNT: state: LOGIN_STATE_AUTHENTICATED result:
+        LOGIN_OK` and `20:30:24.125 ClientConnection Completed: COP_GET_CHARACTERS code=44
+        result=TRUE`; server side, `acore_auth.account` `101 YULON last_login 2026-09-04 18:30:22
+        online 1 failed_logins 0` (18:30 UTC = 20:30 CEST). Two limits the record states itself:
+        `Enter World` was never clicked, so nothing here speaks to the world server beyond a
+        character-list reply — the plan's own bar at `:6584` is "logged in **and entered the
+        world**" — and the client was on the laptop over Tailscale, not on this line's "the host".
+      * **"after the LAN step" — NOT MET, and deliberately.** The launcher's LAN step
+        (`svc.network_apply`) was never invoked; the realm row was repointed at the Tailscale
+        address by hand (`docker exec … UPDATE acore_auth.realmlist … WHERE id=1`, `rows_changed`
+        1), and `sudo ufw status` at the end of that log still reads `Status: inactive`. The reason
+        is `bug-checklist.md` §39: the step would run `ufw --force enable` with only 3724 and 8085
+        allowed and cut SSH to a box with no console. **This clause is blocked on §39, not on
+        machine time** — and §39's own repair is not finished either (see it).
+      **So: four clauses stand between this sub-gate and a tick** — a compose-config capture and
+      diff, the kill-mid-build/ccache half re-exercised (or the line re-scoped to say it is carried
+      by the 2026-08-31 set), the `no UPDATE` clause reworded to the engine's current design, and
+      the LAN step, which waits on §39. **And the 7.1 box could not tick even if all four landed**,
+      because the Fedora/Arch sub-gate below is open on its own terms: nothing was installed on
+      Arch (the AppImage will not launch without `fuse2`), and Fedora still owes the kill-mid-build
+      and a run from a cold checkpoint.
+      **What the tick would cost was measured while deciding this, on `m910q`, 2026-09-04:**
+      `tests/test_docs_pins.py` widens `test_every_test_these_pages_name_by_hand_actually_exists`
+      to `phase7-plans/7.1-spine-azerothcore-linux.md` the moment this box reads `- [x] 7.1 `, and
+      that page cites **141** test names as live, of which **13** resolve to nothing in
+      `pylauncher/tests/`. Same 13 as the 2026-09-02 measurement — the plan's citations have not
+      drifted further, and none of them is fixed by a gate run. With the box left open the guard
+      stays scoped as it was: **4 passed** against this edit
+      (`~/dads-mmo-lab/pylauncher/.venv/bin/python -m pytest tests/test_docs_pins.py -q` on
+      `m910q`, run over a copy of these files).
+      * **One number in the login record has no artifact behind it, recorded before it gets
+        re-cited.** `LOGIN-2026-09-04.md:11` says "500/500 bots loaded". No capture from the 20:13
+        install carries a bot count. The 500 that exists is
+        `7.1-client-login/server-side-after-attempt.txt:9` (`characters.online=1 count` → 500),
+        taken at **14:22** from the earlier attempt of the same day — a different install, account
+        `GATE0904`, realm already at `172.30.55.119`, and `0` accounts with a non-null
+        `session_key`, i.e. the attempt in which no client ever completed SRP6. That file's auth
+        log also reads `Added realm "AzerothCore" at 172.30.55.119:8085`, which is what the
+        `127.0.0.1:8085` clause looks like when the authserver starts *after* the advertise.
     - **A WHOLE GATE RUN WAS RECOVERED FROM INSIDE A CHECKPOINT ON 2026-09-04, AND AUDITING IT SAYS
       DO NOT TICK.** `pyplan/gates/7.1-ubuntu-2026-08-31/` — an E3 report headed `Verdict: PASSED`,
       four press logs, a compose-config capture. It had never been in the repo; restoring
@@ -1006,6 +1148,37 @@
     with two warnings (55 GB free against the 60 GB comfort line; the same repack-shaped client
     warning Linux gives). Whoever ticks this line commits the widening on the strength of the run,
     not ahead of it.
+  - **The 1800 s ready budget is the wrong shape for 9p, measured 2026-09-04 on `yulon-win11-gate`.**
+    Both CMaNGOS entries wait for the first `Avg Diff:` line with `timeout_s: 1800`. On this box the
+    world server's own timestamps (`docker logs -t`) put that line **24.6 min** after `mangosd` started
+    for Vanilla (06:12:43Z → 06:37:22Z, inside the budget) and **46.0 min** for TBC (18:59:55Z →
+    19:45:58Z, outside it). So the TBC run's engine verdict was `install failed: The server started but
+    never reported ready`, exit 1 at 12:29:57 box-local after a 7 h 10 min run — while `tbc-mangosd`
+    was up with `restarts=0`, loaded the world and has been printing its diff loop since. The three
+    containers are still up at the time of writing. The install is complete and correct; the verdict
+    is not, and the difference between the two games is the size of the world being read over 9p at
+    ~1.4 MB/s, not anything either core did. Tortoise, which booted in 28 min on Linux (7.6), was
+    given `timeout_s: 10800` in the box-local copy for its own run rather than a value guessed to
+    fit. What this asks of the engine is a decision, not a number: a fixed wall-clock budget cannot
+    be right on both a native Linux disk and a 9p share, and a container that is alive, not
+    restarting, and still printing `Loading …` lines is not a server that failed. Left for the
+    owner; recorded here so the TBC exit code is read as what it is.
+  - **The `platforms` widening for TBC and Vanilla landed at `2f39a6d9`**, on the Vanilla run above
+    and the TBC run just described. Tortoise stays `["linux"]` in the repo until its Windows run
+    earns it; the copy on the box carries the widening so the run can start at all (the
+    chicken-and-egg two bullets up).
+  - **Windows Tortoise, started 2026-09-04 23:19 CEST (14:19 box-local)** on `yulon-win11-gate`, driven
+    by `C:\gate\run-tortoise.cmd` as scheduled task `dml-tortoise-install`, log at
+    `C:\gate\evidence\tortoise77.log`. Source: a copy of this repo at `2f39a6d9` in
+    `C:\gate\tortoise-src`, widened box-locally by `widen-tortoise.py` (platforms + `windows`, ready
+    `timeout_s` 3600 → 10800 on the TBC measurement above). Client: the 7.6 copy from m910q
+    (`/home/pk/TurtleWoW`, 172 files, tar md5 `5bca6fa4…` verified on arrival), byte-identical in
+    `WoW.exe`/`TurtleWoW.exe` to the owner's copy on the Hyper-V host. Two things the run needed
+    first, both recorded in `windows-gate-box-recipes`: preflight refused with **10 GB free against
+    40 GB needed** (the 120 GB disk now carries three servers), answered by a second 120 GB VHDX
+    hot-added from the host and mounted as `D:`; then Docker could not see `D:` until the
+    docker-desktop distro had it mounted by hand (`mount -t drvfs`, not persistent). Server folder
+    is therefore `D:\gate\tortoise-server`, client still on `C:`. The TBC stack was stopped first.
   - **Windows Vanilla, started 2026-09-04 04:20** into `C:\gate\vanilla-server` against the 5.14 GB
     1.12.1 client at `C:\gate\client`. Numbers already in hand from setting it up, since 7.7 asks
     for throughput: the client zip came down from `wow.baerthe.com` at about **13 MB/s** (5.33 GB,
