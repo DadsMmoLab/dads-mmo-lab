@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 
 from yulon import docker
+from yulon.catalog import native
 from yulon.catalog.catalog import NativeInstall
 from yulon.catalog.composegen import fill
 from yulon.catalog.native import INSTALL_REALM_HOST
@@ -80,7 +81,14 @@ stop_staged = docker.stop_staged
 status = docker.status
 health = docker.health
 wait_db_healthy = docker.wait_db_healthy
-wait_ready = docker.wait_ready
+# NOT `wait_ready = docker.wait_ready`. That alias stood here until 2026-09-05,
+# in all three CMaNGOS/AzerothCore packages, publishing the SINGLE-SHOT ready
+# primitive under this package's public name while `wait_server_ready()` below
+# spends the same catalogue number as a quiet budget. Nothing imported it (a
+# tree-wide grep, 2026-09-05, found no caller), and the audit that claims to
+# enumerate every ready wait in the app could not see it either: it matched
+# function DEFINITIONS, and a module-level binding is an `ast.Assign`. It now
+# reads bindings too, so re-adding this line is red rather than dormant.
 port_conflicts = docker.port_conflicts
 
 
@@ -168,8 +176,18 @@ def wait_server_ready(
     is the address the authserver prints. This entry declares `ready.auth` as
     null — nothing waits on the realmd log — so there is no port to pass and
     none is accepted, rather than one being accepted and ignored.
+
+    `timeout` is the entry's `timeout_s` and it is a QUIET budget: how long
+    mangosd may print nothing new, restarted every time it prints, bounded by
+    `native.management_ceiling()`. Until 2026-09-05 this spent it once, as a
+    fixed total, while the install spine spent the same field as a window — and
+    this game is the one that makes the two readings impossible to argue as
+    equivalent. On yulon-win11-gate 2026-09-04 Vanilla's first boot took 24.6
+    minutes and TBC's took 46.0, both entries carrying `timeout_s: 1800`: one
+    fixed total was right for one game and wrong for the other, on one machine,
+    on the same day.
     """
-    return docker.wait_ready_for(SPEC, ready_spec(realm_host, **kwargs), wsl_distro=wsl_distro)
+    return native.wait_ready_quietly(SPEC, ready_spec(realm_host, **kwargs), wsl_distro=wsl_distro)
 
 
 def port_conflicts_here() -> list[str]:

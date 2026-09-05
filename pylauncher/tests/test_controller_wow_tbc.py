@@ -180,7 +180,7 @@ def test_the_controller_waits_for_this_games_marker(
 
 
 def test_the_controller_forwards_a_shorter_wait(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_world_container_that_answers: None
 ) -> None:
     """A caller that wants a 5-second poll gets one, without editing the catalog."""
     seen: dict[str, docker.ReadySpec] = {}

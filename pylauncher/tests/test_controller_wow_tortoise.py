@@ -125,7 +125,7 @@ def test_the_wait_timeout_is_the_entrys_unless_the_caller_says_otherwise() -> No
 
 
 def test_the_controllers_wait_ready_polls_with_this_games_spec(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_world_container_that_answers: None
 ) -> None:
     """The base class builds an AzerothCore spec in this very method; the
     override is what puts this game's markers in front of `wait_ready()`."""

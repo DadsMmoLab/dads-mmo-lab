@@ -32,6 +32,7 @@ from dataclasses import replace
 from typing import Final
 
 from yulon import docker
+from yulon.catalog import native
 from yulon.catalog.catalog import (
     CatalogEntry,
     CmangosData,
@@ -97,7 +98,14 @@ stop_staged = docker.stop_staged
 status = docker.status
 health = docker.health
 wait_db_healthy = docker.wait_db_healthy
-wait_ready = docker.wait_ready
+# NOT `wait_ready = docker.wait_ready`. That alias stood here until 2026-09-05,
+# in all three CMaNGOS/AzerothCore packages, publishing the SINGLE-SHOT ready
+# primitive under this package's public name while `wait_server_ready()` below
+# spends the same catalogue number as a quiet budget. Nothing imported it (a
+# tree-wide grep, 2026-09-05, found no caller), and the audit that claims to
+# enumerate every ready wait in the app could not see it either: it matched
+# function DEFINITIONS, and a module-level binding is an `ast.Assign`. It now
+# reads bindings too, so re-adding this line is red rather than dormant.
 port_conflicts = docker.port_conflicts
 
 _TOKEN = re.compile(r"\{\{[A-Z_]+\}\}")
@@ -184,12 +192,21 @@ def wait_server_ready(*, wsl_distro: str | None = None, **kwargs: float) -> bool
     exist there to spell AzerothCore's auth marker `<host>:<port>`, and this
     entry has no auth marker to spell. Taking them anyway would let a caller
     believe the realmd log was being watched.
+
+    `timeout` is the entry's `timeout_s`, and it is a QUIET budget: how long
+    mangosd may print nothing new, restarted every time it prints, bounded by
+    `native.management_ceiling()`. That is the reading the install spine has
+    given the same catalogue field since 2026-09-04, and this call spent it as a
+    fixed total wall clock for a day afterwards — the reading the incident
+    disproved. `tbc-mangosd` took 46.0 minutes to its first `Avg Diff:` on
+    yulon-win11-gate's 9p share, printing all the way, against
+    `timeout_s: 1800`. One number cannot mean both.
     """
     unknown = set(kwargs) - {"timeout", "interval"}
     if unknown:
         raise TypeError(f"wait_server_ready() accepts timeout/interval only, not {sorted(unknown)}")
     ready = ready_spec(timeout=kwargs.get("timeout"), interval=kwargs.get("interval"))
-    return docker.wait_ready_for(SPEC, ready, wsl_distro=wsl_distro)
+    return native.wait_ready_quietly(SPEC, ready, wsl_distro=wsl_distro)
 
 
 def port_conflicts_here() -> list[str]:

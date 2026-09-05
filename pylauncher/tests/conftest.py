@@ -21,7 +21,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -749,3 +749,148 @@ def _classic_mysql_client_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: None)
     apply_module._client_cache.clear()
+
+
+DOCKER_ARGV0S = ("docker", "docker.exe", "wsl", "wsl.exe")
+r"""Every argv[0] `docker._docker()` can produce, so the guard below knows one when it sees one.
+
+`platform.docker_prefix()` answers `["docker"]`, an absolute
+`...\resources\bin\docker.exe`, or `["wsl", "-d", <distro>, "--", "docker"]`.
+The guard matches on the BASENAME, so the pinned Windows path is caught too.
+"""
+
+
+def argv_reaches_the_docker_cli(command: object) -> bool:
+    """Does this argv start a docker CLI? The one rule the guard below is built on.
+
+    Public and named so a test can drive the RULE rather than the fixture: an
+    autouse fixture that refuses something is very hard to prove is doing
+    anything at all, and until 2026-09-05 nothing proved this one. See
+    `tests/test_docker_guard.py`.
+    """
+    if not isinstance(command, (list, tuple)) or not command:
+        return False
+    # `PureWindowsPath` on every host, not `Path`. `Path` is the RUNNING
+    # platform's flavour, and on Linux a Windows argv[0] has no separator it
+    # recognises: `Path(r"C:\Program Files\Docker\resources\bin\docker.exe").name`
+    # is that whole string there, so the pinned Windows spelling the guard's
+    # docstring claims to catch would sail through on the box this suite
+    # actually runs on. Windows flavour splits on both `/` and `\`, so it is
+    # right for either shape.
+    return PureWindowsPath(str(command[0])).name.lower() in DOCKER_ARGV0S
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_talks_to_a_real_docker_daemon(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail a non-integration test that reaches `docker` through `runner`.
+
+    A unit test that shells out is not a unit test: it is slow, it answers
+    differently on a box with Docker than on one without, and on the owner's
+    laptop a single `docker` invocation auto-starts Docker Desktop's WSL2 VM
+    (~2.4 GB) — the failure mode that crashed his PC on 2026-09-01 and the
+    reason this suite is run on a test box at all.
+
+    The reach is easy to add by accident and invisible once added, because a
+    real `docker inspect` against a container that does not exist returns a
+    perfectly usable "no" — which is what the test wanted anyway. The wait this
+    file's `test_ready_budget.py` covers acquired exactly that: the management
+    waits went through `native.wait_ready_quietly()`, whose first act is a state
+    read, and every test that patched only `docker.wait_ready_for` started
+    inspecting a container on the box running the suite.
+
+    `runner.run`/`runner.stream` rather than `docker._docker`, because `_docker`
+    is where the argv is BUILT and the tests that assert argv shape patch below
+    it. Only docker argv is refused; every other subprocess (git, wsl-less
+    shells) still runs, so this cannot quietly disable a test that was never
+    about docker.
+
+    TWO OF THE THREE ROUTES, and the third is named rather than implied. `docker.py`
+    reaches the CLI through `runner.run()`, through `runner.stream()`
+    (`run_attached()` at docker.py:2518, `follow_logs()` at :2351) and through a
+    bare `subprocess.Popen` in `exec_stdin()` (docker.py:3338). `stream` was
+    added here on 2026-09-05 after a review pointed out the guard covered one
+    route and the commit message claimed all of them; adding it changed no
+    result (m910q, whole suite, 0 failures either way), so what it buys is the
+    NEXT accidental reach, not a defect today. `exec_stdin()` is still open:
+    patching `subprocess.Popen` for the whole suite would catch every unrelated
+    child process this repo spawns, and that is a bigger decision than a guard.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    from yulon import runner
+
+    real_run, real_stream = runner.run, runner.stream
+
+    def refuse(command: object) -> None:
+        if argv_reaches_the_docker_cli(command):
+            pytest.fail(
+                f"a unit test shelled out to the real docker CLI: {command!r}. "
+                "Patch the seam the code under test reads (docker.container_state, "
+                "docker._logs, native._world_output, or the installer's seams) instead."
+            )
+
+    def guarded(
+        command: list[str], *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        refuse(command)
+        return real_run(command, *args, **kwargs)  # type: ignore[arg-type]
+
+    def guarded_stream(command: list[str], *args: object, **kwargs: object) -> object:
+        # NOT a generator function. `runner.stream()` is one, and a `def` with a
+        # `yield` in it runs no code at all until the first `next()` — the
+        # refusal would then fire wherever the caller happened to iterate, or
+        # not at all for a caller that builds the generator and drops it.
+        refuse(command)
+        return real_stream(command, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner, "run", guarded)
+    monkeypatch.setattr(runner, "stream", guarded_stream)
+
+
+@pytest.fixture
+def a_world_container_that_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`native._world_output()` answering "up, never restarted, printing", with no daemon.
+
+    For the tests whose subject is a ready wait's ARGUMENTS. Since 2026-09-04 a
+    management wait polls in windows and reads the container's state and log
+    between them (`native.wait_ready_quietly`), so patching `wait_ready_for`
+    alone no longer covers everything the call touches: the state read is the
+    FIRST thing it does, before any window, and it went to whatever docker the
+    box running the suite had. Four tests were doing that until 2026-09-05 —
+    `docker inspect t-world`, `ac-worldserver`, `tbc-mangosd`,
+    `tortoise-mangosd` — and passing.
+
+    A constant, and a benign one: every test that takes this fixture also makes
+    the wait answer True on its first window, so exactly one reading is taken
+    and nothing is decided by it. A test ABOUT the reading builds its own (see
+    `tests/test_ready_budget.py`, where `FakeWorld` is the machine).
+    """
+    from yulon.catalog import native
+
+    monkeypatch.setattr(
+        native,
+        "_world_output",
+        lambda spec, **_kwargs: native.WorldOutput(text="loading", restarts=0, status="running"),
+    )
+
+
+@pytest.fixture
+def the_compose_project_is_not_pinned(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """`docker.pin_project_name()` recorded instead of run. Returns what it was asked to pin.
+
+    `catalog_view._pin_compose_project()` runs at the end of every successful
+    install and shells out to `docker compose config --format json` to learn
+    what compose is calling the project. Four GUI tests whose subject is a
+    BUTTON reached the box's daemon through it (measured m910q 2026-09-05); on
+    a box with no docker they were passing through the best-effort `except`
+    instead, which is a third behaviour again. Neither is the button.
+    """
+    from yulon import docker
+
+    pinned: list[Path] = []
+    monkeypatch.setattr(
+        docker, "pin_project_name", lambda server_dir, **_kw: pinned.append(server_dir)
+    )
+    return pinned

@@ -172,7 +172,9 @@ def test_status_nothing_running(fake_runner: _FakeRunner) -> None:
     assert status.any_running is False
 
 
-def test_wait_helpers_are_bound_to_the_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wait_helpers_are_bound_to_the_spec(
+    monkeypatch: pytest.MonkeyPatch, a_world_container_that_answers: None
+) -> None:
     """`wait_db_healthy()`/`wait_ready()` forward the spec's containers + kwargs."""
     seen: dict[str, object] = {}
 
@@ -201,7 +203,7 @@ def test_wait_helpers_are_bound_to_the_spec(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_wait_helpers_forward_the_distro_a_wsl_install_lives_in(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, a_world_container_that_answers: None
 ) -> None:
     """Polling has to ask the right daemon, and asking the wrong one does not fail.
 

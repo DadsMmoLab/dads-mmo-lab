@@ -598,7 +598,10 @@ def test_the_launcher_actually_calls_it_at_startup(monkeypatch: pytest.MonkeyPat
 
 
 def test_a_successful_install_shows_no_dialog_at_all(
-    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    qapp: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    the_compose_project_is_not_pinned: list[Path],
 ) -> None:
     """Dropping `not ok` from the call site left the suite green.
 
