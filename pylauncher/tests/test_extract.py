@@ -984,7 +984,7 @@ def test_a_refused_extraction_ran_nothing_and_changed_nothing_as_its_sentence_sa
     before it. Driven through the real `CmangosInstaller.run()` on
     yulon-fedora 2026-09-05 with the images gone and the evidence file deleted
     (`tests/test_families_cmangos.py`'s own fixtures), the press logged
-    "The build finished." four log lines above this refusal and left 11 changed
+    "The build finished." four log lines above this refusal and left 12 changed
     files under the server folder from a pre-`patch-sources` install and 1 from
     a finished modern one. What the sentence claims — no container launched by
     the extraction, no byte changed under `data/` — held in both, and is what

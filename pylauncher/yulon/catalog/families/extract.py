@@ -1441,10 +1441,12 @@ def blocked_message(tool: ExtractTool, folder: Path) -> str:
     `data/.yulon-extract.json` deleted and `data/Buildings` kept, two fixtures
     -- a pre-`patch-sources` install and a finished modern one -- both logged
     "compiling" and "The build finished." exactly four log lines above this
-    refusal. The pre-patch press left 11 changed files under the server folder
+    refusal. The pre-patch press left 12 changed files under the server folder
     (the four patched extractor sources, `Dockerfile`, `.dockerignore`, three
-    compose files, `.env`, `.yulon-install.json`); the modern one left 1
-    (`.yulon-install.json`). Neither launched an extraction container and
+    compose files, `.env`, `.yulon-install.json`, and `.db_password` -- the
+    fixture carries none, so the press mints one; an earlier count said 11 and
+    omitted it); the modern one left 1 (`.yulon-install.json`). Re-measured by
+    the round-10 review (`pyplan/gates/doodad-2026-09-05/round10-press-probe.txt`). Neither launched an extraction container and
     neither changed a byte under `data/`, which is what the narrower sentence
     claims and what
     `test_a_refused_extraction_ran_nothing_and_changed_nothing_as_its_sentence_says`

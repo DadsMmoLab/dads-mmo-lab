@@ -463,8 +463,9 @@ class CmangosInstaller(StagedInstaller):
         the rest -- and it does not need to, because the mmaps stage wipes
         `mmaps/` itself when no finished record vouches for it. "No refusal"
         and "overwrites" are separate claims and only the first is what this
-        paragraph rests on; this sentence said both of all three until the
-        sixth pass (`extract.DIRTY_MARKERS` records where each was read).
+        paragraph rests on; until the sixth pass this sentence asserted the
+        first of the two of all three (`extract.DIRTY_MARKERS` records where
+        each was read).
 
         The price is stated rather than hidden, and it is smaller than the
         price the old sentence hid: hours of compiling and extracting, against
@@ -1337,9 +1338,12 @@ class CmangosInstaller(StagedInstaller):
         claim about the press, and the press runs `build` before either of
         them. Measured on yulon-fedora 2026-09-05 through the real `run()`
         with the images gone: `build` logs "compiling" and "The build
-        finished.", and the extract stage's first refusal lands four log lines
-        after that, so a sentence reading "Nothing was run" would be read
-        directly under a line saying the build did.
+        finished.", and this function's refusal lands three log lines after
+        that (`Step …`, `--- extract`, the stage's cancel note; `run_plan()`'s
+        refusal, one yield further on, lands four -- the round-10 review's
+        press probe, `pyplan/gates/doodad-2026-09-05/round10-press-probe.txt`),
+        so a sentence reading "Nothing was run" would be read directly under
+        a line saying the build did.
         `extract.blocked_message()` carries the same scope for the same
         reason, and
         `test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_runs`
