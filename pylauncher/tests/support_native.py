@@ -113,6 +113,20 @@ class Recorder:
     db_healthy: bool = True
     ready: bool = True
 
+    world_output: native.WorldOutput = native.WorldOutput(
+        text="mangosd loading", restarts=0, status="running"
+    )
+    """What the world container has printed, read BETWEEN ready windows.
+
+    A CONSTANT by default, which is a machine deliberately: with `ready=False`
+    it models the server that is up, has never restarted and is saying nothing
+    new -- the one honest reading of "it never came up" that a fixed answer can
+    give. A test about a server that is still loading has to say so by handing
+    `world_output` a callable that changes its answer, because a double that
+    cannot produce a different second reading cannot produce the failure this
+    module exists to make producible (see `tests/test_ready_budget.py`).
+    """
+
     container_runs: list[docker.ContainerRun] = field(default_factory=list)
     """Every `docker run` the engine asked for, as the typed spec — asserted by field."""
 
@@ -434,6 +448,7 @@ class Recorder:
             start=self.start,
             wait_db_healthy=lambda spec: self.db_healthy,
             wait_ready=lambda spec, ready: self.ready,
+            world_output=lambda spec: self.world_output,
             # An INERT SELinux by default: not enforcing, on a filesystem that
             # could hold a label if it were. That is Ubuntu/Arch/macOS, which
             # is what every other test in both files is about, and it keeps
