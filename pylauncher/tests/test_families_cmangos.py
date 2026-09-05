@@ -54,6 +54,18 @@ from yulon.catalog.installer import InstallerError, InstallOptions, installer_fo
 
 DB_PASSWORD = "tbc-0123456789abcdef"
 
+SECRETS_FOR_A_RENDER = native.Secrets(db_password=DB_PASSWORD)
+"""What the two tests below hand `dockerfile.render()` when they call it directly.
+
+`render()` takes the declaration keyword-only and REQUIRED — §29's value half — so every
+direct call needs one even when the test is about something else entirely (the shipped
+`.dockerignore` lines, or that the public mapping fills the templates on its own). Both
+of those pass the install's real password, so a collision between it and a public token
+value would show up here as a refusal rather than as a silent pass;
+`test_no_shipped_public_mapping_collides_with_a_password_the_catalog_can_declare` is
+where that is the subject rather than a side effect. Inside a stage the argument is
+`ctx.secrets`, which `context()` builds from this same value."""
+
 HANG_BOUND = 30.0
 """A DEADLOCK BREAKER for every thread wait here, not an assertion about speed.
 
@@ -470,7 +482,7 @@ def test_the_build_context_mapping_needs_no_secret_and_still_fills_the_shipped_t
     native_block = ENTRY.install.native
     assert native_block is not None and native_block.dockerfile_dir is not None
     template_dir = resources.installers_dir() / native_block.dockerfile_dir
-    text, ignore = dockerfile.render(template_dir, public)
+    text, ignore = dockerfile.render(template_dir, public, secrets=SECRETS_FOR_A_RENDER)
     assert "{{" not in text and "{{" not in ignore
     assert text.startswith(composegen.GENERATED_MARKER)
 
@@ -556,14 +568,22 @@ def test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_render
         f"road is untested and a mutation reading it would survive again:\n{dotenv}"
     )
     seen: list[dict[str, str]] = []
+    handed: list[native.Secrets] = []
     real = dockerfile.render
 
-    def spy(template_dir: Path, tokens: Mapping[str, str]) -> tuple[str, str]:
+    def spy(
+        template_dir: Path, tokens: Mapping[str, str], *, secrets: native.Secrets
+    ) -> tuple[str, str]:
         seen.append(dict(tokens))
-        return real(template_dir, tokens)
+        handed.append(secrets)
+        return real(template_dir, tokens, secrets=secrets)
 
     monkeypatch.setattr(dockerfile, "render", spy)
     list(eng._write_dockerfile(ctx))
+    assert handed == [ctx.secrets], (
+        "the stage did not hand `render()` the context's own secrets, so §29's value rule "
+        "was armed with nothing and the refusal below proves less than it reads"
+    )
     assert len(seen) == 1, "the renderer was not called once; this test would prove nothing"
     for name, value in sentinels.items():
         leaked = [key for key, held in seen[0].items() if value in held]
@@ -837,9 +857,11 @@ def test_every_shipped_dockerignore_excludes_the_entrys_password_file(
     )
     native_block = entry.install.native
     assert native_block is not None and native_block.dockerfile_dir is not None
-    eng = engine_for(entry, Recorder(), platform_id=lambda: "linux")
+    eng = engine_for(entry, Recorder())
     template_dir = resources.installers_dir() / native_block.dockerfile_dir
-    _text, ignore = dockerfile.render(template_dir, eng._public_tokens(tmp_path / "srv"))
+    _text, ignore = dockerfile.render(
+        template_dir, eng._public_tokens(tmp_path / "srv"), secrets=SECRETS_FOR_A_RENDER
+    )
 
     withheld = dockerignore_excludes(ignore, plan.file)
     assert withheld, f"{game} would send {plan.file} to the build daemon:\n{ignore}"
@@ -938,6 +960,11 @@ def test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret(
     password in it. The glob is widened to the whole tree as a tripwire; this is
     the guarantee.
 
+    §29's VALUE rule has nothing to say here, deliberately: `DB_PASSWORD` is one of the
+    tokens `render()` DROPS, so a declared secret riding under it is the mapping working
+    as designed, and this test would be about the wrong refusal if it fired. What refuses
+    the render is the template naming `{{DB_PASSWORD}}`.
+
     Rendered from the REAL `_secret_tokens()` mapping — the SECRET-bearing one,
     deliberately, and not the one `_write_dockerfile` now passes. 7.3 took the
     password out of the build-context mapping; if this test followed it there,
@@ -958,15 +985,106 @@ def test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret(
         encoding="utf-8",
         newline="\n",
     )
-    tokens = engine(Recorder())._secret_tokens(context(tmp_path / "srv"))
+    ctx = context(tmp_path / "srv")
+    tokens = engine(Recorder())._secret_tokens(ctx)
     assert tokens["DB_PASSWORD"] == DB_PASSWORD, "the secret-bearing set, on purpose"
     with pytest.raises(dockerfile.DockerfileError, match="DB_PASSWORD") as caught:
-        dockerfile.render(folder, tokens)
+        dockerfile.render(folder, tokens, secrets=ctx.secrets)
     assert DB_PASSWORD not in str(caught.value)
     # The refusal's own words, not the belt's. Dropping the key from the mapping ALSO
     # stops the render — as an unfilled placeholder — so without this line the test
     # would stay green with the by-name refusal deleted, which is the bug it is here for.
     assert "docker history" in str(caught.value)
+
+
+def test_the_write_dockerfile_stage_refuses_a_bland_key_carrying_the_install_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§29's VALUE half, driven through the STAGE and not through `render()`.
+
+    The RED, measured against the shipped module on m910q 2026-09-05 on a copy of the
+    tree at `0cc637c7`: with `Secrets` declaring one field, `SOAP_PASSWORD` was refused
+    and `BUILD_ARG` was not —
+
+        BUILD_ARG -> ACCEPTED, secret in text: True
+                     write() accepted it: ['Dockerfile', '.dockerignore']
+                     Dockerfile on disk contains the secret: True
+                     the line it wrote: ['ENV BUILD_ARG=tbc-0123456789abcdef']
+
+    — because the only rule reading the mapping read the NAME of the key.
+
+    **The leak here takes the route §29 measured rather than a literal.** The helper
+    below reads the password back with `self.resolve_secrets(server_dir)`, which is the
+    live first-install route recorded in `_public_tokens`'s own docstring: `db-password`
+    (`STAGE_NAMES` index 1) has already written the plaintext into that folder by the
+    time `write-dockerfile` (index 2) runs, so that public inherited method no longer
+    mints — it reads the install's real secret off disk. Run here, not described, and the
+    assertion that the two match is what stops this from going quietly vacuous if the
+    stage order or the password plan changes.
+
+    **Driven through `_write_dockerfile` because a guard proved only at the function is a
+    guard nobody has shown the production path reaches**
+    ([[reviews-check-functions-not-call-sites]]). The `secrets=ctx.secrets` argument is
+    passed by exactly one line in `yulon/`; delete it and this test fails, because the
+    parameter is required rather than optional.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    ctx = context(server_dir)
+    list(eng._db_password(ctx))
+    real = CmangosInstaller._public_tokens
+
+    def leaky(self: CmangosInstaller, sd: Path) -> dict[str, str]:
+        return {**real(self, sd), "BUILD_ARG": self.resolve_secrets(sd).db_password}
+
+    monkeypatch.setattr(CmangosInstaller, "_public_tokens", leaky)
+    assert leaky(eng, server_dir)["BUILD_ARG"] == DB_PASSWORD, (
+        "the leak did not reach the install's real password, so this test would be about "
+        "a literal rather than about the route §29 measured"
+    )
+    with pytest.raises(InstallerError, match="BUILD_ARG") as caught:
+        list(eng._write_dockerfile(ctx))
+    said = str(caught.value)
+    assert DB_PASSWORD not in said, "the refusal a user reads must not print the password"
+    assert "DB_PASSWORD" in said, "it names the declaration the value belongs to"
+    assert not (server_dir / "Dockerfile").exists(), "and nothing was laid down"
+    assert not (server_dir / ".dockerignore").exists()
+
+
+@pytest.mark.parametrize(
+    "password",
+    [DB_PASSWORD, "password"],
+    ids=["generated-shape", "shortest-fixed-in-the-catalog"],
+)
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_no_shipped_public_mapping_collides_with_a_password_the_catalog_can_declare(
+    game: str, password: str, tmp_path: Path
+) -> None:
+    """The false-positive half: the value rule must not refuse a real install.
+
+    Containment is a rule that CAN misfire — a token value that happens to contain the
+    password is refused exactly like a leak. Measured on m910q 2026-09-05 over the 34
+    distinct values these three mappings produce: `password` is contained in none of
+    them, while `mangos` (below `MIN_CONTAINED_SECRET`, so equality-only) is contained in
+    five. Both passwords here are ones the shipped catalog can really declare —
+    `<prefix><16 hex>` for the three generated entries, and `wow-wotlk`'s literal
+    `password`, which is the shortest fixed value anywhere in `catalog.json` and
+    therefore the worst case the floor admits.
+
+    Rendered through the real shipped templates rather than a stand-in pair, because what
+    is asserted is that a real install of each game still runs.
+    """
+    entry = installable(load_catalog().get(game))
+    eng = engine_for(entry, Recorder())
+    native_block = entry.install.native
+    assert native_block is not None and native_block.dockerfile_dir is not None
+    template_dir = resources.installers_dir() / native_block.dockerfile_dir
+    tokens = eng._public_tokens(tmp_path / "srv")
+    text, ignore = dockerfile.render(
+        template_dir, tokens, secrets=native.Secrets(db_password=password)
+    )
+    assert "{{" not in text and "{{" not in ignore
 
 
 def test_image_ref_names_the_built_server_image_and_refuses_an_unknown_service(
@@ -2225,9 +2343,11 @@ def test_write_dockerfile_hands_the_renderer_the_public_mapping_and_nothing_else
     seen: list[dict[str, str]] = []
     real = dockerfile.render
 
-    def spy(template_dir: Path, tokens: Mapping[str, str]) -> tuple[str, str]:
+    def spy(
+        template_dir: Path, tokens: Mapping[str, str], *, secrets: native.Secrets
+    ) -> tuple[str, str]:
         seen.append(dict(tokens))
-        return real(template_dir, tokens)
+        return real(template_dir, tokens, secrets=secrets)
 
     monkeypatch.setattr(dockerfile, "render", spy)
     eng = engine(Recorder())

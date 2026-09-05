@@ -145,20 +145,33 @@ deleted.** Measured 2026-09-04 on m910q before the literals existed: narrowing t
 from six words to three gave `58 passed` against `61 passed`, zero failures, because a
 test generated from the set shrinks with it.
 
-**What it does NOT cover, said plainly, because §29 records three guarantees about this
-same hole and each was refuted by execution within a day of being written.** A secret filed
-under a name that announces nothing — `FOO`, `EXTRA`, `BUILD_ARG` — passes this rule
-untouched. Catching that needs a comparison BY VALUE against the real secrets, which needs
-those values, which means a
-`Secrets` instance: §29's enumerating guard, and it belongs at the call site that holds
-`ctx.secrets`. This is a price on the careless spelling, not a wall.
+**What this rule does NOT cover, and what does now.** A secret filed under a name that
+announces nothing — `FOO`, `EXTRA`, `BUILD_ARG` — passes this rule untouched. Measured
+against the shipped module on m910q 2026-09-05, at `0cc637c7`, with `Secrets` declaring
+one field:
 
-**Rejected: an optional `secrets=` parameter on `render()` doing that value comparison.**
-It would have to default to "none declared", because since 7.3 the only production caller
+    SOAP_PASSWORD  -> REFUSED: "SOAP_PASSWORD: each of those reads as a secret ..."
+    BUILD_ARG      -> ACCEPTED, secret in text: True
+    EXTRA          -> ACCEPTED, secret in text: True
+    FOO            -> ACCEPTED, secret in text: True
+    the line it wrote: ['ENV BUILD_ARG=tbc-0123456789abcdef']
+
+That is the VALUE half of `pyplan/bug-checklist.md` §29, and it is `carries_a_secret()`'s
+job, not this set's. The two are complementary and neither subsumes the other: this rule
+reads a NAME and so catches a careless key holding a secret it has never been shown, while
+the value rule reads a VALUE and so catches a careless key whatever it is called. This
+one remains a price on the careless spelling, not a wall.
+
+**Rejected — still — an OPTIONAL `secrets=` parameter doing that value comparison.** It
+would have to default to "none declared", because since 7.3 the only production caller
 passes `_public_tokens(server_dir)` and `ctx.secrets` is one scope above it. A guard no
 caller invokes is a guard that never fires — [[guards-that-prove-declarations]] is four of
 those — and its presence would read, to the next person, as though the value case were
-handled.
+handled. What `render()` takes instead is a REQUIRED keyword-only `secrets`, which is a
+different object: a caller that forgets it does not lose the guard, it fails to call the
+function at all (`TypeError`), and
+`test_a_caller_that_forgets_the_secrets_argument_fails_instead_of_losing_the_guard` is
+what says so.
 
 **Rejected: scanning the rendered TEXT for these words.** `write()`'s docstring already
 argued that down for the same words: it would refuse a legitimate
@@ -190,11 +203,71 @@ def announces_a_secret(key: str) -> bool:
     return any(word in squashed for word in SECRET_NAME_WORDS)
 
 
+MIN_CONTAINED_SECRET = 8
+"""At this length a secret is looked for INSIDE a token value; below it, only as the whole.
+
+**Why a floor at all.** Containment against a very short secret refuses everything.
+Measured on m910q 2026-09-05 over the 34 distinct values the three shipped CMaNGOS
+`_public_tokens()` mappings produce: the empty string is contained in every one of them,
+and 30 of the 36 single alphanumeric characters are contained in at least one — `a` alone
+is in 16 (`/opt/mangos`, `characters`, …). A rule that refused those would not be strict,
+it would be an install that can never run.
+
+**Why 8, with the two measurements that bound it.** Below it there is a real collision in
+the shipped mapping: `mangos`, six characters, is contained in five shipped token values,
+so a six-character password spelled that way would refuse every CMaNGOS install. At 8
+there is none — `password`, which is the shortest secret VALUE the shipped catalog
+declares anywhere (`wow-wotlk`'s `install.password.mode == "fixed"`), is contained in no
+shipped token value. Every other declared password is `<prefix><16 hex>`, so 20
+characters or more. 8 is therefore the smallest number that covers every secret this app
+can hand `render()` today while colliding with nothing it renders.
+
+**And why not a larger number, which is the tempting answer.** Because raising it buys
+nothing measurable. The collision surface does not empty out with length: same box, same
+day, the shipped values yield 98 distinct 8-character substrings, 78 distinct
+12-character ones, and the longest value is 29 characters
+(`yulon.local/cmangos-tortoise-`), so a containment collision remains *possible* at every
+length a password can have. What makes 8 safe is not that collisions stop, it is that the
+strings which collide are catalog-derived fragments — `mariadb:`, `/opt/man`, `haracter`
+— and none of them is a password anybody sets. A bigger floor would drop coverage of
+`wow-wotlk`'s real declared secret in exchange for that same non-guarantee.
+
+**Below the floor it is equality, not silence.** All four leaks ever measured into this
+mapping put the password in VERBATIM under some other key — M15 and M-R2
+(`CmangosInstaller._public_tokens`'s docstring), §29's `SOAP_PASSWORD` probe, and the
+`BUILD_ARG` probe above — so equality still catches the shape that has actually happened,
+even for a one-character password. What equality cannot see is a short secret embedded in
+a longer value, and that is stated rather than fixed: no shipped entry declares one.
+
+An EMPTY secret matches nothing at all, by either test. It is in every string, so
+containment would refuse every install; and equality on it would refuse any empty token
+value. Measured the same day: no shipped `_public_tokens()` mapping has an empty value
+today, so the second half of that is a cost nobody is paying — but "no empty values,
+today" is a fact about the catalog, and the guard should not depend on it. An empty
+password is not a secret worth a refusal in any case.
+"""
+
+
+def carries_a_secret(value: str, secret: str) -> bool:
+    """Whether a token VALUE leaks `secret` — contained if it is long enough, else equal.
+
+    The asymmetry is `MIN_CONTAINED_SECRET`'s, argued there with the measurements.
+    Containment rather than equality above the floor because a leak does not have to be
+    tidy: `--db-pass=<the password>` under one key is the same image layer as the bare
+    value under another, and equality alone would wave it through.
+    """
+    if not secret:
+        return False
+    if len(secret) < MIN_CONTAINED_SECRET:
+        return value == secret
+    return secret in value
+
+
 class DockerfileError(RuntimeError):
     """A template could not be rendered, or a file in the way is not ours to replace."""
 
 
-def render(template_dir: Path, tokens: Mapping[str, str]) -> tuple[str, str]:
+def render(template_dir: Path, tokens: Mapping[str, str], *, secrets: Secrets) -> tuple[str, str]:
     """(Dockerfile text, .dockerignore text), each beginning with the marker as a `#` comment.
 
     One `fill()` for every template in the app — `composegen.fill`, which refuses an
@@ -229,13 +302,89 @@ def render(template_dir: Path, tokens: Mapping[str, str]) -> tuple[str, str]:
     has already watched fail twice. It also means the rule holds for a `template_dir`
     nobody has seen.
 
+    **`secrets` is the VALUE half of the same question, and it is required.** The name
+    rule can only read the name a caller chose; a secret filed under `BUILD_ARG` walked
+    past it, measured on m910q 2026-09-05 at `0cc637c7` and quoted in
+    `SECRET_NAME_WORDS`. So the caller hands over the declaration itself and this
+    function refuses any key carrying one of its values — `carries_a_secret()` decides
+    what carrying means. The two rules are complementary rather than layered: the name
+    rule catches a careless spelling around a value nobody here has seen, and this one
+    catches a careless key around a value that is provably the install's own secret.
+
+    It is a `Secrets` and not a bag of strings for the reason `SECRET_TOKENS` is derived
+    rather than listed: a second field on `native.Secrets` extends this refusal on the
+    day it is added, with nobody to remember. `fields()` is asked of the INSTANCE, so a
+    subclass carrying an extra secret answers with both — the same choice
+    `cmangos.secret_token_map()` made, and for the same reason.
+
+    It is REQUIRED and keyword-only, which is the whole difference between this and the
+    optional parameter §29 rejected. Today's sole production caller is
+    `CmangosInstaller._write_dockerfile`, which holds `ctx.secrets` one frame above the
+    `_public_tokens(server_dir)` it passes as `tokens`; the narrow parameter list of
+    `_public_tokens()` is untouched, so nothing about 7.3's capability split is undone —
+    the secret is named at the RENDER call, as the thing that must not be emitted, not
+    added to the mapping. A second caller who forgets it raises `TypeError` rather than
+    quietly rendering without the guard.
+
+    **The exemption is the tokens this module DROPS, not the tokens the declaration
+    names.** A value may carry a secret only under a key in `SECRET_TOKENS`, because
+    those are exactly the keys removed from the mapping below — that is the whole purpose
+    of `_secret_tokens()`'s mapping, and `test_a_dockerfile_template_the_glob_cannot_see…`
+    hands it over on purpose. A subclass's extra secret filed under its own declared
+    token is NOT exempt, and should not be: `SECRET_TOKENS` comes from `native.Secrets`,
+    so such a key would survive the drop and be filled straight into the build context.
+
+    **Rejected: also scanning the rendered TEXT for these values.** `render()` now holds
+    them, so it could — and `write()`'s docstring only rejected the NAME-scanning version.
+    What it would add is a template that hard-codes a real secret, and measured
+    2026-09-05 that set is empty in both directions: a GENERATED password is minted per
+    install (`<prefix><16 hex>`), so no committed template can contain one, and the only
+    FIXED password in the shipped catalog is `wow-wotlk`'s literal `password` — eight
+    characters of English, belonging to an entry whose family does not call this function.
+    Against that, containment over a whole Dockerfile is a much larger false-positive
+    surface than containment over one token value: a future template line reading
+    `# the password file is mounted at run time` would refuse that entry's install
+    outright. No shipped template spells the word today (measured, same box), so this is
+    a cost nobody pays yet and a coverage nobody gains yet — reconsider it the day a
+    family with a short fixed password renders a Dockerfile.
+
     Both halves come back as `_Rendered`, which is the only text `write()` will lay down.
 
     Raises:
         DockerfileError: a template could not be read, a placeholder was left unfilled, a
-            template names a `SECRET_TOKENS` placeholder such as `{{DB_PASSWORD}}`, or the
-            mapping files a secret-sounding value under a name no `Secrets` field declares.
+            template names a `SECRET_TOKENS` placeholder such as `{{DB_PASSWORD}}`, the
+            mapping files a secret-sounding value under a name no `Secrets` field
+            declares, or the mapping carries a declared secret's VALUE under a key this
+            module does not drop.
+        TypeError: `secrets` was not passed. Deliberate, and see above.
     """
+    # The VALUE rule runs FIRST, and the order is a decision about the sentence a reader
+    # gets when a key trips both — `SOAP_PASSWORD` holding the install's real password,
+    # say. The name rule reports a guess about spelling ("this READS as a secret"); this
+    # one reports something proved by comparison against the declaration ("this IS the
+    # value of DB_PASSWORD"), and the remedies differ: a merely secret-sounding key may
+    # be a false alarm to rename, while a key holding the real password has to go.
+    # `test_a_key_that_trips_both_rules_is_reported_by_the_one_that_proved_it` pins it.
+    declared = {
+        secret_token_name(field.name): getattr(secrets, field.name) for field in fields(secrets)
+    }
+    carrying: list[str] = []
+    for key, value in sorted(tokens.items()):
+        if key in SECRET_TOKENS:
+            continue
+        named = sorted(name for name, secret in declared.items() if carries_a_secret(value, secret))
+        if named:
+            carrying.append(f"{key} (the value declared as {', '.join(named)})")
+    if carrying:
+        raise DockerfileError(
+            f"{'; '.join(carrying)} — and this mapping is rendered into the build context, "
+            "where a Dockerfile is copied into an image layer that `docker history` prints "
+            "long after the file is deleted. A secret may only ride in this mapping under a "
+            "token this renderer drops "
+            f"({', '.join(sorted(SECRET_TOKENS))}), and only towards a consumer that needs "
+            "it — `_secret_tokens()`, whose conf files are written 0600. Drop the key, or "
+            "file the value under its declared token. The value itself is not printed here."
+        )
     undeclared = sorted(
         key for key in tokens if key not in SECRET_TOKENS and announces_a_secret(key)
     )
@@ -362,12 +511,19 @@ def write(server_dir: Path, dockerfile: str, dockerignore: str) -> tuple[Path, .
     2026-09-01 on commit b8973c52, marked text reading `ENV PW=<the password>` was written
     into the build context without a word. Re-checking the CONTENT here was the
     alternative and it is weaker in both directions, because `write()` is never given the
-    secret VALUES — they live in `native.Secrets`, which this module's signature never
-    sees — so a re-check could only scan for the token NAMES: it would miss a password
-    stored under any other name (exactly the text above) and refuse a legitimate
+    secret VALUES — THIS function's signature does not take a `Secrets` and is not being
+    given one — so a re-check here could only scan for the token NAMES: it would miss a
+    password stored under any other name (exactly the text above) and refuse a legitimate
     `ENV DB_PASSWORD_FILE=/run/secrets/db`. Requiring `render()`'s own output INHERITS
     that refusal whole instead of approximating it. The marker check runs first, so text
     that is neither marked nor rendered is still reported as unmarked.
+
+    That inheritance is now worth more than it was, and the sentence above needed
+    correcting rather than deleting: since §29's value half landed, `render()` DOES take
+    the declaration, so what `write()` inherits includes a refusal of any mapping value
+    that carried a declared secret — the thing a content re-check here could never have
+    done. What it still does not inherit is anything about text a caller assembled
+    itself, which is the provenance rule's whole subject.
 
     The provenance check is what a caller reusing this writer while bypassing `render()`
     runs into. It is not a defence against code that deliberately builds a `_Rendered`.

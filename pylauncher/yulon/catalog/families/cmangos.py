@@ -364,6 +364,26 @@ class CmangosInstaller(StagedInstaller):
         depth: the glob-bypass test in `test_families_cmangos.py` hands
         `render()` the SECRET-bearing mapping on purpose, so the renderer's own
         refusal is still proved by a test this stage does not go through.
+
+        **`secrets=ctx.secrets` is passed here and not from `_public_tokens()`,
+        and the difference is the point.** §29's value half needs the real
+        secret VALUES to compare against, and `render()` cannot know which of
+        the opaque strings it is handed are secret — measured on m910q
+        2026-09-05 at `0cc637c7`, a key spelled `BUILD_ARG` carrying the
+        install's password rendered `ENV BUILD_ARG=tbc-0123456789abcdef` into a
+        Dockerfile on disk with nothing to say about it. This body is where the
+        two facts meet: `ctx.secrets` is in scope, and the mapping is one call
+        away. `_public_tokens(server_dir)` keeps its narrow parameter list —
+        nothing about 7.3's split is undone, because the secret is named as the
+        thing that must NOT be emitted rather than added to what is.
+
+        The argument is keyword-only and REQUIRED, so this stage cannot lose
+        the guard by forgetting it and neither can the next caller; §29
+        rejected an OPTIONAL one, and rightly.
+        `test_the_write_dockerfile_stage_refuses_a_bland_key_carrying_the_install_password`
+        drives THIS body rather than `render()` directly, because a guard
+        proved only at the function is a guard nobody has shown reaches the
+        production path ([[reviews-check-functions-not-call-sites]]).
         """
         native_block = self._native()
         if native_block.dockerfile_dir is None:
@@ -373,7 +393,11 @@ class CmangosInstaller(StagedInstaller):
             )
         template_dir = self.installers_root / native_block.dockerfile_dir
         try:
-            text, ignore = dockerfile.render(template_dir, self._public_tokens(ctx.server_dir))
+            text, ignore = dockerfile.render(
+                template_dir,
+                self._public_tokens(ctx.server_dir),
+                secrets=ctx.secrets,
+            )
             written = dockerfile.write(ctx.server_dir, text, ignore)
         except dockerfile.DockerfileError as exc:
             # Already the sentence a user reads. A class name in front of
