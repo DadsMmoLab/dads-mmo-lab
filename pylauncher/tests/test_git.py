@@ -840,7 +840,19 @@ def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
 
 
 @pytest.mark.parametrize(
-    "impl", [git.RunnerGit(), git.ContainerGit()], ids=["host", "containerized"]
+    "impl",
+    [
+        git.RunnerGit(),
+        # Both seams pinned. Bare, `ContainerGit()` asks the machine at call time,
+        # and on an SELinux-Enforcing box the `stat -f -c %T` filesystem probe
+        # goes through `runner.run` -- the one this test fakes -- and eats the
+        # first canned answer. Measured 2026-09-05 on `yulon-fedora` (Enforcing,
+        # Python 3.13): `IndexError: pop from empty list` at the rev-list call,
+        # while m910q (no SELinux) and CI's Ubuntu runners passed. A fixture that
+        # answers differently on the second box is what this pins against.
+        git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _path: "ext4"),
+    ],
+    ids=["host", "containerized"],
 )
 def test_no_local_commits_counts_what_head_has_that_the_update_would_not(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.HistoryReader
