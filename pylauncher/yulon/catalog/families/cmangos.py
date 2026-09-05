@@ -453,9 +453,18 @@ class CmangosInstaller(StagedInstaller):
         with nothing blocking is not told to delete a folder that is not there;
         `run_plan()` refuses with the folder named if anyone arrives in that
         state by another road. The other three folders are NOT named, and that
-        is a reading of the pinned sources rather than a hope: `ad`,
-        `vmap_assembler` and `MoveMapGen` overwrite (`extract.DIRTY_MARKERS`
-        records where each was read).
+        is a reading of the pinned sources rather than a hope: none of `ad`,
+        `vmap_assembler` and `MoveMapGen` refuses a non-empty output folder.
+        `ad` and `vmap_assembler` also overwrite what they write, through
+        `fopen(.., "wb")` (`ad`'s one output-path `FileExists()` is on
+        `Cameras/`, and it skips past a camera file already there);
+        `MoveMapGen` does NOT -- `MapBuilder::shouldSkipTile`
+        keeps an existing `.mmtile` whose magic and versions match and rebuilds
+        the rest -- and it does not need to, because the mmaps stage wipes
+        `mmaps/` itself when no finished record vouches for it. "No refusal"
+        and "overwrites" are separate claims and only the first is what this
+        paragraph rests on; this sentence said both of all three until the
+        sixth pass (`extract.DIRTY_MARKERS` records where each was read).
 
         The price is stated rather than hidden, and it is smaller than the
         price the old sentence hid: hours of compiling and extracting, against
@@ -1319,6 +1328,22 @@ class CmangosInstaller(StagedInstaller):
         disk is refused too, deliberately: the install folder as a whole can be
         put wherever they like, and telling them so is cheaper than deciding
         which outside destinations are the harmless ones.
+
+        "This stage ran nothing and removed nothing" is scoped to the STAGE,
+        and read "Nothing was run and nothing was removed" until the sixth
+        pass of 2026-09-05. Both callers are stage bodies (`_extract`,
+        `_mmaps`) and each asks this before it starts a container or deletes
+        anything, so the narrow claim is true of each; the wide one was a
+        claim about the press, and the press runs `build` before either of
+        them. Measured on yulon-fedora 2026-09-05 through the real `run()`
+        with the images gone: `build` logs "compiling" and "The build
+        finished.", and the extract stage's first refusal lands four log lines
+        after that, so a sentence reading "Nothing was run" would be read
+        directly under a line saying the build did.
+        `extract.blocked_message()` carries the same scope for the same
+        reason, and
+        `test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_runs`
+        asserts this one on both stages and both attempts.
         """
         server_dir = ctx.server_dir
         data_dir = server_dir / DATA_DIR
@@ -1329,8 +1354,8 @@ class CmangosInstaller(StagedInstaller):
                 f"({server_dir}). This install writes extracted game data into that folder and "
                 "deletes a folder inside it when it regenerates movement maps, so a link pointing "
                 "elsewhere would let it overwrite and delete files that are not its own — a game "
-                "client's, if that is where the link goes. Nothing was run and nothing was "
-                f"removed. Remove the link so {DATA_DIR} can be this install's own folder, or "
+                "client's, if that is where the link goes. This stage ran nothing and removed "
+                f"nothing. Remove the link so {DATA_DIR} can be this install's own folder, or "
                 "install this server in the folder you want its data to live in."
             )
         data_dir.mkdir(parents=True, exist_ok=True)

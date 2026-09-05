@@ -666,6 +666,19 @@ six that go quiet under the fabrication are exactly the tests that drive the gua
 that survives — the tool stats it, so a folder that holds one is refused by the real binary
 whoever put it there.
 
+That reason then had to be asserted too, and for one round it was not. The mirror of the mutation
+above — narrowing `blocking_output()`'s OR to `if (folder / DIR_BIN).exists():`, dropping the half
+`DIRTY_MARKERS` exists for — survived the whole gate set: 2758 passed, 4 skipped, 23 deselected,
+0 RED (yulon-fedora 2026-09-05, `mutations-round6.txt` MU4, anchor asserted `== 1`, `__pycache__`
+purged both sides, original restored and md5-checked). The test named for the marker asked
+`blocking_output()` only for the `dir_bin` folder and, once `dir_bin` was unlinked, called
+`blocked_message()` directly — which
+lists whatever is present without ever asking whether the guard fires. One line closes it
+(`assert extract.blocking_output(VMAP, data) == buildings` after the unlink), and the same
+mutation is now RED. The condition being mirrored is `!stat(sdir.c_str(), &status) ||
+!stat(sdir_bin.c_str(), &status)` — `vmapexport.cpp:477` at 8ec338a1 and `:527` at f82e7d67,
+re-read at both revisions.
+
 **The refusal now runs nothing before it refuses.** `blocking_output()` used to be asked per tool
 inside `run_plan()`'s loop, and the shipped plans put `dbc and maps` first, so the press that
 refused `vmap extract` had already run an `ad` container to completion — under a sentence reading
@@ -677,6 +690,21 @@ difference is tens of minutes of `ad` and every file under `dbc/` and `maps/` wr
 `ad` opens each output `"wb"`. The question is now asked over every unsatisfied tool in one pass
 before the first container and before the evidence file is rewritten, and a test asserts the
 sentence's words together with its truth.
+
+**And the sentence says EXTRACTION, not press.** The hoist made "nothing was run" true of the
+extraction and the round that made it then widened the words to the press, which is a different
+and false claim: the stage spine runs `clone-sources`, `patch-sources`, `db-password`,
+`write-dockerfile`, `generate-compose` and `build` before `extract`. Driven through the real
+`CmangosInstaller.run()` on yulon-fedora 2026-09-05 in the state this lane's own remedy asks for —
+images gone (`docker image rm`, so `images_built` answers False), `data/.yulon-extract.json`
+deleted, `data/Buildings` kept — two fixtures both logged "compiling" and "The build finished."
+exactly four log lines above the refusal: a pre-`patch-sources` install, which came out with 11
+changed files under the server folder, and a finished modern one, which came out with 1
+(`.yulon-install.json`). Neither launched an extraction container and neither changed a byte under
+`data/`. So the shipped sentence is "The extraction ran nothing and changed nothing under data/.",
+which is what was measured, and `cmangos.py`'s `_data_dir()` refusal — reached from the same two
+stages, after the same build — says "This stage ran nothing and removed nothing." for the same
+reason. Both are asserted by name in tests, and deleting either is red.
 
 **What this costs, and the recommendation the owner asked for.** The owner said "do what you
 recommend". The recommendation is the refusal as it now stands, and the argument is the price:

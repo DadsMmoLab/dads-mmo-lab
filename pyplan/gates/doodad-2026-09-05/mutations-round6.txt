@@ -1,0 +1,81 @@
+round-6 mutations, doodad lane -- yulon-fedora, 2026-09-05
+Run copy ~/yulon-runs/fix10-doodad, a `git clone -b lane/doodad` of a bundle of this
+branch (the commit exists nowhere else yet), venv symlinked to the gate checkout's,
+Python 3.13.15. Deleted after the run.
+
+The tree is the BRANCH's, not a copy: the first line below is `git hash-object` of each
+file under mutation, and each id is what `git rev-parse <commit>:<path>` answers for the
+commit this capture belongs to. An md5 of a working copy would not settle that -- the
+laptop worktree is CRLF and this clone is LF -- so the md5s that follow are only the
+before/after guard inside one run.
+
+Scored on the GATE's suite -- `-m 'not integration'`, the set run-tests-vm.sh --checks
+runs -- and NOT on the whole suite (which also runs the 23 deselected integration tests)
+or on the two test files alone. The two-file baseline is printed once for reference only;
+every mutation line below is the gate's set.
+
+Rules, applied by mutations-round6.py and visible in its source: each anchor asserted to
+occur EXACTLY once before it is substituted, the substitution md5-checked on disk, every
+__pycache__ under the run copy purged BEFORE and AFTER each pytest invocation, and the
+original restored from bytes with its md5 re-checked before the next mutation.
+
+What each pair says:
+* MU1/MU2 and MU5/MU6 are the two refusal sentences this pass narrowed, deleted and
+  widened back to the press claim they carried. Each is 1 red, on the test named for it.
+* MU3 against MU4 is the pair that matters for the guard. MU3 narrows
+  `blocking_output()`'s OR to `if (folder / DIR_BIN).exists():` -- dropping the `dir`
+  half the tool also stats -- and is 1 red. MU4 is the SAME narrowing with this pass's
+  one new assertion removed, and it survives the whole set: 2758 passed, 0 red. That is
+  what round 9 was scoring, and why the assertion is the fix rather than the docstring.
+* MU7 gives `wow-vanilla`'s `dbc and maps` a `Buildings` key, so two tools in one plan
+  produce one folder: 2 red.
+
+-----------------------------------------------------------------------------------
+BLOB (git hash-object, unmutated): {'extract.py': '86727b936d9e61c3bbd89bf64b0da0709326ab8c', 'cmangos.py': 'c3d8380d44f610b6270524be12ed9747cc3f607b', 'test_extract.py': '00793baff96c41914e1a0986cab518f965097544', 'test_families_cmangos.py': 'e5ad7b9c9e32c63eff2d2a15c5e16a00ea4a2e46', 'catalog.json': 'ca76208f589382fad3e49451b624535a33ee7570'}
+BASELINE md5: {'extract.py': '0a044cf79fa33844e832354d39c0da4e', 'cmangos.py': 'c8d7374067b27da6e8575e9029618fa7', 'test_extract.py': '4820417a4880d3a9f5f777791ecb965c', 'test_families_cmangos.py': '3e796ef7d3673d681907c559f0dda7cf', 'catalog.json': 'e7125cc429e6656d33ee9b075e3e8601'}
+BASELINE gate suite: 2758 passed, 4 skipped, 23 deselected in 76.84s (0:01:16)
+BASELINE two files: 298 passed in 9.23s
+
+=== MU1: the narrowed sentence deleted from blocked_message
+    md5 after: {'extract.py': '9576c9111eaf9dccb8d805b751be8559'}
+    1 failed, 2757 passed, 4 skipped, 23 deselected in 76.98s (0:01:16)
+    RED: tests/test_extract.py::test_a_refused_extraction_ran_nothing_and_changed_nothing_as_its_sentence_says
+    restored, md5 re-checked OK
+
+=== MU2: the sentence widened back to the press claim it was until this pass
+    md5 after: {'extract.py': 'ad4f845d3041bf1138b18e69046c92a9'}
+    1 failed, 2757 passed, 4 skipped, 23 deselected in 77.43s (0:01:17)
+    RED: tests/test_extract.py::test_a_refused_extraction_ran_nothing_and_changed_nothing_as_its_sentence_says
+    restored, md5 re-checked OK
+
+=== MU3: blocking_output narrowed to DIR_BIN alone -- the `dir` half of the tool's OR dropped
+    md5 after: {'extract.py': 'b65636cef3d48fab1e5ac26c2120b3d5'}
+    1 failed, 2757 passed, 4 skipped, 23 deselected in 76.90s (0:01:16)
+    RED: tests/test_extract.py::test_the_refusal_names_the_marker_that_is_actually_on_the_disk
+    restored, md5 re-checked OK
+
+=== MU4: MU3 with this pass's new assertion removed: what round 9 was scoring
+    md5 after: {'test_extract.py': 'cec41a93714bb6c5f403d07dd3c765ba', 'extract.py': 'b65636cef3d48fab1e5ac26c2120b3d5'}
+    2758 passed, 4 skipped, 23 deselected in 77.31s (0:01:17)
+    restored, md5 re-checked OK
+
+=== MU5: _data_dir's stage sentence deleted
+    md5 after: {'cmangos.py': '14897055600e4f49d6e0ad138a13f7f8'}
+    1 failed, 2757 passed, 4 skipped, 23 deselected in 77.53s (0:01:17)
+    RED: tests/test_families_cmangos.py::test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_runs
+    restored, md5 re-checked OK
+
+=== MU6: _data_dir's sentence widened back to the press claim
+    md5 after: {'cmangos.py': 'e85e1b096722b06b3fc6b0d280df7155'}
+    1 failed, 2757 passed, 4 skipped, 23 deselected in 77.02s (0:01:17)
+    RED: tests/test_families_cmangos.py::test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_runs
+    restored, md5 re-checked OK
+
+=== MU7: wow-vanilla's `dbc and maps` made to produce Buildings too -- two tools, one folder
+    md5 after: {'catalog.json': '864a6710821191b65c0e27a86937bcb0'}
+    2 failed, 2756 passed, 4 skipped, 23 deselected in 77.29s (0:01:17)
+    RED: tests/test_extract.py::test_every_shipped_cmangos_entry_produces_and_then_reads_the_buildings_dir
+         tests/test_extract.py::test_no_shipped_plan_lets_one_tool_fill_another_tools_produces
+    restored, md5 re-checked OK
+
+FINAL gate suite: 2758 passed, 4 skipped, 23 deselected in 77.02s (0:01:17)

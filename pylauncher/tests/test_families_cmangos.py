@@ -3620,6 +3620,19 @@ def test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_
             assert (
                 str(client.resolve()) in said
             ), f"attempt {attempt}: the refusal does not say where the link leads"
+            # Scoped to the STAGE since 2026-09-05. "Nothing was run and
+            # nothing was removed" was a claim about the press, and the press
+            # runs `build` before either stage that calls `_data_dir()` --
+            # measured through `run()` on yulon-fedora 2026-09-05, "The build
+            # finished." lands four log lines above the extract stage's own
+            # refusal. `rec.container_runs` below is the fact half; this is the
+            # words half, and for one round only the fact half was asserted.
+            assert (
+                "This stage ran nothing and removed nothing." in said
+            ), f"attempt {attempt}: {said}"
+            assert (
+                "Nothing was run and nothing was removed" not in said
+            ), f"attempt {attempt}: {said}"
         assert rec.container_runs == [], f"attempt {attempt}: a container ran over a linked data/"
         assert kept.is_file(), f"attempt {attempt}: the client lost content to a refused install"
 

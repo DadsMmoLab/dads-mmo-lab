@@ -967,10 +967,19 @@ def run_plan(
     # full `ad` -- tens of minutes, and every file under `dbc/` and `maps/`
     # opened `"wb"` and written again.
     #
-    # `tool_satisfied` cannot flip from False to True except by the tool
-    # running (it demands a record for that tool's own argv), so this pass sees
-    # exactly the tools the loop below would run. The retry pass does not come
-    # through here; it empties first.
+    # This pass sees exactly the tools the loop below would run, and that takes
+    # BOTH halves of `tool_satisfied` rather than the first one alone. The
+    # record half is the obvious one: it demands a record for that tool's own
+    # argv, and only the tool running writes one. The COUNT half is
+    # `return not shortfall(produces, data_dir)`, and a folder can be filled by
+    # somebody else -- so a tool with a matching record and a short `produces`
+    # would flip to satisfied if an EARLIER tool in the same loop wrote into
+    # that folder. In every shipped plan it cannot: the three tools' `produces`
+    # are disjoint ({dbc, maps} / {Buildings} / {vmaps} for `wow-tbc`,
+    # `wow-vanilla` and `wow-tortoise` alike), which
+    # `test_no_shipped_plan_lets_one_tool_fill_another_tools_produces` asserts
+    # over the catalog rather than leaving it here as a sentence. The retry
+    # pass does not come through here; it empties first.
     for tool in plan.tools:
         if tool_satisfied(tool, data_dir, current, expected):
             continue
@@ -1257,17 +1266,24 @@ r"""The two names `vmap_extractor`'s `main()` stats before it will start at all.
 
 Read out of the pinned sources on m910q, 2026-09-05, at the two revisions
 `catalog.json` names -- `cmangos/mangos-classic` 8ec338a1
-(`contrib/vmap_extractor/vmapextract/vmapexport.cpp:465-483`) and
-`cmangos/mangos-tbc` f82e7d67 (the same file, :515-533). Both carry the same
-eleven lines, and the condition is an OR over exactly these two paths::
+(`contrib/vmap_extractor/vmapextract/vmapexport.cpp:472-483`) and
+`cmangos/mangos-tbc` f82e7d67 (the same file, :522-533). Re-read at both
+revisions on yulon-fedora 2026-09-05 (`~/probe10`, `git init` + `git fetch
+--depth 1` BY SHA): the twelve lines are byte-identical at the two revisions,
+and the condition is an OR over exactly these two paths -- quoted whole,
+`fflush` included, classic :472-483 / tbc :522-533::
 
-    std::string sdir = std::string(szWorkDirWmo) + "/dir";
-    std::string sdir_bin = std::string(szWorkDirWmo) + "/dir_bin";
-    struct stat status;
-    if (!stat(sdir.c_str(), &status) || !stat(sdir_bin.c_str(), &status))
+    else
     {
-        printf("Your output directory seems to be polluted, please use an empty directory!\n");
-        return 1;
+        std::string sdir = std::string(szWorkDirWmo) + "/dir";
+        std::string sdir_bin = std::string(szWorkDirWmo) + "/dir_bin";
+        struct stat status;
+        if (!stat(sdir.c_str(), &status) || !stat(sdir_bin.c_str(), &status))
+        {
+            printf("Your output directory seems to be polluted, please use an empty directory!\n");
+            fflush(stdout);
+            return 1;
+        }
     }
 
 `szWorkDirWmo` is `Buildings`, so the folder the check is about is
@@ -1408,14 +1424,32 @@ def blocked_message(tool: ExtractTool, folder: Path) -> str:
     and no `dir` -- and listing both would be telling somebody about a file
     they will not find.
 
-    "Nothing was run and nothing was changed" is a claim about the PRESS, not
-    about this tool, and it is why `run_plan()` asks every unsatisfied tool
-    this question in one pass before it runs any of them. Asked inside the loop
-    instead, the sentence was false in the one scenario the refusal exists for:
-    the shipped plans put `ad` first, so a press that refused `vmap extract`
-    had already run an `ad` container to completion -- tens of minutes on a
-    real client -- and rewritten the evidence file the user had just been told
-    to delete.
+    "The extraction ran nothing and changed nothing under data/" is a claim
+    about the whole EXTRACTION -- every tool in the plan and not only this one
+    -- and it is why `run_plan()` asks every unsatisfied tool this question in
+    one pass before it runs any of them. Asked inside the loop instead, the
+    sentence was false in the one scenario the refusal exists for: the shipped
+    plans put `ad` first, so a press that refused `vmap extract` had already
+    run an `ad` container to completion -- tens of minutes on a real client --
+    and rewritten the evidence file the user had just been told to delete.
+
+    It is scoped to the extraction and not to the PRESS, which is how the
+    fifth pass of 2026-09-05 worded it, because the wider sentence is false:
+    the build stage runs first. Measured on yulon-fedora 2026-09-05 through the real
+    `CmangosInstaller.run()`, in the state this module's own remedy asks for
+    (`docker image rm`, so `images_built` answers False) with
+    `data/.yulon-extract.json` deleted and `data/Buildings` kept, two fixtures
+    -- a pre-`patch-sources` install and a finished modern one -- both logged
+    "compiling" and "The build finished." exactly four log lines above this
+    refusal. The pre-patch press left 11 changed files under the server folder
+    (the four patched extractor sources, `Dockerfile`, `.dockerignore`, three
+    compose files, `.env`, `.yulon-install.json`); the modern one left 1
+    (`.yulon-install.json`). Neither launched an extraction container and
+    neither changed a byte under `data/`, which is what the narrower sentence
+    claims and what
+    `test_a_refused_extraction_ran_nothing_and_changed_nothing_as_its_sentence_says`
+    asserts. `cmangos.py`'s `_data_dir()` carries the same scope for the same
+    reason.
     """
     present = [marker for marker in DIRTY_MARKERS if (folder / marker).exists()]
     held = " and ".join(present)
@@ -1423,7 +1457,8 @@ def blocked_message(tool: ExtractTool, folder: Path) -> str:
         f"{tool.name} cannot run into {folder}: it already holds {held} from an earlier "
         f"extraction, and this tool refuses to start while that is there "
         f'("Your output directory seems to be polluted, please use an empty directory!", and '
-        f"it exits without writing anything). Nothing was run and nothing was changed. "
+        f"it exits without writing anything). The extraction ran nothing and changed nothing "
+        f"under data/. "
         f"Delete {folder} and press Install again. {DIRTY_OUTPUT_NOTE}"
     )
 

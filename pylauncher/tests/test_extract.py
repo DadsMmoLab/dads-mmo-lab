@@ -961,22 +961,34 @@ def _data_snapshot(data_dir: Path) -> dict[str, bytes]:
     }
 
 
-def test_a_refused_press_really_ran_nothing_and_changed_nothing_as_its_sentence_says(
+def test_a_refused_extraction_ran_nothing_and_changed_nothing_as_its_sentence_says(
     tmp_path: Path,
 ) -> None:
-    """The refusal's last claim about the PRESS, asserted as words and as fact.
+    """The refusal's last claim about the EXTRACTION, asserted as words and as fact.
 
     Both halves are here because for one round they disagreed. `blocking_output()`
     was asked per tool inside `run_plan()`'s loop, so the shipped `ad`-first
-    order meant the refused press had already run an `ad` container to
+    order meant the refused extraction had already run an `ad` container to
     completion — tens of minutes on a real client — under a message reading
     "Nothing was run and nothing was changed." Measured through `run_plan()` on
     yulon-fedora 2026-09-05, this exact scenario twice: with the check in the
-    loop the press launched `["ad"]` and rewrote `data/.yulon-extract.json`,
+    loop the extraction launched `["ad"]` and rewrote `data/.yulon-extract.json`,
     the very file the remedy had told the user to delete; with the check
     hoisted it launched `[]` and left `data/` byte-identical. And nothing in
     the suite could see the difference, because the sentence was asserted
     nowhere.
+
+    The name and the sentence say EXTRACTION and not press, and that is the
+    sixth pass's correction rather than a preference. This function is `run_plan()`,
+    which is what the extract stage calls; the stage spine runs six stages
+    before it. Driven through the real `CmangosInstaller.run()` on
+    yulon-fedora 2026-09-05 with the images gone and the evidence file deleted
+    (`tests/test_families_cmangos.py`'s own fixtures), the press logged
+    "The build finished." four log lines above this refusal and left 11 changed
+    files under the server folder from a pre-`patch-sources` install and 1 from
+    a finished modern one. What the sentence claims — no container launched by
+    the extraction, no byte changed under `data/` — held in both, and is what
+    is asserted below.
 
     Two presses, because the snapshot is by CONTENT and only the second shows
     why. In the first the evidence file was DELETED, so its return would show
@@ -994,9 +1006,10 @@ def test_a_refused_press_really_ran_nothing_and_changed_nothing_as_its_sentence_
     with pytest.raises(InstallerError) as caught:
         run(PLAN, blocked, tmp_path)
     message = str(caught.value)
-    assert "Nothing was run and nothing was changed." in message, message
-    assert blocked.names() == [], "the sentence says nothing was run"
-    assert _data_snapshot(data) == before, "the sentence says nothing was changed"
+    assert "The extraction ran nothing and changed nothing under data/." in message, message
+    assert "Nothing was run and nothing was changed" not in message, message
+    assert blocked.names() == [], "the sentence says the extraction ran nothing"
+    assert _data_snapshot(data) == before, "the sentence says nothing under data/ changed"
     assert not (data / extract.EVIDENCE_FILE).exists(), "the deleted evidence file came back"
 
     other = tmp_path / "edited"
@@ -1007,8 +1020,10 @@ def test_a_refused_press_really_ran_nothing_and_changed_nothing_as_its_sentence_
     second = Runner(FULL)
     with pytest.raises(InstallerError) as again:
         run(edited, second, other)
-    assert "Nothing was run and nothing was changed." in str(again.value), str(again.value)
-    assert second.names() == [], "the sentence says nothing was run"
+    assert "The extraction ran nothing and changed nothing under data/." in str(again.value), str(
+        again.value
+    )
+    assert second.names() == [], "the sentence says the extraction ran nothing"
     assert _data_snapshot(kept) == was, "the evidence file was rewritten under that sentence"
 
 
@@ -1059,6 +1074,20 @@ def test_the_refusal_names_the_marker_that_is_actually_on_the_disk(tmp_path: Pat
     folder that holds a `dir` as well. It is driven because the guard mirrors
     the tool's condition rather than the tool's output, and a `dir` that
     arrives from anywhere at all is refused by the real binary too.
+
+    The `dir`-ALONE case asks `blocking_output()` and not only
+    `blocked_message()`, and that is the sixth pass's correction. Until then
+    the third case called the message builder directly, which lists whatever
+    is present without ever asking whether the guard fires — so narrowing
+    `blocking_output()` to `(folder / DIR_BIN).exists()` survived the whole
+    gate set. Measured both ways on yulon-fedora 2026-09-05
+    (`pyplan/gates/doodad-2026-09-05/mutations-round6.txt`, MU3 against MU4):
+    with the line below removed that mutation is 2758 passed / 4 skipped /
+    23 deselected and 0 red; with it, 1 red, here. The tool itself stats BOTH
+    names and refuses on either — `!stat(sdir.c_str(), &status) ||
+    !stat(sdir_bin.c_str(), &status)` at
+    `contrib/vmap_extractor/vmapextract/vmapexport.cpp:477` (mangos-classic
+    8ec338a1) and `:527` (mangos-tbc f82e7d67), re-read at both revisions.
     """
     data = tmp_path / "data"
     buildings = data / extract.BUILDINGS_DIR
@@ -1074,6 +1103,7 @@ def test_the_refusal_names_the_marker_that_is_actually_on_the_disk(tmp_path: Pat
     assert f"holds {extract.DIR_INDEX} and {extract.DIR_BIN} from" in both, both
 
     (buildings / extract.DIR_BIN).unlink()
+    assert extract.blocking_output(VMAP, data) == buildings, "a lone `dir` did not stop the tool"
     index_only = extract.blocked_message(VMAP, buildings)
     assert f"holds {extract.DIR_INDEX} from" in index_only, index_only
     assert extract.DIR_BIN not in index_only, index_only
@@ -3487,4 +3517,37 @@ def test_every_shipped_cmangos_entry_produces_and_then_reads_the_buildings_dir()
             if any(extract.BUILDINGS_DIR in arg for arg in tool.argv)
         ]
         assert reads, (entry.id, "no tool names Buildings in its argv")
+    assert seen == 3, seen
+
+
+def test_no_shipped_plan_lets_one_tool_fill_another_tools_produces() -> None:
+    """The second half of the reason `run_plan()`'s pre-pass sees the loop's own set.
+
+    `tool_satisfied` ends `return not shortfall(produces, data_dir)`, so a
+    record is necessary and not sufficient: a tool that HAS a matching record
+    and whose `produces` folder is short answers False, and would answer True
+    later in the same press if an earlier tool in the loop filled that folder.
+    The pre-pass asks its question before any of them runs, so its set and the
+    loop's set agree only while no tool can fill another's `produces`.
+
+    In the three shipped plans they cannot, and that is a fact about
+    `catalog.json` rather than about this module -- {dbc, maps}, {Buildings},
+    {vmaps}, disjoint per entry -- which is why the comment beside the pre-pass
+    names this test rather than resting on the claim. A fourth tool sharing a folder
+    with a third would make the pre-pass's set a superset of the loop's, and
+    the refusal it exists to raise could then fire for a tool the loop would
+    have skipped.
+    """
+    seen = 0
+    for entry in load_catalog().games:
+        native = entry.install.native
+        block = native.cmangos if native is not None else None
+        if block is None:
+            continue
+        seen += 1
+        folders: list[str] = []
+        for tool in block.extract.tools:
+            assert tool.produces, (entry.id, tool.name, "a tool that produces nothing")
+            folders.extend(tool.produces)
+        assert len(folders) == len(set(folders)), (entry.id, folders)
     assert seen == 3, seen
