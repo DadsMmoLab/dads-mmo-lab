@@ -82,6 +82,7 @@ from yulon.catalog.native import (
     StageContext,
     StagedInstaller,
     secret_token_name,
+    stop_abandoned_worker,
 )
 from yulon.log import get_logger
 
@@ -502,7 +503,8 @@ class CmangosInstaller(StagedInstaller):
                 required_file=data.client.required_file,
                 client_build=self.entry.client.build,
                 selinux_enforcing=self._seams.selinux_enforcing,
-            )
+            ),
+            cancel=ctx.cancel,
         )
         self._check_cancel(ctx.cancel)
         yield "Extraction finished."
@@ -571,7 +573,8 @@ class CmangosInstaller(StagedInstaller):
                 user_args=user_args,
                 sink=sink,
                 cancel=ctx.cancel,
-            )
+            ),
+            cancel=ctx.cancel,
         )
         self._check_cancel(ctx.cancel)
         yield "Map generation finished."
@@ -747,7 +750,8 @@ class CmangosInstaller(StagedInstaller):
                 exec_stdin=self._seams.exec_stdin,
                 sink=sink,
                 cancel=ctx.cancel,
-            )
+            ),
+            cancel=ctx.cancel,
         )
         self._check_cancel(ctx.cancel)
         try:
@@ -1204,7 +1208,9 @@ class CmangosInstaller(StagedInstaller):
         ask = cast("Callable[[], platform.PlatformId]", self._seams.platform_id)
         return tuple(platform.container_user_args(platform_id=ask))
 
-    def _stream(self, call: Callable[[docker.OutputSink], Iterator[str]]) -> Iterator[str]:
+    def _stream(
+        self, call: Callable[[docker.OutputSink], Iterator[str]], *, cancel: threading.Event | None
+    ) -> Iterator[str]:
         """Run a stage-kind generator that ALSO takes a sink, and yield both streams live.
 
         `extract.run_plan()` and `sqlplan.apply()` yield their own progress
@@ -1213,19 +1219,17 @@ class CmangosInstaller(StagedInstaller):
         call that is both, so a two-hour extraction shows line by line rather
         than as a list at the end.
 
-        Deliberately the same shape as `_pump()`, including what that shape does
-        NOT do: if the consumer abandons this generator, `GeneratorExit` is
-        raised at the `yield` and `worker.join()` is never reached, so the
-        worker keeps running and keeps pushing into a queue nobody reads. The
-        app has exactly one abandonment path — `log_panel._StreamWorker.run()`
-        breaking out of its `for`, which drops the last reference and closes the
-        generator chain — and `LogPanel.stop()` sets the cancel event BEFORE it
-        asks the worker to stop, so `run_container(cancel=…)` returns and the
-        thread ends on its own. A join in a `finally` would be worse than the
-        leak: it would block whoever is abandoning for as long as the
-        extraction has left to run. An abandonment WITHOUT a cancel would leak a
-        live extraction, and nothing prevents one — undecided; `_pump()` has
-        shipped with the same hole since 7.1 and no note says it was weighed.
+        Deliberately the same shape as `_pump()`, abandonment included. Until
+        2026-09-04 that shape leaked: `GeneratorExit` at the `yield` skipped
+        `worker.join()` and the worker went on running — for the extract stage,
+        a live multi-hour extraction with no owner. What stood in for a fix was
+        an ORDERING somewhere else: `LogPanel.stop()` sets the cancel event
+        BEFORE it asks its worker to stop, so `run_container(cancel=…)`
+        returned and the thread ended by itself. Nothing made that ordering
+        load-bearing, and an abandonment without a cancel was prevented by
+        nothing at all. `stop_abandoned_worker()` now does it here, where the
+        abandonment is, so a reorder up in the panel is no longer the only
+        thing between an extraction and running forever.
         """
         lines: queue.Queue[str | None] = queue.Queue()
         failure: list[BaseException] = []
@@ -1241,11 +1245,19 @@ class CmangosInstaller(StagedInstaller):
 
         worker = threading.Thread(target=work, daemon=True, name="yulon-cmangos-output")
         worker.start()
-        while True:
-            item = lines.get()
-            if item is None:
-                break
-            yield item
+        try:
+            while True:
+                item = lines.get()
+                if item is None:
+                    break
+                yield item
+        except BaseException:
+            # See `_pump()`: abandonment or an exception thrown into this
+            # frame, never the normal path, which leaves by `break`. Widened
+            # from `GeneratorExit` on 2026-09-04 for the reason measured there
+            # — a Ctrl+C lands in `lines.get()` as a `KeyboardInterrupt`.
+            stop_abandoned_worker(worker, cancel, what="the CMaNGOS stage output")
+            raise
         worker.join()
         if failure:
             exc = failure[0]

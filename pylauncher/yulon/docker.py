@@ -2725,7 +2725,7 @@ def bind_mount_ok(
     *,
     timeout: float = BIND_PROBE_TIMEOUT_SECONDS,
     wsl_distro: str | None = None,
-    selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing,
+    selinux_enforcing: Callable[[], bool | None] | None = None,
 ) -> bool | None:
     """Can a container actually see the chosen folder? None = could not ask.
 
@@ -2767,6 +2767,29 @@ def bind_mount_ok(
     whole of that story. Measured on a clean Fedora 44 box (2026-08-30): every
     install was refused here, one line after `[pass] SELinux`, and told to
     check a Docker Desktop setting that does not exist on Docker Engine.
+
+    `selinux_enforcing` is resolved at CALL time rather than bound as a
+    default, which is `extract.run_plan()`'s shape and is copied from it. The
+    default here USED to be `platform.selinux_enforcing` itself, so a test
+    that patched the module attribute was not seen — the trap
+    `platform.container_user_args()` documents against itself, and this
+    function was the real instance of it. Asked of the interpreter on m910q
+    before the change (2026-09-04):
+
+        signature(bind_mount_ok).parameters["selinux_enforcing"].default
+            is platform.selinux_enforcing        -> True
+        the same question of extract.run_plan    -> None
+
+    It was latent rather than live, and by luck rather than by wiring: the
+    production caller `preflight._default_bind_probe` passes no seam, so the
+    bound default ran and asked the real host, which was the right answer by
+    accident; under test it never ran at all, because `test_preflight.py`
+    fakes one level up. The rejected alternative was to leave this default
+    alone and thread a seam down from `preflight` instead — that fixes the one
+    caller there is and leaves the same default waiting for the next one, and
+    it would not have made this function's own tests state the machine's
+    answer. Nothing about a real install changes either way: `None` here asks
+    the same `platform.selinux_enforcing` the bound default was.
     """
     mount = _first_populated_ancestor(server_dir)
     if mount is None:
@@ -2787,8 +2810,9 @@ def bind_mount_ok(
     # turned into a refusal. **Every native install, on every platform, was
     # refused** (found by the Windows file-sharing gate 2026-08-24, then
     # reproduced on Linux — it was never Windows-specific).
+    ask = selinux_enforcing if selinux_enforcing is not None else platform.selinux_enforcing
     proc = _docker(
-        ["run", "--rm", *_probe_selinux_argv(selinux_enforcing), "--entrypoint", "ls"]
+        ["run", "--rm", *_probe_selinux_argv(ask), "--entrypoint", "ls"]
         + ["-v", f"{mount}:/probe:ro", image, "-A", "/probe"],
         timeout=timeout,
         wsl_distro=wsl_distro,

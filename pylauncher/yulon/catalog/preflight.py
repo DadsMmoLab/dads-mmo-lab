@@ -166,8 +166,8 @@ def gather(
     bind_mount_ok: Callable[[Path], bool | None] | None = None,
     port_conflicts: Callable[[], list[str]] | None = None,
     probe_port: Callable[[str, int], platform.PortProbe] = platform.probe_tcp,
-    selinux: Callable[[], bool | None] = platform.selinux_enforcing,
-    fs_type: Callable[[Path], str | None] = platform.filesystem_type,
+    selinux: Callable[[], bool | None] | None = None,
+    fs_type: Callable[[Path], str | None] | None = None,
 ) -> Facts:
     """Ask the machine everything `evaluate()` needs, refusing to invent an answer.
 
@@ -213,8 +213,32 @@ def gather(
             listening.append(port)
     # SELinux is a Linux fact. Off Linux the questions are not asked, so the
     # check below can tell "not applicable" from "could not read it".
-    enforcing = selinux() if here == "linux" else None
-    server_fs = fs_type(server_dir) if here == "linux" else None
+    #
+    # BOTH Linux seams are resolved against `platform` here, at call time, the
+    # way `_default_bind_probe()` -> `docker.bind_mount_ok()` has since
+    # 2026-09-04. Both defaults used to be the module functions themselves, so
+    # one patch of `platform.*` was not seen here at all. Asked of the
+    # interpreter on m910q, `selinux` on 2026-09-04 and `fs_type` on 2026-09-05
+    # (it was the one this pass found still bound):
+    #
+    #     signature(gather).parameters["selinux"].default
+    #         is platform.selinux_enforcing        -> True   (2026-09-04)
+    #     signature(gather).parameters["fs_type"].default
+    #         is platform.filesystem_type          -> True   (2026-09-05)
+    #
+    # `fs_type` was the sharper of the two, because `ContainerGit` had already
+    # been moved to a late lookup: one patch of `platform.filesystem_type` on
+    # m910q, 2026-09-05, gave `ContainerGit()._ask_filesystem(Path("/tmp"))
+    # -> 'btrfs'` while this line handed back the real host's 'ext2/ext3' and
+    # the fake counted no call at all — one call chain answering one platform
+    # question two ways, which is the defect bug-checklist §27 names.
+    # `test_gather_asks_both_linux_seams_the_module_holds_at_call_time` failed
+    # against that file (`asked == ['selinux']`, one entry short) and pins both
+    # late lookups now.
+    ask_selinux = selinux if selinux is not None else platform.selinux_enforcing
+    ask_fs = fs_type if fs_type is not None else platform.filesystem_type
+    enforcing = ask_selinux() if here == "linux" else None
+    server_fs = ask_fs(server_dir) if here == "linux" else None
     # The server folder is probed here rather than inside the `Facts(...)` call
     # below, so that the two bind probes run in the order they are reported.
     # Left inline it would be the client that goes first: the client block sits

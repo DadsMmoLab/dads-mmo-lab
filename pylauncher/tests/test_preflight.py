@@ -716,6 +716,77 @@ def test_gather_asks_selinux_only_on_linux_and_accepts_a_client_dir(tmp_path: Pa
     assert asked == []
 
 
+def test_gather_asks_both_linux_seams_the_module_holds_at_call_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Patching `platform` has to be SEEN by BOTH of `gather()`'s Linux questions.
+
+    The test above states both answers through `selinux=` and `fs_type=`, so it
+    could not tell that either default was BOUND AT IMPORT. Asked of the
+    interpreter on m910q, against the file as the round-2 work left it
+    (2026-09-05):
+
+        signature(gather).parameters["selinux"].default
+            is platform.selinux_enforcing        -> False
+        signature(gather).parameters["fs_type"].default
+            is platform.filesystem_type          -> True
+
+    — one seam resolved late, one still bound, which is what made this the
+    two-shape defect bug-checklist §27 was opened for rather than a dormant
+    one. ONE patch of `platform.filesystem_type` was answered two ways by the
+    two consumers of that one attribute (m910q, 2026-09-05, before the fix):
+
+        ContainerGit()._ask_filesystem(Path("/tmp")) -> 'btrfs'      (the fake)
+        gather(...).server_fs_type                   -> 'ext2/ext3'  (the host)
+        asked: ['fs:/tmp']
+
+    "EITHER default" is a claim, so it was mutated rather than asserted. Each
+    default was put back to the module function on its own, `__pycache__`
+    purged between, m910q 2026-09-05:
+
+        selinux rebound at import -> 1 failed in 0.37s
+        fs_type rebound at import -> 1 failed in 0.89s
+
+    It fails on every host rather than only on one whose real answers happen to
+    differ, because the fakes COUNT their calls: `asked` is short by an entry
+    before any value is compared. Asserting the parameters exist would have
+    proved nothing — that distinction is what §27 asked for.
+    """
+    asked: list[str] = []
+
+    def enforcing() -> bool | None:
+        asked.append("selinux")
+        return True
+
+    def labelling(path: Path) -> str | None:
+        asked.append(f"fs:{path}")
+        return "btrfs"
+
+    monkeypatch.setattr(platform_module, "selinux_enforcing", enforcing)
+    monkeypatch.setattr(platform_module, "filesystem_type", labelling)
+    # The production shape: neither Linux seam handed in. Checked 2026-09-05 —
+    # the one production call is `native.StagedInstaller._preflight_lines()`'s
+    # `self._seams.gather(...)` (whose `Seams.gather` default IS this
+    # function), and it passes `client_dir`, `platform_id`, `docker_ready` and
+    # `dir_problem` only. So these two defaults are what a real install runs.
+    got = preflight.gather(
+        ENTRY,
+        tmp_path,
+        platform_id=lambda: "linux",
+        docker_ready=lambda: True,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        disk_free=lambda _p: 100 * GIB,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+    )
+    assert asked == ["selinux", f"fs:{tmp_path}"]
+    assert got.selinux_enforcing is True
+    assert got.server_fs_type == "btrfs"
+
+
 # -- the client folder (7.3, I.8) ---------------------------------------------
 #
 # Two facts, and both of them have three answers. `client_checks` carries

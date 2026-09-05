@@ -49,8 +49,20 @@ def secret_tokens(secret_type: type[Any]) -> frozenset[str]:
 
     Derived from the declaration rather than listed here, because a list is a
     thing somebody has to remember to extend. `native.Secrets` is where this app
-    declares what may never be printed — so reading the dataclass IS reading the
-    declaration, and a second secret added there arrives here already refused.
+    declares what may never be printed, so a second secret added there arrives
+    here already refused.
+
+    **What this set covers is the DECLARATION, and the mapping is not the
+    declaration.** An earlier version of this sentence read "reading the
+    dataclass IS reading the declaration", which stated a convention in the
+    voice of a guarantee — corrected 2026-09-04, because a probe disproved it
+    the same way both times it has been tried. The mapping handed to `render()`
+    is built by hand and nothing makes its keys correspond to fields of
+    anything: a secret filed under a name `Secrets` never declared, or minted
+    inside the function that builds the mapping, was never a field, so this set
+    cannot see it (`pyplan/bug-checklist.md` §29). `SECRET_NAME_WORDS` below is
+    what looks at the mapping actually handed over; this set is what the
+    declaration buys, and the two cover different halves.
 
     The spelling comes from `native.secret_token_name()`, which is the same one
     line `CmangosInstaller._secret_tokens()` spends to build the name->value
@@ -100,6 +112,83 @@ A SET, and a derived one, because the by-name version protected one NAME rather 
 property: `Secrets` is a dataclass and a second field on it is one line away.
 """
 
+SECRET_NAME_WORDS = frozenset(
+    {"PASSWORD", "PASSWD", "SECRET", "CREDENTIAL", "APIKEY", "PRIVATEKEY", "PRIVKEY"}
+)
+"""Words that announce a secret in a token NAME, for the secrets no declaration reaches.
+
+**The question this answers.** `render()` is handed a `Mapping[str, str]`; the values are
+opaque strings, and the only thing in this app that names a secret is `native.Secrets` —
+which the caller did not have to use. So `render()` cannot know a value is a secret by
+looking at it, and `SECRET_TOKENS` can only speak for values that came from a declared
+field. The one piece of evidence `render()` really holds about a value it was handed is
+the NAME the caller chose to file it under, and a caller who puts a password in a
+build-context mapping almost always says so in the key. That is what this reads.
+
+**Fitted to leaks that were measured, not to a threat model.** All three secrets that have
+actually reached a build-context mapping in this project were filed under a `*PASSWORD`
+name: `SOAP_PASSWORD` (the §29 probe, 2026-09-02, reproduced against the real module on
+m910q 2026-09-04 — `render()` returned `_Rendered` with the secret in it and `write()` laid
+`ENV SOAP_PASSWORD=tbc-0123456789abcdef` into the build context without a word), and
+`ROOT_PASSWORD` twice, in the two mutations recorded in
+`CmangosInstaller._public_tokens`'s docstring (M15, 2026-09-01; M-R2, 2026-09-02). The
+other six words are the same claim about the neighbouring nouns. `PRIVKEY` was the last
+one in: with `PRIVATEKEY` alone, a probe on m910q on 2026-09-04 got
+`PRIVKEY -> ACCEPTED, secret in text: True` and the same for `PRIV_KEY`, which is the
+one-keystroke difference `announces_a_secret()` squashes `_` to avoid, arriving through
+the vocabulary instead of the spelling.
+
+**Each word is named as a literal in
+`test_the_secret_name_vocabulary_spells_every_word_and_the_measured_leaks`, and that
+literal list — not the parametrized per-word test — is what goes red when a word is
+deleted.** Measured 2026-09-04 on m910q before the literals existed: narrowing this set
+from six words to three gave `58 passed` against `61 passed`, zero failures, because a
+test generated from the set shrinks with it.
+
+**What it does NOT cover, said plainly, because §29 records three guarantees about this
+same hole and each was refuted by execution within a day of being written.** A secret filed
+under a name that announces nothing — `FOO`, `EXTRA`, `BUILD_ARG` — passes this rule
+untouched. Catching that needs a comparison BY VALUE against the real secrets, which needs
+those values, which means a
+`Secrets` instance: §29's enumerating guard, and it belongs at the call site that holds
+`ctx.secrets`. This is a price on the careless spelling, not a wall.
+
+**Rejected: an optional `secrets=` parameter on `render()` doing that value comparison.**
+It would have to default to "none declared", because since 7.3 the only production caller
+passes `_public_tokens(server_dir)` and `ctx.secrets` is one scope above it. A guard no
+caller invokes is a guard that never fires — [[guards-that-prove-declarations]] is four of
+those — and its presence would read, to the next person, as though the value case were
+handled.
+
+**Rejected: scanning the rendered TEXT for these words.** `write()`'s docstring already
+argued that down for the same words: it would refuse a legitimate
+`ENV DB_PASSWORD_FILE=/run/secrets/db` line in a template. A mapping KEY is different
+evidence — not a word that appears in a file, but the name a caller chose for a value it
+put into a build-context mapping.
+
+**Rejected: a `_FILE`/`_PATH` carve-out for that same false positive.** `ROOT_PASSWORD_FILE`
+is one plausible spelling of the password itself, so the carve-out is the evasion route.
+The asymmetry decides it: a false positive costs one refusal and a deliberate code change
+with a reviewer in the room, and a false negative costs a content-addressed image layer
+that has to be hunted down. A template that genuinely needs a path token can be given its
+exception the loud way.
+"""
+
+
+def announces_a_secret(key: str) -> bool:
+    """Whether a token name reads as a secret, `_` squashed before the words are looked for.
+
+    `API_KEY` and `APIKEY` are one name, and a plain substring test over the key as spelled
+    would catch the second and miss the first — a difference of one keystroke that nobody
+    would read as a security decision. The same goes for case: `soap_password` is
+    `SOAP_PASSWORD`. The `.upper()` here survived as a mutant until 2026-09-04 — dropped,
+    `test_dockerfile.py` stayed `61 passed` on m910q, because every case handed the rule a
+    key already in upper case; `test_the_case_of_a_key_is_not_a_way_past_the_name_rule`
+    is the one that fails without it.
+    """
+    squashed = key.upper().replace("_", "")
+    return any(word in squashed for word in SECRET_NAME_WORDS)
+
 
 class DockerfileError(RuntimeError):
     """A template could not be rendered, or a file in the way is not ours to replace."""
@@ -131,12 +220,38 @@ def render(template_dir: Path, tokens: Mapping[str, str]) -> tuple[str, str]:
     the token would then be UNFILLED rather than quietly rendering the secret into the
     build context.
 
+    A key whose NAME announces a secret while corresponding to no `Secrets` field is
+    refused outright, before anything is read or filled — `SECRET_NAME_WORDS`. It is
+    refused on the MAPPING and not on the rendered text, deliberately: §29's own words
+    about the case that preceded it are *"nothing exploited it; the exposure was one
+    template edit away"*, so a rule that waited for a template to spell the token would be
+    a guard over today's templates, which is the LOCATION-shaped protection this module
+    has already watched fail twice. It also means the rule holds for a `template_dir`
+    nobody has seen.
+
     Both halves come back as `_Rendered`, which is the only text `write()` will lay down.
 
     Raises:
-        DockerfileError: a template could not be read, a placeholder was left unfilled,
-            or a template names a `SECRET_TOKENS` placeholder such as `{{DB_PASSWORD}}`.
+        DockerfileError: a template could not be read, a placeholder was left unfilled, a
+            template names a `SECRET_TOKENS` placeholder such as `{{DB_PASSWORD}}`, or the
+            mapping files a secret-sounding value under a name no `Secrets` field declares.
     """
+    undeclared = sorted(
+        key for key in tokens if key not in SECRET_TOKENS and announces_a_secret(key)
+    )
+    if undeclared:
+        raise DockerfileError(
+            f"{', '.join(undeclared)}: each of those reads as a secret and matches no field "
+            "of `native.Secrets`, so nothing here can drop them or refuse a template that "
+            "spells one — and this mapping is rendered into the build context, where a "
+            "Dockerfile is copied into an image layer that `docker history` prints long "
+            "after the file is deleted. Whichever of them IS a secret, declare it on "
+            "`native.Secrets`: the drop and the by-name refusal are both derived from that "
+            "declaration, and the consumers that genuinely need the value get it through "
+            "`_secret_tokens()`, whose conf files are written 0600. Whichever is not, rename "
+            "it — this rule reads the name, because the value it was handed is an opaque "
+            "string."
+        )
     safe = {key: value for key, value in tokens.items() if key not in SECRET_TOKENS}
     return (
         _Rendered(_render_one(template_dir / TEMPLATE, safe)),

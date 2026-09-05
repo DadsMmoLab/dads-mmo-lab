@@ -24,13 +24,19 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
-import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import process_events
+from tests.conftest import (
+    HANG_BOUND,
+    HANG_BOUND_MS,
+    process_events,
+    pump_until,
+    spelled_bounds,
+    wait_for_panel,
+)
 from yulon import platform, runner
 from yulon.catalog import installer
 from yulon.ui.widgets.log_panel import LogPanel
@@ -353,11 +359,8 @@ def test_prompter_carries_the_answer_from_the_gui_thread_to_the_worker(
 
     worker = threading.Thread(target=lambda: answer.append(prompter.ask("[sudo] password for pk:")))
     worker.start()
-    for _ in range(50):
-        process_events(20)
-        if not worker.is_alive():
-            break
-    worker.join(timeout=5)
+    pump_until(lambda: not worker.is_alive(), "ask() returned")
+    worker.join(timeout=HANG_BOUND)
 
     assert answer == ["hunter2"]
     assert seen == [("[sudo] password for pk:", True)], "a password must be masked"
@@ -382,7 +385,7 @@ def test_prompter_stops_waiting_when_the_job_is_cancelled(
     worker = threading.Thread(target=lambda: answer.append(prompter.ask("[sudo] password:")))
     worker.start()
     cancel.set()  # the user hit Cancel on the install itself
-    worker.join(timeout=5)
+    worker.join(timeout=HANG_BOUND)
 
     assert not worker.is_alive(), "ask() never returned after cancel"
     assert answer == [None]
@@ -431,11 +434,8 @@ def test_the_prompter_does_not_keep_the_answer_after_handing_it_over(
 
     worker = threading.Thread(target=lambda: answer.append(prompter.ask("[sudo] password:")))
     worker.start()
-    for _ in range(50):
-        process_events(20)
-        if not worker.is_alive():
-            break
-    worker.join(timeout=5)
+    pump_until(lambda: not worker.is_alive(), "ask() returned")
+    worker.join(timeout=HANG_BOUND)
 
     assert answer == ["hunter2"]
     assert prompter._answer is None, "the password is still on the prompter"
@@ -488,9 +488,9 @@ def test_the_view_reuses_one_prompter_instead_of_leaving_one_per_install(
     try:
         view.start_install(catalog.get("wow-wotlk"))
         first = view._prompter
-        _drain(panel)
+        wait_for_panel(panel)
         view.start_install(catalog.get("wow-wotlk"))
-        _drain(panel)
+        wait_for_panel(panel)
         assert view._prompter is first, "a second install built a second prompter"
         assert len(view.findChildren(InputPrompter)) == 1
     finally:
@@ -500,17 +500,8 @@ def test_the_view_reuses_one_prompter_instead_of_leaving_one_per_install(
         # running", so every other test passes and the run still exits 134.
         # That is what it did on CI (2026-08-23).
         panel.stop()
-        panel.wait(5000)
+        assert panel.wait(HANG_BOUND_MS), "the panel's job never joined after stop()"
         process_events(50)
-
-
-def _drain(panel: LogPanel, timeout: float = 5.0) -> None:
-    """Pump the event loop until the panel's job has finished, then join it."""
-    deadline = time.monotonic() + timeout
-    while panel.running and time.monotonic() < deadline:
-        process_events(20)
-    panel.wait(2000)
-    process_events(50)
 
 
 class _NoopInstaller:
@@ -748,10 +739,8 @@ def test_the_docker_group_question_reaches_a_real_dialog_unmasked(qapp: object) 
     watchdog.timeout.connect(drive)
     watchdog.start()
 
-    deadline = time.monotonic() + 10.0
-    while worker.is_alive() and time.monotonic() < deadline:
-        QApplication.processEvents()
-    worker.join(timeout=2.0)
+    pump_until(lambda: not worker.is_alive(), "the consent dialog was driven to an answer")
+    worker.join(timeout=HANG_BOUND)
     watchdog.stop()
 
     assert not worker.is_alive(), "the consent dialog never appeared"
@@ -784,3 +773,18 @@ def _dialog_text(dialog: object) -> str:
     from PySide6.QtWidgets import QLabel
 
     return " ".join(label.text() for label in dialog.findChildren(QLabel))
+
+
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """Every bound here must be spelled as one of the named ones, and nothing else.
+
+    The same audit `test_log_panel.py` runs on itself, for the same reason.
+    Until 2026-09-04 this file kept its own `_drain` with `timeout: float =
+    5.0` and a `panel.wait(2000)` whose result was thrown away, three
+    `worker.join(timeout=5)`s and a `worker.join(timeout=2.0)`, two loops
+    bounded by a turn count (`for _ in range(50): process_events(20)`) that no
+    clock audit can see, and one deadline built by hand (`time.monotonic() +
+    10.0`). Every wait goes through `pump_until` now, and every join is
+    `HANG_BOUND`.
+    """
+    assert spelled_bounds(__file__) == {"HANG_BOUND", "HANG_BOUND_MS"}

@@ -775,16 +775,22 @@ class Containers(_Strict):
     services: tuple[str, str, str] | None = Field(
         default=None,
         description=(
-            "Compose SERVICE names for db/auth/world, in that order, when they differ from the "
-            "container names above. `docker compose up` takes services, and a container name "
-            "it does not know fails outright with `no such service` (Discord report, "
-            "2026-08-26). No shipped entry needs it: AzerothCore names a service and its "
-            "container the same thing, and the generated CMaNGOS stack follows that convention "
-            "too — shared/cmangos/base.yml.tmpl writes its service keys as "
-            "{{CONTAINER_PREFIX}}db/-realmd/-mangosd, which ARE tbc-db and friends. Saying "
-            "db/realmd/mangosd here, as the three CMaNGOS entries did until 2026-09-01, named "
-            "the bash installers' services and would have failed every generated install at "
-            "the first `compose up`."
+            "Compose SERVICE names for db/auth/world, in that order. `docker compose up` "
+            "takes services, and a container name it does not know fails outright with "
+            "`no such service` (Discord report, 2026-08-26). Refused since 2026-09-04 by "
+            "`composegen._container_prefix()`, whatever the value, for any entry with an "
+            "`install.native` block — and every shipped entry has one (bug-checklist §30): the "
+            "generated compose file takes its service keys from the templates "
+            "({{CONTAINER_PREFIX}}db/-realmd/-mangosd in shared/cmangos/base.yml.tmpl, the "
+            "literal ac-database and friends in wow-wotlk/native/base.yml.tmpl), so the entry "
+            "has nothing to declare and the only correct state of this field is absent. The "
+            "entry still loads; `composegen.render()` refuses it, so `write_plan()` never gets "
+            "a plan to write. "
+            "Saying db/realmd/mangosd here, as the three CMaNGOS entries did until 2026-09-01, "
+            "named the bash installers' services and would have failed every generated install "
+            "at the first `compose up` — and the rule that accepted it then was satisfiable by "
+            "that mistake alone. The field stays on the model for `docker.ContainerSpec.services`, "
+            "which an adopted project whose services and containers differ really does need."
         ),
     )
     db_import: str | None = Field(

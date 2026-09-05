@@ -679,12 +679,47 @@ class ContainerGit:
 
     image: str = _CONTAINER_GIT_IMAGE
 
-    # The SELinux seams, in the shape `docker.bind_mount_ok()` already uses:
-    # the real functions by default, overridable so a test can state the
-    # machine's answer instead of inheriting the host the suite runs on. Both,
-    # because `platform.bind_label()` needs both — see `_capture()`.
-    selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing
-    filesystem_type: Callable[[Path], str | None] = platform.filesystem_type
+    # The SELinux seams: `None` by default, and `_capture()` resolves `None`
+    # against `platform` at call time (`_ask_selinux()`, `_ask_filesystem()`),
+    # the shape `docker.bind_mount_ok()` took on 2026-09-04. A test states the
+    # machine's answer by passing both; production passes neither — `native.py`
+    # constructs `ContainerGit()` bare in `_git_file_unmodified()`
+    # (`.is_unmodified`), in the `Seams.clone` `default_factory`, and in
+    # `_git_remote_url()` (`.remote_url`).
+    #
+    # No count is written here and that list is not narrative:
+    # `test_the_production_container_gits_are_bare_and_there_are_no_others`
+    # owns it. It drives all three routes, asserts each construction carried no
+    # seam, and re-derives the set from `native.py`'s syntax tree so a FOURTH
+    # site fails it — the half a written number cannot do. The number it
+    # replaced was a dated `grep -n 'ContainerGit(' native.py` count, and this
+    # same comment block had already gone stale once in the direction that
+    # reads as verified, giving the line numbers as "593, 616 and 2364" while
+    # the file read 593, 616 and 2370.
+    # Both seams, because `platform.bind_label()` needs both — see `_capture()`.
+    #
+    # Until 2026-09-04 these two lines read `= platform.selinux_enforcing` and
+    # `= platform.filesystem_type`, and a comment above them said they were "in
+    # the shape `docker.bind_mount_ok()` already uses" — which had been true
+    # until that function was changed earlier the same day, and was then the
+    # opposite of true. Asked of the interpreter on m910q before this change:
+    #
+    #     {f.name: f.default is getattr(platform, f.name)
+    #      for f in fields(ContainerGit) if f.name != "image"}
+    #     -> {'selinux_enforcing': True, 'filesystem_type': True}
+    #
+    # `test_a_bare_container_git_asks_the_selinux_seams_the_module_holds_at_call_time`
+    # failed against that file (`asked == []`) and pins the late lookup now.
+    selinux_enforcing: Callable[[], bool | None] | None = None
+    filesystem_type: Callable[[Path], str | None] | None = None
+
+    def _ask_selinux(self) -> bool | None:
+        ask = self.selinux_enforcing
+        return (ask if ask is not None else platform.selinux_enforcing)()
+
+    def _ask_filesystem(self, path: Path) -> str | None:
+        ask = self.filesystem_type
+        return (ask if ask is not None else platform.filesystem_type)(path)
 
     def remote_url(self, dest: Path) -> str | None:
         """`git remote get-url origin` in the checkout at `dest`; see `RunnerGit.remote_url()`.
@@ -1038,15 +1073,15 @@ class ContainerGit:
         hardening: list[str] = []
         untrusted: list[str] = []
         if writes:
-            enforcing = self.selinux_enforcing()
+            enforcing = self._ask_selinux()
             label = platform.bind_label(
                 enforcing=enforcing,
-                fs_type=self.filesystem_type(dest) if enforcing is True else None,
+                fs_type=self._ask_filesystem(dest) if enforcing is True else None,
             )
         else:
             label = ":ro"
             hardening = [
-                *platform.label_disable_args(enforcing=self.selinux_enforcing()),
+                *platform.label_disable_args(enforcing=self._ask_selinux()),
                 *_READ_ONLY_CONTAINER_ARGS,
             ]
             untrusted = _UNTRUSTED_REPO_ARGS

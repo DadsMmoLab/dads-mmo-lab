@@ -3185,10 +3185,15 @@ def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
         return _completed(returncode=1, stderr="invalid mount config")
 
     monkeypatch.setattr(docker.runner, "run", refuse_the_mount)
-    assert docker.bind_mount_ok(server_dir, "alpine/git") is False
+    # The seam is stated here, as it is above: this test is not about
+    # SELinux, and a call that omits it takes the answer of whatever box the
+    # suite runs on — green only because every runner so far is non-enforcing
+    # (bug-checklist §27). A Fedora runner would have put `label:disable` into
+    # the argv these fakes record.
+    assert docker.bind_mount_ok(server_dir, "alpine/git", selinux_enforcing=lambda: False) is False
     # 124 is what `runner.run()` reports for a command that never answered.
     monkeypatch.setattr(docker.runner, "run", answer(124, stderr="timed out after 30.0s"))
-    assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+    assert docker.bind_mount_ok(server_dir, "alpine/git", selinux_enforcing=lambda: False) is None
 
 
 def _probe_argv(
@@ -3256,6 +3261,55 @@ def test_a_selinux_answer_that_could_not_be_read_does_not_disable_labels(
     assert "label:disable" not in _probe_argv(monkeypatch, tmp_path, enforcing=None)
 
 
+def test_the_bind_probe_asks_the_selinux_seam_the_module_holds_at_call_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A test that patches `platform.selinux_enforcing` has to be SEEN in here.
+
+    The three tests above hand the answer in through `selinux_enforcing=`, so
+    not one of them could tell that `bind_mount_ok`'s own default was BOUND AT
+    IMPORT — the trap `platform.container_user_args()` documents against
+    itself, and the one a previous audit misattributed to `extract.run_plan()`.
+    Asked of the interpreter on m910q against the unchanged file (2026-09-04):
+
+        signature(docker.bind_mount_ok).parameters["selinux_enforcing"].default
+            is platform.selinux_enforcing
+        -> True
+
+    while the same question of `extract.run_plan` answered `None`, because that
+    one resolves the module attribute at call time. This test pins the second
+    shape.
+
+    **What is asserted is that the patched seam is CALLED and that its answer
+    ARRIVES in the argv** — not that the parameter exists. Counting the calls is
+    the half that makes this fail on every host instead of only a non-enforcing
+    one: with the default bound at import the REAL host is asked, and on a
+    Fedora runner that would have produced `label:disable` by luck and passed a
+    test that only read the argv.
+    """
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+    seen: list[list[str]] = []
+    asked: list[str] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _completed(stdout="already-here.txt\n")
+
+    def enforcing() -> bool:
+        asked.append("asked")
+        return True
+
+    monkeypatch.setattr(docker.runner, "run", run)
+    monkeypatch.setattr(docker.platform, "selinux_enforcing", enforcing)
+    # No `selinux_enforcing=` here, deliberately: this is the production call
+    # shape. `preflight._default_bind_probe` passes no seam either, which is why
+    # the import binding was latent rather than live — the default ran and asked
+    # the real host, which was the right answer by accident.
+    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is True
+    assert asked == ["asked"]
+    assert seen[-1][:5] == ["docker", "run", "--rm", "--security-opt", "label:disable"]
+
+
 def test_a_probe_that_never_reached_the_mount_is_unchecked_not_a_refusal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3300,7 +3354,7 @@ def test_a_probe_that_never_reached_the_mount_is_unchecked_not_a_refusal(
         )
 
     monkeypatch.setattr(docker.runner, "run", run)
-    assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+    assert docker.bind_mount_ok(server_dir, "alpine/git", selinux_enforcing=lambda: False) is None
     assert [a[1:3] for a in asked] == [["run", "--rm"], ["image", "inspect"]]
 
 
@@ -3322,7 +3376,10 @@ def test_a_mount_the_daemon_refused_with_the_image_in_hand_is_still_a_refusal(
         return _completed(returncode=125, stderr="Mounts denied: the path is not shared from OS X")
 
     monkeypatch.setattr(docker.runner, "run", run)
-    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
+    assert (
+        docker.bind_mount_ok(tmp_path / "wow", "alpine/git", selinux_enforcing=lambda: False)
+        is False
+    )
 
 
 def test_a_listing_with_entries_in_it_is_a_listing_however_ls_exited(
@@ -3374,7 +3431,10 @@ def test_a_listing_with_entries_in_it_is_a_listing_however_ls_exited(
         )
 
     monkeypatch.setattr(docker.runner, "run", run)
-    assert docker.bind_mount_ok(tmp_path / "wow-server", "alpine/git") is True
+    assert (
+        docker.bind_mount_ok(tmp_path / "wow-server", "alpine/git", selinux_enforcing=lambda: False)
+        is True
+    )
 
 
 def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(
@@ -3390,7 +3450,10 @@ def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(
     """
     (tmp_path / "the-host-can-see-this").write_text("x", encoding="utf-8")
     monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(returncode=0, stdout="\n"))
-    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
+    assert (
+        docker.bind_mount_ok(tmp_path / "wow", "alpine/git", selinux_enforcing=lambda: False)
+        is False
+    )
 
 
 def test_the_probe_walks_up_to_a_directory_that_has_something_in_it(tmp_path: Path) -> None:

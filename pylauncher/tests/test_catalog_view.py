@@ -13,7 +13,7 @@ import pytest
 from PySide6.QtWidgets import QPushButton, QScrollArea, QSplitter, QWidget
 
 from main import DEFAULT_WINDOW_SIZE
-from tests.conftest import process_events
+from tests.conftest import JOB_PACE, process_events, pump_until, spelled_bounds, wait_for_panel
 from yulon import runner, wsl
 from yulon.apply import ApplyError
 from yulon.catalog.catalog import CatalogEntry, load_catalog
@@ -114,15 +114,7 @@ class _CancellableInstaller:
         yield "cloning"
         self.streaming.set()
         while cancel is not None and not cancel.is_set():
-            time.sleep(0.005)
-
-
-def _wait(panel: LogPanel, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while panel.running and time.monotonic() < deadline:
-        process_events(20)
-    panel.wait(1000)
-    process_events(50)
+            time.sleep(JOB_PACE)
 
 
 def test_one_tile_per_catalog_entry_with_install_button(qapp: object) -> None:
@@ -164,7 +156,7 @@ def test_install_asks_for_folders_then_streams_the_installer(qapp: object, tmp_p
     assert view.start_install(CATALOG.get("wow-wotlk")) is True
     assert len(prompts) == 1 and "client" not in prompts[0]
     assert view.button_for("wow-tbc").isEnabled() is False  # buttons locked while running
-    _wait(panel)
+    wait_for_panel(panel)
     # The panel stamps every line with a clock (and an elapsed field while a
     # run is on), so what it holds is not what the engine yielded. Compared
     # after the stamp, which is where this test's subject lives.
@@ -183,7 +175,7 @@ def test_install_asks_for_folders_then_streams_the_installer(qapp: object, tmp_p
     prompts.clear()
     assert view.start_install(CATALOG.get("wow-tbc")) is True
     assert len(prompts) == 2 and "client" in prompts[1]
-    _wait(panel)
+    wait_for_panel(panel)
     assert made[1].ran_with[0].client_dir == tmp_path / "client"
 
 
@@ -290,7 +282,7 @@ def test_an_install_that_wrote_compose_yml_is_remembered(
     view.installed.connect(lambda g, s, c: events.append("installed"))
 
     assert view.start_install(CATALOG.get("wow-wotlk")) is True
-    _wait(panel)
+    wait_for_panel(panel)
     assert "installed" in events, f"a finished install was discarded: {events}"
     assert "finished:True" in events
 
@@ -446,7 +438,7 @@ def test_a_script_that_exits_0_without_installing_is_not_remembered(
     view.installed.connect(lambda g, s, c: events.append("installed"))
 
     assert view.start_install(CATALOG.get("wow-wotlk")) is True
-    _wait(panel)
+    wait_for_panel(panel)
 
     assert events == ["finished:False"], "an install that never happened was registered"
     assert not (tmp_path / ".env").exists(), "a folder with no install was pinned"
@@ -499,11 +491,9 @@ def test_a_cancelled_install_is_not_remembered_and_says_what_it_left(
     view.installed.connect(lambda g, s, c: events.append(("installed", g, str(s), str(c))))
 
     assert view.start_install(CATALOG.get("wow-wotlk")) is True
-    deadline = time.monotonic() + 5.0
-    while not made[0].streaming.is_set() and time.monotonic() < deadline:
-        process_events(10)
+    pump_until(lambda: made[0].streaming.is_set(), "the installer began streaming")
     panel.stop()
-    _wait(panel)
+    wait_for_panel(panel)
 
     assert [event[0] for event in events] == ["finished"], "a cancelled install was registered"
     assert events[0][2] == "False"
@@ -606,7 +596,7 @@ def test_unlocking_after_a_job_never_re_enables_a_gated_tile(qapp: object, tmp_p
     assert view.button_for("wow-tbc").isEnabled() is False  # still Linux-only
 
     assert view.start_install(widened) is True
-    _wait(panel)
+    wait_for_panel(panel)
     process_events(50)
 
     # Disabled now for the OTHER reason, and the text is what tells them apart:
@@ -1783,7 +1773,7 @@ def test_a_finished_install_greys_its_own_button_and_leaves_the_others(
         home=tmp_path,
     )
     assert view.start_install(CATALOG.get("wow-wotlk")) is True
-    _wait(panel)
+    wait_for_panel(panel)
     assert view.button_for("wow-wotlk").text() == "Installed"
     assert view.button_for("wow-wotlk").isEnabled() is False
     assert view.button_for("wow-tbc").isEnabled() is True, "the unlock must still reach the rest"
@@ -1813,7 +1803,7 @@ def test_an_install_that_failed_leaves_its_button_offering_a_retry(
         home=tmp_path,
     )
     assert view.start_install(CATALOG.get("wow-wotlk")) is True
-    _wait(panel)
+    wait_for_panel(panel)
     assert view.button_for("wow-wotlk").text() == "Install"
     assert view.button_for("wow-wotlk").isEnabled() is True
 
@@ -1834,3 +1824,17 @@ def test_using_an_existing_install_greys_the_tile_too(
     assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
     assert view.button_for("wow-wotlk").text() == "Installed"
     assert view.button_for("wow-wotlk").isEnabled() is False
+
+
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """Every bound here must be spelled as one of the named ones, and nothing else.
+
+    The same audit `test_log_panel.py` runs on itself, for the same reason.
+    Until 2026-09-04 this file kept its own `_wait` with `timeout: float = 5.0`
+    and a `panel.wait(1000)` whose result was thrown away, plus one deadline
+    built by hand from the clock (`time.monotonic() + 5.0`) that no call-site
+    audit could have seen; all of it goes through `pump_until` now. `JOB_PACE`
+    is the fake installer's own tick while it waits to be cancelled, not a
+    deadline, and is named so this audit can tell it from one.
+    """
+    assert spelled_bounds(__file__) == {"JOB_PACE"}

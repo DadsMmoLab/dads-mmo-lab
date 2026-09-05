@@ -1584,31 +1584,88 @@ entry's heading is the compose-service defect, not this): `test_no_bash_installe
 mutation-proven: rename the installers root and it passes while its two siblings in the same file
 fail. Inconsistent with the guard F.2 deliberately added two files over.
 
-### 27. The import-bound SELinux seam is in `docker.py`, not in `run_plan` — 2026-09-01, OPEN, latent
+### 27. One platform question, two answerers — the import-bound SELinux seams — 2026-09-01, OPEN in `native.Seams` only
 
-`docker.bind_mount_ok(… selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing)`
-(`docker.py:2728`) **is** bound at import. Asked of the interpreter, not read off the page:
-`signature(docker.bind_mount_ok).parameters["selinux_enforcing"].default is platform.selinux_enforcing`
-→ **True**.
+**Three of the four sites are fixed. `native.Seams` is not, and it is the one a real install reaches
+most.** The heading and the text below were rewritten on 2026-09-05 because what stood here was a
+present-tense description of `docker.bind_mount_ok()` that the 2026-09-04 fix had made false, left
+under an OPEN marker — the entry read as live for a day after its subject had changed.
 
-This is the real instance of the trap `container_user_args()` documents against itself — and the one
-**K.5 wrongly attributed to `extract.run_plan()`**, whose default is `None` with a late module lookup
-(`extract.py:755`, correct). K.5's docstring took a true fact about one function and asserted it about
-another that does the reverse; corrected on `fix/mmaps-audit-and-the-claim-that-was-backwards`, where
-the replacement now carries the interpreter output instead of a claim.
+**What was found, 2026-09-01.** `docker.bind_mount_ok(… selinux_enforcing = platform.selinux_enforcing)`
+bound the module function as its default, at import. Asked of the interpreter rather than read off the
+page: `signature(docker.bind_mount_ok).parameters["selinux_enforcing"].default is
+platform.selinux_enforcing` → **True**, while the same question of `extract.run_plan` → **None**. That
+made `bind_mount_ok` the real instance of the trap `container_user_args()` documents against itself,
+and the one **K.5 had wrongly attributed to `extract.run_plan()`** — a true fact about one function
+asserted about another that does the reverse. K.5's docstring was corrected on
+`fix/mmaps-audit-and-the-claim-that-was-backwards`, where the replacement carries the interpreter
+output instead of a claim.
 
-**Latent, not live — and the reason is luck, not wiring.** Its production caller,
-`preflight._default_bind_probe` (`preflight.py:257`), passes **no** seam, so on a real machine the
-default runs and asks the real host — which is the right answer by accident. Under test it never runs
-at all: `test_preflight.py` fakes one level up (`bind_mount_ok=lambda _p: …`). `test_docker.py` passes
-`selinux_enforcing=` explicitly at 3147 and 3207 and **omits it at 3188/3191/3303/3325/3377/3393/3418**,
-so those calls take the runner's own host answer — **green today only because every runner is
-non-enforcing. A Fedora runner is what would change that.**
+It was latent rather than live, by luck and not by wiring: the production caller
+`preflight._default_bind_probe` passed no seam, so the bound default ran and asked the real host, which
+was the right answer by accident; and under test it never ran at all, because `test_preflight.py` fakes
+one level up. It was green only because every runner so far is non-enforcing.
 
-**Fix:** have `preflight` thread its own seam for this question (it has none), rather than changing the
-default in place. **The guard to add first** is a test that patches `platform.selinux_enforcing` and
-asserts the value **arrives** — not that the parameter exists. That distinction is this run's third
-standing rule and it has caught three separate defects.
+**FIXED 2026-09-04/05 (m910q), in three modules, all to one shape** — default `None`, module attribute
+resolved inside the call, which is `extract.run_plan()`'s shape:
+
+* `docker.bind_mount_ok()` — 2026-09-04. Guard:
+  `test_the_bind_probe_asks_the_selinux_seam_the_module_holds_at_call_time`, which patches
+  `platform.selinux_enforcing`, **counts the call**, and asserts `label:disable` reached the argv. The
+  rejected alternative was the one this entry used to prescribe — thread a seam down from `preflight`
+  and leave the default alone — which fixes the one caller there is and leaves the same default waiting
+  for the next.
+* `git.ContainerGit.selinux_enforcing` / `.filesystem_type` — 2026-09-04, via `_ask_selinux()` and
+  `_ask_filesystem()`. Before the change,
+  `{f.name: f.default is getattr(platform, f.name) for f in fields(ContainerGit) if f.name != "image"}`
+  → `{'selinux_enforcing': True, 'filesystem_type': True}`. Guard:
+  `test_a_bare_container_git_asks_the_selinux_seams_the_module_holds_at_call_time` (`asked == []`
+  against the old file).
+* `preflight.gather()` — `selinux` 2026-09-04, **`fs_type` 2026-09-05**, which is the one the third
+  pass had left bound. It was the sharpest of the three, because `ContainerGit` had already moved: one
+  patch of `platform.filesystem_type` on m910q, 2026-09-05, gave
+  `ContainerGit()._ask_filesystem(Path("/tmp"))` → `'btrfs'` while `gather()` handed back the host's
+  `'ext2/ext3'`. Guard: `test_gather_asks_both_linux_seams_the_module_holds_at_call_time`, mutation-
+  proven one default at a time with `__pycache__` purged between (`selinux rebound -> 1 failed`,
+  `fs_type rebound -> 1 failed`).
+
+**STILL OPEN — `native.Seams`, and here it is live rather than latent.** `Seams.selinux_enforcing`,
+`Seams.fs_type` and `Seams.relabel` are still the `platform` functions bound at class-definition time,
+so the split this entry is named for now sits between `Seams` and the three modules above. Measured on
+m910q, 2026-09-05, with ONE `monkeypatch` of each attribute and the two consumers a single install
+reaches (`_preflight_lines()` → `self._seams.gather(…)`, and `stage_generate_compose` →
+`self._seams.selinux_enforcing()` / `.fs_type()`):
+
+```
+Seams.selinux_enforcing default is platform.selinux_enforcing -> True
+Seams.fs_type default is platform.filesystem_type             -> True
+gather(...).selinux_enforcing        -> True        (the fake)
+Seams().selinux_enforcing()          -> False       (the host)
+gather(...).server_fs_type           -> btrfs       (the fake)
+Seams().fs_type(server_dir)          -> ext2/ext3   (the host)
+```
+
+`cmangos.stage_extract` makes it worse in a way its own docstring predicted and then walked into: it
+passes `selinux_enforcing=self._seams.selinux_enforcing` into `extract.run_plan()` **to avoid** "one
+question about one machine put to two answerers inside a single install" — and because the object it
+passes is the import-bound one, that is now exactly what it causes. Left to default, `run_plan` would
+resolve `platform` late and agree with `gather()`.
+
+**Fix, not applied here because `native.py` is another lane's file this run:** give `Seams` the
+`bind_mount_ok` treatment — the three fields default to `None`, and `ask_selinux()`, `ask_fs(path)` and
+`ask_relabel(path)` resolve `None` against `platform` at call time; `native.py`'s two call sites in
+`stage_generate_compose` and `cmangos.stage_extract`'s pass-through move to those. Tried on a lane copy
+on m910q, 2026-09-05: the probe above then answers `True`/`True` and `btrfs`/`btrfs`.
+
+**The guard to add with it**, and it is the distinction this entry exists for: patch
+`platform.selinux_enforcing` and `platform.filesystem_type`, drive a bare `Seams()` **and**
+`preflight.gather()`, and assert both fakes were **called** and that one patch produced one answer.
+Asserting that the parameter or the field exists proves nothing; asserting its identity is worse,
+because it pins the defect — which is what
+`test_families_azerothcore.py::test_every_seam_defaults_to_the_real_function_it_stands_in_for` did
+until the two asserts were **withdrawn** on 2026-09-05. Against a `Seams` fixed as above that test
+failed on m910q at `assert None is <function relabel_for_containers>`; its comment now carries the
+withdrawal and the guard that is owed.
 
 ### 28. The gaming-mode script cannot be used from the artifact it exists for — 2026-09-01, OPEN, packaging
 

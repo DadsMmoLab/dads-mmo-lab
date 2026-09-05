@@ -14,12 +14,14 @@ case it was wrong about was a mock. Both run against local repositories only:
 
 from __future__ import annotations
 
+import ast
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from yulon import git, runner
+from yulon.catalog import native
 
 
 def _completed(
@@ -545,6 +547,124 @@ def test_the_filesystem_is_not_stated_unless_selinux_says_enforcing(
         git.CloneSpec(url="https://example/core.git", dest=enforcing_dest)
     )
     assert asked == [enforcing_dest]
+
+
+def test_a_bare_container_git_asks_the_selinux_seams_the_module_holds_at_call_time(
+    monkeypatch: pytest.MonkeyPatch, seen: list[list[str]], tmp_path: Path
+) -> None:
+    """A test that patches `platform.selinux_enforcing` has to be SEEN in here.
+
+    Every test above hands the answer in through `selinux_enforcing=`, so not
+    one of them could tell that the dataclass defaults were BOUND AT IMPORT —
+    the same shape `docker.bind_mount_ok()` had until 2026-09-04, and the one
+    its three production callers meet: `native.py` constructs `ContainerGit()`
+    bare in `_git_file_unmodified()`, in the `Seams.clone` `default_factory`,
+    and in `_git_remote_url()` — named, not numbered, because the numbers rot:
+    an earlier draft of this docstring said "593, 616 and 2364" while the file
+    already read 593, 616 and 2370 (`grep -n 'ContainerGit(' native.py`,
+    m910q, 2026-09-05). Asked of the interpreter on m910q against the
+    unchanged file (2026-09-04):
+
+        {f.name: f.default is getattr(platform, f.name)
+         for f in fields(git.ContainerGit) if f.name != "image"}
+        -> {'selinux_enforcing': True, 'filesystem_type': True}
+
+    **What is asserted is that the patched seams are CALLED and that their
+    answers ARRIVE in the argv** — the write path's `:z` and the read path's
+    `label:disable` — not that the fields exist. Counting the calls is what
+    makes this fail on every host rather than only a non-enforcing one: with
+    the defaults bound at import the REAL host is asked, and a Fedora runner
+    would have produced the same argv by luck.
+    """
+    asked: list[str] = []
+
+    def enforcing() -> bool | None:
+        asked.append("selinux")
+        return True
+
+    def labelling(path: Path) -> str | None:
+        asked.append(f"fs:{path}")
+        return "ext2/ext3"
+
+    monkeypatch.setattr(git.platform, "selinux_enforcing", enforcing)
+    monkeypatch.setattr(git.platform, "filesystem_type", labelling)
+    monkeypatch.setattr(git.platform, "docker_program", lambda: "docker")
+
+    # The production shape: no seam handed in.
+    dest = tmp_path / "core"
+    git.ContainerGit().clone(git.CloneSpec(url="https://example/core.git", dest=dest, depth=None))
+    assert asked == ["selinux", f"fs:{dest}"]
+    assert seen[-1][seen[-1].index("-v") + 1] == f"{dest}:/git:z"
+
+    asked.clear()
+    (dest / ".git").mkdir(parents=True)
+    git.ContainerGit().remote_url(dest)
+    assert asked == ["selinux"], "a read consults SELinux and never the filesystem"
+    assert "label:disable" in seen[-1]
+
+
+def test_the_production_container_gits_are_bare_and_there_are_no_others(
+    monkeypatch: pytest.MonkeyPatch, seen: list[list[str]], tmp_path: Path
+) -> None:
+    """The late lookup above is only reached by a `ContainerGit()` that carries no seam.
+
+    The test above proves a BARE `ContainerGit` resolves `platform` at call
+    time. That is evidence about production only if production really builds
+    them bare, which the class comment used to assert as a dated
+    `grep -n 'ContainerGit(' native.py` count — narrative nothing checked, and
+    that same comment block had already gone stale once (it named lines "593,
+    616 and 2364" while the file read 593, 616 and 2370). This test owns the
+    claim instead, in the two halves a written number cannot have:
+
+    * **Driven, not read.** Each of the three routes is called with
+      `git.ContainerGit` replaced by a recorder, so what is asserted is that
+      the construction really happened on that path and really carried no
+      keyword — a route that started passing `selinux_enforcing=` would fail
+      here even though the grep count would not move.
+    * **Re-derived, so it fails on what it cannot see.** Driving three routes
+      can never notice a FOURTH, so the set is also taken from `native.py`'s
+      syntax tree. A new `git.ContainerGit(...)` anywhere in that module fails
+      this test rather than silently joining an unaudited majority.
+
+    An AST walk and not a text search: `audit by argv, not by string` — the
+    same call spelled over two lines, or with a comment inside the parentheses,
+    is one `ast.Call` and is two different greps.
+    """
+    real = git.ContainerGit
+    made: list[dict[str, object]] = []
+
+    def record(**kwargs: object) -> git.ContainerGit:
+        made.append(kwargs)
+        return real(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(git, "ContainerGit", record)
+    monkeypatch.setattr(git.platform, "docker_program", lambda: "docker")
+    monkeypatch.setattr(git.platform, "selinux_enforcing", lambda: False)
+    monkeypatch.setattr(git.platform, "filesystem_type", lambda _p: "ext4")
+
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    # `.git` exists on purpose: both read methods answer `None` early without
+    # it, and an early return would still have constructed the object — so the
+    # recorder alone could not tell a route that runs from one that gives up.
+    assert native._git_file_unmodified(dest, "docker-compose.yml") is not None
+    ran = len(seen)
+    native._git_remote_url(dest)
+    assert len(seen) == ran + 1, "the remote-url route reached a container, not an early return"
+    native.Seams()
+
+    assert made == [{}, {}, {}], "a production ContainerGit that carries a seam is not bare"
+
+    tree = ast.parse(Path(native.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "ContainerGit"
+    ]
+    assert len(calls) == len(made), "native.py grew a ContainerGit site this test does not drive"
+    assert all(not c.args and not c.keywords for c in calls)
 
 
 def test_docker_desktop_never_gets_a_user_flag(

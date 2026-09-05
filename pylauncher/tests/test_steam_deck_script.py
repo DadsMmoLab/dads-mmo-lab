@@ -25,7 +25,6 @@ thing a module docstring cannot keep true.
 
 from __future__ import annotations
 
-import ast
 import os
 import re
 import subprocess
@@ -33,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import spelled_bounds
 from tests.support_bash import bash_available
 from yulon import resources
 
@@ -427,7 +427,7 @@ def test_it_detects_the_client_and_launches_nothing() -> None:
 
 
 def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
-    """Every `timeout=` here must be one of the two named ones, and nothing else.
+    """Every bound here must be one of the two named ones, and nothing else.
 
     A source-shape read of THIS file, not of the script — the kind its module
     docstring warns about, and deliberate: what it pins is that the reasoning
@@ -442,16 +442,18 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
     they mean opposite things — one must never be reached, the other must be —
     and a test that only asked "is it a name?" would let a hang bound be sized
     like the dwell one.
+
+    **Positional bounds are read too, added 2026-09-04.** This looked only at
+    `timeout=` keywords, and the hole was measured rather than argued: appending
+    `def _mutation(proc): proc.communicate(60)` to this file left the audit
+    reporting `1 passed`. A bound spelled positionally is the same defect the
+    entry above is about, and `communicate`, `wait` and `sleep` all take one
+    that way — so the audit that exists to stop the next bare 60 was blind to
+    two of the three ways of writing it. The reading moved to
+    `conftest.spelled_bounds` the same day, so the four Qt test files run the
+    same one; what it reads and what it cannot is documented there.
+
+    `timeout` itself is `_run()`'s own parameter being forwarded to
+    `subprocess.run()`; its default is `HANG_BOUND`, one hop up.
     """
-    bounds = [
-        keyword.value
-        for node in ast.walk(ast.parse(Path(__file__).read_text(encoding="utf-8")))
-        if isinstance(node, ast.Call)
-        for keyword in node.keywords
-        if keyword.arg == "timeout"
-    ]
-    assert bounds, "no wall-clock bound was found at all, so this pins nothing"
-    spelled = [ast.unparse(value) for value in bounds]
-    # `timeout` itself is `_run()`'s own parameter being forwarded to
-    # `subprocess.run()`; its default is `HANG_BOUND`, one hop up.
-    assert set(spelled) == {"HANG_BOUND", "DWELL_PROOF", "timeout"}, spelled
+    assert spelled_bounds(__file__) == {"HANG_BOUND", "DWELL_PROOF", "timeout"}

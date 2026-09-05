@@ -161,13 +161,50 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     assert real.one_shot is docker.run_one_shot
     assert real.gather is preflight.gather
     assert real.wait_ready is docker.wait_ready_for
-    # The three SELinux seams. Every SELinux test in `test_spine.py` fakes all
-    # three, so they are only evidence about Fedora if these are what a real
-    # install reaches for — and `selinux_enforcing` in particular must be the
-    # tri-state probe, not something that answers `False` for "could not ask".
+    # `relabel`. Every SELinux test in `test_spine.py` fakes it, so those are
+    # only evidence about Fedora if this is what a real install reaches for.
+    # It is the one SELinux seam with a single answerer (`native.py`'s
+    # `stage_generate_compose`, and nothing else asks the host whether the
+    # folder was relabelled), so an identity assert about it states a fact
+    # rather than pinning a shape — see the withdrawal below.
     assert real.relabel is platform.relabel_for_containers
-    assert real.selinux_enforcing is platform.selinux_enforcing
-    assert real.fs_type is platform.filesystem_type
+    # WITHDRAWN 2026-09-05 (m910q), not moved: two asserts stood here,
+    #
+    #     assert real.selinux_enforcing is platform.selinux_enforcing
+    #     assert real.fs_type is platform.filesystem_type
+    #
+    # and their argument is retracted rather than restated in another form.
+    # They read as "the engine calls the real probe", which is the claim the
+    # rest of this test makes. For these two seams they said something else as
+    # well, and that something is the defect bug-checklist §27 is open for:
+    # `Seams` binds `platform.selinux_enforcing` and `platform.filesystem_type`
+    # AT IMPORT, while the other consumers of those two attributes —
+    # `preflight.gather()`, `docker.bind_mount_ok()`, `git.ContainerGit` and
+    # `extract.run_plan()` — resolve them at CALL time as of 2026-09-04/05. One
+    # patch is therefore answered two ways inside ONE install. Measured on
+    # m910q, 2026-09-05, one `monkeypatch` of each `platform` attribute and the
+    # two consumers a `cmangos` install reaches:
+    #
+    #     gather(...).selinux_enforcing  -> True        (the fake)
+    #     Seams().selinux_enforcing()    -> False       (the host)
+    #     gather(...).server_fs_type     -> 'btrfs'     (the fake)
+    #     Seams().fs_type(server_dir)    -> 'ext2/ext3' (the host)
+    #
+    # An identity assert cannot tell those two shapes apart — it passes on the
+    # broken one and FAILS on the fixed one, which is what makes it a pin and
+    # not a test. Measured, not reasoned: with `Seams` given the `bind_mount_ok`
+    # treatment (both fields `None`, resolved against `platform` in
+    # `ask_selinux()`/`ask_fs()`) this test failed on m910q, 2026-09-05, at the
+    # first of the two lines — `assert None is <function selinux_enforcing>`.
+    #
+    # Nothing is asserted in their place HERE because the guard that belongs
+    # here cannot pass yet: `native.py` is another lane's file this run and the
+    # split is still live in it. The guard it owes, once `Seams` resolves late,
+    # is the one §27 asked for in as many words — patch
+    # `platform.selinux_enforcing` and `platform.filesystem_type`, drive a bare
+    # `Seams()` and `preflight.gather()`, and assert both fakes were CALLED and
+    # that ONE patch produced ONE answer. Asserting the fields exist, or that
+    # they are some particular object, is what was here and it proved nothing.
     # `ensure_docker` is the one seam whose REAL default escalates on Linux, so
     # the engine not calling it (or calling a fake) is what the macOS path's
     # "no sudo" claim ultimately rests on. Pin that the default really is the

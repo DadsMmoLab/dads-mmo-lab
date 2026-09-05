@@ -58,6 +58,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
@@ -1662,7 +1663,8 @@ class StagedInstaller:
         run = yield from self._pump(
             lambda sink: self._seams.build(
                 ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel
-            )
+            ),
+            cancel=ctx.cancel,
         )
         self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE)
         yield "The build finished."
@@ -1802,7 +1804,10 @@ class StagedInstaller:
             return
         yield f"Importing the databases ({service}). This takes several minutes."
         run = yield from self._pump(
-            lambda sink: self._seams.one_shot(service, ctx.server_dir, sink=sink, cancel=ctx.cancel)
+            lambda sink: self._seams.one_shot(
+                service, ctx.server_dir, sink=sink, cancel=ctx.cancel
+            ),
+            cancel=ctx.cancel,
         )
         if run.returncode == docker.CANCELLED_RETURNCODE:
             raise InstallerError(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
@@ -2104,7 +2109,10 @@ class StagedInstaller:
         return ask(dest)
 
     def _pump(
-        self, call: Callable[[docker.OutputSink], docker.AttachedRun]
+        self,
+        call: Callable[[docker.OutputSink], docker.AttachedRun],
+        *,
+        cancel: threading.Event | None,
     ) -> Generator[str, None, docker.AttachedRun]:
         """Turn a push-style docker call into yielded lines, without buffering the run.
 
@@ -2113,6 +2121,13 @@ class StagedInstaller:
         contract needs). A queue between a worker thread and this generator is
         the whole bridge: nothing is collected into a list first, so a
         four-hour build appears line by line rather than at the end.
+
+        `cancel` is the SAME event `call` closed over, handed in a second time
+        so that a consumer who abandons this generator can be honoured — see
+        `stop_abandoned_worker()`. Required rather than defaulted, for the
+        reason `_check_run()` gives about its own note: a default here is the
+        shape of the mistake, because the call site that forgets it is exactly
+        the one whose worker is left running.
         """
         lines: queue.Queue[str | None] = queue.Queue()
         outcome: list[docker.AttachedRun] = []
@@ -2128,11 +2143,24 @@ class StagedInstaller:
 
         worker = threading.Thread(target=work, daemon=True, name="yulon-install-output")
         worker.start()
-        while True:
-            item = lines.get()
-            if item is None:
-                break
-            yield item
+        try:
+            while True:
+                item = lines.get()
+                if item is None:
+                    break
+                yield item
+        except BaseException:
+            # Abandonment, or an exception thrown INTO this frame — never the
+            # normal path, which leaves the loop by `break` once the worker has
+            # put its sentinel; setting the cancel event there would mark a
+            # stage that succeeded as stopped. `BaseException` and not
+            # `GeneratorExit`, measured on m910q 2026-09-04: the CLI harness
+            # spends an install blocked in `lines.get()` above, so its Ctrl+C
+            # is raised right there as a `KeyboardInterrupt`, and the narrower
+            # clause let it past with the worker still running — §21's state,
+            # one exception type to the side of the test that closed it.
+            stop_abandoned_worker(worker, cancel, what="the install output")
+            raise
         worker.join()
         if failure:
             raise InstallerError(f"the command could not be run: {failure[0]}") from failure[0]
@@ -2212,6 +2240,66 @@ def _without(said: str, secret: str) -> str:
     line nobody could read.
     """
     return said.replace(secret, "***") if secret else said
+
+
+ABANDONED_WORKER_SECONDS = runner._SHUTDOWN_TIMEOUT_SECONDS
+"""How long an abandoning consumer may be blocked while its worker stops.
+
+A cap on the ABANDONER, not a promise about teardown. `join()` with no timeout
+is what bug-checklist §21 rejects in as many words: the worker is a container
+run, so an unbounded join blocks whoever dropped the generator for the hours
+the extraction has left. The number is read from `runner` rather than typed
+here a second time: `_SHUTDOWN_TIMEOUT_SECONDS` answers the same question one
+layer down, and `test_spine.py` pins that the two agree.
+"""
+
+
+def stop_abandoned_worker(
+    worker: threading.Thread, cancel: threading.Event | None, *, what: str
+) -> None:
+    """Stop a `_pump()`/`_stream()` worker whose consumer walked away (bug-checklist §21).
+
+    Both bridges start a daemon thread and join it only after the queue drains.
+    `GeneratorExit` at the `yield` skips that join, so the worker went on
+    running and went on pushing into a queue nobody would ever read — for the
+    extract stage, a live multi-hour extraction with no owner.
+
+    Setting the cancel event is what actually stops it: every worker here is a
+    `run_container(cancel=…)` underneath, and that is the seam it already
+    polls. The join that follows is only so the abandoner does not race ahead
+    of a container still being torn down, and it is bounded for the reason
+    `ABANDONED_WORKER_SECONDS` gives.
+
+    **Setting the event cannot change what the user is told.** The one thing
+    that says "cancelled" is `LogPanel._stop_requested`, set by the Stop button
+    and by nothing else — its own docstring says why: a cancelled source does
+    not raise, so the panel is the only thing that knows. `_check_cancel()`
+    does read the event, but it is downstream of the `yield` that was
+    abandoned and can never run again for this install. Checked rather than
+    assumed, because "set the caller's cancel event" is exactly the shape that
+    quietly turns a crash into "you stopped it".
+
+    `cancel=None` (a test that passes no event; the CLI harness did too, until
+    2026-09-04) has no seam to pull, so it is logged rather than silently
+    tolerated. It is NOT joined: nothing would end the worker, so the join
+    could only spend the full timeout before saying the same thing.
+    """
+    if sys.is_finalizing():
+        # A daemon thread that asks for the GIL after finalisation has begun is
+        # exited on the spot, so it can never reach the cancel check and the
+        # join below could only ever time out. The process is going away, which
+        # is the one moment this leak costs nothing.
+        return
+    if cancel is None:
+        logger.warning(f"{what} was abandoned with no cancel event; its worker was left running")
+        return
+    cancel.set()
+    worker.join(timeout=ABANDONED_WORKER_SECONDS)
+    if worker.is_alive():
+        logger.warning(
+            f"{what} was abandoned and did not stop within {ABANDONED_WORKER_SECONDS}s; "
+            f"thread {worker.name} was left running"
+        )
 
 
 def _cancelled_message(what: str, note: str = "") -> str:

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -222,18 +223,47 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"unknown game {args.game!r}\n")
         return 2
     options = InstallOptions(server_dir=args.server_dir, client_dir=args.client_dir)
+    # One event per run, as the Catalog tab makes one per install. It is the
+    # only seam that stops a bridge worker whose consumer has gone: a `run()`
+    # given no event leaves `_pump()`'s worker running on abandonment
+    # (bug-checklist §21), and until 2026-09-04 this harness gave none — the
+    # one install path every gate box runs was the case §21's own closing test
+    # could not pass.
+    cancel = threading.Event()
     try:
         engine = installer_for_app(entry, installers_root=args.installers_root)
         # `ask=` is not optional. Provisioning asks the docker-group consent and
         # the sudo password through it, and a run given no prompter answers
         # neither — which on a password-sudo box is the hang above.
-        for line in engine.run(options, ask=_terminal_prompter):
+        for line in engine.run(options, cancel=cancel, ask=_terminal_prompter):
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
     except InstallerError as exc:
         logger.error(f"install failed: {exc}")
         sys.stderr.write(f"install failed: {exc}\n")
         return 1
+    except KeyboardInterrupt:
+        # Ctrl+C, in either of the two places it can land. Measured on m910q
+        # 2026-09-05, both of them through the real `main()`, the worker was
+        # already stopped by the time this handler ran:
+        #
+        #   * inside `engine.run()`'s frame — where this thread spends an
+        #     install, blocked in the bridge's `lines.get()`. The generator's
+        #     own `except BaseException` calls `stop_abandoned_worker()` there.
+        #   * inside the `sys.stdout.write` above. The `for` loop's iterator is
+        #     the only reference to that generator, so unwinding to this
+        #     handler drops it and CPython closes it: the SAME hook runs, as a
+        #     `GeneratorExit`, and it runs BEFORE this line
+        #     (`test_install_wiring.py`). An earlier version of this comment
+        #     said that case "reaches no hook"; that was measured false.
+        #
+        # `cancel.set()` is kept anyway, because it costs nothing and does not
+        # depend on refcounting: setting a set event is a no-op, and the only
+        # reader is a worker that is already stopping. 130 is what a shell
+        # reports for a SIGINT exit.
+        cancel.set()
+        sys.stderr.write("install stopped\n")
+        return 130
     return 0
 
 

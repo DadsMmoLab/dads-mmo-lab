@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -36,15 +37,42 @@ from typing import BinaryIO
 import pytest
 
 import yulon
+from tests.conftest import spelled_bounds
 from tests.support_native import ABSENT, IMPORTED, PARTIAL, POPULATED_HALF, Recorder
 from yulon import docker, platform, resources
 from yulon.catalog import composegen, native
-from yulon.catalog.catalog import CatalogEntry, PasswordPlan, SqlPhase, SqlPlan, load_catalog
+from yulon.catalog.catalog import (
+    CatalogEntry,
+    PasswordPlan,
+    SqlPhase,
+    SqlPlan,
+    load_catalog,
+)
 from yulon.catalog.families import cmangos, dockerfile, extract, family_for, sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions, installer_for
 
 DB_PASSWORD = "tbc-0123456789abcdef"
+
+HANG_BOUND = 30.0
+"""A DEADLOCK BREAKER for every thread wait here, not an assertion about speed.
+
+Each wait it sizes is for a fake `call` on a worker thread to be released, or
+for that thread to end — an `Event.set()` away in a healthy run. Measured on
+m910q (4 cores) 2026-09-05, the four `_stream()` abandonment tests below run
+together on an idle box: `4 passed, 117 deselected in 0.40s`.
+
+Large on purpose: the bound is on THIS process while the contention is on the
+box, and bug-checklist §33 records what a stopwatch-sized bound cost — 60
+seconds against a run measured at 0.16s went red under 15-way load and the run
+it happened in was read as a real failure. Deleting the bounds is not an option
+either: `_stream()`'s worker is only released by the cancel event this fix
+sets, so a regression with no bound is a suite that never returns, which CI
+reports as a stuck job rather than a red one.
+
+The proofs that a bound was NOT waited out are written against a fraction of
+this number rather than a second one, so the two cannot drift apart.
+"""
 
 
 def installable(entry: CatalogEntry) -> CatalogEntry:
@@ -349,7 +377,9 @@ def test_the_module_constants_are_the_shared_template_s_own_spellings() -> None:
     assert f"- {cmangos.DB_DATA_VOLUME}:/var/lib/mysql" in base
 
 
-def test_both_token_mappings_carry_the_family_set_from_catalog_data(tmp_path: Path) -> None:
+def test_both_token_mappings_carry_the_family_set_from_catalog_data(
+    tmp_path: Path,
+) -> None:
     """Every catalog- and install-derived key is in BOTH mappings; only one carries the secret.
 
     Asserted over both, not over the public one with a note about the other:
@@ -386,7 +416,10 @@ def test_both_token_mappings_carry_the_family_set_from_catalog_data(tmp_path: Pa
         assert "" not in tokens.values(), "an absent value is an absent key, never an empty fill"
     assert "DB_PASSWORD" not in public
     assert secret["DB_PASSWORD"] == DB_PASSWORD
-    assert secret == {**public, "DB_PASSWORD": DB_PASSWORD}, "one set is the other plus the secrets"
+    assert secret == {
+        **public,
+        "DB_PASSWORD": DB_PASSWORD,
+    }, "one set is the other plus the secrets"
 
 
 def test_tokens_omit_logs_db_when_the_entry_has_no_extra_schema(tmp_path: Path) -> None:
@@ -540,7 +573,9 @@ def test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_render
         assert not [value for value in sentinels.values() if value in built], name
 
 
-def test_the_secret_mapping_carries_a_second_secret_nobody_listed(tmp_path: Path) -> None:
+def test_the_secret_mapping_carries_a_second_secret_nobody_listed(
+    tmp_path: Path,
+) -> None:
     """A secret added to the secret TYPE arrives in `_secret_tokens()` with no list edited.
 
     The other half of M15's lesson. Covering the name `DB_PASSWORD` is what
@@ -836,7 +871,9 @@ def test_every_shipped_dockerignore_excludes_the_entrys_password_file(
     )
 
 
-def test_the_secret_mapping_spells_each_field_the_way_the_templates_do(tmp_path: Path) -> None:
+def test_the_secret_mapping_spells_each_field_the_way_the_templates_do(
+    tmp_path: Path,
+) -> None:
     """`db_password` -> `DB_PASSWORD`: the derivation has to match what the catalog wrote.
 
     A derivation is only as good as its spelling rule, and the shipped conf
@@ -917,7 +954,9 @@ def test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret(
         newline="\n",
     )
     (folder / "dockerignore.tmpl").write_text(
-        f"{composegen.GENERATED_MARKER} - do not hand-edit.\n*\n", encoding="utf-8", newline="\n"
+        f"{composegen.GENERATED_MARKER} - do not hand-edit.\n*\n",
+        encoding="utf-8",
+        newline="\n",
     )
     tokens = engine(Recorder())._secret_tokens(context(tmp_path / "srv"))
     assert tokens["DB_PASSWORD"] == DB_PASSWORD, "the secret-bearing set, on purpose"
@@ -963,7 +1002,9 @@ def functions_spending(tail_name: str) -> set[str]:
     }
 
 
-def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(tmp_path: Path) -> None:
+def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(
+    tmp_path: Path,
+) -> None:
     """Every refusal that spends the catalog tail, driven — the set derived, not restated.
 
     Until 2026-09-01 two ended "That is a catalog error in the app…" and a
@@ -1049,7 +1090,9 @@ def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(tmp_path: Pat
         assert not sent_to_catalog, wrong_tail
 
 
-def test_the_typed_blocks_refuse_a_catalog_that_does_not_carry_them(tmp_path: Path) -> None:
+def test_the_typed_blocks_refuse_a_catalog_that_does_not_carry_them(
+    tmp_path: Path,
+) -> None:
     """`_native()`/`_data()` name a catalog error in the app, never a machine's."""
     no_cmangos = ENTRY.model_copy(
         update={
@@ -1114,8 +1157,13 @@ def test_stream_interleaves_the_sink_and_the_generator_without_buffering() -> No
         sink("container said two")
         yield "progress two"
 
-    got = list(engine(Recorder())._stream(call))
-    assert got == ["container said one", "progress one", "container said two", "progress two"]
+    got = list(engine(Recorder())._stream(call, cancel=None))
+    assert got == [
+        "container said one",
+        "progress one",
+        "container said two",
+        "progress two",
+    ]
 
 
 def test_stream_yields_each_line_before_the_next_is_produced() -> None:
@@ -1124,10 +1172,10 @@ def test_stream_yields_each_line_before_the_next_is_produced() -> None:
 
     def call(sink: docker.OutputSink) -> Iterator[str]:
         yield "first"
-        assert released.wait(5), "the consumer had not been handed line one"
+        assert released.wait(HANG_BOUND), "the consumer had not been handed line one"
         yield "second"
 
-    stream = engine(Recorder())._stream(call)
+    stream = engine(Recorder())._stream(call, cancel=None)
     assert next(stream) == "first"
     released.set()
     assert next(stream) == "second"
@@ -1149,7 +1197,7 @@ def test_stream_re_raises_an_installer_error_untouched_and_wraps_anything_else()
         raise InstallerError("mmaps was stopped. Finished tiles are kept.")
 
     with pytest.raises(InstallerError) as raised:
-        list(engine(Recorder())._stream(refuses))
+        list(engine(Recorder())._stream(refuses, cancel=None))
     assert str(raised.value) == "mmaps was stopped. Finished tiles are kept."
 
     def breaks(sink: docker.OutputSink) -> Iterator[str]:
@@ -1157,13 +1205,188 @@ def test_stream_re_raises_an_installer_error_untouched_and_wraps_anything_else()
         yield ""  # pragma: no cover - unreachable, keeps this a generator
 
     with pytest.raises(InstallerError, match="the step could not be run: division by zero"):
-        list(engine(Recorder())._stream(breaks))
+        list(engine(Recorder())._stream(breaks, cancel=None))
+
+
+WORKER_THREAD = "yulon-cmangos-output"
+
+
+def _live_workers() -> list[str]:
+    """Every `_stream()` worker still alive, by thread name — §21's question, asked directly."""
+    return [t.name for t in threading.enumerate() if t.name == WORKER_THREAD]
+
+
+def test_abandoning_the_stream_stops_its_worker_with_no_cancel_from_the_caller() -> None:
+    """bug-checklist §21: abandon WITHOUT setting the cancel, and no live worker may remain.
+
+    The RED, before `stop_abandoned_worker()`:
+
+        AssertionError: assert ['yulon-cmangos-output'] == []
+
+    The abandonment this stands for is real: `log_panel._StreamWorker` breaks
+    out of its `for`, dropping the last reference to the generator chain. What
+    made that survivable was `LogPanel.stop()` setting the cancel event BEFORE
+    asking the worker to stop — an ordering in a different file, which nothing
+    here could keep. This test sets no cancel at all, so a return to the
+    ordering-only mitigation fails it.
+
+    The worker waits on the cancel event because that is what
+    `run_container(cancel=…)` does underneath every real `call`; the `HANG_BOUND`
+    wait is only so a broken fix fails instead of hanging the suite.
+    """
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        yield "started"
+        assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
+        yield "unreachable for a consumer that has gone"
+
+    generator = engine(Recorder())._stream(call, cancel=cancel)
+    assert next(generator) == "started"
+    assert WORKER_THREAD in _live_workers(), "the worker should be running at this point"
+
+    generator.close()
+
+    assert _live_workers() == []
+
+
+def test_finishing_the_stream_normally_does_not_set_the_cancel_event() -> None:
+    """The other direction, and the one that would be dangerous to get wrong.
+
+    `stop_abandoned_worker()` sets the caller's own cancel event. On the normal
+    path the worker has already put its sentinel and is one statement from
+    returning, so a `finally` that fired there would mark a stage that
+    SUCCEEDED as stopped — and the `_check_cancel()` right after each call site
+    would raise "was stopped" over a finished extraction. Hence an
+    `except BaseException` clause on the abandonment path rather than a
+    `finally`, and hence this test. (The clause said `except GeneratorExit`
+    when this docstring was written and was widened on 2026-09-04 — see
+    `test_an_interrupt_thrown_into_the_stream_stops_its_worker_too` — which
+    changes nothing here: what matters is that it is on the exception path and
+    not a `finally`, and this test is what says so.)
+    """
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        sink("container said one")
+        yield "progress one"
+
+    assert list(engine(Recorder())._stream(call, cancel=cancel)) == [
+        "container said one",
+        "progress one",
+    ]
+    assert not cancel.is_set()
+
+
+def test_a_worker_that_ignores_the_cancel_is_left_rather_than_waited_for(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The bound is on the ABANDONER. §21 rejects a bare `join()` in as many words.
+
+    A worker that never honours the cancel is exactly the case where an
+    unbounded join would hold the abandoning thread for the hours the run has
+    left. `ABANDONED_WORKER_SECONDS` is monkeypatched down: what is under test
+    is that `close()` returns after roughly the BOUND and not after the
+    worker's own lifetime, and paying the shipped five seconds to say so would
+    put another load-sensitive test into the suite (§33).
+    """
+    monkeypatch.setattr(native, "ABANDONED_WORKER_SECONDS", 0.2)
+    release = threading.Event()
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        yield "started"
+        assert release.wait(HANG_BOUND), "the test never released the deaf worker"
+        yield "released"
+
+    generator = engine(Recorder())._stream(call, cancel=cancel)
+    assert next(generator) == "started"
+    try:
+        with caplog.at_level("WARNING"):
+            started = time.monotonic()
+            generator.close()
+            elapsed = time.monotonic() - started
+        assert elapsed < HANG_BOUND / 3, "close() waited for the worker instead of for the bound"
+        assert WORKER_THREAD in _live_workers(), "this worker is deaf by construction"
+        assert any("did not stop within" in record.message for record in caplog.records)
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == WORKER_THREAD:
+                thread.join(timeout=HANG_BOUND)
+    assert _live_workers() == []
+
+
+def test_an_interrupt_thrown_into_the_stream_stops_its_worker_too() -> None:
+    """A Ctrl+C that lands INSIDE this frame is an abandonment as well (bug-checklist §21).
+
+    `install_wiring.main()` sits in `for line in engine.run(...)`, and the
+    thread it runs on spends its time blocked in `lines.get()` here — so a
+    Ctrl+C is raised at that line, inside the generator frame, as a
+    `KeyboardInterrupt`: a `BaseException`, but not a `GeneratorExit`.
+    Measured on m910q 2026-09-04 against the `except GeneratorExit` hook, with
+    `generator.throw(KeyboardInterrupt())`:
+
+        AssertionError: assert ['yulon-cmangos-output'] == []
+
+    The hook never fired and the worker was left running: the §21 state, one
+    exception type to the side of the test that closed it.
+    """
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        yield "started"
+        assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
+        yield "unreachable for a consumer that has gone"
+
+    generator = engine(Recorder())._stream(call, cancel=cancel)
+    assert next(generator) == "started"
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            generator.throw(KeyboardInterrupt())
+        assert _live_workers() == []
+    finally:
+        cancel.set()
+        for thread in threading.enumerate():
+            if thread.name == WORKER_THREAD:
+                thread.join(timeout=HANG_BOUND)
+
+
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """Every bound here must be spelled `HANG_BOUND`, and nothing else.
+
+    The audit five test files already run on themselves (bug-checklist §33),
+    opted into here on 2026-09-05. The §21 tests above added
+    `cancel.wait(10)`, `release.wait(30)` and `thread.join(timeout=10)` to a
+    file whose only previous bound was a typed `released.wait(5)` — a number at
+    a call site carries no argument for its size, and these waits are the only
+    thing in this file a loaded box can move.
+
+    **What this audit cannot see, stated so the price is known.**
+    `time.monotonic()` is in the set because the deaf-worker test measures
+    elapsed time as its ASSERTION, and that costs this file the strongest thing
+    the audit does elsewhere: a NEW hand-built deadline here would not change
+    the set. The `monkeypatch.setattr(native, "ABANDONED_WORKER_SECONDS", 0.2)`
+    is not read either, and should not be — it is the SUBJECT's bound being
+    shrunk, not one this file waits on. `conftest.spelled_bounds` documents the
+    rest of its reading.
+
+    **Measured both ways on m910q 2026-09-05.** A bare `time.sleep(3)` appended
+    to this file fails this test — `Extra items in the left set: '3'`. The same
+    bound spelled through an alias (`import time as _t` then `_t.sleep(3)`)
+    left it at `1 passed`: `conftest.spelled_bounds` matches the SPELLING
+    `time.sleep`, so an aliased import is invisible to it in every file that
+    runs this audit, not only here.
+    """
+    assert spelled_bounds(__file__) == {"HANG_BOUND", "time.monotonic()"}
 
 
 # -- the Recorder's new doubles ---------------------------------------------
 
 
-def test_the_sql_doubles_take_the_distro_the_sql_plan_always_passes(tmp_path: Path) -> None:
+def test_the_sql_doubles_take_the_distro_the_sql_plan_always_passes(
+    tmp_path: Path,
+) -> None:
     """`sqlplan.apply()` passes `wsl_distro=` UNCONDITIONALLY; a fake without it is a TypeError.
 
     Driven through the real `apply()` rather than called directly, because
@@ -1231,7 +1454,9 @@ def test_the_failing_sql_switch_answers_the_way_the_client_does() -> None:
     assert bad.returncode == 1 and "ERROR 1064" in bad.stderr
 
 
-def test_the_run_container_double_lays_exactly_what_the_real_plan_counts(tmp_path: Path) -> None:
+def test_the_run_container_double_lays_exactly_what_the_real_plan_counts(
+    tmp_path: Path,
+) -> None:
     """The fixture's folder names are the catalog's, not a convenient invention.
 
     A `produce` naming a folder no tool produces is a test that cannot fail:
@@ -1262,7 +1487,9 @@ def test_the_run_container_double_lays_exactly_what_the_real_plan_counts(tmp_pat
     assert extract.file_count(out / "mmaps") == 500
 
 
-def test_the_run_container_double_leaves_nothing_when_the_run_failed(tmp_path: Path) -> None:
+def test_the_run_container_double_leaves_nothing_when_the_run_failed(
+    tmp_path: Path,
+) -> None:
     """A tool that exited non-zero produced nothing; a double that still fills `/out` hides that."""
     rec = Recorder(run_result=docker.AttachedRun(1, ("segfault",)))
     out = tmp_path / "out"
@@ -1286,7 +1513,10 @@ def extract_run(client: Path, out: Path) -> docker.ContainerRun:
     return docker.ContainerRun(
         image="yulon.local/cmangos-tbc-server:t",
         argv=("/opt/mangos/bin/tools/ad",),
-        mounts=(docker.Mount(client, "/client", read_only=True), docker.Mount(out, "/out")),
+        mounts=(
+            docker.Mount(client, "/client", read_only=True),
+            docker.Mount(out, "/out"),
+        ),
         workdir="/out",
     )
 
@@ -1362,7 +1592,9 @@ def test_the_seams_carry_every_new_double_through_to_the_engine() -> None:
 # -- the stages that are bound today ----------------------------------------
 
 
-def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Path) -> None:
+def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(
+    tmp_path: Path,
+) -> None:
     """End to end over the whole tuple; K.7 inserted `import` between them.
 
     Also drives `lay_sql`/`on_clone`, so the SQL fixtures the import spends are
@@ -1435,7 +1667,9 @@ def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(tmp_path: Pa
     assert (server_dir / "src/mangos-tbc/src/modules/Bots/sql/world/0001.sql").is_file()
 
 
-def test_clone_sources_consults_the_record_under_its_own_stage_name(tmp_path: Path) -> None:
+def test_clone_sources_consults_the_record_under_its_own_stage_name(
+    tmp_path: Path,
+) -> None:
     """`stage_clone_sources` needs `recorded_as`; without the family's own name it re-clones.
 
     A resume that fetches and resets the user's checkout on every press is the
@@ -1692,7 +1926,9 @@ def test_db_password_asks_about_the_volume_name_compose_gives_this_install(
     assert asked == [db_volume(server_dir)]
 
 
-def test_db_password_refuses_when_the_file_is_gone_but_the_volume_exists(tmp_path: Path) -> None:
+def test_db_password_refuses_when_the_file_is_gone_but_the_volume_exists(
+    tmp_path: Path,
+) -> None:
     """The volume was initialised with the password the file held; a new one locks us out."""
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
@@ -1889,7 +2125,9 @@ def test_db_password_writes_nothing_for_a_fixed_password(tmp_path: Path) -> None
     assert any("fixed" in line for line in said), said
 
 
-def test_db_password_calls_a_generated_plan_with_no_file_a_catalog_error(tmp_path: Path) -> None:
+def test_db_password_calls_a_generated_plan_with_no_file_a_catalog_error(
+    tmp_path: Path,
+) -> None:
     """Not "this server uses a fixed password" — that sends the user looking in the wrong place.
 
     Two fences already stand in front of this one: `PasswordPlan`'s validator
@@ -1947,7 +2185,9 @@ def plant_templates(root: Path, body: str, ignore: str = "*\n") -> Path:
     return folder
 
 
-def test_write_dockerfile_renders_the_marked_pair_from_the_entry_template(tmp_path: Path) -> None:
+def test_write_dockerfile_renders_the_marked_pair_from_the_entry_template(
+    tmp_path: Path,
+) -> None:
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     said = list(engine(Recorder())._write_dockerfile(context(server_dir)))
@@ -2287,7 +2527,9 @@ def test_extract_second_run_skips_finished_tools_and_redoes_only_the_lost_one(
     assert [run.argv for run in reran] == [CMANGOS.extract.tools[0].argv]
 
 
-def test_extract_refuses_a_tool_that_exits_zero_with_a_shortfall(tmp_path: Path) -> None:
+def test_extract_refuses_a_tool_that_exits_zero_with_a_shortfall(
+    tmp_path: Path,
+) -> None:
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     client = client_folder(tmp_path)
@@ -2358,7 +2600,9 @@ def test_mmaps_refuses_before_any_extraction(tmp_path: Path) -> None:
     assert rec.container_runs == []
 
 
-def test_no_mmaps_container_is_handed_anything_that_names_the_users_client(tmp_path: Path) -> None:
+def test_no_mmaps_container_is_handed_anything_that_names_the_users_client(
+    tmp_path: Path,
+) -> None:
     """`run_mmaps` deletes `data/mmaps`; this is the call site that keeps the client away from it.
 
     Three legs held the guarantee inside `extract.py` before anything called
@@ -2455,7 +2699,10 @@ def test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_
     data = server_dir / "data"
     try:
         data.symlink_to(client, target_is_directory=True)
-    except (OSError, NotImplementedError):  # pragma: no cover - needs privilege on Windows
+    except (
+        OSError,
+        NotImplementedError,
+    ):  # pragma: no cover - needs privilege on Windows
         pytest.skip("cannot create a directory symlink on this machine")
     if data.resolve() == data:  # pragma: no cover - resolution disabled
         pytest.skip("symlinks are not resolved on this filesystem")
@@ -2621,7 +2868,9 @@ def test_conf_copies_dist_files_out_of_the_server_image_once_and_patches_them(
     assert DB_PASSWORD not in (etc / "ahbot.conf").read_text(encoding="utf-8")
 
 
-def test_conf_second_run_never_recopies_and_keeps_the_users_own_edit(tmp_path: Path) -> None:
+def test_conf_second_run_never_recopies_and_keeps_the_users_own_edit(
+    tmp_path: Path,
+) -> None:
     """Copy-once is decided by the files on disk, and the copy double is not idempotent.
 
     A second `copy_from_image` would append to `rec.copied` AND overwrite the
@@ -2868,7 +3117,9 @@ def one_statement_plan(*statements: str) -> SqlPlan:
 
 
 @pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
-def test_schemas_answers_for_every_database_name_the_shipped_plan_spells(game: str) -> None:
+def test_schemas_answers_for_every_database_name_the_shipped_plan_spells(
+    game: str,
+) -> None:
     """Keyed by NAME and not by role (A10): `sqlplan` looks the plan's own spellings up here.
 
     Enumerated off the plan, so the question asked is the one
@@ -2916,7 +3167,9 @@ def test_schemas_carries_the_entrys_databases_and_nothing_the_entry_does_not_own
     assert "acore_world" not in schemas
 
 
-def test_the_import_applies_the_plans_dumps_in_the_plans_own_order(tmp_path: Path) -> None:
+def test_the_import_applies_the_plans_dumps_in_the_plans_own_order(
+    tmp_path: Path,
+) -> None:
     """Phases in data order; within a phase, each pattern's files in natural order."""
     rec = ready_to_import(ABSENT)
     list(engine(rec)._import(context(server_with_sql(tmp_path))))
@@ -3094,7 +3347,9 @@ def test_the_import_leaves_a_finished_one_alone_even_when_an_older_plan_wrote_it
     assert any("leaving them alone" in line for line in said), said
 
 
-def test_the_import_leaves_a_populated_database_that_is_complete_alone(tmp_path: Path) -> None:
+def test_the_import_leaves_a_populated_database_that_is_complete_alone(
+    tmp_path: Path,
+) -> None:
     """`populated` + `complete` is a finished import, and it is not the `imported` branch.
 
     It has to be read off the SAME answer the spine's table returned on: the
@@ -3108,7 +3363,9 @@ def test_the_import_leaves_a_populated_database_that_is_complete_alone(tmp_path:
     assert rec.sql_calls == []
 
 
-def test_the_import_clears_a_half_written_database_before_it_runs(tmp_path: Path) -> None:
+def test_the_import_clears_a_half_written_database_before_it_runs(
+    tmp_path: Path,
+) -> None:
     rec = ready_to_import(PARTIAL, IMPORTED)
     rec.reset_answer = (ENTRY.databases.world,)
     said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
@@ -3117,7 +3374,9 @@ def test_the_import_clears_a_half_written_database_before_it_runs(tmp_path: Path
     assert any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls), "and the import then ran"
 
 
-def test_the_import_refuses_a_database_that_already_holds_somebodys_data(tmp_path: Path) -> None:
+def test_the_import_refuses_a_database_that_already_holds_somebodys_data(
+    tmp_path: Path,
+) -> None:
     rec = ready_to_import(POPULATED_HALF)
     with pytest.raises(InstallerError, match="already hold data"):
         list(engine(rec)._import(context(server_with_sql(tmp_path))))
@@ -3145,7 +3404,9 @@ def test_a_warn_phase_failure_names_the_file_by_its_server_relative_path_and_car
     assert any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls), "the import still finished"
 
 
-def test_a_fail_phase_failure_stops_the_import_and_leaves_no_marker(tmp_path: Path) -> None:
+def test_a_fail_phase_failure_stops_the_import_and_leaves_no_marker(
+    tmp_path: Path,
+) -> None:
     phase = next(p for p in SQL.phases if p.on_error == "fail" and p.files)
     failing = phase.files[0].replace("*", "0001")
     rec = ready_to_import(ABSENT)
@@ -3189,7 +3450,9 @@ def test_a_verify_rule_that_could_not_be_answered_is_a_refusal_and_not_a_marker(
     assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
 
 
-def test_a_phase_statement_reaches_the_client_with_its_tokens_filled_in(tmp_path: Path) -> None:
+def test_a_phase_statement_reaches_the_client_with_its_tokens_filled_in(
+    tmp_path: Path,
+) -> None:
     """Statements are filled through the one `composegen.fill`; dumps never are.
 
     The value asserted is one only the install knows — the entry's database
@@ -3307,7 +3570,9 @@ def test_a_marker_that_could_not_be_written_arrives_as_the_modules_own_sentence(
     assert "InstallerError" not in said, said
 
 
-def test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else(tmp_path: Path) -> None:
+def test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else(
+    tmp_path: Path,
+) -> None:
     """A4: the spine says every stage's note, so the body yields none of its own.
 
     Read off a whole install rather than off `stages()`, because a
@@ -3367,7 +3632,13 @@ def test_the_real_gate_asks_this_installs_container_with_this_installs_password(
     # One question per plan schema, and every one of them to the SAME place: it is a
     # call going somewhere else that this asserts against, not the number of calls.
     assert set(seen) == {
-        (ENTRY.container_spec().db, DB_FACTS.client, DB_PASSWORD, None, "SHOW DATABASES")
+        (
+            ENTRY.container_spec().db,
+            DB_FACTS.client,
+            DB_PASSWORD,
+            None,
+            "SHOW DATABASES",
+        )
     }
     assert state.state == "absent"
     for name in {*SQL.create, SQL.marker_db, *(rule.db for rule in SQL.verify)}:
@@ -3377,7 +3648,9 @@ def test_the_real_gate_asks_this_installs_container_with_this_installs_password(
 # -- the one guard on a Tortoise password ------------------------------------
 
 
-def test_the_compose_scalar_set_is_the_only_guard_on_the_tortoise_password(tmp_path: Path) -> None:
+def test_the_compose_scalar_set_is_the_only_guard_on_the_tortoise_password(
+    tmp_path: Path,
+) -> None:
     """`wow-tortoise`'s `sql.create` is empty, so `create_schemas()`'s value checks never run.
 
     Measured 2026-09-02 against a mutant that dropped the single quote from
@@ -3577,7 +3850,9 @@ def test_a_schema_that_never_reached_its_update_level_refuses_and_writes_no_mark
     )
 
 
-def test_an_update_level_that_could_not_be_asked_is_a_refusal_not_a_pass(tmp_path: Path) -> None:
+def test_an_update_level_that_could_not_be_asked_is_a_refusal_not_a_pass(
+    tmp_path: Path,
+) -> None:
     """Same rule as `verify()`: unanswerable is never satisfied.
 
     This runs immediately before the marker that makes the import skippable
@@ -3592,7 +3867,9 @@ def test_an_update_level_that_could_not_be_asked_is_a_refusal_not_a_pass(tmp_pat
     assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
 
 
-def test_a_phase_without_the_flag_is_never_asked_about_its_update_level(tmp_path: Path) -> None:
+def test_a_phase_without_the_flag_is_never_asked_about_its_update_level(
+    tmp_path: Path,
+) -> None:
     """The check is opt-in per phase, and the opt-out has to be real.
 
     `content updates` is also `on_error: warn` and also a pile of numbered

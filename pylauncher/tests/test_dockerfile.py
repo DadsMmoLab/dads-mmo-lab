@@ -348,6 +348,205 @@ def test_a_spaced_placeholder_is_refused_as_unfilled_and_not_by_the_secret_rule(
     assert SECRET not in said
 
 
+# -- render: a secret the declaration never named -----------------------------
+
+
+def test_render_refuses_a_secret_bearing_token_the_declaration_never_named(
+    tmp_path: Path,
+) -> None:
+    """The bug-checklist §29 probe, run as a test.
+
+    `SECRET_TOKENS` is derived from `native.Secrets`, which is the right coupling and is
+    not this. The mapping handed to `render()` is built BY HAND, and a key in it that
+    corresponds to no `Secrets` field is invisible to a by-name refusal — the caller did
+    not have to use the dataclass at all.
+
+    Measured against the real module on m910q, 2026-09-04, before this rule existed, and
+    the lines are §29's own probe reproduced:
+
+        Secrets fields          : ['db_password']
+        SECRET_TOKENS           : ['DB_PASSWORD']
+        render() with an undeclared secret key -> type _Rendered | secret in text: True
+        write() accepted it: ['Dockerfile', '.dockerignore']
+        Dockerfile on disk contains the secret: True
+        the line it wrote: ['ENV SOAP_PASSWORD=tbc-0123456789abcdef']
+
+    `write()` had nothing to say because the text really was `render()`'s own output: the
+    provenance rule inherits `render()`'s refusal whole, so a hole in `render()` is a hole
+    in `write()` too. One rule violated by this fixture: the mapping carries a
+    secret-bearing name that is not a `Secrets` field.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV SOAP_PASSWORD={{SOAP_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(dockerfile.DockerfileError, match="SOAP_PASSWORD") as caught:
+        dockerfile.render(folder, {**TOKENS, "SOAP_PASSWORD": SECRET})
+    said = str(caught.value)
+    assert "reads as a secret" in said, "the NAME rule fired, not the template rule"
+    assert "native.Secrets" in said, "and it says where a real secret is declared"
+    assert SECRET not in said, "a refusal about a secret does not print it"
+
+
+def test_render_refuses_the_undeclared_secret_name_even_when_no_template_spells_it(
+    tmp_path: Path,
+) -> None:
+    """The rule reads the MAPPING, not the rendered text, and that is the whole point.
+
+    §29's opening sentence about the case it replaced is *"nothing exploited it; the
+    exposure was one template edit away"*. A guard that only fired once a template spelled
+    the token would be a guard against today's templates — the same LOCATION-shaped
+    protection that was defeated twice already (a template planted in `shared/cmangos/`,
+    then `--installers-root` pointing the engine at a tree no glob walks). A build-context
+    mapping carrying an undeclared secret is the defect; what the templates happen to
+    spend today is not part of it.
+
+    One rule violated: the same undeclared name. The templates here are the stand-in pair,
+    which spells `CORE_DIR` and `MAKE_JOBS` and nothing else, so `fill()` would have been
+    perfectly happy and the render would have succeeded.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match="SOAP_PASSWORD") as caught:
+        dockerfile.render(templates(tmp_path), {**TOKENS, "SOAP_PASSWORD": SECRET})
+    assert "reads as a secret" in str(caught.value)
+
+
+@pytest.mark.parametrize("word", sorted(dockerfile.SECRET_NAME_WORDS))
+def test_every_word_that_announces_a_secret_is_refused_as_a_token_name(
+    word: str, tmp_path: Path
+) -> None:
+    """One case per word in the vocabulary, generated from the vocabulary itself.
+
+    This proves that every word the set holds is really reachable through `render()`; it
+    proves nothing about a word the set has LOST. A word deleted from `SECRET_NAME_WORDS`
+    takes its own case away with it, and the run narrows SILENTLY: measured 2026-09-04 on
+    m910q, the set cut from six words to three gave `58 passed` against `61 passed` and
+    zero failures. (This docstring said the opposite in the commit that added it — "this
+    goes red rather than silently narrowing" — and that sentence was measured false.) The
+    empty set is the same shape one step further: pytest SKIPS a test whose parameter
+    list is empty, measured on the sibling
+    `test_every_token_the_secret_declaration_produces_is_refused_in_a_template` on
+    2026-09-01. Both are held by the literal list in
+    `test_the_secret_name_vocabulary_spells_every_word_and_the_measured_leaks` below,
+    outside the parametrize, which is the only test that knows a word by name.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match=f"CUSTOM_{word}"):
+        dockerfile.render(templates(tmp_path), {**TOKENS, f"CUSTOM_{word}": SECRET})
+
+
+VOCABULARY = frozenset(
+    {"PASSWORD", "PASSWD", "SECRET", "CREDENTIAL", "APIKEY", "PRIVATEKEY", "PRIVKEY"}
+)
+"""Every word of `SECRET_NAME_WORDS`, restated as literals so a deletion has a witness.
+
+A superset check, not equality: a word ADDED to the set arrives in the parametrized
+per-word test on its own and needs nothing here, while a word DELETED is exactly what that
+test cannot see."""
+
+
+def test_the_secret_name_vocabulary_spells_every_word_and_the_measured_leaks() -> None:
+    """Each word by name, and the three leaks that have actually been measured.
+
+    All three filed the secret under a `*PASSWORD` name — `SOAP_PASSWORD` (§29's probe,
+    2026-09-02) and `ROOT_PASSWORD` twice (M15 on 2026-09-01, M-R2 on 2026-09-02, both
+    recorded in `CmangosInstaller._public_tokens`'s docstring). That is what the
+    vocabulary is fitted to.
+
+    The literal list is the whole reason this test exists beside the parametrized one:
+    that one is generated FROM the set, so it shrank with the set — six words to three,
+    `58 passed` against `61`, zero failures, measured 2026-09-04 on m910q while this test
+    still named only `PASSWORD`. Deleting `CREDENTIAL` from the set with this list in
+    place was the RED that proved the list: `AssertionError: frozenset({'CREDENTIAL'})`,
+    `1 failed, 67 passed`, same box, same day.
+    """
+    missing = VOCABULARY - dockerfile.SECRET_NAME_WORDS
+    assert not missing, missing
+    for leaked in ("SOAP_PASSWORD", "ROOT_PASSWORD", "DB_ROOT_PASSWORD"):
+        assert dockerfile.announces_a_secret(leaked), leaked
+
+
+@pytest.mark.parametrize("key", ["soap_password", "Root_Password", "api_key", "privkey"])
+def test_the_case_of_a_key_is_not_a_way_past_the_name_rule(key: str, tmp_path: Path) -> None:
+    """`soap_password` is `SOAP_PASSWORD`; the rule folds case before it looks.
+
+    Every other case in this file hands the rule a key already in upper case, so the
+    `.upper()` in `announces_a_secret()` was a surviving mutant: dropped, the file stayed
+    `61 passed` on m910q, 2026-09-04. These four are the keys that fail without it, and
+    the refusal names the key as the caller spelled it.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match=key):
+        dockerfile.render(templates(tmp_path), {**TOKENS, key: SECRET})
+
+
+@pytest.mark.parametrize("key", ["PRIVKEY", "PRIV_KEY", "SSH_PRIVKEY"])
+def test_privkey_is_the_keystroke_the_underscore_rule_argued_about(
+    key: str, tmp_path: Path
+) -> None:
+    """`PRIVKEY` is `PRIVATEKEY` with three letters dropped, which nobody reads as a decision.
+
+    The underscore rule's own principle — a difference of one keystroke is not a security
+    decision — reached `PRIVATE_KEY` and stopped at the vocabulary: probed against the
+    real module on m910q, 2026-09-04, with `PRIVATEKEY` the only spelling in the set,
+    `PRIVKEY -> ACCEPTED, secret in text: True` and `PRIV_KEY` the same. `PRIVKEY` is a
+    word of its own in `SECRET_NAME_WORDS` for that reason; `PRIVATEKEY` does not contain
+    it, so squashing could never have reached it.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match=key):
+        dockerfile.render(templates(tmp_path), {**TOKENS, key: SECRET})
+
+
+@pytest.mark.parametrize("key", ["API_KEY", "APIKEY", "PRIVATE_KEY", "PRIVATEKEY"])
+def test_the_underscore_is_not_a_way_past_the_name_rule(key: str, tmp_path: Path) -> None:
+    """`API_KEY` and `APIKEY` are one name, so the rule squashes `_` before it looks.
+
+    Written as a plain substring test over the key as spelled, `APIKEY` would be caught and
+    `API_KEY` would not — and the difference between them is a keystroke nobody would read
+    as a security decision.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match=key):
+        dockerfile.render(templates(tmp_path), {**TOKENS, key: SECRET})
+
+
+def test_a_declared_secret_is_reported_by_the_template_rule_and_not_by_the_name_rule(
+    tmp_path: Path,
+) -> None:
+    """`DB_PASSWORD` announces a secret AND is declared, and only one refusal may fire.
+
+    The name rule exists for the names `SECRET_TOKENS` cannot cover; for a declared field
+    the older machinery is strictly better — the key is DROPPED from the mapping `fill()`
+    sees, and a template spelling it is refused by its own path. Reporting a declared
+    secret as "not a field of native.Secrets" would send the next reader to add a field
+    that is already there.
+
+    One rule violated: the template spells a refused token. The key is declared, so the
+    name rule has nothing to say about it.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV DB_PASSWORD={{DB_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(dockerfile.DockerfileError) as caught:
+        dockerfile.render(folder, {**TOKENS, "DB_PASSWORD": SECRET})
+    said = str(caught.value)
+    assert "Dockerfile.tmpl" in said and "docker history" in said, "the template rule"
+    assert "reads as a secret" not in said, "and not the name rule as well"
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_no_catalog_token_a_shipped_entry_produces_reads_as_a_secret(entry: CatalogEntry) -> None:
+    """The rule must not refuse the mapping production actually renders from.
+
+    `composegen.entry_tokens()` is the catalog-derived half of
+    `CmangosInstaller._public_tokens()`; the per-install half it is merged with
+    (`PROJECT_NAME`, `IMAGE_PREFIX`, `IMAGE_TAG`, the three ports, `REALM_HOST`) is string
+    literals in `families/cmangos.py`, another module's file, and is exercised through the
+    `write-dockerfile` stage in `test_families_cmangos.py` rather than restated here.
+    """
+    offenders = sorted(
+        key for key in composegen.entry_tokens(entry) if dockerfile.announces_a_secret(key)
+    )
+    assert offenders == [], f"{entry.id} would be refused by the name rule"
+
+
 def test_render_names_a_missing_template(tmp_path: Path) -> None:
     with pytest.raises(dockerfile.DockerfileError, match="Dockerfile.tmpl"):
         dockerfile.render(tmp_path, TOKENS)

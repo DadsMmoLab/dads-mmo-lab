@@ -302,7 +302,8 @@ def render(
         ComposeGenError: the entry has no `install.native` block, a template is
             missing, a placeholder was left unfilled, a value cannot be safely
             spliced into YAML, the entry generates its password and none was
-            given, or a template names `{{DB_PASSWORD}}` in generated mode.
+            given, a template names `{{DB_PASSWORD}}` in generated mode, or the
+            entry declares `containers.services` (see `_container_prefix()`).
     """
     native = _native_of(entry)
     templates = templates_root / native.templates
@@ -498,29 +499,90 @@ def _container_prefix(entry: CatalogEntry) -> str:
     `abcx-mangosd` answer `"abc"`, with the separator eaten. Every one of those
     is a filled-but-wrong token, and `fill()` has no opinion about those — it
     refuses an UNFILLED placeholder — so the first thing to report it would be
-    `docker compose up` naming a container no service owns. In a module whose
-    whole design is that a bad value is loud, the answer is checked here:
+    `docker compose up` naming a container no service owns. Two rules follow,
+    and both are about what the catalog is ALLOWED to say, not about what the
+    prefix happens to come out as:
 
     * an empty prefix is refused outright. It cannot be right for any entry.
-    * an entry that declares `containers.services` must have the prefix rebuild
-      all three container names from those service names exactly. That is
-      literally the `{{CONTAINER_PREFIX}}<service>` the templates write, checked
-      against the catalog instead of assumed.
+    * `containers.services` is refused outright, whatever its value. This module
+      writes the compose file, and the service keys in it are the templates' own
+      — read 2026-09-04: `shared/cmangos/base.yml.tmpl` writes
+      `{{CONTAINER_PREFIX}}db`/`realmd`/`mangosd`, `wow-wotlk/native/base.yml.tmpl`
+      writes the literal `ac-database`/`ac-authserver`/`ac-worldserver` — so a
+      declaration on the entry can only restate them or contradict them.
 
-    No shipped entry declares `services` since 2026-09-01, so only the empty
-    check applies to any of them: every entry names each container after its own
-    service (AzerothCore's `ac-database` IS both; the shared CMaNGOS templates
-    write `{{CONTAINER_PREFIX}}db` as the SERVICE key too, which renders
-    `tbc-db`). Read the second rule as a constraint on a future entry rather than
-    as a description of the catalog — and note what it demands: an entry it
-    accepts has `container == prefix + service`, so its `compose_services()` are
-    the bare suffixes, which is exactly the shape `docker compose up` rejects.
-    That is how the three CMaNGOS entries passed this check for a week while
-    selecting three services their own compose file did not define.
+    What the refusal is allowed to say, measured 2026-09-04 on m910q (§30,
+    round 2): the first rewrite of this rule refused the declaration and then
+    named the entry's three container names as "the names compose must be
+    given". With containers `db`/`dbauth`/`dbworld` the shared/cmangos
+    templates rendered the keys `dbdb`/`dbrealmd`/`dbmangosd`, so every name in
+    that advice answered `no such service` — the headline complaint of §30,
+    reproduced by its fix. The suffix a template writes is not known here, so
+    the refusal names no service at all; it says what to delete and where the
+    names come from, and
+    `test_the_refusal_names_no_service_the_rendered_file_does_not_define`
+    renders the shape and holds the text to that.
+
+    Until 2026-09-04 the second rule was the opposite: an entry declaring
+    `containers.services` was accepted when the prefix rebuilt the container
+    names from them, `container == prefix + service`. Probed on the shipped
+    `wow-tbc` entry (bug-checklist §30) it answered backwards —
+
+        ("tbc-db","tbc-realmd","tbc-mangosd")  -> REFUSED: 'tbc-' in front of
+            those rebuilds tbc-tbc-db, tbc-tbc-realmd, tbc-tbc-mangosd
+        ("db","realmd","mangosd")              -> ACCEPTED, prefix 'tbc-',
+            and compose_services() then answered those three bare suffixes
+
+    — so the one declaration shape it accepted was the one `docker compose up`
+    answers `no such service` for, which is precisely the defect §26 fixed and
+    the reason three CMaNGOS entries would have died at the first `up`. A rule
+    satisfiable only by the bug it was written to refuse, whose refusal text
+    ("Name every container after its service with one shared prefix in front of
+    it") read as instructions for reproducing it, handed to whoever adds the
+    fifth game.
+
+    Correcting the rule to `service == container` was the other option and was
+    rejected: it would accept a declaration that only ever restates what
+    `ContainerSpec.compose_services()` already answers when the field is absent,
+    and it leaves the next person a second place to write the two names apart.
+    Refusing the declaration removes the opportunity instead of documenting it.
+    `docker.ContainerSpec.services` itself stays — an ADOPTED project really can
+    name its services and containers differently, which the integration suite's
+    throwaway stack exercises on purpose — what has no correct value is the
+    field on an entry whose compose file this module writes.
+
+    The other two commonprefix shapes are not refused here, and cannot be:
+    telling `dbdb` from `tbc-db` needs the literal suffix the template writes
+    (`db`, `realmd`, `mangosd`), which lives in the template and not in the
+    entry. Rendering first and then checking that every container name is a
+    service key of the filled text was considered and rejected — the app has no
+    YAML parser among its dependencies, the templates are data (style-guide §3),
+    and a generation-time check that reads them would refuse every one-token
+    template these tests render. Measured 2026-09-04 against the shipped
+    `shared/cmangos` templates instead: containers `db`/`dbauth`/`dbworld` render
+    the service keys `dbdb`/`dbrealmd`/`dbmangosd`, and `abc-db`/`abcd-realmd`/
+    `abcx-mangosd` render `abcdb`/`abcrealmd`/`abcmangosd` — in neither case a
+    name the entry would select, which is exactly the disagreement
     `test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file`
-    is what now compares the selected names against the rendered ones.
+    compares for every shipped entry, and
+    `test_a_commonprefix_the_template_does_not_share_is_caught_by_the_rendered_file`
+    pins on those two shapes. The price of catching it there rather than here,
+    stated rather than glossed: a shipped entry fails the suite (that cross-check
+    ran on all four shipped entries 2026-09-04), an entry added without running
+    the suite fails at `compose up` after the build (the §26 Discord report of
+    2026-08-26 is what that looks like).
     """
+    services = entry.containers.services
     names = (entry.containers.db, entry.containers.auth, entry.containers.world)
+    if services is not None:
+        raise ComposeGenError(
+            f"{entry.id} declares containers.services ({', '.join(services)}), but this engine "
+            "generates the compose file and the service names in it come from the templates, "
+            "not from the entry: no value of the field is both correct and needed. Delete "
+            f"containers.services from {entry.id}. Whether its container names are then the "
+            "services the rendered file defines is checked by rendering it, not here: "
+            "test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file."
+        )
     prefix = os.path.commonprefix(list(names))
     if not prefix:
         raise ComposeGenError(
@@ -529,17 +591,6 @@ def _container_prefix(entry: CatalogEntry) -> str:
             "would name containers that no service owns. Give the three containers one shared "
             "prefix, as in <game>-db, <game>-realmd and <game>-mangosd."
         )
-    services = entry.containers.services
-    if services is not None:
-        rebuilt = tuple(prefix + service for service in services)
-        if rebuilt != names:
-            raise ComposeGenError(
-                f"the container prefix {prefix!r} of {entry.id} rebuilds "
-                f"{', '.join(rebuilt)} from its service names {', '.join(services)}, but its "
-                f"containers are {', '.join(names)}. A template that writes the prefix in front "
-                "of a service name would name a container that does not exist. Name every "
-                "container after its service with one shared prefix in front of it."
-            )
     return prefix
 
 
@@ -562,7 +613,10 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     (K.7) the SQL and verify.
 
     Raises:
-        ComposeGenError: the entry has no `install.native` block.
+        ComposeGenError: the entry has no `install.native` block, its three
+            container names share no prefix, or it declares
+            `containers.services` — the last two through `_container_prefix()`,
+            which is reached from here and from nowhere else in the app.
     """
     native = _native_of(entry)
     tokens = {

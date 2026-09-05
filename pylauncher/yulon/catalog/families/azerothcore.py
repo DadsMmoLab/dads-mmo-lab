@@ -198,7 +198,10 @@ class AzerothCoreInstaller(StagedInstaller):
             return
         yield f"Fetching server data ({service}). The download resumes if it is interrupted."
         run = yield from self._pump(
-            lambda sink: self._seams.one_shot(service, ctx.server_dir, sink=sink, cancel=ctx.cancel)
+            lambda sink: self._seams.one_shot(
+                service, ctx.server_dir, sink=sink, cancel=ctx.cancel
+            ),
+            cancel=ctx.cancel,
         )
         self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
         yield "Server data is in place."

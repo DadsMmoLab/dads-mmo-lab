@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 import traceback
 from collections.abc import Iterator
 from pathlib import Path
@@ -234,6 +235,203 @@ def test_main_hands_the_engine_a_prompter_so_a_sudo_box_is_not_a_hang(
     monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _Engine())
     assert install_wiring.main(["wow-wotlk", "--server-dir", str(tmp_path)]) == 0
     assert asks[-1] is install_wiring._terminal_prompter
+
+
+def test_main_hands_the_engine_a_cancel_event_of_its_own(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`run(cancel=…)` is not optional either: it is the only seam that stops a worker.
+
+    bug-checklist §21's closing test abandons the bridge WITHOUT setting the
+    cancel event and demands that no worker survive. `stop_abandoned_worker()`
+    honours that by setting the event it was handed — and a bridge handed
+    `None` has nothing to set, logs "left running", and returns. Until
+    2026-09-04 this harness passed no event at all (`main()` had zero
+    occurrences of `cancel`), so the one install path every gate box runs was
+    exactly the case §21's test could not pass. The Catalog tab creates an
+    `Event` per install (`catalog_view.py`); this is the harness doing the same.
+    """
+    cancels: list[object] = []
+
+    class _Engine:
+        def preflight(
+            self, options: InstallOptions, cancel: object = None, *, ask: object = None
+        ) -> None:
+            return None
+
+        def run(
+            self,
+            options: InstallOptions | None = None,
+            *,
+            cancel: object = None,
+            ask: object = None,
+        ) -> Iterator[str]:
+            cancels.append(cancel)
+            yield "done"
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _Engine())
+    assert install_wiring.main(["wow-wotlk", "--server-dir", str(tmp_path)]) == 0
+    assert isinstance(cancels[-1], threading.Event), cancels[-1]
+
+
+def test_main_turns_a_ctrl_c_in_the_bridge_into_a_sentence_and_exit_130(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Ctrl+C is raised INSIDE the engine's generator, and the harness owes a sentence for it.
+
+    The harness's thread spends an install blocked in the bridge's
+    `lines.get()`, so that is where the `KeyboardInterrupt` lands: inside
+    `engine.run()`'s frame, from where it propagates out of `for line in
+    engine.run(...)`. The engine's own hook has stopped the worker by then
+    (`test_spine.py`, `test_families_cmangos.py`); what is left is what the
+    person at the terminal sees. Written with `pytest.fail` rather than
+    letting the interrupt escape, because an escaping `KeyboardInterrupt`
+    does not fail one test — it stops the whole session.
+
+    The event is asserted SET on the way out, and this fake engine is the case
+    where `main()` is the ONLY thing that could have set it: its `run()` is a
+    plain generator with no hook of its own, so the assertion below is about
+    `main()`'s own `cancel.set()` and nothing else. That is the whole reason
+    the fake is shaped this way — with a real engine the same assertion would
+    pass for two reasons and distinguish neither.
+
+    The docstring here used to justify that line by saying an interrupt landing
+    in `main()`'s own `write` "reaches no hook". Measured false on m910q
+    2026-09-05, through the real `main()`:
+    `test_a_ctrl_c_in_the_harness_own_write_still_reaches_the_engines_hook`
+    below records what actually happens.
+    """
+    cancels: list[object] = []
+
+    class _Engine:
+        def preflight(
+            self, options: InstallOptions, cancel: object = None, *, ask: object = None
+        ) -> None:
+            return None
+
+        def run(
+            self,
+            options: InstallOptions | None = None,
+            *,
+            cancel: object = None,
+            ask: object = None,
+        ) -> Iterator[str]:
+            cancels.append(cancel)
+            yield "cloning"
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _Engine())
+    try:
+        code = install_wiring.main(["wow-wotlk", "--server-dir", str(tmp_path)])
+    except KeyboardInterrupt:
+        pytest.fail("KeyboardInterrupt escaped main(): a traceback where a sentence was owed")
+    assert code == 130
+    out = capsys.readouterr()
+    assert out.out.splitlines() == ["cloning"]
+    assert "install stopped" in out.err
+    assert isinstance(cancels[-1], threading.Event) and cancels[-1].is_set()
+
+
+class _InterruptingStdout:
+    """A stdout whose `write` raises Ctrl+C: the OTHER place an interrupt can land."""
+
+    def __init__(self) -> None:
+        self.wrote: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.wrote.append(text)
+        raise KeyboardInterrupt
+
+    def flush(self) -> None:
+        return None
+
+
+class _SnapshottingStderr:
+    """A stderr that records what `watch` held at the moment `main()` wrote to it.
+
+    `main()`'s only write to stderr on this path is inside the
+    `except KeyboardInterrupt` handler, so this is a probe of HANDLER TIME. It
+    has to be: a generator closed a moment later — when `main()`'s frame is
+    destroyed on return — leaves the same list behind, so a check made after
+    the call cannot tell the two apart.
+    """
+
+    def __init__(self, watch: list[str]) -> None:
+        self._watch = watch
+        self.at_handler_time: list[list[str]] = []
+        self.wrote: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.at_handler_time.append(list(self._watch))
+        self.wrote.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+
+def test_a_ctrl_c_in_the_harness_own_write_still_reaches_the_engines_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An interrupt in `main()`'s own `write` closes the engine's generator too.
+
+    `install_wiring.py`'s handler used to be justified by a comment saying this
+    case "reaches no hook", so `main()` had to set the cancel event itself.
+    **Measured false on m910q (CPython 3.11.15) 2026-09-05, through the real
+    `main()`: the hook fires, as a `GeneratorExit`, and it fires BEFORE the
+    handler body runs.** The reason is refcounting — the `for` loop's iterator
+    is the only reference to `engine.run(...)`, unwinding to the handler pops
+    it, and CPython closes the generator on the spot.
+
+    That is worth a test rather than a corrected sentence, because it is a
+    property of how `main()` is WRITTEN and one edit away from being false. The
+    mutation that says so, measured the same day: binding the generator to a
+    name first (`gen = engine.run(...)` and `for line in gen:`) keeps it alive
+    until `main()` returns and leaves this test at
+
+        AssertionError: assert [[]] == [['GeneratorExit']]
+
+    — the hook had not run when the handler did, though it had by the time the
+    call returned, which is why the observation is taken through stderr rather
+    than afterwards. `main()` still calls `cancel.set()`; this test does not
+    stop that being deleted, it stops the CLAIM beside it being wrong again.
+    """
+    hooked: list[str] = []
+
+    class _Engine:
+        def preflight(
+            self, options: InstallOptions, cancel: object = None, *, ask: object = None
+        ) -> None:
+            return None
+
+        def run(
+            self,
+            options: InstallOptions | None = None,
+            *,
+            cancel: object = None,
+            ask: object = None,
+        ) -> Iterator[str]:
+            # Where `_pump()` calls `stop_abandoned_worker()`; recording the
+            # exception type is the same observable one layer up.
+            try:
+                yield "cloning"
+            except BaseException as exc:
+                hooked.append(type(exc).__name__)
+                raise
+
+    stdout = _InterruptingStdout()
+    stderr = _SnapshottingStderr(hooked)
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _Engine())
+    monkeypatch.setattr(install_wiring.sys, "stdout", stdout)
+    monkeypatch.setattr(install_wiring.sys, "stderr", stderr)
+    try:
+        code = install_wiring.main(["wow-wotlk", "--server-dir", str(tmp_path)])
+    except KeyboardInterrupt:
+        pytest.fail("KeyboardInterrupt escaped main(): a traceback where a sentence was owed")
+    assert code == 130
+    assert stdout.wrote == ["cloning\n"], stdout.wrote
+    assert stderr.wrote == ["install stopped\n"], stderr.wrote
+    assert stderr.at_handler_time == [["GeneratorExit"]], stderr.at_handler_time
 
 
 class _Stdin:
