@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import queue
 import re
@@ -601,48 +602,127 @@ grants a server that is still printing another window every time it prints, so
 without an outer bound an install could wait for ever with no way to cancel it
 (`wait_ready()` takes no cancel) — this is where that stops.
 
-Six hours is about eight times the slowest first boot this project has
-measured: WoW TBC on yulon-win11-gate 2026-09-04 took 46.0 minutes from
-`mangosd` start to its first `Avg Diff:`, with the server directory on Docker
-Desktop's 9p share reading at about 1.4 MB/s. It is a wall-clock number and
-therefore exactly the kind this design is here to get rid of, which is why it
-sits eight times clear of the evidence rather than beside it: a server still
-emitting fresh boot output six hours in has a problem no timeout should hide.
+Six hours is 5.8 times the slowest first boot this project has measured —
+Tortoise's 3702 s ready stage on yulon-win11-gate 2026-09-05, with the server
+directory on Docker Desktop's 9p share reading at about 1.4 MB/s. (This line
+read "about eight times" and cited TBC's 46.0 minutes until 2026-09-05, when
+the Tortoise run measured a slower boot and nothing recomputed the multiple;
+21600 / 2763 is 7.8 and 21600 / 3702 is 5.8. The evidence moved, the sentence
+did not.) It is a wall-clock number and therefore exactly the kind this design
+is here to get rid of, which is why it sits several times clear of the evidence
+rather than beside it: a server still emitting fresh boot output six hours in
+has a problem no timeout should hide.
 
 This is the INSTALL ceiling. A management wait gets its own — see
 `MANAGEMENT_CEILING_WINDOWS`.
 """
 
-SLOWEST_MEASURED_FIRST_BOOT_SECONDS = 3702
-"""The longest ready stage this project has measured, in seconds. A healthy one.
+MEASURED_9P_FIRST_BOOTS_SECONDS = (1479, 2763, 3702)
+"""Every first boot this project has timed on Docker Desktop's 9p share, in seconds.
 
-Three first boots have been timed on Docker Desktop's 9p share, and every one of
-them printed the whole way and ended `RestartCount=0` — they are slow servers,
-not broken ones:
+All three are HEALTHY: each printed the whole way and ended `RestartCount=0`.
+They are slow servers, not broken ones, and they are the entire evidence base
+under both numbers below.
 
-    Vanilla   1476 s  (24.6 min)  yulon-win11-gate 2026-09-04, `docker logs -t`,
-                                  06:12:43Z `mangosd` start -> 06:37:22Z `Avg Diff:`
-    TBC       2760 s  (46.0 min)  yulon-win11-gate 2026-09-04, `docker logs -t`,
-                                  18:59:55Z -> 19:45:58Z
-    Tortoise  3702 s  (61.7 min)  yulon-win11-gate 2026-09-05, ready-stage wall,
-                                  `pyplan/gates/7.7-win11-tortoise/README.md`,
-                                  23:41:37 `up` -> 00:43:19 `finished` box-local
-                                  (the banner's own "59 minutes 18 seconds" is
-                                  3558 s of that; the stage wall is what a wait
-                                  sits through, so the stage wall is the number)
+    Vanilla   1479 s  yulon-win11-gate 2026-09-04, `docker logs -t`,
+                      06:12:43Z `mangosd` start -> 06:37:22Z first `Avg Diff:`
+    TBC       2763 s  yulon-win11-gate 2026-09-04, `docker logs -t`,
+                      18:59:55Z -> 19:45:58Z
+    Tortoise  3702 s  yulon-win11-gate 2026-09-05, ready-stage wall,
+                      `pyplan/gates/7.7-win11-tortoise/README.md`,
+                      23:41:37 `up` -> 00:43:19 `finished` box-local (the
+                      banner's own "59 minutes 18 seconds" is 3558 s of that;
+                      the stage wall is what a wait sits through, so the stage
+                      wall is the number)
+
+Each figure is the difference between the two stamps beside it and nothing
+else. Until 2026-09-05 this docstring printed 1476 and 2760 for the first two,
+which are 24.6 * 60 and 46.0 * 60 — the write-up's ROUNDED MINUTES multiplied
+back out, three seconds adrift of the stamps on the same line. The seconds are
+no longer typed anywhere they can drift:
+`test_the_boots_this_file_bounds_waits_with_are_the_difference_between_their_own_stamps`
+computes all three, from the stamps for the first two and from the gate's
+README for the third.
+
+The Tortoise number is a STAGE wall and the other two are container-to-banner,
+so they are not the same measurement. Mixing them anyway is the conservative
+direction and the only one available: a ready wait pays the stage's clock, and
+nobody has timed a CMaNGOS stage wall on 9p.
+"""
+
+SLOWEST_MEASURED_FIRST_BOOT_SECONDS = max(MEASURED_9P_FIRST_BOOTS_SECONDS)
+"""The longest of those, 3702 s. The measurement, not the bound.
 
 A management wait that stops before this has stopped on a server that was about
-to succeed, which is the 2026-09-04 verdict this whole lane exists to remove. So
-it is the FLOOR under `management_ceiling()` and not a comment beside it: until
-2026-09-05 the two callers that use `docker.azerothcore_ready()`'s 480 s default
-— `controller.Controller.wait_ready()` and
+to succeed, which is the 2026-09-04 verdict this whole lane exists to remove:
+until 2026-09-05 the two callers that use `docker.azerothcore_ready()`'s 480 s
+default — `controller.Controller.wait_ready()` and
 `controller_wow_wotlk.docker_ctl.wait_server_ready()` — were bounded at four
 windows, 1920 s, which is shorter than all three of the boots above.
 
-The Tortoise number is a STAGE wall and the other two are container-to-banner,
-so they are not the same measurement. Taking the largest of the three anyway is
-the conservative direction and the only one available: a ready wait pays the
-stage's clock, and nobody has timed a CMaNGOS stage wall on 9p.
+What bounds a wait is `MANAGEMENT_FLOOR_SECONDS`, which stands clear of this
+rather than on it. The two are separate names on purpose: this one may only
+change when somebody measures a boot, and the review that split them measured
+the reason — with the floor sitting exactly here, a 3702 s boot was accepted at
+the 480 s callers and a 3703 s one was refused, at elapsed 3702 s (m910q
+2026-09-05, driven through `wait_ready_quietly()`).
+"""
+
+MANAGEMENT_FLOOR_MARGIN = max(
+    slower / faster
+    for faster, slower in zip(
+        sorted(MEASURED_9P_FIRST_BOOTS_SECONDS),
+        sorted(MEASURED_9P_FIRST_BOOTS_SECONDS)[1:],
+        strict=False,
+    )
+)
+"""How much slower than the slowest boot measured a healthy one is still allowed to be.
+
+1.868 today: 2763 / 1479, the widest gap between two adjacent boots in
+`MEASURED_9P_FIRST_BOOTS_SECONDS`. **OWNER DECISION, made 2026-09-05 and open**
+— `pyplan/checklist.md`, under 7.7 — because it is a policy argued from
+evidence rather than a measurement, and the owner may want it wider, narrower,
+or replaced by a fourth run.
+
+THE ARGUMENT. Round 4 put the floor exactly on the slowest sample, and a review
+answered it in one line: 3703 s is refused. A bound with zero margin over a
+single sample of a noisy quantity is a bound that will refuse the first healthy
+boot slightly slower than the one boot anybody happened to time. The three
+measurements are the only thing available to size the margin with, and what
+they show is the spread ACROSS the servers this project ships on one box and one
+share: 1479 -> 2763 -> 3702, a factor of 2.50 end to end and 1.87 between the
+widest-separated neighbours. So the margin is the widest gap the evidence
+actually exhibits, applied once above the slowest thing in it — i.e. the next
+server, or the next box, is assumed to sit no further above Tortoise than TBC
+sits above Vanilla.
+
+WHAT IT DOES NOT MEASURE, said plainly: nothing here is run-to-run variance.
+These are three DIFFERENT servers, timed once each; nobody has booted the same
+server twice on 9p, so the project has no number for how much one server varies
+between runs, and this margin is a stand-in for a quantity that has never been
+measured. That is the weakness the owner is being asked to rule on, and the way
+to close it is a second run of one of these three rather than an argument.
+
+WHY NOT THE INSTALL CEILING'S RULE. `READY_CEILING_SECONDS` sits 5.8 times
+clear of the same slowest boot, and copying that here would bound the 480 s
+AzerothCore callers at six hours — the exact collapse of the two ceilings that
+`MANAGEMENT_CEILING_WINDOWS` exists to undo. The two bounds answer different
+failures: the install ceiling stops a server that talks for ever, and this
+floor stops a management wait refusing one that was going to finish.
+"""
+
+MANAGEMENT_FLOOR_SECONDS = math.ceil(SLOWEST_MEASURED_FIRST_BOOT_SECONDS * MANAGEMENT_FLOOR_MARGIN)
+"""The shortest wall clock any management wait may be bounded by. 6916 s (1.9 h).
+
+`ceil(3702 * 1.868…)`. Derived rather than typed, so the two things a reader
+would otherwise have to trust — the measurement and the margin — are each owned
+somewhere: the boots by the stamps and the gate README they are read from, the
+margin by the docstring above and the checklist bullet it points at.
+
+6916 is not a multiple of any budget in use (480, 1800, 10800), which is why
+the last window of a management wait is a short one — see
+`test_a_management_wait_is_bounded_by_the_ceiling_and_shortens_its_last_window`.
+That is a consequence, not a reason.
 """
 
 MANAGEMENT_CEILING_WINDOWS = 2
@@ -661,10 +741,20 @@ not a budget, and that single-shot reading is the bug this lane exists for. It
 is not the number that decides any shipped ceiling today, and that is asserted
 rather than hoped — `test_the_management_ceiling_is_the_floor_or_the_cap_for_every_budget_shipped`
 walks `catalog.json` and fails the day an entry lands in the band
-(1851 s < `timeout_s` < 10800 s) where `timeout * WINDOWS` is what answers. At
-that point somebody has to own the multiple with a measurement; today nothing
-can tell 2 from 5, and a docstring claiming otherwise would be the fourth
-confident reason with nothing behind it that this file has carried.
+(3458 s < `timeout_s` < 10800 s) where `timeout * WINDOWS` is what answers. At
+that point somebody has to own the multiple with a measurement.
+
+HOW FAR THAT GOES, measured rather than claimed (m910q 2026-09-05, this file's
+whole test module at each value): 1 is red (two tests, one of them a real-path
+wait that goes back to spending the budget once), 2 and 3 are both green, and 4,
+5 and 11 are red (the floor-or-cap audit plus the last-window shortening). So
+the constant is owned to a band of exactly two values and a docstring arguing
+for one of them over the other would be a confident reason with nothing behind
+it. The band was a single value, 2, until 2026-09-05: raising the floor to
+`MANAGEMENT_FLOOR_SECONDS` moved 1800 * 3 = 5400 s from above the floor to
+below it, and a bound nothing reaches is a bound nothing can measure. That is a
+real cost of the margin, recorded here rather than left for the next reader to
+find with a mutation.
 
 WHO ACTUALLY CALLS ONE. Not the Server tab's Stop/Start buttons: an earlier
 version of this docstring rested the size on them and they do not wait —
@@ -677,14 +767,18 @@ by grepping the tree: outside `native.py` and `docker.py` every `wait_ready` /
 is therefore three ceilings:
 
     game          budget    ceiling   3 x ceiling   was, single-shot
-    wow-wotlk       480 s    3702 s        3.1 h          24 min
-    wow-tbc        1800 s    3702 s        3.1 h           1.5 h
-    wow-vanilla    1800 s    3702 s        3.1 h           1.5 h
+    wow-wotlk       480 s    6916 s        5.8 h          24 min
+    wow-tbc        1800 s    6916 s        5.8 h           1.5 h
+    wow-vanilla    1800 s    6916 s        5.8 h           1.5 h
     wow-tortoise  10800 s   21600 s         18 h             9 h
 
 Those are the numbers this change costs, written down because the round that
 introduced a management ceiling quoted only the flattering end of its own
-arithmetic. A quiet server still ends its wait after ONE window (`_read_world()`
+arithmetic. The first three rows read 3702 s and 3.1 h for one day: that was
+`MANAGEMENT_FLOOR_SECONDS` sitting exactly on the slowest measured boot, with
+no margin, which a review refuted by refusing a 3703 s boot. The margin is
+1.87x and the price of it is the difference between those two columns.
+A quiet server still ends its wait after ONE window (`_read_world()`
 answers `quiet` the moment two readings match), so none of this is paid by a
 server that is merely down — only by one that talks for ever.
 
@@ -707,17 +801,19 @@ def management_ceiling(timeout: float) -> float:
 
     * `timeout * MANAGEMENT_CEILING_WINDOWS` — the budget must be spendable more
       than once or it is the single-shot total this lane replaced.
-    * `SLOWEST_MEASURED_FIRST_BOOT_SECONDS` as a floor — a caller may not ask
-      for a bound shorter than the slowest healthy boot anyone here has
-      measured, because that bound refuses a server that was going to succeed.
+    * `MANAGEMENT_FLOOR_SECONDS` as a floor — a caller may not ask for a bound
+      shorter than the slowest healthy boot anyone here has measured, plus a
+      margin, because that bound refuses a server that was going to succeed.
       This is why `timeout=` no longer bounds the call all the way down, and it
       is deliberate: at 480 s the old four-window bound stopped 1782 s short of
-      the boot the same box measured on the same share.
+      the boot the same box measured on the same share. The margin is there
+      because the floor spent a day sitting exactly ON that boot, where 3703 s
+      was refused.
     * `READY_CEILING_SECONDS` as a cap — a catalogue entry asking for a six-hour
       quiet budget does not get a twelve-hour poll behind a button.
     """
     return min(
-        max(timeout * MANAGEMENT_CEILING_WINDOWS, float(SLOWEST_MEASURED_FIRST_BOOT_SECONDS)),
+        max(timeout * MANAGEMENT_CEILING_WINDOWS, float(MANAGEMENT_FLOOR_SECONDS)),
         float(READY_CEILING_SECONDS),
     )
 
@@ -987,7 +1083,7 @@ def wait_ready_quietly(
 
     **The call is bounded**, by `management_ceiling(ready.timeout)`: at least
     `MANAGEMENT_CEILING_WINDOWS` of the caller's windows, never shorter than
-    `SLOWEST_MEASURED_FIRST_BOOT_SECONDS`, never longer than
+    `MANAGEMENT_FLOOR_SECONDS`, never longer than
     `READY_CEILING_SECONDS`. So `timeout=` shortens the call only down to that
     measured floor, and deliberately: the two callers on
     `docker.azerothcore_ready()`'s 480 s default were bounded at 1920 s between

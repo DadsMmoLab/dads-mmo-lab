@@ -4,8 +4,11 @@ The incident this file exists for, measured on yulon-win11-gate 2026-09-04 from
 the world server's OWN timestamps (`docker logs -t`), Docker Desktop, the server
 directory on a 9p share reading at about 1.4 MB/s:
 
-    Vanilla  06:12:43Z mangosd start -> 06:37:22Z first `Avg Diff:`  = 24.6 min
-    TBC      18:59:55Z mangosd start -> 19:45:58Z first `Avg Diff:`  = 46.0 min
+    Vanilla  06:12:43Z mangosd start -> 06:37:22Z first `Avg Diff:`  = 1479 s
+    TBC      18:59:55Z mangosd start -> 19:45:58Z first `Avg Diff:`  = 2763 s
+
+(24.6 and 46.0 minutes, which is how the gate write-up rounded them; the
+seconds below are always computed from the stamps, never from the minutes.)
 
 Both entries carried `ready.timeout_s: 1800`, so the first fitted and the second
 did not. TBC's install ended `install failed: The server started but never
@@ -28,6 +31,7 @@ six-hour ceiling both run in microseconds.
 from __future__ import annotations
 
 import ast
+import math
 import re
 import threading
 from collections.abc import Callable
@@ -43,11 +47,32 @@ from yulon.catalog.catalog import CatalogEntry, ReadyMarkers
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError
 
+
+def _stamps_apart(start: str, end: str) -> int:
+    """Seconds between two `HH:MM:SS` stamps, wrapping once over midnight.
+
+    The stamps are the measurement; the seconds are arithmetic on them, done
+    here rather than typed. `native.py` carried 1476 and 2760 for the two
+    `docker logs -t` boots until 2026-09-05 -- 24.6 * 60 and 46.0 * 60, the
+    write-up's rounded MINUTES multiplied back out, three seconds adrift of the
+    stamps printed on the same line -- and `TBC_BOOT_S` below was spelled
+    `46 * 60` for the same reason. Nothing downstream was wrong (the floor takes
+    the largest of the three, which is Tortoise's) and nothing said so either,
+    which is the failure this removes: a citation its own numbers do not support.
+    """
+    begin = [int(part) for part in start.split(":")]
+    finish = [int(part) for part in end.split(":")]
+    spanned = (finish[0] - begin[0]) * 3600 + (finish[1] - begin[1]) * 60 + finish[2] - begin[2]
+    return spanned + (24 * 3600 if spanned < 0 else 0)
+
+
 TBC_QUIET_S = 1800
 """What `catalog.json` gives both CMaNGOS entries. Pinned by `test_the_catalogue...` below."""
 
-TBC_BOOT_S = 46 * 60
-"""The measured 9p first boot the old budget called a failure (yulon-win11-gate, 2026-09-04)."""
+TBC_BOOT_S = _stamps_apart("18:59:55", "19:45:58")
+"""The measured 9p first boot the old budget called a failure (yulon-win11-gate, 2026-09-04).
+
+2763 s, from the two `docker logs -t` stamps in this file's header."""
 
 
 @dataclass
@@ -1074,10 +1099,10 @@ def _tortoise_stage_wall_from_the_gate() -> int:
 
 MEASURED_9P_BOOTS: dict[str, int] = {
     # yulon-win11-gate 2026-09-04, `docker logs -t`, mangosd start -> first `Avg
-    # Diff:`. The two stamps are in this file's own header; the seconds are the
-    # difference between them, not the rounded minutes the header prints.
-    "wow-vanilla, 06:12:43Z -> 06:37:22Z": 1479,
-    "wow-tbc, 18:59:55Z -> 19:45:58Z": 2763,
+    # Diff:`. The two stamps are in this file's own header and in
+    # `pyplan/checklist.md`'s 7.7 block; the seconds are computed from them.
+    "wow-vanilla, 06:12:43Z -> 06:37:22Z": _stamps_apart("06:12:43", "06:37:22"),
+    "wow-tbc, 18:59:55Z -> 19:45:58Z": _stamps_apart("18:59:55", "19:45:58"),
     # yulon-win11-gate 2026-09-05, the ready STAGE's wall clock, which is what a
     # wait actually sits through. Read off the gate's own write-up.
     "wow-tortoise, ready-stage wall": _tortoise_stage_wall_from_the_gate(),
@@ -1085,10 +1110,13 @@ MEASURED_9P_BOOTS: dict[str, int] = {
 """Every first boot this project has timed on Docker Desktop's 9p share. All healthy.
 
 Every one printed the whole way and ended `RestartCount=0`. They are the
-evidence under `native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS`, and the reason a
+evidence under `native.MEASURED_9P_FIRST_BOOTS_SECONDS`, and the reason a
 management ceiling shorter than the largest of them is a bug rather than a
 policy: it refuses a server that was about to succeed, which is the 2026-09-04
 verdict this whole file exists to remove.
+
+Not one of the three seconds figures is typed here: two are computed from their
+stamps, the third is read out of the gate's README.
 """
 
 
@@ -1142,30 +1170,89 @@ def test_the_gate_write_up_the_floor_is_read_from_agrees_with_its_own_clock() ->
     )
 
 
-def test_the_management_floor_is_the_slowest_boot_this_project_has_measured() -> None:
-    """The constant IS the measurement, from both directions.
+def test_the_boots_this_file_bounds_waits_with_are_the_difference_between_their_own_stamps() -> (
+    None
+):
+    """`native.py`'s three seconds figures, each checked against the citation beside it.
 
-    Round 3 argued the size of the management ceiling in a long docstring and
-    left the number owned by nothing: measured on m910q 2026-09-05, every value
-    of `MANAGEMENT_CEILING_WINDOWS` from 2 to 11 kept all 2593 tests green, and
-    at 11 a management wait on a `timeout_s: 1800` entry blocked for 5.5 hours
-    with no red anywhere. Re-derived here before this round changed it:
-    `MANAGEMENT_CEILING_WINDOWS = 5` -> `2594 passed, 4 skipped, 23 deselected`.
-
-    So the floor is not argued, it is read: the largest boot in
-    `MEASURED_9P_BOOTS`, whose Tortoise entry comes out of the gate's own
-    write-up. Raising the constant goes red here; lowering it goes red here AND
-    in the twelve waits below.
+    Two are `docker logs -t` stamps and the third is the 7.7 gate's README. All
+    three are recomputed here rather than compared to a second typed copy --
+    until 2026-09-05 `native.py` printed 1476 and 2760 against stamps that span
+    1479 and 2763, because somebody multiplied the write-up's rounded minutes
+    (24.6, 46.0) back out by 60. Nothing downstream was wrong (the floor takes
+    the largest, which is Tortoise's) and nothing said so either.
     """
-    assert native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS == max(MEASURED_9P_BOOTS.values()), (
-        f"the management floor is {native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS}s and the "
-        f"slowest boot measured on this project is {max(MEASURED_9P_BOOTS.values())}s "
-        f"({MEASURED_9P_BOOTS})"
+    assert sorted(native.MEASURED_9P_FIRST_BOOTS_SECONDS) == sorted(MEASURED_9P_BOOTS.values()), (
+        f"native.py bounds waits with {native.MEASURED_9P_FIRST_BOOTS_SECONDS} and the stamps "
+        f"and artefacts they cite give {sorted(MEASURED_9P_BOOTS.values())}"
     )
-    assert native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS < native.READY_CEILING_SECONDS, (
+    assert _stamps_apart("23:59:00", "00:01:00") == 120, "a stage that crosses midnight is 2 min"
+
+
+def test_the_management_floor_stands_clear_of_the_slowest_boot_by_a_measured_margin() -> None:
+    """The floor is the slowest boot WIDENED, and both halves are derived.
+
+    Round 3 left the ceiling owned by nothing: measured on m910q 2026-09-05,
+    every value of `MANAGEMENT_CEILING_WINDOWS` from 2 to 11 kept all 2593 tests
+    green. Round 4 fixed that by reading the floor off the evidence -- and put
+    it exactly ON the largest sample, where a review measured the consequence in
+    one line: through the real `wait_ready_quietly()` at the 480 s callers, a
+    3702 s boot was accepted and a 3703 s boot was refused at elapsed 3702 s.
+
+    So the floor now carries a margin, and the margin is the widest gap the
+    three measurements actually exhibit (2763 / 1479 = 1.868), applied once
+    above the slowest of them. Recomputed here from `MEASURED_9P_BOOTS`, whose
+    Tortoise entry comes out of the gate's own write-up, so neither the
+    measurement nor the multiplier is a number typed in two places.
+    """
+    boots = sorted(MEASURED_9P_BOOTS.values())
+    widest_gap = max(slower / faster for faster, slower in zip(boots, boots[1:], strict=False))
+
+    assert native.MANAGEMENT_FLOOR_MARGIN == pytest.approx(widest_gap), (
+        f"the floor is widened by {native.MANAGEMENT_FLOOR_MARGIN:.4f} and the widest gap "
+        f"between two boots this project has measured is {widest_gap:.4f} ({boots})"
+    )
+    assert native.MANAGEMENT_FLOOR_SECONDS == math.ceil(boots[-1] * widest_gap), (
+        f"the floor is {native.MANAGEMENT_FLOOR_SECONDS}s and the slowest measured boot "
+        f"widened by that margin is {math.ceil(boots[-1] * widest_gap)}s"
+    )
+    assert native.MANAGEMENT_FLOOR_SECONDS > native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS, (
+        "a floor sitting exactly on the slowest sample refuses the first healthy boot one "
+        "second slower than the one boot anybody happened to time"
+    )
+    assert native.MANAGEMENT_FLOOR_SECONDS < native.READY_CEILING_SECONDS, (
         "a floor at or above the install ceiling would give every management wait the "
         "install's six hours, which is the regression the two ceilings exist to undo"
     )
+
+
+def test_a_boot_slower_than_every_one_measured_is_still_inside_the_margin() -> None:
+    """The margin, driven through the real wait rather than compared to a constant.
+
+    The smallest budget any caller hands one is 480 s
+    (`docker.azerothcore_ready()`'s default, used by `Controller.wait_ready()`
+    and `controller_wow_wotlk`), so it is the site with the least room and the
+    one this asserts against. Both boots below were refused there on 2026-09-05
+    before the margin existed, measured on m910q at elapsed 3702 s.
+    """
+    smallest = min(BUDGETS_IN_USE.values())
+    for boot in (native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS + 1, native.MANAGEMENT_FLOOR_SECONDS):
+        world = FakeWorld(boot_s=float(boot))
+
+        got = native.wait_ready_quietly(
+            TBC.container_spec(),
+            docker.ReadySpec(world="Avg Diff:", timeout=smallest),
+            wait=world.wait_ready,
+            output=world.output,
+            monotonic=world.clock,
+        )
+
+        assert got is True, (
+            f"a {boot}s boot was refused by the ceiling a {smallest:.0f}s budget buys "
+            f"({native.management_ceiling(smallest):.0f}s), and the slowest boot this project "
+            f"has measured is {native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS}s -- so the margin "
+            "over it is not being spent"
+        )
 
 
 @pytest.mark.parametrize("budget", sorted(BUDGETS_IN_USE.items()))
@@ -1208,18 +1295,24 @@ def test_no_boot_this_project_has_measured_is_refused_by_a_management_ceiling(
 def test_the_management_ceiling_is_the_floor_or_the_cap_for_every_budget_shipped() -> None:
     """`MANAGEMENT_CEILING_WINDOWS` decides no shipped ceiling today, and this says so.
 
-    The multiple only answers for a budget between 1851 s and 10800 s, and no
-    caller hands one: below that the measured floor wins, at Tortoise's 10800 s
-    the install cap does. So 2 and 5 are indistinguishable on this tree, which
-    is why the constant's docstring claims only "more than one" -- a docstring
-    arguing for a specific multiple would be a reason with nothing behind it.
+    The multiple only answers for a budget between 3458 s and 10800 s, and no
+    caller hands one: below that the derived floor wins, at Tortoise's 10800 s
+    the install cap does. So 2 and 3 are indistinguishable on this tree (m910q
+    2026-09-05, whole module per value: 1 red, 2 green, 3 green, 4 red, 5 red,
+    11 red), which is why the constant's docstring claims only "more than one"
+    -- a docstring arguing for a specific multiple would be a reason with
+    nothing behind it. The green band was 2 alone until the floor was widened
+    the same day; 1800 * 3 = 5400 s used to be above the floor and now is not.
+    (The band's lower end is `MANAGEMENT_FLOOR_SECONDS / 2` and moves with it:
+    it read 1851 s while the floor sat on the slowest sample, 3458 s since the
+    margin was added on 2026-09-05.)
 
     The audit is written to FAIL on what it cannot see: the day an entry lands
     in that band, this test goes red and the multiple has to be owned by
     somebody with a measurement, instead of quietly starting to decide a
     ceiling.
     """
-    floor = float(native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS)
+    floor = float(native.MANAGEMENT_FLOOR_SECONDS)
     cap = float(native.READY_CEILING_SECONDS)
     decided_by_the_multiple = {
         who: budget
@@ -1270,20 +1363,36 @@ def test_a_management_wait_spends_more_than_one_window_of_every_budget_in_use() 
 
 
 def test_a_management_wait_is_bounded_by_the_ceiling_and_shortens_its_last_window() -> None:
-    """A Stop/Start button could block for six hours, and nothing tested the change.
+    """A management wait could block for six hours, and nothing tested the change.
 
     The four management waits used to spend `timeout` ONCE, as a total, so the
     call was bounded at 480 s, 1800 s or 10800 s depending on which it was.
     Reading the number as a quiet budget was right; taking the INSTALL ceiling
-    with it was not, and it went to 21600 s with no test naming the change.
+    with it was not, and it went to 21600 s with no test naming the change. (An
+    earlier version of this line said a Stop/Start BUTTON could block for six
+    hours. It could not: `yulon/ui/controller_view.py:998` and `:1006` call
+    `controller.start` and `.stop`, neither of which waits. The only code that
+    runs a management wait is `pyplan/gates/gate-79-controller-surface.py`,
+    three times a run -- see `native.MANAGEMENT_CEILING_WINDOWS`, which had the
+    claim removed on 2026-09-05 while this docstring kept it.)
 
     The last window is the second half of this. `management_ceiling()` is no
-    longer a whole number of budgets -- 3702 is not a multiple of 1800 -- so the
+    longer a whole number of budgets -- 6916 is not a multiple of 1800 -- so the
     `min(ready.timeout, ceiling - spent)` term is what makes the wait stop AT
     the ceiling instead of overshooting it by most of a window. Until 2026-09-05
-    the shortening could not fire for any real caller and no test drove it;
-    replacing it with a plain `ready.timeout` leaves three whole windows and
-    5400 s elapsed, and both assertions below go red.
+    the shortening could not fire for any real caller and no test drove it.
+
+    Two mutations of that term, both run on m910q 2026-09-05:
+    `window = ready.timeout if (clock() - started) < ceiling else 0.0` gives
+    four whole windows and 7200 s (`2 failed, 75 passed`, this test on
+    `assert 7200.0 == 6916.0` and the two-ceilings test with it). A plain
+    `window = ready.timeout` does not overshoot -- it never returns:
+    `if window <= 0` is the loop's ONLY exit that does not depend on the server,
+    so against a server that keeps printing the wait runs for ever, and
+    `test_a_management_wait_spends_more_than_one_window_of_every_budget_in_use`
+    hangs (killed at 45 s, verified as the test in flight with `-x -v`). The
+    round that added the term wrote the first result down for the second
+    mutation; they are not the same edit and only one of them is a bounded wait.
     """
     world = FakeWorld(boot_s=float("inf"))
 
@@ -1315,7 +1424,7 @@ def test_the_install_wait_and_a_management_wait_stop_in_different_places() -> No
     printing rubbish for ever cannot hang it. A management wait is one something
     is waiting on -- today the only code that runs one is the 7.9 controller
     gate, three times a run. Collapsing the two was the regression;
-    `MANAGEMENT_CEILING_WINDOWS` and `SLOWEST_MEASURED_FIRST_BOOT_SECONDS` carry
+    `MANAGEMENT_CEILING_WINDOWS` and `MANAGEMENT_FLOOR_SECONDS` carry
     the argument for the size between them.
     """
     managed = FakeWorld(boot_s=float("inf"))
@@ -1353,9 +1462,10 @@ def test_a_quiet_budget_larger_than_the_install_ceiling_does_not_raise_it() -> N
     assert native.management_ceiling(float(native.READY_CEILING_SECONDS)) == pytest.approx(
         native.READY_CEILING_SECONDS
     )
-    assert native.management_ceiling(1.0) == pytest.approx(
-        native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS
-    ), "a caller may not ask to be bounded below the slowest boot anyone here has measured"
+    assert native.management_ceiling(1.0) == pytest.approx(native.MANAGEMENT_FLOOR_SECONDS), (
+        "a caller may not ask to be bounded below the slowest boot anyone here has measured, "
+        "widened by the margin over it"
+    )
 
 
 # -- what a window that did not find the banner is allowed to mean -----------

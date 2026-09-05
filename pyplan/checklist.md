@@ -1575,6 +1575,35 @@
 
     **The CSV committed here is a snapshot taken while the run was still going**, which the file's
     own timestamps show; it is evidence of a rate, not of a finished install.
+  - **OWNER DECISION OPEN (2026-09-05): how much margin the ready wait keeps over the slowest 9p
+    boot.** The three first boots this phase measured are the only evidence the launcher has for how
+    long a healthy server may say nothing: Vanilla **1479 s** (06:12:43Z → 06:37:22Z) and TBC
+    **2763 s** (18:59:55Z → 19:45:58Z), both `docker logs -t` on `yulon-win11-gate` 2026-09-04, and
+    Tortoise **3702 s** (23:41:37 → 00:43:19, ready-stage wall,
+    `pyplan/gates/7.7-win11-tortoise/README.md`). A management wait bounded below the slowest of them
+    refuses a server that was going to succeed — the 2026-09-04 "never reported ready" verdict. The
+    first fix put the bound exactly ON 3702 s, and a review measured what that means: driven through
+    the real `wait_ready_quietly()` at the 480 s callers, a 3702 s boot is accepted and a **3703 s
+    boot is refused**.
+    **Decided, and open to override:** the bound is now `ceil(3702 × 1.868) = 6916 s`, where 1.868 is
+    2763 / 1479 — the widest gap between two adjacent boots in that evidence, applied once above the
+    slowest of them. In code: `native.MANAGEMENT_FLOOR_MARGIN` and `native.MANAGEMENT_FLOOR_SECONDS`,
+    both derived from `native.MEASURED_9P_FIRST_BOOTS_SECONDS` rather than typed, with the argument
+    in their docstrings.
+    **What the number does not rest on:** these are three DIFFERENT servers, timed once each. Nobody
+    has booted the same server twice on 9p, so the project has no measurement of run-to-run variance
+    and this margin stands in for a quantity nobody has measured. The way to close it is a second run
+    of one of the three, not an argument.
+    **What it costs:** the 7.9 controller gate's worst case — a server that keeps printing and never
+    says ready, three `wait_ready_for_game()` calls per run — goes from 3 × 3702 s (3.1 h) to
+    3 × 6916 s (5.8 h) for WotLK, TBC and Vanilla; Tortoise is unchanged at 3 × 21600 s (18 h),
+    its 10800 s budget already landing on the install cap. A server that is merely quiet still ends
+    its wait after ONE window, so none of this is paid by a server that is down.
+    **A second cost, measured on m910q the same day:** `MANAGEMENT_CEILING_WINDOWS` used to be
+    pinned to one value by the tests; with the floor at 6916 s the values 2 and 3 are
+    indistinguishable, because 1800 × 3 no longer reaches above the floor. Recorded in that
+    constant's docstring. Override by editing the margin expression, or close it with a fourth
+    measurement.
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
 - [x] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
   - **TICKED 2026-09-04. The three unmeasured criteria were driven against all three live CMaNGOS
