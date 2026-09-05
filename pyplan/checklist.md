@@ -623,6 +623,58 @@
     `catalog.json`, so those three Install buttons are **live on Linux** — which is exactly the state
     bug-checklist §32 puts to the owner. This line said the opposite until 2026-09-02, and §32 is read
     while deciding it.
+    - **That 2026-09-02 verification went stale two days later, and the clause above with it.**
+      Measured 2026-09-05 at `6546b190`, straight out of `catalog.json`:
+      `wow-tbc -> ["linux","windows"]`, `wow-vanilla -> ["linux","windows"]`,
+      `wow-tortoise -> ["linux"]`. TBC and Vanilla were widened at `2f39a6d9` (2026-09-04), each on
+      a Windows install that finished on `yulon-win11-gate` — Vanilla all twelve stages that
+      morning, TBC's three containers up that evening — and 7.7 established the order the widening
+      has to take: `Install.supports()` is `platform_id in platforms`, so a Windows install refuses
+      BEFORE preflight while the list is Linux-only, and the widening cannot follow the run that
+      justifies it. Tortoise stays `["linux"]`: never attempted on Windows.
+      **So this clause is met in the sense that decided it and not as it is written.** What 7.2 owed
+      was *do not empty the list* — the plan's Step 6 template still says `platforms: []`, which is
+      the value that would have greyed out three of the four Install buttons — and no entry has
+      ever been emptied. What it says, "KEEP `platforms: ["linux"]`", stopped being the value on
+      2026-09-04 for two of the three, by a later phase's evidence. The clause is left as written
+      rather than edited to match the tree: rewriting a criterion so it passes is the failure this
+      checklist exists to prevent. Whoever ticks 7.2 states it in that form.
+  - **The line's own clauses, audited 2026-09-05 at `6546b190` — seven of eight met outright, and
+    the box is left OPEN on the eighth plus the gate.** Same method as 7.3's tick: read the line's
+    claims against the tree rather than run anything new.
+
+    | the line says | what answers it |
+    |---|---|
+    | six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` gone | **MET.** `git ls-files` matches none of the eight outside `archive/guides/` (which holds four non-catalog installers no entry references). Deleted at `2fddaa0e`, *"chore: delete the six bash installers, dml-start.sh and wow-manage.sh"* |
+    | (eight files, 19,451 lines) | **the count is the plan's, not the deletion's.** Measured 2026-09-05 off `2fddaa0e^`: 2603 + 1417 + 2837 + 122 + 2290 + 2104 + 2244 + 8263 = **21,880** lines (`git show --stat` says 21,881; `dml-start.sh` has no trailing newline). 19,451 comes from `7.2-retire-bash.md:567` and is repeated in `phase7-decisions.md:10,174`. Nothing turns on it — it is a size, not a criterion — but it is wrong in three places and should be corrected in all three or in none |
+    | `installer.Installer`, `PROMPT_RULES`, `make_responder`, `bash_available` | **MET.** No definition of any of the four survives in `yulon/`; the only occurrences are two past-tense mentions in comments (`catalog/installer.py:286`, `runner.py:221`), which is this repo's own convention. What is left in `installer.py` is the shared surface: `compose_file()`, the error types, the copy, `InstallOptions`, `InstallEngine`, `installer_for()` |
+    | script tests | **MET.** `tests/test_installer.py` is the post-7.2 file and says so in its first line — options, errors, copy, dispatch, 15 tests; the `interact()` transport pair runs against a throwaway script through `tests/support_bash.py::bash_available`, which is where F.1 copied the probe when the engine that needed it was deleted |
+    | `Install.script*` fields | **MET.** The `Install` model carries `default_server_dir`, `password`, `requires_client_dir`, `platforms`, `native` and nothing else; no entry in `catalog.json` has a key containing `script` |
+    | the three CMaNGOS entries KEEP `platforms: ["linux"]` | **NOT as written — see the bullet above.** Never emptied, which is what the clause was for; two of the three read `["linux","windows"]` since `2f39a6d9` |
+    | gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh` | **MET.** `pylauncher/catalog/installers/steam-deck/setup-gaming-mode.sh` is tracked; that directory otherwise holds only templates |
+    | `contribution.md` harness paragraph rewritten | **MET and guarded.** `test_docs_pins.py::test_the_contribution_harness_is_the_engine_not_the_scripts` requires `python -m yulon.install_wiring wow-wotlk` and forbids `python -m yulon.catalog.installer`, `sudo -v`, `bash-script path` and `dml-start.sh` |
+    | style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py` | **MET and guarded.** `…::test_the_style_guide_rows_describe_the_post_7_2_modules`, which also covers the `catalog/native.py` row — added 2026-09-02 after that row went on describing *"the same `run()` contract as `Installer`"* for as long as F.3 had deleted the class |
+
+  - **Why the box is still `- [ ]` after that audit, said plainly so the next reader does not redo
+    it.** Two things, neither of them the deletion:
+    1. **The `platforms` clause no longer reads true**, and the fix is an owner-facing wording
+       change rather than a measurement — see the bullet above. Ticking over it would put a `- [x]`
+       next to a sentence a reader can falsify in one `grep` of `catalog.json`.
+    2. **The gate box below is open on 7.1's clauses 14 and 15**, which the 2026-09-05 re-run could
+       not re-earn (client login needs the owner's laptop; the LAN step is blocked on
+       bug-checklist §39), and 7.1's own box is open for the same reasons. The previous reading of
+       this line set that condition explicitly — *"the line ticks when those three are settled on
+       the 7.1 line"* — and it is not overturned here.
+
+    **What ticking will cost, measured 2026-09-05 on m910q so it is not a surprise later.**
+    `test_docs_pins.py::test_every_test_these_pages_name_by_hand_actually_exists` widens to
+    `phase7-plans/7.2-retire-bash.md` the moment this box reads `- [x] 7.2 `, and that page cites
+    **58** test names as live, of which **19** resolve to nothing in `pylauncher/tests/` — mostly
+    names of tests the plan told a task to write or delete. (`7.1-spine-azerothcore-linux.md`: 13
+    of 141, unchanged since 2026-09-02. `7.3-cmangos-family.md`: **0 of 219**, its pass done.) With
+    this box left open the guard stays scoped as it was: **4 passed** against this edit
+    (`~/dads-mmo-lab/pylauncher/.venv/bin/python -m pytest tests/test_docs_pins.py -q` on m910q,
+    run over a copy of these files).
   - [ ] Gate: full checks green; 7.1's Ubuntu gate re-run from the same checkpoint with no other change
     - **Static half PASSED, 2026-09-02, overnight run.** `yulon-phase7` at `0e394d9b`: **1974 passed,
       3 skipped** on yulon-ubuntu (`-m "not integration"`), mypy `Success: no issues found in 48 source
@@ -668,7 +720,9 @@
         (`zero-bash-sampler.log:490`). The `.sh` processes it did see are the lane's own helpers
         and two inside containers (`docker-entrypoint.sh mysqld`; the client-data init reading
         upstream's `functions.sh` with `sed`). The transcripts' only `.sh` is the AzerothCore
-        image's `entrypoint.sh`.
+        image's own entrypoint, under two spellings — `/azerothcore/entrypoint.sh` and
+        `apps/docker/entrypoint.sh`, two occurrences each (`final-state.txt:377-378`). This said
+        one spelling until the 2026-09-05 doc pass.
       * **Its own compose capture**, the "second, independent capture" the 7.1 audit asked this
         run to produce: taken at 01:58:59, byte-identical (md5 `5ec739cc…`) to the 09-04 clean
         run's, which passed the fixture diff (59 passed, 0/0 differences).
@@ -677,6 +731,34 @@
         `7.1-client-login/`) and 15 (LAN step, bug-checklist §39, not run on purpose) are not part
         of what this run could re-earn. Everything a machine on its own could do is done and
         filed; the line ticks when those three are settled on the 7.1 line.
+        **Re-checked 2026-09-05 by the doc pass below: unchanged. Clauses 14 and 15 are still
+        unrun, 7.1's own box is still `- [ ]`, and nothing in this folder moves either.**
+      * **The record was corrected on 2026-09-05, and one of the five corrections matters to a
+        clause.** A doc pass over `pyplan/gates/7.2-ubuntu-2026-09-05/` against the box (read-only
+        over ssh) found four citations that read as fact and one capture that had gone stale
+        underneath them; all five are written up in that README, the fifth in a section of its own.
+        The one that touches a clause: **10-12's `127.0.0.1:8085` is a snapshot of a container
+        that no longer exists.** `final-state.txt:380` holds it, captured at 01:14:33; that
+        `ac-authserver` was removed at 01:23:00 by the cycle-2 `compose down`, and the three
+        containers on the box today were created at 01:56:40 by the cycle-2 cleanup
+        (`docker inspect -f '{{.Created}}' ac-authserver` -> `2026-09-04T23:56:40Z`). Measured on
+        `yulon-ubuntu` 2026-09-05: `docker logs ac-authserver | grep -n 'Added realm'` ->
+        `41:Added realm "AzerothCore" at 172.30.55.119:8085.` The two readings do not conflict —
+        the authserver reads `acore_auth.realmlist` once at startup, press 3's came up before
+        `ready` rewrote the row and the cycle-2 restart read it after — and the row itself is
+        `1 AzerothCore 172.30.55.119 172.30.55.119 8085` in both `final-state.txt:58` and
+        `final-state-2.txt:38`. **Consequence for whoever settles 10-12:** settle it on the
+        reworded criterion (the database row plus `ready`'s own line, `press3.log:3377`), which
+        the box still supports, not on the auth-log capture, which it no longer does.
+        The other four: every `press1.log` line number in the README's clause table was wrong
+        (before-probe `:3-13` not `:3-14`; consent `:27`/`:29`/`:34` not `:29-31,44`; re-login
+        report `:31-33` with `state-after: id -Gn` at `:40-41`, not `:34-37,45-51`);
+        `cycle2-edge-rate.txt` labelled press A3 and press B as "press 2" and "press 3", because
+        `edge-rate.sh` was re-run with its labels untouched (its headings now carry the correction
+        and every figure is as printed); `cycle2-kill-record.txt`'s post-kill
+        `compiler-processes=1` — flat across all twelve samples while press 2's read 0 — is the
+        recorder's own shell, whose argv spells `~/gate72-ccache-stats.txt` and so matches the
+        counter's `[c]cache`, and nothing said so; and the entrypoint spelling above.
       * **Two things learned that were not on the sheet**, both in the README: a `--no-cache`
         build naming a cache mount resets it (it cost this run its first ccache measurement), and
         a second install cannot even build on a box that holds another one's containers, because

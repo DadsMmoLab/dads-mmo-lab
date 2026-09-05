@@ -1342,7 +1342,44 @@ there will be a fourth, and the fourth is where it gets missed. This is the same
 the secret needs nobody to remember anything.** (Reasoning from `dads-mmo-lab-58`.) Decide before K.4
 lands; recorded as undecided rather than settled with a docstring.
 
-### 21. `_stream()`/`_pump()` leak a running worker when the generator is abandoned — 2026-09-01, OPEN, inherited
+### 21. `_stream()`/`_pump()` leak a running worker when the generator is abandoned — 2026-09-01, **CLOSED 2026-09-05 at `d2b963d5`**
+
+**What was true, and how it was checked before the box was ticked.** `stop_abandoned_worker()`
+(`catalog/native.py`) now runs at the abandonment itself — in an `except BaseException` around both
+bridges' `yield` loops, `native.StagedInstaller._pump()` and
+`families/cmangos.py::CmangosInstaller._stream()` — and both take the SAME `cancel` event their
+`call` closed over, keyword-only and required, so a call site that forgets it does not compile past
+review. `install_wiring.main()` makes one event per run and passes it, which is the path every
+headless gate box drives and was the one case the closing test could not have exercised.
+
+The two tests this entry asked for exist by the name it gave them —
+`test_spine.py::test_abandoning_the_pump_stops_its_worker_with_no_cancel_from_the_caller` and
+`test_families_cmangos.py::test_abandoning_the_stream_stops_its_worker_with_no_cancel_from_the_caller`
+— and neither sets a cancel from outside, so a return to the ordering-only mitigation fails them.
+Four more hold the edges: `…::test_an_interrupt_thrown_into_the_pump_stops_its_worker_too` and its
+`_stream` twin (a Ctrl+C lands INSIDE the frame as a `KeyboardInterrupt`, which is why the clause is
+`BaseException` and not `GeneratorExit`), `test_a_worker_that_ignores_the_cancel_is_left_rather_than_waited_for`,
+and `test_the_abandoner_bound_is_the_streams_own_shutdown_timeout`.
+
+**Re-derived on m910q 2026-09-05, on a copy of the tree at `6546b190`, not taken from the fix's own
+record.** GREEN: `pytest tests/test_spine.py tests/test_families_cmangos.py -k 'abandon or
+interrupt_thrown'` -> **7 passed, 203 deselected**. RED, with `stop_abandoned_worker(...)` deleted
+from both `except BaseException` clauses and nothing else changed: **5 failed, 2 passed**, the first
+of them `AssertionError: assert ['yulon-install-output'] == []` — this entry's own sentence, printed
+by the suite — and the `_stream` twin `assert ['yulon-cmang...angos-output'] == []`, two workers
+still live.
+
+**What is deliberately NOT fixed, so it is not read as covered.** `cancel=None` — a caller with no
+event at all — has no seam to pull, so the worker IS left running and the function logs
+`"… was abandoned with no cancel event; its worker was left running"` rather than joining a thread
+nothing will end. That is the documented behaviour, pinned by
+`test_abandoning_the_pump_with_no_cancel_event_leaves_the_worker_and_says_so`, and it is why the
+`cancel` parameter is required rather than defaulted. The join is bounded at
+`ABANDONED_WORKER_SECONDS`, read from `runner._SHUTDOWN_TIMEOUT_SECONDS` rather than typed twice,
+because this entry's own objection to an unbounded `join()` in a `finally` stands: it would block
+the abandoner for the hours the extraction has left.
+
+The record of what was wrong, kept because it is what the fix had to answer:
 
 `CmangosInstaller._stream()` starts a worker thread and joins it only after the queue drains. If the
 consumer abandons the generator — a downstream exception, a partial `list()` — `GeneratorExit` fires
@@ -1359,12 +1396,13 @@ abandonment *without* a cancel is not prevented by anything.
 
 Not fixed: a `join()` in a `finally` would block the abandoner for the remaining hours of the run,
 which is worse. Options not yet weighed: setting the cancel event in the `finally`, a bounded join, or
-a weak reference.
+a weak reference. *(The bounded join is what landed, with the cancel set first so that the join has
+something to wait for.)*
 
 **The test that closes it is cheap and should be written whatever the fix is:** abandon the generator
 **without** setting the cancel event, and assert no live worker remains. That converts the mitigation
 from "`LogPanel.stop()` happens to set cancel first" into something a **reorder fails** — the sixth
-standing rule's second exit.
+standing rule's second exit. *(Written, in both bridges, and named above.)*
 
 **No note anywhere says `_pump`'s hole was ever considered**, which is why this is recorded as
 **unweighed rather than intentional**. "Inherited and shipped since 7.1" is not evidence it was
@@ -1727,7 +1765,68 @@ shortcut itself. Choosing is owner work.
 the bundle first, and why. That is a warning, not a fix — a user who does not read the header still
 hits it, and per §1 nothing outside `pyplan/` points a user at the header at all.
 
-### 29. The Dockerfile refusal covers declared FIELD NAMES, not secrets — 2026-09-02, OPEN, residual
+### 29. The Dockerfile refusal covers declared FIELD NAMES, not secrets — 2026-09-02, the NAME half FIXED 2026-09-04 at `d2b963d5`, **the VALUE half still OPEN**
+
+**Not ticked, and the reason is measurable.** A second rule landed —
+`dockerfile.SECRET_NAME_WORDS` plus `announces_a_secret()`, read on the MAPPING before anything is
+rendered — and it closes the case this entry was filed for. It does not close the entry's title.
+Probed against the real module on m910q 2026-09-05, on a copy of the tree at `6546b190`, `Secrets`
+declaring one field (`db_password`, so `SECRET_TOKENS == {'DB_PASSWORD'}`):
+
+```
+SOAP_PASSWORD  -> REFUSED: "SOAP_PASSWORD: each of those reads as a secret and matches no field of ..."
+BUILD_ARG      -> ACCEPTED, secret in text: True
+```
+
+The same probe against the pre-fix module (`git show d2b963d5^:…/dockerfile.py`) answered
+`SOAP_PASSWORD -> ACCEPTED, secret in text: True`, which is the RED, re-derived rather than quoted.
+So: the three leaks that have ever been measured here were all filed under a `*PASSWORD` name and
+are all refused now; a secret filed under a name that announces nothing still reaches the Dockerfile
+on disk, exactly as before. The refusal covers declared field names **and** secret-sounding names.
+It still does not cover secrets.
+
+**What of this entry's three recommendations landed:**
+
+* *The refusal itself* — landed, and the fix's own docstring says what it is: "a price on the
+  careless spelling, not a wall". Held by
+  `test_dockerfile.py::test_render_refuses_a_secret_bearing_token_the_declaration_never_named`
+  (this entry's probe, run as a test),
+  `…::test_render_refuses_the_undeclared_secret_name_even_when_no_template_spells_it` (the rule
+  reads the mapping, not the rendered text — the LOCATION-shaped protection this module has already
+  watched fail twice), `…::test_the_case_of_a_key_is_not_a_way_past_the_name_rule`, and
+  `…::test_the_secret_name_vocabulary_spells_every_word_and_the_measured_leaks`, which names each
+  word as a literal *outside* the parametrize — because a per-word test generated FROM the set
+  shrinks silently with it (measured: six words cut to three gave `58 passed` against `61 passed`,
+  zero failures).
+* *The docstring that stated a convention in the voice of a guarantee* — fixed. `secret_tokens()`
+  no longer says "reading the dataclass IS reading the declaration"; it says what the set covers and
+  points here.
+* *The enumerating guard by VALUE* — **NOT landed, and rejected at the level this entry proposed
+  it.** An optional `secrets=` parameter on `render()` was considered and refused in writing: it
+  would default to "none declared", because since 7.3 the only production caller passes
+  `_public_tokens(server_dir)` and `ctx.secrets` is one scope above — a guard no caller invokes,
+  which is [[guards-that-prove-declarations]] a fifth time. That argument is sound and the hole it
+  leaves is still a hole.
+
+**What stands in for it today, and what that is worth.** The value comparison exists as a TEST, not
+as a runtime guard: `test_families_cmangos.py::test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_rendered_mapping`
+builds a `Secrets` from `dataclasses.fields()` with one sentinel per field, drives the real
+`_write_dockerfile` stage, and asserts no sentinel appears under ANY key of the mapping or in either
+file on disk — which is stronger than the by-name check this entry asked for. Its own docstring
+states the set it cannot close: a value cached outside the call, or read from some other file under
+`server_dir` that a stage writes a password into. So the shape today is a runtime rule that catches
+careless NAMES and a test that catches the three known VALUE routes on the shipped path. A secret
+minted inside `_public_tokens` under a bland name is caught by neither.
+
+**This entry stays open on that gap**, and the closing condition is unchanged: something that
+compares by VALUE where `ctx.secrets` is in scope, at the call site rather than in `render()`. Until
+then the title is still literally true, and ticking it would be the fourth guarantee in this section
+to be refuted by execution.
+
+---
+
+**The original entry, unchanged below.**
+
 
 Found by the independent review of `fix/dockerfile-refuses-any-secret-not-one-name` (merged at
 `092bad91`), and **not a regression** — the merged change is strictly better than what preceded it.
@@ -1810,7 +1909,56 @@ blind to.
 it. A sentence that describes a convention in the voice of a guarantee is how the next reader concludes
 the case is covered.
 
-### 30. `_container_prefix()`'s rebuild branch is satisfiable only by the bug it should refuse — 2026-09-02, OPEN
+### 30. `_container_prefix()`'s rebuild branch is satisfiable only by the bug it should refuse — 2026-09-02, **CLOSED 2026-09-04 at `d2b963d5`**
+
+**Closed by removing the field's only correct value rather than by correcting the rule**, which is
+what this entry recommended: `_container_prefix()` now refuses `containers.services` outright for any
+entry carrying an `install.native` block, whatever the value, and every shipped entry carries one.
+The reason is in the code where it is declared: this module WRITES the compose file, and its service
+keys come from the templates (`shared/cmangos/base.yml.tmpl` writes `{{CONTAINER_PREFIX}}db` /
+`-realmd` / `-mangosd`; `wow-wotlk/native/base.yml.tmpl` writes the literal `ac-database` and
+friends), so an entry-level declaration can only restate them or contradict them.
+
+**Both docstrings this entry named at the point of declaration were rewritten, not annotated.**
+`composegen._container_prefix()` no longer asserts *"That is literally the
+`{{CONTAINER_PREFIX}}<service>` the templates write"* — the sentence that was true only in the buggy
+configuration — and `catalog.Containers.services` no longer opens with *"when they differ from the
+container names above"*; it says the field is refused since 2026-09-04, that the only correct state
+is absent, and why it stays on the model at all (`docker.ContainerSpec.services`, which an adopted
+project really does need). The refusal text this entry called "a set of instructions for reproducing
+the bug" is gone and cannot come back: the test asserts `"after its service" not in message`.
+
+**The one lower item is now documented where it is read.** `service_names()`'s
+`^  ([A-Za-z0-9-]+):` still excludes `_`, and the helper's own docstring (`test_composegen.py:77`)
+now records why it is left alone: an underscored service key would read as UNDEFINED, so the
+cross-check fails loudly on a good file rather than passing quietly on a bad one, and widening it is
+the permissive direction.
+
+**Re-derived on m910q 2026-09-05, on a copy of the tree at `6546b190`.** GREEN:
+`pytest tests/test_composegen.py tests/test_dockerfile.py` -> **160 passed**. RED, with the pre-fix
+module dropped in whole (`git show d2b963d5^:…/composegen.py`, md5 `86ffd5ba3e8f21ab10a66c33864a40b8`
+— the same md5 the test's docstring cites, so its provenance checks out): **3 failed, 88 passed**,
+and the failure prints the old refusal verbatim —
+
+```
+AssertionError: Regex pattern did not match.
+  Expected regex: 'containers\.services'
+  Actual message: "the container prefix 'abc' of wow-tbc rebuilds abcone, abctwo, abcthree from its
+  service names one, two, three ... Name every container after its service with one shared prefix in
+  front of it."
+```
+
+The three that go red are `test_an_entry_this_module_renders_may_not_declare_compose_services` (the
+discriminating one: it drives both the CORRECT declaration and the §26 bug through
+`_container_prefix()`, `entry_tokens()` and `render()`, since a refusal nothing reaches is not a
+refusal) and both cases of `test_the_refusal_names_no_service_the_rendered_file_does_not_define`,
+which exist because the FIRST rewrite of this rule taught the bug again — it refused the declaration
+and then named the entry's three container names as "the names compose must be given", every one of
+which answers `no such service`.
+
+---
+
+**The original entry, unchanged below.**
 
 Found by the independent review of `fix/cmangos-compose-service-names` (merged at `08fb785e`), which
 fixed the *consequence* and left this. `composegen.py`, `_container_prefix()`, the rebuild branch.
@@ -1942,7 +2090,53 @@ Recording it here rather than deciding it — the trade is "an unexercised path 
 2026-09-01 record filed under 7.1. That run predates `test_sqlplan_live.py` entirely — 21 test functions
 then, 23 now — so it could not have executed two of the six things the gate line names.
 
-### 33. The suite has load-sensitive tests, and a flake let a merge go through on red — 2026-09-02, the steam-deck half FIXED, the rest OPEN
+### 33. The suite has load-sensitive tests, and a flake let a merge go through on red — 2026-09-02, the steam-deck half FIXED 2026-09-02, **the rest CLOSED 2026-09-04 at `d2b963d5`**
+
+**The log-panel half.** `test_log_panel.py::test_a_runner_dropped_before_its_thread_runs_does_not_leave_the_worker_dead`
+held its job open with `gate.wait(5.0)`, so "provably still in flight" was true only for five
+seconds of wall clock and a loaded box made the verdict depend on the box. The clock is gone —
+`gate.wait()` with no bound — and every remaining wait in that file goes through `conftest.pump_until`,
+which does not return silently on its deadline: it fails, naming the turns/s it actually got against
+`PUMPED_HEALTHY` (98/s idle, 24/s with the whole suite 14-way at loadavg 83), so a starved box and a
+wedged subject are told apart IN THE REPORT rather than by re-running. That is the damage this entry
+is about, answered directly.
+
+**"`--dist loadfile` is a harness setting, so the test is still order-sensitive for anyone who runs
+the suite another way" — measured, and no longer true.** On m910q (4 cores, a live `mangosd` taking
+~60% of one of them throughout), 2026-09-05, on a copy of the tree at `6546b190`, with **no
+`--dist loadfile` anywhere**:
+
+```
+-m 'not integration' -n auto  x5   ->  2536 passed, 4 skipped   (18.0 / 19.5 / 17.7 / 20.9 / 21.2 s)
+-m 'not integration' -n 14    x3   ->  2536 passed, 4 skipped   (20.2 / 20.7 / 19.2 s)
+```
+
+`-n 14` is 3.5x this box's cores; loadavg was 3.6, 5.4 and 10.4 after the three runs. Eight
+whole-suite runs under the exact distribution this entry says the harness was chosen to avoid, zero
+failures, and the count matches CI's baseline.
+
+**The bound the fix leans on is audited rather than trusted.** `test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number`
+parses the file and requires every deadline to be one of the named constants — proven RED here on
+2026-09-05 by putting `gate.wait(5.0)` back: `AssertionError: … Extra items in the left set: '5.0'`,
+`1 failed, 21 deselected`. `test_an_expired_pump_says_so_and_reports_how_fast_it_ran` holds the
+report itself (restoring the silent return left `21 passed` without it, measured 2026-09-04). Five
+files now audit their own deadlines through the one helper.
+
+**What is recorded rather than fixed, because it cannot be fixed.** The original 60 s stall was never
+reproduced, so what is proven is that this test no longer depends on the two things that were
+removed — not that the red run of 2026-09-02 cannot recur. Its own docstring says exactly that. And
+the identity of that failure is gone for good: the grep that read it kept only the totals. The
+lesson survives as machinery in two places — `pump_until`'s report, and `run-tests-vm.sh --checks`,
+which until 2026-09-04 chained every step through one `;`-joined ssh command and `exit $?`, so the
+status was the LAST step's and a red suite exited 0. It now accumulates `rc` across the steps and
+prints `=== --checks: RED (see !! lines above) ===`. **That helper lives on the laptop
+(`C:\Users\perzi\run-tests-vm.sh`) and not in this repo**, so this is the one claim in this entry a
+reader cannot re-derive from the tree; its reasoning is in the script's own header at lines 203-208.
+
+---
+
+**The original entry, unchanged below.**
+
 
 **What happened, recorded because the process failure is the more useful half.** The verification run
 before merging `fix/gate-7.2-7.3-code` reported **`1 failed, 2003 passed, 3 skipped`**. The merge went
@@ -2404,7 +2598,59 @@ A repair was in flight in this tree the same night; this entry records the defec
 Every line number above is pinned to `4c959d70` for that reason: `networking.py` was being edited
 while this was written, and by morning they will point at something else.
 
-### 40. Abandoning `logs_source()` aborts the interpreter at exit — 2026-09-04, OPEN
+### 40. Abandoning `logs_source()` aborts the interpreter at exit — 2026-09-04, **CLOSED 2026-09-05 at `d2b963d5`**
+
+**What was done.** `runner.stream()` is now a plain function that builds the generator, registers it
+weakly in `_LIVE_STREAMS` with a holder for the child `Popen`, and returns it; an `atexit` hook,
+`_close_abandoned_streams()`, closes whatever is still open at exit. `atexit` runs BEFORE
+finalisation, so the generator's own `finally` can still terminate the child and join the reader —
+which is precisely what it could not do when the shutdown garbage collector reached it. The
+registration is why `stream()` is no longer a generator function; the body moved to `_stream_lines()`
+so no caller can skip it, and the laziness that change threatens is asserted rather than asserted-in-a-comment
+by `test_stream_registers_at_the_call_and_starts_no_process_until_the_first_next`.
+
+**The second shape, which is the app's own.** A generator another thread is RUNNING refuses
+`close()` with `ValueError: generator already executing` — `native._pump()`'s worker sitting inside
+`docker.run_attached()` inside `stream()`. That is logged at debug and the CHILD is ended directly
+instead, because a frame that is executing cannot be entered from here; the thread that owns it then
+leaves its `readline()` on EOF and runs the `finally` itself. Without that branch the driver exited
+**0** — no abort, nothing contended — and left its grandchild alive with **PPID 1**.
+
+**Re-derived on m910q 2026-09-05, on a copy of the tree at `6546b190`, at loadavg ~3 with a live
+`mangosd` beside it.** GREEN: sixty consecutive runs of
+`pytest tests/test_runner.py -k "worker_thread or abort_the_interpreter"` -> **`nonzero=0 fatal=0
+runs=60`**. RED, with `atexit.register(_close_abandoned_streams)` commented out and nothing else
+changed: **2 failed** on the first run, both shapes at once —
+
+```
+AssertionError: Fatal Python error: _enter_buffered_busy: could not acquire lock for
+  <_io.BufferedReader name=5> at interpreter shutdown, possibly due to daemon threads
+AssertionError: pid 2193871 outlived the driver
+```
+
+The 60-run count is not ceremony: this test's own driver had a 2-in-60 flake of its own (runs 16 and
+54, `nonzero=2 fatal=2`, the same `_enter_buffered_busy` abort raised by the TEST rather than by
+`runner`, because a bare `for _line in gen` let the terminate's `CalledProcessError` escape into
+`threading.excepthook` mid-finalisation). The driver's `work()` catches `BaseException` for that
+reason, and a 3%-of-60 flake needs a sample to say it is gone.
+
+**Four tests hold it**, each a different half:
+`test_abandoning_a_stream_without_closing_it_does_not_abort_the_interpreter` (the abort),
+`test_the_exit_hook_ends_the_child_of_a_stream_another_thread_is_inside` (the refusal),
+`test_a_stream_a_worker_thread_is_running_at_exit_leaves_no_child_behind` (the end-to-end orphan,
+`/proc/<pid>` on Linux), and `test_the_exit_hook_goes_on_past_a_stream_whose_close_raises` (one bad
+generator must not stop the ones after it).
+
+**Two alternatives are rejected in writing rather than left for the next reader to retry**, both
+measured on the same box and day: not closing `proc.stderr` while the reader is alive moves the
+abort rather than removing it (the `BufferedReader`'s deallocation takes the same lock — still 134,
+still `_enter_buffered_busy`), and making the reader non-daemon so `threading._shutdown()` joins it
+first turns the abort into a launcher that will not close, because nothing has ended the child at
+that point.
+
+---
+
+**The original entry, unchanged below.**
 
 Found by 7.10's sweep. A `logs_source()` generator that is dropped without being closed makes the
 interpreter abort at shutdown — SIGABRT, exit 134 — from inside `runner.stream()`'s `finally`.

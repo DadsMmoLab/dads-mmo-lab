@@ -49,19 +49,46 @@ Docker 29.1.3 / Compose 2.40.3 / buildx 0.30.1 from Ubuntu's own packages.
 
 | # | clause (as reworded 2026-09-04) | verdict here | where |
 |---|---|---|---|
-| 1 | clean checkpoint | **MET** — `docker: NOT INSTALLED`, no docker group, no `~/wowserver`, 78 GB, up 0 min, straight after the restore | `state-as-restored.txt`; `press1.log:3-14` (the driver's own before-probe) |
-| 2 | starting state captured before press 1 | **MET** | `press1.log:3-14` |
-| 3 | press 1: consent dialog | **MET** — asked once, `answered group x1` | `press1.log:29-31,44` |
-| 4 | press 1: re-login report | **MET** — verbatim, and `state-after: id -Gn` still without `docker` | `press1.log:34-37,45-51` |
+| 1 | clean checkpoint | **MET** — `docker: NOT INSTALLED`, no docker group, no `~/wowserver`, 78 GB, up 0 min, straight after the restore | `state-as-restored.txt`; `press1.log:3-13` (the driver's own before-probe) |
+| 2 | starting state captured before press 1 | **MET** | `press1.log:3-13` |
+| 3 | press 1: consent dialog | **MET** — asked once at `:27`, answered `y` at `:28`, `docker group consent for pk: granted` at `:29`, and `answered group x1` in the driver's exit line at `:34` | `press1.log:18-27,29,34` |
+| 4 | press 1: re-login report | **MET** — the report verbatim at `:31`, repeated in the failure sentence at `:32-33`; `state-after: id -Gn` still without `docker` at `:40-41` | `press1.log:31-33,40-41` |
 | 5 | re-login | **MET as the 7.1 lane did it**: press 2 under `sg docker -c`, whose before-probe shows `docker` in `id -Gn` | `press2.log:9` |
 | 6 | a later press reaches `ready` | **MET** — press 3, `--- ready` at line 3372, `install of wow-wotlk finished` 01:09:56, exit 0 | `press3.log:3371-3380` |
 | 7 | kill mid-build | **MET** — SIGKILL at edge 1226/1834, unit `Result=signal`, no install/buildx/inhibitor survivors, daemon compile stopped | `kill-record.txt` |
 | 8 | resume recovers the finished objects from the ccache mount | **NOT observed on press 3** (see below: the probe reset the mount); **MET in cycle 2** on the same box: 590 objects, 340 MB, replayed in ~5 s, 590/2400 hits | `edge-rate.txt` (press 3: no replay); `cycle2-edge-rate.txt`, `ccache-stats.txt:63-91` |
 | 9 | `docker compose config` matches a fixture from a different run | **MET** — the 09-04 clean capture: 59 passed, 0/0 differences; this run's capture is byte-identical (md5 `5ec739cc…`) | `../7.1-ubuntu-2026-09-04-clean/compose-diff.txt`, `COMPOSE-CAPTURE.md` |
-| 10-12 | auth log `127.0.0.1:8085`, no `UPDATE`, from the container's log | **captured, not claimed** — an owner decision per the brief. `docker logs ac-authserver` line 42: `Added realm "AzerothCore" at 127.0.0.1:8085.`; a case-insensitive `UPDATE` grep hits 4 lines | `final-state.txt` |
+| 10-12 | auth log `127.0.0.1:8085`, no `UPDATE`, from the container's log | **captured, not claimed** — an owner decision per the brief. **And the capture is of a container that no longer exists: read what it says below before citing it.** At 01:14:33, `docker logs ac-authserver` line 42 read `Added realm "AzerothCore" at 127.0.0.1:8085.`; a case-insensitive `UPDATE` grep hit 4 lines | `final-state.txt:380-381`; see "The `127.0.0.1:8085` line belongs to a container that was destroyed nine minutes later" |
 | 13 | account | **MET** — `YULON` id 101 GM 3, read back by `docker exec mysql`, second call `created=False` | `account.log` |
 | 14 | client login from the host | **NOT RUN** — needs the owner's laptop client; Tailscale is not on this restore | — |
 | 15 | after the LAN step | **NOT RUN, deliberately** — bug-checklist §39 (the step enables ufw and cuts SSH); another lane owns it. The realm row reads `172.30.55.119` because the engine's `ready` stage set it, not the LAN step | `final-state-2.txt` |
+
+## The `127.0.0.1:8085` line belongs to a container that was destroyed nine minutes later
+
+Corrected 2026-09-05 by a doc pass over this folder, against the box itself. The clause-10-12
+row above was written from `final-state.txt`, captured at 01:14:33 while press 3's own
+`ac-authserver` was up. That container was removed at 01:23:00 by the cycle-2 `compose down`
+(timeline row 40), and the three containers on the box today were created by the cycle-2 cleanup
+`compose up` at 01:56:40. Measured on `yulon-ubuntu` on 2026-09-05, read-only:
+
+    docker inspect -f '{{.Created}}' ac-authserver  ->  2026-09-04T23:56:40.932489833Z   (= 01:56:40 CEST)
+    docker logs ac-authserver | grep -n 'Added realm'
+        41:Added realm "AzerothCore" at 172.30.55.119:8085.
+
+So the box **as left** answers `172.30.55.119:8085`, at line 41, and the `127.0.0.1:8085` at line
+42 exists only inside `final-state.txt`. Both readings are true of their own container and they
+are not in conflict: the authserver reads `acore_auth.realmlist` once at startup, press 3's
+authserver came up before `ready` rewrote that row, and the cycle-2 restart read the rewritten
+row. The realm row itself never changed between the two: `final-state.txt` and
+`final-state-2.txt` both hold `1 AzerothCore 172.30.55.119 172.30.55.119 8085`.
+
+**What that costs the clause.** 7.1's clauses 10-12 ask for the auth log's `127.0.0.1:8085`
+line. The capture that answers them is a snapshot of a destroyed container, and it is not
+reproducible from the box — a reader who runs `docker logs ac-authserver` there today gets the
+other address and would reasonably conclude this record is wrong. It is not wrong; it is stale,
+and "captured, not claimed" is doing more work than it looks. Whoever settles 10-12 on the 7.1
+line should settle it on the reworded criterion (the realm row plus `ready`'s own transcript
+line, `press3.log:3377`), which both files still support, and not on this one.
 
 ## Zero bash on the path
 
@@ -87,7 +114,11 @@ witnesses, none of them the engine's own claim:
   upstream's VERSION out of that file with `sed`. Nothing from `catalog/installers/`.
 * **The transcripts say what ran**: press 1 had no stage at all (refused before the spine);
   press 2 `--- clone-core … --- build`; press 3 all nine. The only `.sh` strings in the three
-  transcripts are `apps/docker/entrypoint.sh` — the AzerothCore image's own entrypoint.
+  transcripts are the AzerothCore image's own entrypoint, under **two** spellings — corrected
+  2026-09-05, this said "`apps/docker/entrypoint.sh`" alone and the capture it cites lists both:
+  `2 /azerothcore/entrypoint.sh` and `2 apps/docker/entrypoint.sh` (`final-state.txt:377-378`).
+  One file, named as the build context sees it and as the image sees it; nothing from
+  `catalog/installers/`.
 
 ## Press 3 recompiled everything, and it was the measurement's fault
 
@@ -124,6 +155,19 @@ so the throwaway build could not be served from BuildKit's layer cache:
   `yulon.install_wiring` in the press-B command it was about to run; the bracketed pattern
   protects a recorder from its own argv, not from another shell that spells the same string.
   The unit itself: `Result=signal`.)
+* **`compiler-processes=1` in that file is the same shell, not a surviving compiler** — added
+  2026-09-05 by the doc pass, because the file read as though a compiler outlived the kill and
+  nothing here said otherwise. `cycle2-kill-record.txt:38` reads `cc1plus/ccache/ninja: 37`
+  before the kill, and all twelve post-kill samples (`:54-65`, 01:35:36 → 01:36:32) read
+  `containers=0 compiler-processes=1` — flat, never falling. The counter is
+  `pgrep -c -f '[c]c1plus|[c]cache|[n]inja'` (`kill-watcher.sh:43`), and pid 107605's argv,
+  printed four times in the survivors section directly above, contains
+  `~/gate72-ccache-stats.txt` — which matches `[c]cache`. Bracketing a pattern stops the
+  recorder matching ITSELF; it does nothing about a second shell that spells the word. Press 2's
+  own record is the control: same watcher, same counter, `cc1plus/ccache/ninja: 36` before the
+  kill (`kill-record.txt:38`) and **`compiler-processes=0` on all twelve samples afterwards**
+  (`kill-record.txt:54-65`), because no such shell was running then. The "audit by argv" trap,
+  twice in one folder.
 * **T1 (v2 probe)**: `Cacheable calls 590 / 590, Misses 590, Cache size 0.2 GiB, 340M /ccache`.
 * **press B**: `Using … (resuming)`, build re-entered from edge 1, `cycle2-edge-rate.txt`:
 
@@ -134,6 +178,17 @@ so the throwaway build could not be served from BuildKit's layer cache:
   | 600 | 209.2 s | 29.69 s |
   | 1226 | — | 230.9 s |
   | 1834 | — | 1078.1 s |
+
+  **`cycle2-edge-rate.txt`'s own header and column titles say "press 2" and "press 3" and it
+  records neither** — noticed and corrected 2026-09-05 by the doc pass. `edge-rate.sh` was
+  re-run for cycle 2 with its labels untouched, so a file whose two source logs are
+  `gate72-c2-pressA3.log` and `gate72-c2-pressB.log` (named in its own last section, `:35` and
+  `:38`) presents them as press 2 and press 3. The numbers are cycle 2's and are right: the
+  cold column is **press A3** and the resume column is **press B**, which the kill line at `:26`
+  settles on its own — `#25 210.7 [605/1834]`, A3's SIGKILL — against the same line of the real
+  press-2/press-3 file, `edge-rate.txt:26`, `#25 366.4 [1227/1834]` (the edge in flight when
+  press 2 was killed after 1226 completed). The header rows in `cycle2-edge-rate.txt` now carry
+  the correction and a verbatim copy of what they said; the columns of figures are untouched.
 
   The first ~590 edges came back in ~5.4 s (8.79 → 14.21 s), the knee sits at the object count
   T1 reported, and the whole 1834-edge build took **1078.1 s** against **1189.7 s** cold on
@@ -192,6 +247,17 @@ exit 0.
   kept: they are the record of what a `--no-cache` probe reads, which is nothing, every time.
 * Cycle 2 took three presses to start (container name, then existing checkout, then a fresh
   folder). Both refusals turned out to be findings and are kept as such.
+* **The doc pass of 2026-09-05, and what it found**, kept here because four of the five were
+  citations that read as fact and one was a capture that had gone stale under it. In order:
+  every `press1.log` line number in the clause table was wrong (the before-probe ends at `:13`
+  not `:14`; the consent lines are `:27/:29/:34`, not `:29-31,44`; the re-login report is
+  `:31-33` with `state-after: id -Gn` at `:40-41`, not `:34-37,45-51`); the `127.0.0.1:8085`
+  citation is a snapshot of a container destroyed at 01:23:00, and the box answers
+  `172.30.55.119:8085` today (its own section above); `cycle2-edge-rate.txt` called press A3 and
+  press B "press 2" and "press 3"; `cycle2-kill-record.txt`'s post-kill `compiler-processes=1`
+  is the recorder's own shell and nothing said so; and the transcripts spell the image
+  entrypoint two ways, not one. Nothing measured changed — every correction is a label, a line
+  number, or a sentence that was missing.
 
 ## State the box was left in
 
