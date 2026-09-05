@@ -4405,10 +4405,17 @@ _UNSHARE_NET_NS = 4026533509
 initial one), net 4026533509, mnt 4026531841. The initial pid namespace, so
 `/proc/1` is this machine's and the network comparison means what it says.
 
-The two numbers above are equal, and `_NETHOST_MNT_NS` is a third: a
-non-initial namespace inode is an allocation, not an identity, and the kernel
-hands the same one out again to different namespaces in different runs — a
-later `sudo unshare --pid --fork` the same day read 4026533619. Only
+FOUR constants in this file carry 4026533509 — `_NETHOST_MNT_NS`,
+`_UNSHARE_PID_NS`, `_UNSHARE_MOUNTPROC_MNT_NS` and this one — and one,
+`_UNSHARE_MOUNTPROC_PID_NS`, carries 4026533510. (Round 9 inserted the
+`_UNSHARE_MOUNTPROC_*` pair between `_UNSHARE_PID_NS` and this constant, which
+is why an earlier version of this paragraph counted two and a third.) That is
+the point: a non-initial namespace inode is an allocation, not an identity, and
+the kernel hands the same one out again to different namespaces in different
+runs — a later `sudo unshare --pid --fork` the same day read 4026533619, and
+six probes re-run on m910q on 2026-09-05 at 17:05 UTC read pid/net
+4026533620/4026533621 for `unshare --net --pid --fork`, where the row in
+`_INITIAL_PID_NAMESPACE_INO`'s table has 4026533509/4026533510. Only
 `_HOST_PID_NS` is a constant (`PROC_PID_INIT_INO`), which is the whole reason
 the pid question can be asked without privilege."""
 
@@ -4691,16 +4698,25 @@ def test_the_pid_question_refuses_both_shapes_without_reading_pid_1() -> None:
     The first is the sentence's counterexample: `/proc/1` IS this machine's
     init, both comparisons would have answered correctly, and the refusal is a
     false one. Both are refused all the same, and this test pins that they are
-    refused ALIKE — the two signatures differ in every `/proc/1` answer and
-    reach the same cause — and, in the same breath, that the module does not
-    buy the difference. `/proc/1/ns/pid` would separate them and is not free:
-    at uid 1000 on m910q that day `os.stat` raised `EACCES` for all three of
+    refused ALIKE — the two signatures differ in TWO of the three `/proc/1`
+    answers, `ns/pid` (4026531836 against 4026533510) and `ns/mnt` (4026531841
+    against 4026533509), while `/proc/1/ns/net` is the host's 4026531840 in
+    both, which is the row `_INITIAL_PID_NAMESPACE_INO`'s table prints for
+    both spellings and what I read on m910q on 2026-09-05 — and reach the same
+    cause anyway, and, in the same breath, that the module does not buy the
+    difference. `/proc/1/ns/pid` would separate them and is not free: at uid
+    1000 on m910q that day `os.stat` raised `EACCES` for all three of
     `/proc/1/ns/{pid,net,mnt}` and only `sudo -n stat -L -c %i
     /proc/1/ns/pid` answered (4026531836), so reading it would cost the
     elevation fallback the other two questions pay and answer `"unknown"`
     without a prefix. `_namespaced()` hands out `/proc/1/ns/pid` anyway: if
     anyone spends that read, the first signature stops being
-    `"other-pid-namespace"` and this assertion is what says so.
+    `"other-pid-namespace"` and this assertion goes red. It is not the only
+    assertion that would: `test_the_cause_is_the_namespace_that_actually_differs`
+    drives the same shape and went red beside this one under both mutations of
+    round 10's driver. This test duplicates that coverage on purpose, to hold
+    the DECISION not to spend the read in one readable place; round 10's gate
+    file names which test each mutation reddens.
     """
 
     def never(argv: list[str]) -> subprocess.CompletedProcess[str]:

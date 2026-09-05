@@ -305,7 +305,13 @@ showed pid 1's `ns/net` equal to the NEW namespace, which only the
 `--mount-proc` spelling produces. Without it the caller's `/proc` is inherited,
 `/proc/1` is still this machine's init, and pid 1's `ns/net` is the host's.
 Both spellings are listed above rather than one, because `/proc/self/ns/pid`
-reads the same in both and no question this module asks can tell them apart.
+reads a NON-INITIAL inode in both — not the same inode, which the two rows
+above refute at a glance (4026533509 against 4026533621, and 4026533509 against
+4026533510 for the `--pid --fork` pair; a re-run of the `--net --pid --fork`
+pair at 17:05 UTC that day read 4026533620 and 4026533510, different again) —
+and the only question this module
+asks of that inode is whether it is the initial one, which answers False in
+both.
 Every container runtime measured here remounts `/proc`, which is why the
 `docker` row looks like the `--mount-proc` rows and not like its own kernel
 flags.

@@ -2961,21 +2961,113 @@ No firewall command was applied anywhere. Evidence, command by command, in
 Two mutations, one at a time, in my own copy on m910q (`~/yulon-runs/fix9-bug39`, a `--shared`
 clone, venv symlinked, deleted afterwards): each anchor asserted to occur exactly once in the file
 bytes, the substitution asserted present-on-disk and the original absent before the run,
-`__pycache__` purged on both sides of every run, and the file byte-compared to the original
-(`sha256 34f37a78…`, 184325 bytes) after each restore. Baseline `238 passed`, restore `238 passed`,
-0 survivors. `tests/test_networking.py` went 237 -> 238: round 9 added
+`__pycache__` purged on both sides of every run, and the file byte-compared to the original after
+each restore. Baseline `238 passed`, restore `238 passed`, 0 survivors. **The guard round 9 printed
+for those restores — `sha256 34f37a78…`, 184325 bytes, CRLF — named no artefact of this commit.
+Round 9's meta traced those bytes to `wt-bug39`'s Windows working copy, `scp`'d over the Linux
+checkout before two further edits and the commit, from the fix agent's own journal — not re-derived
+here; what round 10 measured is only that no artefact of `4fb61ea9` has that size or hash. Round 10 re-ran both mutations on the
+committed blob and they are re-recorded below.** `tests/test_networking.py` went 237 -> 238: round 9
+added
 `test_the_pid_question_refuses_both_shapes_without_reading_pid_1` and removed none, and changed no
 existing test's assertions — only `_namespaced()` gained a `pid1_pid` parameter and an answer for
 `/proc/1/ns/pid` that nothing reads.
 
-What keeps this section OPEN is what round 5 recorded and rounds 7, 8 and 9 did not change:
-`enable_firewall`
-occurs in `pylauncher/yulon/networking.py` and `pylauncher/tests/test_networking.py` and nowhere
-else, so no view, service or controller can ask for the enable, and the owner's "click a button and
-the server's ports get forwarded" still ends at a plan the GUI cannot drive. The RELOAD half is on
+**ROUND 10, 2026-09-05 — text closure. No behaviour changed; five sentences did, and one guard was
+re-run against the bytes it claims to be about. Still OPEN.** Round 9's review and meta both found
+the behaviour measured-correct in both pid shapes and blocked the merge on prose. Everything below
+was measured by me on 2026-09-05 on **m910q** (namespaces, mutations, `sudo` environment) and on
+**yulon-fedora** (`journalctl`, read-only); no firewall command was applied anywhere, no VM was
+started or stopped, nothing ran on the laptop. Evidence, command by command, in
+`pyplan/gates/bug39-ssh-lockout/round10-2026-09-05.md`.
+
+* **"the two signatures differ in every `/proc/1` answer" was false in the fixture and on the box.**
+  `_namespaced()` hard-codes `"/proc/1/ns/net": _HOST_NET_NS`, so no parameter can vary it. Driving
+  the new test's two signatures through the fixture printed `/proc/1/ns/pid` 4026531836 vs
+  4026533510 DIFFER, `/proc/1/ns/net` 4026531840 vs 4026531840 **SAME**, `/proc/1/ns/mnt`
+  4026531841 vs 4026533509 DIFFER; the box agrees — `sudo -n unshare --pid --fork` and the same with
+  `--mount-proc`, re-probed at 17:05 UTC, both read pid 1's `ns/net` as the host's 4026531840. The
+  docstring now says TWO of the three, names which and with what values, and says `/proc/1/ns/net`
+  is the host's in both. Its closing claim — that this test is what says so if anyone spends the
+  read — is corrected in the same breath: both round-10 mutations reddened
+  `test_the_cause_is_the_namespace_that_actually_differs` alongside it, and the docstring now says
+  the duplication is deliberate.
+* **The mutation guard named a file no commit contains.** Round 9 recorded `sha256 34f37a78…,
+  184325 bytes, CRLF` as the restore guard; `git show 4fb61ea9:pylauncher/yulon/networking.py` is
+  **180895 bytes, LF, `sha256 bfc196bf30…`**, `git hash-object b8268a01873209479cb5023452d171cbdd9c7215`,
+  and the same blob converted to CRLF is 184343 bytes (`| python -c "len(b.replace(b'\n', b'\r\n'))"`)
+  — 184325 is neither. Both mutations were re-run on the
+  committed blob in a fresh `git clone --shared` checkout on m910q (`~/yulon-runs/fix10-bug39`,
+  deleted afterwards), the guard printed before, between and after each run: baseline `238 passed`,
+  M1 `2 failed, 236 passed`, M2 `2 failed, 236 passed`, restore `238 passed`, and the file's sha256
+  and blob id back to `bfc196bf…` / `b8268a01…` after each. Driver and full transcript committed as
+  `mutations-round10.py` / `mutations-round10.txt`.
+* **"`/proc/self/ns/pid` reads the same in both" contradicted the table two lines above it.** The
+  rows print 4026533509 and 4026533621 for the two `--net --pid --fork` spellings; a re-run of that
+  pair at 17:05 UTC read 4026533620 and 4026533510, different again. The sentence now says what is true and what
+  the module actually asks: a NON-INITIAL inode in both, and the only question asked of it is
+  whether it is the initial one.
+* **"The two numbers above are equal, and `_NETHOST_MNT_NS` is a third" was made stale by round 9's
+  own insertion.** Round 9 put `_UNSHARE_MOUNTPROC_PID_NS = 4026533510` and
+  `_UNSHARE_MOUNTPROC_MNT_NS = 4026533509` between the two constants that sentence counted.
+  Enumerated in the checkout rather than read: four constants carry 4026533509
+  (`_NETHOST_MNT_NS`, `_UNSHARE_PID_NS`, `_UNSHARE_MOUNTPROC_MNT_NS`, `_UNSHARE_NET_NS`) and one
+  carries 4026533510 (`_UNSHARE_MOUNTPROC_PID_NS`). The docstring names all five.
+* **Round 7's qualifier is back in the OPEN paragraph below**, and the one live apply this lane ever
+  ran on a real Fedora box is now recorded rather than alluded to: `sudo -n journalctl _COMM=sudo
+  --since today` on yulon-fedora lists **39 firewall writes at 06:00:22-06:07:39 UTC** in boot `-4`
+  — two `systemd-run --on-active=420 --unit=b39-failsafe[2] systemctl stop firewalld` failsafes,
+  both cancelled before firing, two identical `--add-port` / `--remove-port` cycles over
+  `FedoraWorkstation` and `docker`, and a closing `--add-port=1025-65535/tcp` that puts Fedora's
+  stock range back. The box now reads `1025-65535/tcp 1025-65535/udp` permanent and runtime, no
+  ports in `docker`, no `b39-failsafe*` units left. Those writes close three minutes before round 6's own
+  commit `ee361035` (`2026-09-05T08:10:40+02:00` = 06:10:40 UTC), which is what dates them. Full journal and current state in
+  `pyplan/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md`.
+* **The one inherited causal claim in the (5c) repair is now measured.** "`connected` follows
+  `SSH_CONNECTION`, which `sudo` strips" was carried from round 8's write-up and re-derived by
+  nobody. On m910q: `env | grep -cE '^SSH_(CONNECTION|CLIENT|TTY)='` is **2** as the ssh user, **0**
+  under `sudo -n`, **2** under `sudo -n -E`, and `/etc/sudoers:9` is `Defaults env_reset`. The
+  claim holds.
+
+What keeps this section OPEN is what round 5 recorded and rounds 7, 8, 9 and 10 did not change:
+`enable_firewall` occurs in exactly two files of code — `pylauncher/yulon/networking.py` and
+`pylauncher/tests/test_networking.py` — and otherwise only in this checklist and four records under
+`pyplan/gates/bug39-ssh-lockout/` (`grep -rln enable_firewall . --exclude-dir=.git`, run at
+`4fb61ea9`, seven files, no view, no service, no controller). So nothing the GUI owns can ask for
+the enable, and the owner's "click a button and the server's ports get forwarded" still ends at a
+plan the GUI cannot drive. The RELOAD half is on
 the path users hit today and is guarded; the ENABLE half is what must already be true before a
-control for it exists. Nothing in rounds 7, 8 or 9 ran `apply()` on any box, and no firewall command
-has been applied on any box in any of the three rounds.
+control for it exists. Nothing in rounds 7, 8, 9 or 10 ran `apply()` on any box. Round 7's own
+scoping of the neighbouring claim is restored here, because round 9 dropped it: no firewall command
+was applied on any box reached over ssh in those rounds, and the only `firewall-cmd` writes that
+executed were **inside a container** — container `b39r7` on m910q, whose `docker` zone round 7 bound
+by hand with `firewall-cmd --permanent --zone=docker --add-interface=docker0`
+(`pyplan/gates/bug39-ssh-lockout/round7-2026-09-05.md:8-9` and `:29-31`). Rounds 8, 9 and 10 ran
+listings and probes only. Earlier than that the lane did apply, on a real box: round 6's clean run
+wrote 39 firewall commands to **yulon-fedora** at 06:00-06:08 UTC on 2026-09-05 and put the box back
+— recorded, with the journal, in
+`pyplan/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md`.
+
+**What is measured-closed, and what is not**, in past tense with the commit each was closed at.
+Closed, each on the shape it names: the DefaultZone reading and the enable being withheld by
+default (`9b0eb089`, rebased to `e72bc758` and again to `ee361035`, round 6 — `plan()` takes
+`enable_firewall: bool = False` at `networking.py:2956`, and its docstring at `:2967` calls it "the
+one knob that can turn a firewall ON"). The refusal that named a cause that was not the cause (`ef022b3a`, round 7; correct
+inside `sudo unshare --net`, and corrected one shape over at `cd827c0f`, round 8, after `docker run
+--network=host` was measured). The zone-breadth warning that fired on every Docker box (`cd827c0f`,
+on yulon-fedora with real subprocesses, after round 7's container stand-in had bound its `docker`
+zone by hand and so proved nothing about a real box). The claim that `/proc/1` in a non-initial pid
+namespace is that namespace's init (`4fb61ea9`, round 9), where the separating read
+`/proc/1/ns/pid` was costed at uid 1000 — `EACCES` unprivileged, answered only under `sudo -n` —
+and declined on purpose. Round 10 changed no behaviour at all: it corrected five sentences and
+re-ran round 9's two mutations against the committed blob, which kill.
+NOT closed, and the reason this section is still OPEN: the LAN button. What the owner asked for is
+"click a button and the ports get forwarded", **LAN only** — and `enable_firewall` is a `plan()`
+keyword with no caller in any view, service or controller (the seven-file `grep` above), so there is
+no button to click and nothing to wire it to; the reload half is what users press today and it is
+guarded. **Not measured by any round so far:** what a LAN press does end to end on a box that then
+has the ports forwarded — every round from 7 on has been listings, probes and stand-ins, by the
+standing rule that bars applying a firewall change on a box reached over ssh.
 
 ### 40. Abandoning `logs_source()` aborts the interpreter at exit — 2026-09-04, **CLOSED 2026-09-05 at `d2b963d5`**
 
