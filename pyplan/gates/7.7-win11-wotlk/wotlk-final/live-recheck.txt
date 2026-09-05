@@ -1,0 +1,29 @@
+==== captured Sat 09/05/2026  4:59:00.27 box-local, box shows PST 
+0 
+==== install start Sat 09/05/2026  1:46:55.39 source=a0cc9dc0 
+==== install end Sat 09/05/2026  1:47:08.20 errorlevel 1 
+==== install start Sat 09/05/2026  1:56:11.13 source=a0cc9dc0 
+==== install end Sat 09/05/2026  4:30:26.73 errorlevel 0 
+ac-worldserver	Up 38 minutes	127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
+ac-authserver	Up 38 minutes	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+ac-database	Up 38 minutes (healthy)	127.0.0.1:3306->3306/tcp
+ac-db-import	Exited (0) 38 minutes ago	
+ac-client-data-init	Exited (0) 51 minutes ago	
+/ac-database StartedAt=2026-09-05T11:20:23.998648492Z RestartCount=0 Status=running ExitCode=0
+/ac-authserver StartedAt=2026-09-05T11:20:35.294481854Z RestartCount=0 Status=running ExitCode=0
+/ac-worldserver StartedAt=2026-09-05T11:20:35.305582457Z RestartCount=0 Status=running ExitCode=0
+/ac-db-import StartedAt=2026-09-05T11:09:59.854187422Z RestartCount=0 Status=exited ExitCode=0
+/ac-client-data-init StartedAt=2026-09-05T11:02:31.149307862Z RestartCount=0 Status=exited ExitCode=0
+2026-09-05T11:20:36.427820608Z [36mAzerothCore rev. 413bea61a85e+ 2026-09-04 09:03:49 -0700 (Playerbot branch) (Unix, RelWithDebInfo, Static) (worldserver-daemon)
+2026-09-05T11:20:36.486641307Z [31;1m> Config::LoadFile: Failed open file '/azerothcore/env/dist/etc/modules/playerbots.conf'
+2026-09-05T11:20:37.775430722Z [0m[36m> Config: Found config value 'Playerbots.Updates.EnableDatabases' from environment variable 'AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES'.
+2026-09-05T11:20:37.780225715Z [0m[36m> Config: Found config value 'PlayerbotsDatabaseInfo' from environment variable 'AC_PLAYERBOTS_DATABASE_INFO'.
+2026-09-05T11:20:37.780257920Z [0m> Config: Missing property PlayerbotsDatabase.WorkerThreads in config file /azerothcore/env/dist/etc/worldserver.conf, add "PlayerbotsDatabase.WorkerThreads = 1" to this file or define 'AC_PLAYERBOTS_DATABASE_WORKER_THREADS' as an environment variable.
+2026-09-05T11:20:37.782957510Z [33m> Config: Missing property PlayerbotsDatabase.WorkerThreads in config file /azerothcore/env/dist/etc/worldserver.conf, add "PlayerbotsDatabase.WorkerThreads = 1" to this file or define 'AC_PLAYERBOTS_DATABASE_WORKER_THREADS' as an environment variable.
+2026-09-05T11:20:37.782979113Z [0m> Config: Missing property PlayerbotsDatabase.SynchThreads in config file /azerothcore/env/dist/etc/worldserver.conf, add "PlayerbotsDatabase.SynchThreads = 1" to this file or define 'AC_PLAYERBOTS_DATABASE_SYNCH_THREADS' as an environment variable.
+2026-09-05T11:20:37.785046812Z [33m> Config: Missing property PlayerbotsDatabase.SynchThreads in config file /azerothcore/env/dist/etc/worldserver.conf, add "PlayerbotsDatabase.SynchThreads = 1" to this file or define 'AC_PLAYERBOTS_DATABASE_SYNCH_THREADS' as an environment variable.
+acore_auth	22
+acore_characters	111
+acore_playerbots	30
+acore_world	315
+1	AzerothCore	172.30.52.119	172.30.52.119	8085

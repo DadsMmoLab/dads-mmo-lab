@@ -1,0 +1,42 @@
+2026-09-05T11:20:36.142268949Z cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
+2026-09-05T11:20:36.173742997Z cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
+2026-09-05T11:20:36.177456833Z '/azerothcore/env/dist/etc/authserver.conf.dist' -> '/azerothcore/env/dist/etc/authserver.conf'
+2026-09-05T11:20:36.192314780Z Starting authserver...
+2026-09-05T11:20:36.296531938Z [36mAzerothCore rev. 413bea61a85e+ 2026-09-04 09:03:49 -0700 (Playerbot branch) (Unix, RelWithDebInfo, Static) (authserver)
+2026-09-05T11:20:36.298761461Z [0m[36m<Ctrl-C> to stop.
+2026-09-05T11:20:36.298832271Z 
+2026-09-05T11:20:36.301234318Z [0m[36m   █████╗ ███████╗███████╗██████╗  ██████╗ ████████╗██╗  ██╗
+2026-09-05T11:20:36.304626408Z [0m[36m  ██╔══██╗╚══███╔╝██╔════╝██╔══██╗██╔═══██╗╚══██╔══╝██║  ██║
+2026-09-05T11:20:36.307807968Z [0m[36m  ███████║  ███╔╝ █████╗  ██████╔╝██║   ██║   ██║   ███████║
+2026-09-05T11:20:36.340584503Z [0m[36m  ██╔══██║ ███╔╝  ██╔══╝  ██╔══██╗██║   ██║   ██║   ██╔══██║
+2026-09-05T11:20:36.344359249Z [0m[36m  ██║  ██║███████╗███████╗██║  ██║╚██████╔╝   ██║   ██║  ██║
+2026-09-05T11:20:36.344925131Z [0m[36m  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝
+2026-09-05T11:20:36.347681929Z [0m[36m                                 ██████╗ ██████╗ ██████╗ ███████╗
+2026-09-05T11:20:36.351901439Z [0m[36m                                ██╔════╝██╔═══██╗██╔══██╗██╔════╝
+2026-09-05T11:20:36.354741749Z [0m[36m                                ██║     ██║   ██║██████╔╝█████╗
+2026-09-05T11:20:36.356801247Z [0m[36m                                ██║     ██║   ██║██╔══██╗██╔══╝
+2026-09-05T11:20:36.358445184Z [0m[36m                                ╚██████╗╚██████╔╝██║  ██║███████╗
+2026-09-05T11:20:36.362153820Z [0m[36m                                 ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝
+2026-09-05T11:20:36.362175323Z 
+2026-09-05T11:20:36.362180824Z [0m[36m     AzerothCore 3.3.5a  -  www.azerothcore.org
+2026-09-05T11:20:36.362185525Z 
+2026-09-05T11:20:36.364131806Z [0m[36m> Using configuration file       /azerothcore/env/dist/etc/authserver.conf
+2026-09-05T11:20:36.367250656Z [0m[36m> Using SSL version:             OpenSSL 3.0.13 30 Jan 2024 (library: OpenSSL 3.0.13 30 Jan 2024)
+2026-09-05T11:20:36.369223241Z [0m[36m> Using Boost version:           1.83.0
+2026-09-05T11:20:36.370748462Z [0m[36m 
+2026-09-05T11:20:36.377012067Z [0m[36m> Config: Found config value 'Updates.EnableDatabases' from environment variable 'AC_UPDATES_ENABLE_DATABASES'.
+2026-09-05T11:20:36.379648948Z [0m[33m> AUTOUPDATER: Automatic database updates are disabled for all databases in the config! This is not recommended!
+2026-09-05T11:20:36.382495959Z [0m[36m> Config: Found config value 'LoginDatabaseInfo' from environment variable 'AC_LOGIN_DATABASE_INFO'.
+2026-09-05T11:20:36.382626278Z [0m[36mOpening DatabasePool 'acore_auth'. Asynchronous connections: 1, synchronous connections: 1.
+2026-09-05T11:20:36.450877740Z [0m[36mMySQL client library: 8.0.46
+2026-09-05T11:20:36.452202431Z [0m[36mMySQL server ver: 8.4.11 
+2026-09-05T11:20:36.454902921Z [0m[36mConnected to MySQL database at ac-database
+2026-09-05T11:20:36.523472629Z [0m[36mMySQL client library: 8.0.46
+2026-09-05T11:20:36.525642842Z [0m[36mMySQL server ver: 8.4.11 
+2026-09-05T11:20:36.528169607Z [0m[36mConnected to MySQL database at ac-database
+2026-09-05T11:20:36.532255998Z [0m[36mDatabasePool 'acore_auth' opened successfully. 2 total connections running.
+2026-09-05T11:20:36.534594036Z [0m[36m 
+2026-09-05T11:20:36.754480707Z [0m[36mStarted auth database connection pool.
+2026-09-05T11:20:36.762629084Z [0m[36mLoading IP Location Database...
+2026-09-05T11:20:36.764182309Z [0m[36m 
+2026-09-05T11:20:36.779216781Z [0m[36mAdded realm "AzerothCore" at 127.0.0.1:8085.

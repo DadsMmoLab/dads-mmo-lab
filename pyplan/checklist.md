@@ -1613,6 +1613,31 @@
     stopped on `MD5 MISMATCH` (that is the `2` in `tortoise-unpack.exitcode`; the client the install
     used was verified at 14:06). The boot may be quicker on a quiet box; the budget covers the boot
     that was measured. Still owed before this line ticks: WotLK's transcript on this box.
+  - **WOW WOTLK, FRESH FROM AN EMPTY FOLDER WITH ITS TRANSCRIPT, 2026-09-05 — the fourth of four.**
+    `D:\gate\wotlk-server77` from source `a0cc9dc0`, driven by `C:\gate\run-wotlk77.cmd` as task
+    `dml-wotlk77`: **exit 0** at 04:30:26 box-local (13:30 CEST), **2 h 34 min 15 s** after its
+    01:56:11 start. `ac-db-import` **Exited (0)** — the 6.3 blocker, this time with the transcript that
+    the 08-31 install never had; `ac-client-data-init` Exited (0); worldserver, authserver and database
+    up with `RestartCount=0`; schemas `acore_auth` 22 / `acore_characters` 111 / `acore_playerbots` 30
+    / `acore_world` 315, identical to every other platform's record; realm `172.30.52.119:8085`. The
+    banner the catalog waits for, from `docker logs -t`: `11:30:24Z … AzerothCore rev. 413bea61a85e+ …
+    ready...` after `World Initialized In 4 Minutes 35 Seconds`; `Random Bots Stats: 500 online` at
+    11:40:46Z. Stage walls from the transcript and `docker inspect`: clone 26 min; build **1h39m** (1834
+    steps, 5 jobs); client-data + start-db 7 min; import 10 min; up → ready **609 s**. Evidence:
+    `pyplan/gates/7.7-win11-wotlk/` (transcript, exit codes, container captures, README).
+    Two facts from getting it started: preflight first **refused** the run — `free space on Docker's
+    disk: 22 GB free, and the install needs 40 GB` — because the VHDX on `C:` carried 20.6 GB of stale
+    build cache; pruned and compacted (32.6 → 12.0 GB), the second start passed. And the 08-31 install's
+    five stopped `ac-*` containers had to be removed first, because compose pins those names globally
+    (volumes kept). The worldserver logs `Failed open file …/modules/playerbots.conf` and then takes
+    every bot setting from `AC_PLAYERBOTS_*`; recorded, not yet compared with the Linux transcripts.
+    **What still keeps this line open:** TBC's engine verdict on this box is `exit 1` (the 1800 s
+    budget, two bullets up) although the install was complete — the quiet-budget engine that fixes
+    that is merged with `lane/readybudget`; a second Install press on `C:\gate\tbc-server` under it
+    (build, extract and mmaps already done, so conf → ready only) is the run that turns TBC's exit code
+    into a 0 and this box into four for four with four transcripts. Also to state honestly at the
+    tick: only the first (failed) WotLK attempt ran from the `clean-ssh` checkpoint; Vanilla, TBC,
+    Tortoise and this WotLK each ran from an empty folder on the box those installs accumulated on.
   - **Windows Vanilla, started 2026-09-04 04:20** into `C:\gate\vanilla-server` against the 5.14 GB
     1.12.1 client at `C:\gate\client`. Numbers already in hand from setting it up, since 7.7 asks
     for throughput: the client zip came down from `wow.baerthe.com` at about **13 MB/s** (5.33 GB,
