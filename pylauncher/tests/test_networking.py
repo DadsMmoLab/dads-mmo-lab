@@ -1146,10 +1146,18 @@ def _route(**kwargs: object) -> networking.SshRoute:
 
 
 def _ports(run: object, prefix: tuple[str, ...] = ()) -> tuple[set[int], bool]:
-    """`_sshd_listening_ports()` with the namespace answer pinned to `_here`."""
-    return networking._sshd_listening_ports(  # type: ignore[arg-type]
+    """`_sshd_listening_ports()` with the namespace answer pinned to `_here`.
+
+    Two values, not the three the function returns: these fixtures are about
+    the SHAPE of the table, and the caller's verdict on a table is `settled and
+    the reading was this machine's` — which is what `detect_ssh_route()`
+    computes and what this returns. The third value is asserted on its own in
+    the tests that are about which machine the reading came from.
+    """
+    found, settled, machine = networking._sshd_listening_ports(  # type: ignore[arg-type]
         run, prefix, in_host_namespace=_here
     )
+    return found, settled and machine is True
 
 
 def _no_ss(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1201,6 +1209,7 @@ def _firewalld_plan(
     enable_firewall: bool = False,
     route: networking.SshRoute | None = None,
     zones: tuple[str, ...] | None = ("public",),
+    default_zone: str | None = None,
     zoning: networking.FirewalldZoning | None = None,
 ) -> networking.NetworkPlan:
     """A LAN plan on a firewalld box, with the daemon's state and zones named rather than probed.
@@ -1225,7 +1234,19 @@ def _firewalld_plan(
     answer = route if route is not None else networking.SshRoute()
     read = zoning
     if read is None and zones is not None:
-        read = networking.FirewalldZoning(write=zones, permanent=zones, runtime=zones)
+        # Both default-zone readings are the first zone: an ordinary box, where
+        # the daemon's live default and `DefaultZone` in firewalld.conf are the
+        # same name. A running daemon whose CONFIGURED default could not be read
+        # refuses the reload (round 6), and that refusal is asserted by the
+        # tests that are about it, not implied by every fixture in this file.
+        named = default_zone or ("public" if "public" in zones else zones[0])
+        read = networking.FirewalldZoning(
+            write=zones,
+            permanent=zones,
+            runtime=zones,
+            default_zone=named,
+            configured_default_zone=named,
+        )
     return networking.plan(
         WOTLK,
         "lan",
@@ -1660,7 +1681,11 @@ def test_the_default_firewalld_plan_asks_the_machine_about_ssh() -> None:
             detect_ssh=lambda: probe(daemon),
             detect_firewalld=lambda: daemon,
             detect_zones=lambda daemon: networking.FirewalldZoning(
-                write=("public",), permanent=("public",), runtime=("public",)
+                write=("public",),
+                permanent=("public",),
+                runtime=("public",),
+                default_zone="public",
+                configured_default_zone="public",
             ),
         )
 
@@ -1681,7 +1706,11 @@ def test_the_default_firewalld_plan_asks_the_machine_about_ssh() -> None:
         detect_ssh=never,
         detect_firewalld=lambda: "stopped",
         detect_zones=lambda daemon: networking.FirewalldZoning(
-            write=("public",), permanent=("public",), runtime=("public",)
+            write=("public",),
+            permanent=("public",),
+            runtime=("public",),
+            default_zone="public",
+            configured_default_zone="public",
         ),
     )
     assert not any(networking._can_lock_out(c) for c in stopped.firewall_commands)
@@ -2514,7 +2543,13 @@ def test_the_ports_are_written_to_every_active_zone_before_the_reload() -> None:
         ("firewall-cmd", "--reload"),
     ]
     assert p.ssh_ports == (2022,) and p.firewalld_zones == zones
-    assert p.refusals == () and p.warnings == (), "resolved, zoned and written: told nothing"
+    assert p.refusals == (), "resolved, zoned and written: nothing is refused"
+    # Round 6: "told nothing" was the wrong half of that. Two zones means the
+    # ports went somewhere the user did not name, so the plan names both.
+    said = next(w for w in p.warnings if "game ports" in w)
+    assert "`internal`" in said and "`public`" in said and "3724, 8085" in said
+    assert "2022" in said, "and why the SSH port is in every one of them"
+
     seen: list[list[str]] = []
 
     def internal_fails(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -3125,8 +3160,12 @@ def _recording_probes(
         seen["asked"] = (backend, elevate)
         return prefix if elevate else ()
 
-    def fake_ssh(prefix: tuple[str, ...] = ()) -> networking.SshRoute:
+    def fake_ssh(
+        prefix: tuple[str, ...] = (),
+        backend: platform.FirewallBackend | None = None,
+    ) -> networking.SshRoute:
         seen["ssh"] = prefix
+        seen["ssh_backend"] = backend
         return networking.SshRoute(ports=(22,), listeners_readable=True)
 
     def fake_daemon(
@@ -3143,7 +3182,11 @@ def _recording_probes(
     ) -> networking.FirewalldZoning:
         seen["zones"] = prefix
         return networking.FirewalldZoning(
-            write=("internal",), permanent=("internal",), runtime=("internal",)
+            write=("internal",),
+            permanent=("internal",),
+            runtime=("internal",),
+            default_zone="internal",
+            configured_default_zone="internal",
         )
 
     monkeypatch.setattr(networking, "probe_prefix", fake_prefix)
@@ -3171,6 +3214,10 @@ def test_every_default_probe_in_a_plan_carries_the_same_authority(
     assert seen["ssh"] == ("sudo", "-n")
     assert seen["daemon"] == ("sudo", "-n")
     assert seen["zones"] == ("sudo", "-n")
+    assert seen["ssh_backend"] == "firewalld", (
+        "the route probe is told which backend's config it must find, or it can only ask "
+        "which namespace the sockets came from (round 6)"
+    )
     assert p.probed_elevated is True
     assert p.ssh_ports == (22,), "the port the elevated reading found is preserved"
 
@@ -3302,6 +3349,8 @@ def test_the_ports_go_where_the_reload_will_leave_them() -> None:
             write=("internal", "public", "work"),
             permanent=("internal", "public"),
             runtime=("work", "public"),
+            default_zone="public",
+            configured_default_zone="public",
             flush_all_on_reload=True,
         ),
     )
@@ -3332,6 +3381,8 @@ def test_a_runtime_zone_move_the_reload_will_undo_is_said_out_loud() -> None:
             write=("internal", "public", "work"),
             permanent=("internal", "public"),
             runtime=("work", "public"),
+            default_zone="public",
+            configured_default_zone="public",
             flush_all_on_reload=True,
         ),
     )
@@ -3356,6 +3407,8 @@ def test_flush_all_on_reload_no_changes_what_the_disagreement_means() -> None:
             write=("internal", "public", "work"),
             permanent=("internal", "public"),
             runtime=("work", "public"),
+            default_zone="public",
+            configured_default_zone="public",
             flush_all_on_reload=False,
         ),
     )
@@ -3372,6 +3425,8 @@ def test_two_readings_that_agree_say_nothing() -> None:
             write=("internal", "public"),
             permanent=("internal", "public"),
             runtime=("internal", "public"),
+            default_zone="public",
+            configured_default_zone="public",
             flush_all_on_reload=True,
         ),
     )
@@ -3433,8 +3488,9 @@ def test_a_table_read_in_another_network_namespace_is_no_evidence(table: str) ->
     namespace the reading came from, which is why THAT is the rule.
     """
     run = lambda argv: subprocess.CompletedProcess(argv, 0, table, "")  # noqa: E731
-    ports, settled = networking._sshd_listening_ports(run, in_host_namespace=lambda: False)
-    assert settled is False, "a table from another namespace settles nothing"
+    ports, settled, machine = networking._sshd_listening_ports(run, in_host_namespace=lambda: False)
+    assert settled is True, "the table itself is fine; it is whose it is that is not"
+    assert machine is False, "a table from another namespace settles nothing"
     route = networking.detect_ssh_route(environ={}, run=run, in_host_namespace=lambda: False)
     assert route.listeners_readable is False
     p = _ufw_plan(enable_firewall=True, route=route)
@@ -3453,7 +3509,11 @@ def test_a_namespace_question_that_cannot_be_answered_settles_nothing() -> None:
     compare it to, and a probe that cannot tell must not be read as a yes.
     """
     run = lambda argv: subprocess.CompletedProcess(argv, 0, _M910Q_ROOT, "")  # noqa: E731
-    assert networking._sshd_listening_ports(run, in_host_namespace=lambda: None) == ({22}, False)
+    assert networking._sshd_listening_ports(run, in_host_namespace=lambda: None) == (
+        {22},
+        True,
+        None,
+    )
 
 
 def test_the_namespace_is_asked_last_so_a_dead_table_spends_no_subprocess() -> None:
@@ -3472,11 +3532,15 @@ def test_the_namespace_is_asked_last_so_a_dead_table_spends_no_subprocess() -> N
     unnamed = lambda argv: subprocess.CompletedProcess(  # noqa: E731
         argv, 0, _M910Q_UNPRIVILEGED, ""
     )
-    assert networking._sshd_listening_ports(unnamed, in_host_namespace=counting) == (set(), False)
+    assert networking._sshd_listening_ports(unnamed, in_host_namespace=counting) == (
+        set(),
+        False,
+        True,
+    )
     assert asked == 0, "a table with holes in it never asked"
 
     named = lambda argv: subprocess.CompletedProcess(argv, 0, _M910Q_ROOT, "")  # noqa: E731
-    assert networking._sshd_listening_ports(named, in_host_namespace=counting) == ({22}, True)
+    assert networking._sshd_listening_ports(named, in_host_namespace=counting) == ({22}, True, True)
     assert asked == 1
 
 
@@ -3585,3 +3649,475 @@ def test_a_machine_with_no_proc_namespaces_answers_nothing_rather_than_yes() -> 
     with pytest.MonkeyPatch.context() as patched:
         patched.setattr(networking.os, "stat", no_proc)
         assert networking.in_host_network_namespace() is None
+
+
+# --- round 6: the door DefaultZone left open, the breadth nobody was told
+# --- about, and the second namespace question -------------------------------
+
+
+_DIVERGED_PERMANENT_ZONES = """public (default)
+  target: default
+  interfaces:
+  sources:
+  services: dhcpv6-client mdns ssh
+  ports: 2222/tcp
+
+work
+  target: default
+  interfaces:
+  sources:
+  services: dhcpv6-client mdns ssh
+  ports:
+"""
+"""`firewall-cmd --permanent --list-all-zones` with the daemon and the file DISAGREEING.
+
+firewalld 2.2.3 in a fedora:41 container on m910q, 2026-09-05, after
+`firewall-offline-cmd --set-default-zone=work` — a supported call that returns
+`success` against a running daemon and writes only the file. The daemon's
+default is still `public`, so `public` is what carries the `(default)` tag HERE
+even though `DefaultZone=work` is what the next reload will install. Trimmed to
+the two zones that matter and to the fields the parser reads; the real answer
+lists all twelve zones.
+"""
+
+_DIVERGED_OFFLINE_ZONES = """public
+  target: default
+  interfaces:
+  sources:
+  services: dhcpv6-client mdns ssh
+  ports: 2222/tcp
+
+work (default)
+  target: default
+  interfaces:
+  sources:
+  services: dhcpv6-client mdns ssh
+  ports:
+"""
+"""`firewall-offline-cmd --list-all-zones` in that same state, one second later.
+
+The tag is on `work`, because this tool reads the files. Two commands, one
+machine, one moment, two different answers to "which zone is the default" —
+which is the whole of the blocker, and the reason this listing is the
+cross-check.
+"""
+
+_FIREWALLD_CONF_DEFAULT_WORK = (
+    "# comment\nDefaultZone=work\nFlushAllOnReload=yes\nIPv6_rpfilter=yes\n"
+)
+"""That container's firewalld.conf in that state.
+
+`DefaultZone` is six lines above the setting this module was already reading
+out of this file, which is what makes the blocker a door left open rather than
+a reading nobody could have taken.
+"""
+
+
+def test_the_default_zone_a_reload_installs_is_read_from_the_file_not_the_daemon() -> None:
+    """BLOCKER, round 6: `(default)` on a `firewall-cmd` listing is the DAEMON's answer.
+
+    Measured twice in the container above (firewalld 2.2.3, fedora:41 on m910q,
+    2026-09-05), daemon default `public`, file `DefaultZone=work`, reached by
+    editing the file and by `firewall-offline-cmd --set-default-zone=work`:
+
+        firewall-cmd --permanent --list-all-zones  ->  public (default)
+        firewall-cmd --get-active-zones            ->  public (default)
+        firewall-offline-cmd --list-all-zones      ->  work (default)
+
+    All three of round 5's readings agreed, `moved_at_runtime` was empty, and
+    the plan wrote 3724, 8085 and 2222 to `public` and reloaded: apply 4/4,
+    refusals 0, warnings 0. Afterwards the daemon's default was `work`, eth0
+    had "no zone", `work` listed no ports, `ssh -p 2222` answered "No route to
+    host" and curl on 3724 and 8085 both answered 000.
+    """
+    probe, _ = _zone_probes(
+        {
+            _PERMANENT_ARGV: (0, _DIVERGED_PERMANENT_ZONES),
+            _RUNTIME_ARGV: (0, _ACTIVE_ZONES_DEFAULT_ONLY),
+            _CONF_ARGV: (0, _FIREWALLD_CONF_DEFAULT_WORK),
+        }
+    )
+    read = networking.detect_firewalld_zones("running", run=probe)
+    assert read is not None
+    assert read.default_zone == "public", "what the daemon says"
+    assert read.configured_default_zone == "work", "what the reload will install"
+    assert read.default_zone_moves is True
+    assert read.write == ("public", "work"), "the surviving zone first, the new one after"
+    # And the disagreement is invisible to every reading round 5 had.
+    assert read.permanent == ("public",) and read.runtime == ("public",)
+    assert read.moved_at_runtime == ()
+
+
+def test_a_default_zone_that_moves_is_written_to_and_said_out_loud() -> None:
+    """The ports land in BOTH zones before the reload, and the plan names the two of them."""
+    p = _firewalld_plan(
+        daemon="running",
+        route=networking.SshRoute(ports=(2222,), listeners_readable=True),
+        zoning=networking.FirewalldZoning(
+            write=("public", "work"),
+            permanent=("public",),
+            runtime=("public",),
+            default_zone="public",
+            configured_default_zone="work",
+            flush_all_on_reload=True,
+        ),
+    )
+    written = [" ".join(c) for c in p.firewall_commands]
+    for port in (3724, 8085, 2222):
+        assert f"firewall-cmd --permanent --zone=work --add-port={port}/tcp" in written
+    assert written.index(
+        "firewall-cmd --permanent --zone=work --add-port=2222/tcp"
+    ) < written.index("firewall-cmd --reload")
+    assert p.refusals == (), "written to both zones is not a refusal"
+    said = next(w for w in p.warnings if "DefaultZone" in w)
+    assert "`public`" in said and "`work`" in said
+    assert "/etc/firewalld/firewalld.conf" in said
+    assert "firewall-offline-cmd --list-all-zones" in said
+
+
+def test_a_running_daemon_whose_configured_default_zone_is_unread_refuses_the_reload() -> None:
+    """Unknown is not "they agree". The one state the divergence cannot be ruled out in.
+
+    The zones ARE known here and the ports are written to all of them — that is
+    what makes this its own refusal rather than `_zone_refusal()`'s. What could
+    not be read is which zone every unbound interface will be in one second
+    after the reload, so the reload does not run.
+    """
+    p = _firewalld_plan(
+        daemon="running",
+        route=networking.SshRoute(ports=(2222,), listeners_readable=True),
+        zoning=networking.FirewalldZoning(
+            write=("public",),
+            permanent=("public",),
+            runtime=("public",),
+            default_zone="public",
+            configured_default_zone=None,
+        ),
+    )
+    assert ("firewall-cmd", "--reload") not in p.firewall_commands
+    assert p.ssh_ports == ()
+    refusal = next(r for r in p.refusals if "DefaultZone" in r)
+    assert "/etc/firewalld/firewalld.conf" in refusal
+    assert "firewall-offline-cmd --get-default-zone" in refusal
+    assert "`public`" in refusal, "the running default is named, since it IS known"
+    assert refusal in p.warnings
+    # The ports the user asked for are still written; it is the reload that is held.
+    assert (
+        "firewall-cmd",
+        "--permanent",
+        "--zone=public",
+        "--add-port=3724/tcp",
+    ) in p.firewall_commands
+
+
+def test_the_offline_listing_is_the_cross_check_when_the_conf_carries_no_default_zone() -> None:
+    """A conf with no `DefaultZone` line falls back to the tool that reads the same files.
+
+    `firewall-offline-cmd --list-all-zones` answered the truth in the diverged
+    state where every `firewall-cmd` reading did not, so it is the fallback
+    rather than a second opinion: it is asked only when the file itself said
+    nothing, because it is another process.
+    """
+    probe, seen = _zone_probes(
+        {
+            _PERMANENT_ARGV: (0, _DIVERGED_PERMANENT_ZONES),
+            _RUNTIME_ARGV: (0, _ACTIVE_ZONES_DEFAULT_ONLY),
+            _CONF_ARGV: (0, "FlushAllOnReload=yes\n"),
+            _OFFLINE_ARGV: (0, _DIVERGED_OFFLINE_ZONES),
+        }
+    )
+    read = networking.detect_firewalld_zones("running", run=probe)
+    assert read is not None
+    assert read.configured_default_zone == "work" and read.default_zone_moves is True
+    assert "work" in read.write
+    assert [list(_OFFLINE_ARGV)] == [c for c in seen if c[0] == "firewall-offline-cmd"]
+
+    # And it is NOT spent when the file answered.
+    probe, seen = _zone_probes(
+        {
+            _PERMANENT_ARGV: (0, _DIVERGED_PERMANENT_ZONES),
+            _RUNTIME_ARGV: (0, _ACTIVE_ZONES_DEFAULT_ONLY),
+            _CONF_ARGV: (0, _FIREWALLD_CONF_DEFAULT_WORK),
+        }
+    )
+    assert networking.detect_firewalld_zones("running", run=probe) is not None
+    assert not [c for c in seen if c[0] == "firewall-offline-cmd"]
+
+
+def test_a_running_daemon_with_neither_source_readable_has_no_configured_default() -> None:
+    """Both readings gone is None, not a guess — and the caller refuses on it."""
+    probe, _ = _zone_probes(
+        {
+            _PERMANENT_ARGV: (0, _DIVERGED_PERMANENT_ZONES),
+            _RUNTIME_ARGV: (0, _ACTIVE_ZONES_DEFAULT_ONLY),
+            _CONF_ARGV: (1, ""),
+            _OFFLINE_ARGV: (255, ""),
+        }
+    )
+    read = networking.detect_firewalld_zones("running", run=probe)
+    assert read is not None, "the zones themselves were readable"
+    assert read.configured_default_zone is None and read.default_zone_moves is False
+    assert read.write == ("public",)
+
+
+def test_a_stopped_daemon_has_one_default_zone_and_cannot_diverge_from_itself() -> None:
+    """No daemon, no live default: the file's answer is both readings, and nothing moves."""
+    probe, _ = _zone_probes(
+        {_OFFLINE_ARGV: (0, _DIVERGED_OFFLINE_ZONES), _CONF_ARGV: (0, _FIREWALLD_CONF_DEFAULT_WORK)}
+    )
+    read = networking.detect_firewalld_zones("stopped", run=probe)
+    assert read is not None
+    assert read.default_zone == "work" and read.configured_default_zone == "work"
+    assert read.default_zone_moves is False
+    assert "work" in read.write
+
+    # With the file unreadable the offline listing's own tag is the answer.
+    probe, _ = _zone_probes({_OFFLINE_ARGV: (0, _DIVERGED_OFFLINE_ZONES), _CONF_ARGV: (1, "")})
+    read = networking.detect_firewalld_zones("stopped", run=probe)
+    assert read is not None and read.configured_default_zone == "work"
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        (_DIVERGED_PERMANENT_ZONES, "public"),
+        (_DIVERGED_OFFLINE_ZONES, "work"),
+        (_ACTIVE_ZONES_INTERNAL, "public"),
+        ("internal (active)\n  interfaces: eth0\n", None),
+        ("public (default, active)\n  interfaces: eth0\n", "public"),
+        ("", None),
+    ],
+    ids=[
+        "the daemon's, from the permanent listing",
+        "the file's, from the offline listing",
+        "the active listing tags it too",
+        "active is not default",
+        "both tags on one line",
+        "nothing at all",
+    ],
+)
+def test_the_default_tag_is_read_apart_from_the_active_one(text: str, name: str | None) -> None:
+    """`(default)` and `(active)` are different claims and only one of them answers this."""
+    assert networking.default_zone_from_listing(text) == name
+
+
+def test_every_zone_the_game_ports_are_written_to_is_named_in_the_plan() -> None:
+    """DEFECT 2: the union is kept, and it stops being silent.
+
+    Measured on firewalld 2.2.3 (fedora:41 on m910q, 2026-09-05) with eth1
+    bound permanently to a custom `wanzone` that allowed nothing: the round-5
+    plan emitted six `--permanent` writes plus the reload, `apply()` ran 7/7,
+    `refusals=0`, `warnings=0`, and afterwards `wanzone` listed 2222/tcp,
+    3724/tcp and 8085/tcp — the game ports AND the SSH port on the interface a
+    multi-homed box faces the internet with. The string `wanzone` appeared
+    nowhere a user could read.
+
+    The breadth is kept because both narrowings break the feature on an
+    ordinary box — ports written to the default zone alone were unreachable on
+    a box bound to `internal` (round 3), and in `internet` mode the WAN-facing
+    zone is where the clients arrive — so what changes is that the plan says
+    where the ports went and how to take one back.
+    """
+    p = _firewalld_plan(
+        daemon="running",
+        route=networking.SshRoute(ports=(2222,), listeners_readable=True),
+        zones=("public", "wanzone"),
+    )
+    written = [" ".join(c) for c in p.firewall_commands]
+    assert "firewall-cmd --permanent --zone=wanzone --add-port=3724/tcp" in written
+    said = next(w for w in p.warnings if "game ports" in w)
+    assert "`wanzone`" in said and "`public`" in said
+    assert "3724, 8085" in said
+    assert "--remove-port=<port>/tcp" in said, "and the command that takes one back"
+    assert "SSH (port 2222)" in said, "and why the SSH rule is not narrowed with them"
+    assert p.refusals == ()
+
+
+def test_one_zone_is_no_breadth_and_a_machine_that_is_fine_is_still_told_nothing() -> None:
+    """The sentence appears when a second zone means a rule nobody asked for by name.
+
+    A box with one zone had its ports written to the only zone there is. Saying
+    so would put a paragraph on the screen of every ordinary Fedora desktop,
+    next to the warnings that mean something — the failure mode
+    `firewalld_start_withheld()` was written against.
+    """
+    p = _firewalld_plan(
+        daemon="running",
+        route=networking.SshRoute(ports=(22,), listeners_readable=True),
+        zones=("public",),
+    )
+    assert p.refusals == () and p.warnings == ()
+
+
+class _Ino:
+    """A `stat` result with nothing on it but the inode, which is all this rule reads."""
+
+    def __init__(self, ino: int) -> None:
+        self.st_ino = ino
+
+
+_HOST_PID_NS = 4026531836
+_HOST_NET_NS = 4026531840
+_HOST_MNT_NS = 4026531841
+_CONTAINER_MNT_NS = 4026533518
+"""The four inodes measured on m910q, 2026-09-05, from inside `docker run --rm
+--privileged --pid=host --network=host` of a fedora:41 image on the Ubuntu
+host: the pid namespace IS the initial one, the network namespace IS pid 1's,
+and the mount namespace is not."""
+
+
+def _namespaced(*, mnt: int, pid1_mnt: int = _HOST_MNT_NS) -> object:
+    """`os.stat` for a process in the host's net namespace and `mnt`'s mount namespace."""
+    answers = {
+        "/proc/self/ns/pid": _HOST_PID_NS,
+        "/proc/self/ns/net": _HOST_NET_NS,
+        "/proc/1/ns/net": _HOST_NET_NS,
+        "/proc/self/ns/mnt": mnt,
+        "/proc/1/ns/mnt": pid1_mnt,
+    }
+
+    def stat(path: str, *args: object, **kwargs: object) -> object:
+        if path in answers:
+            return _Ino(answers[path])
+        raise AssertionError(f"asked about {path}")
+
+    return stat
+
+
+def _never_asked(path: str) -> bool:
+    raise AssertionError(f"asked whether {path} exists for a backend that writes no file")
+
+
+def test_a_container_with_the_hosts_network_is_still_not_the_hosts_machine() -> None:
+    """DEFECT 3: round 5 asked which NETWORK namespace and never which MOUNT namespace.
+
+    Measured on m910q, 2026-09-05: `docker run --rm --privileged --pid=host
+    --network=host` of a fedora:41 image on the Ubuntu host read
+
+        /proc/self/ns/pid  4026531836   the initial pid namespace
+        /proc/self/ns/net  4026531840 == /proc/1/ns/net
+        /proc/self/ns/mnt  4026533518 != /proc/1/ns/mnt (4026531841)
+        /etc/ufw           absent, and /etc/firewalld present (the image's)
+
+    `in_host_network_namespace()` answered True — correctly; those really are
+    the host's sockets — `ss` named the host's sshd on 22, and the round-5 plan
+    emitted `ufw allow 3724/tcp`, `ufw allow 8085/tcp`, `ufw allow 22/tcp` and
+    `ufw --force enable` with `refusals=0`, writing a config directory that
+    does not exist for a netfilter policy that is the host's. It also refuted
+    that function's own stated price, which said a container "is not in the
+    initial pid namespace and gets False here".
+    """
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os, "stat", _namespaced(mnt=_CONTAINER_MNT_NS))
+        patched.setattr(networking.os.path, "isdir", lambda path: path == "/etc/firewalld")
+        assert networking.in_host_network_namespace() is True, "round 5's answer, unchanged"
+        assert networking.in_host_mount_namespace() is False
+        # The config-directory question alone does not catch this one: the
+        # image HAS /etc/firewalld. The mount namespace is what does.
+        assert networking.reads_this_machine("firewalld") is False
+        assert networking.reads_this_machine("ufw") is False
+        assert networking.reads_this_machine() is False
+
+
+def test_the_config_the_backend_writes_must_exist_on_this_filesystem() -> None:
+    """The second half of the question, asked before the mount namespace costs a subprocess.
+
+    A missing `/etc/ufw` is decisive on its own and free to read, which matters
+    because the mount-namespace read is EACCES at uid 1000 and needs the prefix.
+    """
+    spawned: list[list[str]] = []
+
+    def never(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        spawned.append(argv)
+        raise AssertionError(f"spawned {argv} after the missing directory answered")
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os, "stat", _namespaced(mnt=_HOST_MNT_NS))
+        patched.setattr(networking.os.path, "isdir", lambda path: False)
+        assert networking.reads_this_machine("ufw", run=never) is False
+        assert spawned == []
+        # With the directory there and the mount namespace pid 1's, it is this
+        # machine — which is every ordinary box, and must stay an ALLOW.
+        patched.setattr(networking.os.path, "isdir", lambda path: True)
+        assert networking.reads_this_machine("ufw") is True
+        assert networking.reads_this_machine("firewalld") is True
+        # A backend with no config file of its own is not asked about one.
+        patched.setattr(networking.os.path, "isdir", _never_asked)
+        assert networking.reads_this_machine("none") is True
+
+
+def test_a_refusal_names_the_machine_it_could_not_place_not_a_hole_it_did_not_have() -> None:
+    """The `--pid=host` table had 15 lines, every one named, sshd on 22, and no hole.
+
+    So the sentence the guard had for an unsettled table — "a listener on the
+    table could not be named, or is held by an init that could be fronting an
+    SSH daemon" — would have been a false reason attached to a correct
+    refusal. `SshRoute.read_elsewhere` carries the true one.
+    """
+    run = lambda argv: subprocess.CompletedProcess(argv, 0, _M910Q_ROOT, "")  # noqa: E731
+    route = networking.detect_ssh_route(environ={}, run=run, in_host_namespace=lambda: False)
+    assert route.ports == (22,), "the table itself was fine"
+    assert route.listeners_readable is False
+    assert route.read_elsewhere is not None and "mount namespace" in route.read_elsewhere
+
+    p = _ufw_plan(enable_firewall=True, route=route)
+    assert all("enable" not in c for cmd in p.firewall_commands for c in cmd)
+    refusal = next(r for r in p.refusals if "REFUSED" in r)
+    assert "mount namespace" in refusal and "/etc/ufw" in refusal
+    assert "could not all be accounted for" not in refusal, "do not blame a table that was whole"
+
+    # And "could not tell" is a different sentence from "it is somewhere else".
+    unknown = networking.detect_ssh_route(environ={}, run=run, in_host_namespace=lambda: None)
+    assert unknown.read_elsewhere is not None
+    assert "could not be established" in unknown.read_elsewhere
+    assert unknown.read_elsewhere != route.read_elsewhere
+
+
+def test_a_table_that_never_settled_does_not_blame_the_machine_it_was_read_on() -> None:
+    """A holed table is refused for the hole, and the namespace question is not asked at all."""
+    run = lambda argv: subprocess.CompletedProcess(argv, 0, _M910Q_UNPRIVILEGED, "")  # noqa: E731
+
+    def never() -> bool:
+        raise AssertionError("asked which machine a table that had already failed came from")
+
+    route = networking.detect_ssh_route(environ={}, run=run, in_host_namespace=never)
+    assert route.listeners_readable is False
+    assert route.read_elsewhere is None
+
+
+def test_an_unknown_daemon_is_held_to_the_running_rule_not_the_stopped_one() -> None:
+    """`unknown` reloads too, and a zone listing that answered means a daemon answered it.
+
+    `firewall-cmd --state` failing is what makes the state `unknown`, and the
+    reload stays in the list for it (`_firewalld_port_commands()`). If the
+    permanent zone listing then succeeded there is a daemon behind it, with a
+    live default zone that can differ from the file's — so the same refusal
+    applies. A STOPPED daemon cannot reach it: its zones came from the files
+    the reload installs.
+    """
+    unknown = _firewalld_plan(
+        daemon="unknown",
+        route=networking.SshRoute(ports=(2222,), listeners_readable=True),
+        zoning=networking.FirewalldZoning(
+            write=("public",),
+            permanent=("public",),
+            runtime=("public",),
+            default_zone="public",
+            configured_default_zone=None,
+        ),
+    )
+    assert ("firewall-cmd", "--reload") not in unknown.firewall_commands
+    assert any("DefaultZone" in r for r in unknown.refusals)
+
+    stopped = _firewalld_plan(
+        daemon="stopped",
+        route=networking.SshRoute(ports=(2222,), listeners_readable=True),
+        zoning=networking.FirewalldZoning(
+            write=("public",),
+            permanent=("public",),
+            default_zone=None,
+            configured_default_zone=None,
+        ),
+    )
+    assert not any("DefaultZone" in r for r in stopped.refusals)
+    assert not any(networking._can_lock_out(c) for c in stopped.firewall_commands)
