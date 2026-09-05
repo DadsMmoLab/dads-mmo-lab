@@ -30,7 +30,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from yulon import docker, platform, resources, runner
@@ -303,7 +303,7 @@ def generated_compose_files(server_dir: Path) -> tuple[str, ...]:
     )
 
 
-def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
+def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     """What Stop actually did, what it did not, and which button to press next.
 
     Three things are easy to imply and all three are false. The app has not
@@ -349,21 +349,55 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     holding a marked override and no base rendered "nothing is lost" and
     "Delete <dir>" in consecutive sentences
     (`test_the_app_never_says_nothing_is_lost_about_a_folder_it_names_for_deletion`).
+    That folder shape has NO install that produces it, and the branch for it
+    says so: `composegen.write_plan()` walks `(BASE_FILE, OVERRIDE_FILE,
+    BUILD_FILE)` in that order and always writes or keeps the base first, so
+    the only route is a base file deleted by hand. Measured, not assumed — with
+    `raise AssertionError` as the branch body the whole suite on m910q
+    2026-09-05 was `1 failed, 2562 passed, 9 skipped` and the single entrant
+    was the test written for it. It stays because a hand-deleted base is a
+    folder a person can be standing in front of, and the alternative render for
+    it is a flat "Delete <dir>" over this app's own files.
 
-    **Where the app has its OWN evidence it uses it instead of asking.** The
-    unmarked-compose wording puts two readings to the user — installed before
-    this attempt, or brought down by this attempt's clone — and until
-    2026-09-05 it put them even when `native.STATE_FILE` was sitting in the
-    folder answering the question. `_claim_before_writing()` writes that record
-    only when `started_empty` is true, and the one non-empty folder
-    `_claim_folder()` lets past is a `.git`, which `refuse_unowned_checkout()`
-    stops at the clone before any stage records anything. So a record means the
-    folder was empty when this attempt began, and "it was already there" is not
-    unlikely, it is impossible. Both halves are driven at the engine in
-    `test_the_conditional_offer_defers_to_the_record_the_app_itself_wrote`,
-    because the copy is worth exactly what the engine underneath it does. Where
-    there is no record, no filesystem read separates the two folders — they are
-    the same folder to `stat` — so both readings are said and the user looks.
+    **A record does NOT prove the folder began empty, and the copy said it
+    did.** The unmarked-compose wording puts two readings to the user —
+    installed before this attempt, or brought down by this attempt's clone. For
+    a few hours on 2026-09-05 a branch here claimed `native.STATE_FILE` settled
+    that, on the ground that `_claim_before_writing()` writes one only when
+    `started_empty` is true and that the one non-empty folder `_claim_folder()`
+    lets past — a `.git` — is stopped at the clone by
+    `refuse_unowned_checkout()`. Measured on m910q 2026-09-05, that is false
+    for three of the four shipped games. `wow-tbc` driven through
+    `CmangosInstaller.run()` into a folder holding a user's own `.git`,
+    `my-notes.txt` and `docker-compose.yml`, Stop pressed after
+    `clone-sources`: the record was there and the modal told the user their own
+    file "came down with the server's source". `_run_one()` writes the record
+    after EVERY recorded stage, `started_empty` or not, and
+    `refuse_unowned_checkout()` only ever sees the server dir when a source's
+    `dest` IS the server dir — `"."`, which of the shipped entries only
+    `wow-wotlk` spells. TBC, Vanilla and Tortoise clone into `src/`, so nothing
+    asks about the folder itself at all.
+
+    **The discriminator is the family's clone layout, so the family is an
+    input.** Hence `entry` where this took a display name until 2026-09-05.
+    Where a source lands in the server dir itself, an unmarked compose file
+    there with a record beside it did come down with the clone: the only other
+    way into that folder is a checkout, and `refuse_unowned_checkout()` refuses
+    one before any stage records anything
+    (`test_the_clone_artefact_reading_is_given_only_where_the_clone_lands_there`).
+    Where no source lands there, nothing this attempt downloads can put a
+    compose file at the root, so it was already there and the adoption is the
+    right offer, record or no record
+    (`test_no_source_of_a_shipped_game_is_cloned_into_the_server_dir_except_wotlks`).
+    Only the first case with no record leaves two readings nothing on disk
+    separates, and there both are said and the user looks.
+
+    The engine defect underneath this is not the copy's to fix and is not fixed
+    here: `_claim_folder()` exempts any folder holding a `.git`, and only a
+    `dest: "."` family redeems that exemption at the clone, so a CMaNGOS
+    install runs to completion inside a user's own checkout (measured the same
+    day; `pyplan/checklist.md`). Both branches above stay true whichever way
+    that is closed, because neither reads the record for emptiness.
 
     *"Press Install again"* is offered on the same record, which is not implied
     by source on disk: a folder can hold a whole checkout and no record. What
@@ -388,12 +422,19 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     are driven at a call site in
     `test_the_engine_refuses_the_folder_a_cancelled_clone_leaves`.
 
-    And the remedy is conditional whenever `compose_file()` answers, because a
-    flat "Delete <dir>" on a folder this app would adopt is the app telling
-    someone to destroy a server. That is the same reading the offer above turns
-    on, deliberately: one `adoptable` decides both, so the app cannot name a
-    folder for deletion in the same breath as an offer to adopt it — which is
-    what it did while the two were decided separately.
+    **"nothing is lost" and a deletion never appear in one message, and one
+    shared reading is what used to put them there.** `2a4f0cab` argued the pair
+    was impossible because `adoptable` decided both the offer and the delete;
+    deciding both on one reading is exactly what makes them SIMULTANEOUS.
+    Measured on m910q 2026-09-05 on a folder holding a marked
+    `docker-compose.yml` and no record — the shape a user reaches by deleting
+    `native.STATE_FILE`, which is what the UNKNOWN refusal tells them to do —
+    the render carried "nothing is lost" and "delete <dir>" two sentences
+    apart. The rule is now on the SENTENCE, not on a reading:
+    `promised_nothing_lost` is the first branch's own condition, named once,
+    and the remedy names a deletion only where it is False. Asserted over every
+    reachable folder shape rather than on the one that was reported, in
+    `test_no_folder_shape_is_offered_adoption_and_deletion_at_once`.
 
     With the record there the resume is real and was measured the same night:
     "Using /home/pk/gate72-cycle2 (resuming)", "Already finished: clone-core,
@@ -413,7 +454,7 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     from yulon.catalog import native
 
     parts = [
-        f"Stop was pressed, so {entry_name} has NOT been remembered as an install and the app "
+        f"Stop was pressed, so {entry.name} has NOT been remembered as an install and the app "
         f"will not show a tab for it. Stopping undoes nothing and tidies nothing away — look "
         f"in {server_dir} to see what the installer had got to (a download it was in the "
         "middle of may have removed its own leftovers; anything already finished stays). If "
@@ -422,13 +463,29 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
         "faster, so do not clear Docker's build cache to tidy up."
     ]
     record = server_dir / native.STATE_FILE
-    # The app's OWN evidence about the folder, and the only input here that is
-    # not a guess about somebody else's files: `_claim_before_writing()` writes
-    # this file only when `started_empty` is true, and the one non-empty folder
-    # `_claim_folder()` lets past — a `.git` — is stopped at the clone by
-    # `refuse_unowned_checkout()` before any stage records anything. So a
-    # record here means the folder was empty when this attempt began.
+    # This attempt got at least one recorded stage in, or started in a folder
+    # that was its to fill. NOT evidence that the folder began empty:
+    # `_run_one()` writes this after every recorded stage regardless
+    # (measured on `wow-tbc`, m910q 2026-09-05 — see the docstring).
     claimed = record.is_file()
+    # Whether a clone of THIS game's sources lands in the server dir itself,
+    # which is the only way a compose file this app did not write can be there
+    # because this attempt put it there. `EmulatorSource.dest` documents `"."`
+    # as exactly that; normalised rather than compared to the literal, because
+    # `"./"` passes that field's validator and means the same folder.
+    clones_into_server_dir = any(
+        PurePosixPath(source.dest) == PurePosixPath(".") for source in entry.emulator.sources
+    )
+    # Where the sources DO go when they do not go here — named in the copy so
+    # "nothing this install downloads goes there" is checkable by the user.
+    sources_land_in = next(
+        (
+            source.dest
+            for source in entry.emulator.sources
+            if PurePosixPath(source.dest) != PurePosixPath(".")
+        ),
+        "",
+    )
     ours = generated_compose_files(server_dir)
     # What `attach_existing()` gates on, asked here for the same reason it is
     # asked there — it is the whole of whether "Use existing…" can take this
@@ -453,9 +510,13 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
         # `test_a_folder_the_copy_cannot_list_is_refused_rather_than_called_empty`.
         leftovers = True
 
-    # The offer and the delete are decided by ONE reading, `adoptable`, so they
-    # cannot both render. `ours` chooses the wording, never whether to offer.
-    if adoptable is not None and ours:
+    # The one branch that says "nothing is lost", named once so the two places
+    # that have to agree with it — the "If it had not" opener and the remedy —
+    # cannot drift from it. They did: `adoptable` alone gated the delete, and
+    # `adoptable` alone is true in this branch too.
+    promised_nothing_lost = adoptable is not None and bool(ours)
+
+    if promised_nothing_lost:
         parts.append(
             f"The compose files this app writes are there ({', '.join(ours)}), so if the build "
             f'had already finished the server may be built and even running: press "Use '
@@ -468,12 +529,23 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
             f"{composegen.BASE_FILE} is not, and that is the one Compose loads — so "
             f'"Use existing…" cannot take {server_dir} as it stands.'
         )
+    elif adoptable is not None and not clones_into_server_dir:
+        # Nothing this attempt downloads can have put that file at the root, so
+        # there is no second reading to put to the user and no reason to
+        # withhold an adoption `attach_existing()` would make.
+        parts.append(
+            f"There is a {adoptable.name} in {server_dir} that this app did not write, and "
+            f"nothing this install downloads goes there — {entry.name}'s source is cloned into "
+            f"{sources_land_in}/ under it. So that file was already there before this attempt: "
+            f'press "Use existing…", choose {server_dir}, and the app will manage it from a '
+            "tab."
+        )
     elif adoptable is not None and claimed:
         parts.append(
             f"There is a {adoptable.name} in {server_dir} that this app did not write, and it "
-            f"came down with the server's source: {record} is this attempt's own record, and "
-            f"the app writes one only into a folder that was empty when it started. There is "
-            "no server behind that file."
+            f"came down with the server's source: {entry.name}'s source is cloned into that "
+            f"folder itself, and {record} is this attempt's own record of having got that far. "
+            "There is no server behind that file."
         )
     elif adoptable is not None:
         parts.append(
@@ -491,9 +563,7 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
         # sentence above says the opposite, and the conditional would refer to
         # a promise nobody made.
         opener = (
-            "If it had not, press Install again"
-            if ours and adoptable is not None
-            else "Press Install again"
+            "If it had not, press Install again" if promised_nothing_lost else "Press Install again"
         )
         parts.append(
             f"{opener} and choose {server_dir}: the installer carries on from the "
@@ -509,12 +579,18 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
             else "it has files in it: the app will not write into a folder that is not empty "
             "and was not created by this app"
         )
-        remedy = (
-            f"If there is no server in it after all, delete {server_dir} and press Install "
-            "again to start over."
-            if adoptable is not None
-            else f"Delete {server_dir}, then press Install again to start over."
-        )
+        # A deletion is named only where the message has NOT already said
+        # "nothing is lost" about this folder. Chosen on that sentence rather
+        # than on `adoptable`, which is true in the branch that says it.
+        if promised_nothing_lost:
+            remedy = f'Use "Use existing…" on {server_dir} instead; nothing here needs deleting.'
+        elif adoptable is not None:
+            remedy = (
+                f"If there is no server in it after all, delete {server_dir} and press Install "
+                "again to start over."
+            )
+        else:
+            remedy = f"Delete {server_dir}, then press Install again to start over."
         parts.append(
             f"Do not press Install again on this folder — the app will refuse it. There is no "
             f"{native.STATE_FILE} in {server_dir}, {why}. {remedy}"

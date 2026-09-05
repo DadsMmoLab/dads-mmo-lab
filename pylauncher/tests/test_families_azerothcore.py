@@ -1924,7 +1924,7 @@ def test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it(
 
     # And the modal the user is looking at when they press Stop says so, rather
     # than sending them at an Install button that stops them.
-    note = cancelled_install_message("WoW WotLK", server_dir)
+    note = cancelled_install_message(ENTRY, server_dir)
     assert "the app will refuse it" in note, note
     assert "carries on" not in note, "the copy promised a resume the engine refuses: " + note
 

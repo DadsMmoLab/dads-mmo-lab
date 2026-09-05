@@ -50,7 +50,12 @@ from yulon.catalog.catalog import (
 )
 from yulon.catalog.families import cmangos, dockerfile, extract, family_for, sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
-from yulon.catalog.installer import InstallerError, InstallOptions, installer_for
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    cancelled_install_message,
+    installer_for,
+)
 
 DB_PASSWORD = "tbc-0123456789abcdef"
 
@@ -3939,3 +3944,78 @@ def test_the_shipped_cmangos_entries_assert_the_update_level_of_their_core_updat
             f"{game} core updates can fail 171 of 172 files and still report the install "
             "finished; without this flag nothing asks the database which reading it was"
         )
+
+
+def test_a_cancelled_tbc_install_offers_the_users_own_compose_file(tmp_path: Path) -> None:
+    """The real path the copy's blocker was found on, driven here so it cannot come back.
+
+    `f9dec5ef` had `installer.cancelled_install_message()` decide that a
+    `native.STATE_FILE` in the folder PROVED the folder was empty when the
+    attempt began, and therefore that any compose file the app did not write
+    "came down with the server's source". Reproduced on m910q 2026-09-05
+    through this engine, into a folder holding a user's own `.git`,
+    `my-notes.txt` and `docker-compose.yml`: the record was written, the modal
+    told the user their own file came down with the clone, said "There is no
+    server behind that file", and withheld the `Use existing...` offer that
+    `attach_existing()` would have honoured.
+
+    Two engine facts make that wording impossible for this family, and both are
+    read off THIS run rather than restated. Every clone spec the engine handed
+    the seam lands under `src/`, so nothing this install downloads can put a
+    file at the server root -- asserted against the specs, not against the
+    catalog, because the catalog is what the copy already reads and an
+    assertion over it would only agree with itself. And the record is there
+    anyway, written by `_run_one()` after `clone-sources`, in a folder that was
+    never empty -- which is exactly why the copy may not read it as proof of
+    emptiness.
+
+    That second fact is a defect in the engine, not a design: `_claim_folder()`
+    exempts any folder holding a `.git`, and only a `dest: "."` family redeems
+    that exemption at the clone, so this install walks into a user's checkout.
+    Filed in `pyplan/checklist.md`, NOT fixed here. Closing it will not turn
+    this test red: what is asserted below is what the user is told and that the
+    user's own file survived, and the record assertion carries the sentence to
+    read if it ever stops being true.
+    """
+    rec = Recorder()
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / ".git").mkdir()
+    (server / "my-notes.txt").write_text("mine\n", encoding="utf-8")
+    (server / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    cancel = threading.Event()
+    rec.on_clone = lay_sql(server, SQL)
+    lines: list[str] = []
+    with pytest.raises(InstallerError):
+        for line in engine(rec).run(
+            InstallOptions(server_dir=server, client_dir=client_folder(tmp_path)),
+            cancel=cancel,
+        ):
+            lines.append(line)
+            if "Sources are in place" in line:
+                cancel.set()
+
+    assert rec.clones, "no clone was asked for, so this run says nothing about where they land"
+    assert all(spec.dest != server for spec in rec.clones), (
+        "a TBC clone was pointed at the server dir itself, which is the one thing that would "
+        "make the 'came down with the server's source' wording true here: "
+        + repr([str(spec.dest) for spec in rec.clones])
+    )
+    assert (server / native.STATE_FILE).is_file(), (
+        "the premise is gone -- the engine no longer records a stage in a folder that was not "
+        "empty. If that is because the `.git` exemption is now redeemed for CMaNGOS, this "
+        "test's setup is the fix's own test case and should move there"
+    )
+    assert (server / "my-notes.txt").is_file(), "the user's own file was removed by this run"
+
+    note = cancelled_install_message(ENTRY, server)
+    assert "came down with the server's source" not in note, (
+        "the app called the user's own compose file a clone artefact, in a folder holding the "
+        "user's own checkout: " + note
+    )
+    assert "no server behind that file" not in note, note
+    assert "Use existing" in note, (
+        "the folder `attach_existing()` accepts got no offer to attach it: " + note
+    )
+    assert f"Delete {server}" not in note and f"delete {server}" not in note, note

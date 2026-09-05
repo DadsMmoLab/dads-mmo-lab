@@ -2395,12 +2395,23 @@ def _listing(folder: Path, *, ignoring: str | None = None) -> list[str]:
     and this function exists to hand back names and a refusal.
 
     The narrow claim is pinned by enumeration rather than by assertion:
-    `test_every_folder_listing_in_the_engine_is_accounted_for` lists every bare
-    `iterdir()`/`scandir()`/`listdir()` under `yulon/catalog/` with the reason
-    each is not a write decision, so a new one anywhere in the engine fails
-    that audit rather than quietly making this paragraph false again. The audit
-    read two modules until 2026-09-05, which is how a sentence about the whole
-    engine went unchecked over five sixths of it.
+    `test_every_folder_listing_in_the_package_is_accounted_for` lists every
+    directory listing under `yulon/` — `iterdir`, `scandir`, `listdir`, `glob`,
+    `rglob`, `walk`, at module level and inside `async def` too — with the
+    reason each is not a write decision, so a new one anywhere in the app fails
+    that audit rather than quietly making this paragraph false again. It read
+    two modules until 2026-09-05, which is how a sentence about the whole
+    engine went unchecked over five sixths of it, and it read only three
+    spellings under `yulon/catalog/` for a few hours after that, which a `glob`
+    respelling of the very regression it was widened for walked straight past.
+
+    Not every listed site is exonerated: `apply.py`'s `_require_own_clone()`
+    makes THIS decision — may the module applier write into this clone dir —
+    with a bare `iterdir()` and no `except` at all, so an unreadable clone dir
+    reaches the user as a `PermissionError` traceback (measured, m910q
+    2026-09-05). It is recorded in that map as a defect rather than a design,
+    and filed; the sentence at the top of this docstring is about the INSTALL
+    engine and stays true.
 
     The caller that made the point was `installer.cancelled_install_message()`,
     which decided with a bare `iterdir()` whether the folder the user just

@@ -2882,3 +2882,45 @@ answers which is right for a tree two services mount (`z`) — which settles it 
 `./modules`, mounted by both `ac-worldserver` and `ac-db-import`. Nothing compares the two
 spellings, so this is read from the captures, not asserted by a test. Recorded in
 `bug-checklist.md` §17, with what is and is not actually open.
+
+
+## A CMaNGOS install walks into a user's own git checkout (2026-09-05, cancelcopy lane)
+
+Found while re-deriving a review finding against the cancel modal, and NOT fixed there: the fix in
+that lane is to the copy, which now stays true whichever way this is closed.
+
+**Measured, m910q 2026-09-05**, `wow-tbc` driven through `CmangosInstaller.run()` into a folder
+holding a user's own `.git`, `my-notes.txt` and `docker-compose.yml`: the install ran, wrote its
+`.yulon-install.json` into that folder, and left the user's files in place beside it. The chain is
+three parts, each of which is right on its own:
+
+1. `native._claim_folder()` exempts any folder holding a `.git` from the not-empty refusal, so a
+   clone stage can say WHOSE repository it is instead of "this folder is not empty".
+2. `refuse_unowned_checkout()` redeems that exemption -- but `stage_clone_sources()` only puts a
+   source's own `dest` to it. Only `wow-wotlk` names `dest: "."`, so for `wow-tbc`, `wow-vanilla`
+   and `wow-tortoise` the server dir is never the subject of that question at all.
+3. `_run_one()` writes the state file after every recorded stage regardless of `started_empty`, so
+   the folder ends up carrying this app's record whether or not it was ever this app's to fill.
+
+The harm is that a first press of Install on a folder the user keeps their own work in is accepted
+for three of the four shipped games. Nothing was destroyed in the probe -- the clones land under
+`src/` -- but nothing in the engine promises that either, and the fourth game refuses the same
+folder outright.
+
+Not fixed in the cancelcopy lane: closing it means asking `refuse_unowned_checkout()`'s question
+about the SERVER DIR when no source claims it, which is a `native.py` change to the shape of the
+guard every family reaches through preflight.
+
+## `apply.py:_require_own_clone()` decides a write with a bare `iterdir()` (2026-09-05, same lane)
+
+`Applier._require_own_clone()` does `leftovers = sorted(item.name for item in clone.iterdir())` and
+raises "`<rel>` already has files in it and was not put there by this app" -- the same write
+decision `native._listing()` exists to translate, one directory up from the install engine.
+**Measured the same day**: the method has no `except` of any kind, and the same expression on a
+`chmod 000` folder raises a raw `PermissionError [Errno 13]`, so an unreadable clone dir reaches
+the user as a traceback where the app promises a sentence.
+
+Not fixed in the cancelcopy lane because `native._listing()` raises `InstallerError` and every
+caller of this one translates `ApplyError`; the fix is a translation in `apply.py`, not a call to
+the installer's helper. Recorded with its reason in `test_spine._ACCOUNTED_LISTINGS`, which is the
+one entry there that is not an exoneration, so the audit names it every time anybody reads it.

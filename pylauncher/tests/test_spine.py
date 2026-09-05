@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+import yulon
 from tests.conftest import spelled_bounds
 from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
 from yulon import docker, install_wiring, networking, platform, resources, runner
@@ -2008,7 +2009,7 @@ def test_a_compose_refusal_reaches_the_cli_as_a_sentence_and_is_recorded(
 # promises a sentence, and no `last_error` at the stage sites. The sites are
 # ENUMERATED rather than described, because they are what the fix is about; a
 # fifth one added later without the helper is caught by
-# `test_every_folder_listing_in_the_engine_is_accounted_for`.
+# `test_every_folder_listing_in_the_package_is_accounted_for`.
 
 
 @dataclass(frozen=True)
@@ -2209,66 +2210,153 @@ def test_a_folder_that_will_not_list_is_a_refusal_and_not_a_traceback(
     )
 
 
+_LISTING_CALLS = frozenset({"iterdir", "scandir", "listdir", "glob", "rglob", "walk"})
+"""Every spelling of "what is in this folder" a Python file can use.
+
+`iterdir`/`scandir`/`listdir` was the whole set until 2026-09-05, and that made
+the audit below unable to fail on the class it enumerates. Measured on m910q the
+same day, `__pycache__` purged both sides: `native._listing(server_dir,
+ignoring=native.STATE_FILE)` in `installer.py` replaced by
+`[p.name for p in server_dir.glob("*") if p.name != native.STATE_FILE]` -- the
+exact regression this audit was widened to catch, spelled with `glob` -- left
+this test GREEN (`1 failed, 2562 passed`, the one failure a behavioural test).
+The `iterdir` spelling of the same mutation turned it red. An audit that a
+one-word respelling walks past is a comment.
+"""
+
+
+def _listing_sites(root: Path) -> set[tuple[str, str]]:
+    """Every directory listing under `root`, as (file, the function it is in).
+
+    Asked of the syntax tree rather than of the text, because the comments
+    explaining the fixes name `iterdir()` too and a grep would match those.
+
+    Descended rather than `ast.walk`ed, and that is the part that had a hole:
+    `ast.walk` plus `isinstance(node, ast.FunctionDef)` sees only listings whose
+    call is an ATTRIBUTE inside a plain `def`. A listing at module level, one in
+    an `async def`, and `listdir(x)` after `from os import listdir` were all
+    invisible -- three more ways to spell the defect past an audit whose own
+    docstring says "every". `<module>` is a real scope name here for that
+    reason, not a placeholder.
+    """
+    sites: set[tuple[str, str]] = set()
+
+    def descend(node: ast.AST, enclosing: str, rel: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = (
+                child.name
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef)
+                else enclosing
+            )
+            if isinstance(child, ast.Call):
+                func = child.func
+                if isinstance(func, ast.Attribute):
+                    named = func.attr
+                elif isinstance(func, ast.Name):
+                    named = func.id
+                else:
+                    named = ""
+                if named in _LISTING_CALLS:
+                    sites.add((rel, enclosing))
+            descend(child, inner, rel)
+
+    for path in sorted(root.rglob("*.py")):
+        rel = str(path.relative_to(root)).replace("\\", "/")
+        descend(ast.parse(path.read_text("utf-8")), "<module>", rel)
+    return sites
+
+
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
-    ("native.py", "_listing"): (
+    ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"
     ),
-    ("families/clientdir.py", "_to_depth"): (
+    ("catalog/families/clientdir.py", "_to_depth"): (
         "reads a client folder the user chose; `mpq_files()` needs the OSError raw so an "
         "unreadable `Data/` is not reported as too few archives"
     ),
-    ("families/clientdir.py", "locale_dirs"): (
-        "same folder, same reason — what a repack stripped, not what may be written"
+    ("catalog/families/clientdir.py", "locale_dirs"): (
+        "same folder, same reason - what a repack stripped, not what may be written"
     ),
-    ("families/extract.py", "file_count"): (
+    ("catalog/families/extract.py", "file_count"): (
         "counts what a tool produced; a listing it cannot make is logged and counts as short, "
         "which re-runs the tool rather than skipping it"
     ),
-    ("families/sqlplan.py", "_listing"): (
+    ("catalog/families/sqlplan.py", "_listing"): (
         "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "
         "directory) and every other OSError stops the install regardless of `on_error`"
     ),
+    ("apply.py", "_require_own_clone"): (
+        "IS a write decision, and the one entry here that is not an exoneration: it lists a "
+        "clone dir under the server dir to decide whether the module applier may write there, "
+        "and raises `<rel> already has files in it and was not put there by this app`. "
+        "Measured on m910q 2026-09-05 - the method has no `except` of any kind, and the same "
+        "expression on a chmod-000 folder raises a raw `PermissionError [Errno 13]`, so an "
+        "unreadable clone dir reaches the user as a traceback. Not routed through "
+        "`native._listing()` from here because that raises `InstallerError` while every "
+        "caller of this one translates `ApplyError`; filed in `pyplan/checklist.md`"
+    ),
+    ("apply.py", "_undeploy"): (
+        "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
+        "removes exactly those names; reads a folder this app filled, decides no write into it"
+    ),
+    ("apply.py", "_patches"): (
+        "resolves a manifest's `patch.file` glob to real paths; a pattern that matches nothing "
+        "is reported as `patch target missing: <path>` by name, never as an emptiness verdict"
+    ),
+    ("apply.py", "_run_sql"): (
+        "resolves a manifest's `sql path` glob the same way, with the same by-name refusal"
+    ),
+    ("docker.py", "_first_populated_ancestor"): (
+        "walks up a path looking for a directory that HAS something in it, to tell a real "
+        "mount from an empty mount point; its own `except OSError` logs and answers None, "
+        "which is the honest 'cannot tell' this probe is allowed to give"
+    ),
+    ("networking.py", "write_client_realmlist"): (
+        "globs `Data/*/realmlist.wtf` in the USER'S client to find the file to write; a glob "
+        "matching nothing falls back to `Data/enUS/`, and the write itself is to a named file"
+    ),
+    ("ui/controller_view.py", "refresh_backups"): (
+        "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
+        "nothing"
+    ),
 }
-"""Every bare directory listing in the install engine, and why it is not `native._listing()`.
+"""Every directory listing in the package, and why it is not `native._listing()`.
 
 `native._listing()`'s docstring claimed to be the only place this engine lists a
 directory, and the audit under it read `native` and `azerothcore` only -- so the
-five sixths of the engine that contradicted the sentence were never asked.
+five sixths of the engine that contradicted the sentence were never asked. The
+root was widened to `yulon/catalog/` on 2026-09-05 and to the whole of `yulon/`
+the same day, when a review pointed out that `apply.py` makes the same write
+decision with a bare `iterdir()` one directory up and the audit could not see
+it: "this engine" was still a wider claim than its evidence, one level out.
+
 Written out rather than derived: the map IS the claim, and one computed from the
 code would agree with whatever the code did.
 
 A reason per site, because "is this a write decision?" is the only question that
-matters here and it cannot be answered by counting.
+matters here and it cannot be answered by counting. One entry says NO -- the
+`apply.py` clone guard -- because a map that could only hold exonerations would
+be somewhere to hide a finding rather than somewhere to record it.
 """
 
 
-def test_every_folder_listing_in_the_engine_is_accounted_for() -> None:
-    """One translation for the write decision, and a named reason for every other listing.
+def test_every_folder_listing_in_the_package_is_accounted_for() -> None:
+    """One translation for the install engine's write decision, a named reason for the rest.
 
     Four sites carried the same untranslated listing and were found one at a
-    time; a fifth appeared in `installer.py` on 2026-09-05. Asked of the syntax
-    tree rather than of the text, because the comments explaining the fix name
-    `iterdir()` too and a grep would match those.
+    time; a fifth appeared in `installer.py` on 2026-09-05.
 
-    The whole package is walked, not a hand-picked pair of modules. That is the
-    difference between an audit and a spot check: a listing this cannot see is
-    a listing nothing checks, and the sentence it would falsify is three
-    screens away in another file.
+    The whole package is walked, not a hand-picked pair of modules and not the
+    `catalog/` subtree. That is the difference between an audit and a spot
+    check: a listing this cannot see is a listing nothing checks, and the
+    sentence it would falsify is three screens away in another file.
     """
-    root = Path(native.__file__ or "").parent
-    found = {
-        (str(path.relative_to(root)).replace("\\", "/"), enclosing.name)
-        for path in sorted(root.rglob("*.py"))
-        for enclosing in ast.walk(ast.parse(path.read_text("utf-8")))
-        if isinstance(enclosing, ast.FunctionDef)
-        for node in ast.walk(enclosing)
-        if isinstance(node, ast.Attribute) and node.attr in {"iterdir", "scandir", "listdir"}
-    }
-    assert found == set(_ACCOUNTED_LISTINGS), (
-        "a folder listing in the install engine is not in the map above. If it decides whether "
-        "the engine may write somewhere it belongs in `native._listing()`; if it does not, add "
-        "it with the reason, and check that `_listing()`'s docstring still tells the truth"
+    root = Path(yulon.__file__ or "").parent
+    assert _listing_sites(root) == set(_ACCOUNTED_LISTINGS), (
+        "a folder listing in this package is not in the map above. If it decides whether the "
+        "app may write somewhere it belongs in `native._listing()`; if it does not, add it "
+        "with the reason, and check that `_listing()`'s docstring still tells the truth"
     )
 
 
