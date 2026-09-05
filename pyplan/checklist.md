@@ -1355,8 +1355,8 @@
     restarting, and still printing `Loading …` lines is not a server that failed. Left for the
     owner; recorded here so the TBC exit code is read as what it is.
   - **The `platforms` widening for TBC and Vanilla landed at `2f39a6d9`**, on the Vanilla run above
-    and the TBC run just described. Tortoise stays `["linux"]` in the repo until its Windows run
-    earns it; the copy on the box carries the widening so the run can start at all (the
+    and the TBC run just described. Tortoise stayed `["linux"]` in the repo until its Windows run
+    earned it — which it did at `eb5f3b3f`, the bullet after next; until then the copy on the box carried the widening so the run could start at all (the
     chicken-and-egg two bullets up).
   - **Windows Tortoise, started 2026-09-04 23:19 CEST (14:19 box-local)** on `yulon-win11-gate`, driven
     by `C:\gate\run-tortoise.cmd` as scheduled task `dml-tortoise-install`, log at
