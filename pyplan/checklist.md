@@ -2924,3 +2924,21 @@ Not fixed in the cancelcopy lane because `native._listing()` raises `InstallerEr
 caller of this one translates `ApplyError`; the fix is a translation in `apply.py`, not a call to
 the installer's helper. Recorded with its reason in `test_spine._ACCOUNTED_LISTINGS`, which is the
 one entry there that is not an exoneration, so the audit names it every time anybody reads it.
+
+## The cancel modal's clone-artefact reading has one route it reads wrong (2026-09-05, same lane)
+
+`cancelled_install_message()` tells a `wow-wotlk` user that an unmarked `docker-compose.yml` beside
+this app's record "came down with the server's source", and withholds the adoption offer. That is
+true of both routes the ENGINE has -- upstream's compose file is git-tracked in
+`mod-playerbots/azerothcore-wotlk` (read off a real install in
+`pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`), and a checkout already in the
+folder is stopped by `refuse_unowned_checkout()` before any stage records anything. It is not true
+of the user's hand: delete this app's marked compose files from a FINISHED wow-wotlk install, drop
+an unmarked `docker-compose.yml` in, press Install (it resumes on the record), press Stop.
+
+**Not driven on 2026-09-05, and its window is unmeasured** -- the same fact that makes the first
+route true means a resumed clone stage may overwrite the dropped-in file before the cancel is read,
+which would make the wording accidentally right. Recorded because the sentence in that docstring
+said "the only other way into that folder is a checkout" until this lane, and the round that found
+it is the round that had just finished removing one absolute from the same function. Settling it
+needs a live wotlk clone, so it did not happen in a copy lane.

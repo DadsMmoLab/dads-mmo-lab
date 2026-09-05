@@ -352,10 +352,23 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     That folder shape has NO install that produces it, and the branch for it
     says so: `composegen.write_plan()` walks `(BASE_FILE, OVERRIDE_FILE,
     BUILD_FILE)` in that order and always writes or keeps the base first, so
-    the only route is a base file deleted by hand. Measured, not assumed — with
-    `raise AssertionError` as the branch body the whole suite on m910q
-    2026-09-05 was `1 failed, 2562 passed, 9 skipped` and the single entrant
-    was the test written for it. It stays because a hand-deleted base is a
+    the only route is a base file deleted by hand. Measured, not assumed — and
+    then re-measured, because the first measurement stopped being true of the
+    commit that shipped it. With `raise AssertionError` as this branch's body,
+    the whole suite on m910q 2026-09-05 (`__pycache__` purged both sides,
+    `pytest -q -p no:randomly`) is `2 failed, 2565 passed, 9 skipped`, and BOTH
+    entrants are tests: this branch's own
+    `test_the_app_never_says_nothing_is_lost_about_a_folder_it_names_for_deletion`
+    and the 40-shape sweep
+    `test_no_folder_shape_is_offered_adoption_and_deletion_at_once`, whose
+    marked-override/no-record shape lands here. 2576 tests were collected;
+    nothing among the other 2574 reaches this branch.
+
+    That paragraph said "the single entrant was the test written for it" and
+    quoted `1 failed, 2562 passed, 9 skipped` until 2026-09-05 — a run taken
+    three tests before the sweep in the same commit existed, and written into
+    the commit that falsified it. The number moved, the conclusion did not: no
+    production path enters here. It stays because a hand-deleted base is a
     folder a person can be standing in front of, and the alternative render for
     it is a flat "Delete <dir>" over this app's own files.
 
@@ -381,10 +394,26 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     **The discriminator is the family's clone layout, so the family is an
     input.** Hence `entry` where this took a display name until 2026-09-05.
     Where a source lands in the server dir itself, an unmarked compose file
-    there with a record beside it did come down with the clone: the only other
-    way into that folder is a checkout, and `refuse_unowned_checkout()` refuses
-    one before any stage records anything
+    there with a record beside it did come down with the clone on every route
+    the ENGINE can take, and the routes were enumerated rather than waved at.
+    The clone itself is one: upstream's `docker-compose.yml` is a git-tracked
+    file of `mod-playerbots/azerothcore-wotlk`, read off a real install in
+    `pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`. A
+    checkout already in the folder is the other, and
+    `refuse_unowned_checkout()` refuses one before any stage records anything
     (`test_the_clone_artefact_reading_is_given_only_where_the_clone_lands_there`).
+    A THIRD route is outside that enumeration and this branch reads it wrong:
+    the user's own hand. Delete this app's marked compose files from a finished
+    `wow-wotlk` install, drop an unmarked `docker-compose.yml` in, press Install
+    — it resumes on the record — and press Stop, and the modal says their file
+    "came down with the server's source". Not driven on 2026-09-05 and its
+    window is unmeasured, because the same fact that makes route one true means
+    a resumed clone stage may overwrite the dropped-in file before the cancel is
+    read. Filed in `pyplan/checklist.md` as the route not covered rather than
+    left here as one that cannot exist: the sentence said "the only other way
+    into that folder is a checkout" until 2026-09-05, and an absolute is what
+    this whole docstring is a record of getting wrong.
+
     Where no source lands there, nothing this attempt downloads can put a
     compose file at the root, so it was already there and the adoption is the
     right offer, record or no record

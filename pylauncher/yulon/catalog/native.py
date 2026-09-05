@@ -2396,14 +2396,18 @@ def _listing(folder: Path, *, ignoring: str | None = None) -> list[str]:
 
     The narrow claim is pinned by enumeration rather than by assertion:
     `test_every_folder_listing_in_the_package_is_accounted_for` lists every
-    directory listing under `yulon/` — `iterdir`, `scandir`, `listdir`, `glob`,
-    `rglob`, `walk`, at module level and inside `async def` too — with the
-    reason each is not a write decision, so a new one anywhere in the app fails
-    that audit rather than quietly making this paragraph false again. It read
-    two modules until 2026-09-05, which is how a sentence about the whole
-    engine went unchecked over five sixths of it, and it read only three
-    spellings under `yulon/catalog/` for a few hours after that, which a `glob`
-    respelling of the very regression it was widened for walked straight past.
+    directory listing under `yulon/` in eight spellings — `iterdir`, `scandir`,
+    `listdir`, `glob`, `iglob`, `rglob`, `walk`, `fwalk`, at module level and
+    inside `async def` too — with the reason each is not a write decision, so a
+    new one anywhere in the app fails that audit rather than quietly making this
+    paragraph false again. It read two modules until 2026-09-05, which is how a
+    sentence about the whole engine went unchecked over five sixths of it; then
+    three spellings under `yulon/catalog/`, which a `glob` respelling of the
+    very regression it was widened for walked straight past; then six, which
+    `glob.iglob` walked past the same way. Eight is a set that can be checked,
+    and `test_the_listing_audit_sees_every_spelling_it_names` checks it — not a
+    claim to read every spelling Python has, which is what the set's own
+    docstring said both times it was wrong.
 
     Not every listed site is exonerated: `apply.py`'s `_require_own_clone()`
     makes THIS decision — may the module applier write into this clone dir —

@@ -2210,18 +2210,37 @@ def test_a_folder_that_will_not_list_is_a_refusal_and_not_a_traceback(
     )
 
 
-_LISTING_CALLS = frozenset({"iterdir", "scandir", "listdir", "glob", "rglob", "walk"})
-"""Every spelling of "what is in this folder" a Python file can use.
+_LISTING_CALLS = frozenset(
+    {"iterdir", "scandir", "listdir", "glob", "rglob", "walk", "iglob", "fwalk"}
+)
+"""The eight standard-library spellings of "what is in this folder" this audit reads.
 
-`iterdir`/`scandir`/`listdir` was the whole set until 2026-09-05, and that made
-the audit below unable to fail on the class it enumerates. Measured on m910q the
-same day, `__pycache__` purged both sides: `native._listing(server_dir,
-ignoring=native.STATE_FILE)` in `installer.py` replaced by
-`[p.name for p in server_dir.glob("*") if p.name != native.STATE_FILE]` -- the
-exact regression this audit was widened to catch, spelled with `glob` -- left
-this test GREEN (`1 failed, 2562 passed`, the one failure a behavioural test).
-The `iterdir` spelling of the same mutation turned it red. An audit that a
-one-word respelling walks past is a comment.
+Eight, enumerated. It said "every spelling a Python file can use" until
+2026-09-05, and one word refuted that twice in a row:
+`iterdir`/`scandir`/`listdir` was the whole set that morning, which left the
+audit unable to fail on the class it enumerates; `glob`/`rglob`/`walk` closed
+the class the first review reported; `iglob`/`fwalk` closed the two the NEXT
+review walked straight past it with. An enumerated set can be checked and an
+absolute cannot, so this one is enumerated and
+`test_the_listing_audit_sees_every_spelling_it_names` drives all eight through
+`_listing_sites()` on a file written for them. Anything outside the eight -- a
+third-party walker, a subprocess `ls` -- this audit does not see and does not
+claim to.
+
+Measured on m910q 2026-09-05, `__pycache__` purged both sides, over this file's
+two audit tests plus `tests/test_installer.py` (25 tests, all green
+unmutated). `installer.py`'s write decision -- `native._listing(server_dir,
+ignoring=native.STATE_FILE)` -- respelled `server_dir.glob("*")` gives
+`2 failed, 23 passed` with `test_every_folder_listing_in_the_package_is_accounted_for`
+among them; respelled `glob.iglob(str(server_dir / "*"))` it gives
+`3 failed, 22 passed`, the audit again (the third is
+`test_the_script_lineage_is_gone`, which the mutation's own `import glob` trips
+-- the module surface is enumerated too). What the audit CANNOT see was read
+off `_listing_sites()` on the same mutated tree rather than inferred from the
+run: with the six spellings of that morning it returns 12 sites and NOT
+`("catalog/installer.py", "cancelled_install_message")`; with these eight it
+returns 13 and does. The audit is an equality against that set, so a site it
+does not return is a site it cannot fail on.
 """
 
 
@@ -2357,6 +2376,118 @@ def test_every_folder_listing_in_the_package_is_accounted_for() -> None:
         "a folder listing in this package is not in the map above. If it decides whether the "
         "app may write somewhere it belongs in `native._listing()`; if it does not, add it "
         "with the reason, and check that `_listing()`'s docstring still tells the truth"
+    )
+
+
+_SPELLING_PROBE = '''\
+"""One listing per spelling `_LISTING_CALLS` names, plus the scopes it claims to reach."""
+
+import glob
+import os
+from os import listdir
+
+
+AT_MODULE_LEVEL = list(os.scandir("."))
+
+
+def probe_iterdir(p):
+    return list(p.iterdir())
+
+
+def probe_scandir(p):
+    return list(os.scandir(p))
+
+
+def probe_listdir(p):
+    return listdir(p)
+
+
+def probe_glob(p):
+    return list(p.glob("*"))
+
+
+def probe_rglob(p):
+    return list(p.rglob("*"))
+
+
+def probe_walk(p):
+    return list(os.walk(p))
+
+
+def probe_iglob(p):
+    return list(glob.iglob(str(p) + "/*"))
+
+
+def probe_fwalk(p):
+    return list(os.fwalk(p))
+
+
+async def probe_in_an_async_def(p):
+    return [entry for entry in p.rglob("*")]
+
+
+def probe_not_a_listing(p):
+    return p.read_text(encoding="utf-8")
+'''
+
+
+def test_the_listing_audit_sees_every_spelling_it_names(tmp_path: Path) -> None:
+    """The instrument's own scope, checked rather than asserted in prose.
+
+    `_LISTING_CALLS`' docstring is the audit's whole value: the map below it is
+    only as complete as the set of spellings that reaches it. Twice on
+    2026-09-05 that docstring said "every spelling" and a one-word respelling
+    walked past -- `glob` the first time, `glob.iglob` the second -- and both
+    times the audit stayed green while the write decision it exists to find had
+    moved. Prose cannot be run, so the claim is driven here instead.
+
+    Written out literally rather than generated from `_LISTING_CALLS`, which is
+    the difference between a probe and a tautology: a probe built from the set
+    shrinks with the set and agrees with whatever the set says. This file is
+    fixed, the expected sites are fixed, and the two are tied to the set by the
+    second assertion. Both assertions are load-bearing, and each was reddened on
+    m910q 2026-09-05, `__pycache__` purged both sides, over the same 25-test
+    subset: dropping `iglob` and `fwalk` back out of `_LISTING_CALLS` gives
+    `1 failed, 24 passed` on the SITE-SET assertion, naming
+    `('probe.py', 'probe_iglob')` and `('probe.py', 'probe_fwalk')` as the sites
+    that vanished; adding a ninth spelling with no `probe_` function for it
+    gives `1 failed, 24 passed` on the DRIFT assertion instead, naming the
+    spelling nothing probes.
+
+    The scopes are here for the same reason `<module>` is a real key: an
+    `async def` site and a `from os import listdir` name-form call were both
+    invisible before the walker descended, and `probe_not_a_listing` is the
+    negative control -- an audit that flags everything is not an audit.
+    """
+    probe = tmp_path / "probe.py"
+    probe.write_text(_SPELLING_PROBE, encoding="utf-8")
+
+    sites = _listing_sites(tmp_path)
+
+    assert sites == {
+        ("probe.py", "<module>"),
+        ("probe.py", "probe_iterdir"),
+        ("probe.py", "probe_scandir"),
+        ("probe.py", "probe_listdir"),
+        ("probe.py", "probe_glob"),
+        ("probe.py", "probe_rglob"),
+        ("probe.py", "probe_walk"),
+        ("probe.py", "probe_iglob"),
+        ("probe.py", "probe_fwalk"),
+        ("probe.py", "probe_in_an_async_def"),
+    }, (
+        "a spelling or a scope this audit claims to read walked past it. `probe_not_a_listing` "
+        "must be absent and every other site present; a missing `probe_<name>` means "
+        "`_LISTING_CALLS` no longer names that spelling, and the audit below cannot fail on it"
+    )
+
+    spellings_probed = {
+        name.removeprefix("probe_") for _, name in sites if name.startswith("probe_")
+    } - {"in_an_async_def"}
+    assert spellings_probed == set(_LISTING_CALLS), (
+        "`_LISTING_CALLS` and the probe file have drifted. Add the new spelling to "
+        "`_SPELLING_PROBE` with a `probe_<spelling>` function, or this set is a claim nothing "
+        "checks"
     )
 
 
