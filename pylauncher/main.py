@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from yulon import platform
-from yulon.log import configure, file_log_problem, get_logger
+from yulon.log import configure, file_log_problem, get_logger, use_utf8_streams
 
 if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay for it.
     from yulon.state import AppState
@@ -30,6 +30,16 @@ budget the catalog tiles are measured against: `test_catalog_view.py` asserts
 that every Install button is inside the viewport at exactly this width, and a
 test that carried its own copy of the number would keep passing if someone
 shrank the window.
+"""
+
+
+_CATALOG_MIN_WIDTH = 420
+"""Narrowest the catalog pane may become, in pixels.
+
+Sized to the widest game tile plus its scrollbar, measured 2026-09-02: below
+this the tile text clips mid-word and the Install button leaves the viewport.
+It is a floor for the splitter, not a preference -- the pane is free to be
+wider, and the user is free to drag it.
 """
 
 
@@ -143,10 +153,32 @@ def build_window() -> object:
     # copy that stood here hand-wrote the same probe pair and the same
     # fixed-password fallback, and `catalog/` may not import a controller
     # package to do it itself (style-guide §3).
-    catalog_view = CatalogView(catalog, installer_for_app, log_panel)
+    catalog_view = CatalogView(
+        catalog,
+        installer_for_app,
+        log_panel,
+        # The tiles for games already in `state.json` open reading "Installed"
+        # and greyed, not "Install" (owner, 2026-09-04). Seeded from state
+        # rather than discovered by the view, because `state.json` is the only
+        # thing that knows: the view cannot look at a folder it was never told
+        # about. Same list `add_controller()` just built the tabs from.
+        installed_games=state.installed_dirs(),
+    )
     splitter = QSplitter()
     splitter.addWidget(catalog_view)
     splitter.addWidget(log_panel)
+    # The catalog is the thing the window is for; it may shrink, never vanish.
+    # A bare QSplitter honours whatever minimum its children ask for, so one
+    # widget with a wide size hint can squeeze the other to nothing -- which is
+    # exactly what an unwrapped status label did on 2026-09-02, leaving the
+    # tiles clipped mid-word and their buttons unreachable. That label now
+    # wraps, which is the fix; this is the floor, so the next widget with a wide
+    # hint cannot do it again. Stretch goes to the log because it is the pane
+    # whose content grows.
+    splitter.setCollapsible(0, False)
+    splitter.setStretchFactor(0, 0)
+    splitter.setStretchFactor(1, 1)
+    catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
     tabs.addTab(splitter, "Catalog")
 
     # Typed as the concrete view, not QWidget: `drop_controller()` and the
@@ -381,8 +413,8 @@ def provision_headless() -> int:
     only they can do.
 
     The clean-box harness (checklist 6.3's "proven on a clean box"): on Windows
-    every shipped catalog entry is `platforms: ["linux"]`, so `Installer.preflight()`
-    refuses before `ensure_docker()` is ever reached and the provisioning chain
+    every shipped catalog entry is `platforms: ["linux"]`, so the engine's
+    `preflight()` refuses before `ensure_docker()` is ever reached and the chain
     cannot be exercised through the app at all. That chain is nonetheless where
     the four Cross-cutting Windows defects live — download over a verified
     connection, silent install, find the executable that was just installed,
@@ -403,15 +435,9 @@ def provision_headless() -> int:
     """
     # The same defect's other half: the human-readable lines below put that same
     # step text through `logging`, and a cp1252 stream cannot encode it either.
-    # `errors="replace"` rather than letting it raise, because a diagnostic that
-    # kills the thing it is diagnosing is worse than one with a "?" in it.
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            try:
-                reconfigure(encoding="utf-8", errors="replace")
-            except (OSError, ValueError):  # a stream that cannot be re-wrapped
-                pass
+    # One home for the rule since 2026-09-03 -- `install_wiring` needed it too
+    # and did not have it, which is what stopped the first Windows gate.
+    use_utf8_streams()
     logger.info("Yu'lon provisioning (headless)")
     report = platform.ensure_docker()
     payload = {
@@ -458,9 +484,36 @@ def provision_headless() -> int:
     return PROVISION_READY if report.ok else PROVISION_MANUAL
 
 
+def _regain_docker_group() -> None:
+    """Restart under `sg docker` when that is all that stands between us and Docker.
+
+    The SILENT half of the fix, and deliberately silent: it runs before the
+    window exists and before any Docker question is asked, so the user never
+    sees the process it replaces. There is nothing to click and nothing to
+    explain -- the app simply opens able to use Docker.
+
+    It covers the user who was joined to the group and then closed the launcher.
+    The other half is `CatalogView._offer_a_restart_instead()`, which covers the
+    user still sitting in the session the join happened in; that one has to ask,
+    because it throws away a running application.
+
+    Not one `os.getgroups()` call. Off Linux `docker_group_reexec()` returns
+    None on a `sys.platform` check and spends nothing else. On Linux, before it
+    can return None, it spends an env read, a `geteuid()`, a
+    `shutil.which("sg")` PATH scan, `os.getgroups()`, and one `grp.getgrgid()`
+    per gid -- and for a user who is NOT in the docker group, which is every
+    Linux user who has not provisioned Docker, also a `pwd.getpwuid()` and a
+    SUBPROCESS (`id -nG <user>`, 5s timeout). All of it runs as the first
+    statement of `main()`, before QApplication exists, so a host where that
+    subprocess is slow delays the window with nothing on screen yet to say why.
+    """
+    platform.restart_under_docker_group()
+
+
 def main() -> int:
     """Start the launcher."""
     configure(config_dir=platform.config_dir())
+    _regain_docker_group()
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):
         return provision_headless()
     logger.info("Yu'lon launcher starting")

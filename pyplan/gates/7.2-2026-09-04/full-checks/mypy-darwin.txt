@@ -1,0 +1,10 @@
+﻿=== mypy-darwin ===
+host          : YULON-WIN11-GAT
+tree          : C:\gate\checks-badee625\pylauncher (git archive of badee6255965f2ba8e05ad2306dcdc6126e5880b)
+interpreter   : C:/Users/pk/co/dads-mmo-lab-yulon-phase7/pylauncher/.venv/Scripts/python.exe
+CI spells it  : python -m mypy --platform darwin yulon main.py
+argv here     : python -m mypy --platform darwin yulon main.py
+started UTC   : 2026-09-04T11:00:30.6494632Z
+---
+Success: no issues found in 71 source files
+--- exit code: 0   elapsed: 17.5s   finished UTC: 2026-09-04T11:00:48.1795769Z

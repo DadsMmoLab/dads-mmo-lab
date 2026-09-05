@@ -9,6 +9,13 @@ app cannot do). The view only calls down into `Controller`, `Applier`,
 `console`, `networking` and signals up; it never shells out itself
 (style-guide §3/§5). Every external call is a seam in `ControllerServices` so
 the view is testable offscreen with fakes.
+
+`ControllerServices.for_entry()` builds those seams out of the installed game's
+own `controller_<acronym>` package, chosen by catalog id through `_FACTORIES`.
+Until 7.9 this module imported `controller_wow_wotlk` directly and used it for
+every install, so a TBC, Vanilla or Tortoise tab drove AzerothCore's package:
+its `acore_*` schema names, its `AC>` console prompt and its `ready...` marker
+reached servers that have none of them.
 """
 
 from __future__ import annotations
@@ -41,6 +48,18 @@ from yulon import docker, install_wiring, networking
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry
 from yulon.controller import Controller, InstallStatus, PortConflictError
+from yulon.controller_wow_tbc import accounts as tbc_accounts
+from yulon.controller_wow_tbc import console as tbc_console
+from yulon.controller_wow_tbc import controller as tbc_controller
+from yulon.controller_wow_tbc import maintenance as tbc_maintenance
+from yulon.controller_wow_tortoise import accounts as tortoise_accounts
+from yulon.controller_wow_tortoise import console as tortoise_console
+from yulon.controller_wow_tortoise import controller as tortoise_controller
+from yulon.controller_wow_tortoise import maintenance as tortoise_maintenance
+from yulon.controller_wow_vanilla import accounts as vanilla_accounts
+from yulon.controller_wow_vanilla import console as vanilla_console
+from yulon.controller_wow_vanilla import controller as vanilla_controller
+from yulon.controller_wow_vanilla import maintenance as vanilla_maintenance
 from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
@@ -55,9 +74,35 @@ from yulon.ui.widgets.log_panel import LogPanel
 logger = get_logger(__name__)
 
 
+class UnsupportedGameError(RuntimeError):
+    """No `controller_<game>` package is wired to this catalog id.
+
+    Raised instead of falling back to the WotLK package, which is what this
+    module did for every game until 7.9: `for_wotlk()` was called for a TBC, a
+    Vanilla and a Tortoise install alike, and the fallback was invisible —
+    AzerothCore's `acore_*` schema names, its `AC>` console prompt and its
+    `ready...` marker simply reached a server that has none of them, and the
+    failures surfaced one control at a time, six clicks later.
+
+    A game in the catalog with no factory here is a DEFECT rather than a user
+    situation: `catalog.get()` has already refused an id that is not in
+    `catalog.json`, so reaching this means a game was added without its
+    controller package being wired. `test_controller_view.py` asserts the
+    registry covers the whole catalog, so this raises in CI before it can
+    raise in front of anybody.
+    """
+
+
 @dataclass
 class ControllerServices:
-    """Everything the view calls down into. Real implementations by default; fakes in tests."""
+    """Everything the view calls down into. Real implementations by default; fakes in tests.
+
+    The types below are named through `controller_wow_wotlk` because that is
+    where the shared implementations live: every per-game package re-exports
+    the SAME `ConsoleReply`, `AccountResult`, `BackupReport`, `RestorePlan`,
+    `RestoreReport` and `InterruptedRestore` objects rather than defining its
+    own, so an `isinstance` in this view holds whichever package answered.
+    """
 
     controller: Controller
     logs_source: Callable[[], Iterator[str]]
@@ -75,6 +120,39 @@ class ControllerServices:
     forget_interrupted: Callable[[], bool]
 
     @classmethod
+    def for_entry(
+        cls,
+        entry: CatalogEntry,
+        server_dir: Path,
+        client_dir: Path | None = None,
+        wsl_distro: str | None = None,
+    ) -> ControllerServices:
+        """The real wiring for the install at `server_dir`, from THIS game's package.
+
+        The dispatch is a lookup on the catalog id, not a chain of `if`s and not
+        a family test. Two of the four games (`wow-tbc` and `wow-vanilla`) are
+        the same core, the same prompt, the same schema names and the same
+        account scheme — everything a family test could branch on is equal —
+        and they still need different packages, because their containers and
+        their ready markers differ. So the key is the id, which is the only
+        thing that is unique per install.
+
+        An id with no factory raises `UnsupportedGameError` rather than falling
+        back to WotLK; that class says what the fallback cost.
+
+        Raises:
+            UnsupportedGameError: no controller package is wired for `entry.id`.
+        """
+        factory = _FACTORIES.get(entry.id)
+        if factory is None:
+            raise UnsupportedGameError(
+                f"{entry.name} ({entry.id}) has no controller package in this build, so this "
+                f"app cannot manage an install of it. Nothing was opened. The games it can "
+                f"manage are: {', '.join(sorted(_FACTORIES))}."
+            )
+        return factory(entry, server_dir, client_dir, wsl_distro)
+
+    @classmethod
     def for_wotlk(
         cls,
         entry: CatalogEntry,
@@ -82,124 +160,425 @@ class ControllerServices:
         client_dir: Path | None = None,
         wsl_distro: str | None = None,
     ) -> ControllerServices:
-        """The real WotLK wiring for an install at `server_dir`."""
-        spec = entry.container_spec()
-        # The entry may carry the password, or name a file the installer generated
-        # it into; `db_password()` knows both. TBC and Vanilla generate one, so
-        # before this they authenticated as root with the literal "password" -
-        # Start and Stop need no database, which is why it surfaced later, on
-        # Create account and Backup. The default stays as a last resort so an
-        # install whose password file has gone missing still gets a tab that can
-        # start and stop, rather than no tab at all.
-        password = entry.install.db_password(server_dir)
-        if password is None:
-            # `db_password()` says None when the entry NAMES a password file and
-            # that file cannot be read - which is not the same as "use the
-            # default", and silently defaulting here would rebuild the bug this
-            # seam exists to close. The tab is still built, because Start and
-            # Stop need no database and no tab at all is worse; but the reason
-            # every SQL-backed control is about to fail is written down once,
-            # here, instead of arriving as "access denied" six clicks later.
-            if entry.install.password.mode == "generated":
-                logger.warning(
-                    f"{entry.id}: cannot read {entry.install.password.file} in "
-                    f"{server_dir}, so the database password is unknown - accounts, backup "
-                    f"and restore will fail until that file is restored"
-                )
-            password = wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
-        # `schemas=` is what keeps a CMaNGOS install off AzerothCore's `acore_*`
-        # names. This factory is the only place that holds both the entry and the
-        # seam, so it is the only place that can say which schemas exist here.
-        # `wsl_distro=` is the other half of the same sentence: the schemas say
-        # WHICH databases, the distro says which daemon they are inside.
-        sql = DockerSql(spec.db, password, schemas=entry.schema_map(), wsl_distro=wsl_distro)
-        # Bound to this entry's own db container, not `mysql_for()`'s
-        # `docker_ctl.SPEC.db`, so a catalog entry that names a different one
-        # cannot end up backing up somebody else's database.
-        mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro)
-        # The probe pair is `(None, None)` for a game that names no one-shot
-        # import service — `install_wiring.import_gate_for()` carries the
-        # reasoning that used to live here, once, for this tab, the Catalog tab
-        # and the CLI. `wsl_distro=` because that function builds its own two
-        # seams and they address a daemon too.
-        #
-        # Its password is `fixed_db_password(entry)` and NOT the file read
-        # above, which is right and is not an oversight: a gate is built only
-        # for an entry that names an import service, wow-wotlk is the only one,
-        # and its plan is `fixed`. The reverse substitution — this function's
-        # `sql`/`mysql`/applier taking the fixed value — is the closed bug the
-        # comment above describes.
-        probe, reset = install_wiring.import_gate_for(entry, wsl_distro=wsl_distro)
-        controller = Controller(
+        """`for_entry()` under the name it had while WotLK was the only wiring.
+
+        Kept because `main.py` still spells the call this way and that file is
+        not this change's to edit; it dispatches like any other caller, so a
+        TBC entry passed to it reaches the TBC package. Prefer `for_entry()`.
+        """
+        return cls.for_entry(entry, server_dir, client_dir, wsl_distro=wsl_distro)
+
+
+# ------------------------------------------------------ one factory per game
+#
+# Everything below builds a `ControllerServices` for one game out of that
+# game's own `controller_<acronym>` package. What is shared sits in the helpers
+# first; what differs — the controller class, the console, the account writer,
+# the maintenance binding and the manifest store — is spelled out per game,
+# because that is exactly the list of things a per-game package exists to
+# answer differently.
+
+
+def _db_password(entry: CatalogEntry, server_dir: Path) -> str:
+    """This install's database root password, with the last-resort default.
+
+    The entry may carry the password, or name a file the installer generated it
+    into; `db_password()` knows both. The three CMaNGOS games generate one, so
+    before it was read they authenticated as root with the literal "password" -
+    Start and Stop need no database, which is why it surfaced later, on Create
+    account and Backup. The default stays as a last resort so an install whose
+    password file has gone missing still gets a tab that can start and stop,
+    rather than no tab at all.
+    """
+    password = entry.install.db_password(server_dir)
+    if password is not None:
+        return password
+    # `db_password()` says None when the entry NAMES a password file and that
+    # file cannot be read - which is not the same as "use the default", and
+    # silently defaulting here would rebuild the bug this seam exists to close.
+    # The tab is still built, because Start and Stop need no database and no tab
+    # at all is worse; but the reason every SQL-backed control is about to fail
+    # is written down once, here, instead of arriving as "access denied" six
+    # clicks later.
+    if entry.install.password.mode == "generated":
+        logger.warning(
+            f"{entry.id}: cannot read {entry.install.password.file} in "
+            f"{server_dir}, so the database password is unknown - accounts, backup "
+            f"and restore will fail until that file is restored"
+        )
+    return wotlk_modules.DEFAULT_DB_ROOT_PASSWORD
+
+
+def _db_client(entry: CatalogEntry) -> str | None:
+    """Which client family this game's database image ships (`install.native.db.client`).
+
+    None for an entry with no `native` block, which is what `DockerSql` reads
+    as "nothing was declared, keep the order you always had".
+    """
+    native = entry.install.native
+    return native.db.client if native is not None else None
+
+
+def _sql_for(entry: CatalogEntry, password: str, *, wsl_distro: str | None) -> DockerSql:
+    """The read+write SQL seam every SQL-backed control on this tab goes through.
+
+    Three per-install facts reach it here and nowhere else, because this is the
+    only layer holding both the entry and the seam:
+
+    * `schemas=` keeps a CMaNGOS install off AzerothCore's `acore_*` names;
+    * `client=` keeps it off AzerothCore's `mysql` binary, which `mariadb:11`
+      does not ship at all (`apply.mysql_client()` carries the measurement);
+    * `wsl_distro=` says which daemon those databases are inside.
+
+    The container is this ENTRY's, not the package's module-level `SPEC.db`, so
+    a catalog entry naming a different one cannot end up addressing somebody
+    else's database.
+    """
+    return DockerSql(
+        entry.container_spec().db,
+        password,
+        schemas=entry.schema_map(),
+        client=_db_client(entry),
+        wsl_distro=wsl_distro,
+    )
+
+
+def _mysql_for(
+    entry: CatalogEntry, password: str, *, wsl_distro: str | None
+) -> wotlk_maintenance.DockerMysql:
+    """The dump/load seam, bound to this entry's own db container.
+
+    `DockerMysql` is one class shared by every game's package (they re-export
+    it), and it is built from the entry rather than from the package's
+    `mysql_for()` for the reason above: `docker_ctl.SPEC.db` is the catalog's
+    answer for the game, and the entry is the catalog's answer for THIS install.
+
+    `client=` for the same reason `_sql_for()` directly above passes it, and
+    this function is why that reason is worth repeating: it sat one function
+    below a correct sibling, without it, through two commits that fixed exactly
+    this in the controller packages. It is the seam the SERVER TAB uses -- the
+    real backup and restore buttons for TBC, Vanilla and Tortoise, all three on
+    MariaDB -- so unbound it fell back to `mysql`, which `mariadb:11` does not
+    ship, whenever the container could not be probed. Found by a review that
+    asked "which OTHER builders were missed", after the same defect had already
+    been fixed twice (2026-09-03).
+    """
+    return wotlk_maintenance.DockerMysql(
+        entry.container_spec().db,
+        password,
+        wsl_distro=wsl_distro,
+        client=_db_client(entry),
+    )
+
+
+def _no_manifest_store(entry: CatalogEntry) -> ManifestStore | None:
+    """None, and a warning if the catalog has since said otherwise.
+
+    Only `manifests/wow-wotlk/` existed when these factories were written and
+    only `controller_wow_wotlk` has a `modules.py`, so the other three games
+    have no store to open and their Modules tab says so. If one of them is
+    given manifests, the honest failure is this line in the log rather than a
+    tab quietly offering AzerothCore's modules for a CMaNGOS server.
+    """
+    if entry.has_manifests:
+        logger.warning(
+            f"{entry.id} now has manifests, but there is no modules.py in its controller "
+            f"package, so the Modules tab has nothing to offer for it"
+        )
+    return None
+
+
+def _assemble(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None,
+    controller: Controller,
+    sql: DockerSql,
+    send_console: Callable[[str], wotlk_console.ConsoleReply],
+    create_account: Callable[[str, str, int], wotlk_accounts.AccountResult],
+    store: ManifestStore | None,
+    applier: Applier | None,
+    backup: Callable[[], wotlk_maintenance.BackupReport],
+    plan_restore: Callable[[Path], wotlk_maintenance.RestorePlan],
+    restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport],
+) -> ControllerServices:
+    """The seams that are the same sentence for every game, plus the ones that are not.
+
+    What is here is here because it takes no per-game decision: following a
+    container's log, planning the network, and the three backup-directory
+    questions, which are path arithmetic under the server dir and are the same
+    function object in all four packages.
+    """
+    spec = entry.container_spec()
+    return ControllerServices(
+        controller=controller,
+        logs_source=lambda: docker.follow_logs(spec.world, wsl_distro=wsl_distro),
+        send_console=send_console,
+        store=store,
+        applier=applier,
+        network_plan=lambda mode: networking.plan(
+            entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
+        ),
+        network_apply=lambda plan: networking.apply(plan, sql=sql),
+        create_account=create_account,
+        backup=backup,
+        backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
+        plan_restore=plan_restore,
+        restore=restore,
+        interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
+        forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
+    )
+
+
+def _for_wotlk(
+    entry: CatalogEntry,
+    server_dir: Path,
+    client_dir: Path | None,
+    wsl_distro: str | None,
+) -> ControllerServices:
+    """AzerothCore: the base `Controller`, the only import gate, the only manifest store."""
+    spec = entry.container_spec()
+    password = _db_password(entry, server_dir)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    # The probe pair is `(None, None)` for a game that names no one-shot import
+    # service — `install_wiring.import_gate_for()` carries the reasoning, once,
+    # for this tab, the Catalog tab and the CLI. `wsl_distro=` because that
+    # function builds its own two seams and they address a daemon too.
+    #
+    # Its password is `fixed_db_password(entry)` and NOT the file read above,
+    # which is right and is not an oversight: a gate is built only for an entry
+    # that names an import service, wow-wotlk is the only one, and its plan is
+    # `fixed`. The reverse substitution — this function's `sql`/`mysql`/applier
+    # taking the fixed value — is the closed bug `_db_password()` describes.
+    probe, reset = install_wiring.import_gate_for(entry, wsl_distro=wsl_distro)
+    return _assemble(
+        entry,
+        server_dir,
+        wsl_distro=wsl_distro,
+        controller=Controller(
             spec,
             server_dir,
             wsl_distro=wsl_distro,
             import_probe=probe,
             reset_unfinished=reset,
-        )
-        return cls(
-            controller=controller,
-            logs_source=lambda: docker.follow_logs(spec.world, wsl_distro=wsl_distro),
-            # Three facts, from three different places, and the command needs
-            # all of them: WHICH container (the spec), how to recognise this
-            # server's console prompt (the entry - CMaNGOS does not print
-            # AzerothCore's), and which daemon that container is inside (the
-            # distro). Without the last one the attach goes to the local daemon,
-            # which has never heard of `ac-worldserver`, so every console line
-            # came back as a docker error rather than as a reply.
-            send_console=lambda cmd: wotlk_console.send_command(
-                cmd,
-                container=spec.world,
-                prompt=entry.console.prompt,
-                prompt_precedes_answer=entry.console.prompt_precedes_answer,
-                wsl_distro=wsl_distro,
-            ),
-            store=wotlk_modules.store() if entry.has_manifests else None,
-            applier=(
-                wotlk_modules.applier(server_dir, sql=sql, client_dir=client_dir)
-                if entry.has_manifests
-                else None
-            ),
-            network_plan=lambda mode: networking.plan(
-                entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
-            ),
-            network_apply=lambda plan: networking.apply(plan, sql=sql),
-            # `gm_level` is passed through rather than defaulted here: the guide
-            # pairs every `account create` with `account set gmlevel ... 3`, and
-            # copying that would hand administrator to every account made from
-            # the tile. The spin box defaults to 0 and the user raises it.
-            create_account=lambda name, pw, gm: wotlk_accounts.create_account(
-                sql, name, pw, gm_level=gm, scheme=entry.accounts.scheme or "azerothcore"
-            ),
-            # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
-            # through `docker exec`, but before it runs, maintenance censuses
-            # the containers with `docker ps` — a second question, to the same
-            # daemon, that was going to the Windows host. On a machine whose
-            # only Docker is inside the distro that is the one with no Docker on
-            # it, so Back up now answered "Docker could not be found on this
-            # machine" while the Console tab, one seam over, was attached and
-            # streaming (Discord report, 2026-08-27).
-            backup=lambda: wotlk_maintenance.backup(
-                server_dir,
-                mysql,
-                spec=spec,
-                core_databases=entry.core_databases(),
-                wsl_distro=wsl_distro,
-            ),
-            backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
-            plan_restore=lambda path: wotlk_maintenance.plan_restore(
-                path, server_dir, spec=spec, wsl_distro=wsl_distro
-            ),
-            # `confirm=plan.token` is not a rubber stamp: the token can only come
-            # from a plan, a plan can only come from a real file, and the human
-            # confirmation is the dialog the view puts in front of this call.
-            # What the token buys is that no confirmation can be spelled `True`.
-            restore=lambda plan: wotlk_maintenance.restore(
-                plan, mysql, confirm=plan.token, spec=spec, wsl_distro=wsl_distro
-            ),
-            interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
-            forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
-        )
+        ),
+        sql=sql,
+        # Three facts, from three different places, and the command needs all of
+        # them: WHICH container (the spec), how to recognise this server's
+        # console prompt (the entry - CMaNGOS does not print AzerothCore's), and
+        # which daemon that container is inside (the distro). Without the last
+        # one the attach goes to the local daemon, which has never heard of
+        # `ac-worldserver`, so every console line came back as a docker error
+        # rather than as a reply.
+        send_console=lambda cmd: wotlk_console.send_command(
+            cmd,
+            container=spec.world,
+            prompt=entry.console.prompt,
+            prompt_precedes_answer=entry.console.prompt_precedes_answer,
+            wsl_distro=wsl_distro,
+        ),
+        # `gm_level` is passed through rather than defaulted here: the guide
+        # pairs every `account create` with `account set gmlevel ... 3`, and
+        # copying that would hand administrator to every account made from the
+        # tile. The spin box defaults to 0 and the user raises it.
+        create_account=lambda name, pw, gm: wotlk_accounts.create_account(
+            sql, name, pw, gm_level=gm, scheme=entry.accounts.scheme or "azerothcore"
+        ),
+        store=wotlk_modules.store() if entry.has_manifests else None,
+        applier=(
+            wotlk_modules.applier(server_dir, sql=sql, client_dir=client_dir)
+            if entry.has_manifests
+            else None
+        ),
+        # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
+        # through `docker exec`, but before it runs, maintenance censuses the
+        # containers with `docker ps` — a second question, to the same daemon,
+        # that was going to the Windows host. On a machine whose only Docker is
+        # inside the distro that is the one with no Docker on it, so Back up now
+        # answered "Docker could not be found on this machine" while the Console
+        # tab, one seam over, was attached and streaming (Discord report,
+        # 2026-08-27).
+        backup=lambda: wotlk_maintenance.backup(
+            server_dir,
+            mysql,
+            spec=spec,
+            core_databases=entry.core_databases(),
+            wsl_distro=wsl_distro,
+        ),
+        plan_restore=lambda path: wotlk_maintenance.plan_restore(
+            path, server_dir, spec=spec, wsl_distro=wsl_distro
+        ),
+        # `confirm=plan.token` is not a rubber stamp: the token can only come
+        # from a plan, a plan can only come from a real file, and the human
+        # confirmation is the dialog the view puts in front of this call. What
+        # the token buys is that no confirmation can be spelled `True`.
+        restore=lambda plan: wotlk_maintenance.restore(
+            plan,
+            mysql,
+            confirm=plan.token,
+            spec=spec,
+            # Bound here for the same reason `backup` binds it four lines up, and
+            # missed when the CMaNGOS wrappers were fixed on 2026-09-04. WotLK has
+            # no per-game maintenance wrapper -- this lambda IS its call site -- so
+            # `restore()`'s new `core_databases` default applied here unbound. It
+            # was harmless only by coincidence: this entry's databases happen to be
+            # the three the default names. An AzerothCore-family entry that spelled
+            # them differently would have reproduced the exact bug that fix removed,
+            # on the tab whose Backup button was already correct.
+            core_databases=entry.core_databases(),
+            wsl_distro=wsl_distro,
+        ),
+    )
+
+
+def _for_tbc(
+    entry: CatalogEntry,
+    server_dir: Path,
+    client_dir: Path | None,
+    wsl_distro: str | None,
+) -> ControllerServices:
+    """WoW TBC (CMaNGOS), through `controller_wow_tbc`.
+
+    `client_dir` is accepted and unused: it exists to copy a manifest's client
+    files, and this entry has no manifests (`_no_manifest_store()`).
+
+    No `import_probe` is handed to the controller, which is `TbcController`'s
+    own decision restated at the call site: the Repair button's only action is
+    `docker.repair_import()`, whose first refusal is "this game does not say
+    which compose service imports its databases" — and this entry names none.
+    `Controller.import_state()` then answers `unreadable`, which is not
+    `repairable`, so nothing is offered; `_show_repair()` gates on the same
+    fact a second time.
+    """
+    del client_dir
+    password = _db_password(entry, server_dir)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    return _assemble(
+        entry,
+        server_dir,
+        wsl_distro=wsl_distro,
+        controller=tbc_controller.TbcController(server_dir, wsl_distro=wsl_distro),
+        sql=sql,
+        # No `prompt=`: this package binds this console's prompt and the side of
+        # it the answer arrives on, both from the same catalog entry. Passing
+        # them again from here would be a second source for one fact.
+        send_console=lambda cmd: tbc_console.send_command(
+            cmd, container=entry.container_spec().world, wsl_distro=wsl_distro
+        ),
+        create_account=lambda name, pw, gm: tbc_accounts.create_account(sql, name, pw, gm_level=gm),
+        store=_no_manifest_store(entry),
+        applier=None,
+        backup=lambda: tbc_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
+        plan_restore=lambda path: tbc_maintenance.plan_restore(
+            path, server_dir, wsl_distro=wsl_distro
+        ),
+        restore=lambda plan: tbc_maintenance.restore(
+            plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
+        ),
+    )
+
+
+def _for_vanilla(
+    entry: CatalogEntry,
+    server_dir: Path,
+    client_dir: Path | None,
+    wsl_distro: str | None,
+) -> ControllerServices:
+    """WoW Vanilla (CMaNGOS), through `controller_wow_vanilla`.
+
+    `controller_wow_vanilla.repair.import_gate()` builds a real `(probe, reset)`
+    pair for this install and it is deliberately NOT wired here. Its probe can
+    answer `absent`, `ImportState.repairable` is true for that, and the button
+    that would appear runs `docker.repair_import()` — which refuses, because
+    this entry names no import service. A button whose only outcome is a
+    refusal is worse than no button; the state is still knowable through that
+    function for anything that wants to report it rather than act on it.
+    """
+    del client_dir
+    password = _db_password(entry, server_dir)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    return _assemble(
+        entry,
+        server_dir,
+        wsl_distro=wsl_distro,
+        controller=vanilla_controller.VanillaController(server_dir, wsl_distro=wsl_distro),
+        sql=sql,
+        send_console=lambda cmd: vanilla_console.send_command(
+            cmd, container=entry.container_spec().world, wsl_distro=wsl_distro
+        ),
+        create_account=lambda name, pw, gm: vanilla_accounts.create_account(
+            sql, name, pw, gm_level=gm
+        ),
+        store=_no_manifest_store(entry),
+        applier=None,
+        backup=lambda: vanilla_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
+        plan_restore=lambda path: vanilla_maintenance.plan_restore(
+            path, server_dir, wsl_distro=wsl_distro
+        ),
+        restore=lambda plan: vanilla_maintenance.restore(
+            plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
+        ),
+    )
+
+
+def _for_tortoise(
+    entry: CatalogEntry,
+    server_dir: Path,
+    client_dir: Path | None,
+    wsl_distro: str | None,
+) -> ControllerServices:
+    """Tortoise (CMaNGOS lineage), through `controller_wow_tortoise`.
+
+    `controller_for()` is that package's own constructor and it is the one used
+    rather than `TortoiseController(...)` directly, because the decision to
+    attach no import probe is written down inside it.
+    """
+    del client_dir
+    password = _db_password(entry, server_dir)
+    sql = _sql_for(entry, password, wsl_distro=wsl_distro)
+    mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    return _assemble(
+        entry,
+        server_dir,
+        wsl_distro=wsl_distro,
+        controller=tortoise_controller.controller_for(server_dir, wsl_distro=wsl_distro),
+        sql=sql,
+        # This package's `send()` takes no container: it addresses its own
+        # entry's worldserver, which is the same catalog fact `spec.world` is.
+        send_console=lambda cmd: tortoise_console.send(cmd, wsl_distro=wsl_distro),
+        create_account=lambda name, pw, gm: tortoise_accounts.create_account(
+            sql, name, pw, gm_level=gm
+        ),
+        store=_no_manifest_store(entry),
+        applier=None,
+        backup=lambda: tortoise_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
+        plan_restore=lambda path: tortoise_maintenance.plan_restore(
+            path, server_dir, wsl_distro=wsl_distro
+        ),
+        restore=lambda plan: tortoise_maintenance.restore(
+            plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
+        ),
+    )
+
+
+_Factory = Callable[[CatalogEntry, Path, Path | None, str | None], ControllerServices]
+
+_FACTORIES: dict[str, _Factory] = {
+    "wow-wotlk": _for_wotlk,
+    "wow-tbc": _for_tbc,
+    "wow-vanilla": _for_vanilla,
+    "wow-tortoise": _for_tortoise,
+}
+"""Catalog id → the wiring for that game. `for_entry()` is the only reader.
+
+A dict rather than a chain of `if`s so that adding a game is adding a row, and
+so that "which games can this build manage?" has an answer that can be printed
+(`UnsupportedGameError` prints it) and asserted against `catalog.json`.
+"""
 
 
 def _safe_bindings(wsl_distro: str | None = None) -> dict[int, str] | None:
@@ -540,9 +919,28 @@ class ControllerView(QWidget):
         self._show_repair()
 
     def _show_repair(self) -> None:
-        """Offer the repair only while the database itself says there is one to do."""
+        """Offer the repair only while the database says there is one to do AND this game can.
+
+        Two facts, and the second is not the first. `ImportState.repairable` is
+        the DATABASE's answer — "these schemas were never filled" — and it is
+        true for a CMaNGOS install whose probe cannot find a marker row. What
+        the button then runs is `docker.repair_import()`, whose first refusal is
+        that this game never said which compose service imports its databases;
+        only `wow-wotlk` names one. So a tab that offered the button on
+        `repairable` alone would arm a two-press destructive gesture whose only
+        possible outcome is that sentence.
+
+        Gated on the entry rather than on `controller.import_probe` being set,
+        because those are two different claims: a probe can be attached by
+        anything, and the fact that decides whether the ACTION can run is the
+        `import_service` the action itself refuses without.
+        """
         state = self._import_state
-        offer = state is not None and state.repairable
+        offer = (
+            state is not None
+            and state.repairable
+            and bool(self.entry.container_spec().import_service)
+        )
         self.repair_button.setVisible(offer)
         self.repair_label.setVisible(offer)
         if offer and state is not None:

@@ -20,13 +20,18 @@ rather than answering each question the way the code under test would like.
 
 from __future__ import annotations
 
+import subprocess
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 from yulon import docker, git, platform, resources
 from yulon.catalog import composegen, native, preflight
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.families import extract, patch
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
 
@@ -50,6 +55,38 @@ whole mechanism (write only an override, then `compose up -d --build`) only
 works because it is. A clone double that made only `.git` hid a blocker that
 refused every install.
 """
+
+
+VMAP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cmangos-vmap-8ec338a1"
+"""`contrib/vmap_extractor/vmapextract/` of `mangos-classic` at `8ec338a1`; see `test_patch.py`."""
+
+
+def lay_patch_sources(entry: CatalogEntry) -> Callable[[Path], None]:
+    """An `on_clone` hook laying the pre-image of every patch `entry` carries under its source.
+
+    A clone double leaves `.git` and nothing else, and since 2026-09-05
+    `patch-sources` runs right after the clone and refuses a checkout that
+    lacks the file it edits — so every install driven through a Recorder has
+    to lay the tree the patch was written against, or it stops one stage in.
+    Laid by BASENAME at the path each hunk names, and only under the dest the
+    catalog says the patch applies to; the dest is recognised by its tail so
+    the hook needs no server dir. An entry with no patches gets a hook that
+    does nothing.
+    """
+    block = entry.install.native.cmangos if entry.install.native is not None else None
+    patches = block.patches if block is not None else ()
+    root = resources.installers_dir()
+
+    def on_clone(dest: Path) -> None:
+        for spec in patches:
+            if not dest.as_posix().endswith("/" + spec.source):
+                continue
+            for hunk in patch.parse((root / spec.file).read_text(encoding="utf-8")):
+                target = dest.joinpath(*hunk.path.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((VMAP_FIXTURE / hunk.path.rsplit("/", 1)[-1]).read_bytes())
+
+    return on_clone
 
 
 @dataclass
@@ -79,6 +116,18 @@ class Recorder:
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
     probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
     reset_answer: tuple[str, ...] = ("acore_world",)
+    reset_error: Exception | None = None
+    """What `reset()` RAISES instead of answering, or None to answer.
+
+    The seam behind it is `controller_wow_wotlk.repair.reset_unfinished()`,
+    whose own `Raises:` names three: `MaintenanceError` (the schemas could not
+    be listed, or one survived its `DROP`), `ApplyError` (the server refused a
+    `DROP DATABASE`) and a bare `RuntimeError` (there is player data, so
+    nothing was dropped). None of the three is an `InstallerError`, and a
+    double that could only ever answer could not produce the refusal the
+    engine has to translate — which is this module's own rule.
+    """
+
     containers: dict[str, str | None] = field(default_factory=dict)
     """Containers that EXIST on this machine, and the compose project owning each.
 
@@ -97,6 +146,145 @@ class Recorder:
     db_healthy: bool = True
     ready: bool = True
 
+    world_output: native.WorldOutput = native.WorldOutput(
+        text="mangosd loading", restarts=0, status="running"
+    )
+    """What the world container has printed, read BETWEEN ready windows.
+
+    A CONSTANT by default, which is a machine deliberately: with `ready=False`
+    it models the server that is up, has never restarted and is saying nothing
+    new -- the one honest reading of "it never came up" that a fixed answer can
+    give. A test about a server that is still loading has to say so by handing
+    `world_output` a callable that changes its answer, because a double that
+    cannot produce a different second reading cannot produce the failure this
+    module exists to make producible (see `tests/test_ready_budget.py`).
+    """
+
+    container_runs: list[docker.ContainerRun] = field(default_factory=list)
+    """Every `docker run` the engine asked for, as the typed spec — asserted by field."""
+
+    copied: list[tuple[str, str, Path]] = field(default_factory=list)
+    sql_calls: list[str] = field(default_factory=list)
+    """The first line of every stream fed to `exec_stdin`, plus every `sql_query` statement.
+
+    A first line names a dump and is the wrong thing to reach for when the
+    question is what a multi-line script said; `sql_scripts` below holds those
+    whole.
+    """
+
+    distros: list[str | None] = field(default_factory=list)
+    """The `wsl_distro` of every `exec_stdin`/`sql_query` call, in order — recorded, not dropped.
+
+    `sqlplan.apply()` passes `wsl_distro=` on EVERY call, so a double without
+    the keyword is a `TypeError` on the first statement rather than a wrong
+    answer. Recording it is what makes the seam's daemon choice assertable:
+    both Protocols (`sqlplan.ExecStdin`, `sqlplan.SqlQuery`) declare the
+    keyword because a container name means nothing to a daemon that does not
+    hold it, and a double that accepted and discarded it would let a call go to
+    the wrong daemon with nothing in a test to show it.
+    """
+
+    sql_scripts: list[str] = field(default_factory=list)
+    """The WHOLE text of every script fed to `exec_stdin`, in order.
+
+    `sql_calls` keeps the FIRST line of each, which names a dump by its
+    `-- <path>` header and was all this double kept until 2026-09-02. That is
+    not enough to see what the database was told: `create_schemas()` writes its
+    `CREATE DATABASE` on line 1 and its `CREATE USER`, `ALTER USER` and `GRANT`
+    lines below it, so an assertion with only the first line in reach cannot
+    tell a grant made for the emulator's user from one made for somebody
+    else's — and a review found exactly that hole under a test that looked
+    like it covered the user. Kept ALONGSIDE the first lines, never instead of
+    them, because every existing assertion reads `sql_calls`.
+    """
+
+    sql_secrets: list[str] = field(default_factory=list)
+    """The connection secret every SQL call carried — one entry per `sql_calls` entry.
+
+    `env["MYSQL_PWD"]` at `exec_stdin`, the `password` argument at `sql_query`:
+    the two seams this app reaches a database through, recorded as one list
+    because "which password did this install spend" is one question about
+    both. `""` is a call that carried no `MYSQL_PWD` at all, which is an answer
+    no caller in `sqlplan` produces and a mutation of one that does.
+    """
+
+    volumes: set[str] = field(default_factory=set)
+    """Named volumes that EXIST on this machine (`docker volume inspect` answers)."""
+
+    run_result: docker.AttachedRun = docker.AttachedRun(0, ("extracted",))
+    success_returncodes: tuple[int, ...] = (0,)
+    """Which statuses this double treats as "the tool did its work and wrote output".
+
+    A field rather than a literal `== 0`, because this double used to encode the
+    exact assumption the code under test stopped making. `MmapPlan.success_codes`
+    exists because MoveMapGen's convention differs by upstream tree -- the
+    Tortoise fork returns 1 when it finishes -- and a double that writes files
+    only on 0 cannot represent that tool at all: a test driving a Tortoise
+    generator through the real stage got an empty output folder and an error
+    about it, which is the double disagreeing with reality rather than the code
+    being wrong (2026-09-03).
+    """
+    produce: dict[str, int] = field(
+        default_factory=lambda: {
+            "dbc": 100,
+            "maps": 100,
+            "Buildings": 100,
+            "vmaps": 100,
+            "mmaps": 500,
+        }
+    )
+    """What a successful container run leaves under the `/out` mount — the real tools' shape.
+
+    The names and the counts are `wow-tbc`'s own `extract.tools[*].produces`
+    plus `mmaps.min_files`, and `test_families_cmangos.py` asserts that against
+    the catalog: a folder no tool produces would be a fixture the code never
+    looks at, and the shortfall it is supposed to exercise could never fire.
+    """
+
+    conf_dist: dict[str, str] = field(
+        default_factory=lambda: {
+            "mangosd.conf.dist": 'LoginDatabaseInfo = "old"\nDataDir = "."\nOther = 1\n',
+            "realmd.conf.dist": 'LoginDatabaseInfo = "old"\n',
+            "aiplayerbot.conf.dist": "AiPlayerbot.MinRandomBots = 50\n",
+            "ahbot.conf.dist": "AuctionHouseBot.Chance.Sell = 0\n",
+        }
+    )
+    failing_sql: str = ""
+    """A substring; any stream containing it exits 1 with a mariadb-shaped stderr."""
+
+    query_answer: str = "20000\n"
+    realm_row: str = "127.0.0.1\t127.0.0.1\n"
+    """What the realm query answers. A FRESH install holds loopback.
+
+    Separate from `query_answer`, which is a row count for the import probe.
+    One canned string for every question let the realm guard read "20000" as a
+    perfectly good address and skip its write, which made a correct guard look
+    broken (review, 2026-09-03)."""
+    """What `sql_query` answers, VERBATIM — trailing newline and all.
+
+    `docker.sql_query()` returns the client's stdout untouched, and under
+    `--batch --skip-column-names` that distinction carries information no
+    caller can get back once it is gone: one row holding the empty string
+    prints `"\\n"`, no rows print `""`. A default of `"20000"` — no newline —
+    is a fixture more convenient than reality, and a double that can never
+    produce a trailing newline cannot exercise the branch it will be pointed
+    at. Set it to `""` or to `"\\n"` to drive those two apart.
+    """
+
+    column_answer: str | None = None
+    """What an `information_schema.columns` question answers; None falls through to `query_answer`.
+
+    Kept apart from `query_answer` for the same reason `realm_row` is: one canned
+    string for every question is a fixture answering itself. `check_update_levels()`
+    asks whether a schema carries the column its last applied update leaves behind,
+    and with a single answer of `"20000"` every schema is always at every level, so
+    the branch that refuses one that is not could never be reached. Set this to
+    `"0\n"` to drive a schema that stopped part-way through the chain.
+    """
+
+    on_clone: Callable[[Path], None] | None = None
+    """Called with the dest after each clone — the CMaNGOS tests lay SQL fixtures with it."""
+
     def probe(self) -> docker.ImportState:
         """What the databases read as — and `unreadable` until one is running.
 
@@ -113,6 +301,8 @@ class Recorder:
 
     def reset(self) -> tuple[str, ...]:
         self.calls.append("reset")
+        if self.reset_error is not None:
+            raise self.reset_error
         return self.reset_answer
 
     def container_exists(self, name: str) -> bool:
@@ -148,12 +338,133 @@ class Recorder:
             raise docker.DockerCommandError(self.db_start_error)
         self.db_started = True
 
+    def run_container(
+        self,
+        spec: docker.ContainerRun,
+        *,
+        sink: docker.OutputSink,
+        cancel: threading.Event | None = None,
+    ) -> docker.AttachedRun:
+        """One `docker run --rm`: its output goes to the sink, its files land on the `/out` bind.
+
+        Nothing is produced when the run failed. A tool that segfaults leaves
+        the folder it was going to fill empty, and that emptiness is exactly
+        what `extract.shortfall()` reads — a double that filled `/out` anyway
+        would make every "the tool failed" test pass for the wrong reason.
+
+        `vmap_extractor` gets two rules of its own, both transcribed from the
+        pinned sources (`cmangos/mangos-classic` 8ec338a1 and
+        `cmangos/mangos-tbc` f82e7d67, `contrib/vmap_extractor/vmapextract/`),
+        re-read on yulon-fedora 2026-09-05 in `~/cmangos-probe9`;
+        `extract.DIRTY_MARKERS` carries the quotation:
+
+        * a successful run leaves `Buildings/dir_bin` and
+          `Buildings/temp_gameobject_models`, and NOT `Buildings/dir` -- the
+          shape every real install measured on m910q is in. `dir_bin` is
+          appended per tile (`adtfile.cpp:118`, `wdtfile.cpp:51`, `fopen(..,
+          "ab")`), `temp_gameobject_models` is written last by
+          `ExtractGameobjectModels()` (`gameobject_extract.cpp:58`), and `dir`
+          has no writer under `contrib` at either revision: it is the second
+          half of the tool's stat check and nothing else. A double that wrote
+          `dir` would put every fixture in a state no extraction can produce,
+          and would hide the half of the guard that fires in the world;
+        * a run that meets either of the two CHECKED names exits 1 with the
+          tool's own last words and writes nothing, which is `main()`'s first
+          `if`.
+
+        Keyed on `argv[0]`'s basename, like `extract.DIRTY_OUTPUT_TOOL` and for
+        its reason: `wow-tortoise`'s `vmapextractor` is a different binary with
+        no such check, and a double that refused for it would be inventing a
+        rule for a tool nobody has read at the pinned revision.
+        """
+        self.calls.append(f"run:{spec.argv[0]}")
+        self.container_runs.append(spec)
+        sink(f"{spec.argv[0]} ran")
+        out = next((m.host for m in spec.mounts if m.guest == "/out"), None)
+        extractor = spec.argv[0].rsplit("/", 1)[-1] == extract.DIRTY_OUTPUT_TOOL
+        buildings = None if out is None else out / extract.BUILDINGS_DIR
+        if extractor and buildings is not None:
+            if any((buildings / marker).exists() for marker in extract.DIRTY_MARKERS):
+                polluted = "Your output directory seems to be polluted, please use an empty "
+                sink(polluted + "directory!")
+                return docker.AttachedRun(1, (polluted + "directory!",))
+        if out is not None and self.run_result.returncode in self.success_returncodes:
+            for name, count in self.produce.items():
+                folder = out / name
+                folder.mkdir(parents=True, exist_ok=True)
+                for index in range(count):
+                    (folder / f"{index:05d}.bin").write_bytes(b"x")
+            if extractor and buildings is not None:
+                for name in (extract.DIR_BIN, extract.GAMEOBJECT_MODELS):
+                    (buildings / name).write_bytes(b"\x00Model001.m2\x00")
+        return self.run_result
+
+    def copy_from_image(self, image: str, src: str, dest: Path) -> None:
+        """`docker create`+`cp`+`rm`: a `.conf.dist` file, or the whole etc directory."""
+        self.calls.append(f"copy:{src}")
+        self.copied.append((image, src, dest))
+        if src.endswith(".conf.dist"):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(self.conf_dist[Path(src).name], encoding="utf-8")
+            return
+        dest.mkdir(parents=True, exist_ok=True)
+        for name, text in self.conf_dist.items():
+            (dest / name).write_text(text, encoding="utf-8")
+
+    def exec_stdin(
+        self,
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        text = source.read().decode("utf-8", errors="replace")
+        first = text.strip().splitlines()[0] if text.strip() else ""
+        self.calls.append("sql")
+        self.sql_calls.append(first)
+        self.sql_scripts.append(text)
+        self.sql_secrets.append(env.get("MYSQL_PWD", ""))
+        self.distros.append(wsl_distro)
+        if self.failing_sql and self.failing_sql in text:
+            return subprocess.CompletedProcess(
+                list(argv), 1, "", "ERROR 1064 (42000) at line 1: You have an error in your SQL"
+            )
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+    def sql_query(
+        self,
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
+    ) -> str:
+        self.calls.append("query")
+        self.sql_calls.append(statement)
+        self.sql_secrets.append(password)
+        self.distros.append(wsl_distro)
+        # The realm row is answered separately; see `realm_row`.
+        if "realmlist" in statement:
+            return self.realm_row
+        if self.column_answer is not None and "information_schema.columns" in statement:
+            return self.column_answer
+        return self.query_answer
+
+    def volume_exists(self, name: str) -> bool:
+        return name in self.volumes
+
     def seams(self, **overrides: object) -> native.Seams:
         def clone(spec: git.CloneSpec) -> None:
             self.calls.append(f"clone:{spec.url}")
             self.clones.append(spec)
             (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
             self.remotes[spec.dest] = spec.url
+            if self.on_clone is not None:
+                self.on_clone(spec.dest)
             if spec.url == ENTRY.emulator.sources[0].url:
                 # What the real repository leaves behind, not just `.git`.
                 path = spec.dest / composegen.BASE_FILE
@@ -183,6 +494,11 @@ class Recorder:
             return IMPORTED
 
         seams = native.Seams(
+            # STATED, not detected. A successful install now advertises the realm at
+            # the end, and the default seam is the real `platform.detect_lan_ip`, so
+            # without this the recorded call lists below depend on whatever network
+            # the test box is on -- present on the VM, absent on a machine with no LAN.
+            lan_ip=lambda: "192.168.1.25",
             platform_id=lambda: "macos",
             docker_ready=lambda: True,
             ensure_docker=_never_provisions,
@@ -200,6 +516,7 @@ class Recorder:
             start=self.start,
             wait_db_healthy=lambda spec: self.db_healthy,
             wait_ready=lambda spec, ready: self.ready,
+            world_output=lambda spec: self.world_output,
             # An INERT SELinux by default: not enforcing, on a filesystem that
             # could hold a label if it were. That is Ubuntu/Arch/macOS, which
             # is what every other test in both files is about, and it keeps
@@ -209,6 +526,11 @@ class Recorder:
             selinux_enforcing=lambda: False,
             fs_type=lambda path: "ext4",
             keep_awake=lambda: nullcontext(),
+            run_container=self.run_container,
+            copy_from_image=self.copy_from_image,
+            exec_stdin=self.exec_stdin,
+            sql_query=self.sql_query,
+            volume_exists=self.volume_exists,
         )
         for key, value in overrides.items():
             setattr(seams, key, value)

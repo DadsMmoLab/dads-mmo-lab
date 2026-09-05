@@ -2,9 +2,9 @@
 
 One entry per installable server. Everything an installer, a controller or
 the networking helpers need to know about a game — emulator sources, the
-install script to wrap (Phase 3a), container names, the auth/world/db port
-table (README §13), database names, what client the user must supply
-(README §3a) — is data here, not Python (style-guide §3). Acronyms only
+`native` block its family engine reads (Phase 6/7), container names, the
+auth/world/db port table (README §13), database names, what client the user
+must supply (README §3a) — is data here, not Python (style-guide §3). Acronyms only
 (§6): `id`s are `wow-wotlk`, `wow-tbc`, `wow-vanilla`, `wow-tortoise`.
 """
 
@@ -25,8 +25,6 @@ CATALOG_FILE = Path(__file__).resolve().with_name("catalog.json")
 
 Slug = Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
 Status = Literal["stable", "beta", "wip"]
-# Keys of `Install.script_variants` — the same names `platform.linux_package_manager()` returns.
-PackageManager = Literal["apt", "dnf", "pacman", "zypper"]
 
 
 class _Strict(BaseModel):
@@ -160,7 +158,23 @@ class ReadyMarkers(_Strict):
     world: str = Field(min_length=1)
     auth: str | None = None
     fatal: str | None = None
-    timeout_s: int = Field(default=600, gt=0)
+    timeout_s: int = Field(
+        default=1800,
+        gt=0,
+        description=(
+            "Seconds to wait for `world` before calling the install failed. Generous on "
+            "purpose: `restart_loop` already catches the server that is never coming up, so "
+            "this only ever binds on one that is merely SLOW, and cutting a slow one short "
+            "tells a user their working server failed. Measured on m910q 2026-09-02, WoW TBC "
+            "first boot on 4 cores: container start 15:51:15, first `Avg Diff:` 16:04:28 -- "
+            "793s, against the 600 the three CMaNGOS entries then carried. The server was "
+            "healthy and idle 44 minutes later; the install had already reported failure. "
+            "The DEFAULT was 600 too, and stayed there for a day after the measurement "
+            "disproved it -- so a new entry that omitted the field inherited the number known "
+            "to call a working server a failed install, and no test would have failed "
+            "(review, 2026-09-02)."
+        ),
+    )
     restart_loop: int = Field(
         default=4,
         ge=1,
@@ -278,10 +292,47 @@ class ExtractTool(_Strict):
 
 
 class RetrySpec(_Strict):
-    """Re-run named tools once when their log matches (Vanilla's vmap extractor segfaults)."""
+    """Re-run named tools once when the ending matches — by exit status, or by log text."""
 
     when_log_matches: str = Field(min_length=1)
+    when_returncode_in: tuple[int, ...] = Field(
+        default=(),
+        description=(
+            "Exit statuses that mean 'the failure this recipe is for', checked BEFORE the log "
+            "pattern. Added 2026-09-03 because the log pattern alone could not fire on the "
+            "failure it names: `Segmentation fault (core dumped)` is printed by a SHELL's job "
+            "control, and these tools are exec'd as the container's PID 1 with no shell in "
+            "between, so a crashed tool's output does not contain it. A signal death is "
+            "128+N, and that number is the only thing the container reliably reports. 139 "
+            "(SIGSEGV) is the one this ships: the recipe is named for a stack overflow, which "
+            "is resource-dependent and so plausibly transient. 134 (SIGABRT) was in this list "
+            "for a day on the theory that it is the same shape, and was removed — an abort in "
+            "these tools is a failed assertion on a particular record of the client's data, and "
+            "the retry re-runs the identical container over the identical data, so it cannot "
+            "change the outcome. Adding it bought a second multi-minute run before the same "
+            "failure. Nothing measured said an abort here is ever transient (review, "
+            "2026-09-03). The log pattern is kept because a tool that prints a "
+            "crash and exits non-zero on its own is a different, real case."
+        ),
+    )
     tools: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("when_returncode_in")
+    @classmethod
+    def _real_failing_statuses(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        """1-255 only: 0 is success and a negative is a sentinel, and both must never retry.
+
+        `_retry_matches()` already refuses `0` and `CANCELLED_RETURNCODE` before
+        it looks at anything, so a recipe naming either would be dead text that
+        reads as if it did something.
+        """
+        bad = [code for code in value if not 1 <= code <= 255]
+        if bad:
+            raise ValueError(
+                f"when_returncode_in must be failing exit statuses (1-255), got {bad}; 0 is "
+                "success and a negative is a cancel or signal sentinel"
+            )
+        return value
 
 
 class ExtractPlan(_Strict):
@@ -323,6 +374,40 @@ class MmapPlan(_Strict):
             "does not."
         ),
     )
+    success_codes: tuple[int, ...] = Field(
+        default=(0,),
+        min_length=1,
+        description=(
+            "Which exit statuses mean the generator FINISHED. Not a style choice: MoveMapGen's "
+            "convention is a property of each upstream tree and they disagree. CMaNGOS "
+            "mangos-classic ends `return 0` (contrib/mmap/src/generator.cpp, read 2026-09-03); "
+            'the Tortoise fork ends `return silent ? 1 : finish("Movemap build is complete!", '
+            "1)` (tools/mmap/src/generator.cpp:352), so a complete Tortoise build exits 1. "
+            "Measured, not guessed: the run that forced this wrote 58 maps and 2075 tiles "
+            "(2.5 GB) on yulon-ubuntu and was then thrown away as a failure. Its other endings "
+            "are -1/-2/-3, which a process reports as 255/254/253, so 1 does not overlap "
+            "anything Tortoise says on the way out."
+        ),
+    )
+
+    @field_validator("success_codes")
+    @classmethod
+    def _real_exit_statuses(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        """0-255 only, so no entry can declare a sentinel as success.
+
+        `docker.CANCELLED_RETURNCODE` is -1 and `run_attached` spells "killed by
+        signal N" as -N. Both are outside the range a process exit status can
+        occupy, and both mean something a catalog entry must never be able to
+        call finished -- a Stop read as success would record the stage and skip
+        it forever after.
+        """
+        bad = [code for code in value if not 0 <= code <= 255]
+        if bad:
+            raise ValueError(
+                f"success_codes must be process exit statuses (0-255), got {bad}; a negative "
+                "value is a cancel or signal sentinel and can never mean success"
+            )
+        return value
 
 
 class ConfPatch(_Strict):
@@ -377,9 +462,28 @@ class SqlPhase(_Strict):
             "`2>/dev/null`, made visible."
         ),
     )
+    assert_update_level: bool = Field(
+        default=False,
+        description=(
+            "After this phase, require each target schema to carry a `required_<stem>` "
+            "column naming the LAST file this phase applied to it. CMaNGOS core updates "
+            "are a chain — every file's first statement renames the previous file's column "
+            "— so that column is the schema's update level, and it is the only thing that "
+            "separates a `warn` phase that skipped already-applied work from one that "
+            "covered a broken world. Both print the same transcript (2026-09-03)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _one_source_one_target(self) -> SqlPhase:
+        if self.assert_update_level and self.statements:
+            # The check reads the LAST FILE this phase applied and turns its name
+            # into a column. A literal statement has no name to read, so the flag
+            # would be dead text on such a phase rather than a weaker check.
+            raise ValueError(
+                f"phase {self.name!r}: `assert_update_level` reads the name of the last file "
+                "applied, so it cannot be set on a `statements` phase"
+            )
         if self.into is not None and self.into_each is not None:
             raise ValueError(f"phase {self.name!r}: `into` and `into_each` are alternatives")
         if self.into_each is not None:
@@ -445,6 +549,45 @@ class SqlPlan(_Strict):
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+class SourcePatch(_Strict):
+    """One unified diff applied to one cloned source after `clone-sources` (`patch-sources`).
+
+    Data, because which tree carries which defect is a fact about a pinned
+    commit and not about the family: `wow-tbc` and `wow-vanilla` carry the
+    doodad-name patch and `wow-tortoise` does not, and the file, the checkout
+    it edits and the reason all belong beside the pin they were measured
+    against. The apply itself is tolerant and platform-neutral —
+    `families/patch.py` says how — and a `rev` on the source is what makes a
+    patch against it a promise rather than a race with upstream's next commit.
+    """
+
+    file: str = Field(
+        min_length=1,
+        description="The patch, relative to catalog/installers/ (like `templates`).",
+    )
+    source: str = Field(
+        min_length=1,
+        description=(
+            "The `dest` of the emulator source this patch is applied inside; must name one of "
+            "the entry's own `emulator.sources`, which `CatalogEntry` checks."
+        ),
+    )
+    reason: str = Field(
+        min_length=1,
+        description="One sentence the install log says when the patch is applied: what it fixes.",
+    )
+
+    @field_validator("file")
+    @classmethod
+    def _file_stays_inside_installers(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or ".." in path.parts:
+            raise ValueError(
+                f"file must be a relative POSIX path under catalog/installers/, got {value!r}"
+            )
+        return value
+
+
 class CmangosData(_Strict):
     """Everything the CMaNGOS family needs that differs per game (roadmap 7.3)."""
 
@@ -454,6 +597,13 @@ class CmangosData(_Strict):
     mmaps: MmapPlan
     conf: ConfPatchTable
     sql: SqlPlan
+    patches: tuple[SourcePatch, ...] = Field(
+        default=(),
+        description=(
+            "Source patches applied after the clone, in order. Empty for an entry whose pinned "
+            "trees carry no known defect this project works around (2026-09-05: Tortoise)."
+        ),
+    )
 
 
 class NativeInstall(_Strict):
@@ -474,7 +624,14 @@ class NativeInstall(_Strict):
         ),
     )
     family: Literal["azerothcore", "cmangos"] = Field(
-        description="Which family engine installs this game; must equal the engine's `family`."
+        description=(
+            "Which family engine installs this game; must equal the engine's `family`. "
+            "This Literal is the first file a new lineage's data touches, so the policy "
+            "is stated here too: a family with no registered engine is a DEFECT and not "
+            "a supported window — `installer_for()` refuses the entry rather than "
+            "falling back to anything. A new lineage is a class in `catalog/families/`, "
+            "a line in `FAMILIES`, and then a member here."
+        )
     )
     images: tuple[str, ...] = Field(
         min_length=1,
@@ -572,27 +729,28 @@ class NativeInstall(_Strict):
 
 
 class Install(_Strict):
-    """How this game is installed: by driving its bash script, or natively.
+    """How this game is installed: through the family engine its `native` block names.
 
-    Two lists rather than one, because "where can this be installed" and "where
-    is the *script* the mechanism" stopped being the same question in roadmap
-    6.2. `platforms` still drives the 6.1 refusal; `script_platforms` says where
-    the bash script runs, and anything in `platforms` but not in
-    `script_platforms` runs `catalog/native.py`'s engine instead. See
-    `installer.installer_for()`, which is the one place that decides.
+    One list, not two. Until 7.2 there were two mechanisms — a bash script per
+    platform and per package manager, and the engine — so `platforms` said
+    where the entry could be installed at all while `script_platforms` said
+    which of those the script owned. 7.2 deleted the scripts, and with a single
+    mechanism left the second question has no content: `platforms` drives the
+    6.1 refusal and the tile's disabled button, and `native.family` picks the
+    engine. See `installer.installer_for()`, which is the one place that
+    decides, and `pyplan/phase7-decisions.md`.
     """
 
-    script: str = Field(
-        min_length=1,
-        description="Path to the install-*.sh, relative to catalog/installers/",
-    )
     default_server_dir: str = Field(min_length=1, description="Default dir name under $HOME")
     password: PasswordPlan = Field(
         description="Where the database root password comes from: fixed, or generated per install."
     )
     requires_client_dir: bool = Field(
         default=False,
-        description="The script asks for the user's client folder and loops until given one.",
+        description=(
+            "The user's own client folder is required before the install can start (README "
+            "§3a); the view asks for it and the engine's preflight refuses without it."
+        ),
     )
 
     def db_password(self, server_dir: Path) -> str | None:
@@ -632,75 +790,26 @@ class Install(_Strict):
         default=("linux",),
         min_length=1,
         description=(
-            "Which platforms this entry's install script can actually run on. Data, not a Python "
-            "conditional (roadmap 6.1): every v1 installer is a Linux-only bash script today, so "
-            "off-Linux clicks must be refused with an honest message instead of streaming a "
-            "script that exits 1. 6.2/6.3 add macOS/Windows variants and widen this list."
-        ),
-    )
-    script_platforms: tuple[PlatformId, ...] | None = Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Where the bash SCRIPT is the install mechanism. Absent means 'wherever this entry "
-            "is installable at all', so every entry written before roadmap 6.2 keeps meaning "
-            "exactly what it said. An entry listing macOS in `platforms` and only Linux here is "
-            "saying: install macOS with the native engine."
+            "Which platforms this entry can be installed on. Data, not a Python conditional "
+            "(roadmap 6.1): an off-list click is refused with an honest message rather than "
+            "starting an install that cannot finish, and the tile disables its button from the "
+            "same list. `min_length=1` because an entry installable nowhere would ship a dead "
+            "button; every shipped entry has an engine (7.3), so that state is now a mistake "
+            "and not a configuration."
         ),
     )
     native: NativeInstall | None = Field(
         default=None,
         description=(
-            "Floors and templates for the native engine. Required for any platform this entry "
-            "dispatches natively; the engine refuses to run without it rather than inventing a "
-            "template directory."
-        ),
-    )
-    script_variants: dict[PackageManager, str] = Field(
-        default_factory=dict,
-        description=(
-            "Per-package-manager overrides of `script` (keys: apt, dnf, pacman, zypper) for "
-            "distros the default script does not cover, same base directory; `script` "
-            "itself is the pacman/SteamOS one."
+            "Floors, templates and the family for the engine that installs this entry. "
+            "`installer_for()` refuses to build an engine without it rather than inventing a "
+            "family, so any entry with a non-empty `platforms` needs one."
         ),
     )
 
     def supports(self, platform_id: str) -> bool:
         """True if this entry can be installed on `platform_id` (`platform.detect()`) at all."""
         return platform_id in self.platforms
-
-    def scripted_platforms(self) -> tuple[PlatformId, ...]:
-        """Where the bash script is the mechanism — `platforms` when nothing narrower is said.
-
-        A method rather than a validator that fills the field in, so the JSON
-        keeps saying what its author wrote: an entry with no `script_platforms`
-        is one that has never been asked the question, and reading `None` back
-        out of it is how a future migration can tell those apart from an entry
-        that answered "the script runs everywhere".
-        """
-        return self.script_platforms if self.script_platforms is not None else self.platforms
-
-    def uses_script(self, platform_id: str) -> bool:
-        """True if installing on `platform_id` means running the bash script."""
-        return platform_id in self.scripted_platforms()
-
-    def is_native(self, platform_id: str) -> bool:
-        """True if installing on `platform_id` means the native engine.
-
-        Supported here, but not by the script. Deliberately NOT "not scripted":
-        a platform the entry does not support at all is the 6.1 refusal, and
-        answering True for it would turn an honest "not on Windows yet" into an
-        engine that starts and then fails.
-        """
-        return self.supports(platform_id) and not self.uses_script(platform_id)
-
-    def script_for(self, package_manager: str | None) -> str:
-        """The script for a host with `package_manager` (None → default), relative to
-        `catalog/installers/`."""
-        for pm, script in self.script_variants.items():
-            if pm == package_manager:
-                return script
-        return self.script
 
 
 class Containers(_Strict):
@@ -712,12 +821,22 @@ class Containers(_Strict):
     services: tuple[str, str, str] | None = Field(
         default=None,
         description=(
-            "Compose SERVICE names for db/auth/world, in that order, when they differ from the "
-            "container names above. AzerothCore names a service and its container the same thing "
-            "and may leave this out; every CMaNGOS game does not — its services are "
-            "db/realmd/mangosd while its containers are <game>-db/-realmd/-mangosd — and "
-            "MUST say so. `docker compose up` takes services, and a container name it does not "
-            "know fails outright with `no such service` (Discord report, 2026-08-26)."
+            "Compose SERVICE names for db/auth/world, in that order. `docker compose up` "
+            "takes services, and a container name it does not know fails outright with "
+            "`no such service` (Discord report, 2026-08-26). Refused since 2026-09-04 by "
+            "`composegen._container_prefix()`, whatever the value, for any entry with an "
+            "`install.native` block — and every shipped entry has one (bug-checklist §30): the "
+            "generated compose file takes its service keys from the templates "
+            "({{CONTAINER_PREFIX}}db/-realmd/-mangosd in shared/cmangos/base.yml.tmpl, the "
+            "literal ac-database and friends in wow-wotlk/native/base.yml.tmpl), so the entry "
+            "has nothing to declare and the only correct state of this field is absent. The "
+            "entry still loads; `composegen.render()` refuses it, so `write_plan()` never gets "
+            "a plan to write. "
+            "Saying db/realmd/mangosd here, as the three CMaNGOS entries did until 2026-09-01, "
+            "named the bash installers' services and would have failed every generated install "
+            "at the first `compose up` — and the rule that accepted it then was satisfiable by "
+            "that mistake alone. The field stays on the model for `docker.ContainerSpec.services`, "
+            "which an adopted project whose services and containers differ really does need."
         ),
     )
     db_import: str | None = Field(
@@ -894,6 +1013,28 @@ class CatalogEntry(_Strict):
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+
+    @model_validator(mode="after")
+    def _every_patch_names_a_source_this_entry_clones(self) -> CatalogEntry:
+        """A `SourcePatch.source` is a `dest` in `emulator.sources`, and the two live apart.
+
+        The relationship has no owner otherwise: `SourcePatch` cannot see the
+        sources and `Emulator` knows nothing of patches, so a typo in one would
+        be an install that clones everything and then refuses at `patch-sources`
+        with "no such file" over a folder that was never meant to exist.
+        """
+        native = self.install.native
+        block = native.cmangos if native is not None else None
+        if block is None:
+            return self
+        dests = {source.dest for source in self.emulator.sources}
+        for spec in block.patches:
+            if spec.source not in dests:
+                raise ValueError(
+                    f"patch {spec.file!r} applies inside {spec.source!r}, which is not a dest "
+                    f"of any of this entry's sources {sorted(dests)}"
+                )
+        return self
 
     def schema_map(self) -> dict[Db, str]:
         """This game's `manifest db key → schema name` map (see `Databases.schema_map`)."""

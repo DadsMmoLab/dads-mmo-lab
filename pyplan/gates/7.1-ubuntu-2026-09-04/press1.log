@@ -1,0 +1,42 @@
+[driver] running: /home/pk/gate0904/venv/bin/python -u -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver
+[driver] sudo password: NOT SET
+[driver] state-before: 5 read-only probes, install dir /home/pk/wowserver
+[driver] state-before: docker --version: exit 0
+[driver] state-before: docker --version: | Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+[driver] state-before: systemctl is-active docker: exit 0
+[driver] state-before: systemctl is-active docker: | active
+[driver] state-before: id -Gn: exit 0
+[driver] state-before: id -Gn: | pk adm cdrom sudo dip plugdev users lpadmin docker
+[driver] state-before: ls -ld /home/pk/wowserver: exit 2
+[driver] state-before: ls -ld /home/pk/wowserver: | ls: cannot access '/home/pk/wowserver': No such file or directory
+[driver] state-before: df -h /home/pk: exit 0
+[driver] state-before: df -h /home/pk: | Filesystem      Size  Used Avail Use% Mounted on
+[driver] state-before: df -h /home/pk: | /dev/sda2        97G   51G   42G  56% /
+Installing WoW WotLK into /home/pk/wowserver
+You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage — that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt — the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+Checking Docker.
+[pass] Docker: the daemon answered
+[pass] memory: Docker's VM has 19.5 GB
+[warn] compiler jobs vs memory: this build compiles with 16 parallel jobs at about 2 GB each, and 19.5 GB affords about 9 Docker Engine has no CPU setting to lower — the build sees every CPU on this machine — so more memory, or swap it can fall back on, is the lever here. A build this far ahead of its memory has finished before, so this is a caution.
+[refuse] free space on Docker's disk and the server folder: 41 GB free, and the install needs 48 GB (the server folder and Docker's disk share one drive, so both needs add up) Free some space, or install to a drive that has room, then try again.
+[pass] the server folder: /home/pk/wowserver looks usable
+[pass] sharing the folder with Docker: a container can read /home/pk/wowserver
+[pass] SELinux: not enforcing
+[pass] the server's ports: nothing else is using them
+2026-09-04 11:23:27 ERROR [__main__] install failed: This machine cannot install the server yet:
+free space on Docker's disk and the server folder: 41 GB free, and the install needs 48 GB (the server folder and Docker's disk share one drive, so both needs add up) Free some space, or install to a drive that has room, then try again.
+install failed: This machine cannot install the server yet:
+free space on Docker's disk and the server folder: 41 GB free, and the install needs 48 GB (the server folder and Docker's disk share one drive, so both needs add up) Free some space, or install to a drive that has room, then try again.
+[driver] exit status 1; answered group x0, sudo x0
+[driver] state-after: 5 read-only probes, install dir /home/pk/wowserver
+[driver] state-after: docker --version: exit 0
+[driver] state-after: docker --version: | Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+[driver] state-after: systemctl is-active docker: exit 0
+[driver] state-after: systemctl is-active docker: | active
+[driver] state-after: id -Gn: exit 0
+[driver] state-after: id -Gn: | pk adm cdrom sudo dip plugdev users lpadmin docker
+[driver] state-after: ls -ld /home/pk/wowserver: exit 2
+[driver] state-after: ls -ld /home/pk/wowserver: | ls: cannot access '/home/pk/wowserver': No such file or directory
+[driver] state-after: df -h /home/pk: exit 0
+[driver] state-after: df -h /home/pk: | Filesystem      Size  Used Avail Use% Mounted on
+[driver] state-after: df -h /home/pk: | /dev/sda2        97G   51G   42G  56% /

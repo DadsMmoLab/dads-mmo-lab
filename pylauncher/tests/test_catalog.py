@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import re
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from yulon import resources
 from yulon.catalog import composegen
 from yulon.catalog.catalog import (
     CATALOG_FILE,
@@ -16,6 +15,7 @@ from yulon.catalog.catalog import (
     DbFacts,
     EmulatorSource,
     ExtractPlan,
+    Install,
     NativeInstall,
     PasswordPlan,
     ReadyMarkers,
@@ -50,43 +50,241 @@ def test_wotlk_entry_matches_the_controller_spec() -> None:
     )
 
 
-def test_install_scripts_exist_in_the_repo() -> None:
-    """Phase 3a wraps the existing scripts — every referenced path must be real."""
-    installers = resources.installers_dir()
-    for game in load_catalog().games:
-        assert (installers / game.install.script).is_file(), game.install.script
-        for pm, variant in game.install.script_variants.items():
-            assert (installers / variant).is_file(), f"{game.id} {pm}: {variant}"
-            assert game.install.script_for(pm) == variant
-        assert game.install.script_for(None) == game.install.script
-        assert game.install.script_for("zypper") == game.install.script
+def _entry(**install: object) -> dict[str, object]:
+    """A minimal valid catalog entry, with `install` members merged over the defaults.
 
-
-def test_script_variant_keys_must_be_known_package_managers() -> None:
-    """A typo like "ubuntu" would silently fall back to the pacman script — refuse it."""
-    bad = {
-        "schema_version": 1,
-        "games": [
-            {
-                "id": "x-y",
-                "name": "X",
-                "status": "wip",
-                "emulator": {"name": "e", "sources": [{"repo": "a/b", "dest": "."}]},
-                "install": {
-                    "script": "s.sh",
-                    "default_server_dir": "d",
-                    "password": {"mode": "fixed", "value": "x"},
-                    "script_variants": {"ubuntu": "s-ubuntu.sh"},
-                },
-                "containers": {"db": "d", "auth": "a", "world": "w"},
-                "ports": {"auth": 1, "world": 2, "db": 3},
-                "databases": {"auth": "a", "characters": "c", "world": "w"},
-                "client": {"version": "1", "build": 1},
-            }
-        ],
+    Written as a helper rather than repeated literals because the tests below
+    differ from each other by exactly one `install` member, and that member is
+    the thing each of them is about.
+    """
+    return {
+        "id": "x-y",
+        "name": "X",
+        "status": "wip",
+        "emulator": {"name": "e", "sources": [{"repo": "a/b", "dest": "."}]},
+        "install": {
+            "default_server_dir": "d",
+            "password": {"mode": "fixed", "value": "x"},
+            **install,
+        },
+        "containers": {"db": "d", "auth": "a", "world": "w"},
+        "ports": {"auth": 1, "world": 2, "db": 3},
+        "databases": {"auth": "a", "characters": "c", "world": "w"},
+        "client": {"version": "1", "build": 1},
     }
-    with pytest.raises(ValidationError):
-        parse_catalog(bad)
+
+
+def test_no_field_or_method_of_install_is_about_a_bash_script() -> None:
+    """7.2: the script path is gone from the model, not merely unused.
+
+    The whole field set is compared, not the names that were deleted: a
+    mutation adding `bash_file` — the script field back under a name that
+    never says "script" — survived a substring check and dies here.
+
+    ORDER MATTERS, and it was wrong when this was written. The substring line
+    was placed AFTER the set comparison and could therefore never fail: any
+    field name containing "script" already breaks the set, so the set assertion
+    always fired first. Its docstring claimed it "stays anyway, because it fails
+    with the offending name in the message" — a purpose the written order
+    forbade. Found by review 2026-09-02, proved by a mutation that restored a
+    real `script` field and watched the set assertion be the one that fell. It
+    now runs first, which is the only arrangement in which that reason is true.
+
+    LIMIT, recorded rather than fixed: this enumerates `Install`'s own fields
+    and namespace. Measured 2026-09-02, three shapes survive it — a plain
+    `@property`, a `@computed_field @property`, and a `script` field on the
+    NESTED `NativeInstall`. What backstops them is
+    `test_the_shipped_catalog_names_no_bash_file`: a re-added field only matters
+    once it carries `.sh` data, and that test walks the JSON. A guard that
+    enumerates one model says nothing about its neighbours.
+
+    `is_native` is named on its own because it is the one deleted symbol whose
+    name does not say "script": it meant "supported, but not by the script",
+    and with a single install path left it could only be a synonym for
+    `supports()`.
+    """
+    assert [name for name in Install.model_fields if "script" in name] == []
+    assert set(Install.model_fields) == {
+        "default_server_dir",
+        "password",
+        "requires_client_dir",
+        "platforms",
+        "native",
+    }
+    assert [name for name in vars(Install) if "script" in name] == []
+    assert not hasattr(Install, "is_native")
+
+
+def test_the_shipped_catalog_names_no_bash_file() -> None:
+    """F.2 deleted the six `install-*.sh`; nothing in `catalog.json` may still point at one.
+
+    Read off the raw JSON rather than the model, because the model can only
+    speak for fields it still has: a `.sh` path pasted into some other string
+    — a template dir, a server dir — would parse cleanly and name a file that
+    was deleted. Every string value in the file is walked, so this does not
+    depend on knowing which key it landed in.
+    """
+    raw = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+    found: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+        elif isinstance(node, str) and node.endswith(".sh"):
+            found.append(node)
+
+    walk(raw)
+    assert found == [], found
+    assert raw["games"], "an empty games list would walk nothing"
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("script", "s.sh"),
+        ("script_platforms", ["linux"]),
+        ("script_variants", {"apt": "s-ubuntu.sh"}),
+    ],
+)
+def test_a_script_member_is_refused_by_forbid_and_by_nothing_else(
+    field: str, value: object
+) -> None:
+    """A stale `script*` key in an entry is an error, not a silently ignored member.
+
+    The error list is compared whole rather than matched on a phrase: that pins
+    the refusal to `extra="forbid"` on `Install` (`extra_forbidden`, at
+    `install.<field>`) and to no other rule.
+
+    THE REASON THIS MATTERS, corrected 2026-09-02 after review. The reason first
+    given here was that `match="script"` could also match a `default_server_dir`
+    error mentioning a `.sh` path — and that is not reproducible against this
+    fixture, whose `default_server_dir` is `"d"`. A confident reason with nothing
+    behind it, attached to a correct decision.
+
+    The demonstrable reason is a different rule on the SAME field. Measured: with
+    a real `script: Literal["none"]` field restored to `Install`, `"script":
+    "s.sh"` is refused by `literal_error` at `install.script` rather than by
+    `extra_forbidden` — and the `match=`-based form PASSES, green, with the
+    deleted field back in the model. The `(loc, type)` comparison fails, naming
+    it. Proved in both directions: with `extra="ignore"` on `Install` alone,
+    every case here fails with DID NOT RAISE rather than with some other error,
+    so no neighbouring rule refuses this fixture at all.
+
+    That is the fifth time in Phase 7 a test passed because a NEIGHBOURING rule
+    refused, and the first where the neighbour was on the same field.
+    """
+    with pytest.raises(ValidationError) as caught:
+        parse_catalog({"schema_version": 1, "games": [_entry(**{field: value})]})
+    assert [(e["loc"], e["type"]) for e in caught.value.errors()] == [
+        (("games", 0, "install", field), "extra_forbidden")
+    ]
+
+
+def test_an_entry_installable_nowhere_is_refused() -> None:
+    """`platforms: []` stays out of the model: after 7.3 it can only be a mistake.
+
+    It was a legal state while the CMaNGOS entries had data but no engine —
+    the tile would have said "not on this platform" instead of starting an
+    install that could not finish. 7.3 gave all three an engine and a family,
+    so an empty list now says only "this entry's Install button is dead", and
+    `min_length=1` is what refuses to ship that by accident.
+    """
+    with pytest.raises(ValidationError) as caught:
+        parse_catalog({"schema_version": 1, "games": [_entry(platforms=[])]})
+    assert [(e["loc"], e["type"]) for e in caught.value.errors()] == [
+        (("games", 0, "install", "platforms"), "too_short")
+    ]
+
+
+def test_every_shipped_entry_is_installable_on_linux_and_names_its_family() -> None:
+    """The relationship the Install button depends on, asserted over the whole catalog.
+
+    `catalog_view` enables the button from `install.supports()` and the engine
+    is built from `install.native.family`, so an entry with one and not the
+    other is a tile that either offers an install nothing can run or hides one
+    that works. Enumerated rather than spot-checked: the four entries are not
+    named here, so a fifth is held to the same rule the day it is added.
+    """
+    games = load_catalog().games
+    assert games, "an empty catalog would pass every loop below"
+    for game in games:
+        assert game.install.platforms, game.id
+        assert game.install.native is not None, game.id
+        assert game.install.supports("linux") is True, game.id
+
+
+GATE_PINS = {
+    "wow-wotlk": {
+        "mod-playerbots/azerothcore-wotlk": "413bea61a85e20d9caef7d66fc601a661fdddd9d",
+        "mod-playerbots/mod-playerbots": "b949b50bfcdd4fab937781bac2d7765e39330e4b",
+    },
+    "wow-tbc": {
+        "cmangos/mangos-tbc": "f82e7d679c283b66bc2adc1b751aa1275e655673",
+        "cmangos/playerbots": "993f18091e67565986cf55c4d9b8e6eae11223f9",
+        "cmangos/tbc-db": "5078439a44d208732a903bca2d7df51941fb373a",
+    },
+    "wow-vanilla": {
+        "cmangos/mangos-classic": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f",
+        "cmangos/playerbots": "993f18091e67565986cf55c4d9b8e6eae11223f9",
+        "cmangos/classic-db": "22b51464f1625f6ef6275771de1f5466c6f5d19e",
+    },
+}
+"""The commit each shipped source was pinned to on 2026-09-05, and the gate that ran on it.
+
+Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
+`dest`), never off a branch tip:
+
+* `wow-wotlk`: `/home/pk/wowserver` on `yulon-ubuntu`, the tree gate 7.1's clean
+  2026-09-04 run installed and logged into (`pyplan/gates/7.1-ubuntu-2026-09-04-clean/`;
+  its `gate71-press2.log` prints `AzerothCore revision : 413bea61a85e+` from the
+  build and names no commit for the module, so both were read off that box).
+* `wow-tbc`: `/home/pk/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
+  2026-09-04 (`pyplan/gates/7.7-win11-tbc/source-identity.txt`) was on
+  `0d2ebc3e`, one commit ahead, and the pin is the LINUX one: 7.4c is the gate
+  with the full evidence chain (build, extract, import, boot, login) on the
+  primary platform, and that note itself establishes the one commit between
+  them touches `src/game` only, so the Windows result stands on either.
+* `wow-vanilla`: `/home/pk/vanilla-75` on `m910q`, gate 7.5; the same core
+  commit the Windows run of 2026-09-04 built (`pyplan/upstream-cmangos-doodad-drop.md`
+  §7 read `8ec338a1` out of both boxes).
+
+`wow-tortoise` is pinned by `test_tortoise_boot_facts.py`, by value, with its
+own argument. Moving any pin here means re-running that entry's gate.
+"""
+
+
+def test_every_shipped_source_is_pinned_to_a_commit() -> None:
+    """No shipped entry clones a moving tip; a fifth entry is held to it on arrival.
+
+    Until 2026-09-05 only `wow-tortoise` carried a `rev`. The other three cloned
+    whatever their branch's tip was on the day, which is how the two Vanilla
+    gate boxes came to agree on `8ec338a1` by coincidence and the two TBC boxes
+    did not (`pyplan/gates/7.7-win11-tbc/source-identity.txt`). A patch carried
+    against upstream source (`patch-sources`) cannot be tolerant of a tip that
+    moves under it, so the pins come first — `pyplan/upstream-cmangos-doodad-drop.md`
+    §10. Enumerated over the catalog rather than over `GATE_PINS`, so an entry
+    added later without a pin fails here and not on some user's install.
+    """
+    games = load_catalog().games
+    assert games
+    unpinned = [
+        f"{game.id}:{source.repo}"
+        for game in games
+        for source in game.emulator.sources
+        if not source.rev
+    ]
+    assert not unpinned, f"cloned from a moving ref: {unpinned}"
+
+
+@pytest.mark.parametrize("game_id", sorted(GATE_PINS))
+def test_the_pins_are_the_commits_the_gates_ran_on(game_id: str) -> None:
+    """By value, because any 40 hex characters satisfy the shape and the loop above."""
+    sources = load_catalog().get(game_id).emulator.sources
+    assert {s.repo: s.rev for s in sources} == GATE_PINS[game_id]
 
 
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:
@@ -112,7 +310,6 @@ def test_unknown_game_and_bad_entries_are_rejected() -> None:
                             "sources": [{"repo": "ftp://evil/x", "dest": "."}],
                         },
                         "install": {
-                            "script": "s.sh",
                             "default_server_dir": "d",
                             "password": {"mode": "fixed", "value": "x"},
                         },
@@ -232,7 +429,6 @@ def test_the_old_password_fields_are_gone_not_ignored() -> None:
                         "status": "wip",
                         "emulator": {"name": "e", "sources": [{"repo": "a/b", "dest": "."}]},
                         "install": {
-                            "script": "s.sh",
                             "default_server_dir": "d",
                             "password": {"mode": "fixed", "value": "x"},
                             "db_root_password": "x",
@@ -247,71 +443,13 @@ def test_the_old_password_fields_are_gone_not_ignored() -> None:
         )
 
 
-def _compose_services_declared(script: Path) -> dict[str, str]:
-    """Map compose SERVICE key -> `container_name:` for every services block in a script.
-
-    The installers write their `docker-compose.yml` from a heredoc, so the file the
-    user ends up with is readable straight out of the script. A service with no
-    `container_name:` maps to "" — compose then names the container itself.
-    """
-    services: dict[str, str] = {}
-    in_services = False
-    current: str | None = None
-    for line in script.read_text(encoding="utf-8").splitlines():
-        if line == "services:":
-            in_services, current = True, None
-            continue
-        if not in_services or not line.strip():
-            continue
-        if not line.startswith(" "):  # `volumes:`, `networks:`, the heredoc terminator
-            in_services, current = False, None
-            continue
-        key = re.match(r"^  ([a-z][a-z0-9_.-]*):\s*$", line)
-        if key:
-            current = key.group(1)
-            services.setdefault(current, "")
-            continue
-        name = re.match(r"^\s+container_name:\s*(\S+)\s*$", line)
-        if name and current:
-            services[current] = name.group(1)
-    return services
-
-
-def test_cmangos_games_select_compose_services_not_container_names() -> None:
-    """Every CMaNGOS installer names its services db/realmd/mangosd (Discord, 2026-08-26).
-
-    Its containers are `<game>-db` and friends, and `docker compose up <container>`
-    answers `no such service`, so the catalog must spell the services out. For
-    AzerothCore the two names coincide and the container names are the answer.
-    """
-    catalog = load_catalog()
-    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
-        spec = catalog.get(game_id).container_spec()
-        assert spec.compose_services() == ("db", "realmd", "mangosd"), game_id
-    assert catalog.get("wow-wotlk").container_spec().compose_services() == (
-        "ac-database",
-        "ac-authserver",
-        "ac-worldserver",
-    )
-
-
-def test_no_catalog_compose_service_is_really_a_container_name() -> None:
-    """The invariant behind the bug: what `compose up` selects must be a service key.
-
-    Only decided for compose files this repo writes; WotLK's base file comes from
-    the AzerothCore checkout, so a service missing from the script proves nothing.
-    """
-    installers = resources.installers_dir()
-    for game in load_catalog().games:
-        declared = _compose_services_declared(installers / game.install.script)
-        if not declared:
-            continue
-        container_names = {name for name in declared.values() if name}
-        for service in game.container_spec().compose_services():
-            assert service not in container_names or service in declared, (
-                f"{game.id}: `docker compose up {service}` names a CONTAINER, not a service; "
-                f"this compose file declares {sorted(declared)}"
-            )
+# `test_cmangos_games_select_compose_services_not_container_names` stood here until
+# 2026-09-01. It asserted the catalog's own literals (`db`/`realmd`/`mangosd`) in one
+# half and the WotLK container names in the other, so its two halves disagreed about
+# what a compose service is while both passed — a restatement cannot fail for the
+# reason its name claims. What it meant to check lives in `test_composegen.py`'s
+# `test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file`,
+# which renders the real templates and reads the service keys back.
 
 
 def test_every_source_says_where_it_lands() -> None:
@@ -331,7 +469,10 @@ def test_every_source_says_where_it_lands() -> None:
             "src/mangos-classic/src/modules/Bots",
             "src/classic-db",
         ),
-        "wow-tortoise": ("src/tortoise-wow",),
+        "wow-tortoise": (
+            "src/tortoise-wow",
+            "src/tortoise-wow/src/modules/Eluna",
+        ),
     }
     for game_id, dests in expected.items():
         sources = catalog.get(game_id).emulator.sources
@@ -370,7 +511,14 @@ def test_wotlk_native_block_names_its_family_images_database_and_ready_markers()
     assert native.ready == ReadyMarkers(world="ready...", auth="{{REALM_HOST}}:{{WORLD_PORT}}")
     assert native.ready.fatal is None
     assert native.ready.regex is False
-    assert native.ready.timeout_s == 600 and native.ready.restart_loop == 4
+    # wow-wotlk names no `timeout_s`, so it INHERITS the model default, and
+    # raising that default from 600 to 1800 changed this entry too. Deliberate:
+    # the 793s TBC boot that disproved 600 was measured on a 4-core box, and
+    # nothing about AzerothCore makes it immune to a slow machine. `restart_loop`
+    # is what catches a server that is never coming up, so a longer wait only
+    # ever binds on one that is merely slow (review, 2026-09-02).
+    assert native.ready.timeout_s == ReadyMarkers(world="x").timeout_s
+    assert native.ready.timeout_s == 1800 and native.ready.restart_loop == 4
     assert native.azerothcore is not None
     assert native.azerothcore.world_env == {
         "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
@@ -464,13 +612,17 @@ def test_a_game_with_a_one_shot_import_service_must_carry_a_fixed_password() -> 
     ), "no entry names an import service at all, so this test would pass on an empty catalog"
 
 
-def test_wotlk_names_no_script_platform_but_still_ships_its_scripts_until_7_2() -> None:
-    """One JSON key changes; the bash files and `script` field stay until 7.2 deletes this test."""
+def test_wotlk_is_installable_on_all_three_platforms() -> None:
+    """WotLK's `platforms` is the widest in the catalog, and the engine is the only path.
+
+    B.7 wrote this test to hold a transitional state (`script_platforms` gone,
+    the `script` field still on the entry); F.4 deleted both fields, so what
+    is left to hold is the list itself — the one entry the 6.1 refusal never
+    fires for.
+    """
     wotlk = load_catalog().get("wow-wotlk")
-    assert wotlk.install.script_platforms is None
     assert wotlk.install.platforms == ("linux", "macos", "windows")
-    assert wotlk.install.native is not None
-    assert wotlk.install.script == "wow-wotlk/install-wow-wotlk.sh"
+    assert all(wotlk.install.supports(p) for p in ("linux", "macos", "windows"))
 
 
 # -- the CMaNGOS blocks (7.3, task G.2) ---------------------------------------
@@ -644,19 +796,57 @@ def test_mpq_depth_is_a_positive_int_or_recursive() -> None:
 
 CMANGOS_GAMES = ("wow-tbc", "wow-vanilla", "wow-tortoise")
 
+CMANGOS_PLATFORMS = {
+    "wow-tbc": ("linux", "windows"),
+    "wow-vanilla": ("linux", "windows"),
+    "wow-tortoise": ("linux", "windows"),
+}
+"""Where each CMaNGOS entry is installable, and every widening was earned by a run.
+
+All three said `("linux",)` until 2026-09-04. Vanilla completed all twelve stages on
+native Windows that morning -- the first CMaNGOS install on Windows -- and TBC finished
+the same evening with `tbc-realmd`, `tbc-mangosd` and `tbc-db` up on `yulon-win11-gate`.
+Tortoise followed on the same box overnight: install exit 0 at 2026-09-05 00:43 box-local
+after 10 h 24 min, `tortoise-realmd`/`tortoise-mangosd`/`tortoise-db` up with
+`RestartCount=0`, and the worldserver's own banner `World server is up and running!
+Loading time: 59 minutes 18 seconds` (transcript and captures in
+`pyplan/gates/7.7-win11-tortoise/`). That run only finished because the ready budget on
+the box was 10800 s, not the 3600 s the repo carried, which is why the widening and the
+budget moved in one commit -- `test_tortoise_boot_facts.py` holds the measurement.
+
+The order is the awkward part and is worth knowing before anyone edits this: 7.7 measured
+that a Windows install refuses BEFORE preflight while `platforms` is Linux-only
+(`Install.supports()` is `platform_id in platforms`), so the widening cannot follow the
+install that justifies it. It has to go first, and the run is what earns it afterwards.
+"""
+
 
 @pytest.mark.parametrize("game_id", CMANGOS_GAMES)
 def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
-    """The data lands in 7.3 while the engine that reads it is still four groups away.
+    """The block the CMaNGOS engine reads, and the Linux install it enables.
 
-    `platforms` deliberately still says `["linux"]` and the entries keep their
-    `script`. The plan for this task had both go — `"platforms": []`, no
-    `script` — on the strength of 7.2 having already deleted the bash path. It
-    has not: those three scripts are the only thing that installs these games
-    today, `FAMILIES` has no `cmangos` engine to replace them with until K.8,
-    and `Install.platforms` carries `min_length=1` so an empty list is not even
-    a value this model accepts. What changes here is the DATA; what installs
-    the game is asserted in `test_families_azerothcore.py`, on the dispatcher.
+    G.4 landed this data while `FAMILIES` still had no `cmangos` engine, so the
+    entries kept their bash `script` and this test asserted it. K.8 registered the
+    engine and F.4 deleted the field: the same three entries install through
+    `CmangosInstaller`, which is what `supports("linux")` below stands for. It said
+    "on Linux and nothing else" until 2026-09-04, when Vanilla and then TBC were
+    installed on native Windows and `platforms` was widened for both -- see
+    `CMANGOS_PLATFORMS`. What installs the game is asserted in
+    `test_families_cmangos.py`, on the dispatcher.
+
+    THIS DOCSTRING IS LOAD-BEARING, which is why it has been corrected twice in a
+    day: `cmangos_entries()` points a reader HERE for which games declare the
+    family, so a present-tense falsehood teaches the opposite of the truth. It has
+    said, at different times, that the three scripts are "the only thing that
+    installs these games" and that the entries "keep their `script`". Both were
+    true when written.
+
+    7.2's plan, written for an order in which it ran BEFORE 7.3, had these three
+    go to `platforms: []`. That would have disabled the Install button on three of
+    the four shipped games -- `Install.supports()` is `platform_id in platforms`
+    and `catalog_view` gates on it twice. It is also not a value the model accepts:
+    `Install.platforms` carries `min_length=1`, kept deliberately, because after
+    7.3 an entry installable nowhere can only be a mistake.
     """
     entry = load_catalog().get(game_id)
     native = entry.install.native
@@ -669,8 +859,11 @@ def test_the_cmangos_entries_carry_a_full_family_block(game_id: str) -> None:
     assert native.db.client == "mariadb"
     assert entry.install.password.mode == "generated"
     assert entry.install.password.file == ".db_password"
-    assert entry.install.platforms == ("linux",)
-    assert entry.install.script
+    assert entry.install.platforms == CMANGOS_PLATFORMS[game_id]
+    assert entry.install.supports("linux") is True
+    assert entry.install.supports("windows") is ("windows" in CMANGOS_PLATFORMS[game_id])
+    # macOS is not widened for any of them: no CMaNGOS entry has been installed there.
+    assert entry.install.supports("macos") is False
     assert entry.install.requires_client_dir is True
     for source in entry.emulator.sources:
         assert source.dest.startswith("src/")
@@ -739,3 +932,175 @@ def test_tortoise_still_clones_the_fork_that_carries_the_playerbots() -> None:
     source = load_catalog().get("wow-tortoise").emulator.sources[0]
     assert source.repo == "Shyalya/tortoise-wow"
     assert source.branch == "playerbots-integration-gh"
+
+
+# Every gitlink `Shyalya/tortoise-wow` declares on `playerbots-integration-gh`,
+# read off GitHub on 2026-09-02. `.gitmodules` named one submodule
+# (`src/modules/Eluna` -> https://github.com/ElunaLuaEngine/Eluna.git) and the
+# recursive tree API answered with exactly one entry of type `commit` and
+# `truncated: false`, so this was the whole list and not the first of several.
+# The sha is the gitlink that branch pins. `Eluna` at that commit shipped no
+# `.gitmodules` of its own (raw.githubusercontent answered 404), so the
+# `--recursive` in CMake's advice had nothing further to fetch.
+#
+# This table is a transcript, not a live query: a submodule ADDED upstream after
+# that date will not turn this red. What it does hold is the other direction —
+# an edit that drops one of these sources takes the build down at `cmake`, and
+# takes this test down first.
+TORTOISE_SUBMODULES = {
+    "src/modules/Eluna": ("ElunaLuaEngine/Eluna", "1b06f28ff3a00054d915d824c725fb4283fee74d"),
+}
+
+
+def test_tortoise_clones_the_submodules_its_cmake_refuses_to_build_without() -> None:
+    """The clone stage does not run `git submodule update`, so each gitlink is a source.
+
+    Measured on m910q 2026-09-02: the Tortoise build died at configure with
+    `CMakeLists.txt:50 (message): Eluna submodule is missing.  Run: git
+    submodule update --init --recursive src/modules/Eluna`. `clone-sources` had
+    cloned the fork and nothing had fetched its submodules, so the gitlink left
+    an empty `src/modules/Eluna` behind.
+
+    Nothing here needs a submodule to BE a submodule. That CMake guard is
+    `if(NOT EXISTS "${CMAKE_SOURCE_DIR}/src/modules/Eluna/LuaEngine.h")` and
+    reads no git metadata at all, so an ordinary clone parked at the pinned
+    commit satisfies it — which is why the fix is a row of data beside the core
+    rather than engine support for `.gitmodules`.
+
+    Three properties, and each one is a way the fix silently stops working:
+
+    * The **rev** is the sha the superproject pins. Without it the clone takes
+      whatever `ElunaLuaEngine/Eluna` publishes next against a fork that has not
+      moved, which is a compile error nobody edited anything to cause.
+    * The **order** — every submodule after the core that contains it.
+      `stage_clone_sources()` walks the list in order and refuses a dest that
+      holds files but no `.git`, so a submodule cloned FIRST turns the core's
+      own clone into "move that folder aside and try again".
+    * The **depth**, left at 1. Measured here on 2026-09-02, running the argv
+      `git.py` runs: a `--depth 1` clone of Eluna's default branch (`master`),
+      then `fetch --depth=1 origin <sha>` and `checkout --detach <sha>`,
+      succeeded and left `LuaEngine.h` on disk in 5.6 MB. That is why no
+      `branch` is spelled: the pinned commit was the head of a side branch
+      (`cmangos-spell-update`), `_pin()` fetches it by hash regardless, and
+      naming a branch that upstream may delete would break the clone outright
+      where the default branch will not.
+    """
+    sources = load_catalog().get("wow-tortoise").emulator.sources
+    core = sources[0]
+    assert core.dest == "src/tortoise-wow", "the submodule dests below are built onto this"
+    by_dest = {source.dest: source for source in sources}
+    for path, (repo, rev) in TORTOISE_SUBMODULES.items():
+        dest = f"{core.dest}/{path}"
+        assert dest in by_dest, f"{path} is declared as a submodule and nothing clones it"
+        source = by_dest[dest]
+        assert source.repo == repo
+        assert source.url == f"https://github.com/{repo}.git", "the .gitmodules url, respelled"
+        assert source.rev == rev, "the gitlink the fork pins, not the tip of some branch"
+        assert source.branch is None
+        assert source.depth == 1
+    cloned_before_the_tree_it_lands_in = [
+        (inner.dest, outer.dest)
+        for i, inner in enumerate(sources)
+        for j, outer in enumerate(sources)
+        if inner.dest.startswith(f"{outer.dest}/") and i < j
+    ]
+    assert not cloned_before_the_tree_it_lands_in, cloned_before_the_tree_it_lands_in
+
+
+# -- source patches (pyplan/upstream-cmangos-doodad-drop.md §10) ------------------
+
+DOODAD_PATCH = "shared/cmangos/patches/vmap-extractor-doodad-name-case.patch"
+"""The one patch that ships, and which entries carry it against which checkout.
+
+`wow-tortoise` carries none, and not by oversight. Its extractor is the older
+lineage whose `wmo.cpp` runs `fixnamen()` over the whole MODN block in place
+before either the writer or the reader looks at a name (read 2026-09-05 at
+`7c0fb278`, `tools/vmap_extractor/vmapextract/wmo.cpp:98`). Reading is what
+that was, and reading is how the same conclusion was reached about
+`mangos-classic` before the extraction disproved half of it, so it was RUN:
+on m910q 2026-09-05 that extractor was built from `7c0fb278` in a container
+and run against the Turtle client (86 s, exit 0, 5,367 files in `Buildings/`),
+and `extract.doodad_placements()` over its output answers
+`DoodadCheck(extracted=4041, placed=2675, unplaced=1366, misspelt=0)` -- zero
+all-caps `.M2`, zero names with a space, and not one file spelled a way the
+placement index would not ask for. Writer and reader agree there, measured.
+
+`mangos-wotlk` is not a shipped entry (`wow-wotlk` is AzerothCore)
+and its `ExtractSingleModel` already normalises (read the same day at
+`4cea3890`), which is why the patch refuses to apply there and nothing asks it to.
+"""
+
+CARRIED = {
+    "wow-tbc": "src/mangos-tbc",
+    "wow-vanilla": "src/mangos-classic",
+    "wow-tortoise": None,
+}
+
+
+@pytest.mark.parametrize("game_id", CMANGOS_GAMES)
+def test_the_doodad_patch_is_carried_by_the_two_entries_whose_extractor_drops_placements(
+    game_id: str,
+) -> None:
+    entry = load_catalog().get(game_id)
+    assert entry.install.native is not None and entry.install.native.cmangos is not None
+    patches = entry.install.native.cmangos.patches
+    source = CARRIED[game_id]
+    if source is None:
+        assert patches == ()
+        return
+    assert [(p.file, p.source) for p in patches] == [(DOODAD_PATCH, source)]
+    assert patches[0].reason
+
+
+def test_only_the_entry_the_drop_was_measured_on_quotes_the_measured_percentage() -> None:
+    """14.8% is one number, from one client, on one box -- and it is not TBC's.
+
+    Measured on m910q 2026-09-05 against the WoW 1.12.1 client with
+    `mangos-classic` at `8ec338a1`: 429,016 placements unpatched against
+    503,782 patched. Nothing was ever extracted from a TBC client to count the
+    same thing, and `wow-tbc`'s `reason` quoted the Vanilla figure with no
+    qualifier until this test -- a sentence a user reads in the install log,
+    stating a measurement of their own world that nobody made.
+
+    What the TBC entry may say is what IS known: the two extractors' relevant
+    functions are byte-identical (`pyplan/upstream-cmangos-doodad-issue.md`),
+    so the defect is certainly there; its size is not.
+    """
+    reasons = {}
+    for game_id, source in CARRIED.items():
+        if source is None:
+            continue
+        entry = load_catalog().get(game_id)
+        assert entry.install.native is not None and entry.install.native.cmangos is not None
+        reasons[game_id] = entry.install.native.cmangos.patches[0].reason
+    assert "14.8%" in reasons["wow-vanilla"] and "Vanilla" in reasons["wow-vanilla"]
+    assert "14.8" not in reasons["wow-tbc"], reasons["wow-tbc"]
+    assert "never counted" in reasons["wow-tbc"], reasons["wow-tbc"]
+
+
+def test_every_shipped_patch_names_a_source_the_entry_clones_and_a_file_that_ships() -> None:
+    """Relationships, enumerated: a patch is a file in the tree AND a dest in the same entry."""
+    from yulon import resources
+    from yulon.catalog.families import patch
+
+    seen = 0
+    for entry in load_catalog().games:
+        block = entry.install.native.cmangos if entry.install.native is not None else None
+        if block is None:
+            continue
+        dests = {source.dest for source in entry.emulator.sources}
+        for spec in block.patches:
+            seen += 1
+            assert spec.source in dests, (entry.id, spec.source)
+            path = resources.installers_dir() / spec.file
+            assert path.is_file(), (entry.id, spec.file)
+            assert patch.parse(path.read_text(encoding="utf-8"))
+    assert seen == 2
+
+
+def test_a_patch_naming_a_source_the_entry_does_not_clone_is_refused() -> None:
+    data = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+    tbc = next(game for game in data["games"] if game["id"] == "wow-tbc")
+    tbc["install"]["native"]["cmangos"]["patches"][0]["source"] = "src/somewhere-else"
+    with pytest.raises(ValidationError, match="src/somewhere-else"):
+        parse_catalog(data)

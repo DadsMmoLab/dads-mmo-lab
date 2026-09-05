@@ -107,11 +107,101 @@ def test_memory_that_could_not_be_read_is_unchecked_not_a_pass_and_not_a_refusal
 
 
 def test_more_cpus_than_the_memory_affords_warns_and_names_the_number() -> None:
-    """Upstream hardcodes `-j $(nproc+1)` inside the RUN, so the CPU count is the only lever."""
-    report = preflight.evaluate(ENTRY, SERVER_DIR, facts(vm=_vm(8, cpus=16)))
-    assert verdict(report, "CPU") == "warn"
-    said = [check for check in report.checks if "CPU" in check.name][0]
+    """Upstream hardcodes `-j $(nproc+1)` inside the RUN, so on AzerothCore the CPU count is it.
+
+    The number is only offered on an engine that has a pane to set it, so this
+    asks a Windows box; the Linux wording has its own test below.
+    """
+    report = preflight.evaluate(ENTRY, SERVER_DIR, facts(platform_id="windows", vm=_vm(8, cpus=16)))
+    assert verdict(report, preflight.JOBS_CHECK) == "warn"
+    said = [check for check in report.checks if check.name == preflight.JOBS_CHECK][0]
+    assert "17 parallel jobs" in said.detail
     assert "3 CPUs" in said.remedy  # 8 GB affords 4 jobs, so 3 CPUs is 4 jobs
+
+
+def test_the_jobs_warning_counts_the_jobs_this_entry_s_build_actually_runs() -> None:
+    """The 2026-09-02 finding: it computed `nproc+1` for a build fixed at `make -j2`.
+
+    A CMaNGOS entry's `-j` is the `{{MAKE_JOBS}}` token `composegen` fills from
+    `cmangos.dockerfile.make_jobs`, so its job count is the same on a 4-core box
+    and a 64-core one. On the box that warned — 15 CPUs, 19.5 GB — this check
+    read only `facts`, so it announced "16 parallel compilers" for a Vanilla
+    install that was about to run two, and named a CPU count as the lever for a
+    number no CPU count can move.
+    """
+    assert CLIENT_ENTRY is not None, "a CMaNGOS entry is what this is about"
+    native = CLIENT_ENTRY.install.native
+    assert native is not None and native.cmangos is not None
+    jobs = native.cmangos.dockerfile.make_jobs
+
+    gate_box = facts(vm=_vm(19.5, cpus=15))
+    cmangos = preflight.evaluate(CLIENT_ENTRY, SERVER_DIR, gate_box)
+    said = [c for c in cmangos.checks if c.name == preflight.JOBS_CHECK][0]
+    assert said.verdict == "pass", "two jobs on 19.5 GB is not a machine to warn"
+    assert f"{jobs} parallel jobs" in said.detail
+    assert "15" not in said.detail and "16" not in said.detail
+
+    # …and the same facts on the AzerothCore entry, whose Dockerfile really does
+    # take its job count from `nproc`, still warn. The entry is what differs.
+    azerothcore = preflight.evaluate(ENTRY, SERVER_DIR, gate_box)
+    warned = [c for c in azerothcore.checks if c.name == preflight.JOBS_CHECK][0]
+    assert warned.verdict == "warn"
+    assert "16 parallel jobs" in warned.detail
+
+
+def test_a_fixed_job_count_that_outruns_the_memory_does_not_name_the_cpu_count() -> None:
+    """Lowering the CPUs cannot change a number that lives in `catalog.json`."""
+    assert CLIENT_ENTRY is not None
+    report = preflight.evaluate(
+        CLIENT_ENTRY, SERVER_DIR, facts(platform_id="windows", vm=_vm(2.5, cpus=1))
+    )
+    said = [c for c in report.checks if c.name == preflight.JOBS_CHECK][0]
+    assert said.verdict == "warn"
+    assert "set Docker Desktop to" not in said.remedy, "no CPU count moves a data-fixed `-j`"
+    assert "the CPU count is not the lever" in said.remedy
+    assert "more memory" in said.remedy
+
+
+def test_the_cpu_remedy_is_only_offered_where_a_cpu_setting_exists() -> None:
+    """Gate defect D4, 2026-08-31: "set Docker Desktop to 8 CPUs" on Docker Engine.
+
+    Docker Engine has no Resources pane and no CPU setting at all — it hands the
+    container every host CPU — so naming a number to set there is advice that
+    cannot be carried out. It is also the same box the warning was measured
+    non-predictive on, and the sentence now says so rather than leaving a user
+    with a warning and no move.
+    """
+    engine = [
+        check
+        for check in preflight.evaluate(ENTRY, SERVER_DIR, facts(vm=_vm(19.5, cpus=15))).checks
+        if check.name == preflight.JOBS_CHECK
+    ][0]
+    assert engine.verdict == "warn"
+    assert "Docker Desktop" not in engine.remedy and "CPUs —" not in engine.remedy
+    assert "no CPU setting to lower" in engine.remedy
+    assert "caution" in engine.remedy
+
+    desktop = [
+        check
+        for check in preflight.evaluate(
+            ENTRY, SERVER_DIR, facts(platform_id="windows", vm=_vm(19.5, cpus=15))
+        ).checks
+        if check.name == preflight.JOBS_CHECK
+    ][0]
+    assert "Docker Desktop" in desktop.remedy
+
+
+def test_the_jobs_row_never_refuses_because_it_was_measured_non_predictive() -> None:
+    """16 compilers on 19.5 GB finished with nothing OOM-killed (Ubuntu gate, 2026-08-31).
+
+    One roomy box completing does not refute 2 GB-per-job for a 6 GB one, so the
+    row stays; what it may never do is block an install that three real ones
+    have since shown will finish.
+    """
+    for cpus, memory in ((15, 19.5), (16, 4.0), (64, 6.0)):
+        report = preflight.evaluate(ENTRY, SERVER_DIR, facts(vm=_vm(memory, cpus=cpus)))
+        said = [c for c in report.checks if c.name == preflight.JOBS_CHECK][0]
+        assert said.verdict != "refuse", (cpus, memory)
 
 
 def test_the_floors_add_when_both_needs_are_on_one_volume() -> None:
@@ -122,6 +212,81 @@ def test_the_floors_add_when_both_needs_are_on_one_volume() -> None:
     report = preflight.evaluate(ENTRY, SERVER_DIR, one_drive)
     assert not report.ok()
     assert "share one drive" in report.message()
+
+
+def _space_rows(report: preflight.Report) -> list[preflight.Check]:
+    return [check for check in report.checks if check.name.startswith("free space on ")]
+
+
+def test_one_drive_gets_one_free_space_row_rather_than_the_same_one_twice() -> None:
+    """The 2026-09-02 duplicate: two rows, one measurement, identical text.
+
+    Once `floors_gb()` has replaced both floors with the added pair, the two
+    rows read the same filesystem against the same figure and print the same
+    sentence — "51 GB free; 60 GB is the comfortable figure", twice. A log that
+    says a thing twice reads as two things to go and fix. Both gate boxes are
+    this shape (measured 2026-09-02: `/var/lib/docker` and `/home` on one
+    `/dev/sda2` on yulon-ubuntu, one `/dev/nvme0n1p3` on m910q), so it is the
+    ordinary Linux case and not an edge one.
+    """
+    one_drive = facts(data_root_free=51 * GIB, server_dir_free=51 * GIB, same_volume=True)
+    rows = _space_rows(preflight.evaluate(ENTRY, SERVER_DIR, one_drive))
+    assert len(rows) == 1, [row.line() for row in rows]
+    assert rows[0].verdict == "warn"
+    assert rows[0].detail.count("51 GB free") == 1
+    # Still findable as the data-root row, which is how a caller matches it.
+    assert rows[0].name.startswith("free space on Docker's disk")
+    assert "the server folder" in rows[0].name
+
+    # Two drives, two questions, two rows — unchanged.
+    apart = facts(data_root_free=51 * GIB, server_dir_free=51 * GIB, same_volume=False)
+    assert len(_space_rows(preflight.evaluate(ENTRY, SERVER_DIR, apart))) == 2
+
+
+def test_the_one_drive_row_reports_the_smaller_of_the_two_readings() -> None:
+    """Two `statvfs` calls at two moments; if they disagree, the smaller can refuse."""
+    report = preflight.evaluate(
+        ENTRY,
+        SERVER_DIR,
+        facts(data_root_free=90 * GIB, server_dir_free=45 * GIB, same_volume=True),
+    )
+    row = _space_rows(report)[0]
+    assert row.verdict == "refuse" and "45 GB free" in row.detail
+
+    # A reading that was not taken is not a zero: the other one still answers.
+    half = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(data_root_free=None, server_dir_free=90 * GIB, same_volume=True)
+    )
+    assert _space_rows(half)[0].verdict == "pass"
+
+    # Neither taken is unchecked — never a pass, and never a fabricated refusal.
+    neither = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(data_root_free=None, server_dir_free=None, same_volume=True)
+    )
+    assert _space_rows(neither)[0].verdict == "unchecked"
+    assert "not a pass" in _space_rows(neither)[0].detail
+
+
+def test_macos_keeps_both_rows_because_there_they_are_not_duplicates() -> None:
+    """Collapsing them on a Mac would promote an `unchecked` to a pass.
+
+    "Docker's disk" on macOS is the HOST volume holding a sparse image behind
+    its own cap, so an ample reading there is `unchecked`; the same number for
+    the server folder is a real pass. One row cannot hold both answers.
+    """
+    report = preflight.evaluate(
+        ENTRY,
+        SERVER_DIR,
+        facts(
+            platform_id="macos",
+            data_root_free=200 * GIB,
+            server_dir_free=200 * GIB,
+            same_volume=True,
+        ),
+    )
+    assert len(_space_rows(report)) == 2
+    assert verdict(report, "free space on Docker's disk") == "unchecked"
+    assert verdict(report, "free space on the server folder") == "pass"
 
 
 def test_a_macos_data_root_that_cannot_be_resolved_says_so_in_its_own_words() -> None:
@@ -256,7 +421,7 @@ def test_no_daemon_is_a_refusal_and_everything_under_it_is_unchecked() -> None:
         facts(docker_ready=False, vm=None, data_root=None, data_root_free=None, bind_mount=None),
     )
     assert verdict(report, "Docker") == "refuse"
-    assert {check.name for check in report.unchecked()} >= {"memory", "CPU vs memory"}
+    assert {check.name for check in report.unchecked()} >= {"memory", preflight.JOBS_CHECK}
 
 
 def test_an_entry_with_no_native_data_is_refused_rather_than_guessed_at() -> None:
@@ -459,8 +624,8 @@ def test_gather_on_macos_assembles_platform_facts(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("cpus", "memory_gb", "expected_verdict", "expected_remedy_cpu"),
     [
-        (2, 8.0, "pass", None),
-        (4, 8.0, "pass", None),  # jobs=5, affordable=4 -> 5 > 4 -> warn
+        (2, 8.0, "pass", None),  # jobs=3, affordable=4
+        (4, 8.0, "warn", "3 CPUs"),  # jobs=5, affordable=4 -> warn with 3 CPUs
         (8, 6.0, "warn", "2 CPUs"),  # jobs=9, affordable=3 -> warn with 2 CPUs
         (16, 4.0, "warn", "1 CPUs"),  # jobs=17, affordable=2 -> warn with 1 CPUs
     ],
@@ -468,13 +633,18 @@ def test_gather_on_macos_assembles_platform_facts(tmp_path: Path) -> None:
 def test_cpu_vs_memory_heuristics(
     cpus: int, memory_gb: float, expected_verdict: str, expected_remedy_cpu: str | None
 ) -> None:
-    report = preflight.evaluate(ENTRY, SERVER_DIR, facts(vm=_vm(memory_gb, cpus=cpus)))
-    cpu_check = [check for check in report.checks if check.name == "CPU vs memory"][0]
-    if cpus == 4 and memory_gb == 8.0:
-        # jobs=5, affordable=4 -> warn
-        assert cpu_check.verdict == "warn"
-    else:
-        assert cpu_check.verdict == expected_verdict
+    """The AzerothCore arithmetic, on the one engine whose remedy names a CPU count.
+
+    The `(4, 8.0)` row used to declare `pass` and then be corrected to `warn` by
+    an `if` inside the body, so the table said one thing and the assertion did
+    another — and any real change of that case would have been absorbed by the
+    override rather than caught. The table now carries the verdict it asserts.
+    """
+    report = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="windows", vm=_vm(memory_gb, cpus=cpus))
+    )
+    cpu_check = [check for check in report.checks if check.name == preflight.JOBS_CHECK][0]
+    assert cpu_check.verdict == expected_verdict
     if expected_remedy_cpu is not None:
         assert expected_remedy_cpu in cpu_check.remedy
 
@@ -544,6 +714,77 @@ def test_gather_asks_selinux_only_on_linux_and_accepts_a_client_dir(tmp_path: Pa
     )  # type: ignore[arg-type]
     assert got.selinux_enforcing is None and got.server_fs_type is None
     assert asked == []
+
+
+def test_gather_asks_both_linux_seams_the_module_holds_at_call_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Patching `platform` has to be SEEN by BOTH of `gather()`'s Linux questions.
+
+    The test above states both answers through `selinux=` and `fs_type=`, so it
+    could not tell that either default was BOUND AT IMPORT. Asked of the
+    interpreter on m910q, against the file as the round-2 work left it
+    (2026-09-05):
+
+        signature(gather).parameters["selinux"].default
+            is platform.selinux_enforcing        -> False
+        signature(gather).parameters["fs_type"].default
+            is platform.filesystem_type          -> True
+
+    — one seam resolved late, one still bound, which is what made this the
+    two-shape defect bug-checklist §27 was opened for rather than a dormant
+    one. ONE patch of `platform.filesystem_type` was answered two ways by the
+    two consumers of that one attribute (m910q, 2026-09-05, before the fix):
+
+        ContainerGit()._ask_filesystem(Path("/tmp")) -> 'btrfs'      (the fake)
+        gather(...).server_fs_type                   -> 'ext2/ext3'  (the host)
+        asked: ['fs:/tmp']
+
+    "EITHER default" is a claim, so it was mutated rather than asserted. Each
+    default was put back to the module function on its own, `__pycache__`
+    purged between, m910q 2026-09-05:
+
+        selinux rebound at import -> 1 failed in 0.37s
+        fs_type rebound at import -> 1 failed in 0.89s
+
+    It fails on every host rather than only on one whose real answers happen to
+    differ, because the fakes COUNT their calls: `asked` is short by an entry
+    before any value is compared. Asserting the parameters exist would have
+    proved nothing — that distinction is what §27 asked for.
+    """
+    asked: list[str] = []
+
+    def enforcing() -> bool | None:
+        asked.append("selinux")
+        return True
+
+    def labelling(path: Path) -> str | None:
+        asked.append(f"fs:{path}")
+        return "btrfs"
+
+    monkeypatch.setattr(platform_module, "selinux_enforcing", enforcing)
+    monkeypatch.setattr(platform_module, "filesystem_type", labelling)
+    # The production shape: neither Linux seam handed in. Checked 2026-09-05 —
+    # the one production call is `native.StagedInstaller._preflight_lines()`'s
+    # `self._seams.gather(...)` (whose `Seams.gather` default IS this
+    # function), and it passes `client_dir`, `platform_id`, `docker_ready` and
+    # `dir_problem` only. So these two defaults are what a real install runs.
+    got = preflight.gather(
+        ENTRY,
+        tmp_path,
+        platform_id=lambda: "linux",
+        docker_ready=lambda: True,
+        vm_resources=lambda: None,
+        data_root=lambda: None,
+        disk_free=lambda _p: 100 * GIB,
+        dir_problem=lambda _p: None,
+        bind_mount_ok=lambda _p: True,
+        port_conflicts=lambda: [],
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+    )
+    assert asked == ["selinux", f"fs:{tmp_path}"]
+    assert got.selinux_enforcing is True
+    assert got.server_fs_type == "btrfs"
 
 
 # -- the client folder (7.3, I.8) ---------------------------------------------

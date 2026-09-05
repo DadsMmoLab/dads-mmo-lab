@@ -1,0 +1,36 @@
+LANE B / 7.7 native-Windows TBC — prediction written BEFORE the Windows extract stage produced
+anything, so that the Buildings comparison is a test rather than a story told afterwards.
+
+Written 2026-09-04 14:21 CEST (box-local 05:21 PDT), while the install was still in
+`clone-sources`. Source of the Linux numbers: /home/pk/tbc-7.4c/data on m910q, the 7.4b/7.4c
+install, counted live today rather than copied from the checklist (the checklist figures
+dbc 185 / maps 3586 / Buildings 7171 / vmaps 8099 / mmaps 2819 were reproduced exactly).
+
+CASE-INSENSITIVE DUPLICATE NAMES IN THE LINUX TBC EXTRACTION, counted per tool
+(`ls <dir> | tr A-Z a-z | sort -u | wc -l` against `ls <dir> | wc -l`):
+
+  dir         files   unique-when-case-folded   collisions
+  dbc           185                       185            0
+  maps         3586                      3586            0
+  Buildings    7171                      5431         1740
+  vmaps        8099                      8099            0
+  mmaps        2819                      2819            0
+
+Buildings is the ONLY directory with case collisions, exactly as the Vanilla run turned out.
+
+THEREFORE, IF THE VANILLA FINDING GENERALISES, THE WINDOWS RUN SHOULD PRODUCE:
+  dbc        185   (same)
+  maps      3586   (same)
+  Buildings 5431   (1,740 FEWER than Linux — the case-folded count, to the file)
+  vmaps    >=8099  (Vanilla's Windows run produced 410 MORE, because NTFS lets
+                    Doodad::ExtractSet() find models Linux silently drops)
+  mmaps    ~2819   (Vanilla's Windows run produced exactly one more)
+
+A Windows Buildings count of 5431 is the expected reading and NOT a defect: 7171 - 5431 = 1740
+byte-identical duplicate spellings that NTFS folds onto their twin. Any other number is the
+interesting result.
+
+Linux dir_bin (the placement index) for comparison: 50,938,121 bytes.
+Vanilla's Windows dir_bin was LARGER than Linux's (36,635,438 vs 31,072,203) because the Linux
+run drops doodad placements it cannot open under the fixed spelling; expect the same direction
+here.

@@ -19,6 +19,7 @@ green (checklist, "CI was green while the suite was red").
 
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import subprocess
@@ -51,143 +52,91 @@ from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import (
     DockerNeedsReLoginError,
     DockerUnavailableError,
-    Installer,
     InstallerError,
     InstallOptions,
     UnsupportedPlatformError,
+    cancelled_install_message,
     installer_for,
 )
 
 STAGE_NAMES = AzerothCoreInstaller.STAGE_NAMES
 
 
+def without_cmangos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registry as it stood before K.8: `azerothcore` and nothing else.
+
+    The test below is about what `installer_for()` does when a shipped entry
+    names a family THIS BUILD has no engine for. That was the tree's real state
+    for the four groups between G.4 (which landed the three CMaNGOS `native`
+    blocks) and K.8 (which registered the class that reads them), and `wow-tbc`
+    was the live example. K.8 registered it, and the example went away; the
+    state did not, because the next lineage's catalog data will arrive ahead of
+    its engine the same way. What F.3 changed is the ANSWER: it used to be a
+    fallback to the entry's bash script, and it is now a refusal.
+
+    Narrowing the REGISTRY rather than editing an entry is what keeps the
+    fixture honest about which rule it violates: `NativeInstall.family` is a
+    `Literal["azerothcore", "cmangos"]`, so an entry naming a third family is a
+    state no `catalog.json` can reach, and a test built on one would be
+    proving the branch against data the app cannot receive.
+    """
+    monkeypatch.setattr(family_registry, "FAMILIES", {"azerothcore": AzerothCoreInstaller})
+
+
 def test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_script() -> None:
     """One place decides, from `catalog.json` data — now on `install.native` (7.1, A1).
 
     WotLK is native on every platform, Linux included: the flip is one JSON key.
-    The three CMaNGOS entries carry a `native` block from G.4 and STILL take the
-    script path, because that block names a family (`cmangos`) `FAMILIES` has no
-    engine for until K.8. That is what the second fact `installer_for()` reads
-    is for: for the several groups between the data landing and the engine
-    landing, dispatching on the block alone would take these three games away
-    from the only thing that installs them and hand them a refusal instead. Off
-    Linux they still meet the 6.1 refusal, which comes from `Installer`, the one
-    place that words it, until 7.2 deletes it.
+
+    This also asserted that the three CMaNGOS entries took the SCRIPT path,
+    which was true until K.8 registered `CmangosInstaller` and made it false in
+    the same commit. Where those three go now is asserted in
+    `test_families_cmangos.py`, beside the class that receives them, and the
+    catalog-wide relationship — every native entry reaching the class its family
+    id names — is `test_spine.py`'s, since it is true of every family. What is
+    left here is the AzerothCore half, which is this file's subject.
     """
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "macos"), AzerothCoreInstaller)
     assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), AzerothCoreInstaller)
-    for game_id in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
-        entry = load_catalog().get(game_id)
-        assert entry.install.native is not None and entry.install.native.family == "cmangos"
-        assert isinstance(installer_for(entry, platform_id=lambda: "linux"), Installer), game_id
-        assert isinstance(installer_for(entry, platform_id=lambda: "macos"), Installer), game_id
-        assert isinstance(installer_for(entry, platform_id=lambda: "windows"), Installer), game_id
 
 
-def test_a_family_with_no_engine_yet_falls_back_to_the_script_and_says_so(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The fallback is logged, because a silent one is how a typo becomes a mystery.
-
-    A family id that no engine claims has two causes and they need opposite
-    responses: data that arrived ahead of its engine (`cmangos`, today), and a
-    misspelling that will never match anything. Both look identical from the
-    outside — the game installs, exactly as it did last week — so the only thing
-    that can tell the second story is a line in the log naming the family that
-    was not found and the script that ran instead.
-    """
-    with caplog.at_level("INFO", logger="yulon.catalog.installer"):
-        engine_for_tbc = installer_for(load_catalog().get("wow-tbc"), platform_id=lambda: "linux")
-    assert isinstance(engine_for_tbc, Installer)
-    said = "\n".join(record.getMessage() for record in caplog.records)
-    assert "cmangos" in said and "install-wow-tbc.sh" in said
-
-
-def test_no_engine_and_no_script_left_is_the_app_bug_family_for_words() -> None:
-    """The third state, and the one 7.2 turns the middle branch into.
-
-    The fallback needs something to fall back TO. Once the bash path is gone an
-    entry naming an unregistered family has neither an engine nor a script, and
-    that is precisely the app bug `family_for()` already has a sentence for — so
-    the sentence is not written a second time here. `model_copy` rather than a
-    catalog edit: `Install.script` is still a required non-empty string, so this
-    state cannot be reached through `catalog.json` today.
-    """
-    tbc = load_catalog().get("wow-tbc")
-    scriptless = tbc.model_copy(update={"install": tbc.install.model_copy(update={"script": ""})})
-    with pytest.raises(InstallerError, match="install family this app does not have"):
-        installer_for(scriptless, platform_id=lambda: "linux")
-
-
-def test_the_same_entry_dispatches_to_its_family_the_day_the_family_is_registered(
+def test_no_engine_and_no_script_left_is_the_app_bug_family_for_words(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half of the fallback: it is the REGISTRY that is missing, not the data.
+    """A family this build has no engine for is the app bug, not a fallback (F.3).
 
-    K.8 adds one line to `FAMILIES`, and these three entries must move to the
-    family engine on that line alone — no catalog edit, no second flip. A
-    stand-in class is registered for the duration of this test rather than
-    weakening the shipped registry, so what is proved is the dispatch rule and
-    not a property of `CmangosInstaller`, which does not exist yet.
+    Until F.3 such an entry was handed back to its bash script, so reaching the
+    refusal took a `model_copy` that also emptied `Install.script`. F.3 deleted
+    that engine, which leaves one answer for the state and it is the sentence
+    `family_for()` already had — so the sentence is not written a second time
+    here. The entry used below is the shipped one, unmodified. Until F.4 that
+    mattered for a second reason — it still carried the `script` field the
+    fallback used to read, so asserting the field's presence said the fallback
+    was GONE rather than merely starved. F.4 deleted the field, and what makes
+    the fixture honest now is that the REGISTRY, not the entry, is what
+    `without_cmangos` narrows: the entry is real catalog data throughout.
     """
+    without_cmangos(monkeypatch)
     tbc = load_catalog().get("wow-tbc")
-
-    class _StandIn(AzerothCoreInstaller):
-        family = "cmangos"
-
-    assert family_registry.is_registered("cmangos") is False, "K.8 has landed; retire this test"
-    monkeypatch.setattr(
-        family_registry, "FAMILIES", {**family_registry.FAMILIES, "cmangos": _StandIn}
-    )
-    assert family_registry.is_registered("cmangos") is True
-    assert isinstance(installer_for(tbc, platform_id=lambda: "linux"), _StandIn)
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
+    assert tbc.install.native is not None and tbc.install.native.family == "cmangos"
+    with pytest.raises(InstallerError, match="install family this app does not have"):
+        installer_for(tbc, platform_id=lambda: "linux")
 
 
-def test_the_entry_names_its_family_and_a_scriptless_entry_still_reads_as_scripted() -> None:
-    """`family` is catalog data; `platforms`/`script_platforms` still say "scripted"."""
+def test_the_wotlk_entry_names_the_family_of_the_engine_that_installs_it() -> None:
+    """The class attribute and the catalog datum agree, for this file's own family.
+
+    Everything else the deleted `..._still_reads_as_scripted` test held was
+    about the script path (`scripted_platforms`/`uses_script`/`is_native` on
+    TBC), which F.4 removed. The catalog-wide version of the agreement below
+    — every native entry reaching the class its family id names — is
+    `test_spine.py`'s, because it is true of every family; this is the
+    AzerothCore half, which is this file's subject.
+    """
     assert ENTRY.install.native is not None
     assert ENTRY.install.native.family == "azerothcore"
     assert AzerothCoreInstaller.family == ENTRY.install.native.family
-    assert TBC.install.native is not None and TBC.install.native.family == "cmangos"
-    assert TBC.install.scripted_platforms() == TBC.install.platforms
-    assert TBC.install.uses_script("linux") is True
-    assert TBC.install.is_native("linux") is False
-    # And a platform the entry does not support is never "native" — that is the
-    # honest 6.1 refusal, not an engine that starts and then fails.
-    assert TBC.install.is_native("macos") is False
-    assert TBC.install.is_native("windows") is False
-
-
-def test_wotlk_drops_script_platforms_so_its_fallback_matches_every_old_entry() -> None:
-    """The 7.1 flip's data half (B.7): one JSON key gone, `scripted_platforms()` falls back.
-
-    `installer_for()` in this tree already dispatches on `install.native` alone
-    (see `test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_script`
-    above) — the A.3 dispatch rewrite has already landed here, ahead of the
-    plan's stated B.7-then-A.1..A.3 order. So there is no transitional window in
-    this tree where `installer_for()` still reads `is_native()`/`uses_script()`
-    for WotLK: those method bodies are provably dead for WotLK already, kept
-    only until 7.2 deletes them (A1). This test pins what they still SAY, now
-    that the field they used to narrow (`script_platforms`) is gone: with no
-    narrower answer on file, WotLK reads exactly like TBC above — "scripted
-    everywhere it is installable" — even though nothing acts on that anymore.
-    """
-    assert ENTRY.install.script_platforms is None
-    assert ENTRY.install.native is not None
-    assert ENTRY.install.scripted_platforms() == ENTRY.install.platforms
-    assert ENTRY.install.uses_script("linux") is True
-    assert ENTRY.install.uses_script("macos") is True
-    assert ENTRY.install.uses_script("windows") is True
-    assert ENTRY.install.is_native("linux") is False
-    assert ENTRY.install.is_native("macos") is False
-    assert ENTRY.install.is_native("windows") is False
-    # And the real dispatcher does not care: WotLK installs natively everywhere,
-    # `is_native()`'s "False" above notwithstanding.
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "linux"), AzerothCoreInstaller)
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "macos"), AzerothCoreInstaller)
-    assert isinstance(installer_for(ENTRY, platform_id=lambda: "windows"), AzerothCoreInstaller)
 
 
 def test_the_unsupported_platform_refusal_still_comes_first(tmp_path: Path) -> None:
@@ -214,13 +163,50 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     assert real.one_shot is docker.run_one_shot
     assert real.gather is preflight.gather
     assert real.wait_ready is docker.wait_ready_for
-    # The three SELinux seams. Every SELinux test in `test_spine.py` fakes all
-    # three, so they are only evidence about Fedora if these are what a real
-    # install reaches for — and `selinux_enforcing` in particular must be the
-    # tri-state probe, not something that answers `False` for "could not ask".
+    # `relabel`. Every SELinux test in `test_spine.py` fakes it, so those are
+    # only evidence about Fedora if this is what a real install reaches for.
+    # It is the one SELinux seam with a single answerer (`native.py`'s
+    # `stage_generate_compose`, and nothing else asks the host whether the
+    # folder was relabelled), so an identity assert about it states a fact
+    # rather than pinning a shape — see the withdrawal below.
     assert real.relabel is platform.relabel_for_containers
-    assert real.selinux_enforcing is platform.selinux_enforcing
-    assert real.fs_type is platform.filesystem_type
+    # WITHDRAWN 2026-09-05 (m910q), not moved: two asserts stood here,
+    #
+    #     assert real.selinux_enforcing is platform.selinux_enforcing
+    #     assert real.fs_type is platform.filesystem_type
+    #
+    # and their argument is retracted rather than restated in another form.
+    # They read as "the engine calls the real probe", which is the claim the
+    # rest of this test makes. For these two seams they said something else as
+    # well, and that something is the defect bug-checklist §27 is open for:
+    # `Seams` binds `platform.selinux_enforcing` and `platform.filesystem_type`
+    # AT IMPORT, while the other consumers of those two attributes —
+    # `preflight.gather()`, `docker.bind_mount_ok()`, `git.ContainerGit` and
+    # `extract.run_plan()` — resolve them at CALL time as of 2026-09-04/05. One
+    # patch is therefore answered two ways inside ONE install. Measured on
+    # m910q, 2026-09-05, one `monkeypatch` of each `platform` attribute and the
+    # two consumers a `cmangos` install reaches:
+    #
+    #     gather(...).selinux_enforcing  -> True        (the fake)
+    #     Seams().selinux_enforcing()    -> False       (the host)
+    #     gather(...).server_fs_type     -> 'btrfs'     (the fake)
+    #     Seams().fs_type(server_dir)    -> 'ext2/ext3' (the host)
+    #
+    # An identity assert cannot tell those two shapes apart — it passes on the
+    # broken one and FAILS on the fixed one, which is what makes it a pin and
+    # not a test. Measured, not reasoned: with `Seams` given the `bind_mount_ok`
+    # treatment (both fields `None`, resolved against `platform` in
+    # `ask_selinux()`/`ask_fs()`) this test failed on m910q, 2026-09-05, at the
+    # first of the two lines — `assert None is <function selinux_enforcing>`.
+    #
+    # Nothing is asserted in their place HERE because the guard that belongs
+    # here cannot pass yet: `native.py` is another lane's file this run and the
+    # split is still live in it. The guard it owes, once `Seams` resolves late,
+    # is the one §27 asked for in as many words — patch
+    # `platform.selinux_enforcing` and `platform.filesystem_type`, drive a bare
+    # `Seams()` and `preflight.gather()`, and assert both fakes were CALLED and
+    # that ONE patch produced ONE answer. Asserting the fields exist, or that
+    # they are some particular object, is what was here and it proved nothing.
     # `ensure_docker` is the one seam whose REAL default escalates on Linux, so
     # the engine not calling it (or calling a fake) is what the macOS path's
     # "no sudo" claim ultimately rests on. Pin that the default really is the
@@ -228,6 +214,66 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     # cannot look like a no-op.
     assert real.ensure_docker is platform.ensure_docker
     assert real.file_unmodified(Path("/nowhere-at-all"), "docker-compose.yml") is None
+
+
+def test_one_patch_of_a_platform_probe_gets_one_answer_out_of_the_whole_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The guard the two withdrawn identity asserts owed (bug-checklist §27).
+
+    Paid 2026-09-05, once `Seams.selinux_enforcing`/`fs_type` stopped being
+    bound at import. What the withdrawn asserts could not tell apart, measured
+    on m910q that day against the import-bound shape:
+
+        gather(...).selinux_enforcing  -> True        (the fake)
+        Seams().selinux_enforcing()    -> False       (the host)
+
+    One patch, two answers, inside one install. This drives both consumers a
+    real install reaches and asserts the fake was ASKED by each of them — the
+    thing an identity assert cannot say, since it passes on the broken shape
+    and fails on the fixed one.
+    """
+    asked: list[str] = []
+
+    def fake_selinux() -> bool | None:
+        asked.append("selinux")
+        return True
+
+    def fake_fs(path: Path) -> str | None:
+        asked.append(f"fs:{path}")
+        return "btrfs"
+
+    monkeypatch.setattr(platform, "selinux_enforcing", fake_selinux)
+    monkeypatch.setattr(platform, "filesystem_type", fake_fs)
+
+    seams = native.Seams()
+    facts = preflight.gather(
+        load_catalog().get("wow-wotlk"),
+        tmp_path,
+        platform_id=lambda: "linux",
+        docker_ready=lambda: True,
+        # `gather()`'s own seams, and they have to be taken: this test's
+        # subject is which SELinux probe two callers reach, and it was reaching
+        # the box's docker daemon three times to find out. `vm_resources`
+        # defaults are bound at def time, so patching `platform.vm_resources`
+        # does nothing -- it ran `docker info`; `port_conflicts` ran
+        # `docker ps`; and `bind_mount_ok` went furthest, doing a real
+        # `docker run` of `alpine/git` over `tmp_path`, which took the whole
+        # suite from 50 s to 148 s on m910q (all measured 2026-09-05).
+        vm_resources=lambda: None,
+        bind_mount_ok=lambda server_dir: True,
+        port_conflicts=lambda: [],
+    )
+
+    # Both consumers, one patch, one answer each.
+    assert seams.ask_selinux() is True, "Seams did not reach the patched probe"
+    assert seams.ask_fs(tmp_path) == "btrfs", "Seams did not reach the patched fs probe"
+    assert facts.selinux_enforcing is True, "preflight.gather did not reach the patched probe"
+    assert facts.server_fs_type == "btrfs", "preflight.gather did not reach the patched fs probe"
+    # and the fakes were CALLED by both, which is what the identity asserts
+    # could never establish.
+    assert asked.count("selinux") >= 2, f"only one caller asked about SELinux: {asked}"
+    assert any(a.startswith("fs:") for a in asked), f"nobody asked about the filesystem: {asked}"
 
 
 # -- the happy path ---------------------------------------------------------
@@ -245,12 +291,18 @@ def test_a_fresh_install_runs_every_stage_in_order(tmp_path: Path) -> None:
         "one-shot:ac-client-data-init",
         # The database is up BEFORE the probe is asked anything. Without this
         # the probe cannot answer, and the install refused itself after the
-        # multi-hour build — see `test_the_import_cannot_be_asked_anything...`.
+        # multi-hour build — see
+        # `test_the_database_is_started_before_the_import_is_asked_anything`,
+        # which owns that claim. (The name cited here until 2026-09-02,
+        # `test_the_import_cannot_be_asked_anything...`, has never existed;
+        # an elided citation cannot be checked by eye, so it is spelled out.)
         "start-db",
         "probe",
         "one-shot:ac-db-import",
         "verify",
         "start",
+        "query",
+        "sql",
     ]
     assert "compiling" in lines  # the build's output is streamed, not buffered
     state = native.read_state(server_dir, valid=STAGE_NAMES)
@@ -491,10 +543,13 @@ def test_a_state_file_nobody_can_read_never_authorises_a_reset_of_a_users_checko
         list(engine(rec, clone=hard_reset).run(InstallOptions(server_dir=server_dir)))
     assert reset == [], reset
     assert rec.clones == [], rec.clones
-    # Nothing ran at all beyond the machine check that precedes the guard — no
-    # clone, no build, no container. A flag set to the right value would not be
-    # evidence of that; an empty call log is.
-    assert rec.calls == ["gather"], rec.calls
+    # Nothing ran at all - no machine check, no clone, no build, no container.
+    # A flag set to the right value would not be evidence of that; an empty call
+    # log is. It read `["gather"]` until 2026-09-02, which recorded the defect as
+    # if it were the contract: the machine was measured, and Docker provisioned
+    # first, before this folder was judged - and the refusal then says `Nothing
+    # was written` about a machine that had just had packages installed on it.
+    assert rec.calls == [], rec.calls
     assert edited.read_text(encoding="utf-8") == "// my patch\n"
     assert not (server_dir / "docker-compose.yml").exists()
 
@@ -1090,6 +1145,15 @@ def test_a_populated_but_unfinished_database_is_refused(tmp_path: Path) -> None:
 
 
 def test_an_engine_without_the_reset_seam_refuses_a_partial_database(tmp_path: Path) -> None:
+    """`CallableGate.reset()`'s own refusal, and it must arrive whole.
+
+    Asserted by EQUALITY, not by a phrase. `stage_import()` translates anything
+    else `reset()` raises into a sentence of its own (2026-09-02), and an
+    `InstallerError` caught by that translation would come back wrapped inside
+    it - two refusals in one line, the second explaining the first. `match=`
+    alone could not see that, because the wrapper interpolates the message it
+    wrapped and the phrase survives inside it.
+    """
     rec = Recorder(images=False, probe_answers=[PARTIAL])
     installer = AzerothCoreInstaller(
         ENTRY,
@@ -1098,8 +1162,12 @@ def test_an_engine_without_the_reset_seam_refuses_a_partial_database(tmp_path: P
         reset_unfinished=None,
         seams=rec.seams(),
     )
-    with pytest.raises(InstallerError, match="no way to clear"):
+    with pytest.raises(InstallerError) as refused:
         list(installer.run(InstallOptions(server_dir=tmp_path / "wow")))
+    assert str(refused.value) == (
+        "This install's databases were left half-written and this installer has no way "
+        "to clear them, so nothing was run."
+    )
 
 
 def test_an_engine_with_no_probe_at_all_refuses_before_anything_runs(tmp_path: Path) -> None:
@@ -1638,6 +1706,8 @@ def test_macos_native_installer_full_run_and_compose_generation(tmp_path: Path) 
         "one-shot:ac-db-import",
         "verify",
         "start",
+        "query",
+        "sql",
     ]
     assert any("The server is up." in line for line in lines)
 
@@ -1673,3 +1743,446 @@ def test_wotlk_stage_names_are_the_historical_tuple() -> None:
     )
     assert engine(Recorder()).stage_names() == AzerothCoreInstaller.STAGE_NAMES
     assert len(set(AzerothCoreInstaller.STAGE_NAMES)) == len(AzerothCoreInstaller.STAGE_NAMES)
+
+
+def as_the_clone_seam_does(dest: Path) -> None:
+    """What both real clone seams do BEFORE they clone, and a double that skips it proves nothing.
+
+    `git.RunnerGit.clone()` and `git.ContainerGit.clone()` open the same way: an
+    existing `.git` means update-in-place and return, and otherwise
+    `if spec.dest.exists(): shutil.rmtree(spec.dest)`. For `clone-core`
+    `spec.dest` IS the server dir — `families/azerothcore.py`'s `_clone_core()`
+    passes `dest=server_dir` — so that one line removes the server dir and
+    every byte in it, `.yulon-install.json` included.
+
+    Named rather than cited by line, and checked rather than either. Four line
+    numbers for these two seams were in the tree at once on 2026-09-05 —
+    `git.py:525` and `:838` here, `git.py:530` and `:855` in `2a4f0cab`'s
+    message — and they were not even the same KIND of citation: 525 is
+    `RunnerGit.clone`'s `def`, 838 is a `logger.warning` in the middle of
+    `ContainerGit.clone`, and the two `shutil.rmtree` calls this paragraph is
+    about are at 531 and 856. Not one of the four named the line it was offered
+    for. `test_both_clone_seams_still_open_the_way_this_double_does` reads the
+    two methods instead: a double that stops matching the seam it stands in for
+    is what made the three tests below pass while asserting the opposite of the
+    truth, and no line number in a docstring would have caught that either.
+
+    Measured on m910q, 2026-09-05: three doubles in this file wrote `.git` and
+    raised without ever doing this, and the three tests asserting that the
+    ownership record survives a death in stage one passed only because of the
+    omission. With the line in, all three went red. The record does not survive
+    `clone-core`, and the tests below now say so.
+    """
+    if (dest / ".git").is_dir():
+        return
+    if dest.exists():
+        shutil.rmtree(dest)
+
+
+def test_both_clone_seams_still_open_the_way_this_double_does(tmp_path: Path) -> None:
+    """`as_the_clone_seam_does()` is a claim about `git.py`, and this is where it is checked.
+
+    A double that has drifted from the seam it stands in for is not a weaker
+    test, it is a test of something that does not exist: the three tests below
+    asserted that the ownership record survives a death in `clone-core` and
+    passed for months, because the doubles wrote `.git` and raised and the real
+    seams begin by removing the destination. The docstring above used to point
+    at line numbers instead, and every line number anyone wrote for these two
+    methods on 2026-09-05 was wrong.
+
+    Asked of the syntax tree, so a comment mentioning `shutil.rmtree` cannot
+    satisfy it, and asserted for BOTH seams by name -- `install_wiring` picks
+    between them at runtime, and a fix applied to one of the two is the shape
+    this repository has been bitten by before.
+    """
+    module = ast.parse(Path(git.__file__ or "").read_text(encoding="utf-8"))
+    clones = {
+        cls.name: node
+        for cls in ast.walk(module)
+        if isinstance(cls, ast.ClassDef)
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "clone"
+    }
+    # `Git` is the Protocol both satisfy and its body is `...`; it is asserted
+    # into the set anyway, because a THIRD implementation of it is exactly what
+    # this test has to notice.
+    assert set(clones) == {
+        "Git",
+        "RunnerGit",
+        "ContainerGit",
+    }, "the set of clone seams this double stands in for has changed: " + str(sorted(clones))
+
+    for name in ("RunnerGit", "ContainerGit"):
+        method = clones[name]
+        tests = {
+            ast.unparse(node.test): node for node in ast.walk(method) if isinstance(node, ast.If)
+        }
+        assert "(spec.dest / '.git').is_dir()" in tests, (
+            f"{name}.clone() no longer treats an existing checkout as update-in-place, so the "
+            "double's first branch is about a seam that is gone"
+        )
+        emptying = tests.get("spec.dest.exists()")
+        assert emptying is not None, (
+            f"{name}.clone() no longer empties the destination, which is the whole of what the "
+            "three tests below pin; if it really is gone, they should assert the resume"
+        )
+        assert [ast.unparse(stmt) for stmt in emptying.body] == ["shutil.rmtree(spec.dest)"], (
+            f"{name}.clone() does something other than `shutil.rmtree(spec.dest)` to a "
+            "destination it does not recognise"
+        )
+        assert tests["(spec.dest / '.git').is_dir()"].lineno < emptying.lineno, (
+            f"{name}.clone() empties before it checks for a checkout, which would remove a "
+            "user's repository rather than update it"
+        )
+
+    # And the double does that, on all three shapes the seams distinguish.
+    missing = tmp_path / "not-there"
+    as_the_clone_seam_does(missing)
+    assert not missing.exists()
+
+    checkout = tmp_path / "checkout"
+    (checkout / ".git").mkdir(parents=True)
+    (checkout / "work").write_bytes(b"mine")
+    as_the_clone_seam_does(checkout)
+    assert (checkout / "work").is_file(), "the double removed a checkout the seam updates in place"
+
+    leftovers = tmp_path / "leftovers"
+    leftovers.mkdir()
+    (leftovers / "half-a-clone").write_bytes(b"x")
+    as_the_clone_seam_does(leftovers)
+    assert not leftovers.exists(), "the double kept what the seam removes"
+
+
+def test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it(
+    tmp_path: Path,
+) -> None:
+    """§38's fix does not reach `clone-core`, because `clone-core` deletes the claim.
+
+    This test was `..._is_still_its_own_on_the_retry` and asserted the opposite
+    — that a folder this app filled and then died in is still its own on the
+    next press. It passed because its `clone_then_die()` double wrote `.git`
+    and raised, and the real seams do something first: `shutil.rmtree` on a
+    destination with no `.git`. For `clone-core` that destination is the server
+    dir, so the claim `_claim_before_writing()` had written seconds earlier was
+    already gone when the clone began. See `as_the_clone_seam_does()`.
+
+    What §38 bought is real and is still asserted, one stage along: a claim
+    written before stage one survives every later stage's failure, because no
+    later `dest` is the server dir (`clone-modules` writes under `modules/`).
+    `test_a_death_that_runs_no_except_block_still_leaves_the_folder_claimed`
+    holds that half, and
+    `test_the_folder_is_claimed_before_the_first_stage_writes_a_single_byte`
+    holds the write itself. What it did NOT buy is the failure that produced it
+    — the TBC-on-Windows gate killed mid-clone on `yulon-win11` (2026-09-03) is
+    a `clone-core` death — and that is what is pinned here, as a defect rather
+    than a design, so a fix has a red test to turn green.
+
+    A fix has to change the clone, not the claim: `git clone <url> <dir>`
+    refuses a directory that is not empty, which is why the seam empties it, so
+    any record living inside the server dir is unreachable to stage one. Not
+    attempted from this lane — it moves `yulon/git.py` and needs a live gate —
+    so what is recorded here is the measured shape of the hole.
+
+    The user-facing consequence is the last assertion: the folder this leaves
+    is the one `cancelled_install_message()` must not send back to Install.
+    """
+    server_dir = tmp_path / "wow"
+    rec = Recorder()
+    attempts: list[native.InstallState | None] = []
+    url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
+
+    # Stage one gets as far as a partial checkout and then the process dies —
+    # what a killed `git clone` really leaves, `.git` and all, after the wipe
+    # the seam opens with.
+    def clone_then_die(spec: git.CloneSpec) -> None:
+        # Read BEFORE the wipe: the claim being there at this instant is the
+        # whole of what `_claim_before_writing()` promises, and it is true.
+        attempts.append(native.read_state(server_dir, valid=("clone-core",)))
+        as_the_clone_seam_does(spec.dest)
+        (server_dir / ".git").mkdir(parents=True, exist_ok=True)
+        (server_dir / "half-a-checkout").write_bytes(b"x")
+        raise InstallerError("killed mid-clone")
+
+    with pytest.raises(InstallerError):
+        install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
+
+    assert (server_dir / "half-a-checkout").is_file(), "the fixture wrote nothing"
+    assert len(attempts) == 1, "the first run did not reach the clone at all"
+    claimed = attempts[0]
+    assert claimed is not None, "the folder was not claimed before stage one wrote anything"
+    # The claim names THIS folder. A claim written under any other install id
+    # is a claim the guard refuses on the very next run ("looks like a copy of
+    # another install"), which is the same dead end wearing a different
+    # sentence. Read at the seam rather than off disk afterwards, because
+    # afterwards there is nothing on disk to read.
+    assert claimed.install_id == composegen.install_id(
+        server_dir, platform_id=lambda: "macos"
+    ), "the folder was claimed for a different install id"
+
+    assert not (server_dir / native.STATE_FILE).is_file(), (
+        "the record survived `clone-core`; if that is now true the hole this test pins has been "
+        "closed, and the test should assert the resume rather than the refusal"
+    )
+
+    # So the retry meets a checkout with no record, and is refused — the exact
+    # dead end §38 named, still live for the one stage it was reported from.
+    with pytest.raises(InstallerError) as again:
+        install(rec, server_dir, clone=clone_then_die, remote_url=lambda _dest: url)
+    assert len(attempts) == 1, "the retry reached the clone; the refusal below is not real: " + str(
+        again.value
+    )
+    assert "no record here of an install this app made" in str(again.value), str(again.value)
+
+    # And the modal the user is looking at when they press Stop says so, rather
+    # than sending them at an Install button that stops them.
+    note = cancelled_install_message(ENTRY, server_dir)
+    assert "the app will refuse it" in note, note
+    assert "carries on" not in note, "the copy promised a resume the engine refuses: " + note
+
+
+def test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    """The half the ownership record does NOT buy back, measured rather than assumed.
+
+    `_claim_before_writing()` teaches `_guard()` that the folder is this
+    install's. It teaches `stage_clone_sources()` nothing: that stage asks a
+    different question — is there a `.git` here — and a destination with files
+    and no `.git` is refused, because the clone seam `shutil.rmtree`s a
+    destination it does not recognise and a tree somebody unpacked by hand must
+    not fall through (review, 2026-08-23).
+
+    **And for `clone-core` the record is not there to consult anyway.** This
+    test asserted `STATE_FILE` was still on disk after the death, and passed
+    only because `write_then_die()` skipped the `shutil.rmtree` the real seams
+    open with (`as_the_clone_seam_does()`, m910q 2026-09-05). With it in, the
+    claim is gone before the double writes a byte, and the retry's refusal is
+    the FIRST one after all — "is not empty and was not created by this app",
+    from `_claim_folder()`, one step earlier than the narrower sentence this
+    test used to end on.
+
+    So the second refusal this test was written to record is not what a
+    `clone-core` death produces; it is what a death in any LATER stage with a
+    non-git destination produces, where the record does survive. Both endings
+    are asserted below, from the same double, so neither can be read as the
+    other.
+
+    The two guards disagreeing about who owns the folder is bug §38's open
+    design question, and the answer is the owner's: ownership recorded before
+    the first mutating stage would let the clone stage consult it, which is a
+    change across the spine and the families rather than a patch.
+    """
+    server_dir = tmp_path / "wow"
+    rec = Recorder()
+
+    def write_then_die(spec: git.CloneSpec) -> None:
+        as_the_clone_seam_does(spec.dest)
+        (server_dir / "src").mkdir(parents=True, exist_ok=True)
+        (server_dir / "src" / "not-a-checkout").write_bytes(b"x")
+        raise InstallerError("killed before git made .git")
+
+    with pytest.raises(InstallerError):
+        install(rec, server_dir, clone=write_then_die)
+    assert not (server_dir / native.STATE_FILE).is_file(), (
+        "the claim survived a `clone-core` death; the hole this and "
+        "`test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it` pin has "
+        "been closed, and both should now assert the resume"
+    )
+
+    with pytest.raises(InstallerError) as again:
+        install(rec, server_dir, clone=write_then_die)
+    message = str(again.value)
+    assert "not empty and was not created by this app" in message, (
+        "with no record left by stage one, the retry meets `_claim_folder()` first: " + message
+    )
+
+    # The narrower refusal this test is named for is real, and it is what a
+    # death in a stage whose destination is NOT the server dir leaves: the
+    # record survives that one, `_guard()` lets the folder through, and
+    # `_clone_modules()` then refuses the non-git leftovers by name.
+    modules_dir = tmp_path / "wow2"
+
+    def clone_core_then_die_in_modules(spec: git.CloneSpec) -> None:
+        as_the_clone_seam_does(spec.dest)
+        if spec.dest == modules_dir:
+            (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+            return
+        spec.dest.mkdir(parents=True, exist_ok=True)
+        (spec.dest / "not-a-checkout").write_bytes(b"x")
+        raise InstallerError("killed before git made .git")
+
+    # `clone-core`'s checkout answers for itself on the retry, which is what a
+    # real one does; the module directory has no `.git` and answers `None`.
+    # By `dest`, not by index: `dest == "."` is the rule that replaced
+    # "sources[0] is the core" (`catalog.py`).
+    core_remote = next(s.url for s in ENTRY.emulator.sources if s.dest == ".")
+
+    def remote_of(dest: Path) -> str | None:
+        return core_remote if dest == modules_dir else None
+
+    with pytest.raises(InstallerError):
+        install(rec, modules_dir, clone=clone_core_then_die_in_modules, remote_url=remote_of)
+    assert (
+        modules_dir / native.STATE_FILE
+    ).is_file(), "a death after stage one lost the record too, so the claim buys nothing anywhere"
+    with pytest.raises(InstallerError) as narrower:
+        install(rec, modules_dir, clone=clone_core_then_die_in_modules, remote_url=remote_of)
+    assert "has files in it but is not a checkout" in str(narrower.value), str(narrower.value)
+    assert "was not created by this app" not in str(narrower.value), (
+        "the ownership record is doing its job; the remaining refusal must not be the one "
+        "that asserts the app did not write these bytes: " + str(narrower.value)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bug §38: the ownership claim moved AHEAD of the first mutating stage
+# (2026-09-03). The tests below are about WHEN the record is written, which is
+# the whole of the fix: `5eef8d9f` wrote it on the `except InstallerError`
+# path, and SIGKILL, a power cut and an unhandled exception never reach an
+# `except` block -- so the endings a person actually meets still left a folder
+# this app would refuse to recognise.
+
+
+def test_the_folder_is_claimed_before_the_first_stage_writes_a_single_byte(
+    tmp_path: Path,
+) -> None:
+    """Asked from INSIDE the clone, which is the only place the answer means anything.
+
+    A test that drives a failure and then finds a state file cannot tell an
+    early claim from a late one -- both leave the same file on disk. So the
+    question is put while stage one is still running: at the moment the clone
+    seam is called, the record must already be there, because that is the
+    instant after which every ending, cooperative or not, leaves bytes in the
+    folder.
+
+    The claim also has to NAME this install rather than merely exist: a record
+    carrying any other `install_id` is refused by `_guard()` on the next run
+    as "a copy of another install", which is the same dead end wearing a
+    different sentence.
+    """
+    server_dir = tmp_path / "wow"
+    seen: list[native.InstallState | None] = []
+
+    def look_then_clone(spec: git.CloneSpec) -> None:
+        # The read is the FIRST thing, and deliberately ahead of the wipe the
+        # real seam opens with: this test is about the instant the seam is
+        # entered, which is the last moment the claim is on disk for
+        # `clone-core`. What happens to it a line later is
+        # `test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`.
+        seen.append(native.read_state(server_dir, valid=("clone-core",)))
+        as_the_clone_seam_does(spec.dest)
+        (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+
+    rec = Recorder()
+    install(rec, server_dir, clone=look_then_clone)
+
+    assert seen, "the clone seam was never reached"
+    claimed = seen[0]
+    assert claimed is not None, (
+        "stage one started writing into a folder this app had not yet claimed; anything that "
+        "ends the process from here leaves a folder the next run refuses as somebody else's"
+    )
+    assert claimed.install_id == composegen.install_id(
+        server_dir, platform_id=lambda: "macos"
+    ), "the folder was claimed under a different install id"
+    assert claimed.game_id == ENTRY.id
+    assert claimed.completed == (), "a claim is not a record of progress"
+
+
+def test_a_death_that_runs_no_except_block_still_leaves_the_folder_claimed(
+    tmp_path: Path,
+) -> None:
+    """The failure that produced the bug, as close as a unit test can get to it.
+
+    The TBC-on-Windows gate was KILLED mid-clone -- its ssh session went away
+    and took the process with it. Nothing about that runs an `except` clause,
+    which is why recording ownership in one covered every failure except the
+    one being fixed. `BaseException` is the honest proxy: `run()` catches
+    `InstallerError` and nothing wider, so a `KeyboardInterrupt` out of stage
+    one traverses exactly the code a signal would have skipped.
+
+    **The kill lands in `clone-modules`, not `clone-core`, and that is the
+    fix's real reach.** This test killed the FIRST clone and asserted the
+    record was still on disk, which passed only because `die_hard()` skipped
+    the `shutil.rmtree` both real seams open with: for `clone-core` the
+    destination is the server dir, so the record is gone before a `.git`
+    exists, and the assertion below went red the moment the double was made
+    faithful (m910q, 2026-09-05 -- `as_the_clone_seam_does()`). What the early
+    claim genuinely buys is every stage after that one, whose destinations are
+    under `modules/`, and that is what is killed here. The `clone-core` hole is
+    pinned as a defect in
+    `test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`.
+    """
+    server_dir = tmp_path / "wow"
+    killed_in: list[Path] = []
+
+    def die_hard(spec: git.CloneSpec) -> None:
+        as_the_clone_seam_does(spec.dest)
+        (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+        if spec.dest == server_dir:
+            return
+        (spec.dest / "half-a-checkout").write_bytes(b"x")
+        killed_in.append(spec.dest)
+        raise KeyboardInterrupt
+
+    rec = Recorder()
+    with pytest.raises(KeyboardInterrupt):
+        install(rec, server_dir, clone=die_hard)
+
+    assert killed_in, "the kill never landed in a stage after `clone-core`"
+    assert (killed_in[0] / "half-a-checkout").is_file(), "the fixture wrote nothing"
+    assert killed_in[0] != server_dir
+    assert (server_dir / native.STATE_FILE).is_file(), (
+        "a death that ran no handler left the folder unclaimed, which is the bug this fix "
+        "exists for and the exact shape the previous fix could not cover"
+    )
+
+
+def test_an_install_into_the_users_own_checkout_still_writes_nothing(tmp_path: Path) -> None:
+    """The one folder the early claim must NOT touch, and why it is safe to write in the others.
+
+    `_guard()` refuses every non-empty folder outright with a single deliberate
+    exception: a directory holding `.git`, deferred so the clone stage can say
+    whose fork it is rather than "this folder is not empty". That exception is
+    the reason bug §38 recorded an early write as blocked -- and it is also the
+    reason it is not, because `started_empty` names exactly that case and
+    excludes it. Asserted here in the same file as the two tests above so the
+    pair is read together: claimed early when the folder is ours, never when it
+    is somebody's repository.
+    """
+    server_dir = tmp_path / "wow"
+    rec = Recorder()
+    rec.remotes[server_dir] = "https://github.com/someone/else.git"
+    (server_dir / ".git").mkdir(parents=True)
+    with pytest.raises(InstallerError):
+        install(rec, server_dir)
+    assert not (server_dir / native.STATE_FILE).exists(), (
+        "an install refused because it is somebody else's checkout left a file in their "
+        "repository"
+    )
+    assert sorted(p.name for p in server_dir.iterdir()) == [".git"]
+
+
+def test_a_folder_that_will_not_hold_the_claim_is_refused_before_any_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim that could not be written is a refusal, and it says which file and why.
+
+    `write_state()` logs its own `OSError` and returns, which is right for the
+    callers recording PROGRESS -- a lost progress note costs a redone stage.
+    Here it would silently rebuild the whole bug, so the file is read back and
+    its absence refused. The late version of this fix could not refuse anything:
+    it ran with an `InstallerError` already in flight, and raising would have
+    replaced the sentence the user was about to read. Nothing is in flight now.
+
+    `write_state` is stubbed rather than a real unwritable path being provoked,
+    because permissions behave differently on the three platforms this suite
+    runs on and what is under test is the READ-BACK, not the OS.
+    """
+    server_dir = tmp_path / "wow"
+    monkeypatch.setattr(native, "write_state", lambda *_a, **_k: None)
+    rec = Recorder()
+    with pytest.raises(InstallerError, match="would not accept") as refusal:
+        install(rec, server_dir)
+    assert native.STATE_FILE in str(refusal.value)
+    assert rec.clones == [], "work started in a folder whose claim could not be written"

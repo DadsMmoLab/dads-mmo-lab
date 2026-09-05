@@ -1,0 +1,38 @@
+=== ccache -s at 2026-09-04T11:31:27+02:00 : T0 baseline: after docker builder prune -af, before any build in this run
+#6 [stage-0 3/3] RUN --mount=type=cache,target=/ccache,sharing=locked     CCACHE_DIR=/ccache ccache -s && echo '--- du' && du -sh /ccache
+#6 0.596 Local storage:
+#6 0.596   Cache size (GiB): 0.0 / 5.0 ( 0.00%)
+#6 0.596 --- du
+#6 0.597 4.0K	/ccache
+#6 DONE 0.7s
+
+=== ccache -s at 2026-09-04T11:39:09+02:00 : T1: immediately after the mid-build SIGKILL at edge 896/1829
+#6 [stage-0 3/3] RUN --mount=type=cache,target=/ccache,sharing=locked     CCACHE_DIR=/ccache ccache -s && echo '--- du' && du -sh /ccache
+#6 1.122 Cacheable calls:    881 / 881 (100.0%)
+#6 1.122   Hits:               0 / 881 ( 0.00%)
+#6 1.122     Direct:           0
+#6 1.122     Preprocessed:     0
+#6 1.122   Misses:           881 / 881 (100.0%)
+#6 1.122 Local storage:
+#6 1.122   Cache size (GiB): 0.3 / 5.0 ( 5.36%)
+#6 1.122   Hits:               0 / 881 ( 0.00%)
+#6 1.122   Misses:           881 / 881 (100.0%)
+#6 1.122 --- du
+#6 1.136 374M	/ccache
+#6 DONE 1.7s
+
+=== ccache -s at 2026-09-04T12:09:45+02:00 : T2: after press 3 completed the whole 1829-edge build
+#6 [stage-0 3/3] RUN --mount=type=cache,target=/ccache,sharing=locked     CCACHE_DIR=/ccache ccache -s && echo '--- du' && du -sh /ccache
+#6 2.103 Cacheable calls:    2686 / 2686 (100.0%)
+#6 2.103   Hits:              881 / 2686 (32.80%)
+#6 2.103     Direct:          881 /  881 (100.0%)
+#6 2.103     Preprocessed:      0 /  881 ( 0.00%)
+#6 2.103   Misses:           1805 / 2686 (67.20%)
+#6 2.103 Local storage:
+#6 2.103   Cache size (GiB):  0.5 /  5.0 ( 9.00%)
+#6 2.103   Hits:              881 / 2686 (32.80%)
+#6 2.103   Misses:           1805 / 2686 (67.20%)
+#6 2.103 --- du
+#6 2.135 561M	/ccache
+#6 DONE 2.4s
+

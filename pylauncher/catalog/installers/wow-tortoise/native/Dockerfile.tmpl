@@ -38,16 +38,71 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY src/tortoise-wow /src
 
+# **A clone made from inside an `ubuntu:22.04` image over HTTP/2 fails**, and
+# this line is here because of it — but the diagnosis was made on the OTHER two
+# entries, not on this one. In `cmangos/mangos-tbc` and `cmangos/mangos-classic`
+# CMake's `FetchContent_MakeAvailable(zlib)` in `dep/src/CMakeLists.txt` clones
+# https://github.com/madler/zlib.git at CONFIGURE time, so THOSE builds reach
+# the network from inside the container before a single file is compiled. That
+# is the TBC/Vanilla reason and it does not apply here: checked 2026-09-02 on
+# `Shyalya/tortoise-wow` branch `playerbots-integration-gh`, its
+# `dep/src/CMakeLists.txt` is the old MaNGOS file with no FetchContent in it at
+# all — the whole zlib handling is `if(WIN32) add_subdirectory(zlib) endif()`
+# over a zlib vendored at `dep/src/zlib`, and the one `FetchContent` anywhere in
+# that tree (tracy, in the root `CMakeLists.txt`) sits behind `USE_TRACY`, which
+# defaults OFF and is not passed to the cmake step below. The line stays anyway:
+# it costs nothing, it covers whatever git this build or a later branch of this
+# fork does run, and three templates that say the same thing are worth more than
+# one that has to be remembered as the exception.
+#
+# Measured on `yulon-ubuntu` 2026-09-02, on the first WoW Vanilla install: the
+# clone died three times with `fatal: could not read Username for
+# 'https://github.com': No such device or address` / `fatal: expected flush
+# after ref listing`, and cmake stopped at `Build step for zlib failed: 2`
+# after 202s. Not a credential problem and not the network: `git ls-remote`
+# from `alpine/git` on the same box SUCCEEDED, the same command from
+# `ubuntu:22.04` FAILED, and the same command from `ubuntu:22.04` with
+# `-c http.version=HTTP/1.1` SUCCEEDED. The HTTP/2 conversation is what breaks.
+#
+# `git.py` already forces HTTP/1.1 for the clones THIS APP makes -- measured
+# from the other side on real Windows, a 224k-object clone dying with
+# `fetch-pack: invalid index-pack output` -- which is why `clone-sources`
+# succeeded minutes before this failed. The build context was the one place
+# still speaking HTTP/2, and the two now agree.
+#
+# `--system` rather than `--global`: it lands in `/etc/gitconfig` and so applies
+# to whatever user cmake ends up running git as, not only to root's HOME.
+RUN git config --system http.version HTTP/1.1
+
 WORKDIR /src/_build
 # DEBUG_SYMBOLS=OFF slims mangosd (612M -> tens of MB). USE_ANTICHEAT=OFF:
 # pointless on a solo offline server and it can flag a Proton client.
 # BUILD_PLAYERBOTS=ON is the point of this fork's branch — without it the tree
 # compiles into a bot-less server that boots and looks entirely healthy, and it
 # is also what emits aiplayerbot.conf.dist into etc/ for the conf stage.
+# The playerbot module is VENDORED in this fork at top-level `modules/mod-playerbots`
+# -- NOT `src/modules/PlayerBots`, which is where the fork's own CMakeLists comment and
+# its PLAYERBOTS_QUICKSTART.md both say it lives. Those docs are stale: the recursive
+# tree API found 1068 paths under `modules/mod-playerbots` and nothing under
+# `src/modules/PlayerBots` (checked 2026-09-02).
+#
+# `MODULES` defaults to "disabled" (CMakeLists.txt:57) and nothing passed it, so the core
+# compiled WITH the playerbot hooks while the module implementing them was never built.
+# The link died on `Playerbot_OnPlayerDestroyed`, `BotActionLog_LogDamage` and a dozen
+# more, 1501s into `make`, on yulon-ubuntu 2026-09-02.
+#
+# Named per-module rather than `-DMODULES=static`: that globs the whole `modules/` tree
+# and would also build `mod-dungeon-clear`, which is deliberately off for Tortoise.
+# `ModuleNameToVariable()` upper-cases and replaces every non-alphanumeric with an
+# underscore, so `mod-playerbots` becomes `MODULE_MOD_PLAYERBOTS`, and a per-module value
+# beats the global default (CMakeLists.txt:459-464).
 RUN cmake .. \
         -DCMAKE_INSTALL_PREFIX={{CORE_DIR}} \
         -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
         -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON \
+        -DMODULES=disabled \
+        -DMODULE_MOD_PLAYERBOTS=static \
+        -DMODULE_MOD_DUNGEON_CLEAR=disabled \
         -DBUILD_PLAYERBOTS=ON
 
 RUN make -j{{MAKE_JOBS}} && make install

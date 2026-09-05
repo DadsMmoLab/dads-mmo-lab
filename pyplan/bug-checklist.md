@@ -729,6 +729,11 @@ list across every round and that has to include the rounds other people ran.
   `platform.keep_awake()` spawns `caffeinate -dims -w <pid>` on macOS; verified proper process
   lifecycle termination upon context exit.
   *Verified with unit tests in `test_platform.py`.*
+  **Scope of that word, added 2026-09-03.** The unit tests DID run on Darwin (1039 passed on the
+  M4 Pro, checklist 6.4), which is more than most of this list can say -- but they drive a fake
+  `spawn`, so what is verified is the argv and the cleanup call, not a `caffeinate` process
+  existing. `platform.py:3746` says it plainly: "neither claim has been executed on a Mac by this
+  project." Nobody has yet watched a real install hold a Mac awake.
 
 The same commit added `WotlkController` tests for `STOP_GRACE_SECONDS` teardown and for the
 port-conflict guard on 3724 and 8085. Those tests and the port work in
@@ -955,8 +960,19 @@ was found by reading code; each is a line in a resolved compose document from a 
   write - and one container-wide flag serves both. So the field belongs on `ContainerRun`, not on
   `Mount`, and Group I should ask `platform.label_disable_args(enforcing=selinux_enforcing())` for it,
   which already keeps the three-outcome answer (enforcing / not / could-not-ask).
-  *Recorded, not fixed:* H.1 deliberately shipped no uncalled field, and Group I is where the caller
-  arrives. It must not land without this.
+  **FIXED 2026-09-01 in task I.5**, which is the task with the caller. `ContainerRun` gained
+  `security_args`, fed from `container_security_args(enforcing=platform.selinux_enforcing())` and
+  asked **once per plan** — container-level, as measured, with no `label` field on `Mount` and `:z`
+  never on an extraction mount. H.1 was right to ship no uncalled field.
+
+  **One residual risk, narrow and inherited rather than introduced.** "Could not ask" ships with
+  confinement **on**: `label_disable_args` adds nothing for `None`, so a host where `getenforce`
+  EXISTS but fails at runtime — the one case `selinux_enforcing()` answers `None` — still meets the
+  denial this entry describes. That is the right default (disabling container confinement on no
+  evidence is itself a decision, and it reuses `git.py`'s existing policy rather than inventing a
+  second one), and it is the same three-outcome discipline the rest of this list turns on. Recorded
+  so the next person seeing a Fedora denial checks whether `getenforce` answered at all before
+  assuming this entry is stale.
 
 - **`composegen.write_plan()` skips a CRLF file forever, and accuses the user when a read flickers** —
   2026-09-01, found while writing I.3's own version of the same "may we overwrite this" question, and
@@ -1026,6 +1042,1343 @@ was found by reading code; each is a line in a resolved compose document from a 
   pattern string rather than a `Path` predicate.
   *Found independently by two sessions working J.3 in parallel.*
 
+- **`docker cp` of a directory containing a symlink FAILS on Windows, measured — so the conf stage's
+  whole-directory copy is one upstream symlink away from breaking every Windows install** —
+  2026-09-01, J.2. H.3 hit this on busybox's `/etc` (`mtab -> /proc/mounts`) and judged it
+  speculative for CMaNGOS. J.2 is the first caller to copy a conf directory for real, so it was
+  measured rather than assumed — with a busybox stand-in rather than a 40-minute CMaNGOS build:
+
+  ```
+  docker cp <c>:/opt/mangos/etc <dest>  exited 1: symlink \proc\mounts <dest>\mtab:
+      A required privilege is not held by the client.
+  ```
+
+  Docker Engine 29.6.2, Windows 11, ordinary (non-elevated, non-developer-mode) user. `docker cp`
+  extracts a tar and recreates each entry, and creating a symlink on Windows needs a privilege a
+  normal account does not have. **One symlink anywhere in the directory fails the whole copy** — the
+  conf files beside it are not extracted either.
+
+  *Not a live defect today, and this time the check was done rather than inferred.* Upstream's own
+  install rules say so: `cmangos/mangos-tbc`'s `src/mangosd/CMakeLists.txt` and
+  `src/realmd/CMakeLists.txt` install every conf with plain
+  `install(FILES ... DESTINATION ${CONF_DIR})`, and the only `install(DIRECTORY ...)` in them is
+  `warden_modules`, which goes to `BIN_DIR`, not `CONF_DIR`. Nothing symlinks into
+  `/opt/mangos/etc` at present.
+
+  **What would break it, and what it would look like.** Any upstream change that ships a conf as a
+  symlink — or the Tortoise fork's playerbots branch doing so, whose CMake nobody has read — turns
+  every Windows install into a failed conf stage whose message names a *privilege*, which reads like
+  a broken Docker installation rather than "this image ships a symlink". If it happens, the fix is a
+  per-file `docker cp` of each missing `.dist`, which is three docker calls times the table and was
+  rejected on cost, not on correctness.
+
+  *Recorded, not fixed.* `conf.materialise()` does behave correctly when it happens — the failed copy
+  leaves the staging directory removed and `etc/` empty, so a resume after enabling developer mode
+  works, and that is covered by a test — but nothing turns the message into the sentence a user
+  could act on.
+
+
+### 18. Two ways the process itself stopped reporting — 2026-09-01
+
+Neither is a defect in the launcher. Both are ways the machinery around it went quiet, which is the
+same failure this file keeps recording one layer down.
+
+**18a. After upstream squash-merges one of our PRs, its copy of a shared file is a snapshot of our
+own past — and taking it is a silent revert, not a conflict resolution.**
+
+`#140` was squash-merged, so `upstream/Yulon`'s `19d821f6` carries this branch's Phase 7.1 work as one
+commit sharing no history with the branch that wrote it. The merge-base stayed back at `4044f59b`, and
+`git merge upstream/Yulon` reported **add/add conflicts on all nine files Phase 7.3 had extended** —
+not one of them a real disagreement.
+
+The trap is the resolution, not the conflict. In an add/add conflict on a file you do not own,
+**"theirs" looks like the safe, polite choice.** It is not: upstream's `extract.py` is the pre-I.4/I.5
+version, its `sqlplan.py` still has the Protocols without `wsl_distro`, its `docker.py` still has
+`argv = ["run", "--rm", *self.user_args]` from before `security_args`, and its `bug-checklist.md`
+still says "Recorded, not fixed" about something I.5 fixed. And the failure mode is that it
+**resolves cleanly and the suite may still pass**, because the work it reverted is newer than the
+tests upstream is carrying.
+
+What was actually done: measure the delta the correct way round (`git diff <ours> upstream/Yulon`
+over the whole tree — **35 insertions against 2957 deletions**), **read all 35**, confirm every one is
+an older version of something later work replaced, then `git merge -s ours --no-ff` with the audit in
+the commit message, and verify with `git diff --stat <pre-merge-sha> HEAD` that the tree is
+untouched. Only one of the 35 was not merely older wording, and it took a `git grep` to establish
+that `shortfall()` still existed with that loop split into a helper.
+
+**18b. On this repository an open pull request is the only thing that makes CI exist.**
+
+`ci.yml` has no bare `push:` trigger — deliberately, and its own comment states the trade: "a topic
+branch with no PR open gets no CI. Open the PR (draft is enough) and it does." The triggers are
+`main`, `Yulon`, `release/**`, `v*` tags, and `pull_request`.
+
+So the moment `#140` merged, `yulon-phase7` had **no CI at all**, and every merge onto it was verified
+only by a local run. Nothing reported a failure, because nothing ran — and **"no runs found" reads
+exactly like "not looked yet"**, which is the same shape as the gate that skipped and read like a
+pass (§ throughout this file, and the standing rule: ask the machine, never the artifact).
+
+The fix is to open the draft PR at the START of a long-lived working branch rather than at the end.
+Done here as **#143**, and the branch is green verified by SHA (run `33538836096`,
+`headSha == 18cbacdd`) — by SHA because `gh pr checks` will happily show a green run that predates
+the current head.
+
+### 19. The database password reaches the install log and a user-facing error — 2026-09-01, **FIXED 2026-09-01 at `2371b979`**
+
+**Reproduced end to end, in already-merged code.** Not found by a test; found by a reviewer asking
+where a docstring's authority came from.
+
+`catalog.json`'s **Tortoise** entry (~line 958) ships an SQL phase whose statements include
+`CREATE USER IF NOT EXISTS '{{DB_USER}}'@'%' IDENTIFIED BY '{{DB_PASSWORD}}'`. Those are streamed by
+`sqlplan.apply()`. When the client rejects such a line it quotes the offending text back, so the
+secret arrives in `proc.stderr` — and `apply()` puts that text in three places, none redacted:
+
+- `sink(line)` — **the install log**. This is not merely "a log": it is the file users are
+  *encouraged* to attach to a bug report, a channel whose entire purpose is being handed to a
+  stranger. The same password in `logger.warning` sits on the user's disk; in `sink()` it is on
+  its way to a GitHub issue. **The two look equivalent in a diff and are not.**
+- the user-facing `InstallerError` on an `on_error: fail` phase;
+- `logger.warning` on an `on_error: warn` phase.
+
+Observed:
+
+```
+The import stopped: statement 1 failed while loading into the server
+(ERROR 1064 (42000) at line 1: syntax error near "'tortoise-0a1b2c3d4e5f6a7b'").
+```
+
+**Why the guard that exists does not catch it.** Task J.5 added `_redact()` to `create_schemas()`, on
+the stated premise that this is "the only SQL in the app that contains the secret." It is not — and
+**Tortoise's `sql.create` is `()`** (pinned at `tests/test_catalog.py:719`), so `create_schemas()`
+returns at its first line for the one shipped game whose plan actually creates the app user. The
+redaction sits on the path that game never takes, while the path it does take is unguarded.
+
+**The claim is the worst part.** `sqlplan.py`'s module docstring now asserts the secret appears in one
+place and "is never logged". A redaction that advertises coverage it does not deliver is worse than
+none, because it stops the next reader looking. Same family as §18 and as the run's standing rule
+about a confident reason with nothing behind it.
+
+**Bounding it honestly, so the next reader does not assume the worse case.** The database port is
+bound to **loopback** — `127.0.0.1:${DOCKER_DB_EXTERNAL_PORT:-{{DB_PORT}}}:3306` in both
+`shared/cmangos/base.yml.tmpl:46` and `wow-wotlk/native/base.yml.tmpl:62`, with the `127.0.0.1:`
+prefix hardcoded and only the port NUMBER overridable by the environment. (Verified by reading the
+templates, after the other session reported measuring it on all three gate boxes.) So a leaked
+password is **not remotely exploitable on its own**; it needs local access or another foothold. That
+does not excuse it — the secret is still in a file the user is encouraged to share, and it is the same
+secret across a reinstall — but this is **"rotate and fix", not "an exposed database"**.
+
+**LANDED at `2371b979` (2026-09-01 20:09), from `feat/7.3-j5-sqlplan-verify`.** Redacted where client
+output ENTERS the module rather than at each call site, because K.7 would have added a fourth site and
+sprinkling is how the next one gets missed. `apply()` passes the client's stderr through
+`_redact_lines()` at the moment it splits it, and the install log, the `fail` message, the log record
+and the `warn` line all read that one redacted local; `apply()`'s two `except` clauses, `verify()`'s
+unanswerable rule, `_run_sql()` and the schema listing are separate entrances and each call `_redact()`
+of their own. Checked 2026-09-02 at `f6ed1b9a` by reading the module: every place that puts client
+text into a sink, an error or a log record reads a value that went through `_redact`. The heading
+still said OPEN a day after the fix landed, which is how a reader concludes a live secret leak.
+
+**Two mutations that survived the implementer's own "17 killed" table**, found by re-running it:
+
+1. `_redact` weakened to `replace(password, "***", 1)` — nothing distinguished all-occurrences from
+   first-occurrence. The code was right by `str.replace`'s default, not by any test.
+2. The charset guard `_IDENTIFIER` widened from `[A-Za-z0-9_]+` to `[A-Za-z0-9_ ]+` — the only test
+   used `"utf8mb4; DROP DATABASE mangos"`, which **any** rule refusing `;` also refuses. The test
+   pinned "semicolons are refused", never "the rule is an identifier fullmatch".
+
+**Open design note, deliberately not fixed here.**
+
+- [ ] **`DbFacts.charset` has no `pattern=`, so a bad catalog entry fails mid-install instead of at
+      load.** `sqlplan.create_schemas()` refuses a charset that is not a plain identifier, because
+      `CHARACTER SET <charset>` is the one splice in that script with nothing around the value. The
+      check is right and in the wrong place: it raises an `InstallerError` during phase 0, after the
+      containers are up and the user has been told the install is running, for a defect entirely
+      visible in `catalog.json`. `catalog.py:143` is `charset: str = "utf8mb4"` — no `pattern`, and
+      no conformance test asserts the shipped entries satisfy the rule `sqlplan` applies to them.
+      Right home: `Field(pattern=r"[A-Za-z0-9_]+")` plus a conformance test over every shipped entry,
+      making it a load-time refusal and a failing test in CI. **The runtime check should stay even
+      then** — `create_schemas()` takes `charset` as a `str`, not a `DbFacts`, so the model cannot be
+      the only guard without changing that signature.
+
+**One more, CHECKED and found already closed — recorded so nobody removes the thing that closes it.**
+`_refuse_unquotable(password, ...)` runs only inside `create_schemas()`, and Tortoise never reaches it
+(`create` is empty) while still splicing `{{DB_PASSWORD}}` into `IDENTIFIED BY '...'` through
+`expand()`'s token fill. That looked like the same gap one layer up. It is not: `composegen.render()`
+calls `_refuse_unsafe(password, "the database root password")` — cited here as `composegen.py:318`
+until 2026-09-02, when it was at 319; the symbol keeps, the number does not — and
+`_UNSAFE_SCALAR_CHARS = frozenset("$\"\;#{}
+
+	'")` **includes the single quote, the backslash
+and both line breaks** — so such a password is refused when the compose files are generated, which is
+stage 4 of 12, six stages before `import`.
+**But it is guarded by STAGE ORDERING, not by the function that appears to own the rule.** Anything
+that reorders the stages reopens it.
+
+**The edit to fear is NOT the one named here, and the difference was measured.** This paragraph said
+that "removes `_refuse_unsafe` from `render()` as redundant … reopens it silently". Measured
+2026-09-02 at `f6ed1b9a`, whole suite each time against a 1974-passed / 3-skipped baseline:
+
+- **Deleting the `_refuse_unsafe(password, …)` call from `render()` is LOUD.** Four tests go red, all
+  four parametrisations of `test_composegen.py::test_a_password_that_cannot_be_spliced_is_refused` —
+  `pass"word`, `pass$word`, `pass;word`, `pass#word`. Nobody removes that call by accident.
+- **NARROWING `_UNSAFE_SCALAR_CHARS` is SILENT.** Delete the single quote alone and the suite comes
+  back **1974 passed, 3 skipped — byte-identical to the baseline**. The four parametrisations above
+  are the only cases that exercise the set, and not one of them is a quote.
+
+And the single quote is the character that matters here: it is what closes `IDENTIFIED BY '<pw>'` in
+the shipped **Tortoise** phase, and Tortoise's `sql.create == ()` means `create_schemas()` — and so
+`_refuse_unquotable()` — is never entered for it. So the whole of this game's protection rests on one
+character of one frozenset, which no test names. Add a case for `'` before touching that set.
+
+**Also known, harmless only by ordering:** `create_schemas()` returns on `if not plan.create` *before*
+validating its schemas, so a plan with an empty `create` and a bogus `marker_db` is refused by
+`expand()` and silently accepted here. The two call sites are not equivalent — and **Tortoise is
+exactly the empty-`create` case**, so the asymmetry sits on a live path.
+
+### 20. The secret-in-a-generated-file rule was decided for compose and never carried to the Dockerfile — 2026-09-01, **PREMISE GONE 2026-09-02; residual filed as §29**
+
+**READ THIS FIRST — the entry below argues about a mapping that no longer exists.** Everything from
+"Found while implementing K.2" down is the record of how the decision was reached, kept because the
+reasoning is what makes §29 legible. What it argues FOR has landed. Verified 2026-09-02 at `f6ed1b9a`:
+
+- **`CmangosInstaller._tokens()` is gone.** 7.3 split it by capability into `_public_tokens(server_dir)`
+  — no `StageContext`, so `ctx.secrets` is not in lexical scope — and `_secret_tokens(ctx)`, which the
+  conf and SQL consumers ask for by name. `_write_dockerfile` passes the public one, and it is the only
+  caller that writes into the build context.
+- **D4's "public bypass" is closed.** `dockerfile.write()` refuses text that is not a `_Rendered` —
+  *"the … text did not come from dockerfile.render(), so nothing has checked it for a secret; refusing
+  to write it into the build context"* — so hand-built marked text no longer reaches disk.
+- **What is NOT closed** is the relationship between the mapping's keys and `native.Secrets`' fields: a
+  secret filed under an undeclared name, or minted inside `_public_tokens` rather than passed in, is
+  still invisible to a by-name refusal. That is §29, and it is where the live question lives now.
+
+Found while implementing K.2, by asking a question the plan did not raise. **Nothing exploited it;
+the exposure was one template edit away.**
+
+`CmangosInstaller._tokens(ctx)` WAS ONE mapping used for the Dockerfile, the conf tables, the SQL
+statements and verify — and it contained `DB_PASSWORD`. **K.4 hands that whole mapping to
+`dockerfile.render()`** (plan ~line 4884). `dockerfile.render()` → `_render_one()` →
+`composegen.fill()`, which refuses an **unfilled** `{{TOKEN}}` and says nothing about a spelled one —
+its own docstring: *"Unused tokens are fine."*
+
+**The compose side refuses this explicitly, and deliberately.** `composegen.generate()`
+(`composegen.py` ~L322–329) raises `ComposeGenError` when a compose template contains
+`{{DB_PASSWORD}}` while `password.mode == "generated"` — *"spell it `${DB_ROOT_PASSWORD:?…}` so the
+secret stays in .env"* — and additionally omits the key from the token map in that mode, described in
+the source as "belt to the refusal's braces". **`wow-tbc` is `mode: "generated"`.**
+
+So the decision *the secret must not be rendered into a generated file* was taken once, for compose,
+and not carried across. **A Dockerfile is the worse of the two:** it sits in the build context, and
+through an `ENV` or `RUN` it lands in an image layer that `docker history` prints — surviving long
+after the file is deleted.
+
+Verified today: none of the six shipped `Dockerfile.tmpl`/`dockerignore.tmpl` names `{{DB_PASSWORD}}`.
+K.2 added `test_no_dockerfile_template_names_the_secret_this_one_mapping_carries`, mutation-verified
+by adding `ENV DB_PASSWORD={{DB_PASSWORD}}` to `wow-tbc/native/Dockerfile.tmpl`.
+
+**A Dockerfile is worse than compose for a second reason, and it changes the REMEDIATION rather than
+the exposure.** A secret rendered into a compose file is in **a file the user owns**: delete it and it
+is gone. A secret in an image layer is **content-addressed and cached** — deleting the Dockerfile does
+nothing, the layer persists, `docker history` prints it, and undoing it means finding and deleting
+every image built from that layer. Compose is "delete a file and rotate"; the Dockerfile is "you now
+have an artefact you must hunt". These are not one rule applied to a second file type at the same
+severity.
+
+**A test over today's templates is not the same guard as a by-name refusal**, which is what compose
+has.
+
+**DECIDED 2026-09-01 by an adversarial review from a second model (Codex), which found the hole both
+of our own agents missed. Verdict: needs-attention — "do not ship Position B as the final contract."**
+
+K.4 shipped the mapping WHOLE, arguing the refusal lives *inside* `dockerfile.render()` rather than at
+a render site, so "the fourth caller inherits it by doing nothing". **That claim is false, and here is
+why:** a caller inherits the protection only if it *chooses that renderer*. A new stage can take
+`_tokens(ctx)` and reach disk through `composegen.fill()`, direct formatting, serialization, or
+logging — and none of `render()`'s checks apply. Worse, **`dockerfile.write()` validates only the
+generated marker, not secret CONTENT**, so even a caller reusing the writer while bypassing `render()`
+can persist secret-bearing text into the build context.
+
+**The deeper point, which neither of our agents reached:** conf's legitimate need for the password is
+not a violation, but it **disproves the abstraction** — a shared `dict[str, str]` conveys **no
+authority distinction** between consumers allowed and forbidden to handle secrets. That is ambient
+authority, and every consumer has it by default.
+
+**THE THIRD DESIGN, better than both of ours: capability-scoped token sets.** A public/build mapping
+that *cannot* contain secrets, handed out by default; plus an explicitly obtained secret-bearing
+mapping (or resolver) that conf/SQL/verify must ask for. Keep `render()`'s by-name refusal as defence
+in depth. Add a test proving every build-context writer receives a mapping without `DB_PASSWORD`, and
+make `dockerfile.write()` reject secret content if it stays a public bypass around `render()`.
+
+**CONFIRMED INDEPENDENTLY, BY A DIFFERENT METHOD, THE SAME DAY.** K.4's own adversarial review
+reached the identical conclusion by **mutation** rather than by reasoning, which is the strongest form
+of agreement available here:
+
+- **M15 — a SECOND secret key in `_tokens()` renders straight into the Dockerfile, and the mutation
+  SURVIVED THE WHOLE SUITE: 1960 tests as it stood on 2026-09-01, recorded at `973b615f`** (the same
+  mutation is written up as "1872 tests" in `cmangos.py`, recorded at `9e198c05`; both are dated
+  counts of the suite of the day, not a size — it is 1974 at `f6ed1b9a`). The by-name refusal covers
+  **one name**, not the property. This is precisely Codex's "ambient authority" point, arrived at from
+  the opposite direction.
+- **D4 — `dockerfile.write()` accepted hand-built marked text containing a secret and wrote it.** It
+  validated only the generated marker, never content — exactly the public bypass Codex named.
+  **Closed:** `write()` now refuses any text that is not a `_Rendered`, i.e. anything that did not come
+  out of `render()` unchanged (checked 2026-09-02 at `f6ed1b9a`).
+
+**What the review also established, and it bounds how much the tripwire is worth:** a template placed
+**outside `resources.installers_dir()`** makes the `rglob` tripwire blind, and **`--installers-root`
+(`install_wiring.py:195`) is a real flag** that repoints the whole tree. So the tripwire is a
+*location* guard by construction. The refusal inside `render()` is what actually covers the property —
+and it held against **five** attacks routed through `render()`. **K.4's central argument was correct
+and could not be broken; it is simply incomplete**, because §20's premise was two claims and K.4
+refuted only the first ("a guard someone must remember at every render site"), never the second
+("a mapping that structurally cannot carry the secret needs nobody to remember anything").
+
+**On deferring it:** rejected, and the reason is one to keep. *"This is the contract-forming change
+and later migration only becomes harder."* **K.7 is the next consumer and it needs the password for
+SQL — so the split must land BEFORE K.7, not after Group K.**
+
+*(Superseded recommendation, kept as the record: split `_tokens()` rather than refuse by name.)* A by-name refusal is a guard someone
+must remember to add at **every render site**, and K.4 is only the third consumer of `_tokens()`;
+there will be a fourth, and the fourth is where it gets missed. This is the same argument that put
+§19's redaction at the boundary instead of the call sites — **a mapping that structurally cannot carry
+the secret needs nobody to remember anything.** (Reasoning from `dads-mmo-lab-58`.) Decide before K.4
+lands; recorded as undecided rather than settled with a docstring.
+
+### 21. `_stream()`/`_pump()` leak a running worker when the generator is abandoned — 2026-09-01, **CLOSED 2026-09-05 at `d2b963d5`**
+
+**What was true, and how it was checked before the box was ticked.** `stop_abandoned_worker()`
+(`catalog/native.py`) now runs at the abandonment itself — in an `except BaseException` around both
+bridges' `yield` loops, `native.StagedInstaller._pump()` and
+`families/cmangos.py::CmangosInstaller._stream()` — and both take the SAME `cancel` event their
+`call` closed over, keyword-only and required, so a call site that forgets it does not compile past
+review. `install_wiring.main()` makes one event per run and passes it, which is the path every
+headless gate box drives and was the one case the closing test could not have exercised.
+
+The two tests this entry asked for exist by the name it gave them —
+`test_spine.py::test_abandoning_the_pump_stops_its_worker_with_no_cancel_from_the_caller` and
+`test_families_cmangos.py::test_abandoning_the_stream_stops_its_worker_with_no_cancel_from_the_caller`
+— and neither sets a cancel from outside, so a return to the ordering-only mitigation fails them.
+Four more hold the edges: `…::test_an_interrupt_thrown_into_the_pump_stops_its_worker_too` and its
+`_stream` twin (a Ctrl+C lands INSIDE the frame as a `KeyboardInterrupt`, which is why the clause is
+`BaseException` and not `GeneratorExit`), `test_a_worker_that_ignores_the_cancel_is_left_rather_than_waited_for`,
+and `test_the_abandoner_bound_is_the_streams_own_shutdown_timeout`.
+
+**Re-derived on m910q 2026-09-05, on a copy of the tree at `6546b190`, not taken from the fix's own
+record.** GREEN: `pytest tests/test_spine.py tests/test_families_cmangos.py -k 'abandon or
+interrupt_thrown'` -> **7 passed, 203 deselected**. RED, with `stop_abandoned_worker(...)` deleted
+from both `except BaseException` clauses and nothing else changed: **5 failed, 2 passed**, the first
+of them `AssertionError: assert ['yulon-install-output'] == []` — this entry's own sentence, printed
+by the suite — and the `_stream` twin `assert ['yulon-cmang...angos-output'] == []`, two workers
+still live.
+
+**What is deliberately NOT fixed, so it is not read as covered.** `cancel=None` — a caller with no
+event at all — has no seam to pull, so the worker IS left running and the function logs
+`"… was abandoned with no cancel event; its worker was left running"` rather than joining a thread
+nothing will end. That is the documented behaviour, pinned by
+`test_abandoning_the_pump_with_no_cancel_event_leaves_the_worker_and_says_so`, and it is why the
+`cancel` parameter is required rather than defaulted. The join is bounded at
+`ABANDONED_WORKER_SECONDS`, read from `runner._SHUTDOWN_TIMEOUT_SECONDS` rather than typed twice,
+because this entry's own objection to an unbounded `join()` in a `finally` stands: it would block
+the abandoner for the hours the extraction has left.
+
+The record of what was wrong, kept because it is what the fix had to answer:
+
+`CmangosInstaller._stream()` starts a worker thread and joins it only after the queue drains. If the
+consumer abandons the generator — a downstream exception, a partial `list()` — `GeneratorExit` fires
+at the `yield`, `worker.join()` is skipped, and **the worker keeps running and keeps pushing into a
+queue nobody reads.** For the extract stage that is a live multi-hour extraction with no owner.
+
+**The shape is inherited, not new:** `native.py:1507`'s `_pump()` is byte-identical in structure and
+has shipped since 7.1.
+
+**Mitigated in practice, by ordering rather than by structure** (see the sixth standing rule):
+`LogPanel.stop()` sets the cancel event **before** `request_stop()`, so `run_container(cancel=…)`
+returns and the daemon thread ends by itself; `install_wiring.py:208` exhausts the generator. An
+abandonment *without* a cancel is not prevented by anything.
+
+Not fixed: a `join()` in a `finally` would block the abandoner for the remaining hours of the run,
+which is worse. Options not yet weighed: setting the cancel event in the `finally`, a bounded join, or
+a weak reference. *(The bounded join is what landed, with the cancel set first so that the join has
+something to wait for.)*
+
+**The test that closes it is cheap and should be written whatever the fix is:** abandon the generator
+**without** setting the cancel event, and assert no live worker remains. That converts the mitigation
+from "`LogPanel.stop()` happens to set cancel first" into something a **reorder fails** — the sixth
+standing rule's second exit. *(Written, in both bridges, and named above.)*
+
+**No note anywhere says `_pump`'s hole was ever considered**, which is why this is recorded as
+**unweighed rather than intentional**. "Inherited and shipped since 7.1" is not evidence it was
+decided, and writing it down this way is what stops the next reader treating silence as approval.
+
+### 22. The ownership guard exists, is reviewed, and is sitting in an unmerged PR — 2026-09-01, SEQUENCING
+
+**This is PR #142's shape, still open, in a second engine.** Found by asking a sharper question than
+"is this the only place": *is every caller that acts destructively **downstream** of it?* **A
+uniqueness claim can be true and still protect nothing.**
+
+`native.py`'s `read_claim()` genuinely **is** the only folder-ownership answer, and every
+`StagedInstaller` clone path is downstream of it — `run()` → `_guard()` → `read_claim`, then per-stage
+`refuse_unowned_checkout()` → `claimed_this_folder()` → `read_claim`, before `_clone()` →
+`git.clone`. No early exit past `_guard()`. The docstring's claim is accurate.
+
+**`yulon/apply.py` is a parallel destructive engine that never asks.** Verified:
+`grep -n "read_claim\|claimed_this_folder\|refuse_unowned\|is_ours" yulon/apply.py` → **no hits**;
+`apply.py` does not import `yulon.catalog.native` **at all**. So this is not a missed branch — **the
+check was never wired in.**
+
+The reachable path: `apply.py:441` `Applier.install()` → `apply.py:448` `self.git.clone(CloneSpec(...))`
+→ `git.py:355` `RunnerGit.clone`, which is **`shutil.rmtree(spec.dest)`** (`git.py:361`) when the dest
+exists without `.git`, or **`git reset --hard FETCH_HEAD`** (`git.py:430`) when it does. Reachable from
+the GUI at `ui/controller_view.py:1363` and from `wotlk_modules.apply_module()`. Also
+`Applier.remove()` → `shutil.rmtree` (`apply.py:494`, `:547`), and `_client()` →
+`shutil.copytree(..., dirs_exist_ok=True)` into the user's `client_dir/Interface/AddOns`
+(`apply.py:642`) with no gate at all.
+
+**Mitigating, and stated so the entry is not read as worse than it is:** the dest is
+`server_dir/modules/<id>`, a path the app creates — narrower than "an arbitrary user directory". But
+`azerothcore.py:139-143` records a user's own `modules/` tree as a **past incident**, so the narrowing
+is not as reassuring as it sounds. This is **wow-wotlk only** and entirely **pre-existing** — nothing
+in Phase 7.3 touches it.
+
+**CORRECTED THE SAME DAY — this is a SEQUENCING problem, not a missing guard.** The fix exists and is
+green in **open PR #142** (`fix/modules-tab-ownership`), which is **not** an ancestor of
+`yulon-phase7` (`git merge-base --is-ancestor` → not merged). That branch adds `_require_own_clone()`
+(7 occurrences) gating `install()`, `remove()` and `configure()`, plus the four-fact adoption rule and
+`server_dir_claim()`, which calls `native.read_claim(server_dir, valid=())` at `apply.py:221`.
+
+**Two consequences, and they are the actionable part:**
+1. **Do not "fix" this independently on `yulon-phase7`.** #142 is the side with the ownership work;
+   a second answer hands Baerthe two implementations to reconcile. Anything merged here that touches
+   `Applier` risks conflicting with it.
+2. **The exposure window is however long #142 takes to merge.** On `yulon-phase7` today,
+   `Applier.install()` → `git.clone` → `rmtree` / `reset --hard` is reachable from the GUI.
+
+**A method note worth more than the entry, because it nearly cost a wrong conclusion twice.** The
+audit's supporting claim was *"`apply.py` does not import `yulon.catalog.native` at all"* — true on
+`yulon-phase7`, and **still true at module scope on #142**, because the import is **deliberately
+deferred inside `server_dir_claim()`**: `apply.py` is imported by `networking`, `accounts`,
+`maintenance`, `repair` and the UI, and none of them should load the native install engine to read one
+JSON file. So **"does not import X" is a strictly weaker check than "does not call X", and a deferred
+import makes the two disagree.** The `read_claim|claimed_this_folder|refuse_unowned|is_ours` grep is
+the one that stays correct across that merge; the import-based half of the claim would have read as
+"still unguarded" over a branch that guards it.
+
+Two lesser notes from the same audit:
+- **`composegen.is_ours()` and `dockerfile._look()` are two independent implementations of one
+  file-level marker rule.** They agree today; **nothing enforces that they keep agreeing.**
+- **`catalog_view._looks_like()` fails OPEN** (`catalog_view.py:151-162`) — and it is the supply route
+  that admits a foreign folder into the `Applier`.
+
+### 23. A future-version state file is silently downgraded on disk — 2026-09-01, **FIXED 2026-09-02**
+
+Both families share one state filename (`STATE_FILE = ".yulon-install.json"`, no family suffix). A
+**cross-family** file is refused by `_guard` on `game_id` (`native.py:894`) and `family` (`:899`) — but
+**after** a silent name-drop.
+
+The quiet case is a **same-family, future-version** state file: stage names the running binary does not
+know are dropped at `native.py:335` **with no log at any level**, `write_state` then persists the
+**post-filter** tuple (`:709`, `:377`), so **an older binary permanently strips the newer names from
+disk**, and the only user-facing line (`:667-669`) prints the already-filtered tuple. A downgrade is
+therefore lossy and silent in both directions.
+
+**FIXED 2026-09-02, on the day K.8 was about to make it reachable.** `InstallState` gained `unknown` —
+the names on disk this build does not recognise. `read_state()` now SPLITS rather than filters, logs a
+warning naming what it did not understand, and `write_state()` persists both halves, so a downgrade is
+no longer destructive. The two stay separate deliberately: this build must not act on a stage it cannot
+interpret, so behaviour reads `completed` while persistence writes `completed + unknown`.
+
+**The read filter was not the dangerous route.** Mutation found a second one that runs far more often:
+`with_stage()` rebuilds `completed` from `order`, and a future name is by definition not in `order`, so
+without `unknown` riding alongside, **the very first stage an older build completed would erase the
+newer build's record** — the same loss, reached on every stage rather than only on a read. Three tests,
+3/3 mutations killed, one of them that route specifically.
+
+Original note follows. Unreachable for cmangos at the time (not in `FAMILIES` until K.8); recorded then
+because **it is
+precisely the mechanism that would hide a `stages()`/`STAGE_NAMES` mismatch** — the thing K.2's
+inertness argument depends on being visible. **Note it in K.8's brief.**
+
+### 24. The false 0600 guarantee K.3 removed is still live in `conf.py` — 2026-09-01, **FIXED 2026-09-02**
+
+**Measured twice, on PKGAME-LAPTOP, Windows 10.0.26200, CPython 3.13.14, 2026-09-01.** On Windows the
+POSIX mode is a **no-op** and the ACL is purely inherited:
+
+- `os.open(p, O_WRONLY|O_CREAT|O_TRUNC, 0o600)`, `open()` + `os.chmod(0o600)`, and a plain `open()`
+  **all** give `st_mode & 0o777 == 0o666`, with **byte-identical `icacls` output**.
+- Under a folder first granted `*S-1-5-32-545:(OI)(CI)(RX)`, the "0600" file carried
+  `BUILTIN\Brukere:(I)(RX)` — readable by every local user — and a following `os.chmod(0o600)`
+  changed **neither the mode nor the ACL**.
+
+K.3 removed its own *"never world-readable for even an instant"* claim on that evidence. **But
+`conf.py`'s `_write` still asserts "the conf is never readable by anyone else even for an instant (the
+database password is in it)"** — the same false guarantee, one module away, over a file that really
+does contain the password (`LoginDatabaseInfo = "host;port;user;password;schema"`). A guarantee that is
+written down stops the next reader checking, which is why this is worse than silence.
+
+**And `conf.py` is strictly weaker than K.3 on POSIX too:** it writes with `open()` and chmods
+**after**, so the temp file holds the password at the umask default until the chmod lands. K.3's
+`os.open`-with-mode has no such window. (Read, not measured — flagged as read.)
+
+**FIXED 2026-09-02, both halves.** The sentence is gone, replaced by a record of what was measured and
+of what the mode does and does not buy. And the POSIX window it described is gone too: `_write` now uses
+`os.open(tmp, O_WRONLY|O_CREAT|O_TRUNC, CONF_MODE)` + `os.fdopen`, so the mode is applied by the creating
+syscall rather than by a `chmod` a moment later — the same shape `cmangos._write_secret` already had.
+
+The test that guarded this was pointed at the wrong syscall. It asserted two `os.chmod` calls under the
+heading "the conf is never briefly readable" — a *declaration* that something was intended, which passed
+happily while the window was open. It now records `os.open`'s third argument, the value that decides the
+outcome, and asserts no chmod follows. Verified by reverting `_write` to `open()` + `chmod` and watching
+it fail. It deliberately claims nothing about Windows: the mode is a no-op there, and a test asserting a
+guarantee on that platform would be this very bug restated as a test.
+
+Deferring the Windows **fix** is right — a real DACL means pywin32 or an `icacls` subprocess on every
+path that touches the file, and that is an app-wide posture decision. **Correcting the false sentence
+is not deferrable.**
+
+### 25. The bash lineage still deletes a volume silently — 2026-09-01, **GONE 2026-09-02: both halves deleted**
+
+`install-wow-vanilla.sh` ran `docker volume rm "${db_volume}"` with no confirmation — **the exact
+destructive answer the Python design rejects**, and the reason `db-password` refuses rather than
+wiping.
+
+While it existed it was unreachable only by **registration**: `installer_for()` fell back to a script
+for an **unregistered** family, and K.8 registered `cmangos`. That made the guard a position rather
+than a check — the sixth standing rule's shape — and this entry closed by saying "de-registering the
+family for any reason re-arms it."
+
+**That conclusion is now impossible, and it is the sentence to correct rather than the finding.**
+Verified 2026-09-02 at `f6ed1b9a`: the file is gone (F.1 deleted all eight bash files), and the
+fallback is gone with it (F.3) — `installer_for()` has one rule, `families.family_for()` on
+`install.native.family`, and an unregistered family now raises "an install family this app does not
+have" instead of reaching for a script. There is no longer anything for de-registration to re-arm.
+
+The argv census below still holds and is worth keeping:
+
+Enumerated at argv level across `yulon/` and `main.py` (re-run 2026-09-02 at `f6ed1b9a`): the **only**
+volume argv in the Python app is `docker.volume_exists()`'s `["volume", "inspect", …]`, read-only.
+No `volume rm`, no `volume prune`, no
+`down -v`, no `--volumes`. `remove_staged` is `["compose","down","-t",…,"--remove-orphans"]`.
+
+### 26. The three CMaNGOS entries name compose services that the rendered file does not have — 2026-09-01, **FIXED 2026-09-02 at `27209099`**
+
+Found by **F.2's reviewer**, while reviewing a 7.2 deletion — a 7.3 defect surfaced from an unrelated
+task. Verified independently at the time; the block below is what the catalog said **on 2026-09-01**,
+not what it says now:
+
+```
+wow-tbc / wow-vanilla / wow-tortoise   catalog compose_services() -> ('db', 'realmd', 'mangosd')
+shared/cmangos/base.yml.tmpl service keys -> {{CONTAINER_PREFIX}}db, ...realmd, ...mangosd
+                                          -> rendered for wow-tbc: tbc-db, tbc-realmd, tbc-mangosd
+wow-wotlk                              compose_services() -> None  (uses the default; consistent)
+```
+
+`docker.start_staged()` runs `compose up -d --no-deps db realmd mangosd`. Against the file this repo
+actually generates that answers **`no such service`** — every one of the three is missing.
+
+**It was not live only because `FAMILIES` registered `azerothcore` alone**, and K.8 was the task that
+would register `CmangosInstaller`.
+
+**FIXED at `27209099` (2026-09-02 00:07), before K.8 registered the family, which is the order this
+entry asked for.** The three `containers.services` declarations were DROPPED rather than prefixed:
+`wow-wotlk` returns `None` and takes the default because its containers ARE its services, and the
+shared CMaNGOS template follows the same convention by design, so the entries had nothing left to
+declare. Prefixing instead would have been refused at generation time — `_container_prefix()` rebuilds
+the container names from `containers.services`, so `tbc-` + `tbc-db` raises rather than renders.
+Verified 2026-09-02 at `f6ed1b9a`: no entry in `catalog.json` carries a `containers.services` key, and
+`start_staged()` therefore asks compose for `tbc-db`, `tbc-realmd`, `tbc-mangosd` — the names the
+rendered file defines.
+
+**Read this before re-opening it.** The one shape `_container_prefix()` ACCEPTS for a
+`containers.services` declaration is `container == prefix + service`, which makes `compose_services()`
+the bare suffixes — exactly what `compose up` answers `no such service` for. So "put the service names
+back and prefix them" re-arms this bug while passing every generation-time check. That asymmetry is
+filed separately as §30.
+
+**Two test-level reasons nobody caught it**, both worth more than the bug:
+1. The deleted `test_no_catalog_compose_service_is_really_a_container_name` was the **only** test that
+   cross-checked declared services against a compose file — and it read the **bash script**, so
+   restoring it verbatim would catch nothing. Its replacement,
+   `test_cmangos_games_select_compose_services_not_container_names`, **restates literals instead of
+   cross-checking**, and its two halves already contradict each other while both pass.
+2. `test_composegen.py::test_the_cmangos_services_are_named_after_their_containers` carried the
+   docstring *"`ContainerSpec.services` keeps its default"* — false at the time, because the catalog
+   set `containers.services` explicitly. A true-sounding premise attached to a passing test. **Both
+   halves are now true**: `27209099` dropped the declaration and rewrote that docstring to say when it
+   became true and what had been believed before (checked 2026-09-02 at `f6ed1b9a`).
+
+**The test that should exist now does**, and landed in the same commit:
+`test_composegen.py::test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file`.
+For every entry with a native block it asserts that each name in `container_spec().compose_services()`
+(plus `import_service` and `containers.client_data`) appears as a service key in the **rendered** base
+from `composegen.render()` — cross-check, not restatement. It also carries the vacuity guard the review
+demanded: `compose_services()` mutated to `return self.services` answers empty for every shipped entry
+now that none declares one, and the entry count alone could not see that, so the test asserts each
+entry SELECTED something before checking what it selected. Verified passing 2026-09-02 at `f6ed1b9a`
+(whole suite 1974 passed, 3 skipped). This paragraph read "and it fails today, which is the point"
+until 2026-09-02 — a reader acting on it would have blocked K.8 and put back the one declaration shape
+that re-arms the bug.
+
+**Also minor, same branch — and STILL OPEN, checked 2026-09-02 at `f6ed1b9a`** (the FIXED in this
+entry's heading is the compose-service defect, not this): `test_no_bash_installer_ships` has **no
+`scanned >= N` vacuity guard** —
+mutation-proven: rename the installers root and it passes while its two siblings in the same file
+fail. Inconsistent with the guard F.2 deliberately added two files over.
+
+### 27. One platform question, two answerers — the import-bound SELinux seams — 2026-09-01, **CLOSED 2026-09-05**
+
+**Three of the four sites are fixed. `native.Seams` is not, and it is the one a real install reaches
+most.** The heading and the text below were rewritten on 2026-09-05 because what stood here was a
+present-tense description of `docker.bind_mount_ok()` that the 2026-09-04 fix had made false, left
+under an OPEN marker — the entry read as live for a day after its subject had changed.
+
+**What was found, 2026-09-01.** `docker.bind_mount_ok(… selinux_enforcing = platform.selinux_enforcing)`
+bound the module function as its default, at import. Asked of the interpreter rather than read off the
+page: `signature(docker.bind_mount_ok).parameters["selinux_enforcing"].default is
+platform.selinux_enforcing` → **True**, while the same question of `extract.run_plan` → **None**. That
+made `bind_mount_ok` the real instance of the trap `container_user_args()` documents against itself,
+and the one **K.5 had wrongly attributed to `extract.run_plan()`** — a true fact about one function
+asserted about another that does the reverse. K.5's docstring was corrected on
+`fix/mmaps-audit-and-the-claim-that-was-backwards`, where the replacement carries the interpreter
+output instead of a claim.
+
+It was latent rather than live, by luck and not by wiring: the production caller
+`preflight._default_bind_probe` passed no seam, so the bound default ran and asked the real host, which
+was the right answer by accident; and under test it never ran at all, because `test_preflight.py` fakes
+one level up. It was green only because every runner so far is non-enforcing.
+
+**FIXED 2026-09-04/05 (m910q), in three modules, all to one shape** — default `None`, module attribute
+resolved inside the call, which is `extract.run_plan()`'s shape:
+
+* `docker.bind_mount_ok()` — 2026-09-04. Guard:
+  `test_the_bind_probe_asks_the_selinux_seam_the_module_holds_at_call_time`, which patches
+  `platform.selinux_enforcing`, **counts the call**, and asserts `label:disable` reached the argv. The
+  rejected alternative was the one this entry used to prescribe — thread a seam down from `preflight`
+  and leave the default alone — which fixes the one caller there is and leaves the same default waiting
+  for the next.
+* `git.ContainerGit.selinux_enforcing` / `.filesystem_type` — 2026-09-04, via `_ask_selinux()` and
+  `_ask_filesystem()`. Before the change,
+  `{f.name: f.default is getattr(platform, f.name) for f in fields(ContainerGit) if f.name != "image"}`
+  → `{'selinux_enforcing': True, 'filesystem_type': True}`. Guard:
+  `test_a_bare_container_git_asks_the_selinux_seams_the_module_holds_at_call_time` (`asked == []`
+  against the old file).
+* `preflight.gather()` — `selinux` 2026-09-04, **`fs_type` 2026-09-05**, which is the one the third
+  pass had left bound. It was the sharpest of the three, because `ContainerGit` had already moved: one
+  patch of `platform.filesystem_type` on m910q, 2026-09-05, gave
+  `ContainerGit()._ask_filesystem(Path("/tmp"))` → `'btrfs'` while `gather()` handed back the host's
+  `'ext2/ext3'`. Guard: `test_gather_asks_both_linux_seams_the_module_holds_at_call_time`, mutation-
+  proven one default at a time with `__pycache__` purged between (`selinux rebound -> 1 failed`,
+  `fs_type rebound -> 1 failed`).
+
+**CLOSED 2026-09-05, the same day, once the lane that owned `native.py` had landed.**
+`Seams.selinux_enforcing` and `Seams.fs_type` now default to `None` and resolve against `platform`
+inside `Seams.ask_selinux()` / `ask_fs()` — the shape `docker.bind_mount_ok()`, `preflight.gather()`,
+`git.ContainerGit` and `extract.run_plan()` already had. The one call site (`native.py`'s
+`generate-compose` stage) reads through the resolvers, and `families/cmangos.py:505` now hands
+`extract.run_plan()` the resolver rather than the import-bound field, which had been defeating
+`run_plan`'s own correct default.
+
+The guard the two withdrawn identity asserts owed is paid:
+`test_one_patch_of_a_platform_probe_gets_one_answer_out_of_the_whole_install` patches both `platform`
+attributes, drives a bare `Seams()` AND `preflight.gather()`, and asserts each fake was CALLED and
+that one patch produced one answer. Proven RED against the import-bound shape rather than assumed:
+restoring `= platform.selinux_enforcing` on the field gives
+`AssertionError: Seams did not reach the patched probe / assert False is True` (m910q, 2026-09-05);
+restoring the resolver passes. Full gate on the combined tree that day: 2536 passed, 4 skipped, mypy
+clean on linux/win32/darwin, ruff and black clean.
+
+`Seams.relabel` stays import-bound, deliberately: nothing else in the app asks the host whether a
+folder was relabelled, so there is no second answerer and no split — the latent trap is recorded here
+rather than changed for no measured defect. What was open when this section was last written: `Seams.selinux_enforcing`,
+`Seams.fs_type` and `Seams.relabel` are still the `platform` functions bound at class-definition time,
+so the split this entry is named for now sits between `Seams` and the three modules above. Measured on
+m910q, 2026-09-05, with ONE `monkeypatch` of each attribute and the two consumers a single install
+reaches (`_preflight_lines()` → `self._seams.gather(…)`, and `stage_generate_compose` →
+`self._seams.selinux_enforcing()` / `.fs_type()`):
+
+```
+Seams.selinux_enforcing default is platform.selinux_enforcing -> True
+Seams.fs_type default is platform.filesystem_type             -> True
+gather(...).selinux_enforcing        -> True        (the fake)
+Seams().selinux_enforcing()          -> False       (the host)
+gather(...).server_fs_type           -> btrfs       (the fake)
+Seams().fs_type(server_dir)          -> ext2/ext3   (the host)
+```
+
+`cmangos.stage_extract` makes it worse in a way its own docstring predicted and then walked into: it
+passes `selinux_enforcing=self._seams.selinux_enforcing` into `extract.run_plan()` **to avoid** "one
+question about one machine put to two answerers inside a single install" — and because the object it
+passes is the import-bound one, that is now exactly what it causes. Left to default, `run_plan` would
+resolve `platform` late and agree with `gather()`.
+
+**Fix, not applied here because `native.py` is another lane's file this run:** give `Seams` the
+`bind_mount_ok` treatment — the three fields default to `None`, and `ask_selinux()`, `ask_fs(path)` and
+`ask_relabel(path)` resolve `None` against `platform` at call time; `native.py`'s two call sites in
+`stage_generate_compose` and `cmangos.stage_extract`'s pass-through move to those. Tried on a lane copy
+on m910q, 2026-09-05: the probe above then answers `True`/`True` and `btrfs`/`btrfs`.
+
+**The guard to add with it**, and it is the distinction this entry exists for: patch
+`platform.selinux_enforcing` and `platform.filesystem_type`, drive a bare `Seams()` **and**
+`preflight.gather()`, and assert both fakes were **called** and that one patch produced one answer.
+Asserting that the parameter or the field exists proves nothing; asserting its identity is worse,
+because it pins the defect — which is what
+`test_families_azerothcore.py::test_every_seam_defaults_to_the_real_function_it_stands_in_for` did
+until the two asserts were **withdrawn** on 2026-09-05. Against a `Seams` fixed as above that test
+failed on m910q at `assert None is <function relabel_for_containers>`; its comment now carries the
+withdrawal and the guard that is owed.
+
+### 28. The gaming-mode script cannot be used from the artifact it exists for — 2026-09-01, OPEN, packaging
+
+`catalog/installers/steam-deck/setup-gaming-mode.sh` exists so a Steam Deck user can start a stack
+from a Steam library entry, and its header documents the flow at line 31: **Games -> Add a Non-Steam
+Game -> Browse**, pointing Steam at the file. A Steam non-Steam-game shortcut stores an **absolute
+path**.
+
+On Linux Yu'lon ships as an **AppImage** (`.github/workflows/release.yml`, "Package AppImage",
+`appimagetool "$APPDIR" "Yulon-${YULON_REF}-x86_64.AppImage"`), and the script is inside it: the spec
+ships `catalog/installers/` as a **tree** (`build/pylauncher.spec:29-31`), so the file lands at
+`usr/bin/catalog/installers/steam-deck/` within the bundle. An AppImage self-mounts under
+`/tmp/.mount_<name>XXXXXX/` with a fresh random suffix per launch and unmounts on exit — so the path
+the user Browses to exists only while that particular run is live.
+
+**Sharpened 2026-09-02 by the review of the F.5 branch; my first wording was too generous.** I wrote that
+the flow "works once, and on the second launch the shortcut points into a mount that is gone". The mount
+exists only while **that Yu'lon process is running**, so the shortcut is dead the moment the user closes
+Yu'lon — including within the first session, and including the very first time they press play in gaming
+mode, since gaming mode is exactly the situation where Yu'lon is not also running. The remedy and the
+severity are unchanged; the failure is earlier and more certain than "the second launch".
+
+**Verified here, 2026-09-01:** the AppImage is the Linux release artifact; a plain tarball is built
+beside it (the workflow says why: "an AppImage cannot run without FUSE"); the script ships inside the
+bundle as part of the installers tree; and the header does instruct the Browse flow.
+**NOT verified here:** the random-per-launch mount path itself, which is asserted from AppImage's
+documented runtime behaviour and has **not** been measured on a Deck or on any Linux box in this
+project. It is the load-bearing link and it is the one taken on trust — measure it before acting.
+
+The tarball and the Windows zip give stable paths and are unaffected. But **Steam Deck gaming mode is
+the AppImage case**, so the one artifact this script exists for is the one it cannot be used from.
+Nothing copies the script out of the bundle, and nothing tells the user to.
+
+**Not a script change.** The fix is a packaging decision with at least three shapes: the app copies the
+script to a stable location (`~/.local/share/yulon/`) during a Steam Deck install; the release ships it
+as a loose file beside the AppImage; or the app grows a "Set up gaming mode" action that writes the
+shortcut itself. Choosing is owner work.
+
+**Interim, on `fix/steam-deck-pins-that-do-not-pin`:** the Steam block now says to copy the file out of
+the bundle first, and why. That is a warning, not a fix — a user who does not read the header still
+hits it, and per §1 nothing outside `pyplan/` points a user at the header at all.
+
+### 29. The Dockerfile refusal covers declared FIELD NAMES, not secrets — 2026-09-02, the NAME half FIXED 2026-09-04 at `d2b963d5`, the VALUE half FIXED 2026-09-05 at `75bce609`, **CLOSED with the residue named below**
+
+`75bce609` is on `lane/dockerfile-value` and unpushed as this is written, and so are the review
+follow-ups that corrected this entry — `da34fb86` (what the containment floor is answerable to) and
+`fd947b1c` (the false-positive refusal). The SHA is cited rather than the branch because the branch
+is disposable and the neighbouring entries cite SHAs; whoever merges this rewrites it to the merged
+one, which upstream's squash habit means will be a single new SHA.
+
+**Both halves are now built, and the RED for each was re-derived rather than quoted.**
+
+*The NAME half* landed 2026-09-04: `dockerfile.SECRET_NAME_WORDS` plus `announces_a_secret()`, read
+on the MAPPING before anything is rendered. *The VALUE half* landed 2026-09-05: `render()` takes a
+required keyword-only `secrets: Secrets` and refuses any key carrying one of its values, whatever
+that key is called. The RED that separated them, probed against the shipped module on m910q
+2026-09-05 on a copy of the tree at `0cc637c7`, `Secrets` declaring one field:
+
+```
+SOAP_PASSWORD  -> REFUSED: "SOAP_PASSWORD: each of those reads as a secret and matches no field of ..."
+BUILD_ARG      -> ACCEPTED, secret in text: True
+                  write() accepted it: ['Dockerfile', '.dockerignore']
+                  Dockerfile on disk contains the secret: True
+                  the line it wrote: ['ENV BUILD_ARG=tbc-0123456789abcdef']
+EXTRA          -> ACCEPTED, secret in text: True
+FOO            -> ACCEPTED, secret in text: True
+```
+
+The same probe against the FIXED module, same box, same day:
+
+```
+SOAP_PASSWORD    -> REFUSED: SOAP_PASSWORD (the value declared as DB_PASSWORD) - and this mapping ...
+BUILD_ARG        -> REFUSED: BUILD_ARG (the value declared as DB_PASSWORD) - ...
+EXTRA            -> REFUSED  |  FOO -> REFUSED
+BUILD_ARG_BURIED -> REFUSED   (value `--db-pass=<the password> --verbose`; containment, not equality)
+secret echoed in the refusal: False   (each of the five)
+a caller that forgets the argument:
+  TypeError: render() missing 1 required keyword-only argument: 'secrets'
+```
+
+**The closing condition said "at the call site rather than in `render()`", and what landed is not
+quite that — deliberately.** The comparison is IN `render()`; the VALUES come FROM the call site.
+`_write_dockerfile` passes `secrets=ctx.secrets`, which it holds one frame above the
+`_public_tokens(server_dir)` it passes as the mapping, so 7.3's capability split is untouched: the
+secret is named as the thing that must NOT be emitted, never added to the mapping. Putting the
+comparison itself in `_write_dockerfile` would protect that call site and nothing else, and this
+module has twice watched a LOCATION-shaped protection lose — a template planted in
+`shared/cmangos/`, then `--installers-root` pointing the engine at a tree no glob walks. `render()`
+is where every mapping passes, so that is where the property lives.
+
+**What each half is worth, and why neither subsumes the other.** The name rule reads a key and so
+catches a careless spelling around a value nobody here has ever seen. The value rule reads a value
+and so catches a careless key around a value that is provably the install's own secret. A key that
+trips both is reported by the value rule, because that one has *proved* something; the name rule's
+remedy ("rename it, or declare it") is the wrong advice for a key holding the real password.
+
+**What a "match" is, and the measurements behind it.** `carries_a_secret(value, secret)` is
+containment at or above `MIN_CONTAINED_SECRET = 8`, equality below it, and never true for an empty
+secret. Measured on m910q 2026-09-05, `server_dir=/tmp/fixedsrv/srv`, over the 34 distinct values the
+three shipped CMaNGOS `_public_tokens()` mappings produce (the directory is named because four of
+those values — two per mapping, `IMAGE_TAG` and `PROJECT_NAME` — carry an 8-hex digest of it, so any
+count over their CHARACTERS moves with it — this
+list said 30, 16 and 98 until 2026-09-05, from a run under per-game temporary directories):
+
+* the empty string is contained in all 34, and 31 of the 36 single alphanumeric characters are
+  contained in at least one (`a` alone in 14 — `/opt/mangos`, `characters`, …). Containment with no
+  floor is not a strict rule, it is an install that can never run.
+* `mangos`, six characters, is contained in five of them — so the floor has to be above 6. That is
+  the lower bound, and it does not move with the directory.
+* The upper bound is coverage: the floor must be at or below every secret the app itself PRODUCES,
+  or containment degrades to equality for a real install. Measured the same day by calling
+  `resolve_secrets()` on an empty server dir through `families.family_for()` for all four shipped
+  entries: `wow-tbc` 20, `wow-vanilla` 24, `wow-tortoise` 25 (`<prefix><16 hex>`), `wow-wotlk` 8
+  (its fixed `password`, contained in none of the 34). 8 is the largest number clearing both bounds,
+  and `test_the_containment_floor_is_at_or_below_every_secret_this_app_itself_produces` asserts it
+  as `floor <= min(...)` over what that function returns — not as `==` over `catalog.json`, which
+  is what it did until 2026-09-05 and which measured a value production never renders: the only
+  `mode: fixed` entry is `wow-wotlk`, whose family is `azerothcore` and never calls `render()`.
+* **A larger floor buys nothing measurable**, and this is the claim worth writing down because it is
+  the tempting one: the collision surface does not empty out with length. The same values yield 102
+  distinct 8-character substrings and 78 distinct 12-character ones, and the longest value is 29
+  characters (`yulon.local/cmangos-tortoise-`), so a containment collision is *possible* at any
+  length a password can have. What makes 8 safe is not that collisions stop but that the strings
+  which collide are catalog fragments — `mariadb:`, `/opt/man`, `haracter` — that nobody sets as a
+  password.
+
+Below the floor it is equality and not silence: all four leaks ever measured into this mapping (M15,
+M-R2, §29's `SOAP_PASSWORD` probe, this entry's `BUILD_ARG` probe) put the password in VERBATIM
+under another key, so the shape that has actually happened is caught at any length.
+
+**The traps, each answered by a test rather than by this paragraph.**
+
+* A refusal must never echo the secret —
+  `test_the_refusal_about_a_carried_secret_never_prints_the_secret`, over the message, its `repr`
+  and the exception's `args`. Not decoration: `_write_dockerfile` re-raises as
+  `InstallerError(str(exc))` and `StagedInstaller.run()` hands that to `_record_error()`, which
+  writes it into the state file as `last_error`. `native._without()`, the redaction that does exist,
+  is spent on one unrelated path.
+* The same secret under its DECLARED key is legitimate —
+  `test_the_declared_token_may_carry_its_own_secret_and_nothing_else_may`. The exemption is the
+  tokens `render()` DROPS (`SECRET_TOKENS`), NOT the tokens the instance declares: a subclass's
+  extra secret has no token in `SECRET_TOKENS`, so exempting it would have opened a hole rather than
+  closed one, and `test_a_secret_declared_only_on_a_subclass_is_refused_under_its_own_token_too` is
+  what fails when the exemption is widened.
+* A second caller who forgets the argument must FAIL — required and keyword-only, so it is a
+  `TypeError` at the call.
+  `test_a_caller_that_forgets_the_secrets_argument_fails_instead_of_losing_the_guard`, written as a
+  runtime test because a `# type: ignore` is one line and mypy is not what runs in a user's install.
+  An OPTIONAL `secrets=` is still rejected, for the reason this entry gave.
+* The guard has to reach the PRODUCTION path, not just the function
+  ([[reviews-check-functions-not-call-sites]]) —
+  `test_the_write_dockerfile_stage_refuses_a_bland_key_carrying_the_install_password` drives the
+  stage, and reaches the password by the route this entry measured (`resolve_secrets(server_dir)`
+  reading what `db-password` wrote one stage earlier) rather than by a literal.
+* The rule must not refuse a real install —
+  `test_no_shipped_public_mapping_collides_with_a_password_the_catalog_can_declare`, all three games
+  × {generated shape, `password`}, through the real shipped templates. That covers the two passwords
+  the CATALOG can produce, and the catalog is not the only source: a user's own `.db_password` is
+  read as written, and **1046 distinct strings collide** with a shipped public token value —
+  measured on m910q 2026-09-05, `server_dir=/tmp/fixedsrv/srv`, 1031 by containment over the 19
+  values at or above the floor plus 15 by equality over the values below it, `characters`,
+  `mariadb:11`, `tw_logon`, `vanilla-`, `/opt/mangos` among them. **That surface is unchanged by
+  anything here and deliberately so** — narrowing the rule to spare those is what would reopen the
+  hole. What was wrong was the SENTENCE. Until 2026-09-05 such a user read
+  `DB_IMAGE (the value declared as DB_PASSWORD) … Drop the key, or file the value under its
+  declared token`, about a key this app puts in the mapping itself, which they cannot drop, while
+  the remedy in their hands — their own password — went unnamed. `render()` cannot name it: it
+  holds a `Secrets` and never a path. So the refusal is now a `CarriedSecretError`, caught by
+  `_write_dockerfile` ahead of every other `DockerfileError`, which appends
+  `_password_origin_note()`: the full path of the password file, that the password is theirs, and
+  what changing it costs (the `db-data` volume was created with the old one). Held by
+  `test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the_password_file`,
+  which plants nothing in the mapping — it writes `mariadb:11` into `.db_password` and lets the
+  shipped `DB_IMAGE` do the colliding.
+
+**Ten mutations, each killed, m910q 2026-09-05, taken at `75bce609`** (`__pycache__` purged on both sides
+of every one; the two files were 211 tests at that commit). At `75bce609`: the
+value refusal deleted → 11 failed. Containment
+weakened to equality → 2. The empty-secret guard deleted → 1. The floor deleted → 2. `secrets` made
+optional with a `Secrets("")` default → 1. The two rules' order swapped → 1. The exemption widened
+to every token the instance declares → 1. The floor moved to 4 → 1; to 20 → 1. The call site's
+`secrets=ctx.secrets` replaced with `Secrets("")` → 2. Two of those "survived" on the first pass and
+neither was a survivor: the edits had not applied, and the script was then made to assert its own
+substitution before it was allowed to believe a green.
+
+**Re-derived at `dd8b863f`, m910q 2026-09-05**, five commits after `75bce609` (`git rev-list --count
+75bce609..dd8b863f` = 5) and with two tests added to them since. `dd8b863f` is the commit whose
+tree the numbers describe: a record cannot hold its own SHA, and `9bff3e81` resolved that by
+labelling its numbers for a DIFFERENT commit. Between `dd8b863f` and `4bee5fdc` `pylauncher/` did
+not change (`git diff --stat dd8b863f 4bee5fdc -- pylauncher` is empty); `fa223a4b` changed one
+docstring in `tests/test_dockerfile.py`, and the round-3c review re-ran the two-file baseline there:
+213. Nothing in this paragraph is claimed of any later commit. Command, at each end:
+`.venv/bin/python -m pytest tests/test_dockerfile.py tests/test_families_cmangos.py -q` — at
+`75bce609` in a throwaway checkout of that commit, and at `dd8b863f`'s tree in a lane copy on
+m910q since deleted (the SHA and the command are the record; lane copies are ephemeral);
+`__pycache__` purged on both sides of every mutation, every
+edit asserted present on disk before its result was believed, every file restored and compared byte
+for byte after. Baseline 213 (was 211). The value refusal deleted → 13 failed (was 11). The floor
+deleted → 3 (was 2). The call site's `Secrets("")` → 3 (was 2).
+
+`9bff3e81` wrote those four numbers, labelled them "what a reader would re-derive at `67128792`" — a
+commit that is neither where they were taken nor where they were written — and explained them with
+"the two new tests join each kill", which is true of one kill in three. The failing ids say where
+each lands. The value refusal's 13 is the 75bce609 11 plus BOTH new tests, +2:
+`test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence` and
+`test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the_password_file`. The
+floor deletion's 3 adds only the first, +1 — the other two, `test_a_one_character_secret_…` and
+today's `test_the_containment_floor_is_at_or_below_…`, both fail at `75bce609` too, the latter under
+its name of that day, `test_the_containment_floor_is_the_shortest_secret_the_shipped_catalog_declares`.
+The
+call-site replacement's 3 adds only the second, +1 (`test_neither_the_context_secrets_…` and
+`test_the_write_dockerfile_stage_refuses_…` are the other two). A third number `9bff3e81` wrote from
+memory was that commit's own: the `render()` call it added to the below-floor test was said to die
+with the floor deleted, and under that mutation the test dies on the `carries_a_secret()` assertion
+above it — removing the added call left the same 3 ids. It is gone, and the below-floor seam is
+cited where it was already held.
+
+**Rejected, with the measurement: also scanning the rendered TEXT for the secret values.** `render()`
+now holds them, so it could, and `write()`'s docstring had only rejected the NAME-scanning version.
+What it would add is a template that hard-codes a real secret, and that set is empty in both
+directions: a generated password is minted per install, so no committed template can contain one,
+and the only fixed password in the shipped catalog is `wow-wotlk`'s literal `password` — belonging
+to an entry whose family does not call this function. Against that, containment over a whole
+Dockerfile is a far larger false-positive surface than over one token value: a future template line
+reading `# the password file is mounted at run time` would refuse that entry's install outright. No
+shipped Dockerfile or dockerignore template spells the word today — and the scope matters, because
+unscoped that sentence is false: measured on m910q 2026-09-05,
+`grep -ril 'password\|passwd' catalog/installers --include=Dockerfile.tmpl --include=dockerignore.tmpl`
+returns nothing, while the same grep over the whole installers tree returns
+`shared/cmangos/base.yml.tmpl` and `wow-wotlk/native/base.yml.tmpl`, compose templates `render()`
+never opens. Reconsider it the day a family with a short fixed password renders a Dockerfile.
+
+**Ticked, and here is the residue, because the title's general form is not what closed.** What is
+closed: *a value this app DECLARES as a secret cannot reach a generated Dockerfile through the token
+mapping, under any key.* What is still true, and is the boundary rather than a regression:
+
+* **A secret MINTED inside `_public_tokens` — never a field of anything, never in `ctx.secrets` — is
+  invisible to this rule as it was to the last one.** The comparison is against the declaration, and
+  a value that was never declared is not in it. This entry has said so since 2026-09-02 and it
+  remains the honest limit of any by-declaration guard.
+* **A secret shorter than 8 characters, embedded in a longer value, passes** — equality cannot see
+  it. Two routes reach that state and only one of them is watched. No shipped entry DECLARES such a
+  password, and `test_the_containment_floor_is_at_or_below_every_secret_this_app_itself_produces`
+  goes red the day the app produces one. But a user's own `<server_dir>/.db_password` is read AS
+  WRITTEN and has no floor at all: measured on m910q 2026-09-05, a file holding `abc` makes
+  `resolve_secrets()` return a three-character secret, and `--db-pass=abc --verbose` under a bland
+  key then renders. That is a limit of the floor and not a bug the floor can fix — containment on a
+  three-character string refuses every install — and
+  `test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence` is where it is
+  measured rather than promised. This bullet said only the first half until 2026-09-05.
+* **The build CONTEXT still holds the plaintext**, and has since K.3: `.db_password` at the root,
+  `DB_ROOT_PASSWORD=` in `.env`, and `etc/*.conf` after the `conf` stage. Only the leading `*` in
+  each `dockerignore.tmpl` keeps them out of what the daemon receives, and `_public_tokens()`'s
+  docstring records which tests hold that line and which do not (`etc/*.conf` is asserted by
+  nothing). **That is the larger hole of the two, and it is a different entry's shape** — nothing
+  about token mappings touches it.
+* **It is not a defence against deliberate code.** A caller can construct `Secrets("")`, exactly as
+  one can construct a `_Rendered`. The guard is against the careless key, which is what every leak
+  measured here has been.
+
+---
+
+**The original entry, unchanged below.**
+
+
+Found by the independent review of `fix/dockerfile-refuses-any-secret-not-one-name` (merged at
+`092bad91`), and **not a regression** — the merged change is strictly better than what preceded it.
+It is the part the change does not reach.
+
+`dockerfile.SECRET_TOKENS` is `frozenset(f.name.upper() for f in fields(native.Secrets))`. That moved
+the coupling from *one hard-coded name* to *the declaration*, which was the point. But the mapping
+handed to `render()` is still built by hand, and **nothing asserts that every secret-bearing key in it
+corresponds to a `Secrets` field.** Proved on the VM against the real module, as a probe rather than by
+reading:
+
+```
+render() with an undeclared secret key -> type _Rendered | secret in text: True
+write() accepted it: ['Dockerfile', '.dockerignore']
+Dockerfile on disk contains the secret: True
+```
+
+The key was `SOAP_PASSWORD`; `native.Secrets` has no `soap_password` field; the value went into the
+build context and `write()` had no objection.
+
+**The dangerous direction is the one the docstring does not mention.** `secret_tokens()`'s docstring
+states the relationship as fact — "`_tokens()` spells each of its fields as the upper-cased token of
+the same name ... so reading the dataclass IS reading the declaration". True today **by convention
+only**. A secret that enters the mapping from somewhere other than `Secrets` — a `token_hex` generated
+inline, a value read from a file, anything not a declared field — is invisible to this refusal.
+
+**What the capability split changes, and what it does not.** `feat/7.3-token-sets-by-capability` gives
+`_public_tokens(server_dir)` no `StageContext` at all, so `ctx.secrets` is not in lexical scope where
+the build-context mapping is built.
+
+**CORRECTED 2026-09-02, and the correction is the point of this entry.** What stood here was: *"That
+closes the case above at the source, and it is the right level — the fix is structural rather than a
+guard someone must remember."* **That was wrong, and I wrote it.** Two independent reviewers refuted it
+by execution, each one refuting the round before:
+
+- `_public_tokens(self, server_dir)` can reach the password through `self.resolve_secrets(server_dir)`,
+  a public inherited method taking exactly the two things in scope. K.3's `db-password` stage
+  (`STAGE_NAMES` index 1) wrote the password into `server_dir` **one stage** before `write-dockerfile`
+  (index 2) — this said "two stages earlier" until 2026-09-02 — so `resolve_secrets` no longer mints:
+  it reads the real install password back off disk. Six lines, full suite green, `ENV ROOT_PASSWORD=…`
+  in a Dockerfile. **This route is live on a first install**, and it is the one that carries this
+  entry's conclusion.
+- Then: it needs neither a method nor a cache. `generate-compose` writes the plaintext password into
+  `<server_dir>/.env` as `DB_ROOT_PASSWORD=`. A file read in `_public_tokens` leaks it, uncached and
+  deterministic. Full suite green again. **But the ordering here was framed against the wrong
+  consumer.** "One stage before `build`" is true of `build` (index 3 → 4) and is not the question:
+  `_public_tokens()`'s only build-context caller is `_write_dockerfile`, the `write-dockerfile` stage
+  at **index 2**, which runs *before* `generate-compose` at index 3, the sole writer of `.env`. So on a
+  FIRST install this helper reads a file that does not exist yet. It is reachable on a **resume**, or
+  on any second press into a server dir a previous attempt had already carried past
+  `generate-compose` — and `_write_dockerfile` really does re-run there, because its own docstring
+  records that `ctx.state` is not read in that body and a recorded `write-dockerfile` reaches it
+  exactly like a first run. Measured 2026-09-02 at `f6ed1b9a` off `stages()` and `STAGE_NAMES`.
+
+So the split is **a price, not a wall**: it raises the cost of writing that leak, and it removes the
+secret from the mapping by default. It does not make the leak unwritable, and no arrangement of
+parameters can, while the build context itself holds the plaintext — which it has since K.3. **That
+conclusion is unchanged by the correction above**: the first route needs nothing but `server_dir`, and
+it is live on the first press.
+
+**The lesson, which is the reason to keep this paragraph rather than silently correct it:** every round
+here stated a guarantee, and the next reviewer found it too strong. A claim of the form *"X cannot
+happen"* is a standing invitation, and three of them in a row were wrong. State what was measured and
+when. See [[guards-that-prove-declarations]] — this is the same failure at the level of a design
+argument rather than a test.
+
+**It does not close the general
+case**: a secret MINTED inside `_public_tokens` rather than passed into it is still unreachable by a
+by-name refusal, because it was never a field of anything.
+
+**This is the "defects live between the parts" shape.** The relationship between what `_tokens()` puts
+in the mapping and what `Secrets` declares has no owner, so nothing checks it. A cheap enumerating
+guard exists and is the recommendation: for each `f in dataclasses.fields(native.Secrets)`, assert that
+every key in the mapping whose VALUE equals `getattr(ctx.secrets, f.name)` is spelled `f.name.upper()`.
+That checks the relationship by enumeration instead of restating a list, and it catches a
+correctly-valued secret filed under a wrong name — which is exactly the case the by-name refusal is
+blind to.
+
+**Also fix the docstring either way:** it should stop asserting the link as though something enforced
+it. A sentence that describes a convention in the voice of a guarantee is how the next reader concludes
+the case is covered.
+
+### 30. `_container_prefix()`'s rebuild branch is satisfiable only by the bug it should refuse — 2026-09-02, **CLOSED 2026-09-04 at `d2b963d5`**
+
+**Closed by removing the field's only correct value rather than by correcting the rule**, which is
+what this entry recommended: `_container_prefix()` now refuses `containers.services` outright for any
+entry carrying an `install.native` block, whatever the value, and every shipped entry carries one.
+The reason is in the code where it is declared: this module WRITES the compose file, and its service
+keys come from the templates (`shared/cmangos/base.yml.tmpl` writes `{{CONTAINER_PREFIX}}db` /
+`-realmd` / `-mangosd`; `wow-wotlk/native/base.yml.tmpl` writes the literal `ac-database` and
+friends), so an entry-level declaration can only restate them or contradict them.
+
+**Both docstrings this entry named at the point of declaration were rewritten, not annotated.**
+`composegen._container_prefix()` no longer asserts *"That is literally the
+`{{CONTAINER_PREFIX}}<service>` the templates write"* — the sentence that was true only in the buggy
+configuration — and `catalog.Containers.services` no longer opens with *"when they differ from the
+container names above"*; it says the field is refused since 2026-09-04, that the only correct state
+is absent, and why it stays on the model at all (`docker.ContainerSpec.services`, which an adopted
+project really does need). The refusal text this entry called "a set of instructions for reproducing
+the bug" is gone and cannot come back: the test asserts `"after its service" not in message`.
+
+**The one lower item is now documented where it is read.** `service_names()`'s
+`^  ([A-Za-z0-9-]+):` still excludes `_`, and the helper's own docstring (`test_composegen.py:77`)
+now records why it is left alone: an underscored service key would read as UNDEFINED, so the
+cross-check fails loudly on a good file rather than passing quietly on a bad one, and widening it is
+the permissive direction.
+
+**Re-derived on m910q 2026-09-05, on a copy of the tree at `6546b190`.** GREEN:
+`pytest tests/test_composegen.py tests/test_dockerfile.py` -> **160 passed**. RED, with the pre-fix
+module dropped in whole (`git show d2b963d5^:…/composegen.py`, md5 `86ffd5ba3e8f21ab10a66c33864a40b8`
+— the same md5 the test's docstring cites, so its provenance checks out): **3 failed, 88 passed**,
+and the failure prints the old refusal verbatim —
+
+```
+AssertionError: Regex pattern did not match.
+  Expected regex: 'containers\.services'
+  Actual message: "the container prefix 'abc' of wow-tbc rebuilds abcone, abctwo, abcthree from its
+  service names one, two, three ... Name every container after its service with one shared prefix in
+  front of it."
+```
+
+The three that go red are `test_an_entry_this_module_renders_may_not_declare_compose_services` (the
+discriminating one: it drives both the CORRECT declaration and the §26 bug through
+`_container_prefix()`, `entry_tokens()` and `render()`, since a refusal nothing reaches is not a
+refusal) and both cases of `test_the_refusal_names_no_service_the_rendered_file_does_not_define`,
+which exist because the FIRST rewrite of this rule taught the bug again — it refused the declaration
+and then named the entry's three container names as "the names compose must be given", every one of
+which answers `no such service`.
+
+---
+
+**The original entry, unchanged below.**
+
+Found by the independent review of `fix/cmangos-compose-service-names` (merged at `08fb785e`), which
+fixed the *consequence* and left this. `composegen.py`, `_container_prefix()`, the rebuild branch.
+
+The branch derives a container prefix by checking `container == prefix + service` for every declared
+service. The reviewer probed it on the real `wow-tbc` entry, and the result is the wrong way round:
+
+```
+services = ("tbc-db","tbc-realmd","tbc-mangosd")   # the CORRECT declaration
+  -> REFUSED: prefix 'tbc-' rebuilds tbc-tbc-db, tbc-tbc-realmd, tbc-tbc-mangosd
+services = ("db","realmd","mangosd")               # the BUG that section 26 was about
+  -> ACCEPTED, prefix='tbc-', compose_services() == ('db','realmd','mangosd')
+```
+
+So it is not "a constraint satisfied by no shipped entry", which is how the implementer described it.
+**It is a constraint satisfiable only by the defect** — any entry it accepts has bare-suffix
+`compose_services()`, which is exactly what `docker compose up` rejects with *no such service*. And its
+refusal message — *"Name every container after its service with one shared prefix in front of it"* —
+is a set of instructions for reproducing the bug, handed to whoever adds the fifth game.
+
+**Not urgent, and it does not block K.8**: no shipped entry declares `containers.services` any more,
+and `FAMILIES` registers only `azerothcore` today. The cross-check added on that branch catches the
+consequence for any entry that ships, so this cannot bite silently — it bites the next person to add an
+entry, at the moment they follow the error message's advice.
+
+**Recommended: make it refuse rather than warn.** Since the cross-check now covers the separator-eaten
+case the rebuild branch was written for, delete the branch and refuse `containers.services` outright
+for any entry carrying an `install.native` block. That removes a field whose only correct value is
+"absent" — the boundary argument: if the fix has to be remembered at the next site, it is at the wrong
+level.
+
+**Two docstrings still carry the false model at the point of declaration**, which is where someone will
+read it:
+- `composegen.py`, `_container_prefix`: the correction was *appended below* a bullet that still asserts
+  *"That is literally the `{{CONTAINER_PREFIX}}<service>` the templates write"*. In the shipped template
+  the prefix precedes a hard-coded literal suffix, never a `containers.services` value — that sentence
+  is true only in the buggy configuration. Rewrite the bullet; do not annotate it.
+- `catalog.py`, `Containers.services`: the field still opens with *"when they differ from the container
+  names above"*, and nothing at the declaration warns that a native-rendered entry setting it
+  *correctly* is rejected. One sentence, or resolve the above and delete the field.
+
+**Also noted by the same review, lower:** the cross-check is one-directional (`selected` is a subset of
+`defined`), so a `service_names()` helper that *over*-reports only makes it more permissive — a mutation
+dropping its stop-at-top-level rule was killed by a TBC-only equality test, not by the cross-check. And
+that helper's `^  ([A-Za-z0-9-]+):` excludes `_`, so an underscored service key would read as undefined:
+loud, therefore acceptable, but undocumented.
+
+### 31. `wsl.find_servers()` collapses fifteen situations into one sentence — 2026-09-02, OPEN
+
+The same defect as the adoption guard fixed at `57130ff0`, one level up, and load-bearing. Found by
+that branch's implementer, confirmed and **enlarged** by its reviewer, who counted the cases rather
+than accepting "at least seven".
+
+`adopt_from_wsl()` opens with `found = wsl.find_servers()` / `if not found:` and then tells the user
+*"No servers found in WSL — No Docker Compose projects were found in the running WSL distros."*
+
+An empty tuple is returned for **at least fifteen distinguishable situations**, counted from
+`yulon/wsl.py` and `yulon/platform.py`:
+
+*`distro_states()` yields nothing:* (1) `_which(WSL_PROGRAM)` is None — no `wsl.exe` on PATH;
+(2) `wsl -l -q` raises `OSError`; (3) it raises `TimeoutExpired` at the 60 s probe timeout;
+(4) any other `SubprocessError`; (5) a non-zero exit — the WSL service wedged;
+(6) **the listing genuinely names no distro, the one case that means what the dialog says**.
+
+*distros exist, none is probed:* (7) every distro is stopped and none is in `include`.
+
+*a distro is probed and answers nothing:* (8) `docker_prefix(distro)` is None; (9) compose exited
+non-zero — daemon down inside the distro, compose absent, permission denied; (10) `_compose_ls()`
+raises `OSError`/`SubprocessError`, including the same 60 s timeout.
+
+*compose answered, nothing survives parsing:* (11) stdout is not JSON — an older compose without
+`--format json`, or an error printed to stdout; (12) JSON that is not a list; (13) every project lacks
+`Name` or `ConfigFiles`; (14) every project's first config path starts with `/mnt/` — Docker Desktop
+integration distros; (15) `wsl_unc_path()` returns None for every path.
+
+The dialog does mention stopped distros, which covers (7). **The other thirteen are asserted as fact**,
+and the user is sent off to start a distro that may already be running.
+
+**The sharpest evidence that this is a real defect and not a reading**: `wsl.py` already argues this
+exact point about itself, two functions above, in `missing_distro_problem()` —
+
+> **An EMPTY listing is not evidence of anything.** `_wsl_list()` answers `()` for four different
+> things — no wsl.exe on PATH, `OSError`, a timeout, and a non-zero exit — and only one of them means
+> "there are no distros". […] Reading that silence as "the distro is gone" sent the user off to
+> re-adopt a server that was never missing
+
+The rule was written where a distro is accused of being deleted, and not applied where a user is told
+they have no servers. **A rule that lives in one function's docstring protects one function** — the
+boundary argument again: if it has to be remembered at the next site, it is at the wrong level.
+
+**Not fixed with the adoption branch, deliberately**: it changes `find_servers()`'s return type and
+every caller and test, and four agents were live in the tree. It is the natural next step after that
+branch, and it is bigger than it looks — the return type has to carry *why* it is empty, the way
+`Identification` now carries why a folder is unidentified.
+
+**Also confirmed by the same review, separate and trivial:** `wotlk_modules.applier()`'s docstring says
+*"pass `sql=None` explicitly via a caller that has no database to get every SQL step reported as
+skipped instead"*. `sql=None` is the parameter's default, and the body is `runner = sql; if runner is
+None: runner = DockerSql(...)` — so passing it explicitly is indistinguishable from omitting it and
+both build a `DockerSql`. `Applier` genuinely has that skip-everything mode (`apply.py` documents it);
+`applier()` intercepts every route to it. Same family: a `None` default folding "unset" into
+"explicitly absent". Fix is a flag or deleting the sentence.
+
+### 32. Three Install buttons now run an engine that has never installed a server — 2026-09-02, OWNER DECISION
+
+Not a defect. Raised by K.8's independent review so that it is a choice rather than a discovery.
+
+K.8 registered `cmangos` in `FAMILIES`, so `wow-tbc`, `wow-vanilla` and `wow-tortoise` no longer fall
+back to their bash scripts — they dispatch to `CmangosInstaller`. That is exactly what the plan asks
+for, and every unit-level guarantee is in place: dispatch is proved for all three entries enumerated
+from `catalog.json`, the stage tuple is pinned, and a working-looking wrong answer
+(`FAMILIES["cmangos"] = AzerothCoreInstaller`) is killed by test.
+
+**What has NOT happened is a live install.** Gates 7.4a/b/c (TBC through `build`; extract + mmaps with
+the 2.4.3 client; conf + import + ready) are unticked, and `pyplan/gates/` does not exist yet. The 7.3
+primitives gate is written and ready but was deliberately not run — it starts containers and pulls
+images, and the standing rule is that the owner starts a run himself.
+
+**The blast radius is bounded by status**: those three entries are `beta`, `beta` and `wip`. A user who
+presses Install gets a real attempt rather than a refusal, and the failure modes are the ordinary ones
+of an unexercised path.
+
+**The alternative, if that is not wanted yet**, is one line: leave the family registered and keep the
+three entries off the Install path until their gates are ticked. It is a data change, not a code change.
+Recording it here rather than deciding it — the trade is "an unexercised path is reachable" against
+"the work 7.3 exists for is not usable", and that is the owner's call.
+
+**Related and already corrected** (`514c2351`): the 7.3 primitives gate cannot be ticked from the
+2026-09-01 record filed under 7.1. That run predates `test_sqlplan_live.py` entirely — 21 test functions
+then, 23 now — so it could not have executed two of the six things the gate line names.
+
+### 33. The suite has load-sensitive tests, and a flake let a merge go through on red — 2026-09-02, the steam-deck half FIXED 2026-09-02, **the rest CLOSED 2026-09-04 at `d2b963d5`**
+
+**The log-panel half.** `test_log_panel.py::test_a_runner_dropped_before_its_thread_runs_does_not_leave_the_worker_dead`
+held its job open with `gate.wait(5.0)`, so "provably still in flight" was true only for five
+seconds of wall clock and a loaded box made the verdict depend on the box. The clock is gone —
+`gate.wait()` with no bound — and every remaining wait in that file goes through `conftest.pump_until`,
+which does not return silently on its deadline: it fails, naming the turns/s it actually got against
+`PUMPED_HEALTHY` (98/s idle, 24/s with the whole suite 14-way at loadavg 83), so a starved box and a
+wedged subject are told apart IN THE REPORT rather than by re-running. That is the damage this entry
+is about, answered directly.
+
+**"`--dist loadfile` is a harness setting, so the test is still order-sensitive for anyone who runs
+the suite another way" — measured, and no longer true.** On m910q (4 cores, a live `mangosd` taking
+~60% of one of them throughout), 2026-09-05, on a copy of the tree at `6546b190`, with **no
+`--dist loadfile` anywhere**:
+
+```
+-m 'not integration' -n auto  x5   ->  2536 passed, 4 skipped   (18.0 / 19.5 / 17.7 / 20.9 / 21.2 s)
+-m 'not integration' -n 14    x3   ->  2536 passed, 4 skipped   (20.2 / 20.7 / 19.2 s)
+```
+
+`-n 14` is 3.5x this box's cores; loadavg was 3.6, 5.4 and 10.4 after the three runs. Eight
+whole-suite runs under the exact distribution this entry says the harness was chosen to avoid, zero
+failures, and the count matches CI's baseline.
+
+**The bound the fix leans on is audited rather than trusted.** `test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number`
+parses the file and requires every deadline to be one of the named constants — proven RED here on
+2026-09-05 by putting `gate.wait(5.0)` back: `AssertionError: … Extra items in the left set: '5.0'`,
+`1 failed, 21 deselected`. `test_an_expired_pump_says_so_and_reports_how_fast_it_ran` holds the
+report itself (restoring the silent return left `21 passed` without it, measured 2026-09-04). Five
+files now audit their own deadlines through the one helper.
+
+**What is recorded rather than fixed, because it cannot be fixed.** The original 60 s stall was never
+reproduced, so what is proven is that this test no longer depends on the two things that were
+removed — not that the red run of 2026-09-02 cannot recur. Its own docstring says exactly that. And
+the identity of that failure is gone for good: the grep that read it kept only the totals. The
+lesson survives as machinery in two places — `pump_until`'s report, and `run-tests-vm.sh --checks`,
+which until 2026-09-04 chained every step through one `;`-joined ssh command and `exit $?`, so the
+status was the LAST step's and a red suite exited 0. It now accumulates `rc` across the steps and
+prints `=== --checks: RED (see !! lines above) ===`. **That helper lives on the laptop
+(`C:\Users\perzi\run-tests-vm.sh`) and not in this repo**, so this is the one claim in this entry a
+reader cannot re-derive from the tree; its reasoning is in the script's own header at lines 203-208.
+
+---
+
+**The original entry, unchanged below.**
+
+
+**What happened, recorded because the process failure is the more useful half.** The verification run
+before merging `fix/gate-7.2-7.3-code` reported **`1 failed, 2003 passed, 3 skipped`**. The merge went
+through anyway, because the check and the merge were chained in one command and the result arrived
+*after* the action. Three re-runs immediately afterwards gave **2004 passed / 3 skipped**, so the tree was
+fine — but that is luck, not process. **Never chain a verification with the action it gates.**
+
+**The flake itself is real and has at least two known candidates**, both load-sensitive rather than
+order-sensitive:
+
+- `test_steam_deck_script.py::test_without_a_terminal_the_client_wait_sleeps_instead_of_reading_stdin` —
+  seen by a gate reviewer hitting its own **60 s subprocess timeout under 15-way parallel load**; 14/14
+  green when re-run serially. A wall-clock timeout inside a parallel suite is a flake generator by
+  construction: the bound is on the child, the contention is on the box.
+- `test_log_panel.py::test_a_runner_dropped_before_its_thread_runs_does_not_leave_the_worker_dead` —
+  documented in `run-tests-vm.sh`'s own header. It fails under plain `-n auto` and passes under
+  `--dist loadfile`, which is why the helper uses that distribution. Thread-timing split across workers.
+
+**Why it matters more than an occasional red run.** A suite that fails once in several runs teaches its
+readers to re-run rather than to look — and the cost is not the wasted minute, it is that a *real* single
+failure becomes indistinguishable from noise. Every merge decision tonight rested on a count.
+
+**The steam-deck half is fixed (2026-09-02, `fix/remaining-error-boundary-holes`).** Measured on
+yulon-ubuntu first: that test costs **0.16 s** serially, **under 0.61 s** inside `-n auto --dist loadfile`
+(it did not reach the slowest-twelve list at all), and **0.24 s** at 30 workers on 15 cores. Against 0.16 s
+the old bound was a stopwatch reading, and a 60 s stall is not contention of that shape — the VM runs its
+fifteen workers with about 2 GB free, and a starved or swapping box stalls a healthy process for a minute.
+So the bound is now `HANG_BOUND`, named and documented as a **deadlock breaker**: contention is bounded by
+some multiple of a run costing milliseconds, a hang is unbounded, and any finite bound catches the
+unbounded case. Deleting it is not an option — without one, that file's pty test wedged the suite when its
+subject regressed, which CI reports as a stuck job rather than a red one. `DWELL_PROOF` names the one bound
+in the file that IS an assertion and points the other way (the script must still be running when it
+elapses, so load makes it pass more surely). An AST test requires every `timeout=` there to be one of the
+two names, because a number typed at a call site carries no argument for its size. And a timeout in the
+flaking test now reports how far the script actually got, so a starved run and a hung script are told apart
+**in the report** rather than by re-running — which is the damage this entry is really about.
+
+**Rejected, and why.** *A bound proportional to load* needs a calibration step that is itself load-sensitive,
+and a bound that moves run to run cannot be reasoned about when it fires: you cannot tell a hang from a
+starved calibration. *Marking the test serial* is not available — xdist's `--dist loadgroup` co-locates
+tests, it does not serialise them, and a cross-worker lock would still leave the other fourteen workers
+loading the box, so it would hide the bound's fragility behind a scheduling choice rather than remove it.
+*A merely larger number* would have been the same defect with a bigger constant; what changed is what the
+bound MEANS and that its reasoning now travels with it.
+
+**Still open:** the `test_log_panel.py` candidate, mitigated but not fixed — `--dist loadfile` is a
+harness setting, so the test is still order-sensitive for anyone who runs the suite another way. And the
+identity of the failure in the run above was never captured — the grep that read it kept only the totals —
+which is itself the lesson: **capture the failing test id, not the count.** The original 60 s stall was
+NOT reproduced here; the sizing above rests on the measurements, not on a reproduction.
+
+### 34. Two more refusals that were nobody's to catch, in the same spine — 2026-09-02, FIXED
+
+The `composegen.render()` blocker (`b22ab381`) was one instance of a class, and an audit of every other
+outward call in the install spine found two more. Both were reproduced through the real
+`install_wiring.main()` on `697adca6` before either was touched, and both cost the same two things the
+blocker did: a traceback where `main()`'s own docstring promises "the sentence written for a person", and —
+wherever the call sits inside `run()` — no `_record_error`, so the state file kept `"last_error": ""` where
+every other stage failure records its own.
+
+**A folder that will not list.** Four sites asked `folder.iterdir()` bare: `_claim_folder()`, which all
+four shipped games reach through preflight and `_guard()`; `stage_clone_sources()`, which the three CMaNGOS
+games bind; and AzerothCore's `_clone_core()` and `_clone_modules()`. `OSError` is not an `InstallerError`,
+and `iterdir()` raises it for a permission change, an unreadable mount, a drive that went away, or a stale
+UNC path into a WSL distro — the app reaches folders that way often enough that `Identification.UNVERIFIED`
+exists in the UI for it. All four go through one `_listing()` now, which **refuses rather than assuming
+empty**: a listing that failed says nothing about what is in the folder, and the caller's next move on
+"empty" is a clone whose seam `shutil.rmtree`s a destination it does not recognise. Mutating the helper to
+return `[]` on `OSError` showed exactly that — the CMaNGOS run walked past the unreadable folder and died
+four stages later asking for a client directory. `_guard()` stays outside `run()`'s `try`, which is correct
+and not a bug (its refusals concern a state file that may be somebody else's), and the regression asserts
+that folder was left as empty as it was found.
+
+**A reset that will not finish.** `stage_import()`'s `partial` branch called `gate.reset()` bare. Its seam
+on the AzerothCore path, `repair.reset_unfinished()`, declares three refusals — `MaintenanceError`,
+`ApplyError` and a bare `RuntimeError` for player data — and none of the three is an `InstallerError`.
+Wrapped with `except Exception` rather than a named tuple, because `gate` is an `ImportGate` **protocol**
+and the spine cannot import `controller_wow_wotlk` to name two of them; `InstallerError` is re-raised
+untouched and first, so `CallableGate`'s own no-reset-seam refusal is not buried inside the wrapper.
+
+Regressions drive the real CLI at every site, assert the sentence the user gets, assert `last_error`
+**equals** it, and assert the neighbouring rule was not the one that fired. Eleven mutations, eleven killed.
 
 ### One thing worth keeping
 
@@ -1039,3 +2392,836 @@ Three of these have an obvious fix that is **wrong**, and two of them arm a wors
 
 The pattern: *check whether the thing you are about to make true is guarded by something that is
 only safe while it is false.*
+
+
+### 35. Every CMaNGOS install is unreachable from any other machine — 2026-09-02, FIXED 2026-09-02
+
+`realmd.realmlist.address` is left at `127.0.0.1`. A client on another machine authenticates
+FINE — realmd answers on 3724, the account is accepted, the realm list arrives — and then the
+client is told the world server lives at `127.0.0.1:8085`, which on the player's own PC means
+the player's own PC. It hangs at "Connecting" or drops back to the realm screen with nothing
+useful said.
+
+**Found by driving it (2026-09-02).** WoW TBC on `m910q`, reached over Tailscale at
+`100.78.24.50`. Auth succeeded and the realm `MaNGOS` appeared; the world connect could not.
+One `update realmd.realmlist set address='100.78.24.50'` later, the same client reached a
+character screen, created `Administrato` (guid 901, account 1, Troll warrior) and the world
+server logged `Sessions online: 1`.
+
+**The cause stated here when it was filed was WRONG, and the correction is the useful part.**
+This entry said the installer "cannot guess" the address and that the work was therefore owed to
+a future phase. That was not true when it was written. `yulon/networking.py` already held every
+piece: `lan_ip()` to detect this machine's address on the network, `advertisable()` to decide
+whether a value is reachable from anywhere else, and `realmlist_sql()` to write the row for
+either family. The 6.5 networking work had built all of it. Nothing was missing except a CALL:
+no install stage ever invoked any of it, so a complete set of working machinery sat one line
+away from the defect it was built to prevent, and the entry blamed the problem for being hard.
+
+Worth keeping as a lesson rather than editing away. "The installer cannot know this" is a
+comfortable thing to write, it reads as analysis, and it stopped anyone looking for the module
+that already knew. The check that would have caught it costs nothing: before recording that a
+value is unknowable, grep for the thing that would compute it.
+
+What IS true from the original paragraph: the address is whichever one the PLAYER can reach, and
+guessing wrong is worse than `127.0.0.1` because it looks configured. That is why the fix writes
+only a detected LAN address, says in plain words what it wrote, and — after a second review —
+leaves ANY already-reachable row alone rather than any row merely equal to the LAN address. See
+`native._advertise_realm()`.
+
+**Not the same as the networking work in 6.5.** That line is about firewalls, port-forwarding
+and a realmlist WRITER for the client side. This is the SERVER side — one row in the server's
+own database — and a launcher that installs a server nobody outside the box can join has not
+finished installing it.
+
+**Fixed in `40fa2e76`, corrected in `f90d3e55`.** The first commit added the stage; the review
+of it found that the guard compared the row against the LAN address instead of asking whether
+the row was REACHABLE, so an ordinary resume overwrote a public address somebody had set for
+internet play with a LAN one, while printing that other machines could now reach the server.
+
+**Live evidence, and what is still owed.** VERIFIED on WotLK/AzerothCore: the Windows gate on
+`yulon-win11` (2026-09-03 02:16) printed "The realm now advertises 172.30.52.116" and the server
+came up — so the AzerothCore half, which this entry marked UNVERIFIED, is now driven. The
+original TBC reproduction stands. Tortoise, on the run that closed 7.6: `172.30.55.119`.
+And Vanilla — whose install finished three hours BEFORE the stage existed, so its log said nothing
+either way — was resumed on 2026-09-03 and moved from `127.0.0.1` to `172.30.55.119`, read back
+out of `realmd.realmlist` rather than off the log. **All four entries are now driven**, and the
+UNVERIFIED note this section carried is spent.
+### 36. A shipped SQL-plan fix never reaches an install that already has a marker — 2026-09-03, OPEN
+
+`MarkerGate` reads a marker row as `imported` **whatever the plan hash says** — `cmangos._import()`
+says so in as many words, and it is a deliberate decision with a good reason behind it: a marker is
+written only after `verify()` passes, so it means "these databases were imported and checked", and
+re-importing over somebody's live world to chase a catalog edit would be far worse than not.
+
+**What it costs, found while driving 7.6.** Two SQL phases were added to `wow-tortoise` today
+(`playerbots characters`, `playerbots world`) because the bots crash the worldserver on boot
+without their tables. Re-running the installer over the existing install printed
+
+    --- import
+    They are already imported; leaving them alone.
+
+and the new phases never ran. That is correct by the rule above and useless to the user: every
+Tortoise install made before this fix stays broken, and the only route to the fix is a new install
+into an empty folder. The same will be true of the next SQL correction, and of every one after it.
+
+**Why the obvious fix is wrong.** Comparing the stored plan hash and re-importing when it moves
+would re-run `world base` — 285 table dumps — over a database that may hold characters somebody
+played. The five-branch table refuses `populated` for exactly that reason, so the honest shape is
+probably a *migration* notion: phases marked as safe to re-apply, applied by name, recorded
+individually — which is what the Tortoise core itself does with its `migrations` table, and what
+`sqlplan` does not have.
+
+**Not urgent, and not nothing.** No shipped install is affected yet because Tortoise has never been
+released. It becomes urgent the moment one is, and the decision (accept a re-install, or build the
+migration notion) is the owner's rather than one to make quietly inside a phase.
+
+**Where to start.** `yulon/catalog/families/cmangos.py::_import` (the ordering argument),
+`yulon/catalog/families/sqlplan.py` (the marker and `verify`), and `native.stage_import`'s
+five-branch table. `SqlPlan.marker` already hashes the canonical plan, so the value needed to
+detect the change is stored — nothing reads it back.
+### 37. The vmap retry recipe could not fire on the failure it names — 2026-09-03, FIXED
+
+`wow-vanilla`'s `ExtractPlan.retry` is `when_log_matches: "Segmentation fault|core dumped"` over
+`vmap extract` / `vmap assemble`. `_retry_matches()` searched the tool's own output for that text.
+
+**A crashed tool does not print it.** `Segmentation fault (core dumped)` is a message a SHELL's job
+control writes about a child it reaped. These tools are `exec`'d as the container's PID 1 with no
+shell in between, so a tool that dies of SIGSEGV writes nothing at all and the container reports
+only the status. Probed on `yulon-ubuntu`: every signal-killed container returned **zero bytes** of
+output and **zero** matches for the pattern.
+
+**Why the test suite agreed with it.** `test_retry_matches_answers_every_ending_and_not_just_the_regex`
+built its crash as `AttachedRun(139, ("Segmentation fault (core dumped)",))` — the status AND the
+words. The fixture handed the matcher the text it was looking for, so nothing ever asked whether a
+real crash produces that text. One line of a fixture stood between a green suite and a guard that
+could not fire.
+
+**Fixed** by `RetrySpec.when_returncode_in`, checked BEFORE the pattern, with `[139, 134]` on the
+Vanilla entry (128+SIGSEGV and 128+SIGABRT). The text match is kept, because a tool that prints a
+crash and exits non-zero on its own is a different and real case. A validator refuses `0` and the
+negatives, which `_retry_matches` already answers before it looks at anything.
+
+**What is still NOT proven, and is the reason 7.5 stays unticked.** The recipe has never fired on a
+real crash, because the crash cannot be produced. `ulimit_stack_unlimited` is documented as existing
+because "the vanilla vmap extractor overflows the default stack on some maps and segfaults"; that is
+**unreproducible on this box and this client**, measured three ways against the real 1.12.1 client:
+
+| forced condition | result |
+| --- | --- |
+| flag off (default 8 MB stack) | both tools completed — Buildings 5076, vmaps 5667 |
+| `--ulimit stack=1048576` (1 MB) | both tools completed |
+| `--ulimit stack=65536` (64 KB) | `vmap_extractor` completed, exit 0, 67 KB of output |
+
+So the flag's own justification is now measured false here. It is NOT removed: one box and one
+client cannot refute a crash reported on others, and the flag costs nothing. But the comment
+claiming the behaviour should say where it came from rather than assert it as fact.
+
+**One more thing the probing turned up, worth knowing before anyone tries this again.** A container's
+PID 1 does not receive an unhandled signal sent from outside — `docker kill --signal=SEGV` on a
+`sleep` left it `Status=running`. A crash has to come from INSIDE the process. That is why the
+probes above squeeze the stack rather than signalling the container.
+### 38. An interrupted first stage still leaves a folder the app disowns — 2026-09-03, FIXED
+
+`_run_one()` writes `.yulon-install.json` only after a stage FINISHES. A stage-one failure
+therefore leaves `src/` and no record, and `_guard()` refuses the retry with "is not empty and was
+not created by this app" — a sentence that is false, and whose only remedy is deleting a
+part-finished clone by hand.
+
+`5eef8d9f` added `_claim_if_ours()`, which records the state on the `except InstallerError` path
+when the folder started empty. **An adversarial review the same day returned "do not ship", and
+its central point is correct:**
+
+**1. It does not cover the failure that produced it.** The bug was found by a KILL — the
+TBC-on-Windows gate died with its ssh session mid-clone and then refused its own 162 MB checkout.
+SIGKILL, power loss and unhandled exceptions never reach an `except` block, so the harshest
+failures still leave an unclaimed folder. The test that shipped with the fix drives a cooperative
+`InstallerError`, which is a different thing from process death — the fix is real for clean stage
+failures (a network error mid-clone) and absent for the case that motivated it.
+
+**2. `started_empty` is a stale observation.** It is read once at the top of `run()`, with no lock
+and no directory identity check. Between that read and the failure handler, a second install can
+start in the same folder, the user can drop a file in, or the path can be replaced or remounted —
+and the handler then writes an ownership record covering all of it. Ownership changes what later
+runs are willing to do to a directory, so a wrong claim is not merely untidy.
+
+**3. A failed claim is silent.** `_listing()` refuses on an unreadable directory and the handler
+swallows it; `write_state()` only logs its own `OSError`. Either way the user is told the stage
+error and not that the incomplete install could not be claimed, which is the fact that decides
+whether their retry will work.
+
+**The shape of the real fix, and why it was not done in that commit.** An install-intent claim
+written BEFORE the first mutating stage, created atomically, carrying the run id.
+`yulon/ownership.py` already has the vocabulary — `UNCLAIMED` / `OWNED` / `UNKNOWN` — so this is
+not a new concept, it is one the install path does not yet use early enough. The obstacle is
+real: three tests forbid an early write, two because an install into the USER'S OWN git checkout
+must leave it untouched, and `_guard()` deliberately defers that judgement to the clone stage so
+the refusal can name whose fork it is. The review's answer is to move that non-mutating checkout
+question AHEAD of the claim. That is a design change across the spine and the families, not a
+patch, and it is the owner's call.
+
+**Also worth doing whatever is decided:** reword the refusal to state only what is observable —
+no valid Yu'lon ownership record exists — rather than asserting who created the contents. That
+sentence is wrong in exactly the case a user is most likely to hit it.
+
+**4. The two guards disagree about who owns the folder (found 2026-09-03 by turning the fix's
+own test from a negative into a positive).** `_claim_if_ours()` teaches `_guard()` that the
+folder is this install's. It teaches `stage_clone_sources()` nothing: that stage asks whether
+there is a `.git` at each `dest`, and a destination holding files and no `.git` is refused —
+correctly, because the clone seam `shutil.rmtree`s a destination it does not recognise. So a
+first stage that wrote non-git files and then died still ends at a manual delete, now behind a
+second, narrower sentence ("has files in it but is not a checkout of …"). It is honest and it no
+longer claims the app did not write those bytes, which is why this is a limitation and not a
+regression. Measured, not argued: `test_a_claimed_folder_whose_leftovers_are_not_a_checkout_is_still_refused`.
+
+The common case is fine, and the difference is worth knowing before deciding anything. `git
+clone` creates `.git` in its destination within its first moments, and all four entries clone
+into per-source directories (`.` for AzerothCore, `src/<repo>` for the three CMaNGOS games), so a
+killed clone leaves a partial checkout that `stage_clone_sources()` recognises and resumes. The
+refusal above needs a kill inside that first instant, or a stage that wrote something other than
+a checkout. An early ownership claim the clone stage could CONSULT is what closes it, which is
+the same design change §38 already turns on.
+
+**Not a defect: the foreign-install-id mutation.** A review mutated `_claim_if_ours()` to write
+somebody else's `install_id` and reported that the suite stayed green. It does, and the reason is
+production code rather than a weak test: `_record_error()` runs on the very next line and
+rewrites the file from the same `state`, so a wrong id written inside the claim is erased before
+anything can observe it. `test_a_folder_this_app_filled_and_then_failed_in_is_still_its_own_on_the_retry`
+now asserts the recorded `install_id` by VALUE anyway — the mask is real, and it is not a reason
+for the tests to hold no opinion about what was claimed. Verified by mutating `_record_error()`
+instead: two tests fail.
+
+**FIXED 2026-09-03 by moving the claim ahead of stage one — and the obstacle recorded above was
+not real.** `_claim_before_writing()` replaces `_claim_if_ours()`: the record is written
+immediately after `_guard()` accepts the folder and before any stage runs, so SIGKILL, a power cut
+and an unhandled exception are covered along with the cooperative failures. Finding 1 closed.
+
+**Why the early write turned out to be safe, which this entry had wrong.** It said three tests
+forbid writing before stage one and that the "whose checkout is this" question had to be moved
+ahead of the claim first. Re-read: it is already ahead. `_guard()` refuses every non-empty folder
+outright, with ONE deliberate exception — a directory holding `.git`, deferred so the clone stage
+can name whose fork it is rather than say "this folder is not empty". So the only folder that can
+reach stage one non-empty and unclaimed is somebody's own checkout, and `started_empty` is exactly
+the predicate that excludes it. All three of the tests in question drive a `.git` directory; not
+one of them constrains an empty folder. Proved by mutation rather than by reading: deleting the
+`started_empty` guard so every folder is claimed fails precisely those three
+(`test_a_first_install_into_the_users_own_checkout_is_refused_and_left_alone`,
+`test_an_enforcing_box_still_recognises_a_users_own_checkout_of_this_repository`,
+`test_a_failure_before_anything_was_written_leaves_no_state_file`) plus the new one written beside
+them. They are the guardrail, not the obstacle.
+
+**Finding 2 narrowed, not eliminated.** `started_empty` is still an observation without a lock, but
+it is now read and acted on in consecutive statements instead of being carried across a
+multi-hour install and spent at the end. A second install, a dropped-in file or a remount can
+still race it; that race is microseconds wide rather than hours.
+
+**Finding 3 closed.** A claim that does not land is a refusal naming the file, checked by reading
+the path back — `write_state()` logs its own `OSError` and returns, which is right for the callers
+recording PROGRESS and wrong for this one, where a silent loss rebuilds the whole bug. The late
+version could not refuse anything: it ran with an `InstallerError` already in flight and raising
+would have replaced the sentence the user was about to read. Nothing is in flight at the new site.
+
+**Finding 4 (the two guards disagreeing) closed as a consequence.** `stage_clone_sources()` still
+asks its own question — is there a `.git` at this dest — and still refuses non-git leftovers,
+which is correct, because the clone seam `shutil.rmtree`s a destination it does not recognise.
+What has changed is that the case is now unreachable from an interrupted install of ours: the
+folder is claimed before anything is written, so the retry is a resume rather than a stranger.
+
+**Tests.** `test_the_folder_is_claimed_before_the_first_stage_writes_a_single_byte` asks the
+question from INSIDE the clone seam, which is the only place the answer distinguishes an early
+claim from a late one — both leave the same file on disk afterwards.
+`test_a_death_that_runs_no_except_block_still_leaves_the_folder_claimed` raises `KeyboardInterrupt`
+out of stage one: `run()` catches `InstallerError` and nothing wider, so that traverses exactly the
+code a signal would have skipped. Three mutants, three kills.
+
+**Still owed:** the refusal wording. "is not empty and was not created by this app" is now
+unreachable for our own interrupted installs, but it is still the sentence a user meets when they
+point the app at a folder holding something else, and it still asserts who created the contents
+rather than what is observable — that no valid Yu'lon ownership record exists.
+
+---
+
+### 39. The LAN step locks you out of a remote Linux box — 2026-09-04, OPEN
+
+Found by 7.1's own gate, the hard way: the lane that pressed it lost its ssh session and had to
+recover by driving the guest's GNOME desktop through the Hyper-V synthetic keyboard. Evidence and
+the whole recovery are in `pyplan/gates/7.1-ubuntu-2026-09-04/ufw-lockout.txt`.
+
+**What it does.** `networking.apply()` on a Linux box with `ufw` emits three commands and runs all
+three:
+
+```
+[['ufw','allow','3724/tcp'], ['ufw','allow','8085/tcp'], ['ufw','--force','enable']]
+```
+
+`ufw enable` brings up ufw's default policy, which is **deny incoming**. The two game ports are
+allowed. Port 22 is not. So on any box you reach over the network — which is every headless server
+this app is for — the LAN step is a remote lockout with no warning:
+
+```
+report.done         = ['ufw allow 3724/tcp', 'ufw allow 8085/tcp', 'ufw --force enable', ...]
+report.skipped      = []
+report.manual_steps = []
+```
+
+Nothing warned, nothing was skipped, and no manual step mentioned SSH. The session that runs the
+step SURVIVES — conntrack keeps an established flow alive — so the operator gets no signal at all
+until the next connection:
+
+```
+Connection closed by UNKNOWN port 65535
+Connection timed out during banner exchange
+```
+
+**Why it is worse than it looks.** The three-command plan is the same on a laptop and on a remote
+server, and the app has no way to tell those apart today. On the laptop it is correct and useful.
+On the server it costs the user their access, and the only recovery is physical or out-of-band —
+here it took the hypervisor's synthetic keyboard, and `Msvm_Keyboard.TypeText` was unusable on that
+guest (17 characters arrived as `dddmm`, twice), so the fix had to be typed as virtual key codes.
+A user with a rented VPS and no console has no equivalent.
+
+**Not a hypothetical severity.** Phase 6's privilege-transparency line already forbids the app from
+quietly taking root-equivalent access; taking away the operator's only route back in is the same
+class of harm and is not covered by that rule's wording.
+
+**What a fix has to decide, and none of it is obvious:**
+
+* whether to allow SSH before enabling. `ufw allow 22/tcp` is not right either — sshd may be on
+  another port, and reading `sshd_config` to find out is a new dependency on a file we do not own.
+  The honest version reads the port from the ACTIVE listener rather than from config.
+* whether to enable ufw at all when the app did not find it already enabled. Turning a firewall ON
+  is a change to the machine's posture that the user did not ask for; the ports could be opened and
+  the enable left to them.
+* whether "am I connected over the network right now?" is even answerable. `SSH_CONNECTION` in the
+  environment answers it for the common case and is absent under a GUI, which is exactly the split
+  that matters.
+
+Until it is decided, the step should refuse on a box where `SSH_CONNECTION` is set, and say why.
+
+**THE FIX WENT IN THE SAME NIGHT AND DID NOT CLOSE THIS, 2026-09-04.** An adversarial review
+reproduced the original lockout against the committed code on `m910q`, with no mutation, and the
+probe was re-derived a second time from that box's own `ss` output while writing this entry. The
+fix has two halves and only one of them holds:
+
+* **Withholding the enable — correct, and it is what closes the bug for every caller that exists
+  today.** `plan()` defaults to `enable_firewall=False`, and that branch drops every command
+  `_turns_ufw_on()` matches and returns `UFW_ENABLE_WITHHELD` on both `refusals` and `warnings`
+  (`networking.py:247-253` at `4c959d70`). `ufw allow` lands whether ufw is on or off, so nothing
+  the user asked for is lost.
+* **The guard behind `enable_firewall=True` — wrong, and wrong in a way that re-arms the exact
+  lockout.** `_sshd_listening_ports()` computes its second return value from *"did any socket carry
+  an owner"* rather than *"could this probe have seen a **root-owned** socket"*: `attributed = True`
+  is set on the first line that carries `users:(` at all — `networking.py:136-170` at `4c959d70`,
+  the assignment itself at `:158` — whatever owns it. One listener owned by an ordinary user is therefore enough to make an unprivileged probe
+  report "this table is readable, and there is no sshd on this box."
+
+**Measured on `m910q`, read-only, as `pk`.** `ss --no-header --listening --tcp --numeric
+--processes` there prints exactly one owner column — `LISTEN 0 10 *:3389 *:*
+users:(("gnome-remote-de",pid=1067,fd=8))` — and pid 1067 runs as `pk`, uid 1000. sshd's own
+`0.0.0.0:22` and `[::]:22` lines print with **no** owner column, because sshd is root's. Feeding
+that real output through the partition in `_sshd_listening_ports()` returns `ports = []` and
+`listeners_readable = True`. With `SSH_CONNECTION` unset — a GUI session, which is what this
+launcher is, and also `sudo`, `tmux` and any systemd unit — `_guard_the_way_back_in()` takes
+`if not asked.connected and asked.listeners_readable` (`networking.py:256-261` at `4c959d70`) and
+returns the three commands **unchanged**, with `refusals` and `warnings` both empty. That is `ufw --force
+enable` with only 3724 and 8085 allowed, and the same four empty reports this section opened with:
+`report.done` carrying the enable, `report.skipped`, `report.manual_steps`, `warnings` all empty.
+
+**The second route, which needs no ordinary-user listener at all.** A socket-activated sshd
+(`ssh.socket`, the default on current Ubuntu and Fedora) shows its listener owned by **systemd,
+pid 1** — `users:(("systemd",pid=1,fd=150))` — and `'"sshd'` does not match that, so even a probe
+running as **root** reads the box as having no sshd: `ports = ()` with `listeners_readable = True`,
+which is the same silent-enable branch. The shape is visible in this night's own gate capture,
+`pyplan/gates/7.1-ubuntu-2026-09-04-clean/gate71-realm-and-account.log`, where `sudo ss -lntp` on
+`yulon-ubuntu` prints `users:(("sshd",pid=17501,fd=3),("systemd",pid=1,fd=150))` — sshd there had
+already been triggered, so both halves appear; on a box where it has not been, only the systemd
+half is there.
+
+**Neither route reached a user.** `enable_firewall` occurs in exactly two files —
+`pylauncher/yulon/networking.py` and `pylauncher/tests/test_networking.py` — so no view, service or
+controller can pass `True` today, and every production call takes the withholding branch. That is
+what makes this a latent defect rather than a second outage, and it is also why the guard's tests
+could all pass while the guard was wrong: the tests are the only caller that drives it.
+
+**One claim filed with the fix is false, and was corrected beside the artifact.**
+`pyplan/gates/bug39-ssh-lockout/README.txt` and `ss-format-live.txt` both end with "if that token
+is ever wrong the probe finds no port, which lands on the REFUSE branch, not on a silent enable."
+It does not: the REFUSE branch is reached only when `listeners_readable` is False or
+`SSH_CONNECTION` is set. A wrong owner token with a readable table and no `SSH_CONNECTION` lands on
+the enable. `ss-format-live.txt`'s other generalisation — "as a normal user there is NO
+`users:((` column at all" — was measured on `dml-arch`, a WSL2 Arch box that happens to have zero
+user-owned listeners; `m910q` refutes it. See `pyplan/gates/bug39-ssh-lockout/CORRECTION-2026-09-04.md`.
+
+**What this section still wants**, stated as what was found rather than as a promise: a readability
+test that asks whether a **root-owned** socket was visible to this probe (an owner column on a
+socket the probe could not otherwise attribute), and an sshd match that survives socket activation.
+A repair was in flight in this tree the same night; this entry records the defect, not its outcome.
+Every line number above is pinned to `4c959d70` for that reason: `networking.py` was being edited
+while this was written, and by morning they will point at something else.
+
+**ROUND 7, 2026-09-05 — round 6's review, re-derived, two of the four repairs NOT closed on the
+shape they claimed. Still OPEN.** Round 6 (`9b0eb089`) closed the DefaultZone blocker and was
+reviewed as needing another pass. Four findings; all four hold, all four were re-derived on `m910q`
+against the committed round-6 module BEFORE anything was changed, and none of them is a new lockout.
+The evidence, command by command, is in `pyplan/gates/bug39-ssh-lockout/round7-2026-09-05.md`, whose
+head now carries the correction. Round 7's own review measured the two repairs below on real boxes
+and found them unproven; the word **Fixed** has been taken back from both, and what actually holds
+of each is recorded here and in the round-8 entry.
+
+* **A refusal named a cause that was not the cause.** `reads_this_machine()` collapsed three
+  questions into one tri-state, so `False` had one sentence and it had to name every way of being
+  False at once. Driving the round-6 module inside `sudo unshare --net` on m910q:
+  `/proc/self/ns/net` 4026533453 against pid 1's 4026531840 — the cause — while
+  `in_host_mount_namespace()` was `True` (self mnt 4026531841 == pid 1's) and
+  `os.path.isdir('/etc/ufw')` was `True`, and the refusal still read *"this process is in a
+  different mount namespace from pid 1, or the directory the firewall backend writes does not
+  exist"*. Both disjuncts false; the network namespace named nowhere. That is the same defect
+  `SshRoute.read_elsewhere` was added to fix, one cause over. **Changed, and measured only on the
+  shape round 6 named:** `where_the_reading_came_from()` returns the cause, `READ_ELSEWHERE` has one
+  sentence per cause, and every one of them ends with a REMEDY. Correct inside `sudo unshare --net`.
+  NOT correct one shape over — round 8 measured `docker run --network=host` and got
+  `other-network-namespace` for a process in pid 1's own network namespace; see the round-8 entry.
+* **The zone-breadth warning fired on every ordinary Linux box.** Round 6 gated it on
+  `len(zones) > 1`, and Docker — required by every Yu'lon Linux install — creates a firewalld zone
+  named `docker` bound to `docker0`. Round 6's own clean run on yulon-fedora read
+  `('FedoraWorkstation', 'docker')`. Rebuilt for real on 2026-09-05 in a `fedora:41` container on
+  m910q with a `docker` zone (`target: ACCEPT`, `interfaces: docker0`), `eth0` in
+  `FedoraWorkstation` and `DefaultZone=FedoraWorkstation`: the committed module told that
+  single-NIC box *"the game ports (3724, 8085) are allowed in `FedoraWorkstation`, `docker` …
+  including any of them that faces the internet"* and offered a `--remove-port` for Docker's own
+  zone. **NOT fixed by round 7, and the container that showed it fixed was the wrong shape:**
+  `machine_made_zones()` — a zone bound to at least one interface, no source, and nothing but
+  `docker0` / `br-*` / `veth*` (19 of m910q's 23 links, `ip -br link`, 2026-09-05) is not breadth —
+  is the right rule, but it required the zone to look machine-made in every listing that NAMED it,
+  and the stand-in container had its `docker` zone bound with `firewall-cmd --permanent
+  --zone=docker --add-interface=docker0`, a permanent binding real Docker never makes. On
+  yulon-fedora, with real subprocesses, round 7's own module still read `machine_made=()` and still
+  warned. Closed in round 8, on that box; see below.
+* **`reads_this_machine()` said "cheapest first" and asked the free question second.** Measured at
+  uid 1000 on m910q with `backend="firewalld"` (a box with no `/etc/firewalld`): one
+  `sudo -n stat -L -c %i /proc/1/ns/net` spent before the free, decisive `isdir` was reached.
+  After: 0 subprocesses.
+* **The breadth sentence said the ports "are allowed in" zones where nothing had put them.**
+  Measured with the reload refused and with the daemon stopped alike: permanent writes only, and
+  the same word. It now says WRITTEN unless the plan is about to reload a running daemon.
+
+**And the decision is a function now.** Every earlier round's guard was a branch inside
+`_guard_the_way_back_in()` that also edited the command list, so a test that wanted the DECISION had
+to build a whole plan — which is why the review could only reach these two states through `plan()`,
+and why they could not be varied one at a time. `decide_lockout(LockoutQuestion) -> LockoutVerdict`
+is that decision: one frozen input carrying BOTH firewalld default-zone readings and the zone shape,
+one reason token out of `LOCKOUT_REASONS`, a refusal that names a remedy, and the notes the user is
+owed whatever the verdict. Driven on m910q with only `zoning` changing: readings agree ->
+`ssh-preserved`, allowed, no note; readings diverge -> `ssh-preserved`, allowed, the breadth note
+naming `work`; the file unread -> `default-zone-unreadable`, refused; zones unread ->
+`zones-unreadable`, refused, a different sentence.
+
+Nine mutations, each killed by the test that owed it (table in the gate file); baseline and restore
+both `235 passed`. The production path is unchanged: m910q, ufw, `enable_firewall=True`, plan only —
+`ufw allow 3724/tcp`, `ufw allow 8085/tcp`, `ufw allow 22/tcp`, `ufw --force enable`, refusals 0.
+
+**ROUND 8, 2026-09-05 — round 7's blocker closed on the real Fedora box, and the refusal's cause set
+completed. Still OPEN, for the same reason as every round since 5.** Round 7's review measured its
+two headline repairs on real hardware and found neither proved. Everything below was measured by me
+on 2026-09-05: on **yulon-fedora** (Fedora 44, firewalld 2.4.0, Docker 29.7.2 build 1.fc44, started
+read-only for this and stopped afterwards) and on **m910q**. No firewall command was applied
+anywhere — every run is a read, a `plan()`, a `decide_lockout()` or a probe. Evidence, command by
+command, in `pyplan/gates/bug39-ssh-lockout/round8-2026-09-05.md`.
+
+* **The zone-breadth gate was inert on a real Docker box.** Real Docker binds its bridges at
+  RUNTIME only. On yulon-fedora: `firewall-cmd --get-zone-of-interface=docker0` -> `docker`,
+  `firewall-cmd --permanent --get-zone-of-interface=docker0` -> `no zone`. So `firewall-cmd
+  --permanent --list-all-zones` — which names all fifteen zones that exist there — names `docker`
+  with `interfaces:` and `sources:` both empty, while `firewall-cmd --get-active-zones` binds it to
+  `br-2ec281b6c57a br-85289dddc52d br-db9be8196055 br-eebe26d3f624 docker0`. Round 7 required every
+  listing that named a zone to make it look machine-made, so the empty permanent reading voted
+  against the runtime bridges. Round 7's module at `efc6d83f`, real subprocesses on that box:
+  `machine_made ()`, `decide_lockout` -> `ssh-preserved`, allowed, **notes 1**, and the note names
+  `docker`. **Fixed, measured on that box with real subprocesses:** a reading that binds neither an
+  interface nor a source is no information and is dropped before the vote, so a zone the permanent
+  listing only NAMES is judged on the listing that BINDS it — which is what
+  `machine_made_zones()`'s docstring had promised and no input could reach. After: `machine_made
+  ('docker',)`, `notes 0`, `write` and `permanent` and `runtime` unchanged
+  (`('FedoraWorkstation','docker')`, `('FedoraWorkstation',)`, `('FedoraWorkstation','docker')`). A
+  real NIC in ANY listing still disqualifies (the test that says so,
+  `test_a_zone_has_to_look_machine_made_in_every_listing_that_names_it`, is unchanged), and a
+  source-only reading still disqualifies too.
+* **The refusal named the network namespace for a process in pid 1's own network namespace.**
+  `_same_namespace_as_pid1()` returns False whenever `/proc/self/ns/pid` is not the initial pid
+  namespace, and round 7 turned that False into the CAUSE "other-network-namespace". Measured on
+  m910q inside `docker run --rm --network=host` of a fedora:41 image carrying `/etc/firewalld`,
+  round 7's module: self pid 4026533512, self net **4026531840 — the host's own**, self mnt
+  4026533509, and `where_the_reading_came_from('firewalld')` -> `other-network-namespace`, whose
+  remedy ends *"apply them with the firewall tool inside it"* — which writes the container's
+  `/etc/firewalld`, the outcome `other-mount-namespace` exists to prevent. **Fixed:**
+  `in_initial_pid_namespace()` is asked as its own free question, before either comparison, and it
+  gets its own cause, `other-pid-namespace`, whose remedy is to run the step from the host's shell
+  or to add `--pid=host` so the probe can answer. The SENTENCE round 8 wrote for that cause was true
+  of the container it was measured in — `/proc/1` there is the container's init, so both comparisons
+  compare a namespace with itself (self mnt 4026533509 == `/proc/1/ns/mnt` 4026533509, while the
+  host's is 4026531841) — and false of the other shape the same cause fires on; round 9 measured
+  that and rewrote it. After, all four shapes
+  measured on m910q with the fixed module: host -> `this-machine`; `sudo unshare --net` ->
+  `other-network-namespace` (round 6's case, unchanged); `sudo unshare --pid --fork` ->
+  `other-pid-namespace`; `docker run --network=host` -> `other-pid-namespace`; `docker run
+  --privileged --pid=host --network=host` -> `other-mount-namespace`, which is the remedy's own
+  promise, checked.
+* **The test fixture cited a command the module never runs.** `_YULON_FEDORA_LISTING` was a
+  hand-written string documented as "`firewall-cmd --list-all-zones` form"; the argvs
+  `detect_firewalld_zones()` actually ran on yulon-fedora, recorded by wrapping `runner.run`, are
+  `firewall-cmd --state`, `firewall-cmd --permanent --list-all-zones`, `firewall-cmd
+  --get-active-zones` and `cat /etc/firewalld/firewalld.conf`. It is now two fixtures,
+  `_YULON_FEDORA_PERMANENT` and `_YULON_FEDORA_ACTIVE`, copied out of that box's own output, and the
+  test derives the zoning through `detect_firewalld_zones()` instead of hand-feeding
+  `machine_made=('docker',)` past it.
+* **The stopped-daemon branch.** `machine_made` there is computed from `firewall-offline-cmd
+  --list-all-zones`, the permanent config. On yulon-fedora that day it had nothing to do: all
+  fifteen zones came back with both fields empty, `bound_only=True` kept only
+  `('FedoraWorkstation',)`, and an unbound `docker` zone did not reach `permanent` or `write` for a
+  breadth note to name. Round 8 wrote that up as **"can never"**; round 9 refuted the generalisation
+  on the same listing and rewrote the comment. One sentence in the code, no change to the path.
+
+Six mutations, one at a time, `__pycache__` purged on both sides of each and the substitution
+asserted present-on-disk and the original absent before every run; baseline and restore both
+`237 passed`, 0 survivors. Fedora is not called the "flagship platform" any more: the owner's order
+is Ubuntu -> Fedora -> Arch -> Windows, and this defect fires on every Linux box with Docker.
+
+**ROUND 9, 2026-09-05 — no behaviour changed; four sentences that were true of one shape and false
+of another were rewritten, and one of them got a test. Still OPEN.** Round 8's own review and its
+meta both said the two behavioural repairs held on real boxes and that what blocked the merge was
+text. The lane was rebased onto `c6b28547` (`ee361035` -> `ef022b3a` -> `cd827c0f`, clean, no
+conflicts) and everything below was measured by me on 2026-09-05: namespaces on **m910q**, firewalld
+listings read-only on **yulon-fedora** (Fedora 44, already Running when I arrived; left Running).
+No firewall command was applied anywhere. Evidence, command by command, in
+`pyplan/gates/bug39-ssh-lockout/round9-2026-09-05.md`.
+
+* **`other-pid-namespace` claimed `/proc/1` was the namespace's own init, and half the time it is
+  this machine's `systemd`.** Both spellings on m910q, one minute apart, `/proc/1/comm` read in
+  each: `sudo unshare --pid --fork` gave self `4026533509 / 4026531840 / 4026531841` with `/proc/1`
+  = `systemd` and pid 1's namespaces `4026531836 / 4026531840 / 4026531841` — byte-identical to the
+  host's own reading; `sudo unshare --pid --fork --mount-proc` gave self `4026533510 / 4026531840 /
+  4026533509` with `/proc/1` = the probe and pid 1's namespaces its own. `--mount-proc` is what
+  decides it, and `/proc/self/ns/pid` — the only read the module makes — is non-initial in both.
+  **Rewritten, not re-implemented:** the sentence now says the process is in a pid namespace of its
+  own, that whether `/proc/1` is this machine's init or the namespace's cannot be told without
+  privilege, gives both measured shapes, and says outright that in the second the refusal is a false
+  one. The remedy is unchanged and is correct in both. The same false precondition was in
+  `in_host_network_namespace()`'s docstring, in `in_initial_pid_namespace()`'s, and in
+  `where_the_reading_came_from()`'s second bullet; all three now say "may be", with the measurement.
+* **The separating read was costed and declined.** `/proc/1/ns/pid` would tell the two shapes apart.
+  At uid 1000 on m910q, `os.stat` raised `EACCES` for all three of `/proc/1/ns/{pid,net,mnt}` and
+  only `sudo -n stat -L -c %i /proc/1/ns/pid` answered (`4026531836`) — so it costs the same
+  elevation fallback the network and mount questions already pay, and answers `"unknown"` with no
+  prefix. It buys one shape (`unshare --pid --fork` from a shell, which no container runtime
+  measured here produces, all of them remounting `/proc`), and it would trade a refusal carrying an
+  actionable remedy for `"unknown"`, whose remedy is "give the launcher sudo". Declined, with the
+  numbers, in `in_initial_pid_namespace()`'s docstring.
+  `test_the_pid_question_refuses_both_shapes_without_reading_pid_1` holds the decision: it drives
+  both signatures through `where_the_reading_came_from()`, hands the fake `os.stat` a truthful
+  `/proc/1/ns/pid` answer, and fails if anyone spends it. Two mutations, killed: `if initial is
+  False:` -> `if initial is False and os.stat("/proc/1/ns/pid").st_ino != _INITIAL_PID_NAMESPACE_INO:`
+  reddened `assert … == "other-pid-namespace"` with `'other-network-namespace'`, and
+  `os.stat("/proc/self/ns/pid")` -> `os.stat("/proc/1/ns/pid")` inside `in_initial_pid_namespace()`
+  reddened `assert networking.in_initial_pid_namespace() is False` with `assert True is False`.
+* **Row five of the `_INITIAL_PID_NAMESPACE_INO` table was labelled with a command that does not
+  produce it.** The row read `m910q, unshare --net --pid --fork: 4026533089 4026533090 4026533090` —
+  pid 1's `ns/net` equal to the new net namespace. Re-measured: that spelling gives self
+  `4026533509 / 4026533510 / 4026531841` with pid 1's `ns/net` `4026531840`, the HOST's, and
+  `/proc/1` = `systemd`; only `unshare --net --pid --fork --mount-proc` gives self `4026533621 /
+  4026533622` with pid 1's `ns/net` `4026533622`. The table is now nine rows, every m910q row read
+  in this sitting, each labelled by the exact command, with a `/proc/1` column — the column that
+  makes the difference visible. `docker run --rm busybox` reproduced its row's shape (self
+  `4026533512 / 4026533514`, pid 1's `ns/net` `4026533514`, `/proc/1` = `sh`).
+* **"`machine_made` … can never have anything to do" in the stopped-daemon branch.** Refuted on that
+  box's own bytes. yulon-fedora's `firewall-offline-cmd --list-all-zones` was byte-identical that
+  day to its `--permanent --list-all-zones` (257 lines, `md5 d05ef29403b14511b0f1f3541336efaf`).
+  As-is, `machine_made_zones(offline)` = `()` and `zones_from_listing(offline, bound_only=True)` =
+  `('FedoraWorkstation',)`. Changing exactly one field in those 257 lines — the `docker` block's
+  `interfaces: ` to `interfaces: docker0`, the anchor asserted to occur once, which is what
+  `firewall-cmd --permanent --zone=docker --add-interface=docker0` writes — gave `machine_made`
+  `('docker',)` and `detect_firewalld_zones(daemon="stopped")` `write` and `permanent`
+  `('FedoraWorkstation', 'docker')`. The code was right; the comment was a guarantee. It now records
+  both readings.
+* **"…which is the default zone's case" in `machine_made_zones()`'s docstring.** On the reading
+  `detect_firewalld_zones()` actually builds, the default zone enters the vote and loses on the
+  rule, not on absence: `machine_made_zones(permanent)` = `()`, `machine_made_zones(active)` =
+  `('docker',)`, `machine_made_zones(permanent, active)` = `('docker',)`, and `_zone_bindings` of
+  the active listing binds `FedoraWorkstation` to `('eth0',)`. Rewritten to name the thirteen zones
+  of fifteen that neither listing binds, which is the case that sentence actually describes.
+* **Two record repairs.** `_YULON_FEDORA_ACTIVE`'s docstring said its bridge list was "copied"; the
+  order is per-boot (`br-2ec281b6c57a br-85289dddc52d br-db9be8196055 br-eebe26d3f624 docker0` in
+  the fixture, `br-db9be8196055 br-eebe26d3f624 br-2ec281b6c57a br-85289dddc52d docker0` from the
+  same command on the same box at 15:12 UTC after a reboot), and the docstring now says so and says
+  nothing rides on it. The round-8 meta also flagged `route: SshRoute(connected=True, …,
+  listeners_readable=True)` in round 8's gate file as unreproducible under `sudo -n`; measured on
+  m910q, that pair is not a contradiction but an environment: as the ssh user, `connected` True and
+  `listeners_readable` False; under `sudo -n`, False and True; under `sudo -n -E`, True and True.
+  Round 8's probe ran python as the ssh user and prefixed each command with `sudo -n`, which is the
+  first field of each pair — the line stands, and round 9's gate file records why.
+
+Two mutations, one at a time, in my own copy on m910q (`~/yulon-runs/fix9-bug39`, a `--shared`
+clone, venv symlinked, deleted afterwards): each anchor asserted to occur exactly once in the file
+bytes, the substitution asserted present-on-disk and the original absent before the run,
+`__pycache__` purged on both sides of every run, and the file byte-compared to the original after
+each restore. Baseline `238 passed`, restore `238 passed`, 0 survivors. **The guard round 9 printed
+for those restores — `sha256 34f37a78…`, 184325 bytes, CRLF — named no artefact of this commit.
+Round 9's meta traced those bytes to `wt-bug39`'s Windows working copy, `scp`'d over the Linux
+checkout before two further edits and the commit, from the fix agent's own journal — not re-derived
+here; what round 10 measured is only that no artefact of `4fb61ea9` has that size or hash. Round 10 re-ran both mutations on the
+committed blob and they are re-recorded below.** `tests/test_networking.py` went 237 -> 238: round 9
+added
+`test_the_pid_question_refuses_both_shapes_without_reading_pid_1` and removed none, and changed no
+existing test's assertions — only `_namespaced()` gained a `pid1_pid` parameter and an answer for
+`/proc/1/ns/pid` that nothing reads.
+
+**ROUND 10, 2026-09-05 — text closure. No behaviour changed; five sentences did, and one guard was
+re-run against the bytes it claims to be about. Still OPEN.** Round 9's review and meta both found
+the behaviour measured-correct in both pid shapes and blocked the merge on prose. Everything below
+was measured by me on 2026-09-05 on **m910q** (namespaces, mutations, `sudo` environment) and on
+**yulon-fedora** (`journalctl`, read-only); no firewall command was applied anywhere, no VM was
+started or stopped, nothing ran on the laptop. Evidence, command by command, in
+`pyplan/gates/bug39-ssh-lockout/round10-2026-09-05.md`.
+
+* **"the two signatures differ in every `/proc/1` answer" was false in the fixture and on the box.**
+  `_namespaced()` hard-codes `"/proc/1/ns/net": _HOST_NET_NS`, so no parameter can vary it. Driving
+  the new test's two signatures through the fixture printed `/proc/1/ns/pid` 4026531836 vs
+  4026533510 DIFFER, `/proc/1/ns/net` 4026531840 vs 4026531840 **SAME**, `/proc/1/ns/mnt`
+  4026531841 vs 4026533509 DIFFER; the box agrees — `sudo -n unshare --pid --fork` and the same with
+  `--mount-proc`, re-probed at 17:05 UTC, both read pid 1's `ns/net` as the host's 4026531840. The
+  docstring now says TWO of the three, names which and with what values, and says `/proc/1/ns/net`
+  is the host's in both. Its closing claim — that this test is what says so if anyone spends the
+  read — is corrected in the same breath: both round-10 mutations reddened
+  `test_the_cause_is_the_namespace_that_actually_differs` alongside it, and the docstring now says
+  the duplication is deliberate.
+* **The mutation guard named a file no commit contains.** Round 9 recorded `sha256 34f37a78…,
+  184325 bytes, CRLF` as the restore guard; `git show 4fb61ea9:pylauncher/yulon/networking.py` is
+  **180895 bytes, LF, `sha256 bfc196bf30…`**, `git hash-object b8268a01873209479cb5023452d171cbdd9c7215`,
+  and the same blob converted to CRLF is 184343 bytes (`| python -c "len(b.replace(b'\n', b'\r\n'))"`)
+  — 184325 is neither. Both mutations were re-run on the
+  committed blob in a fresh `git clone --shared` checkout on m910q (`~/yulon-runs/fix10-bug39`,
+  deleted afterwards), the guard printed before, between and after each run: baseline `238 passed`,
+  M1 `2 failed, 236 passed`, M2 `2 failed, 236 passed`, restore `238 passed`, and the file's sha256
+  and blob id back to `bfc196bf…` / `b8268a01…` after each. Driver and full transcript committed as
+  `mutations-round10.py` / `mutations-round10.txt`.
+* **"`/proc/self/ns/pid` reads the same in both" contradicted the table two lines above it.** The
+  rows print 4026533509 and 4026533621 for the two `--net --pid --fork` spellings; a re-run of that
+  pair at 17:05 UTC read 4026533620 and 4026533510, different again. The sentence now says what is true and what
+  the module actually asks: a NON-INITIAL inode in both, and the only question asked of it is
+  whether it is the initial one.
+* **"The two numbers above are equal, and `_NETHOST_MNT_NS` is a third" was made stale by round 9's
+  own insertion.** Round 9 put `_UNSHARE_MOUNTPROC_PID_NS = 4026533510` and
+  `_UNSHARE_MOUNTPROC_MNT_NS = 4026533509` between the two constants that sentence counted.
+  Enumerated in the checkout rather than read: four constants carry 4026533509
+  (`_NETHOST_MNT_NS`, `_UNSHARE_PID_NS`, `_UNSHARE_MOUNTPROC_MNT_NS`, `_UNSHARE_NET_NS`) and one
+  carries 4026533510 (`_UNSHARE_MOUNTPROC_PID_NS`). The docstring names all five.
+* **Round 7's qualifier is back in the OPEN paragraph below**, and the live apply this lane ran on a
+  real Fedora box in round 6 is now recorded rather than alluded to (round 10's review-of-review
+  then found an earlier one in boot `-5`, 2026-09-04 23:32-23:35 UTC, without a failsafe — the
+  Fedora record's addendum): `sudo -n journalctl _COMM=sudo
+  --since today` on yulon-fedora lists **39 firewall writes at 06:00:22-06:07:39 UTC** in boot `-4`
+  — two `systemd-run --on-active=420 --unit=b39-failsafe[2] systemctl stop firewalld` failsafes,
+  both cancelled before firing, two identical `--add-port` / `--remove-port` cycles over
+  `FedoraWorkstation` and `docker`, and a closing `--add-port=1025-65535/tcp` that puts Fedora's
+  stock range back. The box now reads `1025-65535/tcp 1025-65535/udp` permanent and runtime, no
+  ports in `docker`, no `b39-failsafe*` units left. Those writes close three minutes before round 6's own
+  commit `ee361035` (`2026-09-05T08:10:40+02:00` = 06:10:40 UTC), which is what dates them. Full journal and current state in
+  `pyplan/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md`.
+* **The one inherited causal claim in the (5c) repair is now measured.** "`connected` follows
+  `SSH_CONNECTION`, which `sudo` strips" was carried from round 8's write-up and re-derived by
+  nobody. On m910q: `env | grep -cE '^SSH_(CONNECTION|CLIENT|TTY)='` is **2** as the ssh user, **0**
+  under `sudo -n`, **2** under `sudo -n -E`, and `/etc/sudoers:9` is `Defaults env_reset`. The
+  claim holds.
+
+What keeps this section OPEN is what round 5 recorded and rounds 7, 8, 9 and 10 did not change:
+`enable_firewall` occurs in exactly two files of code — `pylauncher/yulon/networking.py` and
+`pylauncher/tests/test_networking.py` — and otherwise only in this checklist and four records under
+`pyplan/gates/bug39-ssh-lockout/` (`grep -rln enable_firewall . --exclude-dir=.git`, run at
+`4fb61ea9`, seven files, no view, no service, no controller). So nothing the GUI owns can ask for
+the enable, and the owner's "click a button and the server's ports get forwarded" still ends at a
+plan the GUI cannot drive. The RELOAD half is on
+the path users hit today and is guarded; the ENABLE half is what must already be true before a
+control for it exists. Nothing in rounds 7, 8, 9 or 10 ran `apply()` on any box. Round 7's own
+scoping of the neighbouring claim is restored here, because round 9 dropped it: no firewall command
+was applied on any box reached over ssh in those rounds, and the only `firewall-cmd` writes that
+executed were **inside a container** — container `b39r7` on m910q, whose `docker` zone round 7 bound
+by hand with `firewall-cmd --permanent --zone=docker --add-interface=docker0`
+(`pyplan/gates/bug39-ssh-lockout/round7-2026-09-05.md:8-9` and `:29-31`). Rounds 8, 9 and 10 ran
+listings and probes only. Earlier than that the lane did apply, on a real box, twice: round 6's
+clean run wrote 39 firewall commands to **yulon-fedora** at 06:00-06:08 UTC on 2026-09-05 and put
+the box back, and an unrecorded run the night before (boot `-5`, 2026-09-04 23:32-23:35 UTC, 24
+writes, no failsafe) did the same — both recorded, with the journal, in
+`pyplan/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md` and its addendum.
+
+**Stopped at round 10 by owner decision, 2026-09-05 ("stop at 10"), and merged.** What is
+measured-closed at `e9d2e1a0`: the guard ALLOWs on the production path with the ssh route preserved
+(round 5 onward); the `docker` zone is judged machine-made on yulon-fedora's real listings and the
+breadth NOTE no longer fires there (round 8, re-run with real subprocesses by round 8's meta);
+the namespace cause names the namespace that actually differs, in both `unshare` shapes (round 9,
+reproduced by rounds 9 and 10); every 'Fixed' claim measured on a stand-in of the wrong shape was
+retracted (round 8). What is NOT done, and stays open under this heading: the LAN button as the
+owner wants it — "click a button and the server's ports get forwarded" — has still never been
+pressed on a real remote Linux box by the app; the two measured lockout routes of round 5 are
+guarded, not exercised end to end. Round 10's remaining text findings were closed by hand at the
+merge (this paragraph and the Fedora record's addendum); their measurements are the round-10
+review-of-review's, quoted with their commands, not re-run by the merger except the `chmod`.
+
+**What is measured-closed, and what is not**, in past tense with the commit each was closed at.
+Closed, each on the shape it names: the DefaultZone reading and the enable being withheld by
+default (`9b0eb089`, rebased to `e72bc758` and again to `ee361035`, round 6 — `plan()` takes
+`enable_firewall: bool = False` at `networking.py:2956`, and its docstring at `:2967` calls it "the
+one knob that can turn a firewall ON"). The refusal that named a cause that was not the cause (`ef022b3a`, round 7; correct
+inside `sudo unshare --net`, and corrected one shape over at `cd827c0f`, round 8, after `docker run
+--network=host` was measured). The zone-breadth warning that fired on every Docker box (`cd827c0f`,
+on yulon-fedora with real subprocesses, after round 7's container stand-in had bound its `docker`
+zone by hand and so proved nothing about a real box). The claim that `/proc/1` in a non-initial pid
+namespace is that namespace's init (`4fb61ea9`, round 9), where the separating read
+`/proc/1/ns/pid` was costed at uid 1000 — `EACCES` unprivileged, answered only under `sudo -n` —
+and declined on purpose. Round 10 changed no behaviour at all: it corrected five sentences and
+re-ran round 9's two mutations against the committed blob, which kill.
+NOT closed, and the reason this section is still OPEN: the LAN button. What the owner asked for is
+"click a button and the ports get forwarded", **LAN only** — and `enable_firewall` is a `plan()`
+keyword with no caller in any view, service or controller (the seven-file `grep` above), so there is
+no button to click and nothing to wire it to; the reload half is what users press today and it is
+guarded. **Not measured by any round so far:** what a LAN press does end to end on a box that then
+has the ports forwarded — every round from 7 on has been listings, probes and stand-ins, by the
+standing rule that bars applying a firewall change on a box reached over ssh.
+
+### 40. Abandoning `logs_source()` aborts the interpreter at exit — 2026-09-04, **CLOSED 2026-09-05 at `d2b963d5`**
+
+**What was done.** `runner.stream()` is now a plain function that builds the generator, registers it
+weakly in `_LIVE_STREAMS` with a holder for the child `Popen`, and returns it; an `atexit` hook,
+`_close_abandoned_streams()`, closes whatever is still open at exit. `atexit` runs BEFORE
+finalisation, so the generator's own `finally` can still terminate the child and join the reader —
+which is precisely what it could not do when the shutdown garbage collector reached it. The
+registration is why `stream()` is no longer a generator function; the body moved to `_stream_lines()`
+so no caller can skip it, and the laziness that change threatens is asserted rather than asserted-in-a-comment
+by `test_stream_registers_at_the_call_and_starts_no_process_until_the_first_next`.
+
+**The second shape, which is the app's own.** A generator another thread is RUNNING refuses
+`close()` with `ValueError: generator already executing` — `native._pump()`'s worker sitting inside
+`docker.run_attached()` inside `stream()`. That is logged at debug and the CHILD is ended directly
+instead, because a frame that is executing cannot be entered from here; the thread that owns it then
+leaves its `readline()` on EOF and runs the `finally` itself. Without that branch the driver exited
+**0** — no abort, nothing contended — and left its grandchild alive with **PPID 1**.
+
+**Re-derived on m910q 2026-09-05, on a copy of the tree at `6546b190`, at loadavg ~3 with a live
+`mangosd` beside it.** GREEN: sixty consecutive runs of
+`pytest tests/test_runner.py -k "worker_thread or abort_the_interpreter"` -> **`nonzero=0 fatal=0
+runs=60`**. RED, with `atexit.register(_close_abandoned_streams)` commented out and nothing else
+changed: **2 failed** on the first run, both shapes at once —
+
+```
+AssertionError: Fatal Python error: _enter_buffered_busy: could not acquire lock for
+  <_io.BufferedReader name=5> at interpreter shutdown, possibly due to daemon threads
+AssertionError: pid 2193871 outlived the driver
+```
+
+The 60-run count is not ceremony: this test's own driver had a 2-in-60 flake of its own (runs 16 and
+54, `nonzero=2 fatal=2`, the same `_enter_buffered_busy` abort raised by the TEST rather than by
+`runner`, because a bare `for _line in gen` let the terminate's `CalledProcessError` escape into
+`threading.excepthook` mid-finalisation). The driver's `work()` catches `BaseException` for that
+reason, and a 3%-of-60 flake needs a sample to say it is gone.
+
+**Four tests hold it**, each a different half:
+`test_abandoning_a_stream_without_closing_it_does_not_abort_the_interpreter` (the abort),
+`test_the_exit_hook_ends_the_child_of_a_stream_another_thread_is_inside` (the refusal),
+`test_a_stream_a_worker_thread_is_running_at_exit_leaves_no_child_behind` (the end-to-end orphan,
+`/proc/<pid>` on Linux), and `test_the_exit_hook_goes_on_past_a_stream_whose_close_raises` (one bad
+generator must not stop the ones after it).
+
+**Two alternatives are rejected in writing rather than left for the next reader to retry**, both
+measured on the same box and day: not closing `proc.stderr` while the reader is alive moves the
+abort rather than removing it (the `BufferedReader`'s deallocation takes the same lock — still 134,
+still `_enter_buffered_busy`), and making the reader non-daemon so `threading._shutdown()` joins it
+first turns the abort into a launcher that will not close, because nothing has ended the child at
+that point.
+
+---
+
+**The original entry, unchanged below.**
+
+Found by 7.10's sweep. A `logs_source()` generator that is dropped without being closed makes the
+interpreter abort at shutdown — SIGABRT, exit 134 — from inside `runner.stream()`'s `finally`.
+Pre-existing and not Phase 7's doing: both functions are byte-identical to their 6.x versions.
+Evidence in `pyplan/gates/7.10-ubuntu-2026-09-04/`.
+
+It matters because the Server tab's log panel is exactly a caller that starts a stream and may stop
+caring about it, and an abort at exit is the kind of thing that looks like "the app crashed on
+close" in a bug report and gets attributed to whatever the user did last.
+
+### 41. A realm cannot be set to loopback on purpose — 2026-09-05, OPEN
+
+Found by the owner, reading Appendix C's reword: *"but make it possible to set it to 127.0.0.1"*.
+Not a regression — the behaviour is deliberate and argued — but the deliberate half has no way out.
+
+`ready`'s realm step (`catalog/native.py:1969-2005`) rewrites the realmlist row unless
+`networking.advertisable()` accepts every column, and `advertisable()` refuses the loopback by
+design (§35: a realm advertising `127.0.0.1` tells every client the world server is on the CLIENT's
+machine, and the client hangs at "Connecting"). So the value a §35 fix exists to prevent by accident
+is also unreachable on purpose: set `127.0.0.1` by hand and the next install press or resume
+overwrites it, printing "players on other machines can reach this server".
+
+`networking.Mode` is `Literal["lan", "internet"]`. The missing third mode is the small half. The
+load-bearing half is that the choice must be REMEMBERED: `ready` has to distinguish a row that is
+loopback because nobody set it from one that is loopback because the owner chose it, and only
+overwrite the first. That is recorded intent, not a value read back out of the database.
+
+- [ ] A mode that writes the loopback, reachable from the Networking tab.
+- [ ] Intent persisted where a resume can read it, and `ready` reading it before it decides.
+- [ ] The gate: choose loopback through the app, press Install again on the finished install, and the
+      row is still `127.0.0.1` with a log line saying why it was left alone — while a server whose
+      loopback was never chosen still ends up advertising a reachable address.
+
+Deliberately not started on 2026-09-05: `networking.py` was mid-flight in §39 round 5 and
+`catalog/native.py` in the §40/§21 lane, and two collisions that night came from editing a file
+another lane owned. Decision recorded in `phase7-decisions.md` Appendix D.
+
+### 42. A headless install writes no log at all — 2026-09-05, FIXED 2026-09-05 on `lane/headlesslog` (merged at `9254b60a`), **CLOSED on the Windows TBC second press**
+
+Found while trying to satisfy a 7.1 clause that asked for a count out of `yulon.log`, on a box that
+had just completed a full 7.2 install. There is no such file, and the reason is in the code rather
+than the box.
+
+`log.configure(config_dir=...)` is what opens the rotating `yulon.log`. Measured 2026-09-05:
+`grep -c 'configure(config_dir' main.py` -> 1, `grep -c 'configure(' yulon/install_wiring.py` -> 0.
+So the GUI writes a log and the CLI writes none, and `~/.local/share/yulon/` does not exist on
+yulon-ubuntu after press 1, press 2, a SIGKILL and press 3 (the whole 7.2 gate).
+
+**Why it matters beyond the gate.** The CLI is what every headless install runs — the gate boxes, a
+Steam Deck started from a shortcut, anyone who scripts an install. When one of those fails, the only
+record is whatever the terminal still holds, and a user who closes it has nothing to send. The GUI's
+own `file_log_problem()` exists precisely because a missing log is worth telling the user about; the
+CLI never even tries.
+
+It also quietly falsified a gate criterion for six hours: 7.1's realm clause, reworded at 05:00 that
+morning, asked for `ready`'s UPDATE "counted in `yulon.log`" — a measurement no headless run could
+ever produce. Corrected the same day to read the database and the transcript instead.
+
+- [x] `install_wiring` configures file logging the way `main.py` does, or says in its own words why a
+      CLI install deliberately does not. — `install_wiring.py` calls `configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)` after `parse_args`, with the argument for the level and for not adding a second reporter written beside it (`lane/headlesslog`, merged `9254b60a`).
+- [x] A test that fails if one entry point writes a log and the other does not. — `tests/test_install_wiring.py::test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind` runs every module the app can be started as and fails on the disagreement; `test_the_harness_puts_the_stage_lines_it_streamed_into_the_log` pins the stage lines.
+- [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `pyplan/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
+
+### 43. `keep_awake()` refuses the headless harness's own thread — 2026-09-05, OPEN
+
+Found in the first headless log §42 produced, `yulon-win11-gate` 2026-09-05 05:12:16 box-local,
+the TBC second press at `745307ad`:
+
+    WARNING [yulon.catalog.native] not holding this machine awake: keep_awake() must run on the
+    worker thread doing the install: Windows scopes the assertion to the thread that set it, so
+    holding it on the GUI thread would claim a guarantee the install does not have.
+
+The guard is right for the app: `SetThreadExecutionState` holds only while the calling thread
+lives, so the GUI thread taking it on a worker's behalf would promise nothing. `install_wiring`
+has no GUI thread. Its main thread IS the thread doing the install and lives exactly as long, so
+the assertion would hold there — and `platform.keep_awake()` refuses the main thread by identity
+rather than by role (`native.py` `_held_awake()` catches the `RuntimeError` and warns, by design:
+"wrong to abort a command-line run over"). The install was not affected on a VM that never
+sleeps; a laptop running a scripted Windows install is not held awake, and the log says so once.
+
+- [ ] `keep_awake()` decides by whether the calling thread is the one doing the install, not by
+      whether it is the main thread — or the harness runs the engine on a worker of its own and
+      says why.
+- [ ] A test that drives `install_wiring` on Windows (`platform.detect` pinned) and asserts the
+      assertion was taken, and one that still refuses the GUI thread's claim on a worker's behalf.
+- [ ] The gate: a headless run on `yulon-win11-gate` whose `yulon.log` carries no `not holding
+      this machine awake` line.

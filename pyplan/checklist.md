@@ -45,7 +45,7 @@
 - [x] 3.2 `installer.py` — orchestration (shells out to existing scripts) — **live Linux run passed 2026-08-21 on a fresh Ubuntu 24.04 VM (see Cross-cutting → Phase 3 live gate)**
 - [x] 3.3 Silent Docker/WSL provisioning stubs wired in (graceful failure until Phase 5)
 - [x] 3.4 Networking auto-setup (LAN + internet play; firewall helpers, realmlist updater, router-step prompts) — README §13
-- [x] **Phase 3 exit criteria met** (verified via CLI/test harness — no UI yet): `python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots` on a fresh Ubuntu 24.04 VM (12 vCPU, Docker provided by `ensure_docker()`) answered every prompt, built AzerothCore + playerbots (~11 min compile), and ended with `install of wow-wotlk finished` and all three containers up (2026-08-21 00:27)
+- [x] **Phase 3 exit criteria met** (verified via CLI/test harness — no UI yet): the CLI harness, spelled `python -m yulon.catalog.installer wow-wotlk --server-dir ~/wow-server-playerbots` on the day and `python -m yulon.install_wiring wow-wotlk --server-dir ~/wow-server-playerbots` today — **do not copy the old spelling out of this line**: `yulon/catalog/installer.py` has carried no `__main__` since 7.2, so it exits 0 having installed nothing (checked 2026-09-02 at `f6ed1b9a`) — was run on a fresh Ubuntu 24.04 VM (12 vCPU, Docker provided by `ensure_docker()`): it answered every prompt, built AzerothCore + playerbots (~11 min compile), and ended with `install of wow-wotlk finished` and all three containers up (2026-08-21 00:27)
 
 ---
 
@@ -172,7 +172,7 @@
   - [ ] **First Darwin interpreter run — partial, on a corporate machine (Baerthe, 2026-08-24).** The cheap no-Docker half of this box was run on a Mac that is a VPN/VPS corporate setup with **no `127.0.0.1` on `lo0`** (`ifconfig` shows `10.10.10.1/32`, `/etc/hosts` names `127.0.0.1` but `ping` gets 100% loss) and **no Docker** (`docker` not found, no `/Applications/Docker.app`). Result: `pytest` **784 passed, 2 skipped, 4 errors** (the run predates this session's two new privilege-transparency tests and the `console.py` creationflags fix, which brought the suite to **786 passed**); `mypy`, `ruff`, `black --check` all green. The 4 errors are all in `test_download.py` (the self-signed-TLS fixtures bind `127.0.0.1`, `OSError: Errno 49 Can't assign requested address`) plus `tests/integration/conftest.py` crashing at collection for the same reason — environmental, not code defects, and not to be generalized from: they are symptoms of this machine's loopback config. `platform.detect()` → `macos`, `config_dir()` → `~/Library/Application Support/yulon`, and `runner.pty_supported()` → `True` (the GM console is a macOS feature, confirmed on a Darwin interpreter). **Unticked**: the box asks for green *on macOS*, and neither the suite here (4 env-dependent errors) nor this machine (no Docker) can close it — the full `pytest` + live half is re-run on a Docker-equipped home Mac.
 - [ ] 6.5 Full WotLK feature coverage on Linux, macOS, and native Windows (the Phase 6 exit gate):
   - [ ] Install (zero shell interaction, all three platforms) — incl. staged/resumable install, preflight floors refusing-not-warning, `keep_awake()`, honest cancel copy
-    - [x] **macOS, real Docker Desktop, cold start to running server (2026-08-29)** — the engine's first live gate anywhere on Apple silicon, driven through `python -m yulon.catalog.installer wow-wotlk` (the CLI harness, which needed its own fix first: it never wired the `import_probe`/`reset_unfinished` seams `main.py`'s GUI factory wires, so a native install of any `import_service` entry — WoW WotLK on every platform — refused instantly at preflight with "this installer was built without a way to check it"; fixed to mirror `main.py::make_installer`). Machine: Apple M4 Pro, 12 CPU, 25.7 GB RAM, Docker Desktop 4.87.0 (engine 29.7.2). Preflight warned (not refused) on the CPU/memory floor — Docker's VM had 7.7 GB against 12 host CPUs, "13 parallel compilers, ~3 affordable" — and the build still completed. **Full result: `ac-db-import` Exited (0)**, all three containers up, 3724/8085 listening, schemas at **22 / 111 / 315 / 30** tables — byte-identical to the Ubuntu, Fedora and Windows gates. Compile (AzerothCore + playerbots, 1829 objects) took roughly 15 minutes wall-clock. **One real bug found and fixed on the way**: the containerized-git clone hit the exact race `git.py`'s own docstring had left as "still open" — `Cloning into '.'...` then `/git/.git: No such file or directory` against a directory `mkdir`'d immediately before the bind mount. It self-healed via the existing host-git fallback (Xcode CLT was present), but a dozen manual repeats of the identical command all succeeded, confirming a mount-propagation race rather than a real failure — so `ContainerGit.clone()` now retries the initial clone once on that exact signature (`_is_fresh_mount_race()`) before falling back to host git, which matters for a Mac *without* Xcode's Command Line Tools, the whole reason `ContainerGit` exists.
+    - [x] **macOS, real Docker Desktop, cold start to running server (2026-08-29)** — the engine's first live gate anywhere on Apple silicon, driven through the CLI harness — `python -m yulon.catalog.installer wow-wotlk` as it was spelled that day, `python -m yulon.install_wiring wow-wotlk` today, the old module having had no `__main__` since 7.2. The harness needed its own fix first — it never wired the `import_probe`/`reset_unfinished` seams `main.py`'s GUI factory wires, so a native install of any `import_service` entry — WoW WotLK on every platform — refused instantly at preflight with "this installer was built without a way to check it"; fixed to mirror `main.py::make_installer`. Machine: Apple M4 Pro, 12 CPU, 25.7 GB RAM, Docker Desktop 4.87.0 (engine 29.7.2). Preflight warned (not refused) on the CPU/memory floor — Docker's VM had 7.7 GB against 12 host CPUs, "13 parallel compilers, ~3 affordable" — and the build still completed. **Full result: `ac-db-import` Exited (0)**, all three containers up, 3724/8085 listening, schemas at **22 / 111 / 315 / 30** tables — byte-identical to the Ubuntu, Fedora and Windows gates. Compile (AzerothCore + playerbots, 1829 objects) took roughly 15 minutes wall-clock. **One real bug found and fixed on the way**: the containerized-git clone hit the exact race `git.py`'s own docstring had left as "still open" — `Cloning into '.'...` then `/git/.git: No such file or directory` against a directory `mkdir`'d immediately before the bind mount. It self-healed via the existing host-git fallback (Xcode CLT was present), but a dozen manual repeats of the identical command all succeeded, confirming a mount-propagation race rather than a real failure — so `ContainerGit.clone()` now retries the initial clone once on that exact signature (`_is_fresh_mount_race()`) before falling back to host git, which matters for a Mac *without* Xcode's Command Line Tools, the whole reason `ContainerGit` exists.
     - [ ] **Linux, through the Install BUTTON (2026-08-24)** — the gap the README review named is closed on the driving half and opened on another. `CatalogView.button_for("wow-wotlk").click()` offscreen, real `LogPanel`, real `Installer` from the factory, real sudo dialog (a watchdog `QTimer` found `activeModalWidget()` and typed into it, so the seam was driven the way a person drives it) — only `pick_dir` stubbed, since a `QFileDialog` cannot run headless and it is already a constructor seam. **33 m 23 s; the C++ compile SUCCEEDED (~30 min, 1828 objects, all four images built).** Every prompt was answered by the rule that should have answered it, and the anchored `^\s*Press ENTER` rule correctly did NOT eat the "Leave blank and press ENTER" hint, so the blank line reached `Install path:` as designed. **But `ok=False`**: `ac-db-import` died 0.3 s after Docker called the database healthy — see the first-run race below. The app's own `repair_import()` then finished the job in 212.1 s, and the resulting server started, reached ready, took an account (and refused the duplicate), and stopped in 49.8 s with `acore_auth` 22 / `acore_characters` 111 / `acore_world` 315 / `acore_playerbots` 30 tables. **Unticked because the two halves are each proven and the single uninterrupted run is not**, and because the script's post-install prompts (`Press ENTER when done creating accounts`, the stop-the-server question, the wow-manage download, the Steam/Gaming-mode launcher) were never reached, so those `PROMPT_RULES` entries are still untested against a live script. `ASK_THE_USER`'s docker-group question was skipped too — `pk` was already in the group
     - [x] **Linux, end to end through the packaged AppImage (2026-08-25)** — a WotLK server running on clean Fedora 44 from a click, on a box restored from a cold `clean-desktop` checkpoint (no Docker, untouched home), driving the AppImage's own GUI rather than `python main.py`. It took three fixes, each only findable once the previous was gone (PR #97). **One: the first install through the GUI could never succeed, on any Linux.** The picker only accepts a directory that ALREADY EXISTS (a typed non-existent name is refused, Choose greyed out) while its title tells the user to make a new one; the scripts treat any existing directory as an install to protect and ask "Remove it and start fresh?"; `PROMPT_RULES` answers "n" because `InstallOptions.reinstall` is never set by the GUI; `exit 0`, nothing installed. Measured: 35 s, empty directory, zero images, and the script's own log at `~/dads-mmo-lab-install-*.log` ending "Keeping existing install - exiting." The scripts now ask `dir_is_reusable` — `find -maxdepth 0 -empty` and `-w`, NOT `ls -A`, which prints nothing for a directory it cannot read exactly as it does for an empty one and would have cloned over a real install. **Two: the GUI-side folder rule was dead code on Linux.** `Installer.preflight()` never calls `preflight.gather()` — that belongs to the native engine — so `server_dir_problem()` was live for macOS and Windows and dead for the one platform whose scripts carry the rule. Unit tests, mutation testing, three review lenses and a Codex pass all read that diff and missed it; only running it found it. **Three: `sudo rm -rf /home` was reachable** — /home is one "up" click from where the picker opens, was in neither banned list, and `--reinstall` answers "remove it" with "y".
     - [x] **SELinux distros could not finish an install at all (2026-08-25)** — with the dead-end fixed the install reached `ac-db-import`, which exited 1 with "cp: cannot create regular file .../authserver.conf.dist: Permission denied" on files owned by the user. The image's own advice blames cloning as root and is wrong here. AzerothCore's compose bind-mounts `env/dist` WITHOUT `:z`, so the host directory keeps `user_home_t` and the container (`container_t`) is refused. Relabelling to `container_file_t` and re-running the identical import gave exit 0 and the whole stack came up. Affects Fedora, RHEL, Rocky, Alma, CentOS Stream and the Silverblue/Bazzite family — one of the two distros the original report named. The scripts now relabel before `compose up`; no sudo, since a user may relabel files they own, and a no-op wherever `getenforce` does not exist.
@@ -196,9 +196,14 @@
       consent text it produces states that the group is root-equivalent, gives the `usermod`
       alternative, and promises no passwordless-sudo rule and no socket `chmod`. Granting it then
       required a re-login before the install could proceed, exactly as the dialog said it would.
-      (3) `installer._main()` passes no `ask`, so the CLI harness DECLINES every `ASK_THE_USER`
-      rule - correct for a harness, but it means the CLI can only ever exercise the refusal path.
-      A gate that drives the product has to supply that seam or it is testing half the code.
+      (3) the CLI harness of the day - `installer._main()`, which 7.2 replaced with
+      `yulon.install_wiring.main()` - passed no `ask`, so it DECLINED every `ASK_THE_USER` rule:
+      correct for a harness, but it meant the CLI could only ever exercise the refusal path. A gate
+      that drives the product has to supply that seam or it is testing half the code. **Since
+      fixed**: `install_wiring.main()` calls `engine.run(options, ask=_terminal_prompter)`, and the
+      comment above that argument records why the keyword is not optional (a run given no prompter
+      answers neither the docker-group consent nor the sudo password). Verified 2026-09-02 at
+      `f6ed1b9a`.
   - [ ] Server lifecycle: start/stop/status/health polling + README §12 port-conflict guard
     - [x] **Windows (2026-08-23)** — 23/23 against a stock server on `yulon-win11` (Windows 11 Pro 26200, Docker Desktop 29.7.2, WSL2, Linux containers). `Controller.start()` 3.2 s; `wait_db_healthy` 0.1 s; `wait_ready(127.0.0.1, 8085)` 27.7 s; **stop 8.8 s**, containers kept; `ac-db-import` stayed `Exited (0)` throughout, so `start_staged` never selected it. README §12 guard: a foreign container published on 3724 produced `PortConflictError` naming `yulon-port-hog` and nothing started, while `port_conflicts()` excused our own three. A further 18 checks covered the fallbacks nobody had run on Windows: with the compose file hidden and no pin, stop and remove both REFUSE; pinned, the by-name `docker stop -t 300` path stopped all three in 7.4 s
     - [x] **macOS, real Docker Desktop (2026-08-29)** — driven directly through `docker.status()`/`stop_staged()`/`start_staged()` against the live install below (Apple M4 Pro, Docker Desktop 4.87.0, engine 29.7.2). `stop_staged()` **13.8 s** (containers kept, not removed), `start_staged()` **5.8 s**, `status()` correct empty/populated before and after each. Docker Desktop for Mac's VM does **not** reproduce Linux's 300 s populated-worldserver drain — this box stopped a live playerbots worldserver in under 14 s, closer to Windows's 8.8 s than to the Linux measurement `STOP_GRACE_SECONDS` was set from. `port_conflicts_for()` correctly named `ac-worldserver`/`ac-authserver` as already holding 8085/3724 (our own containers) before the stop.
@@ -220,10 +225,16 @@
   - [ ] Self-update check (README §10) — no platform-specific `config_dir()` issues
     - [x] **Windows (2026-08-23)** — `platform.detect()` -> `windows`, `config_dir()` -> `%APPDATA%\yulon`, the update check does not stall
     - [ ] **macOS (Baerthe)** — confirm `config_dir()` lands somewhere sane (`~/Library/Application Support/…`) and that the update check does not stall behind Gatekeeper. Needs no server. **Automated Darwin unit tests verified (2026-08-29)**: `platform.detect()` -> `macos`, `config_dir()` -> `~/Library/Application Support/yulon`, `detect_alf_state()` and `alf_unblock_commands()` for Application Firewall.
+  - [ ] **The `.dmg` is arm64 only, and nothing said so until 2026-09-03.** `release.yml` builds on
+    `macos-latest` with no Intel job, so an Intel Mac gets no artifact at all -- not a broken one,
+    none. No line in this file, the README or the bug list mentioned it; found by an inventory pass
+    that went looking for macOS items with no checklist entry. The fix exists on the unmerged branch
+    `ci/macos-intel-dmg` (an 18-line workflow diff). Merging it or dropping Intel support on purpose
+    is an owner decision; either way it stops being invisible.
   - [ ] Packaging: live-gated against the packaged `.AppImage`/`.dmg`/`.exe`, not just `python main.py` from source
     - [x] **Linux `.AppImage` (2026-08-25)** — the packaged artifact launched and driven on clean Fedora 44 (Wayland) and clean Arch + Xfce (X11), both from cold checkpoints. Qt picks the wayland plugin by default on Fedora; forcing `xcb` exercises the bundled libxcb-cursor. **The AppImage still requires FUSE** — `fusermount3` is a setuid helper and no packaging choice removes it, which is why the `.tar.gz` beside it exists; that fallback was confirmed on the FUSE-less Arch box. Two automation notes for whoever repeats this: Fedora's `xdotool` is libei-patched, so on Wayland every synthetic click raises an xdg-desktop-portal "Remote Desktop" consent dialog OVER the launcher — either grant it once or drive the app on a private Xvfb; and `pkill -f` matches the ssh command line carrying the script, killing the shell that ran it.
     - [x] **The SHIPPED artifact could not start on Arch at all (found 2026-08-25, fixed on the same branch)** — `Yulon-v0.6.51Public-x86_64.tar.gz` aborts before drawing anything with "From 6.5.0, xcb-cursor0 or libxcb-cursor0 is needed". **That message is a red herring**: `libxcb-cursor.so.0` IS bundled and #96 works. Qt prints that line whenever the xcb plugin fails to load, for any reason; `QT_DEBUG_PLUGINS=1` gives the real one — `libqxcb.so` cannot resolve `libxkbcommon-x11.so.0`. The bundle carries `libxkbcommon.so.0` and not the `-x11` one; they are different libraries and clean Arch has neither. Same tree, two builds: the CI artifact has one library and aborts, a build on a box with the package has both and starts. It is #96's trap one library over — PyInstaller bundles what the BUILD HOST has — and Fedora hid it because GNOME pulls the package in. `libxkbcommon-x11-0` added to the workflow's apt step. **A bundle nobody launches on a minimal distro will keep producing these one at a time; a CI check that runs the built binary headless, or asserts a soname list, would catch the class rather than the instance.**
-    - [ ] **macOS (Baerthe)** — **run the CI-built `.dmg`.** The one artifact nobody has ever launched: Phase 5 proved it builds and nothing more. Needs no server, so it is the first thing to try. Wanted back: whether Gatekeeper blocks it and exactly what a user has to do about it — an unsigned `.dmg` is a shipping decision, not just a test result
+    - [ ] **macOS (Baerthe)** — **record the Gatekeeper path for the CI-built `.dmg`.** This line said "the one artifact nobody has ever launched" until 2026-09-03, and that was false when it was written: Baerthe opened the 0.6.53 dmg from Finder on 2026-08-25, and that run is how the launchd-PATH bug in `docker_programs()` was found (Cross-cutting, "The first macOS run"). What is genuinely unrecorded is narrower and is the half that decides a shipping question. Needs no server, so it is the first thing to try. Wanted back: whether Gatekeeper blocks it and exactly what a user has to do about it — an unsigned `.dmg` is a shipping decision, not just a test result
   - [ ] User-facing README topics (`pylauncher/README.md` + `archive/guides/wow-wotlk/README.md`) accurately reflect each platform's real state — no "works on macOS" claim before 6.2 is done. **Rewritten 2026-08-23.** The defect this item names did not exist: neither file contained the string "macOS" at all. The real one was the opposite — `pylauncher/README.md` was a single line saying the folder was "pending", with a link to `pyplan/README.md` that resolved to `pylauncher/pyplan/README.md` and 404ed. It is now a per-platform capability table with **three** values, not two: *run live*, *built* (code and tests, nobody has driven it) and *never run* — because "yes" was carrying both of the first two, which is the conflation this item exists to prevent. Review then found four claims in the rewrite that were themselves wrong, all corrected: that the app never downloads client files (WotLK is the one entry with `requires_client_dir` false, because the server fetches AzerothCore's own client-data archive — the same over-broad claim was in `installer.py`'s module docstring and is fixed there too); that the Catalog's Install *button* is proven, when the live install ran through the CLI harness; that account creation "works on all three platforms", when only the transport can and only Linux has been run; and "there is no Mac on this project", which claims more than "no Mac on this side of it". Restore now says what it destroys, the artifacts say "opens" rather than "launched" (the evidence is a `YULON_SMOKE_TEST` headless run), and `DISCLAIMER.md` and the Releases page are linked. The archived shell-script guide gained a header saying what it is and is not, and its three dead links were fixed. **Unticked**: the item asks that all three platforms be reflected accurately, and the macOS column is still "never run"
   - [ ] **TBC, Vanilla and Tortoise cannot be remembered by the GUI even after a successful install (found 2026-08-25, NOT fixed — the installers are being converted from shell to Python as part of the phasing, so this is a note for that work rather than a patch).** Two independent reasons, either alone sufficient: all three hardcode `SERVER_DIR` (`$HOME/wow-tbc-server` and friends) and have no `Install path:` prompt, so the folder the picker returns is ignored entirely; and TBC and Vanilla write `compose.yml` while `catalog_view.py` (`:217`, `:335`) requires `docker-compose.yml` in the folder it picked. So a multi-hour compile can complete and the launcher will still say there is nothing there. Also: the WotLK scripts' sudo banner promises "Fixing file ownership after build" and the files contain no `chown` at all — a password asked for something never done.
 - [ ] **Phase 6 exit criteria met** — WoW WotLK has 100% working feature coverage (6.5) on Linux, macOS, and native Windows, zero shell interaction, no silent off-Linux fast-fail. ~~**Phase 7 does not start until this is fully met.**~~ **Gate lifted 2026-08-26** by owner decision (`pyplan/phase7-decisions.md`): Phase 7 runs Linux-first while the macOS gate waits for hardware and the Windows 6.3 blocker is closed by Phase 7.7. The items above stay owed.
@@ -242,40 +253,1849 @@
 > The roadmap's §7 has NOT been edited (roadmap is edited only when explicitly tasked);
 > `phase7-decisions.md` Appendix A holds the proposed text.
 
+> **Getting a game client onto a Hyper-V VM: use a VHDX, not the network (2026-09-02).** Filed here
+> rather than in a gate log because every Phase 7 gate left needs a multi-GB client on a VM, and the
+> next person to want one should not rediscover this. Over the network, laptop → Hyper-V guest ran at
+> **0.42 MB/s** (200 MB in 8 minutes, measured) — the DERP-relayed path, so 4 GB that way is about
+> **2.7 hours**. What was done instead: a **16 GiB dynamic VHDX created on the host**, formatted
+> exFAT, filled **host-locally** (3.8 GB in 52 s, recorded as ~74 MB/s), then **hot-added to the
+> RUNNING VM on the SCSI controller** and read by the guest (4.0 GB in 14.6 s, recorded as
+> ~265 MB/s). **About 70 seconds end to end against 2.7 hours.**
+>
+> **Two gotchas, both from the run.** The exFAT volume comes up as **`/dev/sdb2`, not `sdb1`** — GPT
+> puts a 16 MB Microsoft-reserved partition first, so mounting `sdb1` fails in a way that looks like
+> a bad format. And **no VM restart is needed**: the disk was added to a live guest and appeared at
+> once. That second one is independently confirmed rather than taken on trust — the file landed on
+> `yulon-ubuntu` at 22:00 while `vanilla-db`, `vanilla-mangosd` and `vanilla-realmd` still read
+> `Up 3 hours` at 22:07, so the guest that received the disk had been running since before the
+> Vanilla install finished at 19:17.
+>
+> **The VHDX is kept at `D:\VMs\transfer\yulon-transfer.vhdx`** on the VM host (`ssh vmhost`), for
+> the next gate to reuse rather than rebuild. Re-checked there 2026-09-02 22:1x: `Size`
+> 17,179,869,184 (16 GiB), `FileSize` 4,097,835,008, `VhdType Dynamic`, **`Attached: False`** — so it
+> is detached and free. The payload it carried this time is on the guest as
+> `~/clients/TurtleWoW-1.18.1-7272-Hotfix-2026-04-12.zip`, **4,038,524,880 bytes**, which is the size
+> the 14.6 s figure refers to. The durations above were taken by the run that did it; what is
+> re-verified here is the geometry, the detached state, and the bytes that arrived.
+
 - [ ] 7.1 Spine + `AzerothCoreInstaller`, Linux native — `StagedInstaller`/`Stage` extracted from `native.py`, WotLK stage names unchanged and pinned; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); `ask` forwarded to `ensure_docker`; once-only sudo password (`SudoSession`, `sudo -S`) in provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` on every host bind line + relabel; `systemd-inhibit`; `install_wiring.py` (probe wiring + the CLI harness); `wait_ready(ReadySpec)`; the proven install's `docker compose config` committed as `tests/data/wotlk-compose-config.json`; wow-wotlk dispatches native on Linux
-  - [ ] Gate: yulon-ubuntu clean checkpoint, **two presses** — press 1: consent dialog + sudo dialog once + re-login report; re-login; press 2: `ready`; kill mid-build, resume skips the compile; `docker compose config` matches the fixture; auth log `127.0.0.1:8085` with no `UPDATE`; account + client login from the host after the LAN step
+  - [ ] Gate: yulon-ubuntu clean checkpoint — **starting state captured** (`docker --version; systemctl is-active docker; id -Gn; ls -d ~/wowserver`, before press 1); press 1: consent dialog + re-login report; re-login; a later press reaches `ready`; kill mid-build, and the resume **recovers the finished objects from the ccache mount** rather than compiling them again; `docker compose config` matches a fixture minted from a DIFFERENT run; auth log `127.0.0.1:8085` read from the authserver container's log, then the realm left advertising an address another machine can REACH — read out of the DATABASE and out of `ready`'s own line in the install transcript, not from `yulon.log` (see §42: the CLI writes none); account + client login from the host after the LAN step
+    - **Three clauses were reworded on 2026-09-04, after an audit of a recovered run showed the old wording could not be satisfied by anything that actually happens.** Kept here rather than silently swapped:
+      * "**two presses**" → "a later press reaches `ready`". The recovered run took FOUR presses (exit 1, 137, 0, 0) and that is the honest shape of a gate that includes a kill-mid-build: the kill costs a press. Counting presses was never the property worth pinning.
+      * "**resume skips the compile**" → the ccache clause. The engine's own `The server is already built; skipping the compile.` fires on a re-press of a COMPLETE install, not on a resume after a kill — a resume re-enters the build step and re-issues every ninja edge, because BuildKit does not cache a partial `RUN`. What it really buys was measured: ~1,315 of 1,829 edges came back from the `--mount=type=cache,target=/ccache` mount in **13.9 s**, and the build finished in **610.7 s** instead of hours. 7.4a's entry made the same correction for its own line on 2026-09-02 ("describing the effect, not the mechanism"); this line had not caught up. Note the mechanism is evictable: a `docker builder prune` between the kill and the resume costs a full compile.
+      * "`docker compose config` **matches the fixture**" now says the fixture must come from a different run. `tests/data/wotlk-compose-config.json` was minted FROM the 2026-08-31 capture and committed 2h31m after it, byte-identical at 8,658 bytes — so that run could not have failed its own check. The fixture is doing its job; it just cannot be both the subject and the standard.
+      * **The starting-state capture is new**, and is the audit's one-line remedy for a "clean checkpoint" claim that no artifact could support.
+    - **"sudo dialog once" was REMOVED from this line, and moved rather than dropped.** `pk` on `yulon-ubuntu` has `NOPASSWD: ALL`, so `SudoSession.verify()` is unreachable there — `_needs_password()` only fires on sudo's own "password is required" after a `sudo -n` step. The clause could never be ticked on the box its own line names. It is already satisfied on Fedora, where the 2026-08-31 record calls it "the first time `SudoSession` has ever been exercised", both other Linux boxes being passwordless. Recorded there; if the owner would rather prove it on Ubuntu too, the E.3 brief's own staging (move `/etc/sudoers.d/pk` aside, re-press) takes minutes.
+    - **THE CLEAN RE-RUN HAPPENED ON 2026-09-04 AND THE BOX STILL DOES NOT TICK: nine of the
+      thirteen clauses on this line are now earned on artifacts, four are not.** The run answers
+      most of what the audit above found missing — the starting state, the account, the client
+      login, and a `ready` that is not a continuation of a killed press. Evidence, all committed at
+      `4c959d70`: `pyplan/gates/7.1-ubuntu-2026-09-04-clean/gate71-press1.log`,
+      `…/gate71-press2.log`, `…/gate71-realm-and-account.log`,
+      `pyplan/gates/7.1-client-login/LOGIN-2026-09-04.md` and
+      `…/client-connection-20260904-2030.log`. Graded clause by clause, in the order this line
+      states them:
+      * **"yulon-ubuntu clean checkpoint" — MET, and falsifiable for the first time.**
+        `pyplan/gates/7.1-client-login/checkpoint-clean-ssh-as-restored.txt:1-5` names the
+        checkpoint (`clean-ssh`, taken 2026-08-28) and records `up 0 min`, `docker: command not
+        found`, and no `/home/pk/wowserver`. Press 1's own probes agree from inside the run:
+        `gate71-press1.log:30` `docker --version: NOT INSTALLED (no such executable)`, `:31-32`
+        `systemctl is-active docker: exit 4 / inactive`, `:34` `id -Gn: | pk adm cdrom sudo dip
+        plugdev users lpadmin` — **no docker group** — and `:35-36` `ls -ld /home/pk/wowserver:
+        exit 2`. The audit's "unfalsifiable from these files" is answered.
+      * **"starting state captured … before press 1" — MET.** `gate71-press1.log:29-40`, five
+        read-only probes (the four the line names plus `df -h`), printed before the harness ran.
+        Read past the first block: `:1-26` is a first invocation that died on
+        `ModuleNotFoundError: No module named 'yulon'` — wrong working directory, `answered group
+        x0`, nothing on the box changed (`:16-26` state-after is identical to `:3-14`
+        state-before). The real press 1 starts at `:27`.
+      * **"press 1: consent dialog" — MET.** `gate71-press1.log:53` `Add 'pk' to the docker group
+        (grants root-equivalent access)? (y/n):`, answered `y`, and `:55` `docker group consent for
+        pk: granted`. Asked once in the run (`:60` `answered group x1`).
+      * **"+ re-login report" — MET, and better than 2026-08-31's.** `gate71-press1.log:56` names
+        what provisioning did (`apt-get update; apt-get install -y docker.io docker-compose-v2
+        docker-buildx; systemctl enable --now docker; usermod -aG docker pk`), and `:57-59` is the
+        refusal: `Docker is installed and set up. It cannot be used from this session yet: your
+        account was added to the docker group, and a session that was already open does not pick up
+        a new group.` Exit 1 (`:60`).
+      * **"re-login" — MET in effect; the act itself is still not in a log.** The pair the
+        2026-08-31 set could not produce: `gate71-press1.log:67` state-AFTER press 1 still reads
+        `pk adm cdrom sudo dip plugdev users lpadmin` — Docker 29.1.3 installed and active
+        (`:62-65`), the group **not** in effect — and `gate71-press2.log:9` state-BEFORE press 2
+        reads `docker adm cdrom sudo dip plugdev users lpadmin pk`. Press 2 was run under
+        `sg docker -c`, which is the `newgrp docker` the product's own message offers; no line of
+        either log spells the `sg`, so the act is inferred and only the effect is captured.
+      * **"a later press reaches `ready`" — MET, and it was the very next press.**
+        `gate71-press2.log:6044` `Step 9 of 9 (100%): ready`, `:6045` `--- ready`, `:6049` `The
+        server is up.`, `:6051` `install of wow-wotlk finished`, `:6053` `exit status 0`. Nine
+        stages in the pinned order from `:29` `--- clone-core` (19:31) to `:6045` (20:13), build
+        1834 edges from cold, client data 1140 MB in 2m03s (`:5010-5011`). Free disk 74 GB → 53 GB
+        (`:14`, `:6065`).
+      * **"kill mid-build, and the resume recovers the finished objects from the ccache mount" —
+        NOT MET BY THIS RUN.** Nothing was killed on 2026-09-04; press 2 ran straight through. The
+        clause is carried only by the 2026-08-31 set — `7.1-ubuntu-2026-08-31/gate-press2.log:4103`
+        SIGKILL at edge 1314 of 1829, `:4105` `COMMAND_EXIT_CODE="137"`, then
+        `gate-press3.log:1622-1626` (edges 1312-1315 back at `#25 13.69`-`18.65`, real compilation
+        resuming at edge 1316 at `#25 28.41`) and `:2174` `#25 DONE 610.7s`. Both runs are
+        committed and either can be re-derived; what does not exist is one run that carries every
+        clause, and no `ccache -s` capture exists in either.
+      * **"`docker compose config` matches a fixture minted from a DIFFERENT run" — NOT MET.** No
+        capture was taken on 2026-09-04: `grep -n "compose config"` over both press logs returns
+        nothing, and the gate directory holds no `.yml` or diff artifact. This run is exactly the
+        different run the clause asks for — the fixture was minted from the 2026-08-31 capture —
+        so the missing artifact is one command (`docker compose config` from the server directory,
+        **no `-f`**, per the Arch capture trap recorded below) plus
+        `test_a_captured_compose_config_matches_the_fixture`.
+      * **"auth log `127.0.0.1:8085` … read from the authserver container's log" — MET.**
+        `gate71-realm-and-account.log`, closing addendum: `docker logs --tail 3 ac-authserver` →
+        `Added realm "AzerothCore" at 127.0.0.1:8085.` The authserver container started at 20:08
+        (`gate71-press2.log:6043`, `compose up -d` at 20:08:34), so it read the row AzerothCore
+        ships before anything changed it.
+      * **"with no `UPDATE`" — the CLAUSE was wrong, and was reworded 2026-09-05 (owner decision).**
+        The old wording asked for behaviour the product deliberately dropped. The plan's definition is
+        `phase7-plans/7.1-spine-azerothcore-linux.md:6561`: `grep -c "UPDATE"
+        ~/.local/share/yulon/yulon.log` → 0 and `SELECT address,port FROM acore_auth.realmlist` →
+        `127.0.0.1 8085` at `ready`, the first and only UPDATE coming later from the Networking tab
+        (`:6576`). What was measured instead: the install itself issued it. `gate71-press2.log:6050`
+        `The realm now advertises 172.30.55.119, so players on other machines can reach this
+        server`, and the row read `172.30.55.119 / 172.30.55.119` at 20:21:36
+        (`gate71-realm-and-account.log`, TASK 1's first `SELECT`) before any hand edit. That line
+        is `catalog/native.py:1990-2001`, the tail of `ready`, and its docstring at `:1955-1968`
+        argues the design on purpose (a 2026-09-03 review: the question is whether the row is
+        REACHABLE, not whether it equals the LAN address). So this half is not a re-run away — it
+        is an owner decision to reword the clause to what the engine does now, and no
+        `yulon.log` UPDATE count was captured either way.
+      * **The reworded clause was itself unmeasurable for six hours, and the fix is measured here
+        (2026-09-05, yulon-ubuntu).** The 05:00 reword asked for `ready`'s UPDATE "counted in
+        `yulon.log`". There is no `yulon.log` on a gate box: `~/.local/share/yulon/` does not exist
+        on yulon-ubuntu after a full 7.2 run, and the reason is in the code, not the box —
+        `configure(config_dir=platform.config_dir())`, the call that opens the rotating file, is made
+        only by `main.py` (the GUI). `install_wiring.py`, which is what every headless gate drives,
+        never calls it (`grep -c 'configure(' install_wiring.py` -> 0). So the criterion could only
+        ever have been met by a run nobody performs. Filed as bug-checklist §42, because a headless
+        install leaving no log at all is a defect in its own right, not just a gate problem.
+        WHAT WAS MEASURED INSTEAD, and what the clause now asks for:
+        `SELECT id,name,address,localAddress,port FROM acore_auth.realmlist` ->
+        `1 AzerothCore 172.30.55.119 172.30.55.119 8085` (reachable, not loopback), and `ready`'s own
+        line in the transcript, `gate72-press3.log:3377`: "The realm now advertises 172.30.55.119, so
+        players on other machines can reach this server". Both halves of the clause are therefore MET
+        on the 2026-09-05 run; what remains open in 7.1 is the client login and §39.
+      * **What the reworded clause asks for, and why (owner decision, 2026-09-05).** The gate now
+        reads: the auth log's `127.0.0.1:8085` line, *then* the realm left advertising an address
+        another machine can REACH, with `ready`'s own `UPDATE` counted in `yulon.log`. The two
+        options put to the owner were to reword the clause or to revert the engine; he chose the
+        reword, on the recommendation that a fresh install should be reachable from another
+        machine the moment it finishes rather than localhost-only until the user finds the
+        Networking tab. The engine's argument is already written down where the behaviour lives
+        (`catalog/native.py:1955-1968`): equality with the LAN address is the WRONG question,
+        because `networking.apply()` exists so a user can advertise a PUBLIC address for internet
+        play, and every ordinary resume runs `ready` again — comparing against the LAN address
+        overwrote that public address and printed 'players on other machines can reach this
+        server', which was the opposite of what had happened (review, 2026-09-03).
+        **Still owed, and not earned by the reword:** no `yulon.log` UPDATE count has ever been
+        captured, under either wording. The clause is met when a run records
+        `grep -c 'UPDATE' ~/.local/share/yulon/yulon.log` together with the realmlist row at
+        `ready`, and shows the count is exactly the one `ready` issues rather than zero or many.
+      * **"account" — MET, through the GUI's own seam.** `gate71-realm-and-account.log`, TASK 2:
+        `ControllerServices.for_entry` → `services.create_account('yulon', <password>, 3)` →
+        `AccountResult(username='YULON', account_id=101, created=True, gm_level=3)`, the row read
+        back by a different route (`SELECT id, username … WHERE username='YULON'` → `101 YULON`),
+        `account_access` → `101 3 -1`, and the same call again converging rather than duplicating
+        (`created=False`, `COUNT(*)` → 1). Not typed at a console.
+      * **"client login" — MET in substance, and the audit's "Absent" is answered.** (Superseded
+        2026-09-05, and kept because it is the 09-04 install's own record: the clause is now met
+        outright against the 09-05 install — `GATELOGIN`, id 102, 07:31:41 — see the clause-14
+        bullet further down this line.)
+        `pyplan/gates/7.1-client-login/client-connection-20260904-2030.log`, quoted at
+        `LOGIN-2026-09-04.md:41,:43`: `20:30:22.955 GRUNT: state: LOGIN_STATE_AUTHENTICATED result:
+        LOGIN_OK` and `20:30:24.125 ClientConnection Completed: COP_GET_CHARACTERS code=44
+        result=TRUE`; server side, `acore_auth.account` `101 YULON last_login 2026-09-04 18:30:22
+        online 1 failed_logins 0` (18:30 UTC = 20:30 CEST). Two limits the record states itself:
+        `Enter World` was never clicked, so nothing here speaks to the world server beyond a
+        character-list reply — the plan's own bar at `:6584` is "logged in **and entered the
+        world**" — and the client was on the laptop over Tailscale, not on this line's "the host".
+        **Met a second time on 2026-09-05 at 07:31 CEST, against the install 7.2's clean-box gate
+        rebuilt** — `pyplan/gates/7.1-client-login/LOGIN-2026-09-05.md`, with
+        `client-connection-20260905-0731.log` (`07:31:41.902 ClientConnection Completed:
+        COP_AUTHENTICATE code=AUTH_OK result=TRUE`, `07:31:42.568 … COP_GET_CHARACTERS code=44
+        result=TRUE`) and `server-side-20260905.txt` (`102 GATELOGIN last_login 2026-09-05 05:31:40
+        failed_logins 0`, created through `ControllerServices` at 05:28:33). The route was not
+        Tailscale: the `clean-ssh` checkpoint predates it and the restore took it away, so the client
+        went through `ssh -L 3724/8085` with the realm at `127.0.0.1` — the loopback realm the owner
+        asked to keep possible (§41), exercised for real. The same two limits apply: character list
+        only, laptop not host. Until this record existed the 09-05 login was cited from memory alone.
+      * **"after the LAN step" — NOT MET, and deliberately.** The launcher's LAN step
+        (`svc.network_apply`) was never invoked; the realm row was repointed at the Tailscale
+        address by hand (`docker exec … UPDATE acore_auth.realmlist … WHERE id=1`, `rows_changed`
+        1), and `sudo ufw status` at the end of that log still reads `Status: inactive`. The reason
+        is `bug-checklist.md` §39: the step would run `ufw --force enable` with only 3724 and 8085
+        allowed and cut SSH to a box with no console. **This clause is blocked on §39, not on
+        machine time** — and §39's own repair is not finished either (see it).
+      **So: four clauses stand between this sub-gate and a tick** — a compose-config capture and
+      diff, the kill-mid-build/ccache half re-exercised (or the line re-scoped to say it is carried
+      by the 2026-08-31 set), the `no UPDATE` clause reworded to the engine's current design, and
+      the LAN step, which waits on §39. **And the 7.1 box could not tick even if all four landed**,
+      because the Fedora/Arch sub-gate below is open on its own terms: nothing was installed on
+      Arch (the AppImage will not launch without `fuse2`), and Fedora still owes the kill-mid-build
+      and a run from a cold checkpoint.
+      **What the tick would cost was measured while deciding this, on `m910q`, 2026-09-04:**
+      `tests/test_docs_pins.py` widens `test_every_test_these_pages_name_by_hand_actually_exists`
+      to `phase7-plans/7.1-spine-azerothcore-linux.md` the moment this box reads `- [x] 7.1 `, and
+      that page cites **141** test names as live, of which **13** resolve to nothing in
+      `pylauncher/tests/`. Same 13 as the 2026-09-02 measurement — the plan's citations have not
+      drifted further, and none of them is fixed by a gate run. With the box left open the guard
+      stays scoped as it was: **4 passed** against this edit
+      (`~/dads-mmo-lab/pylauncher/.venv/bin/python -m pytest tests/test_docs_pins.py -q` on
+      `m910q`, run over a copy of these files).
+      * **One number in the login record has no artifact behind it, recorded before it gets
+        re-cited.** `LOGIN-2026-09-04.md:11` says "500/500 bots loaded". No capture from the 20:13
+        install carries a bot count. The 500 that exists is
+        `7.1-client-login/server-side-after-attempt.txt:9` (`characters.online=1 count` → 500),
+        taken at **14:22** from the earlier attempt of the same day — a different install, account
+        `GATE0904`, realm already at `172.30.55.119`, and `0` accounts with a non-null
+        `session_key`, i.e. the attempt in which no client ever completed SRP6. That file's auth
+        log also reads `Added realm "AzerothCore" at 172.30.55.119:8085`, which is what the
+        `127.0.0.1:8085` clause looks like when the authserver starts *after* the advertise.
+    - **A WHOLE GATE RUN WAS RECOVERED FROM INSIDE A CHECKPOINT ON 2026-09-04, AND AUDITING IT SAYS
+      DO NOT TICK.** `pyplan/gates/7.1-ubuntu-2026-08-31/` — an E3 report headed `Verdict: PASSED`,
+      four press logs, a compose-config capture. It had never been in the repo; restoring
+      `pre-7.2-gate-2026-09-02` to run this gate is what surfaced it, one command before the restore
+      would have destroyed it. Full audit beside it in `AUDIT-2026-09-04.md`; every count there was
+      re-derived against the committed files rather than taken from the report.
+      **Tally against this line's fifteen clauses: 3 satisfied, 1 unsatisfiable on this box, 11 not
+      — of which 5 are contradicted by the logs and 6 have no artifact at all.**
+      * **Genuinely earned, and worth keeping:** the consent dialog (`gate-press1.log:15-16`, asked
+        exactly once across all four presses); the re-login report (`:17-18`, whose sentence is
+        appended only when the group join actually succeeded, so it doubles as proof of that); and
+        **kill mid-build** — SIGKILL at ninja edge **1314 of 1829** (`gate-press2.log:4103-4105`,
+        exit 137).
+      * **`ready` was not press 2.** Four presses ran, not two: exit 1, 137, 0, 0. Press 2 was the
+        one that got killed; `ready` first came at `gate-press3.log:3334`.
+      * **"resume skips the compile" is mis-worded, and the truth is better.** Press 3 re-entered
+        the build and re-issued every one of the 1829 edges from edge 1. What it actually did is
+        recover ~1315 of them from the BuildKit ccache mount in **13.9 s** and finish in **610.7 s**
+        instead of hours. The engine's own `The server is already built; skipping the compile.`
+        occurs exactly ONCE in the whole set, at `gate-press4.log:36` — a re-press of a COMPLETE
+        install, not a resume after a kill. Reword the clause to what press 3 proves, and note the
+        mechanism is evictable build cache: a `docker builder prune` between kill and resume would
+        have cost a full compile.
+      * **The compose-fixture clause is circular for this run.** Applying the documented transform
+        to `gate-compose-config.yml` reproduces `tests/data/wotlk-compose-config.json`
+        **byte-identical, 8658 bytes both**, same install id `243c46e3` — and the fixture was
+        committed at `aa50d2ad`, **2h31m after** the capture. The fixture IS this capture. That is
+        fine for what the fixture is FOR (it is meant to be a proven install's output); it means
+        only that this run cannot also be the run that CHECKS against it. A comparison here could
+        not have failed. `compose config` is mentioned in zero press logs.
+      * **Six clauses have no artifact at all:** the `127.0.0.1:8085` auth line (zero IPv4 addresses
+        in any log; press 3 started the stack detached so no container log was captured), the "no
+        `UPDATE`" count (its zero is vacuous — the press logs hold no SQL text, and the same grep
+        case-insensitively returns 289 and 315 hits, all `apt-get update` and `DBUpdater.cpp.o`),
+        the account, the client login, the LAN step (the realm stayed on loopback, which the report
+        itself concedes), and the starting state.
+      * **"Clean checkpoint" is unfalsifiable from these files.** The only support is
+        `Docker is not answering yet` — a daemon-REACHABILITY probe that reads identically for
+        "installed, but `pk` is outside the docker group", which we know independently was the case.
+        The strings `clean-ssh` and `checkpoint` appear in no log. One line before press 1 would fix
+        this forever: `docker --version; systemctl is-active docker; id -Gn; ls -d ~/wowserver`.
+      * **The report marks a criterion PASSED that it did not test.** `gate-e3-report.md:334` lists
+        "No sudo password dialog on a passwordless box" under PASSED, for a clause that asks the
+        dialog to APPEAR.
+    - **The sudo clause needs re-scoping, not re-running, and that is an owner decision.**
+      `pk` on `yulon-ubuntu` has `NOPASSWD: ALL`, so `SudoSession.verify()` is unreachable —
+      `_needs_password()` only fires on sudo's own "password is required" after a `sudo -n` step.
+      Either move the clause to a password-sudo box (`SudoSession`'s docstring names clean Fedora
+      and Arch, and Fedora already exercised it on 2026-08-31), or stage this box as the E.3 brief
+      actually specified — move `/etc/sudoers.d/pk` aside and re-press — which is minutes of work.
+      Leaving it as written means the clause can never be ticked on the box the line names.
+    - **7.2 cannot be ticked from this evidence either, and for a reason worth stating.** Its line
+      asks for 7.1's gate "re-run from the same checkpoint with no other change" — a reproducibility
+      clause, so one run cannot satisfy both lines. Presses 2/3/4 are not re-runs from a checkpoint;
+      they are continuations of one accumulating install, with free disk falling 75 → 67 → 53 GB
+      across them. One useful consequence: a proper 7.2 re-run would naturally produce the second,
+      independent compose capture that removes the circularity above. Sequence it that way.
+      **Read this bullet as the 7.2 GATE box, not the 7.2 line — note added 2026-09-05, the day the
+      line was ticked, so the two do not read as a contradiction.** What this bullet tests is the
+      re-run clause it quotes, and that clause is the text of the `- [ ] Gate:` sub-box under 7.2,
+      which is still open and still open for exactly this reason. The 7.2 LINE was ticked on
+      2026-09-05 on a different claim — its own eight criteria plus the size figure, audited against
+      the tree, none of which is a re-run — and that tick makes no statement about this evidence or
+      about the gate. Nothing above is withdrawn: this paragraph is still true of the box it is
+      about. The same distinction is stated from the other side in the tick record on the 7.2 line.
+    - **RUN FROM A GENUINELY CLEAN CHECKPOINT, TWICE — 2026-09-04 (the 7.1 lane) and 2026-09-05
+      (the 7.2 re-run, lane gate-71-72) — and clauses 1, 2, 8 and 9 are now on evidence.** Both
+      runs restored `yulon-ubuntu` to `clean-ssh` (2026-08-28) and the driver's own before-probe
+      read `docker --version: NOT INSTALLED (no such executable)`, `id -Gn` without `docker`, no
+      `~/wowserver`, 75-78 GB free — the sentence the 08-31 logs could not produce.
+      `pyplan/gates/7.1-ubuntu-2026-09-04-clean/` (press 1 + press 2, `ready` at
+      `gate71-press2.log:6045`, 20:13:05) and `pyplan/gates/7.2-ubuntu-2026-09-05/` (press 1, a
+      kill at edge 1226/1834, press 3 to `ready`, plus a second kill+resume cycle — its `README.md`
+      answers all fifteen clauses in a table). What the second run adds to THIS line:
+      * **Clause 9, `docker compose config` against a fixture from a different run: MET.**
+        `docker compose config --format json`, in `~/wowserver` with no `-f`, from the 09-04 clean
+        install (core `413bea61a`; the fixture's run was `47960183b`), diffed on m910q with BOTH
+        `YULON_COMPOSE_CONFIG` and `YULON_COMPOSE_ROOT` set: `test_compose_fixture.py` **59
+        passed**, `compare()` 0 service differences, `compare_stack()` 0 stack differences; the
+        ROOT-only trap reproduced on purpose reads `SKIPPED [1]`. The 09-05 run's own capture was
+        byte-identical (md5 `5ec739cc…`). `7.1-ubuntu-2026-09-04-clean/compose-diff.txt` and
+        `COMPOSE-CAPTURE.md`.
+      * **Clause 8, the ccache recovery, MET on the same box — but not on the first try, and the
+        reason is worth more than the number.** Press 2 was SIGKILLed at edge 1226/1834 (BuildKit
+        stage clock 366.1 s; `kill-record.txt`) and press 3 then compiled all 1834 edges from
+        nothing, *slower* than press 2 at every edge (`edge-rate.txt`). Three busybox builds
+        (`cachemount-diag*.txt`) found why: **a `docker build --no-cache` that names a cache mount
+        RESETS it** on this daemon (BuildKit v0.26.2 in docker 29.1.3) — a marker written by a
+        normal build is gone after a `--no-cache` build lists the mount — and the lane's ccache
+        probe, run with `--no-cache` between the kill and the resume, had emptied the mount the
+        clause is about. The kill loses nothing (a SIGKILLed writer kept its 52 MB). So the cycle
+        was run again on a throwaway folder with a probe that has no `--no-cache`: SIGKILL at edge
+        **605/1834** (210.7 s), `ccache -s` **590 misses / 340 MB**, the resume replayed the first
+        590 edges in **~5 s** (edge 500 at 14.2 s against 168.2 s cold, knee at ~590), build
+        **1078.1 s** against 1189.7 s cold, `ccache -s` afterwards **590 hits of 2400**.
+        `cycle2-edge-rate.txt`, `ccache-stats.txt:63-91`. Add to the caveat above: the mechanism is
+        evicted by `docker builder prune` AND by any `--no-cache` build naming `target=/ccache`.
+      * **Clauses 3-7 and 13 re-earned on the 09-05 run** (consent asked once, re-login refusal
+        verbatim with `id -Gn` unchanged after it, press 2 under `sg docker -c`, `ready` on press
+        3, the kill above, account `YULON` id 101 GM 3 through `ControllerServices.create_account`
+        with the second call converging). **Not touched by either clean run: 10-12** (the auth log
+        was captured — `Added realm "AzerothCore" at 127.0.0.1:8085.` at `docker logs` line 42 —
+        but the "no `UPDATE`" reading is the owner's call, as recorded above), **14** (no client on
+        the box at the time; **since MET — see the bullet below**), and **15** (the
+        LAN step is bug-checklist §39 and was not run; the realm row reads `172.30.55.119` because
+        the engine's `ready` stage wrote it).
+      * **CLAUSE 14 IS MET, 2026-09-05 at 07:31:41, against THIS install rather than a sibling.**
+        A real 3.3.5a client authenticated against the 09-05 clean-checkpoint install — the one
+        the two bullets above describe — on account **`GATELOGIN`, id 102**, created through
+        `ControllerServices` the same way `YULON` (id 101) was, so the account half and the login
+        half are one chain rather than two records. Client side: `COP_AUTHENTICATE AUTH_OK` and
+        `COP_GET_CHARACTERS code=44 result=TRUE`. Server side, read back out of `acore_auth`:
+        `last_login 2026-09-05 05:31:40, failed_logins 0` (05:31 UTC = 07:31 CEST, the
+        same one-hour-plus-DST offset the 09-04 record carries).
+        **Where the capture is — added 2026-09-05, because when this bullet was first written the
+        numbers in it were filed nowhere and it did not say so.** It was written from the run
+        report; `grep -rl GATELOGIN pyplan/` then returned `pyplan/checklist.md` and nothing else,
+        while the bullet it contrasts itself with is backed by a 17-file folder. The capture now
+        exists, committed on `yulon-phase7` at **`a0cc9dc0`**, and this record cites it by path and
+        line instead of by recollection:
+        * `pyplan/gates/7.1-client-login/LOGIN-2026-09-05.md` — the write-up; the route is its
+          lines 18-42, the account its lines 12-15, the two limits its lines 69-72.
+        * `pyplan/gates/7.1-client-login/client-connection-20260905-0731.log` — twelve lines, the
+          whole client-side trace. Line **6**: `9/5 07:31:41.385  GRUNT: state:
+          LOGIN_STATE_AUTHENTICATED result: LOGIN_OK`. Line **10**: `9/5 07:31:41.902
+          ClientConnection Completed: COP_AUTHENTICATE code=AUTH_OK result=TRUE`. Line **12**:
+          `9/5 07:31:42.568  ClientConnection Completed: COP_GET_CHARACTERS code=44 result=TRUE`.
+        * `pyplan/gates/7.1-client-login/server-side-20260905.txt` — read-only `docker exec` +
+          `SELECT`, captured `2026-09-05T08:17:56Z` (line **1**). Line **11** is the account row:
+          `| 102 | GATELOGIN | 2026-09-05 05:31:40 | 172.18.0.1 | 0 | 0 | 2026-09-05 05:28:33 |`.
+          Line **10** is `YULON` id 101 with `last_login NULL` — the 09-04 account exists on this
+          install and was never logged in on it, which is why the 09-04 login could not answer this
+          clause.
+        **One number in this bullet was wrong and is corrected here:** it said `online 1`. The
+        filed row reads `online 0`, because the readback was taken at 08:17 UTC / 10:17 CEST, hours
+        after the client was closed (`LOGIN-2026-09-05.md:52-56` says so and gives the reason).
+        `online` was never the evidence either way; `last_login 2026-09-05 05:31:40` with
+        `failed_logins 0` is. The 09-04 record's `online 1` is a different install and a different
+        capture moment and is not affected.
+        **The transport, stated because it is the clause's own weak point.** The client reached the
+        realm over an `ssh -L` tunnel with the realmlist at `127.0.0.1` — **not** over Tailscale,
+        which did not survive the `clean-ssh` restore. That is a deliberate difference from the
+        09-04 login (`pyplan/gates/7.1-client-login/`, account `YULON`, over Tailscale, against a
+        different install), and it is what makes this one answer the clause: the 09-04 login could
+        not, because its install was not this one. What a loopback tunnel still does not speak to
+        is the LAN step — that is clause **15**, and it stays open on bug-checklist §39. The two
+        are recorded apart on purpose: 14 asks that a client can log in, 15 asks that another
+        machine on the network can reach the realm the launcher advertises.
+      * **A note on the edge count.** Every earlier record says 1829 ninja edges; core `413bea61a`
+        has **1834**. A watcher written for `/1829]` never fired, which is why the first kill
+        landed at 1226 rather than ~900. Pin the total from the log, not from a previous run.
   - [ ] Gate: packaged artifact on clean Fedora 44 (SELinux, password sudo, moby-engine + buildx) and clean Arch (pacman + buildx)
+    - **ARCH, 2026-09-04: the artifact does not start on a clean Arch box, and the app underneath it
+      is fine.** Evidence: `pyplan/gates/7.1-arch/71-arch-appimage.log`. Same artifact as the Fedora
+      run — sha256 `cb7c1b7e751da93ffd81569bd8acc671a9f81832296f6509356765074bb1bf1b`, verified on
+      the box, so this is not a different build. `yulon-arch`, kernel 7.1.8-arch1-3, **no docker
+      installed**, which is what makes it a clean box for this line.
+      * **Plain launch is refused before any of our code runs:**
+        `Error: No suitable fusermount binary found on the $PATH` / `Cannot mount AppImage, please
+        check your FUSE setup.` Neither `fuse2` nor `fuse3` is installed — Arch ships neither by
+        default, and an AppImage's own runtime mounts itself with FUSE.
+      * **The same artifact with `--appimage-extract-and-run`, which bypasses FUSE, starts**: Qt
+        loads (offscreen), and the app reaches its own update check —
+        `INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False`.
+      * **So the 6.5-era failure class does not recur.** That entry records the shipped tarball
+        aborting on Arch because `libqxcb.so` could not resolve `libxkbcommon-x11.so.0`, and notes
+        that "a CI check that runs the built binary headless, or asserts a soname list, would catch
+        the class rather than the instance". Run headless here, the bundle resolves everything it
+        needs. What stops it is one package outside the bundle.
+      * **What a user is told, and why it is not enough.** The message says "check your FUSE setup"
+        and links a wiki. On Arch the actual remedy is `pacman -S fuse2`. A launcher whose whole
+        premise is that a person should not have to know this ought to say the sentence rather than
+        link the concept — and it can, because the runtime's failure is detectable.
+      * **NOT ticked by this.** The line asks for a packaged artifact installing a server on clean
+        Arch, and nothing was installed: the run stops at launch, and the extract-and-run path was
+        used to establish that the bundle is sound, not to do a gate. The Arch half needs
+        `fuse2` present (or a launcher that says so), then a real install.
     - **Fedora 44 progress, 2026-08-31 — the ENGINE passed; the line stays open because it asks for the packaged ARTIFACT.** Run on `yulon-fedora-gate`, a clean box cloned from `yulon-fedora`'s `clean-desktop` (the owner's own Fedora box could not be restored — it carries his TBC and Tortoise servers with containers running). Driven headlessly over ssh through a pty driver, because the harness declines every question when stdin is not a tty and hangs forever on a pty fed by a heredoc. Press 1: consent once, **sudo password asked once — the first time `SudoSession` has ever been exercised**, both other Linux boxes being passwordless; `dnf -y install moby-engine docker-compose docker-buildx` installed 29.7.2 / 5.5.0 / 0.36.1; group joined; correct re-login refusal; no state file. Press 2: build 1829/1829, client data 1140 MB in 1m58s, **`ac-db-import` exit 0 under SELinux Enforcing** — the 2026-08-25 failure does not recur and this is the first proof of it under the Python engine. Schemas 22 / 111 / 30 / 315, byte-identical to the macOS, Ubuntu and Windows records. `:z` counts 7 + 1 as predicted; `env/dist/etc`, `env/dist/logs`, `modules` and the root all `container_file_t`; `relabel_for_containers()` proven in isolation (`user_home_t` → `container_file_t`, recursive, no sudo) because a successful relabel logs nothing and `:z` on the clone mount would have covered for it either way. Compose diff PASS (57 passed). Re-press on a finished install: **7 s**, compile skipped. Ports: 3306 and 7878 on `127.0.0.1`, 3724/8085 open as clients need. `ls ~/dads-mmo-lab-install-*.log` → 0: zero bash. **The plan's compose-diff command is stale** — it names `YULON_COMPOSE_ROOT`, but E.2 changed the mechanism and BOTH `YULON_COMPOSE_CONFIG` and `YULON_COMPOSE_ROOT` are needed; with only the root set the test SKIPS silently and reads exactly like a pass.
-    - **Still owed on Fedora:** the run from the CI-built AppImage rather than the CLI harness (what this line actually asks for), and the kill-mid-build interrupt (the build finished before it could be taken; Ubuntu proved that path, Fedora only proves resume-on-complete).
+    - **THE APPIMAGE RUN IS DONE, 2026-09-04 — the half this line was actually asking for.**
+      `Yulon-yulon-phase7-x86_64.AppImage` from release run 33803191903 (built at `6a8afb07`),
+      sha256 `cb7c1b7e75…`, verified identical after the copy to `yulon-fedora-gate`. Fedora 44
+      Workstation, **SELinux Enforcing**, docker 29.7.2, buildx 0.36.1. The owner clicked
+      Install in the artifact's own GUI on the machine's Wayland session; every prior Fedora
+      record came from `gate-driver.py` driving the CLI harness through a pty, which is exactly
+      why this line stayed open after the 2026-08-31 engine pass.
+      **Result:** `install of wow-wotlk finished` at 22:04:35, 47 minutes after the build
+      started — build 21:17→21:54, `ac-db-import` 21:54→22:00, all three containers up, 3724
+      and 8085 listening, `WORLD: World Initialized In 1 Minutes 56 Seconds`. Schemas at
+      **22 / 111 / 315 / 30** — byte-identical to the Ubuntu, Windows and macOS gates.
+      Transcript: `pyplan/gates/7.1-fedora44-appimage.log`.
+      **What this run does NOT re-prove, said plainly:** the box was cleaned by removing the
+      previous install (5 containers, 2 volumes, 4 built images, the 2.3 GB server dir) rather
+      than restored from a cold checkpoint, so Docker was already present and `pk` already in
+      the `docker` group. The consent dialog, the group join and the re-login step were not
+      exercised again — `pyplan/gates/7.1-fedora44-press1.log` from 2026-08-31 is where those
+      live. What is proven here is the packaged artifact driving a real install to a running
+      server on an enforcing box.
+    - **Still owed on Fedora:** the kill-mid-build interrupt, and a run from a cold
+      `clean-desktop` checkpoint that exercises provisioning from the artifact too. (This
+      bullet read "the run from the CI-built AppImage rather than the CLI harness, and the
+      kill-mid-build interrupt" until 2026-09-04; the first half is the entry above.)
     - **Arch progress, 2026-09-01 — the ENGINE passed; the line stays open because it asks for the packaged ARTIFACT.** Run on `yulon-arch`, driven headlessly through the same pty driver Fedora needed. Every stage reached in order: `clone-core`, `clone-modules`, `generate-compose`, `build` (1829/1829), `client-data`, `start-db`, `import`, `up`, `ready`; `install of wow-wotlk finished`, driver child exit 0, state file recording all six persisted stages. Schemas **22 / 111 / 315 / 30** (auth / characters / world / playerbots) — byte-identical to the macOS, Ubuntu, Windows and Fedora records, which is now five platforms agreeing. Ports as designed: 3306 and 7878 on `127.0.0.1`, 3724 and 8085 open as clients need. `ls ~/dads-mmo-lab-install-*.log` -> 0: zero bash. Compose diff **PASS (57 passed)** against `tests/data/wotlk-compose-config.json`.
     - **What Arch specifically proves, and nothing else could.** The pacman branch installed `docker 1:29.7.2-1`, `docker-compose 5.5.0-1` and **`docker-buildx 0.36.1-1`** — the package name this branch's `platform.py` fix exists for. Fedora's dnf branch wants `docker-buildx-plugin` after Docker's CE repo is added; the two names are not interchangeable and Arch is the only box that can show the pacman half is right. `getenforce` is absent here, so the SELinux path takes its **third** answer (could-not-ask -> `unchecked`) rather than either boolean — the case that produced the Fedora failures, exercised on a machine where it is the normal state rather than a fault.
     - **A capture trap, recorded so the next gate does not lose an hour to it.** `docker compose -f docker-compose.yml config` does NOT load `docker-compose.override.yml` — passing `-f` at all disables the automatic override discovery. The first Arch capture was taken that way and the diff reported two real-looking differences: no `./modules` bind on the worldserver, and four missing `AC_AI_PLAYERBOT_*` / `AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES` env keys. Both live in the override file by design, and both were present all along. The correct capture is `docker compose config` run **from the server directory with no `-f`**. This is the same shape as the stale-marker and the `YULON_COMPOSE_ROOT`-only traps already recorded on this line: an incomplete capture reads exactly like a real defect, and in all three cases the artifact was believed before the machine was asked.
-    - **Windows 11 progress, 2026-09-01 — the ENGINE passed on a real Windows box.** Run on `yulon-win11-gate`, a Hyper-V guest with genuine TPM 2.0, nested virtualisation, WSL2 + VirtualMachinePlatform and Docker Desktop 29.7.2 — retail apart from Secure Boot, which nothing here touches. All nine preflight checks passed, including *sharing the folder with Docker: a container can read `C:\gate\wotlk-server`*, the check every earlier Windows attempt died on. Every stage reached in order; state file records all six. Schemas **22 / 111 / 315 / 30** — identical to macOS, Ubuntu, Fedora and Arch, so **six platforms now agree on the same four numbers**. `World Initialized In 4 Minutes 18 Seconds`, **500/500 bots logged in**, all three containers healthy, ports as designed. Compose diff **PASS (57 passed)**.
+    - **Windows 11 progress, 2026-09-01 — the ENGINE passed on a real Windows box.** Run on `yulon-win11-gate`, a Hyper-V guest with genuine TPM 2.0, nested virtualisation, WSL2 + VirtualMachinePlatform and Docker Desktop 29.7.2 — retail apart from Secure Boot, which nothing here touches. All nine preflight checks passed, including *sharing the folder with Docker: a container can read `C:\gate\wotlk-server`*, the check every earlier Windows attempt died on. Every stage reached in order; state file records all six. Schemas **22 / 111 / 315 / 30** — identical to macOS, Ubuntu, Fedora and Arch, so **six platforms now agree on the same four numbers**. `World Initialized In 4 Minutes 18 Seconds`, **500/500 bots logged in**, all three containers healthy, ports as designed. Compose diff recorded as **PASS — but the test count filed with it, "57 passed", is UNVERIFIABLE and is not evidence of a Windows run.** `tests/test_compose_fixture.py` held **57** test functions until `cdbb5895` (2026-09-01 04:24) and **59** after, and `cdbb5895` is the same commit that made this gate runnable on Windows at all — it is the `support_compose.volume_from_config` fix recorded two bullets below. A Windows run of the diff can therefore only have been a 59-test file, so 57 is the pre-fix count, carried over from a Linux record rather than read off this run. The run's own log was destroyed the same night (next bullet), so the real number cannot be recovered; it is left unstated rather than guessed. Measured 2026-09-02 at `f6ed1b9a`: `git show cdbb5895^:…/test_compose_fixture.py | grep -c '^def test_'` = 57, the same at `cdbb5895` = 59.
     - **The evidence log of that successful run no longer exists, and the harness destroyed it.** `run-gate.cmd` redirects with `>`, so a second run truncates the log in place. A second run started ~2 hours later and overwrote 402 KB of a passing install with 3.8 KB ending `install failed: Docker isn't available`. The exit-code marker read `1`. **Both artefacts describe the second run's Docker probe, not the install** — which was verified from the machine instead: schemas, a populated 500-bot realm, listening ports and a state file with six completed stages. The second run failed because **Docker Desktop is per-user and its engine does not answer in a non-interactive session**; the install had been driven from an interactive one. Two fixes owed: `run-gate.cmd` must append or rotate rather than truncate — it already deletes the exit-code marker first, for exactly this class of bug, and then destroys the log — and the Windows gate must be documented as interactive-session-only.
     - **A defect in our own test support, found only because Windows was gated.** `tests/support_compose.py::volume_from_config` relativised bind paths with `root.rstrip("/")` and `startswith(f"{base}/")` — POSIX-only. Windows `compose config` reports `C:\gate\wotlk-server\env\dist\etc`, nothing stripped, and the shape could never match the fixture: **the compose-diff gate was unrunnable on Windows**, which is why no Windows compose diff exists before tonight. Fixed by deciding from the SHAPE of the paths, never from `os.name`, so one fixture serves all three platforms and a Windows-shaped capture normalises correctly on Linux CI. The sibling-directory guard (`…-server-backup` must not be rewritten into `./-backup`) is preserved and now tested on both separator styles, plus drive-letter case and UNC. Windows paths fold case; POSIX paths deliberately do not.
     - **A third capture trap, same family as the other two.** Windows PowerShell 5.1's `Out-File -Encoding utf8` writes a **BOM**, and `json.load` refuses it outright (`Unexpected UTF-8 BOM`). Captures must be written with `[System.IO.File]::WriteAllText(..., New-Object System.Text.UTF8Encoding($false))`. With the `-f` trap and the `YULON_COMPOSE_ROOT`-only skip, that is three ways to produce a capture that reads like a defect or a pass without being either.
     - **Real client login — PROVEN, 2026-08-31, first time on any platform.** The gap matrix built the same evening found this step at zero everywhere and on no run sheet. Account made through `accounts.create_account()`, realm advertised through `networking.plan()`/`apply()`, and the owner logged in from his laptop on a different machine. Server-side: `auth.account` 101 GATETEST `last_login 2026-08-31 20:48:17` `online=1` `failed_logins=0`; `characters` 1001 Gatetest night elf hunter level 1 `online=1`. Two things only a live run could show — the LAN step **refused rather than blocked** when sudo wanted a password, returning all four `firewall-cmd` lines by name in `report.skipped`; and `networking.plan()` cannot see past NAT, filed in `bug-checklist.md`.
     - **Linux console gate — PASS, 2026-08-31**, closing the row the Phase 6 matrix found reading macOS-only (the Linux evidence existed but lived in `console.py`'s docstring, never in this file). `server info` → 9 lines; `account onlinelist` → 504 lines; pid 2991 and `StartedAt` unchanged across both cycles, `RestartCount` unmoved, still running, replies distinct.
     - **Linux port-conflict guard — PASS both halves, 2026-08-31**, proven on Windows and macOS and never gated on Linux. A stranger holding 3724 is found by name (`['yulon-port-hog']`); the install's own containers are also flagged (`['ac-authserver', 'ac-worldserver']`) — the D6 limitation its own docstring admits, now measured rather than asserted.
-  - [ ] Gate: busybox/mariadb:11 primitives live (`-u`, `:ro` refusal, `copy_from_image`, `exec_stdin` + gzip, `mariadb` client name, restart-loop detection)
+  - [x] Gate: busybox/mariadb:11 primitives live — **this box is a duplicate of 7.3's gate below, and was left open beside it while that one was ticked and evidenced.** One gate, one record: `pyplan/gates/7.3-yulon-ubuntu.log` (20 passed / 1 skipped on `yulon-ubuntu`, Docker 29.1.3). Ticked here by pointing at it rather than by running it again; noticed by an audit pass, 2026-09-03.
     - **PASSED on Linux, 2026-09-01** — `yulon-ubuntu`, Docker 29.1.3, cloned from `yulon-phase7` at `79ea63c`: **20 passed / 1 skipped**, `docker ps -aq` and `docker volume ls -q` byte-identical before and after. Also 16 passed / 5 skipped on Windows/Docker Desktop 29.6.2, where four gates are Linux-only.
     - **What only Linux could prove.** `platform.container_user_args()` returns `[]` off Linux, so every `--user` assertion on Docker Desktop is a statement about busybox's default user, not about `ContainerRun` — a review demonstrated that by re-running the gate with `to_argv()`'s `*self.user_args` deleted and watching it still pass. On Linux the argv really carries `--user 1000:1000` and the container reports it back. Measured consequence: with the flag, extracted files land `uid=1000 gid=1000`; without it, `uid=0 gid=0` — a server folder full of root-owned map data on the user's own machine.
     - **A skip can no longer read as a pass.** `YULON_REQUIRE_DOCKER=1` turns an unreachable daemon into a failure; without it the skip reason names what did not run. All three branches exercised. CI is stronger still: the `integration (live Docker)` job runs `docker info` before pytest.
     - **`docker rm -f` was leaking a volume every run.** `mariadb:11` declares `VOLUME /var/lib/mysql`, so each gate stranded ~200 MB under a 64-hex name `docker ps -a` cannot show. Now `rm -f -v`, and the teardown asserts on survivors so a leak is an error naming the volume.
 
-- [ ] 7.2 Delete the bash lineage — six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, 19,451 lines), `installer.Installer`/`PROMPT_RULES`/`make_responder`/`bash_available`, script tests, `Install.script*` fields; the three CMaNGOS entries set `platforms: []` until their own gates; gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh`; `contribution.md` harness paragraph rewritten; style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py`
+- [x] 7.2 Delete the bash lineage — six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, **21,880 lines** — this line said 19,451 until 2026-09-05; see the audit row), `installer.Installer`/`PROMPT_RULES`/`make_responder`/`bash_available`, script tests, `Install.script*` fields; the three CMaNGOS entries keep a **non-empty** `platforms` — the deletion empties no entry and changes where no game can be installed (**reworded 2026-09-05**; the two wordings this clause had before, and the argument for the reword, are below); gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh`; `contribution.md` harness paragraph rewritten; style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py` — **ticked 2026-09-05, see the audit and the tick record below**
+  - **The `platforms: []` half of that list was NOT applied, and must not be.** The 7.2 plan was
+    written for an order in which 7.2 ran BEFORE 7.3; the owner's ruling reversed it, so by the time
+    F.4 landed the three entries already had a family engine, and K.8 registered `cmangos` in
+    `FAMILIES`. Emptying the list would have disabled the Install button on three of the four shipped
+    games — `Install.supports()` is `platform_id in self.platforms`, and `ui/catalog_view.py` asks it
+    twice (once to grey the tile, once in `start_install()`) — so F.4 kept `platforms: ["linux"]` on
+    all three. It is not a value the model accepts any more either: `Install.platforms` carries
+    `min_length=1`, pinned by `test_an_entry_installable_nowhere_is_refused`. Verified 2026-09-02 at
+    `f6ed1b9a`: `wow-tbc`, `wow-vanilla` and `wow-tortoise` each read `"platforms": ["linux"]` in
+    `catalog.json`, so those three Install buttons are **live on Linux** — which is exactly the state
+    bug-checklist §32 puts to the owner. This line said the opposite until 2026-09-02, and §32 is read
+    while deciding it.
+    - **That 2026-09-02 verification went stale two days later, and the fact that moved belongs to
+      7.7.** Measured 2026-09-05 at `6546b190`, straight out of `catalog.json`:
+      `wow-tbc -> ["linux","windows"]`, `wow-vanilla -> ["linux","windows"]`,
+      `wow-tortoise -> ["linux"]`. TBC and Vanilla were widened at `2f39a6d9` (2026-09-04), each on
+      a Windows install that FINISHED on `yulon-win11-gate` — Vanilla all twelve stages that
+      morning, TBC's three containers up that evening — and that widening is **7.7's**, whose own
+      line ends *"`platforms` widened per entry"* and carries the evidence. 7.7 also established
+      the order it has to take: `Install.supports()` is `platform_id in platforms`, so a Windows
+      install refuses BEFORE preflight while the list is Linux-only, and the widening cannot follow
+      the run that justifies it. **Tortoise too, since `eb5f3b3f` on 2026-09-05** — this sentence
+      read *"Tortoise stays `["linux"]`: never attempted on Windows"* when it was written on
+      2026-09-04 (`2e8ae66c`) and again when the 7.2 box was ticked, and the rebase onto
+      `a0cc9dc0` made it false: the Windows Tortoise install finished 00:43 box-local that morning
+      and `eb5f3b3f` widened the entry. All three CMaNGOS entries now read `["linux","windows"]`,
+      and all three widenings are 7.7's, after `2fddaa0e`. 7.7's own record further down this file
+      carried a sentence with the same fault — *"Tortoise stays `["linux"]` in the repo until its
+      Windows run earns it"* — and this lane deliberately did not touch it; `0586d9ba` fixed it on
+      the branch instead, which is what the tick record's "deliberately NOT done" note now records.
+    - **WHAT THE CLAUSE MEANT — decided 2026-09-05 from the record rather than assumed, because the
+      reword turns entirely on it.** Two readings were open: **(a)** *the bash deletion must not
+      change where these games can be installed* — a statement about the deletion, which the
+      deletion satisfies; or **(b)** *these three entries stay Linux-only for the life of Phase 7* —
+      a standing constraint, which 7.7 has deliberately overtaken and which would therefore be a
+      real disagreement for the owner to settle rather than a wording problem. It is **(a)**, on
+      three things that are in the history and not in the reading:
+      * **The clause's ORIGINAL wording was time-limited on its face.** From `2850ad70` (2026-08-27), the commit that
+        added this line, until 2026-09-02 it read *"the three CMaNGOS entries set `platforms: []` **until
+        their own gates**"*, and the 7.2 plan's Architecture paragraph
+        (`phase7-plans/7.2-retire-bash.md:7`) says the same words. A clause that names the entries'
+        own gates as its own expiry cannot also be a promise that nothing changes at those gates —
+        and 7.7's Windows runs ARE those gates, for TBC and for Vanilla.
+      * **The 2026-09-02 rewrite corrected a VALUE; it did not change the subject.** `12116341`,
+        titled *"The record said three Install buttons were gated when they are live on Linux"*,
+        replaced *"set `platforms: []`"* with *"KEEP `platforms: ["linux"]`"* for the reason its own
+        message gives: "the checklist went on describing the plan rather than the tree". The
+        *"until their own gates"* half went with the sentence it was part of, not as a decision to
+        make the clause permanent. Nothing in that commit, its message, or the bullet it added
+        argues for a freeze; the bullet's whole subject is which value F.4 wrote.
+      * **Every other clause on this line is an artefact of the deletion**, and the line's verb is
+        *Delete*: eight files gone, four names gone, script tests, `Install.script*` gone, one
+        script extracted, two docs rewritten. A clause forbidding a LATER phase from widening a
+        data field would be the only forward-looking constraint on the line — and it would sit
+        against a sibling line, 7.7, that names the same field as its own deliverable.
+    - **So the clause is REWORDED to what it meant, and every wording it has had is kept here.**
+      * **2026-08-27 → 2026-09-02, as first written** (`2850ad70`, the commit that added this line)**:** *"the three CMaNGOS entries set
+        `platforms: []` until their own gates"*. Never applied, and correctly so — see the bullet
+        above; `Install.platforms` carries `min_length=1`, pinned by
+        `test_an_entry_installable_nowhere_is_refused` (`tests/test_catalog.py:187`), so `[]` is
+        not a value the model accepts at all.
+      * **2026-09-02 → 2026-09-05 (`12116341`):** *"the three CMaNGOS entries KEEP
+        `platforms: ["linux"]`"*. True of all three on the day it was written; false for two of
+        them since `2f39a6d9`, 2026-09-04, and false for **all three** since `eb5f3b3f` later on
+        2026-09-05, which widened `wow-tortoise` on the Windows run that finished at 00:43 that
+        morning. Re-measured in this lane after rebasing onto `a0cc9dc0`: `384b1a87` (`eb5f3b3f`'s
+        parent) still reads `wow-tortoise ["linux"]` and `eb5f3b3f` reads `["linux","windows"]`.
+        So the wording this clause carried until 2026-09-05 is now false of every entry it names
+        — which is the reword's own argument arriving a third time, from a commit written after
+        it.
+      * **From 2026-09-05:** *"the three CMaNGOS entries keep a non-empty `platforms` — the
+        deletion empties no entry and changes where no game can be installed"*. **MET, both halves
+        measured** — all three read `["linux","windows"]` on this branch (`wow-tortoise` since
+        `eb5f3b3f`, which the rebase onto `a0cc9dc0` brought in),
+        no revision of `catalog.json` has ever carried an empty one, and the deletion commit itself
+        left all four entries' `platforms` and `native` blocks byte-for-byte as it found them. The
+        commands and their output are in the audit row below; the second half of this wording was
+        asserted rather than shown when it was first written, and that is what the row now fixes.
+        The fact underneath moved at **`2f39a6d9`**, three days AFTER the deletion (author dates
+        2026-09-01T23:10 → 2026-09-04T22:25), and its
+        evidence lives on the **7.7** line and in the gate folders that line names — not here.
+      **Why this is not the failure this checklist exists to prevent.** A criterion bent until it
+      passes is one that can no longer be falsified. **The falsifier this record offered on
+      2026-09-05 was not one, and is replaced here (2026-09-05, same day, after review).** It read
+      *"emptying any entry's `platforms` breaks it, in a `grep` of `catalog.json`"* — but the audit
+      row below says, in the same edit, that `min_length=1` on `platforms` refuses that value
+      (`catalog.py:743`, pinned by `test_an_entry_installable_nowhere_is_refused`,
+      `tests/test_catalog.py:187`, which asserts the `ValidationError` at
+      `('games', 0, 'install', 'platforms')` type `too_short`). A tree with an emptied entry is not
+      a tree this repo can be in: the catalog stops loading. Offering a test whose failing case
+      cannot occur is the shape of a claim that cannot be falsified, which is the thing this
+      paragraph was written to rule out.
+      **The falsifier the clause's own subject supplies.** The clause is about a commit — the
+      deletion, `2fddaa0e` — so it is falsified by reading the four entries on both sides of it: if
+      any entry's `platforms` were shorter after the deletion than before, or if an entry lost the
+      `native` block its engine needs, then the deletion took an install path away and the clause is
+      false. That state is entirely reachable — it is what a careless deletion produces — and it is
+      what the clause forbids. The comparison was run in this lane and came back identical on both
+      sides; the commands and the output are in the audit row below. The argument for the meaning is
+      above, both older wordings are legible, and the commit that moved the underlying value is
+      named with the line that owns its evidence.
+  - **The line's own clauses, re-audited from scratch 2026-09-05 (every file and line the rows cite
+    resolves in the tree of `88072267`, whose `pylauncher/` is byte-identical to the commits after
+    it on this lane — an earlier header said `fe3c1ae0`, a `git log -1` taken in the wrong worktree,
+    on a branch this lane never touched) — all nine rows
+    MET, each with the file and line that answers it.** Nine rows: the eight criteria the previous
+    audit counted, plus the size figure, which that audit set aside as "not a criterion" and which
+    is now simply correct. Not a re-reading of the 09-05 audit above it:
+    every row below was re-derived against the tree in this lane, and two of them came back with
+    more than that audit had. Same method as 7.3's tick — read the line's claims against the tree
+    rather than run anything new.
+
+    | the line says | what answers it, re-derived |
+    |---|---|
+    | six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` gone | **MET.** `git ls-files \| grep -E "install-.*\.sh\|dml-start\.sh\|wow-manage\.sh"` returns five paths, all under `archive/guides/` (MapleStory, Mu Online, RuneScape, two Wrath-Unbound addon scripts) and none of them one of the eight. Deleted at `2fddaa0e`, *"chore: delete the six bash installers, dml-start.sh and wow-manage.sh"* |
+    | (eight files, **21,880** lines) | **MET as now written.** Re-counted in this lane off `2fddaa0e^`, per file: `wow-tbc/install-wow-tbc.sh` 2603, `wow-tortoise/install-tortoise-wow-wsl.sh` 1417, `wow-vanilla/install-wow-vanilla.sh` 2837, `wow-wotlk/dml-start.sh` 122, `install-wow-wotlk-fedora.sh` 2290, `install-wow-wotlk-ubuntu.sh` 2104, `install-wow-wotlk.sh` 2244, `wow-manage.sh` 8263 = **21,880** (the eight `.sh` rows of `git show --numstat 2fddaa0e` sum to 21,881 — `--stat`'s total, 23,999, includes the six non-`.sh` files; `dml-start.sh` has no trailing newline). The line and `phase7-decisions.md:10,177` said **19,451**, the plan's pre-deletion figure, on the `- Delete:` line of that page's Task F.2 (cited by name because this lane's edits to that page move its line numbers — see the tick record below); **all three of those, plus this line, are corrected in this lane**, so the "all three or in none" note the previous audit left is discharged. A fourth occurrence exists that the previous audit did not name — the plan's Step 6 tick template under Task F.7, also cited by name — and it is left as the plan's own instruction text; see the tick record below. It is a size, not a criterion |
+    | `installer.Installer`, `PROMPT_RULES`, `make_responder`, `bash_available` | **MET.** `grep -rn "^class Installer\b\|^PROMPT_RULES\|^def make_responder\|^def bash_available" yulon/` returns nothing. **Three** past-tense prose mentions survive, not the two the earlier audit named — `catalog/families/__init__.py:10` (*"`Installer` such an entry used to fall back to; G.7 deleted the …"*), `catalog/installer.py:286`, `runner.py:221` — which is this repo's own convention. The remaining live hits are a `catalog.json` description string, `platform.py:3177`'s `Docker Desktop Installer.exe`, and `ui/catalog_view.py:377`'s user-facing *"Installer needs …"* copy. What is left in `installer.py` is the shared surface: `compose_file()` :61, `InstallerError` :92, `InstallOptions` :228, `InstallEngine` :345, `installer_for()` :370 |
+    | script tests | **MET.** `tests/test_installer.py:1` is the post-7.2 docstring — *"options, errors, copy, dispatch"* — and the file holds **15** test functions; the `interact()` transport pair runs against a throwaway script through `tests/support_bash.py:24::bash_available`, where F.1 copied the probe when the engine that needed it went |
+    | `Install.script*` fields | **MET.** `Install` in `yulon/catalog/catalog.py` carries exactly five fields — `default_server_dir` :698, `password` :699, `requires_client_dir` :702, `platforms` :743, `native` :755 — and nothing else. `grep -oE '"script[a-zA-Z_]*"' yulon/catalog/catalog.json` returns **zero** keys. (A plain `grep script catalog.json` returns four hits and all four are the word `description`, which contains it; the earlier audit's phrasing "no key containing `script`" would have been read that way.) |
+    | the three CMaNGOS entries keep a non-empty `platforms` — the deletion empties no entry and changes where no game can be installed (**reworded**) | **MET — and this row is in three parts because the clause makes three claims, the second and third of which were asserted rather than measured when the box was first ticked.** *(a) Non-empty today:* `wow-tbc ["linux","windows"]`, `wow-vanilla ["linux","windows"]`, `wow-tortoise ["linux","windows"]`, read out of `catalog.json` 2026-09-05 at `cbb5360b` (that commit's identity after the rebases onto `a0cc9dc0` and `0586d9ba`; `git diff --stat eb5f3b3f 0586d9ba -- pylauncher/yulon/catalog/catalog.json` and `git diff --stat 0586d9ba cbb5360b -- pylauncher/yulon/catalog/catalog.json` are both empty, so the file the row reads is the one `eb5f3b3f` wrote). Tortoise read `["linux"]` when this row was first written and was widened by `eb5f3b3f` the same day, on the native-Windows run recorded two sections down; the row is re-read here rather than carried forward, because a values list is exactly the kind of sentence that goes stale under a rebase. *(b) No entry has ever been emptied:* `git log --follow -- pylauncher/yulon/catalog/catalog.json` names **35** revisions; 33 resolve at that path and two (`5129149e`, `f2ddcaec`) under the earlier paths `--follow` crossed (`py-launcher/yulon/catalog/catalog.json`, `py-launcher/py/catalog/catalog.json`); every one was fetched with `git show <rev>:<path>`, parsed with `json.load` and checked for `install.platforms == []` — **zero occurrences**, re-run in this lane on 2026-09-05 at `35e9c7fc`. Three of the 35 hold no entries at all (`games` is `[]`): the two crossed-path revisions AND `5032494d`, the rename into `pylauncher/`, which is one of the 33 at the new path. An earlier wording attached the empty `games` to the crossed paths alone, which told a reader that 33 of the 35 had entries to check when 32 did. `min_length=1` on `platforms` (`catalog.py:743`) is why: it makes the empty list a parse failure rather than a configuration, and `tests/test_catalog.py:187::test_an_entry_installable_nowhere_is_refused` pins that refusal. *(c) The deletion changed where nothing can be installed:* `git show 2fddaa0e^:pylauncher/yulon/catalog/catalog.json` and `git show 2fddaa0e:pylauncher/yulon/catalog/catalog.json`, each piped through `json.load` and printed as `id / platforms / native-present`, answer **identically on both sides** — `wow-wotlk ["linux","macos","windows"] native`, `wow-tbc ["linux"] native`, `wow-vanilla ["linux"] native`, `wow-tortoise ["linux"] native`. All four already carried a `native` block before the eight files went, so the deletion removed no platform and no engine: it is the load-bearing half of the reworded clause, and it is now shown rather than claimed. The reword, the two earlier wordings and the argument for the meaning are in the bullet above; the widening is `2f39a6d9` on 2026-09-04 for TBC and Vanilla and `eb5f3b3f` on 2026-09-05 for Tortoise — both AFTER `2fddaa0e` — three and four calendar days after it by author date (2026-09-01T23:10, 2026-09-04T22:25, 2026-09-05T10:11) — and both evidenced on the **7.7** line |
+    | gaming mode → `catalog/installers/steam-deck/setup-gaming-mode.sh` | **MET.** `git ls-files pylauncher/catalog/installers/` returns 13 paths: this one `.sh` and twelve `*.tmpl` templates. It is the only shell script left in the tree's installer directory |
+    | `contribution.md` harness paragraph rewritten | **MET and guarded.** `tests/test_docs_pins.py:12::test_the_contribution_harness_is_the_engine_not_the_scripts` requires `python -m yulon.install_wiring wow-wotlk` and forbids `python -m yulon.catalog.installer`, `sudo -v`, `bash-script path` and `dml-start.sh` |
+    | style-guide §3 rows for `catalog/installer.py` and `catalog/catalog.py` | **MET and guarded.** `tests/test_docs_pins.py:21::test_the_style_guide_rows_describe_the_post_7_2_modules`, which also covers the `catalog/native.py` row — added 2026-09-02 after that row went on describing *"the same `run()` contract as `Installer`"* for as long as F.3 had deleted the class |
+
+  - **TICKED 2026-09-05, and what the tick does NOT claim.** The box reads `- [x]` because the nine rows
+    above — eight criteria and the size figure — are each answered by a file and a line, re-derived in this lane
+    rather than inherited, and because the one clause that had gone stale now says what it was
+    written to say. The two reasons the box was last left open, and what became of each:
+    1. *"The `platforms` clause no longer reads true."* **Settled** — by establishing what it meant
+       (`12116341`, the plan's own *"until their own gates"*, and the shape of the rest of the
+       line) and rewording it to that, with both earlier wordings kept and dated above. The test
+       the previous reading applied was the right one and the reworded clause still passes it — but
+       not by the falsifier first written here. A reader falsifies it by reading `catalog.json` on
+       both sides of `2fddaa0e`: a shorter `platforms` or a missing `native` block after the
+       deletion breaks the clause. That comparison is in the audit row above, with its commands;
+       emptying an entry is not a falsifier, because `min_length=1` makes it unreachable.
+    2. *"The gate box below is open on 7.1's clauses 14 and 15."* **Not overturned, and not blurred
+       into this tick.** The gate below is still `- [ ]` and stays so on its own terms. What is
+       said here is only that the two boxes carry different claims — this line's claim is the nine rows
+       audited above, the gate's is a live re-run of 7.1's gate. **No precedent is claimed for this
+       shape, because the file does not have one** (corrected 2026-09-05, after review: the first
+       version of this bullet said the file "already treats parent and sub-box independently in both
+       directions" and then gave the OTHER direction as its only example — the 7.1 primitives gate
+       `- [x]` under an open 7.1). Every `- [x]`/`- [ ]` pair in this file was enumerated in this
+       lane by indentation. **Ticked child under an open parent is ordinary:** 7.1 (its primitives
+       gate is `- [x]`), 6.3 (two ticked records under an open line), 6.5 (fifteen). **Ticked parent
+       over an open child happens exactly once besides this line:** 6.4, whose open child is a
+       *"First Darwin interpreter run — partial"* record bullet, not a `Gate:` box. So with this
+       commit 7.2 is the only line in the file reading `- [x]` above an open `Gate:` box, and 7.3 —
+       the sibling this tick explicitly models itself on — has its gate `- [x]`. The tick rests on
+       the nine audited rows and on nothing else; a reader who thinks a parent must not outrun its
+       gate is disagreeing with this line alone, which is the honest place to put the disagreement.
+       For the record on the gate's own terms: clause 14 is **now met**
+       (a real client authenticated against the 09-05 install at 07:31:41 — see the 7.1 line),
+       and clause 15 is not, so that box would still be open on the old reading too.
+    - **What was deliberately NOT done, so nobody hunts for it.** The plan's Step 6 under Task F.7
+      gives a template for this tick that appends *"CMaNGOS entries `platforms: []`"* and ticks the
+      gate box in the same commit. Neither was followed: `[]` was never applied and must not be
+      (see above), and the gate box is left open. That template is also a fourth place the 19,451
+      figure appears, which the previous audit's "three places" did not count; it is left as the
+      plan's own instruction text, and the three places that audit did name are corrected. **Cited
+      by name here rather than by line**, because this lane's own edits to that page move its line
+      numbers: `git show <rev>:pyplan/phase7-plans/7.2-retire-bash.md | grep -n '19,451'` answers
+      603 and 1807 at `3b7fe339`, 620 and 1824 at `cbb5360b`, and 624 and 1828 at `35e9c7fc` — and this
+      bullet went on printing 603 and 1807 through all three.
+      **What this bullet flagged as not done, and what became of it (measured 2026-09-05 after the
+      rebase onto `0586d9ba`):** it said the 7.7 record further down this file *still said*
+      *"Tortoise stays `["linux"]` in the repo until its Windows run earns it"* (written at
+      `dfd21396`), and left it alone as 7.7's record rather than this line's. That was true at
+      `a0cc9dc0`, this lane's base until today — `git show a0cc9dc0:pyplan/checklist.md | grep -n
+      'Tortoise stays'` answers 644 and 1358 — and it stopped being true at `0586d9ba`, the commit
+      this lane is now rebased onto, whose entire content is a two-line change to that paragraph.
+      The same grep at `0586d9ba` answers 644 only, and its line 1358 now reads *"Tortoise
+      **stayed** `["linux"]` in the repo until its Windows run earned it — which it did at
+      `eb5f3b3f`, the bullet after next"*. So the flag is spent: nothing is left for a later pass
+      to correct, and what is kept here is why this lane did not make that edit itself — a docs
+      lane editing another line's dated record is how two lanes collide — together with the
+      measurement it was handing on: `git show 384b1a87:pylauncher/yulon/catalog/catalog.json`
+      reads `wow-tortoise ["linux"]` and `git show eb5f3b3f:...` reads `["linux","windows"]`.
+    - **The citation pass the tick costs, paid in the same commit.**
+      `test_docs_pins.py::test_every_test_these_pages_name_by_hand_actually_exists` widens to
+      `phase7-plans/7.2-retire-bash.md` the moment this box reads `- [x] 7.2 `. **Before:** that
+      page presented **58** test names as live, of which **19** resolved to nothing, across **24**
+      sites. Each was re-derived against the tree and marked with what actually became of it —
+      deleted where the page had told a task to delete it (the word was usually already on the
+      line, just further from the name than the guard's 60-character window reaches), or never
+      written under that name, with the live test that carries the property named by file and line.
+      The pass is written up under a dated `CITATIONS` heading on the plan. What it changed on
+      that page: **79 lines added and 17 removed** — `git diff --numstat a0cc9dc0 35e9c7fc --
+      pyplan/phase7-plans/7.2-retire-bash.md`, both endpoints pinned to SHAs and the range ending
+      at `35e9c7fc`. Two earlier versions of this sentence said "seventeen lines"
+      with no side named; seventeen is the removed side alone. Split by fence state: 7 of the 17
+      removed and 7 of the 79 added are the same seven `def test_...` signature lines, each given
+      a trailing marker comment and nothing else, and they sit in **five** distinct fenced blocks,
+      not the seven an earlier version claimed. The other 10 removed lines are all outside the
+      fences and all directive — eight imperative instructions and two rows of F.2's disposition
+      table — where an earlier version called them "prose claims and three instructions". The
+      plan's `CITATIONS` section carries the old-side line numbers and the fence walk that settle
+      both counts. **Two findings that were not wording:** F.3's instructed
+      rename never happened — `test_the_family_decides_which_engine_installs_and_linux_no_longer_keeps_the_script`
+      is alive at `tests/test_families_azerothcore.py:84`, rewritten in place, and the replacement
+      name the plan gave it has never existed — and F.5's bundle test specified an assertion
+      against `build/pylauncher.spec` that no test in `pylauncher/tests/` makes.
+    - **Measured on m910q, 2026-09-05, over the synced copy of these files** (`YULON_TEST_BOX=m910q
+      run-tests-vm.sh tests/test_docs_pins.py -v`): **4 passed**, `test_every_test_…` among them.
+      Four passing tests look the same whether the guard widened or not, so the widening was
+      asserted rather than assumed — `_plans_whose_phase_the_checklist_ticks()` run against the
+      same synced `pyplan/` answered `['7.2-retire-bash.md', '7.3-cmangos-family.md']`, and over
+      those two: 7.2 **44 live-cited, 0 unresolved**; 7.3 **219 live-cited, 0 unresolved**.
+      (`7.1-spine-azerothcore-linux.md` is 13 of 141 and stays out of scope while 7.1 is open.)
+      The whole gate over the same copy: `run-tests-vm.sh --checks` → **2537 passed, 4 skipped**,
+      mypy ×3 clean (71 source files, this platform / win32 / darwin), ruff `All checks passed!`,
+      black 136 unchanged, `ALL GREEN`, exit 0. That is the branch baseline: the rebase onto
+      `a0cc9dc0` brought in one test (`eb5f3b3f`'s
+      `test_the_ready_budget_also_covers_the_windows_first_boot_measured_over_9p`), and the later
+      rebase onto `0586d9ba` brought in none — that commit changes only `pyplan/checklist.md`.
+      This lane touches no test file, and the 2536 an earlier version of this line quoted was the
+      pre-rebase count. Every figure in this bullet was re-run on m910q on 2026-09-05 at
+      `88072267`: 4 passed, the same two-plan widening, 44/0 and
+      219/0, and the same 2537 / 4 skipped with mypy ×3, ruff and black green.
   - [ ] Gate: full checks green; 7.1's Ubuntu gate re-run from the same checkpoint with no other change
-- [ ] 7.3 CMaNGOS data model + pure stage kinds — catalog 7.3 models (`Source.rev`, `dockerfile_dir`, `CmangosData`: `ClientSpec`, `DockerfileSpec`, `ExtractPlan`, `MmapPlan`, `ConfPatchTable`, `SqlPlan`); `families/cmangos.py`; `clientdir`/`dockerfile`/`extract`/`conf`/`sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four entries validate; WotLK templates byte-identical; static catalog invariants test
-  - [ ] Gate: busybox/mariadb:11 primitives live (`-u`, `:ro` refusal, `copy_from_image`, `exec_stdin` + gzip, `mariadb` client name, restart-loop detection)
-- [ ] 7.4a WoW TBC through `build` on yulon-ubuntu — build time and context-transfer time recorded; kill + resume skips the build
-- [ ] 7.4b WoW TBC extract + mmaps with the 2.4.3 client — client tree checksummed before/after (nothing written into it); per-tool counts; kill after `ad`, resume runs only the later tools; symlink-farm fallback recorded if a tool refuses `:ro`
-- [ ] 7.4c WoW TBC conf + import + ready — every `warn` phase justified or flipped; marker written; interrupted import → `partial` → reset → re-run; second Install press ends in seconds; realmd's ready line recorded; client logs in
-- [ ] 7.5 WoW Vanilla — data + templates only; full install with the 1.12.1 client incl. a forced vmap retry; the change set contains no Python
-- [ ] 7.6 WoW Tortoise — data + templates; first-ever extraction from a 7272 client; boot to `Ready to login`; client connects; `status` promoted from `wip`; source pinned
-- [ ] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from `yulon-win11`'s clean checkpoint; 9p extract/mmaps throughput recorded; `platforms` widened per entry
+    - **Static half PASSED, 2026-09-02, overnight run.** `yulon-phase7` at `0e394d9b`: **1974 passed,
+      3 skipped** on yulon-ubuntu (`-m "not integration"`), mypy `Success: no issues found in 48 source
+      files`, ruff `All checks passed!`, black `105 files would be left unchanged`, working tree clean.
+      7.2 F.1-F.6 and the whole of 7.3 are merged.
+    - **LIVE half NOT RUN, and deliberately.** The gate is a two-press WotLK install driven through the
+      GUI on the restored `clean-ssh` checkpoint — press 2 is a **2-4 hour compile**. The plan's own
+      Step 3 opens with *"the user's go-ahead first"*, and the standing rule is that the owner starts a
+      build himself. Nothing is blocked; it needs the VM powered on and someone to press go.
+    - **What it still owes when someone runs it:** press 2's wall clock (the `--- ready` timestamp minus
+      the press), and `docker compose config --format json` from `~/wow-server-playerbots` diffed against
+      `tests/data/wotlk-compose-config.json`, 7.1's fixture. **Do not tick this from a unit suite** — the
+      integration tests self-skip without a daemon, so a green `pytest` says nothing about the half that
+      matters. Same trap as the 7.3 primitives gate, recorded above.
+    - **7.3's primitives gate WAS still owed when this was written, and was run on 2026-09-02** —
+      22 passed / 1 skipped, `pyplan/gates/7.3-yulon-ubuntu.log`. The correction filed there stands
+      and is what made a fresh run necessary: the 2026-09-01 record under 7.1 could not stand in,
+      because `test_sqlplan_live.py` postdates it entirely (21 test functions then, 23 now).
+    - **THE LIVE HALF WAS RUN ON 2026-09-05, from `clean-ssh`, with zero bash on the path — and
+      the box stays unticked because "7.1's Ubuntu gate" is not itself fully earned.**
+      `pyplan/gates/7.2-ubuntu-2026-09-05/README.md`, every clause with a file and a line. The
+      short form, so this line can be read without it:
+      * **"Full checks green" — MET at this code.** `run-tests-vm.sh --checks` on m910q against
+        `lane/gate-71-72` = `2f39a6d9`'s `pylauncher/`: **2341 passed, 4 skipped**, mypy ×3 clean
+        (71 files), ruff clean, black 136 unchanged, `ALL GREEN`, exit 0
+        (`full-checks-m910q.txt`). The 09-04 Windows record above (2291 passed at `badee625`) stands
+        beside it.
+      * **"Re-run from the same checkpoint with no other change" — the run itself: MET.** The box
+        was restored to `clean-ssh` at 23:57:34 (`state-before-restore.txt` holds what was there
+        first; `state-as-restored.txt` reads no docker, no docker group, no `~/wowserver`, 78 GB,
+        up 0 min). One change was made before press 1 and is recorded as such: `apt-get install
+        python3.12-venv`, because `clean-ssh` cannot make a venv without it
+        (`box-preparation.txt`); the 09-04 lane had the same need. Press 1 (consent, Docker
+        installed, re-login refusal), press 2 under `sg docker -c` SIGKILLed at edge 1226/1834,
+        press 3 to `--- ready` and exit 0 at 01:09:56 — 37 min 37 s from the press, of which the
+        build ≈ 22 min, client-data ≈ 4, import 7.2, up-and-ready 4.6. Schemas **22 / 111 / 315 /
+        30**, the same four numbers as every other platform; 500/500 bots online; ports as
+        designed (`final-state.txt`).
+      * **Zero bash, three ways.** No `install-*.sh` / `dml-start.sh` / `wow-manage.sh` exists
+        under `$HOME` outside `archive/`; `~/dads-mmo-lab-install-*.log` never appeared; a
+        sampler polled every 15 s for two hours — 466 samples, 465 with no lineage-shaped
+        process and the one exception a recorder seeing another recorder's argv
+        (`zero-bash-sampler.log:490`). The `.sh` processes it did see are the lane's own helpers
+        and two inside containers (`docker-entrypoint.sh mysqld`; the client-data init reading
+        upstream's `functions.sh` with `sed`). The transcripts' only `.sh` is the AzerothCore
+        image's own entrypoint, under two spellings — `/azerothcore/entrypoint.sh` and
+        `apps/docker/entrypoint.sh`, two occurrences each (`final-state.txt:377-378`). This said
+        one spelling until the 2026-09-05 doc pass.
+      * **Its own compose capture**, the "second, independent capture" the 7.1 audit asked this
+        run to produce: taken at 01:58:59, byte-identical (md5 `5ec739cc…`) to the 09-04 clean
+        run's, which passed the fixture diff (59 passed, 0/0 differences).
+      * **Why not ticked.** The clause names 7.1's gate, and 7.1's clauses 10-12 (owner
+        decision), 14 (client login) and 15 (LAN step, bug-checklist §39, not run on purpose) were
+        not part of what this run could re-earn on its own. Everything a machine on its own could
+        do is done and filed; this box ticks when those are settled on the 7.1 line.
+        **Updated 2026-09-05: clause 14 IS now met** — a real client authenticated against THIS
+        install at 07:31:41 that morning, account `GATELOGIN` id 102, over an `ssh -L` tunnel; the
+        numbers are on the 7.1 line and the capture is
+        `pyplan/gates/7.1-client-login/LOGIN-2026-09-05.md` with
+        `client-connection-20260905-0731.log:10` and `server-side-20260905.txt:11`
+        (committed at `a0cc9dc0`; before that it was cited from the run report alone). **10-12 (owner decision) and 15 (§39) remain**, so this box
+        stays `- [ ]` — on two clauses now rather than three. Note that the PARENT 7.2 line was
+        ticked the same day on its own nine clauses; that tick says nothing about this gate, and
+        this gate is not evidence for it.
+      * **The record was corrected on 2026-09-05, and one of the five corrections matters to a
+        clause.** A doc pass over `pyplan/gates/7.2-ubuntu-2026-09-05/` against the box (read-only
+        over ssh) found four citations that read as fact and one capture that had gone stale
+        underneath them; all five are written up in that README, the fifth in a section of its own.
+        The one that touches a clause: **10-12's `127.0.0.1:8085` is a snapshot of a container
+        that no longer exists.** `final-state.txt:380` holds it, captured at 01:14:33; that
+        `ac-authserver` was removed at 01:23:00 by the cycle-2 `compose down`, and the three
+        containers on the box today were created at 01:56:40 by the cycle-2 cleanup
+        (`docker inspect -f '{{.Created}}' ac-authserver` -> `2026-09-04T23:56:40Z`). Measured on
+        `yulon-ubuntu` 2026-09-05: `docker logs ac-authserver | grep -n 'Added realm'` ->
+        `41:Added realm "AzerothCore" at 172.30.55.119:8085.` The two readings do not conflict —
+        the authserver reads `acore_auth.realmlist` once at startup, press 3's came up before
+        `ready` rewrote the row and the cycle-2 restart read it after — and the row itself is
+        `1 AzerothCore 172.30.55.119 172.30.55.119 8085` in both `final-state.txt:58` and
+        `final-state-2.txt:38`. **Consequence for whoever settles 10-12:** settle it on the
+        reworded criterion (the database row plus `ready`'s own line, `press3.log:3377`), which
+        the box still supports, not on the auth-log capture, which it no longer does.
+        The other four: every `press1.log` line number in the README's clause table was wrong
+        (before-probe `:3-13` not `:3-14`; consent `:27`/`:29`/`:34` not `:29-31,44`; re-login
+        report `:31-33` with `state-after: id -Gn` at `:40-41`, not `:34-37,45-51`);
+        `cycle2-edge-rate.txt` labelled press A3 and press B as "press 2" and "press 3", because
+        `edge-rate.sh` was re-run with its labels untouched (its headings now carry the correction
+        and every figure is as printed); `cycle2-kill-record.txt`'s post-kill
+        `compiler-processes=1` — flat across all twelve samples while press 2's read 0 — is the
+        recorder's own shell, whose argv spells `~/gate72-ccache-stats.txt` and so matches the
+        counter's `[c]cache`, and nothing said so; and the entrypoint spelling above.
+      * **Two things learned that were not on the sheet**, both in the README: a `--no-cache`
+        build naming a cache mount resets it (it cost this run its first ccache measurement), and
+        a second install cannot even build on a box that holds another one's containers, because
+        AzerothCore pins `container_name` and the engine refuses at the name.
+- [x] 7.3 CMaNGOS data model + pure stage kinds — catalog 7.3 models (`Source.rev`, `dockerfile_dir`, `CmangosData`: `ClientSpec`, `DockerfileSpec`, `ExtractPlan`, `MmapPlan`, `ConfPatchTable`, `SqlPlan`); `families/cmangos.py`; `clientdir`/`dockerfile`/`extract`/`conf`/`sqlplan`; `docker.run_container`/`copy_from_image`/`exec_stdin`; all four entries validate; WotLK templates byte-identical; static catalog invariants test
+  - **TICKED 2026-09-04, by auditing the parent line's own five claims rather than by running
+    anything new.** The box had been left open with nothing written about why, while its only
+    sub-gate was already ticked on a real run. Each claim, and the artefact that answers it:
+
+    | the line says | what answers it |
+    |---|---|
+    | catalog 7.3 models | `catalog.py`: `ClientSpec` :222, `DockerfileSpec` :261, `ExtractPlan` :338, `MmapPlan` :365, `ConfPatchTable` :426, `SqlPlan` :523, `CmangosData` :552, `dockerfile_dir` :611; `Source.rev` in `manifest.py:71`. Validated by six tests in `test_catalog.py` (:622, :639, :663, :677, :703, :716) |
+    | `families/cmangos.py` and the five stage kinds | registered at `families/__init__.py:25-27`; dispatch proved end-to-end, enumerated off `catalog.json`, by `test_families_cmangos.py:279` and `test_spine.py:571`; the stage tuple pinned at `test_families_cmangos.py:209,235` |
+    | `docker.run_container`/`copy_from_image`/`exec_stdin` | `docker.py` :3025, :3097, :3201 (and `sql_query` :3397), each live-gated by the sub-gate below |
+    | all four entries validate | `load_catalog()` is a strict `model_validate` (`catalog.py:1005-1013`); `test_catalog.py:32` pins the four ids, :203 and :731 walk them |
+    | WotLK templates byte-identical | `test_composegen.py:991` renders WotLK and asserts `text == expected` against the three committed files in `tests/data/wotlk-rendered/` (`SNAPSHOT_DIR` :966); backed by `test_compose_fixture.py:83` |
+    | static catalog invariants test | `test_catalog_invariants.py`, `ENTRIES = list(load_catalog().games)` — all four — across fifteen invariants (:292 through :958) |
+
+    Nothing the line names is missing, and the static suite was green on record at `0e394d9b`
+    (1974 passed / 3 skipped, mypy, ruff and black clean).
+  - **What kept it open was its own prose, not a missing gate.** The three bullets below were
+    written BEFORE the 2026-09-02 run and were never revised when `08e098bc` ticked the sub-box,
+    so the tail of this block argued the gate was still owed while its own heading said PASSED.
+    They are past-tensed in place rather than deleted, because what they predicted is the reason
+    the run happened. Same for the 7.2 bullet above.
+  - [x] Gate: busybox/mariadb:11 primitives live (`-u`, `:ro` refusal, `copy_from_image`, `exec_stdin` + gzip, `mariadb` client name, restart-loop detection)
+    - **PASSED 2026-09-02 on `yulon-ubuntu`** — Linux 7.0.0-30-generic, Docker 29.1.3, Python 3.12.3,
+      `yulon-phase7` at `5a1098d9`. **22 passed, 1 skipped in 149.33s.** Full log:
+      `pyplan/gates/7.3-yulon-ubuntu.log`. Run twice, 154.42s and 149.33s, same counts both times.
+    - **`docker ps -aq` and `docker volume ls -q` byte-identical before and after** — 5 containers and
+      2 volumes each way, diffed, not eyeballed. Nothing leaked.
+    - **Run with `YULON_REQUIRE_DOCKER=1`**, so an unreachable daemon would have been a FAILURE rather
+      than a skip. That is the guard that makes this tick mean something; without it a green run says
+      only that pytest started.
+    - **Each of the six named items has a test, checked by name before this box was ticked** rather
+      than inferred from the total: `-u` → `…run_container_reads_the_client_read_only_and_writes_out_as_this_user`;
+      `:ro` refusal → `…a_read_only_client_mount_refuses_a_write`; `copy_from_image` →
+      `…copy_from_image_leaves_no_container_behind_either_way`; `exec_stdin` + gzip →
+      `…exec_stdin_streams_a_gzipped_dump_and_sql_query_reads_it_back`; restart-loop →
+      `…wait_ready_gives_up_on_a_crash_loop_long_before_its_timeout`; and the **`mariadb` client name**
+      by `test_sqlplan_live.py`, which passes `client="mariadb"` to a real `mariadb:11` at two call
+      sites. `docker.sql_query` takes the client's name as DATA (`DbFacts.client`) and does not know
+      which binary the image ships, so that item is only exercised by a run that names it.
+    - **The one skip is not this gate's:** `test_wotlk_live.py::test_wotlk_controller_start_ready_stop`
+      needs `YULON_WOTLK_SERVER_DIR`, i.e. an AzerothCore server already installed on the box. It
+      belongs to 7.4, not to the primitives.
+    - **This is why the 2026-09-01 record under 7.1 could not stand in.** `test_sqlplan_live.py` — the
+      two tests that carry the `mariadb` client-name item and the live `sqlplan.apply` proof — did not
+      exist at `79ea63c`. Measured: 21 test functions in `tests/integration/` then, 23 now. The earlier
+      run was real and was a different gate.
+ The eleven steps are in `pyplan/phase7-plans/7.3-cmangos-family.md`, Task K.8 step 7: hand the box over with `yulon-use.ps1 ubuntu`, announce through `claude-say`, sync the checkout, run the unit suite, pull `busybox:1.36` and `mariadb:11`, run `pytest -m integration tests/integration`, copy the log to `pyplan/gates/7.3-yulon-ubuntu.log` (which did not exist when this was written and does now), record the five numbers here, shut the box down. K.8 landed the code half only — the family registered, the stage tuple pinned, dispatch proved for all three CMaNGOS entries — because this gate starts containers and pulls images and the standing rule is that the owner starts a run himself. Nothing was blocked; it needed the VM powered on and someone to press go, and on 2026-09-02 that happened. **Do not tick from a unit suite alone:** a `SKIPPED` in the integration run means the daemon was never reached, which is the failure a gate this shape exists to catch. The run's one `SKIPPED` is not that failure — `test_wotlk_live.py::test_wotlk_controller_start_ready_stop` skipped on `YULON_WOTLK_SERVER_DIR not set`, an environment-variable skip on a 7.4 fixture, and the 22 passes beside it are the proof the daemon was reached.
+    - **This gate's text is duplicated verbatim under 7.1 above, where it is recorded as PASSED on 2026-09-01** (`yulon-ubuntu`, Docker 29.1.3, `yulon-phase7` at `79ea63c`, 20 passed / 1 skipped). **It is one gate written twice, mis-filed** — `79ea63c` is *"Task H.6: the Group H primitives get gates that run them for real"*, which is a 7.3 task recorded under 7.1.
+    - **The 7.3 line still needed its own run when this was written, and an earlier draft of this note said otherwise. It got one on 2026-09-02.** It claimed "same suite, same two images, so the substance of the run below already exists". Measured 2026-09-02: `git diff --stat 79ea63c HEAD -- pylauncher/tests/integration/` is `conftest.py +10/-…`, `test_docker_live.py +101/-…`, and **`test_sqlplan_live.py` +160, which did not exist at all**. At `79ea63c` the integration suite held exactly **21** test functions (4 + 16 + 1) — precisely the 20 passed / 1 skipped on that record. Today it holds **23**. The live `sqlplan.apply` / `exec_stdin` + gzip proof against a real `mariadb:11` is two of the six things this gate line names, and it **postdates the recorded run**. So the 2026-09-01 numbers cannot stand for this gate; it was run fresh on 2026-09-02 (22 passed / 1 skipped, against that run's 20 / 1), and the 7.1 copy should be moved here rather than counted twice.
+- [x] 7.4a WoW TBC through `build` — build time and context-transfer time recorded; kill + resume skips the build
+  - **PASSED 2026-09-02 on `m910q`**, not on `yulon-ubuntu` as the line says. TBC has
+    `requires_client_dir: true` and its preflight REFUSES without one, so "through build" cannot be
+    reached on a box with no client; m910q is where the clients live. The line's box name was
+    written before that was known.
+  - **Build: 2357.1s (39m17s)** on 4 cores, producing `yulon.local/cmangos-tbc-server:native-1cbfa4ac`
+    (395 MB). **Context transfer: 279.81 MB in 2.8s**; the Dockerfile itself 3.88 kB.
+  - **Resume skips the compile**, in the engine's own words: `The server is already built; skipping
+    the compile.` The three clones likewise: `cmangos/mangos-tbc is already in src/mangos-tbc;
+    leaving it exactly as it is.`
+  - **The mid-build kill was measured on WotLK instead, and the number is the useful part.** Killed
+    at object 1597/1829 after 757s; the resume reached 1682/1829 in 120s, because
+    `apps/docker/Dockerfile` line 83 mounts `--mount=type=cache,target=/ccache`. BuildKit does not
+    cache a partial `RUN`, so the STAGE re-runs — what is skipped is the compilation, not the step.
+    A gate line that says "resume skips the build" is describing the effect, not the mechanism.
+- [x] 7.4b WoW TBC extract + mmaps with the 2.4.3 client — client untouched; per-tool counts; resume runs only the unfinished tool
+  - **PASSED 2026-09-02 on `m910q`.** Per-tool counts: **dbc 185, maps 3586, Buildings 7171,
+    vmaps 8099, mmaps 2819** across 72 maps.
+  - **Nothing was written into the client**, established three ways rather than asserted: **0 files**
+    under `~/clients/WoW-Client-2.4.3` have an mtime at or after the install began (15:35:50); the
+    newest file in the whole 8.0 GB tree dates from **2023-03-24**; and **all four** client mounts
+    across both runs were `:ro` with **zero** writable ones (`grep -c` on the recorded `docker run`
+    lines). Baseline for future runs, taken after the install:
+    `sha256 bff72303c63c1a202c78ce8b56f8bfe5342ca15816f45a71c68d220c6be3a358`, 200 files,
+    8,490,172,040 bytes. **The mtime evidence is the weaker half** — a write that preserved mtimes
+    would not show — which is why the content hash exists; it is a baseline, not a before/after.
+  - **Resume ran only the unfinished tool.** The first run died inside `vmap assemble`; the resume
+    reported `dbc and maps: already extracted (dbc: 185 files, maps: 3586 files)` and `vmap extract:
+    already extracted (Buildings: 7171 files)` and re-ran the assembler alone. That is the criterion
+    in substance; no separate kill-after-`ad` was staged because a real failure supplied one.
+  - **No symlink-farm fallback was needed**: no tool refused the `:ro` mount. Recorded because the
+    line asks for it, not because it happened.
+  - **It found a real defect, which is why it took two runs.** `vmap_assembler Buildings vmaps` does
+    not create its output folder; it died with `Cannot open vmaps/000.vmtree` and then `error
+    converting Abandonedorcbarracks.wmo`, naming a model file rather than the missing directory.
+    Fixed in `extract.make_out_dirs()` (2ce89000), with the same hole found by reading one stage
+    later in `run_mmaps`, which WIPES `mmaps/` and never put it back.
+- [x] 7.4c WoW TBC conf + import + ready — every `warn` phase justified or flipped; marker written; interrupted import → `partial` → reset → re-run; second Install press ends in seconds; realmd's ready line recorded; client logs in
+  - **Substantially done 2026-09-02 on `m910q`; deliberately NOT ticked.** `conf`, `start-db`,
+    `import`, `up` and `ready` all completed and `WoW TBC is installed and running` was printed;
+    three containers Up.
+  - **realmd's ready line, recorded as the line asks:** `Added realm id 1, name 'MaNGOS'`. Note the
+    catalog sets `ready.auth: null` for TBC, so the engine does not wait on the auth log at all —
+    this line is evidence, not a marker in use.
+  - **Second press: 70s**, from a state where only `up` and `ready` remained.
+  - **The three preflight `warn` phases are answered, 2026-09-03 — one flipped, two justified.**
+    What that run printed, and what the same code prints now:
+
+    1. `[warn] CPU vs memory: 15 CPUs means 16 parallel compilers at about 2 GB each, and 19.5 GB
+       affords about 9. Either raise the memory, or set Docker Desktop to 8 CPUs — the job count
+       comes from the CPU count and cannot be set any other way.` **FLIPPED, because it was
+       wrong on both halves.** TBC compiles with `make -j2`, fixed in `catalog.json`
+       (`cmangos.dockerfile.make_jobs`), so the "16 parallel compilers" it named were nobody's
+       build — the CPU count is not one of the two things being compared on any CMaNGOS entry.
+       And the remedy named a Docker Desktop pane on a box running Docker Engine, which has no
+       such setting. Both fixed on 2026-09-02 (`_build_jobs`, `_cpu_check`, and the rename to
+       `compiler jobs vs memory`). The same code on the same box now prints
+       `[pass] compiler jobs vs memory: 2 parallel jobs against about 5 the memory affords`.
+    2. and 3. `[warn] free space on Docker's disk: 51 GB free; 60 GB is the comfortable figure`
+       and the identical row again for the server folder. **JUSTIFIED as a warning, and the
+       duplicate is gone.** They were two rows saying one thing because both paths were the same
+       drive; the check now emits a single
+       `free space on Docker's disk and the server folder` row that says so.
+
+       The band itself (refuse below 40 GB, warn below 60, from `min_data_root_gb` 20 +
+       `min_server_dir_gb` 20 and their warn twins) earned its keep the same day, on Tortoise:
+       the install warned at **42 GB free**, and a later attempt on the same box **refused at
+       33 GB** and could not proceed until about 9 GB was freed. So the warn band is not
+       decoration — it is the interval in which an install that has not started yet is likely to
+       cross the floor before it finishes, which is exactly what happened.
+
+  - **The last thing owed, the interrupted `import` → `partial` → reset → re-run path, was run on
+    2026-09-04 on `m910q` and is what ticks this box.** Evidence:
+    `pyplan/gates/7.4c-m910q/` — both install logs, the watcher's own log, and the three scripts.
+
+    * **The interruption is real, not carved.** A fresh `wow-tbc` install into `/home/pk/tbc-7.4c`
+      ran unattended from 23:25:21, with `watch_74c.py` beside it counting applied SQL steps in
+      the log and holding a `SIGKILL`. At **01:11:52** it wrote
+      `KILLING pid 826323 after 22 SQL files - this is the interruption`, then
+      `killed; process still present: False`. A hand-built half-written database would have
+      proved only that the probe can read what we wrote, which is not the question.
+    * **22 of 232 steps, and the shape of that matters.** The re-press applied **232** SQL steps;
+      the first press had applied **22** (`grep -c ' -> '` on each log). The 22 are not the small
+      ones — they include the `Full_DB` load — which is why the wreckage was already substantial:
+      `mangos` **184 tables / 259 MB**, `characters` 68 / 2 MB, `realmd` 13, `logs` 3, and **no
+      marker row**.
+    * **`probe` reads `partial`, asked read-only and through the installer's own gate.**
+      `controller_wow_tbc.repair.import_gate()` builds the same `sqlplan.MarkerGate` from the same
+      plan, container and generated password that `stage_import()` will build seconds later, so
+      this is not a second implementation agreeing with itself. It answered
+      `partial — mangos, realmd, characters, logs exist but there is no import marker, so the
+      import never finished`. The controller's own translation was recorded in the same breath
+      and is `unreadable`, exactly as `controller_wow_tbc/repair.py`'s docstring says it must be:
+      the installer may drop on this evidence and a controller may not.
+    * **Preflight refused the re-press first, and that is a result, not an obstacle.** The box was
+      at **39 GB** free against the entry's 40 GB floor (`min_data_root_gb` 20 + `min_server_dir_gb`
+      20, added because both land on one drive). It refused with one row, not two — the merged
+      `free space on Docker's disk and the server folder` row 7.4c's warn-phase work introduced.
+      Cleared by reclaiming only re-pullable things (`docker builder prune`, 1.137 GB, plus
+      `mysql:8.4`, `mariadb:10.6` and `ubuntu:22.04` — pulls, not builds); nothing built and
+      nothing anybody's. At **42 GB** the same row reads `[warn] 42 GB free; 60 GB is the
+      comfortable figure`, which is the band 7.4c already justified.
+    * **The re-press drove the whole chain by itself**, in `stage_import()`'s own words:
+      `The databases read as partial: …` → `Clearing the half-written databases first (…)` →
+      four `dropping <name>: it was left half-written by an interrupted import` warnings →
+      `Cleared mangos, realmd, characters, logs.` → `Importing 232 SQL steps over 12 phases.`
+      → `The databases are imported and marked complete.`
+    * **It finished: `WoW TBC is installed and running`, `INSTALL RETURNED CLEANLY`, 01:38:48.**
+      Whole re-press **13m40s**; the rest after the import is the world server loading.
+      **The import figure is a BOUND, not a measurement, and the first draft of this line got that
+      wrong.** It said "65 s (01:25:08 → 01:26:13)", which summed a start time narrated into
+      `claude-activity.log` when the run was launched with a completion time stamped by the
+      install log itself — two different clocks, one of them uninstrumented. The install log
+      stamps only its logger lines, never the per-step `X -> Y` stdout lines, so what it can
+      actually support is `01:25:13` (the last `dropping <db>` warning, immediately before
+      `Importing 232 SQL steps`) to `01:26:13` (`verified mangos: … item_template = 30396`):
+      **drop + 232-step import + verify inside 60 s**, ±1 s for second-resolution stamps. Corrected
+      by a review that grepped the committed logs instead of trusting the prose.
+    * **The marker names this run and no other.** `mangos.yulon_install` holds
+      `plan_hash 7936812f10440345`, `finished_unix 1788477973` = **2026-09-03 23:26:13 UTC** =
+      01:26:13 local — the re-press's own import minute. There was no marker before it.
+    * **The data is new, not the survivor of the drop.** `mangos` went **184 → 197 tables** and
+      **259 → 426 MB**, `characters` 68 → 82. Content on the finished server: **18,799 creature
+      templates, 6,599 quests, 30,396 items, 14,215 gameobjects**. Every one of those rows was
+      written after a `DROP DATABASE`, which is the point.
+    * **Which of those numbers a reader can re-derive, and which they cannot.** A review checked
+      every figure on this line against the committed logs, and the honest split is:
+      - **In the evidence.** The 22 and the 232 (`grep -cE '^\S+.* -> \w+\s*$'` over each log),
+        the kill line, the 12 phases, `item_template = 30396` and the 12 `ai_playerbot%` tables
+        (`tbc-74c-repress.log:1574-1575`), the 42 GB warn row (`:7`), and the 60 s bracket above.
+      - **Captured afterwards, on 2026-09-04, into `pyplan/gates/7.4c-m910q/74c-db-after.txt`**:
+        the finished server's table and size counts, the four content counts, and the marker row
+        `7936812f10440345 / 1788477973 / 2026-09-03 23:26:13`. These were read live off the
+        server when the line was first written and were in no artifact at all; the file exists
+        because a review said so.
+      - **NOT recoverable, and stated as such rather than quietly kept.** The BEFORE half —
+        `mangos` at 184 tables / 259 MB, `characters` at 68 — was read from databases that this
+        very run then dropped, and no probe output was captured at the time. The same goes for
+        `probe_74c.py`'s stdout and the preflight refusal at 39 GB: both were read off a terminal.
+        They are reported here as measurements taken, not as artifacts a reader can open. The
+        `partial` reading itself is independently in the evidence, because `stage_import()`
+        printed its own copy of it into `tbc-74c-repress.log:59`.
+      - **The lesson, since it will recur:** a number read off a live server during a gate is
+        gone the moment the gate changes that server. Capture it into a file in the same breath
+        as reading it.
+    * `realmd` again logged **`Added realm id 1, name 'MaNGOS'`** and `tbc-mangosd` reached
+      **`CMANGOS: World initialized`**; all three containers up.
+  - **What the earlier note said was still owed** — the same chain, which until this run had never
+    been exercised on a CMaNGOS entry. (This read "on any entry" until 2026-09-04 and was
+    over-broad: line 213 of this file records the identical chain live-gated on WotLK on
+    2026-08-23 — `ac-db-import` killed 19 s in, probe reads `partial`, `acore_world` dropped
+    and re-imported in 195 s, back at 316 tables, 10/10 checks. What was unproven was the
+    CMaNGOS family's own `MarkerGate`, a different implementation of the same five branches, and
+    that is what the 2026-09-04 run above exercised.)
+
+  - **CLIENT LOGIN DONE 2026-09-03.** The owner drove a real 2.4.3 client on the Hyper-V host
+    against this server over Tailscale (`100.78.24.50`). The evidence is what the SERVER recorded,
+    not what appeared on screen:
+    - `realmd.account` id **105**, `YULON`, `gmlevel 3`, `active_realm_id 1`, `expansion 1`,
+      `failed_logins 0`, and **`length(sessionkey) = 80`** — a session key exists only after a
+      completed SRP6 exchange, so this is authentication and not merely a TCP connection.
+    - `characters.characters` guid **903**, name `Ggkki`, **account 105**, race 2 / class 1,
+      `online = 1` — a character created on that account, in the world.
+    - `tbc-mangosd` logging `Avg Diff: 68. Sessions online: 1.`
+    - **The account was written by this app**, through `controller_wow_tbc.accounts.sql_for_install()`
+      + `create_account()` with the `mangos_srp6` scheme — so this run also proves the CMaNGOS SRP6
+      encoding (salt byte-reversed before hashing, verifier stored big-endian, g=7) against a real
+      client rather than against our own re-implementation of it. That is 7.9's
+      CMaNGOS-family account-creation item, closed by the same act.
+    - **One trap worth recording for whoever repeats this.** The 2.4.3 archive is a StormForge
+      repack: it carries its own `realmlist.wtf` at the client root saying `logon.stormforge.gg`,
+      and a background extraction that finished AFTER the realmlist had been set restored it,
+      so the first attempt failed with "unable to connect" against a client that looked configured.
+      Both `realmlist.wtf` (root) and `Data/enGB/realmlist.wtf` had to be written, and the locale
+      is **enGB**, not enUS. Preflight's "the client's origin ... which is how a repack looks"
+      warning was pointing at exactly this.
+  - **This gate caught the worst defect of the day.** `ready` gave up after 600s on a boot that
+    took **793s** (container start 15:51:15, first `Avg Diff:` 16:04:28) and told the user
+    `The server started but never reported ready.` — while the server was healthy and idle. Raised
+    to 1800s in `1b88d49d`; the test pins the floor at the measured 793, not at the shipped number.
+- [x] 7.5 WoW Vanilla — data + templates only; full install with the 1.12.1 client incl. a forced vmap retry (**forced through the injected `Seams.run_container`, which is what "forced" has to mean**: bug §37 established the natural crash is not reproducible, and the harness override the plan imagined never existed. No production change is needed — the seam is already injectable, so a gate harness returns 139 for the first `vmap extract` and delegates afterwards); the change set contains no Python (**already false, and recorded rather than quietly dropped**: `make_out_dirs`, the HTTP/1.1 line in three templates, and since 2026-09-02 five more commits including `assert_update_level`. The honest claim is that no Vanilla-SPECIFIC Python was needed; every line it did take is spine-level and shared by all four games)
+  - **TICKED 2026-09-04, on the second of the two counts that held it open.** The forced vmap
+    retry now fires AND completes, landing on 5,076 / 5,667 / 2,008 — the shipped counts to the
+    file (above). The other count was never work owed: the line predicted "the change set contains
+    no Python", the prediction was falsified before this session started, and the line has carried
+    its own correction inline ever since — no Vanilla-SPECIFIC Python was needed, and every line it
+    did take is spine-level and shared by all four games. A phase box does not stay open because a
+    prediction it existed to test turned out false; that is the box doing its job. What the
+    prediction cost is recorded, not erased.
+  - **Two things this line does NOT claim, said plainly so nobody reads them in.** No natural
+    extractor crash has ever been produced on this client, so every retry evidence here is an
+    injected status at a seam — read `force-vmap-retry.py`'s docstring, which is explicit about
+    what is and is not faked. And the `leaving it alone` branch of the retry, for a tool that
+    finished before the crash, has no live run behind it: the harness hard-codes the crash onto the
+    extractor, so only the empty-and-re-run branch has been exercised outside the unit tests.
+  - **Installed and running 2026-09-02 19:17 on `yulon-ubuntu`** (15 cores), against
+    `WoW-Client-1.12.1` downloaded to that box and extracted (5.1 GB, `Data/` with 14 MPQs). All
+    twelve stages; `WoW Vanilla is installed and running in /home/pk/vanilla-server`.
+    The twelve, in the order the log records them: `clone-sources`, `db-password`,
+    `write-dockerfile`, `generate-compose`, `build`, `extract`, `mmaps`, `conf`, `start-db`,
+    `import`, `up`, `ready`. **Still running when this was written** — re-checked on the box at
+    22:07 the same evening: `vanilla-db` healthy, `vanilla-mangosd` and `vanilla-realmd` both `Up
+    3 hours`, so it survived the ~3 h after the installer let go of it rather than only reaching
+    `ready` once. The four data counts were read back off the log the same way
+    (`dbc: 158 files`, `maps: 2429 files`, `Buildings: 5076 files`, `vmaps: 5667 files`,
+    `mmaps: 2008 files`).
+  - **Build 2744.3s (45m44s)**; context transfer 441.59 kB in 0.3s — three orders of magnitude
+    smaller than TBC's 279.81 MB, because this entry's `.dockerignore` keeps the already-cloned
+    sources out and the sources are COPYed rather than shipped in the context. Data counts:
+    **dbc 158, maps 2429, Buildings 5076, vmaps 5667, mmaps 2008**.
+  - **The forced vmap retry, attempted 2026-09-03, and what it found instead.** The line asks for
+    one. It could not be produced, and the attempt was worth more than the tick — see
+    bug-checklist §37.
+    - `ulimit_stack_unlimited` is documented as existing because the vanilla vmap extractor
+      "overflows the default stack on some maps and segfaults", so dropping it should reproduce
+      the crash the recipe matches. It does not, measured three ways against the real client:
+      flag off, `stack=1048576`, and `stack=65536` all completed (Buildings 5076, vmaps 5667 —
+      the shipped counts). The flag's own justification is unreproducible here.
+    - Chasing that turned up why it would not have mattered: **the recipe could not fire on a real
+      crash anyway.** `Segmentation fault (core dumped)` is a SHELL's job-control message and
+      these tools are PID 1 with no shell, so a crashed tool prints nothing — every signal-killed
+      container probed returned zero bytes. `RetrySpec.when_returncode_in` now carries
+      `[139, 134]` and is checked before the text.
+    - **That kept the line open at the time**: the recipe was reachable and unit-tested and had
+      still never fired outside a test. It has since fired twice against real containers — once on
+      2026-09-04 before the fix, where it could not recover, and once after, where it ran to a
+      working server. Neither was a NATURAL crash, and §37's point stands: nobody has made a
+      CMaNGOS extractor segfault on this client, and nobody should expect to.
+  - **THE FORCED RETRY WAS RUN 2026-09-04 on `m910q`, it FIRED, and then it could not succeed.**
+    Evidence: `pyplan/gates/7.5-m910q/vmap75-full.log` (7,876 lines), driven by
+    `pyplan/gates/force-vmap-retry.py` against the real engine, real containers and the real
+    1.12.1 client. A full `wow-vanilla` install ran from an empty folder; the harness replaced
+    only the STATUS of the first `vmap extract`, with 139 and an empty tail, which is exactly
+    what `docker.run_container` hands back for a signal-killed PID 1.
+
+    **The recipe is reachable, which is what the line asked for.** The transcript, in order (five
+    lines; this said "four" until a review counted them too):
+
+    ```
+    shipped recipe: statuses=(139,) tools=('vmap extract', 'vmap assemble')
+    vmap extract: running /opt/mangos/bin/tools/vmap_extractor -d /client/Data
+    [harness] reporting 139 for /opt/mangos/bin/tools/vmap_extractor
+    vmap extract crashed the way the retry recipe expects; running vmap extract, vmap assemble again once
+    vmap extract: retrying /opt/mangos/bin/tools/vmap_extractor -d /client/Data
+    ```
+
+    `when_returncode_in` works: a status with no log text behind it was matched, which is the
+    whole of what bug §37 added it for, and no run had ever put it to the question.
+
+    **And then the retry died on its first breath:**
+
+    ```
+    Your output directory seems to be polluted, please use an empty directory!
+    install failed: vmap extract failed (exit 1), and that was already the one retry the
+    plan's recipe asks for.
+    ```
+
+    **`vmap_extractor` refuses to start unless its output directory is EMPTY, and nothing empties
+    it between the two attempts.** `make_out_dirs()` creates the folders a tool writes into and
+    has never removed anything — its docstring is explicit that "creating a folder cannot make a
+    tool look finished", which was the right property for the bug it was written for and is the
+    wrong one here. `run_mmaps` is the contrast: it WIPES `mmaps/` before it runs, which is
+    precisely the step `vmap extract` lacks.
+
+    **So the one retry the recipe exists for cannot survive the crash it names.** At the moment
+    of the refusal `data/Buildings` held **5,076 files** — the shipped Vanilla count — and the
+    log shows the tool writing them one at a time, thousands of `Extracting World\wmo\…` lines.
+    So a crash at any point after the first file should leave a directory the tool calls polluted,
+    which would mean the only crash this recipe could recover from is one that happened before the
+    tool wrote anything. **That last step is an inference, not a measurement**, and it is the one
+    sentence on this line that was not observed: the run only ever produced TOTAL pollution. It
+    rests on the tool's own wording — it asks for an empty directory, not a complete one — and on
+    the log showing the files written one at a time. It would be settled by deleting half of
+    `Buildings/` and re-running the tool, which nobody has done.
+
+    **Stated against itself, because the harness is not a real crash.** The injected 139 arrived
+    AFTER the first attempt had finished its work, so the pollution observed here is total where
+    a real crash's would be partial. That difference does not rescue the recipe: the tool's own
+    sentence asks for an empty directory, not a complete one. What has NOT been observed is a
+    real mid-extract crash, and nobody has made a CMaNGOS extractor segfault on this client — §37
+    says nobody should expect to.
+
+    **The fix is not obvious and is deliberately not applied here.** Clearing the re-run tools'
+    output before a retry is what the tool's message asks for, and it is also a change that
+    DELETES a user's extracted data on a path that fires automatically. The recipe re-runs
+    `vmap extract` AND `vmap assemble`, so a crash in the assembler would clear a perfectly good
+    `Buildings/` and spend the whole extraction again. That trade wants the owner's eye rather
+    than an unattended commit.
+
+  - **The client this ran against is flagged by our own preflight**, recorded because it bears on
+    every count above: `[warn] the client's origin: realmlist.wtf sits at the root of
+    /home/pk/clients/WoW-Client-1.12.1 and there is no locale folder, which is how a repack
+    looks`. The extraction still produced the shipped counts, so nothing came up short.
+
+  - **THE RETRY COMPLETED 2026-09-04, after the fix, and that closes the first of the two counts.**
+    `pyplan/gates/7.5-m910q/vmap75-postfix-retry-completed.log`, a fresh install into
+    `/home/pk/vanilla-75b`. The whole chain, in the engine's own words:
+
+    ```
+    vmap extract crashed the way the retry recipe expects; running vmap extract, vmap assemble again once
+    vmap extract: emptying Buildings before the retry, so it regenerates what the crashed attempt left rather than adding to it
+    vmap extract: retrying /opt/mangos/bin/tools/vmap_extractor -d /client/Data
+    vmap extract: done (Buildings: 5076 files)
+    vmap assemble: emptying vmaps before the retry, ...
+    vmap assemble: done (vmaps: 5667 files)
+    mmaps: done (mmaps: 2008 files)
+    WoW Vanilla is installed and running in /home/pk/vanilla-75b
+    ```
+
+    **5076 / 5667 / 2008 — the shipped counts, to the file.** The retry does not merely survive now,
+    it produces the same data a clean run does.
+    **The extractor was emptied and re-run rather than skipped, and that is the designed answer:**
+    the retry branch is taken before `_conclude()`, so a crashed tool has no record, is not
+    `satisfied`, and is redone. The `leaving it alone` branch — for a tool that finished earlier in
+    the outer loop, which is the ASSEMBLER-crash case — is still unexercised by any live run, and
+    that is written down rather than glossed: this harness hard-codes the crash onto the extractor.
+  - **NOT ticked on one remaining count, and it is the line's own premise rather than missing work.**
+    The line says **"the change set contains no Python"**: it does not. Reaching a running Vanilla needed
+    `make_out_dirs()` in `extract.py` and the HTTP/1.1 line in all three Dockerfile templates.
+    That is not a failure of the run; it is the line's premise being wrong, and the premise is what
+    7.5 was for — it predicted Vanilla would be data-only and it was not.
+    **Both counts re-checked 2026-09-02 and both still hold**, rather than being carried forward on
+    the earlier reading: `grep -c -i retry` over `~/vanilla2.log` on `yulon-ubuntu` returns **0**, so
+    no retry path was entered at all; and the Python is still there and still needed —
+    `make_out_dirs` at `yulon/catalog/families/extract.py:325`, plus the HTTP/1.1 line now in all
+    three `native/Dockerfile.tmpl` files (`wow-tbc`, `wow-vanilla`, `wow-tortoise`).
+  - **A third thing this run left open — not one of the line's own criteria, which is why it is a
+    separate bullet: 171 of the 172 `core updates` SQL files FAILED, and `on_error: warn` printed
+    success over them.** Counted off `~/vanilla2.log` on 2026-09-02: 172 files under
+    `src/mangos-classic/sql/updates/` were attempted, exactly **one** applied
+    (`z2837_01_mangos_gobject_near_link.sql`), and the other **171** died the same way —
+    `ERROR 1054 (42S22) at line 1: Unknown column 'required_<the previous update>' in 'db_version'`
+    (or `character_db_version`). Each file's first statement renames the column the previous update
+    left behind, so a chain that does not start cannot continue: the earliest failure in the run,
+    `z2683_01_mangos_scriptdev2_tables.sql`, already could not find
+    `required_z2681_01_mangos_mangos_string`, and every one after it is that same miss inherited.
+    Because the phase is `on_error: warn`, the engine logged each as `continuing because 'core
+    updates' is on_error: warn` and finished with `WoW Vanilla is installed and running`.
+    **SETTLED 2026-09-03 by asking the database, and the answer is the harmless one: the warnings
+    are noise.** Every schema is at the NEWEST update the checkout ships, so nothing is missing:
+
+    | schema | update files | `*_db_version` column on the live server |
+    |---|---|---|
+    | `mangos` | 137, newest `z2837_01_mangos_gobject_near_link` | `required_z2837_01_mangos_gobject_near_link` |
+    | `characters` | 27, newest `z2819_01_characters_item_instance_text_id_fix` | `required_z2819_01_characters_item_instance_text_id_fix` |
+    | `realmd` | 10, newest `z2820_01_realmd_joindate_datetime` | `required_z2820_01_realmd_joindate_datetime` |
+    | `logs` | 1, `z2778_01_logs_anticheat` | `required_z2778_01_logs_anticheat` |
+
+    The base dump announces itself as `Classic DB version 1.12.1 "Melting Pot v2". For Classic core
+    z2815` and already carried every update but the last, which is why exactly ONE file applied
+    (`z2837`, the only one newer than the dump) and the other 171 could not: each update's first
+    statement RENAMES the previous update's `required_*` column, and the dump had already renamed
+    past all of them. The chain did not fail to start — it was already finished. World content
+    agrees: 10,384 creature templates, 4,245 quests, 17,718 items, 10,744 gameobjects.
+
+    **What is NOT settled is how anybody was supposed to know that from the run.** `on_error: warn`
+    printed 171 `ERROR 1054` lines and then `WoW Vanilla is installed and running`, and the only
+    instrument that separates "already applied" from "171 updates behind" is a query nobody runs.
+    Both readings produce the identical transcript. The phase either has to skip updates the
+    `*_db_version` column says are already in, or the verify step has to assert that column against
+    the newest file in `sql/updates/<schema>/` — which is a rule this catalog can express and does
+    not. Not a defect in this install; a defect in what the install can tell you about itself.
+  - **It found the second-worst defect of the day.** The build died at cmake configure, before
+    compiling anything: CMaNGOS's `FetchContent_MakeAvailable(zlib)` CLONES madler/zlib at configure
+    time, and over HTTP/2 that clone fails (`could not read Username for 'https://github.com'` /
+    `expected flush after ref listing`). Established by three runs on the same box — `alpine/git`
+    worked, `ubuntu:22.04` failed, `ubuntu:22.04` with `-c http.version=HTTP/1.1` worked — and fixed
+    in all three templates (`12d7e240`). `git.py` had already made this choice for the clones the
+    app itself makes; the build context was the last place still speaking HTTP/2.
+- [x] 7.6 WoW Tortoise — data + templates; first-ever extraction from a 7272 client; boot to the banner this core actually prints (`World server is up and running!` — the line originally read `Ready to login`, which was defect 3 of this very gate: no Tortoise worldserver prints it, and a criterion asking for it could only ever be met by a false reading); client connects; `status` promoted from `wip`; source pinned
+  - **What code produced this tick cannot be recovered, established 2026-09-04.** No commit was
+    recorded for the run, and the 7.3 procedure that requires one (`pyplan/phase7-plans/7.3-cmangos-family.md`,
+    steps 3 and 9) has no 7.4/7.5/7.6 counterpart. Worse than unrecorded: no committed commit
+    can reproduce it. The tick's own commit `9e00f999` is what ADDED the Tortoise `rev` pin, so
+    the run happened on an unpinned catalog; and two of the catalog fixes the entry describes —
+    `5c290188` (ready budget 1800→3600, 12:09:06) and `5e2ea700` (the fatal lookahead, 12:17:20)
+    — landed AFTER the 28-minute boot they are about, six minutes before `25d72ec2` declared the
+    gate closed. The run is traceable to a WINDOW (after `9c93ad6e` 08:44, before `9e00f999`
+    14:08, on core `7c0fb278`) and provably not to a point. It stays ticked because the
+    measurements are real and pinned by `tests/test_tortoise_boot_facts.py`; what it cannot
+    claim is re-runnability.
+  - **Five defects, 2026-09-03, `yulon-ubuntu`. Not ticked.** Every one is a fact about a binary
+    this project did not write, and not one was visible from our own code — the suite was green
+    through all five. This is the entry that justifies the gate existing.
+    1. **MoveMapGen returns 1 when it SUCCEEDS.** `tools/mmap/src/generator.cpp:352` ends
+       `return silent ? 1 : finish("Movemap build is complete!", 1)`; CMaNGOS ends `return 0`. The
+       stage hard-coded 0, so a finished run — 58 maps, 2075 tiles, 2.5 GB, about four hours — was
+       thrown away as a failure while quoting the tool's own line saying it had just written a
+       file. Fixed by `MmapPlan.success_codes` (`9c93ad6e`); re-run reached
+       `mmaps: done (mmaps: 2133 files)`.
+    2. **The DB auto-updater was pointed one directory too high.** `Database.AutoUpdate.Path` said
+       `/opt/tortoise/sql/`; the migrations are at `/opt/tortoise/sql/database_updates/world` (125
+       files). `ProcessTargetUpdates` skips a missing directory in SILENCE, so the only symptom was
+       the worldserver crash-looping later on `Unknown column 'script_name' in 'SELECT'`. Corrected:
+       the updater applied all 125 and wrote 125 rows to `migrations`; `script_name` verified
+       present in the database, not inferred from the log.
+    3. **The ready marker named three lines this core never prints.** It looked for
+       `World initialized|MaNGOS.*started up successfully|Ready to login`. A booted, ticking
+       Tortoise worldserver prints none of them; it prints
+       `World server is up and running! Loading time: 0 minutes 32 seconds`. Its two siblings are
+       no guide — Vanilla and TBC match `Avg Diff:`, and `grep -c` for that over this core's whole
+       log returns **0**. Every Tortoise install would have waited out 1800 s and then reported a
+       healthy server as never ready.
+    4. **The bots it is named for were compiled in and switched off.** `8176a2ec` built playerbots
+       into the image; the conf table then materialised `mangosd.conf` and `realmd.conf` and not
+       `aiplayerbot.conf`, though the image ships `aiplayerbot.conf.dist` beside them —
+       `AI Playerbot is Disabled. No configuration file at /opt/tortoise/etc/aiplayerbot.conf`.
+    5. **And their SQL was never imported.** With the conf written, the bots initialise, load 680
+       area levels, and die on `Table 'tw_world.ai_playerbot_weightscales' doesn't exist`. Vanilla
+       has carried `playerbots characters` / `playerbots world` phases all along (the second
+       listing `sql/world/*.sql` AND `sql/world/classic/*.sql`); Tortoise's plan had neither.
+    - **The verify is why 2, 4 and 5 all got through.** The only world-side check was
+      `COUNT(*) FROM information_schema.tables >= 150`. The database that crash-looped the server
+      had **285** tables, so it passed comfortably while missing every table the bots query and 125
+      migrations besides. A count answers "did something get imported", never "did the right
+      things". Now also counts `ai_playerbot% >= 10`.
+    - **STILL OWED, and the reason it is not ticked.** The five fixes have not been proved by ONE
+      uninterrupted run. Each was verified where it was found — the mmaps fix on the real path, the
+      updater against the `migrations` table and the `script_name` column, the conf by
+      `Bot configuration read from /opt/tortoise/etc/aiplayerbot.conf` — but the install that
+      currently exists was corrected in place across several resumes, which proves the diagnoses
+      and not the fixed catalog. A clean run needs an empty database, and `import` will not re-run
+      over the existing one by design (bug-checklist §36). Owner decision pending: drop the four
+      `tw_*` schemas on this test server, or install fresh into an empty folder (~90 min: the image
+      is cached, extract and mmaps are not).
+  - **TICKED 2026-09-03, every item on the line.**
+    - *data + templates* — the six fixes above are all `catalog.json`; the only Python this gate
+      needed was `MmapPlan.success_codes`, and that is a spine change the other three entries
+      inherit rather than a Tortoise special case.
+    - *first-ever extraction from a 7272 client* — `data/mmaps` at 2133 files from
+      `/home/pk/clients/TurtleWoW`, the client untouched (mounted `:ro`).
+    - *boot to ready* — `World server is up and running! Loading time: 28 minutes 38 seconds`,
+      `RestartCount=0`, ports 3724 and 8090 listening, all three verify rules green including
+      `ai_playerbot% = 12`.
+    - *client connects* — the owner logged in from the Hyper-V host with `turtle-wow.exe` and
+      played a character. Server-side: `tw_logon.account` id **104** `YULON`, `rank 3`,
+      `online = 1`, `current_realm = 1`, `last_ip 172.30.48.1` (the host), `failed_logins 0`,
+      `length(sessionkey) = 80`; `tw_char.characters` guid **901** `Kandranya`, account 104,
+      `online = 1`, `totaltime 146`. The account was written by this app's own
+      `accounts.sql_for_install()` + `create_account()`, and Tortoise's `account` table has a
+      DIFFERENT shape from TBC's (`sha_pass_hash`/`rank`/`security`, not `gmlevel`) — so the
+      shared account writer is now proven against two CMaNGOS variants, not one.
+    - *`status` promoted* — `wip` → `beta`, level with its two siblings.
+    - *source pinned* — the core was on a BRANCH while Eluna beside it had a `rev`. Every one of
+      the six fixes is a measurement of one commit, so a branch tip was free to invalidate all of
+      them. Pinned to `7c0fb278f3f8966422f219e6f5035cb09b76ada7`, the commit that was actually
+      built, extracted, migrated, booted and logged into. A test now requires EVERY source of this
+      entry to carry a `rev`.
+    - **Two notes carried forward, neither blocking this line.** The run that produced it resumed
+      over recorded `build`/`extract`/`mmaps` stages rather than starting from an empty folder —
+      those three were each driven earlier the same day on the same commit. And an existing
+      install cannot receive the two new SQL phases, by the marker's design: bug-checklist §36.
+  - **Reached `build` and FAILED there, 2026-09-02 on `m910q`** — the first time this entry has been
+    driven at all. Five stages ran in order — `clone-sources`, `db-password`, `write-dockerfile`,
+    `generate-compose`, `build` — the build was invoked at 21:44:05 and the run ended at 21:44:49,
+    killed at **cmake configure**, 0.585 s into the `cmake ..` step, before one object was compiled:
+
+        Eluna submodule is missing.  Run: git submodule update --init --recursive
+        src/modules/Eluna
+        -- Configuring incomplete, errors occurred!
+
+    `install failed: the build failed (exit 1)`, and the failing step is `Dockerfile:71`, the
+    `cmake .. -DCMAKE_INSTALL_PREFIX=/opt/tortoise … -DBUILD_PLAYERBOTS=ON` line. Log kept at
+    `~/tortoise.log` on m910q (104,741 bytes).
+  - **What the failure proves is bigger than one broken build: the engine clones a repository and
+    nothing fetches that repository's git SUBMODULES.** Established from the clone it produced
+    rather than read off the error message. `src/tortoise-wow/.gitmodules` declares
+    `[submodule "src/modules/Eluna"]` with `url = https://github.com/ElunaLuaEngine/Eluna.git`; the
+    directory `src/modules/Eluna` exists on disk and is **empty** — git creates the mount point and
+    stops there. And the argv `yulon.git` logged for the clone carries no `--recurse-submodules` and
+    is followed by no `submodule update`: `clone --config core.autocrlf=false --config core.eol=lf
+    --config http.version=HTTP/1.1 --depth 1 --branch playerbots-integration-gh
+    https://github.com/Shyalya/tortoise-wow.git .`. So the defect is in the clone step and Tortoise
+    is only the first of the four entries whose source needs one — nothing about this is
+    Tortoise-specific except that it is the entry that exposed it. (A fix was being written
+    elsewhere while this was recorded; what is recorded here is the failure and what it establishes,
+    not the remedy.)
+  - **Preflight on that box is worth reading before the next attempt, because it already warned
+    about the thing 7.6 is for.** Nine checks passed and three warned: free space 44 GB against a
+    60 GB comfortable figure (twice — Docker's disk and the server folder share the drive), and the
+    one that matters, *"the client's origin: realmlist.wtf sits at the root of /home/pk/TurtleWoW
+    and there is no locale folder, which is how a repack looks"*, alongside `21 MPQ archives in
+    /home/pk/TurtleWoW/Data`. Whether a repack extracts completely is exactly what "first-ever
+    extraction from a 7272 client" exists to answer, and this run stopped four stages short of it.
+  - **The old Tortoise test server on m910q was removed by owner decision (2026-09-02)** — to free
+    the container names, which AzerothCore/CMaNGOS compose stacks pin GLOBALLY, so a second Tortoise
+    install cannot stand beside an old one. Three containers and two volumes went. The volumes were
+    `tortoise-wow-hunt_dbdata` and `tortoise-wow-server_dbdata`, named in
+    `~/tortoise-volumes-before.txt` before the removal and gone afterwards: the box now holds one
+    volume (`yulon-wow-tbc-1cbfa4ac_db-data`) and three containers (the exited TBC set), checked
+    after the fact. **The 428 MB the removal reclaimed was read at the time and cannot be
+    re-measured** now that the volumes are deleted; it is recorded as reported, not as re-verified.
+- [x] 7.7 Native Windows, all four — WotLK first (closes the 6.3 `ac-db-import` blocker), then TBC, Vanilla, Tortoise from **`yulon-win11-gate`**'s clean checkpoint (this line said `yulon-win11`, which is the working box and has carried an install since 2026-09-03; the clean-checkpoint box is the `-gate` one); 9p extract/mmaps throughput recorded; `platforms` widened per entry
+  - **A WotLK server is ALREADY installed and running on `yulon-win11-gate`, and its schemas match
+    every other platform byte for byte** (found 2026-09-04, not by a fresh run). `C:\gate\wotlk-server`,
+    all three containers up, `ac-db-import` **Exited (0)** and `ac-client-data-init` Exited (0) —
+    which is the 6.3 blocker cleared on native Windows. Schemas: `acore_auth` **22**,
+    `acore_characters` **111**, `acore_world` **315**, `acore_playerbots` **30**, identical to the
+    Ubuntu, Fedora and macOS records.
+    **What is missing is its transcript, and that is why this does not tick the WotLK half.** The
+    box's own evidence folder (`pyplan/gates/7.7-win11-gate/`) turns out to record a FAILED attempt
+    — `20-install.exitcode` is **1**, and `20-install.log` ends with the Docker Desktop engine
+    never answering after four minutes of retries. The install that is actually running there was
+    made afterwards and nothing captured it. Worth keeping precisely because the filename says
+    "install" and the contents say the opposite.
+  - **The first thing 7.7 hits is its own `platforms` line, and it is a chicken-and-egg** (measured
+    2026-09-04). A Vanilla install on `yulon-win11-gate` refuses before preflight:
+    `WoW Vanilla cannot be installed on Windows yet: its installer needs Linux. Nothing was
+    started.` That is `Install.supports()` reading `platforms: ["linux"]`, which `catalog.json`
+    still carries for all three CMaNGOS entries. So "platforms widened per entry" is not a step
+    that happens after the installs — it is a step that has to happen before one can be attempted
+    at all, and the widening is the thing the run is supposed to justify.
+    **Resolved for the gate by widening the catalog ON THAT BOX ONLY**, never in the repo: the
+    three entries there now read `["linux", "windows"]`, the engine accepts, and preflight passes
+    with two warnings (55 GB free against the 60 GB comfort line; the same repack-shaped client
+    warning Linux gives). Whoever ticks this line commits the widening on the strength of the run,
+    not ahead of it.
+  - **The 1800 s ready budget is the wrong shape for 9p, measured 2026-09-04 on `yulon-win11-gate`.**
+    Both CMaNGOS entries wait for the first `Avg Diff:` line with `timeout_s: 1800`. On this box the
+    world server's own timestamps (`docker logs -t`) put that line **24.6 min** after `mangosd` started
+    for Vanilla (06:12:43Z → 06:37:22Z, inside the budget) and **46.0 min** for TBC (18:59:55Z →
+    19:45:58Z, outside it). So the TBC run's engine verdict was `install failed: The server started but
+    never reported ready`, exit 1 at 12:29:57 box-local after a 7 h 10 min run — while `tbc-mangosd`
+    was up with `restarts=0`, loaded the world and has been printing its diff loop since. The three
+    containers are still up at the time of writing. The install is complete and correct; the verdict
+    is not, and the difference between the two games is the size of the world being read over 9p at
+    ~1.4 MB/s, not anything either core did. Tortoise, which booted in 28 min on Linux (7.6), was
+    given `timeout_s: 10800` in the box-local copy for its own run rather than a value guessed to
+    fit. What this asks of the engine is a decision, not a number: a fixed wall-clock budget cannot
+    be right on both a native Linux disk and a 9p share, and a container that is alive, not
+    restarting, and still printing `Loading …` lines is not a server that failed. Left for the
+    owner; recorded here so the TBC exit code is read as what it is.
+  - **The `platforms` widening for TBC and Vanilla landed at `2f39a6d9`**, on the Vanilla run above
+    and the TBC run just described. Tortoise stayed `["linux"]` in the repo until its Windows run
+    earned it — which it did at `eb5f3b3f`, the bullet after next; until then the copy on the box carried the widening so the run could start at all (the
+    chicken-and-egg two bullets up).
+  - **Windows Tortoise, started 2026-09-04 23:19 CEST (14:19 box-local)** on `yulon-win11-gate`, driven
+    by `C:\gate\run-tortoise.cmd` as scheduled task `dml-tortoise-install`, log at
+    `C:\gate\evidence\tortoise77.log`. Source: a copy of this repo at `2f39a6d9` in
+    `C:\gate\tortoise-src`, widened box-locally by `widen-tortoise.py` (platforms + `windows`, ready
+    `timeout_s` 3600 → 10800 on the TBC measurement above). Client: the 7.6 copy from m910q
+    (`/home/pk/TurtleWoW`, 172 files, tar md5 `5bca6fa4…` verified on arrival), byte-identical in
+    `WoW.exe`/`TurtleWoW.exe` to the owner's copy on the Hyper-V host. Two things the run needed
+    first, both recorded in `windows-gate-box-recipes`: preflight refused with **10 GB free against
+    40 GB needed** (the 120 GB disk now carries three servers), answered by a second 120 GB VHDX
+    hot-added from the host and mounted as `D:`; then Docker could not see `D:` until the
+    docker-desktop distro had it mounted by hand (`mount -t drvfs`, not persistent). Server folder
+    is therefore `D:\gate\tortoise-server`, client still on `C:`. The TBC stack was stopped first.
+  - **WOW TORTOISE IS INSTALLED AND RUNNING ON NATIVE WINDOWS, 2026-09-05 — the fourth of four.**
+    That run ended `install of wow-tortoise finished` at **00:43:19 box-local (09:43 CEST), exit 0**,
+    10 h 24 min after its 14:18:59 start; `tortoise-realmd` (3724), `tortoise-mangosd` (8090) and
+    `tortoise-db` (3306 on loopback, healthy) up with `RestartCount=0` on every one, realm
+    advertising `172.30.52.119`, and the worldserver's own banner — re-read from the live container
+    with `docker logs -t`, not from the transcript — `07:41:17Z World server is up and running!
+    Loading time: 59 minutes 18 seconds`. Evidence: `pyplan/gates/7.7-win11-tortoise/` (transcript,
+    exit codes, the container captures, and a README that walks the stamps). Stage walls from the
+    transcript's own timestamps: clone 6 min; build **1h17m**; extract **2h47m** (dbc 158, maps 2805,
+    Buildings 5367, vmaps 6921); mmaps **5h08m** (2133 files — the same 2133 the 7.6 Linux run
+    produced, so the mmaps side of the TBC counts question does not recur here); conf + start-db +
+    import 4 min; up → ready **61m42s**.
+    **The widening is now earned for all three CMaNGOS entries** — `wow-tortoise` reads
+    `["linux", "windows"]` with this commit, `CMANGOS_PLATFORMS` in `test_catalog.py` records the run
+    that did it — and it could not be committed alone. The ready stage measured **3702 s** wall
+    (23:41:37 `start_staged()` → 00:43:19 finished) against the **3600 s** the repo carried for
+    Tortoise; the run was reported as a success only because the box's copy had 10800 s. Shipping
+    `windows` at 3600 would ship a Windows install measured to expire 102 s before it sees its own
+    banner and to repeat TBC's `never reported ready` verdict, so the budget moved to **10800 s** in
+    the same commit and `test_tortoise_boot_facts.py` now holds the 3702 s floor beside the Linux
+    one — the value it pins is the measured stage wall, not the number typed. The "decision, not a
+    number" note two bullets up still stands: 10800 is the third data point for that decision
+    (Vanilla 24.6 min, TBC 46.0 min, Tortoise 61.7 min, all over 9p), not the end of it.
+    One confound, kept: the box's `dml-tortoise-dl` task fired a second time at 23:59 and re-fetched
+    the 9.98 GB client at 6.6 MB/s until 00:23 — inside the 59-minute load — and its `unpack` twin
+    stopped on `MD5 MISMATCH` (that is the `2` in `tortoise-unpack.exitcode`; the client the install
+    used was verified at 14:06). The boot may be quicker on a quiet box; the budget covers the boot
+    that was measured. Still owed before this line ticks: WotLK's transcript on this box.
+  - **WOW WOTLK, FRESH FROM AN EMPTY FOLDER WITH ITS TRANSCRIPT, 2026-09-05 — the fourth of four.**
+    `D:\gate\wotlk-server77` from source `a0cc9dc0`, driven by `C:\gate\run-wotlk77.cmd` as task
+    `dml-wotlk77`: **exit 0** at 04:30:26 box-local (13:30 CEST), **2 h 34 min 15 s** after its
+    01:56:11 start. `ac-db-import` **Exited (0)** — the 6.3 blocker, this time with the transcript that
+    the 08-31 install never had; `ac-client-data-init` Exited (0); worldserver, authserver and database
+    up with `RestartCount=0`; schemas `acore_auth` 22 / `acore_characters` 111 / `acore_playerbots` 30
+    / `acore_world` 315, identical to every other platform's record; realm `172.30.52.119:8085`. The
+    banner the catalog waits for, from `docker logs -t`: `11:30:24Z … AzerothCore rev. 413bea61a85e+ …
+    ready...` after `World Initialized In 4 Minutes 35 Seconds`; `Random Bots Stats: 500 online` at
+    11:40:46Z. Stage walls from the transcript and `docker inspect`: clone 26 min; build **1h39m** (1834
+    steps, 5 jobs); client-data + start-db 7 min; import 10 min; up → ready **609 s**. Evidence:
+    `pyplan/gates/7.7-win11-wotlk/` (transcript, exit codes, container captures, README).
+    Two facts from getting it started: preflight first **refused** the run — `free space on Docker's
+    disk: 22 GB free, and the install needs 40 GB` — because the VHDX on `C:` carried 20.6 GB of stale
+    build cache; pruned and compacted (32.6 → 12.0 GB), the second start passed. And the 08-31 install's
+    five stopped `ac-*` containers had to be removed first, because compose pins those names globally
+    (volumes kept). The worldserver logs `Failed open file …/modules/playerbots.conf` and then takes
+    every bot setting from `AC_PLAYERBOTS_*`; recorded, not yet compared with the Linux transcripts.
+    **What still keeps this line open:** TBC's engine verdict on this box is `exit 1` (the 1800 s
+    budget, two bullets up) although the install was complete — the quiet-budget engine that fixes
+    that is merged with `lane/readybudget`; a second Install press on `C:\gate\tbc-server` under it
+    (build, extract and mmaps already done, so conf → ready only) is the run that turns TBC's exit code
+    into a 0 and this box into four for four with four transcripts. Also to state honestly at the
+    tick: only the first (failed) WotLK attempt ran from the `clean-ssh` checkpoint; Vanilla, TBC,
+    Tortoise and this WotLK each ran from an empty folder on the box those installs accumulated on.
+  - **TICKED 2026-09-05 — TBC's exit code became a 0, and the four games have four exit-0 transcripts.**
+    A second Install press on the finished 09-04 TBC folder (`C:\gate\tbc-server`) under the
+    merged engine at `745307ad` (which carries `lane/readybudget`'s quiet budget): **exit 0** at
+    05:22:34 box-local, 10 min 49 s after its 05:11:45 start; steps 1–10 all found done, `up` at
+    12:12:50Z, `CMANGOS: World initialized` 12:22:24Z, first `Avg Diff: 138` 12:22:33Z, `The server
+    is up.` the same second; three containers up with `RestartCount=0`. A warm boot, so 9 min 34 s
+    says nothing about the 46-minute first boot; what it says is that the engine now reports a
+    complete install as complete. Evidence: `pyplan/gates/7.7-win11-tbc-second-press/`. The line's
+    clauses, as they stand: *WotLK first, closes the 6.3 blocker* — MET on the 2026-09-05 fresh run
+    (exit 0, `ac-db-import` Exited (0), transcript kept); *then TBC, Vanilla, Tortoise* — MET, exit 0
+    each (TBC on this second press, Vanilla 09-04, Tortoise 2026-09-05); *from `yulon-win11-gate`'s
+    clean checkpoint* — MET only for the first (failed) WotLK attempt; every other run started from
+    an empty folder on the box those installs accumulated on, stated rather than hidden; *9p
+    extract/mmaps throughput recorded* — MET (`7.7-win11-gate/ninep.csv`, the TBC/Vanilla stage
+    tables, Tortoise's stage walls); *`platforms` widened per entry* — MET (`2f39a6d9`, `eb5f3b3f`).
+    Not met and not claimed: a client login on native Windows (7.1's clause, not this line's).
+  - **Windows Vanilla, started 2026-09-04 04:20** into `C:\gate\vanilla-server` against the 5.14 GB
+    1.12.1 client at `C:\gate\client`. Numbers already in hand from setting it up, since 7.7 asks
+    for throughput: the client zip came down from `wow.baerthe.com` at about **13 MB/s** (5.33 GB,
+    and its size matches the server's ETag exactly), and unpacking it needed `tar -xf` rather than
+    `Expand-Archive` — **91 MB/s against under 1 MB/s**, a 100-fold difference on the same file and
+    the same box. Anyone scripting a Windows gate should not use `Expand-Archive` on a client.
+    Docker's VM there has **11.7 GB and builds with 2 jobs**; the compile took **68 minutes**
+    (18:01 clone start → 19:22 extract start, box-local Pacific stamps).
+  - **WoW VANILLA IS INSTALLED AND RUNNING ON NATIVE WINDOWS, 2026-09-04.** All twelve stages, from
+    an empty folder, ending `WoW Vanilla is installed and running in C:\gate\vanilla-server`. Three
+    containers up; schemas `mangos` 207, `characters` 72, `realmd` 13, `logs` 3. Transcript:
+    `pyplan/gates/7.7-win11-gate/vanilla77.log` (27,488 lines), throughput
+    `ninep.csv`. **This is the first CMaNGOS install on Windows.**
+
+    | stage | box-local (PST) | elapsed |
+    |---|---|---|
+    | clone-sources → build | 18:01:02 → 19:22:21 | **1h21m** |
+    | extract (`ad`, `vmap extract`, `vmap assemble`) | 19:22:21 → 21:48:52 | **2h27m** |
+    | mmaps | 21:48:52 → 23:05:58 | **1h17m** |
+    | conf + start-db | 23:05:58 → 23:11:02 | 5m |
+    | import | 23:11:02 → 23:12:31 | **1m29s** |
+    | up → ready | 23:12:31 → 23:37:24 | 25m |
+    | **total** | | **5h36m** |
+
+    Read that table against the 9p figures above and the shape is unmistakable: **extract and mmaps
+    are 3h44m of the 5h36m**, and they are the two stages that write thousands of files through the
+    bind mount. The import, which writes one big stream into a Docker volume rather than the mount,
+    took **89 seconds**.
+
+  - **THREE OF THE FIVE EXTRACTION COUNTS DIFFER FROM LINUX, AND THE SERVER CAME UP ANYWAY.**
+    This is the open question 7.7 must answer before its Windows half is ticked.
+
+    | | Linux (7.5) | Windows | |
+    |---|---|---|---|
+    | dbc | 158 | 158 | same |
+    | maps | 2429 | 2429 | same |
+    | Buildings | 5076 | **3913** | 1,163 fewer |
+    | vmaps | 5667 | **6077** | 410 more |
+    | mmaps | 2008 | **2009** | one more |
+
+    The two `ad` outputs match exactly. Everything downstream of `vmap_extractor` does not, and the
+    `mmaps` figure is off by exactly one, which is the kind of difference that usually means a
+    boundary rather than a fault. **No cause is established here and none should be guessed at.**
+    What is worth writing down:
+    * the server reached `ready` and is serving, so whatever the difference is, it is not fatal;
+    * our own preflight warned about this client on BOTH platforms — `the client's origin:
+      realmlist.wtf sits at the root ... which is how a repack looks`, whose remedy reads "use a
+      clean client of this expansion **if extraction comes up short**";
+  - **SETTLED 2026-09-04: THE DIFFERENCE IS THE PLATFORM.** The measurement above was taken, and
+    every variable anyone could hold has been held.
+    * **The client is identical.** All 20 files under `Data/` match byte for byte in size across
+      the two boxes, including the 1.9 GB `patch.MPQ`; and `wmo.MPQ` — the archive
+      `vmap_extractor` reads to produce `Buildings` — hashes
+      `9933d9ca23d481647880c9798dc7c225cd926f51026d148f09cd5251fc56edb7` on both. 149 files each,
+      24 under `Data/`.
+    * **The CMaNGOS source is the same commit**, `8ec338a1704e7dcb1c0213eb7ed58f9231ade40f`, read
+      out of each box's own clone rather than assumed from the catalog pin.
+    * **The differing image tags are a red herring**, and worth writing down so nobody else spends
+      time on them. `native-0baff6f3` and `native-d61e7711` differ because `image_tag()` is
+      `native-` plus `install_id()`, and `install_id()` is a hash of the install DIRECTORY PATH —
+      `/home/pk/vanilla-75` against `C:/gate/vanilla-server`. It carries nothing about source or
+      tools.
+    * **And the Linux number is not a memory**: `/home/pk/vanilla-75/data/Buildings` on m910q holds
+      **5,076 files** right now, produced from that same hash-verified client.
+
+    So: same archive, same commit, same Dockerfile, **5,076 `Buildings` on Linux and 3,913 on
+    Windows**.
+  - **AND THE CONCLUSION THAT FOLLOWED THAT SENTENCE WAS BACKWARDS. Corrected 2026-09-04, hours
+    later, by diffing the two file lists instead of comparing their counts.** This line said the
+    shortfall was "on the Windows side"; it is not a shortfall at all, and the run that loses data
+    is the LINUX one. Evidence: `pyplan/gates/7.7-win11-gate/buildings-shortfall-measurements.txt`
+    and the lists beside it.
+    * **Nothing is missing on Windows.** `comm` over the two sorted lists: 1,163 names in Linux and
+      not Windows, **0** in Windows and not Linux. All 1,163 are `.m2`; the 814 `.wmo` and 1,464
+      `.M2` are identical on both sides. Every one of the 1,163 has a case-insensitive twin present
+      on Windows — **1,163 of 1,163** — and md5 + size of all 1,163 pairs, computed on m910q where
+      both spellings exist, is **SAME 1,163 / DIFF 0**. Unique case-insensitive names in the Linux
+      list: **3,913**, which is the Windows file count to the file. NTFS folded byte-identical
+      duplicates onto their twin. **Zero unique bytes lost.**
+    * **The Windows run is the MORE complete one**, and this is the part worth the entry.
+      `Buildings/dir_bin` — the placement index — is **36,635,438 bytes on Windows against
+      31,072,203 on Linux**. Distinct model names in it: **3,348 against 2,981**. Placements:
+      **503,722 against 429,016 — Linux is missing 74,706**. Not a truncation: 284 of the 367
+      Windows-only names first appear below Linux's own end-of-file offset.
+    * **The cause is upstream, in CMaNGOS at `8ec338a1`.**
+      `vmap_extractor/vmapextract/gameobject_extract.cpp:9` `ExtractSingleModel()` writes the file
+      under the RAW name from the WMO `MODN` chunk (`INNBED.MDX` → `INNBED.M2`), applying neither
+      `fixnamen()` nor `fixname2()`. `model.cpp:242` `Doodad::ExtractSet()` then looks the model up
+      under the FIXED spelling (`Innbed.m2`) and does `if (!input) continue;` — **a silent drop of
+      the placement**. On a case-sensitive filesystem that lookup misses and the doodad is
+      discarded; on NTFS it hits. Witness on m910q: `ls Innbed.m2` → no such file, `ls INNBED.M2`
+      → 840 bytes. Verified independently by this session, not taken from the lane.
+    * **So the count check is the thing that is wrong, not the extraction.** Any comparison of
+      `produces` counts across platforms has to fold case, and a Windows count BELOW a Linux one is
+      the expected reading rather than a defect. 7.7's Vanilla half is not blocked by this.
+    * **What a fix would be, and whose.** `ExtractSingleModel()` should apply the same
+      `fixnamen()`/`fixname2()` its reader uses, so the write and the later `fopen()` agree; and
+      `Doodad::ExtractSet()`'s `continue` should count what it drops rather than dropping silently.
+      Both are upstream CMaNGOS, not ours. Ours is the count check — and the knowledge that **every
+      Linux install this project has ever made is missing about 74,706 doodad placements**, which
+      is a thing players would see.
+  - **THE 9p FIGURE 7.7 ASKS FOR, measured 2026-09-04.** Everything a container writes into the
+    server folder on Windows crosses Docker Desktop's 9p mount, and that is the whole of the
+    Windows tax. Sampled once a minute into `pyplan/gates/7.7-win11-gate/ninep.csv` by
+    `pyplan/gates/ninep-sampler.ps1` — into a FILE, because the lesson from 7.4c's review is that a
+    number read off a live box during a gate is gone the moment the gate changes the box.
+
+    | phase | MB/s | files/s | what it wrote |
+    |---|---|---|---|
+    | `clone-sources` (git, into `src/`) | **~1.4** | ~8 | 415 MB, 5,294 files, about 5 min |
+    | `extract` (`ad` then `vmap extract`, into `data/`) | **0.253 mean** (0.197–0.330) | **4.97 mean** (2.80–8.77) | 151.8 MB / 3,060 files in the 11-minute window |
+
+    **Extract is four to five times slower than the clone**, and the reason is visible in the two
+    columns: the rate per FILE barely moves while the rate per BYTE collapses, because 9p charges
+    per operation and the extractors write many small files. Vanilla's shipped counts are dbc 158,
+    maps 2429, Buildings 5076, vmaps 5667 — about 13,300 files before mmaps — so at five files a
+    second the extract stage alone is over an hour of pure mount overhead. On Linux the same stage
+    runs at disk speed.
+    **THE EXTRACT STAGE FINISHED AT 06:49, AND TWO OF ITS FOUR COUNTS DO NOT MATCH LINUX.**
+    This is the most important thing on this line and it needs answering before any Windows tick.
+
+    | tool | Linux (7.5) | Windows | |
+    |---|---|---|---|
+    | `ad` — dbc | 158 | **158** | same |
+    | `ad` — maps | 2429 | **2429** | same |
+    | `vmap extract` — Buildings | 5076 | **3913** | **1,163 FEWER** |
+    | `vmap assemble` — vmaps | 5667 | **6077** | **410 MORE** |
+
+    Fewer Buildings and more vmaps, from the same tools against a client fetched from the same URL.
+    **No cause is established and none should be guessed at here.** What is worth writing down is
+    that our own preflight warned about this client on both platforms — `the client's origin:
+    realmlist.wtf sits at the root ... which is how a repack looks`, whose remedy line reads
+    "use a clean client of this expansion **if extraction comes up short**" — and on Windows the
+    extraction did come up short on the count that feeds the assembler. Whether the two boxes hold
+    byte-identical clients has NOT been checked; 7.4b's method for exactly this question is a
+    content hash of the client tree, and neither side has one here.
+    **Until that is settled, "Windows produces the same data" is not a claim this line may make.**
+    An earlier draft of this entry made it on the strength of dbc and maps alone, an hour before the
+    vmap tools finished and disagreed.
+    It wrote **170 MB / 2,598 files in at most 9.3 minutes**: **0.305 MB/s, 4.66 files/s**.
+    "At most" because the sampler's first row already had 321 files in it, so the true start is
+    inside that first minute.
+    **And the phase after it is not write-bound at all.** Once `vmap extract` began, the write rate
+    fell to **0.008 MB/s and 0.63 files/s** while the tool kept working — it is reading the client
+    over the read-only mount and computing, not writing. So "9p throughput" is not one number for
+    the extract stage: `ad` is write-heavy and pays the per-operation cost, `vmap_extractor` is
+    read- and CPU-heavy and does not.
+    **The rate over the whole extract stage, in ten-minute windows** (from the same CSV, minutes
+    counted from the stage's first sample):
+
+    | minutes | MB/s | files/s | files written |
+    |---|---|---|---|
+    | 0–10 | 0.238 | 4.45 | 2,756 |
+    | 10–21 | 0.149 | 3.17 | 1,980 |
+    | 21–31 | 0.008 | 0.31 | 194 |
+    | 31–42 | 0.008 | 0.48 | 298 |
+    | 42–52 | 0.008 | 0.37 | 233 |
+    | 52–63 | 0.008 | 0.30 | 190 |
+    | 63–73 | 0.008 | 0.25 | 157 |
+    | 73–83 | 0.007 | 0.09 | 57 |
+
+    The break at minute 21 is `ad` finishing and `vmap_extractor` starting. After it the BYTE rate
+    is flat at eight kilobytes a second while the FILE rate decays by an order of magnitude, which
+    is the shape of a tool that is reading and computing more per output file as it goes, not of a
+    mount getting slower.
+
+    **No completion estimate is given here on purpose.** A rate that falls from 0.31 to 0.09
+    files/s across four windows cannot be extrapolated honestly, and the two projections this line
+    could have carried (25 minutes, then 2.4 hours) were both made during the run and both wrong
+    within the hour. What can be said is measured: the install started at 04:20 CEST, and **90
+    minutes later it was still inside its FIRST of the two vmap tools**, with roughly 3,600 of
+    Vanilla's 5,076 `Buildings` files written. A CMaNGOS install on Windows is not "Linux but
+    slower" — the extract stage is on a different scale, and 7.7 should budget for it rather than
+    discover it.
+
+    **The CSV committed here is a snapshot taken while the run was still going**, which the file's
+    own timestamps show; it is evidence of a rate, not of a finished install.
+  - **OWNER DECISION OPEN (2026-09-05): how much margin the ready wait keeps over the slowest 9p
+    boot.** The three first boots this phase measured are the only evidence the launcher has for how
+    long a healthy server may say nothing: Vanilla **1479 s** (06:12:43Z → 06:37:22Z) and TBC
+    **2763 s** (18:59:55Z → 19:45:58Z), both `docker logs -t` on `yulon-win11-gate` 2026-09-04, and
+    Tortoise **3702 s** (23:41:37 → 00:43:19, ready-stage wall,
+    `pyplan/gates/7.7-win11-tortoise/README.md`). A management wait bounded below the slowest of them
+    refuses a server that was going to succeed — the 2026-09-04 "never reported ready" verdict. The
+    first fix put the bound exactly ON 3702 s, and a review measured what that means: driven through
+    the real `wait_ready_quietly()` at the 480 s callers, a 3702 s boot is accepted and a **3703 s
+    boot is refused**.
+    **Decided, and open to override:** the bound is now `ceil(3702 × 1.868) = 6916 s`, where 1.868 is
+    2763 / 1479 — the widest gap between two adjacent boots in that evidence, applied once above the
+    slowest of them. In code: `native.MANAGEMENT_FLOOR_MARGIN` and `native.MANAGEMENT_FLOOR_SECONDS`,
+    both derived from `native.MEASURED_9P_FIRST_BOOTS_SECONDS` rather than typed, with the argument
+    in their docstrings.
+    **What the number does not rest on:** these are three DIFFERENT servers, timed once each. Nobody
+    has booted the same server twice on 9p, so the project has no measurement of run-to-run variance
+    and this margin stands in for a quantity nobody has measured. The way to close it is a second run
+    of one of the three, not an argument.
+    **What it costs:** the 7.9 controller gate's worst case — a server that keeps printing and never
+    says ready, three `wait_ready_for_game()` calls per run — goes from 3 × 3702 s (3.1 h) to
+    3 × 6916 s (5.8 h) for WotLK, TBC and Vanilla; Tortoise is unchanged at 3 × 21600 s (18 h),
+    its 10800 s budget already landing on the install cap. A server that is merely quiet still ends
+    its wait after ONE window, so none of this is paid by a server that is down.
+    **A second cost, measured on m910q the same day:** `MANAGEMENT_CEILING_WINDOWS` used to be
+    pinned to one value by the tests; with the floor at 6916 s the values 2 and 3 are
+    indistinguishable, because 1800 × 3 no longer reaches above the floor. Recorded in that
+    constant's docstring. Override by editing the margin expression, or close it with a fourth
+    measurement.
 - [ ] 7.8 macOS, all four — **[blocked]** on hardware
-- [ ] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
+- [x] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
+  - **TICKED 2026-09-04. The three unmeasured criteria were driven against all three live CMaNGOS
+    servers, and the run found a defect on every one of them, which is why the bar was the right
+    one to keep.** Harness: `pyplan/gates/gate-79-controller-surface.py`. Logs:
+    `pyplan/gates/7.9-cmangos/`.
+
+    It drives `ControllerServices` rather than `docker`, deliberately. Timing `docker.stop_staged()`
+    would have timed a function the Server tab does not call; `Controller.stop()` is what the Stop
+    button calls and what calls `stop_staged()` in turn (`controller.py:291`), so the button's own
+    path is what was measured.
+
+    | | TBC (m910q) | Vanilla (yulon-ubuntu) | Tortoise (yulon-ubuntu) |
+    |---|---|---|---|
+    | `console.send_command()` | 3.61 s | 3.60 s | 3.61 s |
+    | `backup()` | 4.4 s, 4 dumps | 6.3 s, 5 dumps | 6.4 s, 4 dumps |
+    | `verify_dump()` | 4/4 | 5/5 | 4/4 |
+    | `stop_staged()` | **3.1 s** (and **301.2 s** on a second run — see below) | **23.2 s** | **6.2 s** |
+    | `start_staged()` | 6.1 s | 6.6 s | 6.8 s |
+    | to ready | 73.0 s | 45.8 s | 111.6 s |
+    | `restore()` | 15.5 s | 29.6 s | **98.2 s, all 4 databases** |
+    | ready again after it | 75.3 s | 45.9 s | 100.0 s |
+
+    Ten checks each, **10 passed / 0 failed on all three**.
+    **Those counts are the instrument as it stood on 2026-09-04.** The harness gained an
+    eleventh check that afternoon — an unconditional wait for this game's ready marker before
+    the console step, added because the run below consoled a server it had not waited for —
+    so a re-run of the same scenario now reports 11, not 10. The numbers above are not
+    reproducible against today's file, and are kept as what the run said rather than
+    re-stated as what a re-run would say.
+
+    * **The console step asks the harder question.** `send_command()` attaches to the worldserver's
+      tty and detaches again, and a detach that forwards a signal kills the server — so
+      `State.Pid`, `RestartCount` and `StartedAt` are read before and after **through the docker
+      CLI**, not through the code under test. All three unchanged on all three games. TBC's five
+      reply lines are cut on `mangos>`, which this core prints AFTER the answer rather than before
+      it, and they name the world DB and the client build.
+    * **`plan_restore()` refused over a running server on all three**, in its own words: the
+      worldserver keeps characters in memory and would overwrite a restore within minutes.
+    * **Tortoise's restore covers every database**; TBC's and Vanilla's cover one. That is a
+      property of the HARNESS, not of the app, and it is recorded rather than smoothed over: the
+      first version restored `report.dumps[0]`, which is always the alphabetically first database,
+      so the world database was backed up and byte-verified and never restored. Fixed, and
+      re-run on the one server that was free.
+    * **`stop_staged()` ranges from 3.1 s to 301.2 s**, and the top of that range came from
+      running the SAME call against the SAME TBC install an hour later. The compose template allows
+      it: `stop_grace_period: 5m`. Anyone putting a spinner on the Stop button should size it for
+      five minutes, not for the 3.1 s this table opens with.
+
+  - **A SECOND TBC run, 03:02–03:12, and it disagrees with the first about the number that matters.**
+    `pyplan/gates/7.9-cmangos/gate79-tbc-alldumps.log`. Run with the `core_databases` fix deployed
+    and with the harness that restores every dump. **9 passed, 1 failed** — against the
+    ten-check instrument of that morning; the same scenario reads 11 passed / 0 failed on the
+    harness as it stands after the fix below, because the check that failed was the one the
+    fix removes the cause of.
+    * **`restore()` put back all four databases — including the 158 MB `mangos` — in 48.4 s.**
+      That is the full round trip the first run only did for `characters`, and it is now proven on
+      two games (TBC here, Tortoise at 98.2 s for four).
+    * **The `acore_*` warning is gone from a live server**: `grep -c 'this install has no acore'`
+      over this run's log is **0**, against 1 on the Vanilla run and 4 on Tortoise's before the fix.
+      Verified where it was found, not only in the test that reproduces it.
+    * **`stop_staged()` took 301.2 s here and 3.1 s in the first run — same function, same install,
+      same day.** The compose template sets `stop_grace_period: 5m`, so 301 s is that window almost
+      exactly; the container still exited **0**, so it shut down on its own rather than being
+      killed. Both readings are real and the range is the finding: **a Stop button on a CMaNGOS
+      worldserver has to tolerate five minutes**, and the 3.1 s in the table above is the lucky end
+      of that range, not a typical figure.
+    * **The one FAIL is the harness's fault and is recorded as such**: `the console prompt never
+      appeared in the window; the reply was not delimited`. This run found all three containers
+      already up — because a person had just `docker start`ed them — so it skipped its own
+      wait-for-ready and attached to a worldserver that was still loading. The attach itself was
+      clean (pid and StartedAt unchanged). A gate that consoles a server it did not wait for is
+      asking a question the server cannot answer yet; the harness should wait for ready even when
+      it did not do the starting.
+  - **The worldserver-exits-alone mechanism now has THREE independent reproductions, and the third
+    is the cleanest.** `docker start tbc-db tbc-realmd tbc-mangosd` — all three at once — put
+    `tbc-mangosd` at **`RestartCount=5`** before it settled, with **five** `Could not connect to
+    MySQL database at tbc-db: Can't connect to MySQL server on 'tbc-db:3306' (111)` lines and five
+    `Cannot connect to world database` — one of each per restart
+    (`pyplan/gates/7.9-cmangos/79-tbc-restart-evidence.log`, which now carries its own counts). The
+    database container was simply not accepting connections yet.
+    **This line said "twelve" until a review counted them.** Twelve was the answer to a different
+    question — a `grep -c` over TWO patterns at once across the whole container log — and the
+    evidence file first committed beside it held only four, because the capture had `head -14` on
+    the end of a pipe. Both are the same mistake in different clothes, and it is the one this
+    checklist recorded a lesson about eight hours earlier: capture the whole thing, and make the
+    artifact carry the count so nobody has to trust the prose. The file now does.
+    **That is precisely what `start_staged()` exists to prevent** — it waits for the database
+    before starting the servers, which a bare `docker start` does not — and it is the mirror of
+    the `stop_staged()` argument. Three triggers, one mechanism: **this core exits when its
+    database is not there, and `restart: unless-stopped` brings it back alone.** The 2026-09-03
+    journal's solo restarts are no longer a mystery about what could possibly cause them; they are
+    a question about which of these three happened, and the containers that would say were deleted.
+  - **What the run found, and what it means for the Server tab.**
+    * **A restore on ANY CMaNGOS server announced three missing AzerothCore databases.** Once on
+      Vanilla, four times on Tortoise, once on TBC: `this install has no acore_auth,
+      acore_characters, acore_world; backing up what it does`, on servers with every database
+      present. **Fixed**: `restore()` had no `core_databases` parameter at all, so its internal
+      safety dump fell back to AzerothCore's names and no per-game wrapper could correct it. The
+      names are now threaded through `restore()` → `_safety_backup()` → `backup()` and bound in
+      all three wrappers. No data was ever at risk; the safety dump always took the right
+      database. What was wrong was a message telling a user their healthy server was broken.
+    * **A CMaNGOS worldserver exits non-zero when its database goes away, and `unless-stopped`
+      then restarts it alone — which is the signature 7.9's open question describes.** Two
+      mechanisms, both captured tonight:
+      1. `tbc-mangosd` **exited 139** when `docker stop tbc-mangosd tbc-realmd tbc-db` took the
+         database out from under it mid-shutdown. Its last words:
+         `SQL ERROR: Lost connection to MySQL server during query` on
+         `UPDATE characters SET online = 0`, then `Critical Error: A condition which must never be
+         false was found to be false. Server was shut down to protect data integrity.` and
+         `GetStmt(): false && "Unable to prepare SQL statement"`.
+         `pyplan/gates/7.9-cmangos/74c-mangosd-sigsegv.log`.
+      2. `vanilla-mangosd` reached **`RestartCount=8`** in a restart loop, exiting 1 within a
+         second each time on `Could not connect to MySQL database at vanilla-db: Unknown MySQL
+         server host 'vanilla-db' (-3)`, because its database container was down and DNS for the
+         name no longer resolved. `pyplan/gates/7.9-cmangos/79-vanilla-restart-loop.log`.
+    * **This is exactly what `stop_staged()` exists to prevent, and it does.** Its docstring says
+      `compose stop` "walks the project's own `depends_on` graph, so the servers close their
+      connections before the database goes away" — and every `stop_staged()` in these three runs
+      stopped all three containers cleanly. Mechanism 1 was produced by a hand-typed
+      `docker stop` of all three by name, which is precisely the un-ordered stop the staged one
+      replaces.
+    * **What this does NOT prove.** The 2026-09-03 journal shows `tbc-mangosd` restarting alone
+      while `tbc-db` and `tbc-realmd` were untouched — no container was stopped. Mechanism 1 needs
+      only a dropped CONNECTION, not a stopped container, so it remains a sufficient explanation
+      of that signature; it is not proof of it, and the containers that would have proved it were
+      deleted. What has changed is that "why would a worldserver exit on its own?" is no longer
+      unanswerable: on this core, losing the database mid-statement is an abort, by design.
+
+  - **UNTICKED again 2026-09-04, one day after it was ticked, and the reason is worth more than
+    the box.** `pyplan/phase7-decisions.md` sets this line's bar as "start/stop/logs/accounts/backup
+    on each installed server". What was driven on the three CMaNGOS games is account creation and
+    a real client login — no backup/restore round trip, no `console.send_command()`, no timed
+    `stop_staged`/`start_staged`. The tick was taken on the half that was measured. Narrowing the
+    DoD was the other option and is the wrong one: that bar is what WotLK's own controller was
+    held to and cleared on three platforms, and narrowing it would ship three games a Server tab
+    whose Stop button has never been pressed against a CMaNGOS worldserver. Found by a
+    verification pass over an audit, not by the audit itself.
+  - **A live question is waiting in that gap.** `pyplan/gates/7.9-m910q-tbc-restarts.journal`
+    holds dockerd's own record from m910q: `tbc-mangosd` rejoined its network ALONE at 13:18:57
+    and again at 20:07:07 on 2026-09-03 — the two restarts behind `RestartCount=2` — while
+    `tbc-db` and `tbc-realmd` were untouched. A solo worldserver restart under `unless-stopped`
+    means it exited on its own, twice, on a server nobody was driving. WHY is no longer
+    recoverable: the container and its logs were deleted that night to free the names for the
+    7.4c run, and the journal's one `oom_kill` line belongs to a Tortoise BUILDER container from
+    the previous day, not to this server. The pattern is evidence; the cause is gone.
+  - **`mysql` → `db.client` DONE 2026-09-03.** `apply.DockerSql` already carried it; `d157001d`
+    threaded it into `maintenance.DockerMysql` and all four `mysql_for()` factories, `f8cacafc`
+    into all four `accounts.sql_for()` (found by driving a live server, which printed
+    `client=None` on the seam it had just built), and `102e2dd1` into
+    `ui/controller_view._mysql_for()` — the Server tab's own backup/restore seam — plus
+    `install_wiring.py` and `modules.py`. Audited now by
+    `tests/test_every_db_seam_binds_its_client.py`, which parses the source and finds every
+    `DockerSql(...)`/`DockerMysql(...)` construction anywhere under `yulon/` rather than naming
+    the ones somebody remembered; the three misses above are why it is an AST audit and not a list.
+  - **CMaNGOS account creation DONE 2026-09-03**, on two of the three entries and by driving the
+    real servers, not the tests. TBC: account `YULON` (id 105) created through
+    `accounts.sql_for_install()` + `create_account()` on `m910q`, then logged into by the owner's
+    2.4.3 client — `sessionkey` present, character `Ggkki` online (see 7.4c for the full chain).
+    Tortoise: the same two functions against `yulon-ubuntu`, account id 104, and the seam printed
+    `client='mariadb'`, which is the `f8cacafc` fix visible in the field. Vanilla uses the same
+    shared `create_account()` and scheme and is UNVERIFIED against a client.
+  - **Console, modules and networking measured 2026-09-03 — nothing owed on any of the three.**
+    The tempting instrument was the wrong one: diffing the keyword arguments each
+    `_for_<game>()` passes reports `prompt`, `prompt_precedes_answer`, `scheme`, `import_probe`
+    and `reset_unfinished` as missing from all three. They are not. The first three are bound
+    INSIDE each package's own `console`/`accounts` module, and the last two are AzerothCore-only —
+    a CMaNGOS install has no one-shot import service to re-run. That diff compares spellings at a
+    call site, not capabilities.
+    - **Console** — each package binds its own `PROMPT`, `prompt_precedes_answer` and container
+      and calls the shared `send_command()`. The lower def-count in those files is WotLK holding
+      the shared implementation, not a smaller surface.
+    - **Modules** — WotLK-only, and correctly so: `manifests/` contains `wow-wotlk` and the schema
+      and nothing else, so there is nothing for the other three to port yet (7.1 step 2 says "if
+      any exist"). `_no_manifest_store()` returns None and warns if the catalog ever says
+      otherwise.
+    - **Networking** — entry-driven rather than per-package: one shared `networking.apply()`,
+      wired for all four in the view.
+    - **Asserted rather than read**, by `test_every_game_offers_the_whole_controller_surface_wotlk_does`:
+      `ControllerServices` is enumerated with `dataclasses.fields()` and every field must arrive
+      for every game, so a sixteenth capability cannot be wired for WotLK and forgotten for the
+      rest. The one exception is required to be REAL both ways — the three must report `store`
+      and `applier` as None and nothing else, because a non-None store there would mean a game
+      was handed somebody else's manifests.
+  - **Vanilla's account creation DONE 2026-09-03**, through the same two functions on the live
+    server: `accounts.sql_for_install()` + `create_account()` on `yulon-ubuntu`, account id 105,
+    `gmlevel 3`, `length(v) = length(s) = 64` — an SRP6 verifier and salt, not a password hash.
+    The seam printed `client='mariadb'`, the `f8cacafc` binding in the field again. All three
+    CMaNGOS account paths have now been driven against a real server.
+  - **VANILLA CLIENT LOGIN DONE 2026-09-03 — 7.9 closed.** The owner drove a real 1.12.1 client
+    from the LAPTOP (not the Hyper-V host) against `yulon-ubuntu`, and reached a character in the
+    world. Server-side evidence, read after he said he was in: `realmd.account` row 106 `PERZI`
+    with `length(sessionkey) = 80` and `active_realm_id = 1` — an SRP6 session negotiated by the
+    core, not a row we wrote; `characters.characters` guid 901 `Perzi`, race 5, class 1, level 1,
+    **`online = 1`**; and the world log's own `Avg Diff: 57. Sessions online: 1.` All three
+    CMaNGOS games have now been logged into with a real client.
+  - **The account had to be a NEW one, and the reason is a deliberate design choice.**
+    `create_account()` never rewrites an existing account's salt and verifier — its docstring:
+    "a second call with a different password does not lock the owner out" — so the password of
+    the `YULON` account made earlier could not be reset through the app, and nothing had recorded
+    it. `PERZI` (id 106) was created through the same `accounts.sql_for_install()` +
+    `create_account()` path, which exercised the Vanilla account seam a second time; the seam
+    printed `container='vanilla-db'`. `YULON`'s `sessionkey` is still NULL, which is the
+    independent confirmation that it was never logged into and the password really was lost.
+  - **The realm row now advertises the Tailscale address, and that is a real finding for 7.7/8.**
+    It was `172.30.55.119` (Hyper-V Default Switch), which only the VM HOST can reach: a client
+    on any other machine authenticates on 3724 and is then handed a world address that does not
+    resolve for it. Set to `100.101.205.6`, which both the laptop and the host reach, and the
+    login above went through from the laptop. The realm address a fresh install writes is
+    whatever `detect_lan_ip()` returned on the server's own box, so an install on a machine with
+    more than one network path can hand out the wrong one — worth an explicit choice rather than
+    a detection, whenever networking is revisited.
 - [ ] 7.10 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.9 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed (was 7.4)
+  - **The honest-cancel copy was seen arriving from a REAL cancelled install, 2026-09-05, through
+    the widgets** — the one install-half item `pyplan/gates/7.10-gaps/README.md` (2026-09-04) said
+    could not be produced on a box that refuses every install at preflight. On `yulon-ubuntu`
+    after 7.2's press 1 (Docker installed, no server, 76 GB free), `widget_cancel_driver.py`
+    built the real `CatalogView` over a real `LogPanel`, clicked the WotLK tile's `Install`
+    (`QTest.mouseClick`, folder picker injected, throwaway folder), waited for the engine's own
+    `Cloning mod-playerbots/azerothcore-wotlk` line (7.1 s after the click), clicked the panel's
+    `Stop` 20 s later, and **320.4 s afterwards** `install_finished(ok=False)` arrived with a modal
+    titled *Install cancelled* whose text **is** `cancelled_install_message()` for the folder as it
+    then stood — compared as strings, not eyeballed. 15 OK / 0 FAIL, the tile still reads
+    `Install`. `pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel.log`.
+    **Two things the run showed that the copy does not know, filed as findings and not fixed
+    here:** (1) the copy's compose-file split fired on **upstream's own `docker-compose.yml`**,
+    which the clone brings in git-tracked and unmodified — generate-compose had never run, and the
+    user was pointed at *Use existing…*; (2) the copy's other half, "press Install again and
+    choose <folder>: the installer carries on from the last stage recorded in
+    `.yulon-install.json`", was **refused** when tried on that folder — no state file existed
+    after the cancel, and the engine said *"already a git checkout … no record here of an
+    install this app made … Install into an empty folder instead"*
+    (`cycle2-pressA2-refused-existing-checkout.log:31`). The refusal is right; the promise is
+    not. Also measured: a Stop during clone-core cannot interrupt the containerized `git`
+    (`docker ps` 5 s after Stop still showed the `alpine/git` container), so five minutes between
+    Stop and the dialog is what a user pays for stopping there.
 - [ ] **Phase 7 exit criteria met** — all four v1 servers install through one Python engine with zero shell interaction and are managed by the app on Linux and native Windows, and on macOS once a machine exists; no `install-*.sh` remains. **Phase 8 does not start until this is fully met.**
 
 ---
@@ -1347,3 +3167,63 @@ answers which is right for a tree two services mount (`z`) — which settles it 
 `./modules`, mounted by both `ac-worldserver` and `ac-db-import`. Nothing compares the two
 spellings, so this is read from the captures, not asserted by a test. Recorded in
 `bug-checklist.md` §17, with what is and is not actually open.
+
+
+## A CMaNGOS install walks into a user's own git checkout (2026-09-05, cancelcopy lane)
+
+Found while re-deriving a review finding against the cancel modal, and NOT fixed there: the fix in
+that lane is to the copy, which now stays true whichever way this is closed.
+
+**Measured, m910q 2026-09-05**, `wow-tbc` driven through `CmangosInstaller.run()` into a folder
+holding a user's own `.git`, `my-notes.txt` and `docker-compose.yml`: the install ran, wrote its
+`.yulon-install.json` into that folder, and left the user's files in place beside it. The chain is
+three parts, each of which is right on its own:
+
+1. `native._claim_folder()` exempts any folder holding a `.git` from the not-empty refusal, so a
+   clone stage can say WHOSE repository it is instead of "this folder is not empty".
+2. `refuse_unowned_checkout()` redeems that exemption -- but `stage_clone_sources()` only puts a
+   source's own `dest` to it. Only `wow-wotlk` names `dest: "."`, so for `wow-tbc`, `wow-vanilla`
+   and `wow-tortoise` the server dir is never the subject of that question at all.
+3. `_run_one()` writes the state file after every recorded stage regardless of `started_empty`, so
+   the folder ends up carrying this app's record whether or not it was ever this app's to fill.
+
+The harm is that a first press of Install on a folder the user keeps their own work in is accepted
+for three of the four shipped games. Nothing was destroyed in the probe -- the clones land under
+`src/` -- but nothing in the engine promises that either, and the fourth game refuses the same
+folder outright.
+
+Not fixed in the cancelcopy lane: closing it means asking `refuse_unowned_checkout()`'s question
+about the SERVER DIR when no source claims it, which is a `native.py` change to the shape of the
+guard every family reaches through preflight.
+
+## `apply.py:_require_own_clone()` decides a write with a bare `iterdir()` (2026-09-05, same lane)
+
+`Applier._require_own_clone()` does `leftovers = sorted(item.name for item in clone.iterdir())` and
+raises "`<rel>` already has files in it and was not put there by this app" -- the same write
+decision `native._listing()` exists to translate, one directory up from the install engine.
+**Measured the same day**: the method has no `except` of any kind, and the same expression on a
+`chmod 000` folder raises a raw `PermissionError [Errno 13]`, so an unreadable clone dir reaches
+the user as a traceback where the app promises a sentence.
+
+Not fixed in the cancelcopy lane because `native._listing()` raises `InstallerError` and every
+caller of this one translates `ApplyError`; the fix is a translation in `apply.py`, not a call to
+the installer's helper. Recorded with its reason in `test_spine._ACCOUNTED_LISTINGS`, which is the
+one entry there that is not an exoneration, so the audit names it every time anybody reads it.
+
+## The cancel modal's clone-artefact reading has one route it reads wrong (2026-09-05, same lane)
+
+`cancelled_install_message()` tells a `wow-wotlk` user that an unmarked `docker-compose.yml` beside
+this app's record "came down with the server's source", and withholds the adoption offer. That is
+true of both routes the ENGINE has -- upstream's compose file is git-tracked in
+`mod-playerbots/azerothcore-wotlk` (read off a real install in
+`pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`), and a checkout already in the
+folder is stopped by `refuse_unowned_checkout()` before any stage records anything. It is not true
+of the user's hand: delete this app's marked compose files from a FINISHED wow-wotlk install, drop
+an unmarked `docker-compose.yml` in, press Install (it resumes on the record), press Stop.
+
+**Not driven on 2026-09-05, and its window is unmeasured** -- the same fact that makes the first
+route true means a resumed clone stage may overwrite the dropped-in file before the cancel is read,
+which would make the wording accidentally right. Recorded because the sentence in that docstring
+said "the only other way into that folder is a checkout" until this lane, and the round that found
+it is the round that had just finished removing one absolute from the same function. Settling it
+needs a live wotlk clone, so it did not happen in a copy lane.

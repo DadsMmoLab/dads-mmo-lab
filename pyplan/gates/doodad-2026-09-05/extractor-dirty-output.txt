@@ -1,0 +1,180 @@
+== date / box
+2026-09-05T14:07:29Z  PK-M910q
+lane checkout: 87e8f1843e1c3c5fe0fc3e31d1b6245514e4e323  branch lane/doodad
+
+== the revisions catalog.json pins
+  wow-wotlk      mod-playerbots/azerothcore-wotlk 413bea61a85e20d9caef7d66fc601a661fdddd9d
+  wow-wotlk      mod-playerbots/mod-playerbots b949b50bfcdd4fab937781bac2d7765e39330e4b
+  wow-tbc        cmangos/mangos-tbc           f82e7d679c283b66bc2adc1b751aa1275e655673
+  wow-tbc        cmangos/playerbots           993f18091e67565986cf55c4d9b8e6eae11223f9
+  wow-tbc        cmangos/tbc-db               5078439a44d208732a903bca2d7df51941fb373a
+  wow-vanilla    cmangos/mangos-classic       8ec338a1704e7dcb1c0213eb7ed58f9231ade40f
+  wow-vanilla    cmangos/playerbots           993f18091e67565986cf55c4d9b8e6eae11223f9
+  wow-vanilla    cmangos/classic-db           22b51464f1625f6ef6275771de1f5466c6f5d19e
+  wow-tortoise   Shyalya/tortoise-wow         7c0fb278f3f8966422f219e6f5035cb09b76ada7
+  wow-tortoise   ElunaLuaEngine/Eluna         1b06f28ff3a00054d915d824c725fb4283fee74d
+
+== 1. the dirty-output check: cmangos/mangos-classic 8ec338a1
+    bool success = true;
+
+    // Use command line arguments, when some
+    if (!processArgv(argc, argv))
+        return 1;
+
+    // some simple check if working dir is dirty
+    else
+    {
+        std::string sdir = std::string(szWorkDirWmo) + "/dir";
+        std::string sdir_bin = std::string(szWorkDirWmo) + "/dir_bin";
+        struct stat status;
+        if (!stat(sdir.c_str(), &status) || !stat(sdir_bin.c_str(), &status))
+        {
+            printf("Your output directory seems to be polluted, please use an empty directory!\n");
+            fflush(stdout);
+            return 1;
+        }
+    }
+
+
+== 1b. the same eleven lines: cmangos/mangos-tbc f82e7d67
+    bool success = true;
+
+    // Use command line arguments, when some
+    if (!processArgv(argc, argv))
+        return 1;
+
+    // some simple check if working dir is dirty
+    else
+    {
+        std::string sdir = std::string(szWorkDirWmo) + "/dir";
+        std::string sdir_bin = std::string(szWorkDirWmo) + "/dir_bin";
+        struct stat status;
+        if (!stat(sdir.c_str(), &status) || !stat(sdir_bin.c_str(), &status))
+        {
+            printf("Your output directory seems to be polluted, please use an empty directory!\n");
+            fflush(stdout);
+            return 1;
+        }
+    }
+
+
+== 2. no other shipped tool carries such a check (both revisions, empty = none)
+-- /home/pk/cmangos-probe/mangos-classic 8ec338a1
+   exit 1
+-- /home/pk/cmangos-probe/mangos-tbc f82e7d67
+   exit 1
+
+== 3. what ad, vmap_assembler and TileAssembler do with an output folder (mangos-tbc f82e7d67)
+#define LANG_COUNT 12
+
+void CreateDir(const std::string& Path)
+{
+#ifdef _WIN32
+    _mkdir(Path.c_str());
+#else
+    mkdir(Path.c_str(), 0777);
+#endif
+}
+
+bool FileExists(const char* FileName)
+{
+    int fp = _open(FileName, OPEN_FLAGS);
+    if (fp != -1)
+-- vmap_assembler main()
+//=======================================================
+int main(int argc, char* argv[])
+{
+    if (argc != 3)
+    {
+        std::cout << "usage: " << argv[0] << " <raw data dir> <vmap dest dir>" << std::endl;
+        return 1;
+    }
+
+    std::string src = argv[1];
+    std::string dest = argv[2];
+
+    std::cout << "using " << src << " as source directory and writing output to " << dest << std::endl;
+
+    VMAP::TileAssembler tileAssembler(src, dest);
+
+    if (!tileAssembler.convertWorld2())
+    {
+        std::cout << "exit with errors" << std::endl;
+        return 1;
+    }
+
+    std::cout << "Ok, all done" << std::endl;
+    return 0;
+}
+-- TileAssembler: every output opened for writing, none stat()ed first
+58:        iDestDir = pDestDirName;
+59:        // mkdir(iDestDir);
+110:            mapfilename << iDestDir << "/" << std::setfill('0') << std::setw(3) << map_iter->first << ".vmtree";
+158:                tilefilename << iDestDir << "/" << std::setw(3) << map_iter->first << "_";
+329:        return model.writeFile(iDestDir + "/" + pModelFilename + ".vmo");
+338:        FILE* model_list_copy = fopen((iDestDir + "/" + GAMEOBJECT_MODELS).c_str(), "wb");
+
+== 4. the Tortoise extractor has no such check, at the rev catalog.json pins
+   clone HEAD 7f2957e0e5f864e4c5cb896941a66f6c9beca7d0
+   7c0fb278 present: commit  (fetched --depth 1 for this reading)
+-- occurrences of polluted / empty directory at 7c0fb278:
+0
+-- its main(), which goes from processArgv straight to mkdir:
+int main(int argc, char** argv)
+{
+    bool success = true;
+
+    // Use command line arguments, when some
+    if (!processArgv(argc, argv))
+        return 1;
+
+    /*if (!ModelLOSMgr::Load())
+    {
+        printf("Unable to open LOS Modificators.\n");
+        return 1;
+    }*/
+    printf("Extract for %s. Beginning work ....\n", szRawVMAPMagic);
+    //xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    // Create the working directory
+    if (mkdir(szWorkDirWmo
+#ifndef _WIN32
+              , 0711
+#endif
+             ))
+        success = (errno == EEXIST);
+
+
+== 5. the two real finished installs on this box are in the blocked shape
+-- /home/pk/tbc-7.4c/data/Buildings: 7171 files
+     -rw-r--r-- 1 pk pk 50938121 sep.   4 00:05 /home/pk/tbc-7.4c/data/Buildings/dir_bin
+-- /home/pk/vanilla-75b/data/Buildings: 5076 files
+     -rw-r--r-- 1 pk pk 31072203 sep.   4 11:25 /home/pk/vanilla-75b/data/Buildings/dir_bin
+
+== 6. the fence still applies, re-checked for this pass
+   doc       14620 bytes,   0 CR
+   fence      3943 bytes, md5 f24324b00a64eefcd9a5dd362ab75e86, 0 CR
+   shipped    3943 bytes, md5 f24324b00a64eefcd9a5dd362ab75e86
+   equal    True
+   as CRLF    4017 bytes, md5 04711a63ac97906d231f5ac3904f2afe
+   mangos-classic 8ec338a1  lf -> exit 0
+   mangos-classic 8ec338a1  crlf -> exit 1
+       error: patch failed: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24
+       error: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp: patch does not apply
+       error: patch failed: contrib/vmap_extractor/vmapextract/model.cpp:257
+       error: contrib/vmap_extractor/vmapextract/model.cpp: patch does not apply
+       error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.cpp:72
+       error: contrib/vmap_extractor/vmapextract/vmapexport.cpp: patch does not apply
+       error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.h:42
+       error: contrib/vmap_extractor/vmapextract/vmapexport.h: patch does not apply
+   mangos-tbc f82e7d67  lf -> exit 0
+   mangos-tbc f82e7d67  crlf -> exit 1
+       error: patch failed: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24
+       error: contrib/vmap_extractor/vmapextract/gameobject_extract.cpp: patch does not apply
+       error: patch failed: contrib/vmap_extractor/vmapextract/model.cpp:257
+       error: contrib/vmap_extractor/vmapextract/model.cpp: patch does not apply
+       error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.cpp:72
+       error: contrib/vmap_extractor/vmapextract/vmapexport.cpp: patch does not apply
+       error: patch failed: contrib/vmap_extractor/vmapextract/vmapexport.h:42
+       error: contrib/vmap_extractor/vmapextract/vmapexport.h: patch does not apply
+
+== done

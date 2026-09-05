@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from yulon import docker, wsl
+from yulon.catalog import native
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -356,6 +357,17 @@ class Controller:
         return docker.wait_db_healthy_for(self.spec, wsl_distro=self.wsl_distro, **kwargs)
 
     def wait_ready(self, realm_host: str, realm_port: int, **kwargs: float) -> bool:
-        """Poll until auth+world are up and ready. `kwargs` forward timeout/interval."""
+        """Poll until auth+world are up and ready. `kwargs` forward timeout/interval.
+
+        `timeout` is a QUIET budget here, as it is everywhere else in this app:
+        how long the world server may print nothing new, restarted every time it
+        prints, bounded by `native.management_ceiling()`. It was a fixed total
+        wall clock until 2026-09-05 — this call spent `ReadySpec`'s 480 seconds
+        once — and a fixed total is the reading the 2026-09-04 incident
+        disproved: a CMaNGOS world server took 46.0 minutes to its first
+        `Avg Diff:` on a 9p share while printing the whole way, and 480 seconds
+        would have called that a dead server five times over. Nothing about
+        AzerothCore makes it immune; the mount is what was slow.
+        """
         ready = docker.azerothcore_ready(realm_host, realm_port, **kwargs)
-        return docker.wait_ready_for(self.spec, ready, wsl_distro=self.wsl_distro)
+        return native.wait_ready_quietly(self.spec, ready, wsl_distro=self.wsl_distro)

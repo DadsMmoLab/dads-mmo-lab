@@ -1,0 +1,195 @@
+** WARNING: connection is not using a post-quantum key exchange algorithm.
+** This session may be vulnerable to "store now, decrypt later" attacks.
+** The server may need to be upgraded. See https://openssh.com/pq.html
+Warning: Permanently added 'yulon-ubuntu' (ED25519) to the list of known hosts.
+Started dml-710c.service - /home/pk/gate0904/venv/bin/python -u /home/pk/gate710c_widget_driver.py.
+==============================================================================
+PART 1 -- ControllerView: six real buttons, pressed with QTest.mouseClick
+==============================================================================
+This plugin does not support propagateSizeHints()
+[OK]   the 5 s status poll is OFF, so only a click can fill status_label -- before any click: 'status: unknown'
+-- Server tab, Refresh
+[OK]   Refresh is a real QPushButton with the text a user reads
+       status_label -> 'status: db up, auth up, world up'
+[OK]   the click filled the Server tab's status label from the live daemon -- status: db up, auth up, world up
+[OK]   what the widget says agrees with `docker ps` read separately -- docker ps -> ['ac-authserver', 'ac-database', 'ac-worldserver']
+-- Console tab, Send
+[OK]   Send is enabled on Linux (a pty exists here)
+[OK]   the typed command reached the QLineEdit -- 'server info'
+2026-09-04 14:29:39 INFO [yulon.controller_wow_wotlk.console] console → ac-worldserver: ['server', 'info']
+       console reply, as the widget holds it:
+         [14:29:42] Minimum account security level to log in: 0.
+         [14:29:42] Server uptime: 1 hour(s) 49 minute(s) 24 second(s)
+         [14:29:42] Update time diff: 2ms. Last 500 diffs summary:
+         [14:29:42] |- Mean: 38ms
+         [14:29:42] |- Median: 5ms
+         [14:29:42] |- Percentiles (95, 99, max): 142ms, 147ms, 154ms
+[OK]   the console round-trip came back through the widget -- reply contains the core revision
+[OK]   the QLineEdit was cleared after Send (send_console_command's own contract)
+-- Accounts tab, Create
+[OK]   the account does not exist before the click -- count=0
+[OK]   the GM spin box was driven to 2 by two Up keys -- value=2
+       account_report -> 'Creating WIDGET0904…'
+2026-09-04 14:29:43 INFO [yulon.controller_wow_wotlk.accounts] creating account WIDGET0904
+       the row, read by docker exec mysql: ''
+[FAIL] the click wrote a real SRP6 account row (salt 32, verifier 32)
+[FAIL] the GM level the spin box showed is the GM level the DB got -- spin box 2, DB ?
+-- Networking tab, Show plan (Apply is asserted dead and never clicked)
+[OK]   Apply is DISABLED before any plan is shown -- the ufw lockout's button
+[OK]   LAN is the default mode
+       plan, as the widget renders it:
+         working out the plan… (this can take a few seconds)
+[FAIL] the plan the widget shows names the realm address the server advertises -- 172.30.55.119 present
+[FAIL] the plan the widget shows names both ports
+[FAIL] Apply became enabled once a plan existed (and is still not clicked)
+-- Maintenance tab, Refresh backups
+[OK]   the backup Refresh is a real button
+       backup list rows: 5
+[OK]   the backup list came back without an error paragraph -- problem_label=''
+2026-09-04 14:29:44 INFO [yulon.controller_wow_wotlk.accounts] granting GM level 2 to account 102
+==============================================================================
+PART 2 -- the INSTALL half, through CatalogView's own Install button
+==============================================================================
+This plugin does not support propagateSizeHints()
+[OK]   the WotLK tile's Install is a real, enabled QPushButton -- text='Install'
+       free space on /home/pk before the click: 41.6 GB
+2026-09-04 14:29:45 WARNING [yulon.ui.widgets.log_panel] log panel job failed: InstallerError: This machine cannot install the server yet:
+free space on Docker's disk and the server folder: 39 GB free, and the install needs 48 GB (the server folder and Docker's disk share one drive, so both needs add up) Free some space, or install to a drive that has room, then try again.
+the server's ports: ac-worldserver, ac-authserver already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+This plugin does not support propagateSizeHints()
+       [modal] title='Install failed'
+       [modal] InstallerError: This machine cannot install the server yet:
+       [modal] free space on Docker's disk and the server folder: 39 GB free, and the install needs 48 GB (the server folder and Docker's disk share one drive, so both needs add up) Free some space, or install to a drive that has room, then try again.
+       [modal] the server's ports: ac-worldserver, ac-authserver already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+       [modal] clicking 'OK'
+[OK]   the Install click reached the folder picker -- picked=[PosixPath('/home/pk/gate710c-doomed-install')]
+       install_finished message:
+         InstallerError: This machine cannot install the server yet:
+         free space on Docker's disk and the server folder: 39 GB free, and the install needs 48 GB (the server folder and Docker's disk share one drive, so both needs add up) Free some space, or install to a drive that has room, then try again.
+         the server's ports: ac-worldserver, ac-authserver already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+[OK]   the preflight REFUSED rather than warned, and nothing was installed -- ok=False
+[OK]   the refusal names free space, which is the floor this box is under -- InstallerError: This machine cannot install the server yet:
+[OK]   the refusal reached the user as a modal dialog, not only a log line -- modals seen: ['Install failed']
+[OK]   nothing was written into the chosen folder -- contents=[]
+[OK]   no compose file, so nothing could be remembered as installed -- button still reads 'Install'
+-- LogPanel Stop: a real cancel, driven by the real button
+[OK]   the panel's Stop button exists and is dead while idle
+[OK]   Stop went live once a job was running
+[OK]   the follow stopped after the click -- 11 lines had arrived first
+[OK]   the panel reports it as CANCELLED, not as finished
+       panel.cancelled=True  panel.running=False
+-- the honest cancel copy (catalog_view.py:753 composes this on a cancelled install)
+       -- a folder with nothing in it: /home/pk/gate710c-empty
+         Stop was pressed, so WoW WotLK has NOT been remembered as an install and the app will not show a tab for it. Stopping undoes nothing and tidies nothing away — look in /home/pk/gate710c-empty to see what the installer had got to (a download it was in the middle of may have removed its own leftovers; anything already finished stays). If the build had started, Docker keeps finishing the step it was on in the background — that is deliberate, and the finished pieces are what make a second attempt much faster, so do not clear Docker's build cache to tidy up. The installer had not got as far as writing a compose file (compose.yml or docker-compose.yml), so there is nothing there for the app to manage yet. Press Install again and choose /home/pk/gate710c-empty to carry on — a source clone that finished is updated, not fetched again. Delete /home/pk/gate710c-empty only if you want a clean start.
+[OK]   the copy for a folder with nothing in it names that folder
+       -- the folder holding the real, complete install: /home/pk/wowserver
+         Stop was pressed, so WoW WotLK has NOT been remembered as an install and the app will not show a tab for it. Stopping undoes nothing and tidies nothing away — look in /home/pk/wowserver to see what the installer had got to (a download it was in the middle of may have removed its own leftovers; anything already finished stays). If the build had started, Docker keeps finishing the step it was on in the background — that is deliberate, and the finished pieces are what make a second attempt much faster, so do not clear Docker's build cache to tidy up. The source is there. If the build had already finished, the server may be built and even running: press "Use existing…", choose /home/pk/wowserver, and the app will manage it from a tab — nothing is lost. If it had not, press Install again and choose /home/pk/wowserver: the installer carries on from the last stage recorded in /home/pk/wowserver/.yulon-install.json, and a stage is only skipped after what it left on disk has been checked.
+[OK]   the copy for the folder holding the real, complete install names that folder
+       NOTE: this copy could not be driven THROUGH a cancelled install on this box,
+       because preflight refuses every install here on free space before an install
+       starts -- see the refusal above. It needs the clean checkpoint 7.1 clause 1 is
+       blocked on. Reported as not exercised, not as passed.
+==============================================================================
+RESULT: 27 OK, 5 FAIL
+==============================================================================
+dml-710c.service: Main process exited, code=exited, status=1/FAILURE
+dml-710c.service: Failed with result 'exit-code'.
+dml-710c.service: Consumed 2.205s CPU time.
+Started dml-710c.service - /home/pk/gate0904/venv/bin/python -u /home/pk/gate710c_widget_driver.py.
+==============================================================================
+PART 1 -- ControllerView: six real buttons, pressed with QTest.mouseClick
+==============================================================================
+This plugin does not support propagateSizeHints()
+[OK]   the 5 s status poll is OFF, so only a click can fill status_label -- before any click: 'status: unknown'
+-- Server tab, Refresh
+[OK]   Refresh is a real QPushButton with the text a user reads
+       status_label -> 'status: db up, auth up, world up'
+[OK]   the click filled the Server tab's status label from the live daemon -- status: db up, auth up, world up
+[OK]   what the widget says agrees with `docker ps` read separately -- docker ps -> ['ac-authserver', 'ac-database', 'ac-worldserver']
+-- Console tab, Send
+[OK]   Send is enabled on Linux (a pty exists here)
+[OK]   the typed command reached the QLineEdit -- 'server info'
+2026-09-04 14:30:46 INFO [yulon.controller_wow_wotlk.console] console → ac-worldserver: ['server', 'info']
+       console reply, as the widget holds it:
+         [14:30:50] Minimum account security level to log in: 0.
+         [14:30:50] Server uptime: 1 hour(s) 50 minute(s) 31 second(s)
+         [14:30:50] Update time diff: 2ms. Last 500 diffs summary:
+         [14:30:50] |- Mean: 37ms
+         [14:30:50] |- Median: 5ms
+         [14:30:50] |- Percentiles (95, 99, max): 137ms, 144ms, 151ms
+[OK]   the console round-trip came back through the widget -- reply contains the core revision
+[OK]   the QLineEdit was cleared after Send (send_console_command's own contract)
+-- Accounts tab, Create
+[OK]   the account does not exist before the click -- count=0
+[OK]   the GM spin box was driven to 2 by two Up keys -- value=2
+2026-09-04 14:30:50 INFO [yulon.controller_wow_wotlk.accounts] creating account WIDGET0904
+2026-09-04 14:30:51 INFO [yulon.controller_wow_wotlk.accounts] granting GM level 2 to account 103
+       account_report -> 'WIDGET0904: created (id 103), GM level 2.'
+       the row, read by docker exec mysql: '103\tWIDGET0904\t32\t32\t2'
+[OK]   the click wrote a real SRP6 account row (salt 32, verifier 32) -- 103	WIDGET0904	32	32	2
+[OK]   the GM level the spin box showed is the GM level the DB got -- spin box 2, DB 2
+-- Networking tab, Show plan (Apply is asserted dead and never clicked)
+[OK]   Apply is DISABLED before any plan is shown -- the ufw lockout's button
+[OK]   LAN is the default mode
+       plan, as the widget renders it:
+         Mode: lan   LAN IP: 172.30.55.119   public IP: -
+         Ports: 3724, 8085   firewall: ufw
+         Players set realmlist to: 172.30.55.119
+         Firewall commands:
+           ufw allow 3724/tcp
+           ufw allow 8085/tcp
+           ufw --force enable
+         Realmlist: UPDATE acore_auth.realmlist SET address='172.30.55.119', localAddress='172.30.55.119' WHERE id=1;
+[OK]   the plan the widget shows names the realm address the server advertises -- 172.30.55.119 present
+[OK]   the plan the widget shows names both ports
+[OK]   Apply became enabled once a plan existed (and is still not clicked)
+-- Maintenance tab, Refresh backups
+[OK]   the backup Refresh is a real button
+       backup list rows: 5
+[OK]   the backup list came back without an error paragraph -- problem_label=''
+==============================================================================
+PART 2 -- the INSTALL half, through CatalogView's own Install button
+==============================================================================
+This plugin does not support propagateSizeHints()
+[OK]   the WotLK tile's Install is a real, enabled QPushButton -- text='Install'
+       free space on /home/pk before the click: 41.6 GB
+2026-09-04 14:30:52 WARNING [yulon.ui.widgets.log_panel] log panel job failed: InstallerError: This machine cannot install the server yet:
+free space on Docker's disk and the server folder: 39 GB free, and the install needs 48 GB (the server folder and Docker's disk share one drive, so both needs add up) Free some space, or install to a drive that has room, then try again.
+the server's ports: ac-worldserver, ac-authserver already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+This plugin does not support propagateSizeHints()
+       [modal] title='Install failed'
+       [modal] InstallerError: This machine cannot install the server yet:
+       [modal] free space on Docker's disk and the server folder: 39 GB free, and the install needs 48 GB (the server folder and Docker's disk share one drive, so both needs add up) Free some space, or install to a drive that has room, then try again.
+       [modal] the server's ports: ac-worldserver, ac-authserver already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+       [modal] clicking 'OK'
+[OK]   the Install click reached the folder picker -- picked=[PosixPath('/home/pk/gate710c-doomed-install')]
+       install_finished message:
+         InstallerError: This machine cannot install the server yet:
+         free space on Docker's disk and the server folder: 39 GB free, and the install needs 48 GB (the server folder and Docker's disk share one drive, so both needs add up) Free some space, or install to a drive that has room, then try again.
+         the server's ports: ac-worldserver, ac-authserver already publish the ports this server needs Stop that server first (or remove its containers), then try again.
+[OK]   the preflight REFUSED rather than warned, and nothing was installed -- ok=False
+[OK]   the refusal names free space, which is the floor this box is under -- InstallerError: This machine cannot install the server yet:
+[OK]   the refusal reached the user as a modal dialog, not only a log line -- modals seen: ['Install failed']
+[OK]   nothing was written into the chosen folder -- contents=[]
+[OK]   no compose file, so nothing could be remembered as installed -- button still reads 'Install'
+-- LogPanel Stop: a real cancel, driven by the real button
+[OK]   the panel's Stop button exists and is dead while idle
+[OK]   Stop went live once a job was running
+[OK]   the follow stopped after the click -- 11 lines had arrived first
+[OK]   the panel reports it as CANCELLED, not as finished
+       panel.cancelled=True  panel.running=False
+-- the honest cancel copy (catalog_view.py:753 composes this on a cancelled install)
+       -- a folder with nothing in it: /home/pk/gate710c-empty
+         Stop was pressed, so WoW WotLK has NOT been remembered as an install and the app will not show a tab for it. Stopping undoes nothing and tidies nothing away — look in /home/pk/gate710c-empty to see what the installer had got to (a download it was in the middle of may have removed its own leftovers; anything already finished stays). If the build had started, Docker keeps finishing the step it was on in the background — that is deliberate, and the finished pieces are what make a second attempt much faster, so do not clear Docker's build cache to tidy up. The installer had not got as far as writing a compose file (compose.yml or docker-compose.yml), so there is nothing there for the app to manage yet. Press Install again and choose /home/pk/gate710c-empty to carry on — a source clone that finished is updated, not fetched again. Delete /home/pk/gate710c-empty only if you want a clean start.
+[OK]   the copy for a folder with nothing in it names that folder
+       -- the folder holding the real, complete install: /home/pk/wowserver
+         Stop was pressed, so WoW WotLK has NOT been remembered as an install and the app will not show a tab for it. Stopping undoes nothing and tidies nothing away — look in /home/pk/wowserver to see what the installer had got to (a download it was in the middle of may have removed its own leftovers; anything already finished stays). If the build had started, Docker keeps finishing the step it was on in the background — that is deliberate, and the finished pieces are what make a second attempt much faster, so do not clear Docker's build cache to tidy up. The source is there. If the build had already finished, the server may be built and even running: press "Use existing…", choose /home/pk/wowserver, and the app will manage it from a tab — nothing is lost. If it had not, press Install again and choose /home/pk/wowserver: the installer carries on from the last stage recorded in /home/pk/wowserver/.yulon-install.json, and a stage is only skipped after what it left on disk has been checked.
+[OK]   the copy for the folder holding the real, complete install names that folder
+       NOTE: this copy could not be driven THROUGH a cancelled install on this box,
+       because preflight refuses every install here on free space before an install
+       starts -- see the refusal above. It needs the clean checkpoint 7.1 clause 1 is
+       blocked on. Reported as not exercised, not as passed.
+==============================================================================
+RESULT: 32 OK, 0 FAIL
+==============================================================================
+dml-710c.service: Consumed 2.172s CPU time.

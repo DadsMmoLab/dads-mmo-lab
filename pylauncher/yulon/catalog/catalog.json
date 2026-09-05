@@ -13,12 +13,14 @@
             "repo": "mod-playerbots/azerothcore-wotlk",
             "branch": "Playerbot",
             "depth": null,
-            "dest": "."
+            "dest": ".",
+            "rev": "413bea61a85e20d9caef7d66fc601a661fdddd9d"
           },
           {
             "repo": "mod-playerbots/mod-playerbots",
             "branch": "master",
-            "dest": "modules/mod-playerbots"
+            "dest": "modules/mod-playerbots",
+            "rev": "b949b50bfcdd4fab937781bac2d7765e39330e4b"
           }
         ]
       },
@@ -28,11 +30,6 @@
           "macos",
           "windows"
         ],
-        "script": "wow-wotlk/install-wow-wotlk.sh",
-        "script_variants": {
-          "apt": "wow-wotlk/install-wow-wotlk-ubuntu.sh",
-          "dnf": "wow-wotlk/install-wow-wotlk-fedora.sh"
-        },
         "default_server_dir": "wow-server-playerbots",
         "password": {
           "mode": "fixed",
@@ -106,23 +103,26 @@
         "sources": [
           {
             "repo": "cmangos/mangos-tbc",
-            "dest": "src/mangos-tbc"
+            "dest": "src/mangos-tbc",
+            "rev": "f82e7d679c283b66bc2adc1b751aa1275e655673"
           },
           {
             "repo": "cmangos/playerbots",
-            "dest": "src/mangos-tbc/src/modules/Bots"
+            "dest": "src/mangos-tbc/src/modules/Bots",
+            "rev": "993f18091e67565986cf55c4d9b8e6eae11223f9"
           },
           {
             "repo": "cmangos/tbc-db",
-            "dest": "src/tbc-db"
+            "dest": "src/tbc-db",
+            "rev": "5078439a44d208732a903bca2d7df51941fb373a"
           }
         ]
       },
       "install": {
         "platforms": [
-          "linux"
+          "linux",
+          "windows"
         ],
-        "script": "wow-tbc/install-wow-tbc.sh",
         "default_server_dir": "wow-tbc-server",
         "requires_client_dir": true,
         "password": {
@@ -155,7 +155,7 @@
             "auth": null,
             "fatal": null,
             "regex": false,
-            "timeout_s": 600,
+            "timeout_s": 1800,
             "restart_loop": 4
           },
           "cmangos": {
@@ -332,6 +332,7 @@
                 },
                 {
                   "name": "core updates",
+                  "assert_update_level": true,
                   "into_each": {
                     "mangos": "src/mangos-tbc/sql/updates/mangos/*.sql",
                     "realmd": "src/mangos-tbc/sql/updates/realmd/*.sql",
@@ -405,15 +406,21 @@
                 }
               ],
               "marker_db": "mangos"
-            }
+            },
+            "patches": [
+              {
+                "file": "shared/cmangos/patches/vmap-extractor-doodad-name-case.patch",
+                "source": "src/mangos-tbc",
+                "reason": "vmap_extractor writes WMO doodad models under their raw MODN name and looks them up under the normalised one, so on a case-sensitive filesystem WMO doodad placements are dropped silently; TBC's own loss was never counted, and the functions this patch edits are byte-identical to the mangos-classic ones where it was (pyplan/upstream-cmangos-doodad-drop.md)"
+              }
+            ]
           }
         }
       },
       "containers": {
         "db": "tbc-db",
         "auth": "tbc-realmd",
-        "world": "tbc-mangosd",
-        "services": ["db", "realmd", "mangosd"]
+        "world": "tbc-mangosd"
       },
       "ports": {
         "auth": 3724,
@@ -458,23 +465,26 @@
         "sources": [
           {
             "repo": "cmangos/mangos-classic",
-            "dest": "src/mangos-classic"
+            "dest": "src/mangos-classic",
+            "rev": "8ec338a1704e7dcb1c0213eb7ed58f9231ade40f"
           },
           {
             "repo": "cmangos/playerbots",
-            "dest": "src/mangos-classic/src/modules/Bots"
+            "dest": "src/mangos-classic/src/modules/Bots",
+            "rev": "993f18091e67565986cf55c4d9b8e6eae11223f9"
           },
           {
             "repo": "cmangos/classic-db",
-            "dest": "src/classic-db"
+            "dest": "src/classic-db",
+            "rev": "22b51464f1625f6ef6275771de1f5466c6f5d19e"
           }
         ]
       },
       "install": {
         "platforms": [
-          "linux"
+          "linux",
+          "windows"
         ],
-        "script": "wow-vanilla/install-wow-vanilla.sh",
         "default_server_dir": "wow-vanilla-server",
         "requires_client_dir": true,
         "password": {
@@ -507,7 +517,7 @@
             "auth": null,
             "fatal": null,
             "regex": false,
-            "timeout_s": 600,
+            "timeout_s": 1800,
             "restart_loop": 4
           },
           "cmangos": {
@@ -564,6 +574,7 @@
               ],
               "retry": {
                 "when_log_matches": "Segmentation fault|core dumped",
+                "when_returncode_in": [139],
                 "tools": [
                   "vmap extract",
                   "vmap assemble"
@@ -686,6 +697,7 @@
                 },
                 {
                   "name": "core updates",
+                  "assert_update_level": true,
                   "into_each": {
                     "mangos": "src/mangos-classic/sql/updates/mangos/*.sql",
                     "realmd": "src/mangos-classic/sql/updates/realmd/*.sql",
@@ -750,15 +762,21 @@
                 }
               ],
               "marker_db": "mangos"
-            }
+            },
+            "patches": [
+              {
+                "file": "shared/cmangos/patches/vmap-extractor-doodad-name-case.patch",
+                "source": "src/mangos-classic",
+                "reason": "vmap_extractor writes WMO doodad models under their raw MODN name and looks them up under the normalised one, so on a case-sensitive filesystem 14.8% of a Vanilla world's placed collision geometry is dropped silently (pyplan/upstream-cmangos-doodad-drop.md)"
+              }
+            ]
           }
         }
       },
       "containers": {
         "db": "vanilla-db",
         "auth": "vanilla-realmd",
-        "world": "vanilla-mangosd",
-        "services": ["db", "realmd", "mangosd"]
+        "world": "vanilla-mangosd"
       },
       "ports": {
         "auth": 3724,
@@ -796,7 +814,7 @@
     {
       "id": "wow-tortoise",
       "name": "WoW Tortoise",
-      "status": "wip",
+      "status": "beta",
       "description": "Tortoise (the Turtle-WoW solo fork on MaNGOS Zero) with the cmangos playerbots AI, source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. Installer is work-in-progress and unverified with a real client.",
       "emulator": {
         "name": "Shyalya/tortoise-wow (Turtle-WoW V2 + cmangos playerbots)",
@@ -804,15 +822,21 @@
           {
             "repo": "Shyalya/tortoise-wow",
             "branch": "playerbots-integration-gh",
-            "dest": "src/tortoise-wow"
+            "dest": "src/tortoise-wow",
+            "rev": "7c0fb278f3f8966422f219e6f5035cb09b76ada7"
+          },
+          {
+            "repo": "ElunaLuaEngine/Eluna",
+            "dest": "src/tortoise-wow/src/modules/Eluna",
+            "rev": "1b06f28ff3a00054d915d824c725fb4283fee74d"
           }
         ]
       },
       "install": {
         "platforms": [
-          "linux"
+          "linux",
+          "windows"
         ],
-        "script": "wow-tortoise/install-tortoise-wow-wsl.sh",
         "default_server_dir": "tortoise-wow-server",
         "requires_client_dir": true,
         "password": {
@@ -841,11 +865,11 @@
             "charset": "utf8mb4"
           },
           "ready": {
-            "world": "World initialized|MaNGOS.*started up successfully|Ready to login",
+            "world": "World server is up and running|World initialized|MaNGOS.*started up successfully|Ready to login",
             "auth": null,
-            "fatal": "Correct \\*.map files not found|Could not open|Database .* not found",
+            "fatal": "Correct \\*.map files not found|Could not open (?!.*Logging to it is off for this run)|Database .* not found",
             "regex": true,
-            "timeout_s": 600,
+            "timeout_s": 10800,
             "restart_loop": 4
           },
           "cmangos": {
@@ -914,18 +938,26 @@
                 "/opt/tortoise/src/tools/mmap/mmapSettings.txt"
               ],
               "min_files": 500,
-              "required": false
+              "required": false,
+              "success_codes": [1]
             },
             "conf": {
               "source_dir": "/opt/tortoise/etc",
               "files": {
+                "aiplayerbot.conf": {
+                  "keys": {
+                    "AiPlayerbot.MinRandomBots": "500",
+                    "AiPlayerbot.MaxRandomBots": "500",
+                    "AiPlayerbot.RandomBotAccountCount": "100"
+                  }
+                },
                 "mangosd.conf": {
                   "keys": {
                     "LoginDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{AUTH_DB}}\"",
                     "WorldDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{WORLD_DB}}\"",
                     "CharacterDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{CHAR_DB}}\"",
                     "LogsDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{LOGS_DB}}\"",
-                    "Database.AutoUpdate.Path": "\"/opt/tortoise/sql/\"",
+                    "Database.AutoUpdate.Path": "\"/opt/tortoise/sql/database_updates/\"",
                     "DataDir": "\"/opt/tortoise/data\"",
                     "WorldServerPort": "{{WORLD_PORT}}",
                     "GameType": "0",
@@ -975,6 +1007,23 @@
                   "on_error": "fail"
                 },
                 {
+                  "name": "playerbots characters",
+                  "into": "tw_char",
+                  "files": [
+                    "src/tortoise-wow/modules/mod-playerbots/sql/characters/*.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
+                  "name": "playerbots world",
+                  "into": "tw_world",
+                  "files": [
+                    "src/tortoise-wow/modules/mod-playerbots/sql/world/*.sql",
+                    "src/tortoise-wow/modules/mod-playerbots/sql/world/classic/*.sql"
+                  ],
+                  "on_error": "warn"
+                },
+                {
                   "name": "realm row",
                   "into": "tw_logon",
                   "statements": [
@@ -993,6 +1042,11 @@
                   "db": "tw_logon",
                   "query": "SELECT COUNT(*) FROM realmlist",
                   "min": 1
+                },
+                {
+                  "db": "tw_world",
+                  "query": "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='tw_world' AND table_name LIKE 'ai_playerbot%'",
+                  "min": 10
                 }
               ],
               "player_data": [
@@ -1019,8 +1073,7 @@
       "containers": {
         "db": "tortoise-db",
         "auth": "tortoise-realmd",
-        "world": "tortoise-mangosd",
-        "services": ["db", "realmd", "mangosd"]
+        "world": "tortoise-mangosd"
       },
       "ports": {
         "auth": 3724,

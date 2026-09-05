@@ -1,0 +1,86 @@
+--- tests/data/wotlk-compose-config.json (08-31 run)
++++ gate-compose-config.json (09-04 run)
+@@ -1,10 +1,17 @@
+ {
+   "networks": {
+-    "ac-network": {},
+-    "default": {}
++    "ac-network": {
++      "ipam": {},
++      "name": "yulon-wow-wotlk-243c46e3_ac-network"
++    },
++    "default": {
++      "ipam": {},
++      "name": "yulon-wow-wotlk-243c46e3_default"
++    }
+   },
+   "services": {
+     "ac-authserver": {
++      "command": null,
+       "container_name": "ac-authserver",
+       "depends_on": {
+         "ac-database": {
+@@ -16,6 +23,7 @@
+           "required": true
+         }
+       },
++      "entrypoint": null,
+       "environment": {
+         "AC_LOGIN_DATABASE_INFO": "ac-database;3306;root;password;acore_auth",
+         "AC_LOGS_DIR": "/azerothcore/env/dist/logs",
+@@ -77,7 +85,9 @@
+       ]
+     },
+     "ac-database": {
++      "command": null,
+       "container_name": "ac-database",
++      "entrypoint": null,
+       "environment": {
+         "MYSQL_ROOT_PASSWORD": "password"
+       },
+@@ -114,6 +124,7 @@
+       ]
+     },
+     "ac-db-import": {
++      "command": null,
+       "container_name": "ac-db-import",
+       "depends_on": {
+         "ac-database": {
+@@ -121,6 +132,7 @@
+           "required": true
+         }
+       },
++      "entrypoint": null,
+       "environment": {
+         "AC_CHARACTER_DATABASE_INFO": "ac-database;3306;root;password;acore_characters",
+         "AC_DATA_DIR": "/azerothcore/env/dist/data",
+@@ -161,6 +173,7 @@
+       ]
+     },
+     "ac-worldserver": {
++      "command": null,
+       "container_name": "ac-worldserver",
+       "depends_on": {
+         "ac-client-data-init": {
+@@ -176,6 +189,7 @@
+           "required": true
+         }
+       },
++      "entrypoint": null,
+       "environment": {
+         "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500",
+         "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500",
+@@ -247,7 +261,11 @@
+     }
+   },
+   "volumes": {
+-    "client-data": {},
+-    "db-data": {}
++    "client-data": {
++      "name": "yulon-wow-wotlk-243c46e3_client-data"
++    },
++    "db-data": {
++      "name": "yulon-wow-wotlk-243c46e3_db-data"
++    }
+   }
+ }

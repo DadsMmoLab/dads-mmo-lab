@@ -1,0 +1,22 @@
+THE CLIENT IS THE SAME ON BOTH BOXES — established before the extract stage, not asserted.
+Measured 2026-09-04.
+
+  file tree   : 200 files, 8,490,012,296 bytes on BOTH
+                (`diff` of "<relative path>|<size>" lists sorted: ZERO differences)
+                Windows: C:\gate\client\WoW-Client-2.4.3   (unpacked here 2026-09-04)
+                Linux  : /home/pk/clients/WoW-Client-2.4.3 (m910q, the 7.4b/7.4c client)
+                Lists: client-win-list.txt / client-linux-list.txt
+
+  sha256 of every MPQ that carries map and model data, computed on each box:
+    common.MPQ     7fef7ace6969fc92e069c5edcbe20882b95aacd6535463c7a06a134af930f101  3777532821
+    expansion.MPQ  9d8c9542dd80017fa3a56f5bfa2b109c48a392410cd90d511de36f3f155a723f  1468608928
+    patch.MPQ      1f76c47d64c6c4f9a729d8c0ad67d19286568d9a9c3d0c1f44bde9d84fa48c94  2045265633
+    patch-2.MPQ    b031516cb1e0dd689177d1d6e7b8e751c01b7b4b087e7178549a2aa21d38c7a8   125708613
+  ALL FOUR IDENTICAL. TBC has no wmo.MPQ; the WMO/M2 data vmap_extractor reads lives in
+  common.MPQ and expansion.MPQ, both of which are in this list.
+
+Footnote for whoever maintains 7.4b: that entry records the client tree as "200 files,
+8,490,172,040 bytes". The file bytes are 8,490,012,296 on both boxes today; the 159,744-byte
+difference is directory entries, which `du`-shaped counting includes and a file-only sum does not.
+The FILE COUNT and every hash agree, so this is a units difference in the record, not a
+different client.

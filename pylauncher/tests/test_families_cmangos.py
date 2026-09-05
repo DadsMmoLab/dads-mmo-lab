@@ -1,0 +1,4932 @@
+"""Tests for the CMaNGOS family engine (`yulon.catalog.families.cmangos`, phase 7.3).
+
+Same shape as `test_families_azerothcore.py`: the `Recorder` machine double from
+`tests/support_native.py`, the real `wow-tbc` catalog entry, the real shared
+templates. Nothing here proves a CMaNGOS server installs — that is gate 7.4 —
+it proves the family's control flow, its refusals, what a resume repeats, and
+that every `docker run` it asks for is shaped the way the design says (client
+`:ro`, `--user` on Linux, cwd `/out`), asserted by FIELD on `ContainerRun`.
+
+The import gate here is a `CallableGate` over `Recorder.probe`/`Recorder.reset`:
+`MarkerGate`'s five branches belong to `test_sqlplan.py`, and this file proves
+the family's reaction to each answer. K.7 bound the `import` stage and added
+`CmangosInstaller._gate`; `engine()` attaches the pair as `_test_gate`, and the
+autouse `gated` fixture patches `_gate` to hand it back, with `raising=True`.
+What that keyword buys — and what stood in for it while no `_gate` existed — is
+recorded in that fixture's own docstring rather than up here, because this
+paragraph went on saying the seam "is not wired yet and cannot be" after K.7 had
+wired it, and cited a test that has never existed. A module docstring is the
+first thing read and the last thing re-checked.
+"""
+
+from __future__ import annotations
+
+import ast
+import gzip
+import inspect
+import json
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, fields, is_dataclass, replace
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
+
+import pytest
+
+import yulon
+from tests.conftest import spelled_bounds
+from tests.support_native import (
+    ABSENT,
+    IMPORTED,
+    PARTIAL,
+    POPULATED_HALF,
+    VMAP_FIXTURE,
+    Recorder,
+    lay_patch_sources,
+)
+from yulon import docker, platform, resources
+from yulon.catalog import composegen, native
+from yulon.catalog.catalog import (
+    CatalogEntry,
+    PasswordPlan,
+    SourcePatch,
+    SqlPhase,
+    SqlPlan,
+    load_catalog,
+)
+from yulon.catalog.families import cmangos, dockerfile, extract, family_for, sqlplan
+from yulon.catalog.families.cmangos import CmangosInstaller
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    cancelled_install_message,
+    installer_for,
+)
+
+DB_PASSWORD = "tbc-0123456789abcdef"
+
+SECRETS_FOR_A_RENDER = native.Secrets(db_password=DB_PASSWORD)
+"""What the two tests below hand `dockerfile.render()` when they call it directly.
+
+`render()` takes the declaration keyword-only and REQUIRED — §29's value half — so every
+direct call needs one even when the test is about something else entirely (the shipped
+`.dockerignore` lines, or that the public mapping fills the templates on its own). Both
+of those pass the install's real password, so a collision between it and a public token
+value would show up here as a refusal rather than as a silent pass;
+`test_no_shipped_public_mapping_collides_with_a_password_the_catalog_can_declare` is
+where that is the subject rather than a side effect. Inside a stage the argument is
+`ctx.secrets`, which `context()` builds from this same value."""
+
+HANG_BOUND = 30.0
+"""A DEADLOCK BREAKER for every thread wait here, not an assertion about speed.
+
+Each wait it sizes is for a fake `call` on a worker thread to be released, or
+for that thread to end — an `Event.set()` away in a healthy run. Measured on
+m910q (4 cores) 2026-09-05, the four `_stream()` abandonment tests below run
+together on an idle box: `4 passed, 117 deselected in 0.40s`.
+
+Large on purpose: the bound is on THIS process while the contention is on the
+box, and bug-checklist §33 records what a stopwatch-sized bound cost — 60
+seconds against a run measured at 0.16s went red under 15-way load and the run
+it happened in was read as a real failure. Deleting the bounds is not an option
+either: `_stream()`'s worker is only released by the cancel event this fix
+sets, so a regression with no bound is a suite that never returns, which CI
+reports as a stuck job rather than a red one.
+
+The proofs that a bound was NOT waited out are written against a fraction of
+this number rather than a second one, so the two cannot drift apart.
+"""
+
+
+def installable(entry: CatalogEntry) -> CatalogEntry:
+    """The entry with `platforms: ["linux"]`, because the family is what is under test.
+
+    A no-op today, kept so this file keeps testing the FAMILY rather than the
+    dispatch refusal, whichever side of that question the catalog is on.
+
+    WITHDRAWN, and it is worth recording why rather than deleting it. This said:
+    "7.2 has not landed, and all three CMaNGOS entries still ship
+    `platforms: ["linux"]` and their bash `script`". Both halves were true when
+    written on 2026-09-01 and the second stopped being true the next day: F.4
+    deleted the `script*` fields, and F.1-F.6 merged. Found by the completion
+    gate's prose seat, which was reading for exactly this.
+
+    What is true, measured 2026-09-02 at `697adca6`: the three entries carry
+    `platforms: ["linux"]` and no `script` of any kind. The 7.3 plan expected
+    `platforms: []` here between 7.2 and gate 7.4c; that never happened and now
+    cannot -- `Install.platforms` carries `min_length=1`, and after 7.3 an entry
+    installable nowhere can only be a mistake. `test_catalog.py` is where that
+    refusal is pinned, and `test_the_install_button_is_offered_for_every_cmangos_entry_on_linux`
+    is what would go red if the field were emptied.
+    """
+    return entry.model_copy(
+        update={"install": entry.install.model_copy(update={"platforms": ("linux",)})}
+    )
+
+
+ENTRY = installable(load_catalog().get("wow-tbc"))
+CMANGOS = ENTRY.install.native.cmangos if ENTRY.install.native is not None else None
+assert CMANGOS is not None, "wow-tbc must carry install.native.cmangos (7.3 catalog)"
+SQL = CMANGOS.sql
+DB_FACTS = ENTRY.install.native.db if ENTRY.install.native is not None else None
+assert DB_FACTS is not None, "wow-tbc must carry install.native.db (the client, user and charset)"
+
+
+def client_folder(tmp_path: Path) -> Path:
+    """A client tree passing the TBC ClientSpec: Data/, the required file, six MPQs, a locale."""
+    client = tmp_path / "client"
+    (client / "Data" / "enUS").mkdir(parents=True)
+    for name in ("common", "expansion", "patch", "patch-2", "patch-3", "misc"):
+        (client / "Data" / f"{name}.MPQ").write_bytes(b"MPQ\x1a")
+    (client / "Data" / "enUS" / "locale-enUS.MPQ").write_bytes(b"MPQ\x1a")
+    return client
+
+
+def context(
+    server_dir: Path,
+    client_dir: Path | None = None,
+    *,
+    completed: Iterable[str] = (),
+    cancel: threading.Event | None = None,
+) -> native.StageContext:
+    """A `StageContext` for calling one stage body directly.
+
+    `cancel` defaults to None — the spine hands a stage body an Event only
+    while a run is cancellable, and None is what a body sees in every test that
+    is not about being stopped.
+    """
+    return native.StageContext(
+        server_dir=server_dir,
+        client_dir=client_dir,
+        state=native.InstallState(
+            game_id=ENTRY.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="cmangos",
+            completed=tuple(completed),
+        ),
+        cancel=cancel,
+        secrets=native.Secrets(db_password=DB_PASSWORD),
+    )
+
+
+def lay_sql(server_dir: Path, plan: SqlPlan) -> Callable[[Path], None]:
+    """An `on_clone` hook laying the files the real plan names under the source just cloned.
+
+    Two files per glob so natural order is observable; gzip where the phase
+    says so. A pattern under a NESTED source dest
+    (`src/mangos-tbc/src/modules/Bots/...`) is laid only by that nested clone,
+    or the spine's own guard would refuse the nested checkout as "has files".
+    """
+    dests = [source.dest for source in ENTRY.emulator.sources]
+
+    def owner(pattern: str) -> str | None:
+        return max((d for d in dests if pattern.startswith(d + "/")), key=len, default=None)
+
+    def on_clone(dest: Path) -> None:
+        rel = dest.relative_to(server_dir).as_posix()
+        for phase in plan.phases:
+            patterns = list(phase.files) + list((phase.into_each or {}).values())
+            for pattern in patterns:
+                if owner(pattern) != rel:
+                    continue
+                for n in (1, 2):
+                    name = pattern.replace("*", f"{n:04d}")
+                    path = server_dir / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    body = f"-- {name}\nSELECT {n};\n"
+                    if phase.gzip:
+                        path.write_bytes(gzip.compress(body.encode("utf-8")))
+                    else:
+                        path.write_text(body, encoding="utf-8")
+
+    return on_clone
+
+
+def engine(rec: Recorder, **overrides: object) -> CmangosInstaller:
+    """An engine over `rec`, carrying the Recorder's probe/reset pair as its test gate."""
+    eng = CmangosInstaller(
+        ENTRY,
+        installers_root=resources.installers_dir(),
+        seams=rec.seams(**{"platform_id": lambda: "linux", **overrides}),
+    )
+    eng._test_gate = native.CallableGate(rec.probe, rec.reset)  # type: ignore[attr-defined]
+    return eng
+
+
+def lay_sources(server_dir: Path) -> Callable[[Path], None]:
+    """`support_native.lay_patch_sources` for `ENTRY`: the extractor files the patch stage edits.
+
+    Laid only under the dest the catalog says the patch applies to, for the
+    same reason `lay_sql` lays under the owning source: the spine refuses a
+    nested dest with files in it before that dest's own clone. `server_dir`
+    is kept in the signature so a caller reads which tree it is about.
+    """
+    hook = lay_patch_sources(ENTRY)
+
+    def on_clone(dest: Path) -> None:
+        assert dest.is_relative_to(server_dir), dest
+        hook(dest)
+
+    return on_clone
+
+
+def install(rec: Recorder, server_dir: Path, client_dir: Path, **overrides: object) -> list[str]:
+    sql = lay_sql(server_dir, SQL)
+    sources = lay_sources(server_dir)
+
+    def on_clone(dest: Path) -> None:
+        sql(dest)
+        sources(dest)
+
+    rec.on_clone = on_clone
+    return list(
+        engine(rec, **overrides).run(InstallOptions(server_dir=server_dir, client_dir=client_dir))
+    )
+
+
+REAL_GATE = CmangosInstaller._gate
+"""The unpatched `_gate`, bound at import — the only way to reach it in this file.
+
+`gated` is autouse, so inside a test body `CmangosInstaller._gate` is the
+double. Every test here wants that; exactly one wants the real thing, and it
+has to have been taken before the first fixture ran.
+"""
+
+
+@pytest.fixture(autouse=True)
+def gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every engine's import gate is the one `engine()` attached, not a real `MarkerGate`.
+
+    `raising=True` since K.7 bound the import stage, and the keyword is what
+    makes this patch mean anything: renaming `CmangosInstaller._gate` now
+    errors here, where before it would have gone on quietly adding an unused
+    attribute while every end-to-end test in this file drove the real gate at a
+    machine that is not there. `GATE_METHOD_AT_IMPORT` and the test that read
+    it were the stand-in for this keyword while no `_gate` existed; they went
+    away with K.7.
+
+    The real `_gate()` — the `MarkerGate` over the plan's marker table — is
+    exercised in `test_sqlplan.py`, which points it at doubles with no engine
+    in the way.
+    """
+
+    def gate(self: CmangosInstaller, ctx: native.StageContext) -> native.ImportGate:
+        attached = getattr(self, "_test_gate", None)
+        assert attached is not None, "build engines with engine(rec) in this file"
+        return attached
+
+    monkeypatch.setattr(CmangosInstaller, "_gate", gate, raising=True)
+
+
+# -- identity ---------------------------------------------------------------
+
+
+def test_family_and_stage_names_are_the_contract_tuple() -> None:
+    assert CmangosInstaller.family == "cmangos"
+    assert CmangosInstaller.STAGE_NAMES == (
+        "clone-sources",
+        "patch-sources",
+        "db-password",
+        "write-dockerfile",
+        "generate-compose",
+        "build",
+        "extract",
+        "mmaps",
+        "conf",
+        "start-db",
+        "import",
+        "up",
+        "ready",
+    )
+
+
+def test_stages_are_unique_and_a_subset_of_the_pinned_names_in_order() -> None:
+    names = [stage.name for stage in engine(Recorder()).stages()]
+    assert len(names) == len(set(names))
+    assert "preflight" not in names and "guard" not in names
+    pinned = [n for n in CmangosInstaller.STAGE_NAMES if n in names]
+    assert names == pinned
+
+
+def test_stage_names_is_the_pinned_tuple_now_that_every_stage_is_bound() -> None:
+    """The equality K.2 deferred, K.7 could only check by hand, and K.8 owes.
+
+    `STAGE_NAMES` is the class's DECLARATION of its order. `stage_names()` is
+    what the spine actually validates a resume against, and it is derived from
+    `stages()`. The two were allowed to disagree while the tuple was being
+    built, because nothing in the app read `STAGE_NAMES` and this class was not
+    in `FAMILIES`; K.8 changed the second half, so the agreement is held here
+    instead of in a module docstring. The test above is the weaker
+    subset-in-order form that let the gap exist — it still earns its place,
+    because uniqueness and the reserved names are not this assertion's business.
+
+    Read off the ENGINE and never off a state file. `read_state()` drops stage
+    names the running binary does not know, silently (bug checklist §23), so a
+    `completed` tuple can be made to agree with almost anything and would
+    satisfy an equality written against it while the two declarations were in
+    fact apart — which is precisely the mismatch this exists to catch.
+    """
+    assert engine(Recorder()).stage_names() == CmangosInstaller.STAGE_NAMES
+
+
+# -- the registered family ----------------------------------------------------
+
+
+def cmangos_entries() -> list[CatalogEntry]:
+    """Every shipped entry whose `install.native` names this family.
+
+    Derived from `catalog.json`, not listed, so a fourth CMaNGOS game is
+    dispatch-tested by adding the entry and nothing else. WHICH games declare
+    the family is `test_catalog.py`'s question
+    (`test_the_cmangos_entries_carry_a_full_family_block`, parametrized over the
+    three ids); what is asserted here is that every entry which declares it
+    gets an engine. The emptiness guard lives here so that no caller can pass
+    over an empty list and call it a result.
+    """
+    entries = [
+        entry
+        for entry in load_catalog().games
+        if entry.install.native is not None and entry.install.native.family == "cmangos"
+    ]
+    assert entries, "no shipped catalog entry names the cmangos family"
+    return entries
+
+
+def test_every_cmangos_entry_dispatches_to_an_engine_that_runs_this_familys_stages() -> None:
+    """The registration proved where it matters: on the entries, through the dispatcher.
+
+    `"cmangos" in FAMILIES` is a declaration, and three guards in this project
+    have passed while the bug they named was live. What the tasks downstream of
+    K.8 need is that pressing Install on one of these games yields an engine of
+    THIS class which knows THIS family's stages — so the registry lookup
+    (`family_for`), the dispatcher that a button reaches (`installer_for`) and
+    the object that comes back are crossed here, once for each shipped entry
+    rather than once for `wow-tbc` with the other two assumed.
+
+    `eng.stage_names()` and not `CmangosInstaller.STAGE_NAMES`: the second is a
+    class attribute every instance shares, so reading it back off the result
+    would say nothing about the object dispatch actually returned. The first is
+    derived from that instance's own `stages()`, which the constructor has
+    already run through `_check_stage_tuple()` — so a family whose stage tuple
+    is broken for a game other than TBC is refused here, and not two hours into
+    that game's build.
+    """
+    for entry in cmangos_entries():
+        assert family_for(entry) is CmangosInstaller, entry.id
+        eng = installer_for(entry, platform_id=lambda: "linux")
+        assert isinstance(eng, CmangosInstaller), entry.id
+        assert eng.stage_names() == CmangosInstaller.STAGE_NAMES, entry.id
+
+
+def test_the_install_button_is_offered_for_every_cmangos_entry_on_linux() -> None:
+    """`Install.supports()` is the gate the tile asks before the engine is ever built.
+
+    An engine nothing can reach is not a shipped feature. `catalog_view.py` asks
+    this one call twice — once to grey the tile and say which platform the
+    installer needs, once in `start_install()` to refuse before the folder
+    prompts — so a False here is an install that cannot be started however well
+    the family dispatches. Measured 2026-09-02: all three CMaNGOS entries answer
+    True for `linux`, which is the platform their `platforms` list carries and
+    the only one this family's containers are built for.
+
+    One-sided on purpose, and the mutation run says what that costs. A `supports()`
+    rewritten to `return True` SURVIVES this test — an always-open gate does not
+    break the claim made here. Measured 2026-09-02 at `f6ed1b9a`, whole suite:
+    that mutation is killed SEVEN times over, in four files — three
+    parametrisations of `test_the_cmangos_entries_carry_a_full_family_block`
+    (`test_catalog.py`); `test_catalog_view.py`'s
+    `test_unsupported_platform_is_said_on_the_tile_and_refused_before_any_prompt`
+    and `test_unlocking_after_a_job_never_re_enables_a_gated_tile`;
+    `test_installer_for_does_not_consult_the_platform_but_does_pass_it_on`
+    (`test_installer.py`); and exactly ONE in `test_families_azerothcore.py`,
+    `test_the_unsupported_platform_refusal_still_comes_first`. This paragraph
+    credited `test_installer_refuses_a_platform_its_script_cannot_run` — deleted
+    with the bash path in 7.2 — and "two in azerothcore". Folding
+    the closure in here would put two rules in one fixture for coverage that
+    already exists seven times over. What this test is not vacuous about was
+    measured the same way: moving `wow-tortoise` to `platforms: ["macos"]` failed
+    it by name, so it really does read each shipped entry rather than TBC alone.
+    """
+    for entry in cmangos_entries():
+        assert entry.install.supports("linux") is True, entry.id
+
+
+def test_the_module_constants_are_the_shared_template_s_own_spellings() -> None:
+    """`data`, `etc` and `db-data` are read off `shared/cmangos/base.yml.tmpl`, not remembered."""
+    from yulon.catalog.families import cmangos
+
+    native_block = ENTRY.install.native
+    assert native_block is not None
+    base = (resources.installers_dir() / native_block.templates / "base.yml.tmpl").read_text(
+        encoding="utf-8"
+    )
+    assert f"- ./{cmangos.DATA_DIR}:" in base
+    assert f"- ./{cmangos.ETC_DIR}:" in base
+    assert f"- {cmangos.DB_DATA_VOLUME}:/var/lib/mysql" in base
+
+
+def test_both_token_mappings_carry_the_family_set_from_catalog_data(
+    tmp_path: Path,
+) -> None:
+    """Every catalog- and install-derived key is in BOTH mappings; only one carries the secret.
+
+    Asserted over both, not over the public one with a note about the other:
+    the split's cost would be a conf table quietly losing `WORLD_PORT` because
+    someone added a key to whichever mapping they had open.
+    """
+    server_dir = tmp_path / "srv"
+    eng = engine(Recorder())
+    public = eng._public_tokens(server_dir)
+    secret = eng._secret_tokens(context(server_dir))
+    native_block = ENTRY.install.native
+    assert native_block is not None and CMANGOS is not None
+    for tokens in (public, secret):
+        assert tokens["DB_HOST"] == ENTRY.containers.db
+        assert tokens["DB_USER"] == native_block.db.user
+        assert tokens["DB_IMAGE"] == native_block.db.image
+        assert tokens["AUTH_DB"] == ENTRY.databases.auth
+        assert tokens["WORLD_DB"] == ENTRY.databases.world
+        assert tokens["CHAR_DB"] == ENTRY.databases.characters
+        assert tokens["LOGS_DB"] == ENTRY.databases.extra[0]
+        assert tokens["CORE_DIR"] == str(PurePosixPath(CMANGOS.conf.source_dir).parent)
+        assert tokens["CORE_DIR"] == "/opt/mangos", "the in-image prefix, never a host path"
+        assert tokens["CLIENT_BUILD"] == str(ENTRY.client.build)
+        assert tokens["MAKE_JOBS"] == str(CMANGOS.dockerfile.make_jobs)
+        assert tokens["DB_PORT"] == str(ENTRY.ports.db)
+        assert tokens["AUTH_PORT"] == str(ENTRY.ports.auth)
+        assert tokens["WORLD_PORT"] == str(ENTRY.ports.world)
+        assert tokens["REALM_HOST"] == native.INSTALL_REALM_HOST == "127.0.0.1"
+        assert tokens["PROJECT_NAME"] == composegen.project_name(
+            ENTRY.id, server_dir, platform_id=lambda: "linux"
+        )
+        assert tokens["IMAGE_TAG"] == composegen.image_tag(server_dir, platform_id=lambda: "linux")
+        assert tokens["IMAGE_PREFIX"] == native_block.image_prefix
+        assert "" not in tokens.values(), "an absent value is an absent key, never an empty fill"
+    assert "DB_PASSWORD" not in public
+    assert secret["DB_PASSWORD"] == DB_PASSWORD
+    assert secret == {
+        **public,
+        "DB_PASSWORD": DB_PASSWORD,
+    }, "one set is the other plus the secrets"
+
+
+def test_tokens_omit_logs_db_when_the_entry_has_no_extra_schema(tmp_path: Path) -> None:
+    bare = ENTRY.model_copy(update={"databases": ENTRY.databases.model_copy(update={"extra": ()})})
+    eng = CmangosInstaller(
+        bare,
+        installers_root=resources.installers_dir(),
+        seams=Recorder().seams(platform_id=lambda: "linux"),
+    )
+    assert "LOGS_DB" not in eng._public_tokens(tmp_path / "srv")
+    assert "LOGS_DB" not in eng._secret_tokens(context(tmp_path / "srv"))
+
+
+def secrets_with_a_sentinel_per_field() -> tuple[native.Secrets, dict[str, str]]:
+    """A `Secrets` whose every field holds a distinct, unmistakable string, and that mapping.
+
+    Built from `dataclasses.fields()` rather than from `db_password=...`, so a
+    secret added to `native.Secrets` is covered by every caller of this helper
+    on the day it is added and not on the day somebody remembers. That is the
+    difference the M15 mutation turned on: the protection K.4 shipped covered
+    the NAME `DB_PASSWORD`, and a second secret walked past it.
+    """
+    named = fields(native.Secrets)
+    assert named, "native.Secrets has no fields; every test built on this would pass vacuously"
+    for field in named:
+        assert field.type in ("str", str), (
+            f"native.Secrets.{field.name} is {field.type!r}, not a string. The sentinel "
+            "trick below assumes strings; re-read these tests before widening the type."
+        )
+    values = {field.name: f"SENTINEL-{field.name}-a4f19c7e" for field in named}
+    return native.Secrets(**values), values
+
+
+def test_the_build_context_mapping_needs_no_secret_and_still_fills_the_shipped_templates(
+    tmp_path: Path,
+) -> None:
+    """`_public_tokens()` is complete on its own — no `Secrets` anywhere in the call.
+
+    This is the by-construction half, and it is a behaviour and not a
+    signature claim: the mapping the build context is rendered from is
+    produced from a `server_dir` alone, and the SHIPPED Dockerfile pair fills
+    from it with nothing left over. `composegen.fill()` refuses an unfilled
+    `{{TOKEN}}`, so "the build context never needs a secret" is what a green
+    render here means — not "we remembered to leave one out".
+    """
+    server_dir = tmp_path / "srv"
+    public = engine(Recorder())._public_tokens(server_dir)
+    native_block = ENTRY.install.native
+    assert native_block is not None and native_block.dockerfile_dir is not None
+    template_dir = resources.installers_dir() / native_block.dockerfile_dir
+    text, ignore = dockerfile.render(template_dir, public, secrets=SECRETS_FOR_A_RENDER)
+    assert "{{" not in text and "{{" not in ignore
+    assert text.startswith(composegen.GENERATED_MARKER)
+
+
+def test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_rendered_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M15 and M-R2, killed at the THREE roads listed below — and covering no others.
+
+    Mutation M15 (2026-09-01) added a second secret key to the single
+    `_tokens()` mapping — `"ROOT_PASSWORD": ctx.secrets.db_password` — and a
+    planted template spelling `{{ROOT_PASSWORD}}` rendered
+    `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into the Dockerfile while all
+    1872 tests passed — the whole suite as it stood that day, recorded at
+    `9e198c05`; it is 1974 at `f6ed1b9a`, so read the number as a date and not
+    as a size. `dockerfile.render()` drops one KEY BY NAME, so the
+    second name walked past it, and no test in the suite looked at the mapping
+    as a whole.
+
+    So this one does, and it names no token: it puts a distinct sentinel in
+    every field of `Secrets`, spies on the mapping the stage actually hands
+    `render()`, and asserts no sentinel is anywhere in it — as a value or
+    inside one.
+
+    **The roads, and the mutation that put each one here.** `_public_tokens()`
+    is handed a `server_dir`, so `ctx.secrets` is not the only place a password
+    can be reached from: whatever the earlier stages have already written into
+    that directory is in reach too. The sentinel therefore goes into each of
+    these before the stage runs.
+
+    * `ctx.secrets` itself — M15, above.
+    * The file `install.password` names, which K.3's `db-password` stage writes
+      two stages before the build. `resolve_secrets(server_dir)` is a public
+      inherited method taking exactly the argument this body already holds, and
+      by that point it READS that file rather than minting. A mutation taking
+      that route walked past the `ctx.secrets`-only version of this test with
+      the whole suite green (measured 2026-09-02).
+    * `<server_dir>/.env` — mutation M-R2, measured 2026-09-02. K.4's
+      `generate-compose` stage merges `DB_ROOT_PASSWORD=<the plaintext
+      password>` into that file, and it runs at `STAGE_NAMES` index 3, ONE
+      stage before `build` at index 4. A seven-line helper reading it, with no
+      public method and no cache anywhere, put that value under
+      `"ROOT_PASSWORD"`, rendered `ENV ROOT_PASSWORD=tbc-0123456789abcdef` into
+      a Dockerfile, and left the suite at 1889 passed, 3 skipped (2026-09-02,
+      recorded at `e176af17`) with mypy, ruff and black clean. The `.env` below
+      is written by RUNNING the real
+      `generate-compose` stage rather than by spelling its key out here, so a
+      renamed key or file follows it; the assertion that the sentinel reached
+      the file is what keeps that from going quietly vacuous.
+
+    **What it still does not catch, said out loud so the name is not read as
+    more than it is.** The set covered is one context and two files, not "the
+    server dir". A mutation reading some OTHER file under `server_dir` that a
+    stage writes a password into is uncovered. So is one that resolves the
+    password ONCE and caches it — on the class, in a module global, anywhere
+    outside this call — because a cached value can have come from an earlier
+    `server_dir` that no sentinel here ever occupied; that variant was measured
+    surviving on 2026-09-02. `_public_tokens()`'s docstring records why no test
+    in this shape can close the set, and the guarantee against a NAMED secret
+    remains `dockerfile.SECRET_TOKENS`' key-drop and refusal, which run
+    whatever the mapping holds.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    secrets, sentinels = secrets_with_a_sentinel_per_field()
+    eng = engine(Recorder())
+    ctx = replace(context(server_dir), secrets=secrets)
+    # The second road: what K.3's `db-password` stage leaves in the build
+    # context, and therefore what `resolve_secrets(server_dir)` reads back.
+    plan = ENTRY.install.password
+    assert plan.file is not None, "wow-tbc's password plan names no file; the disk road is untested"
+    assert "db_password" in sentinels, (
+        "the password FILE holds `Secrets.db_password` specifically; that field is gone or "
+        "renamed, so re-read which sentinel belongs on disk before trusting this test"
+    )
+    (server_dir / plan.file).write_text(sentinels["db_password"] + "\n", encoding="utf-8")
+    # The third road: what K.4's `generate-compose` leaves in `.env` one stage
+    # before the build. Run, not spelled out, so this follows a renamed key.
+    list(eng.stage_generate_compose(ctx))
+    dotenv = (server_dir / composegen.DOTENV_FILE).read_text(encoding="utf-8")
+    assert sentinels["db_password"] in dotenv, (
+        "`generate-compose` no longer writes the install password into `.env`, so the M-R2 "
+        f"road is untested and a mutation reading it would survive again:\n{dotenv}"
+    )
+    seen: list[dict[str, str]] = []
+    handed: list[native.Secrets] = []
+    real = dockerfile.render
+
+    def spy(
+        template_dir: Path, tokens: Mapping[str, str], *, secrets: native.Secrets
+    ) -> tuple[str, str]:
+        seen.append(dict(tokens))
+        handed.append(secrets)
+        return real(template_dir, tokens, secrets=secrets)
+
+    monkeypatch.setattr(dockerfile, "render", spy)
+    list(eng._write_dockerfile(ctx))
+    assert handed == [ctx.secrets], (
+        "the stage did not hand `render()` the context's own secrets, so §29's value rule "
+        "was armed with nothing and the refusal below proves less than it reads"
+    )
+    assert len(seen) == 1, "the renderer was not called once; this test would prove nothing"
+    for name, value in sentinels.items():
+        leaked = [key for key, held in seen[0].items() if value in held]
+        assert not leaked, f"{leaked} in the build-context mapping carries Secrets.{name}"
+    for name in ("Dockerfile", ".dockerignore"):
+        built = (server_dir / name).read_text(encoding="utf-8")
+        assert not [value for value in sentinels.values() if value in built], name
+
+
+def test_the_secret_mapping_carries_a_second_secret_nobody_listed(
+    tmp_path: Path,
+) -> None:
+    """A secret added to the secret TYPE arrives in `_secret_tokens()` with no list edited.
+
+    The other half of M15's lesson. Covering the name `DB_PASSWORD` is what
+    failed; the fix derives the secret token names from the fields of the
+    `Secrets` instance, so the derivation has to be shown to answer for a
+    field that did not exist when it was written. A subclass is how a second
+    secret is added here without editing `yulon/catalog/native.py`, and
+    `secret_token_map()` asks `fields()` of the INSTANCE for exactly that
+    reason.
+
+    **The line this test used to end on was not a guard.** It read
+    `assert "API_TOKEN" not in eng._public_tokens(server_dir)`, and `API_TOKEN`
+    exists only on the local subclass below — which `_public_tokens()` is never
+    handed, since it takes a `server_dir` and no context. No edit to that
+    method's body could fail it short of literally spelling `API_TOKEN`; undoing
+    the split makes it raise `AttributeError`, which is a claim about a
+    DECLARATION and not about a value. It is replaced by the enumeration below,
+    which is this test's actual subject: the keys `_secret_tokens()` adds on top
+    of the public half are exactly the ones the derivation predicts from the
+    fields of the secret handed in — no fewer (a dropped field), no more (a
+    listed name), and spelled the one way.
+
+    Measured 2026-09-02, and corrected the same day. The first version of this
+    note said an extra undeclared key was caught here but that
+    `test_both_token_mappings_carry_the_family_set_from_catalog_data` caught it
+    too, and that "no mutation was found that this line alone kills". A review
+    found one, and it is exactly the shape this test exists for: a key added
+    only when the secret carries more fields than `native.Secrets` declares —
+
+        if len(fields(ctx.secrets)) > 1:
+            secret = {**secret, "UNDECLARED_EXTRA": "x"}
+
+    — is invisible to every test that builds a real `native.Secrets`, because
+    for one the branch never runs. Reproduced 2026-09-02: with that edit in
+    `_secret_tokens()` the suite came back `1 failed, 1888 passed, 3 skipped`
+    (recorded at `e176af17`; the baseline was 1889 that day and is 1974 at
+    `f6ed1b9a`) and the one failure was this test. So the enumeration below is not
+    redundant with the other: it reaches a field that exists only on a
+    subclass, and that reach is what caught this.
+
+    Whether a secret VALUE can reach the public mapping is a different question
+    with a different answer, and it belongs to
+    `test_neither_the_context_secrets_nor_the_password_on_disk_reaches_the_rendered_mapping`
+    — asserted over values, over the real `native.Secrets`, and over both the
+    context and the on-disk roads, none of which a subclass-only token reaches.
+    """
+
+    @dataclass(frozen=True)
+    class TwoSecrets(native.Secrets):
+        api_token: str = "second-secret-6b2d0f11"
+
+    server_dir = tmp_path / "srv"
+    eng = engine(Recorder())
+    ctx = replace(context(server_dir), secrets=TwoSecrets(db_password=DB_PASSWORD))
+    assert cmangos.secret_token_map(native.Secrets(db_password=DB_PASSWORD)) == {
+        "DB_PASSWORD": DB_PASSWORD
+    }
+    tokens = eng._secret_tokens(ctx)
+    assert tokens["API_TOKEN"] == "second-secret-6b2d0f11", "derived, not listed"
+    assert tokens["DB_PASSWORD"] == DB_PASSWORD
+    added = set(tokens) - set(eng._public_tokens(server_dir))
+    declared = {native.secret_token_name(f.name) for f in fields(TwoSecrets)}
+    assert added == declared, "a declared field is missing, or a name nobody declared is present"
+
+
+def test_a_secret_named_like_a_public_token_is_refused_instead_of_shadowing_it(
+    tmp_path: Path,
+) -> None:
+    """`{**public, **secret}` lets the secret WIN, so a name collision is a silent swap.
+
+    Not hypothetical arithmetic: the public half already spells `DB_HOST`,
+    `DB_USER`, `DB_PORT` and `CORE_DIR`, and `native.Secrets` is a dataclass
+    one field away from any of them. A field named `db_host` would put the
+    PASSWORD wherever the conf tables, the SQL and (K.7) verify expect the
+    database host — every value still filled, every file still well-formed,
+    and `test_the_secret_mapping_spells_each_field_the_way_the_templates_do`
+    still green, because `{{DB_PASSWORD}}` would keep coming out right.
+
+    So the collision is refused rather than merged, and the refusal is asserted
+    HERE rather than left to the docstring that describes it. The subclass
+    names `db_host` because that is the collision this catalog actually
+    affords; the assertion is over the token the engine itself produces, not
+    over a literal restated in this file, so it follows a rename of the public
+    key.
+    """
+
+    @dataclass(frozen=True)
+    class ShadowingSecrets(native.Secrets):
+        db_host: str = "not-a-host-but-a-password"
+
+    server_dir = tmp_path / "srv"
+    eng = engine(Recorder())
+    collision = native.secret_token_name("db_host")
+    assert collision in eng._public_tokens(server_dir), (
+        "the public half no longer spells this token, so the fixture no longer collides "
+        "with anything and this test would pass for the wrong reason"
+    )
+    ctx = replace(context(server_dir), secrets=ShadowingSecrets(db_password=DB_PASSWORD))
+    with pytest.raises(InstallerError, match=collision):
+        eng._secret_tokens(ctx)
+
+
+def test_the_build_context_already_holds_the_plaintext_password_before_the_build_stage(
+    tmp_path: Path,
+) -> None:
+    """The build context is NOT secret-free, and enumeration is what says which stages.
+
+    `_public_tokens()`'s docstring once counted the stages writing into the
+    server dir before the build and got the count wrong twice over: it said
+    two, and the stage it left out was `generate-compose`, the one immediately
+    before the build. A number in prose cannot go red, so the ordering is read
+    off `STAGE_NAMES` here instead and the CONTENT is read off the disk each
+    stage wrote.
+
+    Two roads into the context, both asserted below as values on disk:
+
+    * `db-password` runs before `build` and puts the plaintext password at the
+      ROOT of the server dir, which is the directory `docker build` is pointed
+      at.
+    * `generate-compose` runs IMMEDIATELY before `build` and merges the same
+      plaintext into `<server_dir>/.env` under `DB_ROOT_PASSWORD`. Nothing
+      asserted that road until 2026-09-02, when mutation M-R2 read that file
+      out of `_public_tokens()` and left the suite at 1889 passed, 3 skipped
+      (2026-09-02, recorded at `e176af17`).
+
+    So from stage 1 the secret is inside the build context as a file, and from
+    stage 3 as two. What keeps them out of what the daemon receives is the
+    leading `*` of the `.dockerignore`;
+    `test_every_shipped_dockerignore_excludes_the_entrys_password_file` covers
+    the password file and `test_composegen.py`'s
+    `test_every_cmangos_dockerignore_admits_only_the_core_tree_it_copies`
+    covers the shape, and no half of this means anything alone.
+
+    What this test does NOT do is notice a stage being ADDED: it names the
+    three it cares about and ignores the rest.
+    `test_family_and_stage_names_are_the_contract_tuple` restates the whole
+    tuple and is the one that goes red for that.
+    """
+    order = CmangosInstaller.STAGE_NAMES
+    wanted = {"db-password", "generate-compose", "build"}
+    assert wanted <= set(order), f"a stage was renamed; this test cannot find them all: {order}"
+    assert order.index("db-password") < order.index("build")
+    assert order.index("generate-compose") == order.index("build") - 1, (
+        "`generate-compose` is no longer the stage immediately before the build, so re-read "
+        "which stages leave a secret in the context before trusting `_public_tokens()`'s list"
+    )
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    ctx = context(server_dir)
+    list(eng._db_password(ctx))
+    plan = ENTRY.install.password
+    assert plan.file is not None
+    written = server_dir / plan.file
+    assert written.read_text(encoding="utf-8").strip() == DB_PASSWORD, "in plaintext, as it must be"
+    assert written.parent == server_dir, (
+        "the password no longer sits at the root of the build context; re-derive what the "
+        "shipped `.dockerignore` has to exclude before trusting the guard that pairs with this"
+    )
+
+    list(eng.stage_generate_compose(ctx))
+    dotenv = server_dir / composegen.DOTENV_FILE
+    assert dotenv.parent == server_dir
+    written_env = dotenv.read_text(encoding="utf-8")
+    assert f"DB_ROOT_PASSWORD={DB_PASSWORD}" in written_env, (
+        "`generate-compose` no longer leaves the plaintext password in the build context; "
+        f"re-read what a build ships before trusting the note that says it does:\n{written_env}"
+    )
+
+
+def dockerignore_excludes(ignore_text: str, path: str) -> bool:
+    """Would `docker build` withhold `path` from the daemon, given this `.dockerignore`?
+
+    Enough of Docker's rule to answer for a name at the ROOT of the context,
+    which is all this file asks about (`.db_password`): patterns are tried in
+    order, the LAST one that matches decides, a leading `!` re-includes, and
+    `*` does not cross a `/` (Go's `filepath.Match`, one segment at a time).
+    Comments and blank lines are skipped.
+
+    Deliberately NOT a general implementation: the parent-directory walk that
+    decides a nested path like `etc/mangosd.conf` is where Docker's real
+    algorithm gets interesting, and a half-right version of it here would be a
+    test asserting this function's bugs. A root-level name needs none of it.
+    """
+    verdict = False
+    for raw in ignore_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        negated = line.startswith("!")
+        pattern = re.escape(line[1:] if negated else line)
+        # `**` before `*`, or the first replacement eats the second star.
+        pattern = pattern.replace(r"\*\*", ".*").replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+        if re.fullmatch(pattern, path):
+            verdict = not negated
+    return verdict
+
+
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_every_shipped_dockerignore_excludes_the_entrys_password_file(
+    game: str, tmp_path: Path
+) -> None:
+    """The leading `*` is the whole of the defence, and this covers the ROOT-level half.
+
+    `db-password` writes the plaintext password into the server dir two stages
+    before the build (the test above), so the file is inside the build context
+    on disk. What keeps it out of the tarball `docker build` streams to the
+    daemon is one character in each shipped `dockerignore.tmpl`: the `*` that
+    excludes everything, before the `!src/...` line re-includes the core tree.
+
+    Nothing tested that. A `!` re-include added below those lines — the shape
+    of edit somebody makes to get one more file into a build — would ship the
+    password into an image layer with the whole suite green, and an image layer
+    is the expensive kind of leak: `docker history` prints it long after the
+    file is deleted.
+
+    Rendered through the real `dockerfile.render()` and the real
+    `_public_tokens()`, not read as a template, because it is the RENDERED text
+    the daemon reads; and asked about the file the ENTRY names rather than a
+    literal `.db_password`, so a catalog that renamed it is answered about the
+    file it actually writes.
+
+    **What was measured about its overlap, and about its limit, 2026-09-02.**
+    `test_composegen.py`'s
+    `test_every_cmangos_dockerignore_admits_only_the_core_tree_it_copies`
+    arrived with `yulon-phase7` and pins the SHAPE — first line `*`, exactly one
+    `!` line, and it names the core tree. Three mutations were run against the
+    pair:
+
+    * the leading `*` deleted — both go red.
+    * `!.db_password` appended — both go red.
+    * `!etc` appended to `wow-tbc/native/dockerignore.tmpl` — the shape test
+      goes red for `wow-tbc`; THIS test stays green on all three
+      parametrisations.
+
+    The third is the honest limit and is written down rather than left for a
+    reader to infer coverage this test does not have. `dockerignore_excludes()`
+    answers for a name at the ROOT of the context and has no parent-directory
+    walk, so the password-bearing `.conf` files `conf` writes under `etc/` are
+    outside what it can be asked about. Nothing on this branch asserts that
+    `etc/*.conf` stays out of the build context; what stands there is the shape
+    test's refusal of a second `!` line plus Docker's own rule that an excluded
+    directory takes its children with it.
+
+    The two are kept apart because they answer to different owners: that one is
+    about which SOURCE TREE reaches the daemon — its whole docstring is about
+    `src/tbc-db` and `.git` — so a legitimate build change needing a second `!`
+    line will be argued with by editing its assertions, and after that edit
+    nothing would be left saying the PASSWORD must not go. This test names the
+    password, derives it from `install.password`, and has to be argued with
+    separately.
+    """
+    entry = installable(load_catalog().get(game))
+    plan = entry.install.password
+    assert plan.mode == "generated" and plan.file is not None, (
+        f"{game} keeps no password file, so there is nothing here to exclude and this "
+        "parametrisation is vacuous for it"
+    )
+    native_block = entry.install.native
+    assert native_block is not None and native_block.dockerfile_dir is not None
+    eng = engine_for(entry, Recorder())
+    template_dir = resources.installers_dir() / native_block.dockerfile_dir
+    _text, ignore = dockerfile.render(
+        template_dir, eng._public_tokens(tmp_path / "srv"), secrets=SECRETS_FOR_A_RENDER
+    )
+
+    withheld = dockerignore_excludes(ignore, plan.file)
+    assert withheld, f"{game} would send {plan.file} to the build daemon:\n{ignore}"
+    # The matcher must be able to answer "no", or the assertion above is a
+    # function that returns True. Two controls, because the obvious one covers
+    # less than it used to say. The core tree is the one path these templates
+    # deliberately let THROUGH; a comment here claimed it answered "no" only if
+    # the `!` lines were read AND `*` was kept from crossing a `/`. Measured
+    # 2026-09-02: only the second half was true. With the `!` branch deleted
+    # (`negated = False`) all three parametrisations stayed green, because
+    # `!src/mangos-tbc` then matches nothing at all and the verdict for a
+    # nested path is left False by `*` alone.
+    core = entry.emulator.sources[0].dest
+    assert "/" in core, (
+        f"{core} no longer has a path separator, so this control now depends on the `!` "
+        "handling rather than on `*` not crossing a `/`; re-read what it proves"
+    )
+    assert not dockerignore_excludes(ignore, core), (
+        f"the matcher withholds {core}, which every one of these templates re-includes, so "
+        "it is letting `*` cross a `/` and the assertion above proves nothing"
+    )
+    # So the `!` branch gets a control of its own, on a fixture rather than on a
+    # shipped template: a root-level name that only a re-include can rescue.
+    # This one does go red when the branch is deleted.
+    assert dockerignore_excludes("*", "keepme"), "the fixture control is not excluded to begin with"
+    assert not dockerignore_excludes("*\n!keepme", "keepme"), (
+        "the matcher ignores a `!` re-include, so it cannot be trusted to notice one added "
+        "below the leading `*` — which is the edit this test exists to catch"
+    )
+
+
+def test_the_secret_mapping_spells_each_field_the_way_the_templates_do(
+    tmp_path: Path,
+) -> None:
+    """`db_password` -> `DB_PASSWORD`: the derivation has to match what the catalog wrote.
+
+    A derivation is only as good as its spelling rule, and the shipped conf
+    tables and SQL statements name `{{DB_PASSWORD}}` literally — a rule that
+    produced `DBPASSWORD` would leave `_secret_tokens()` looking correct and
+    every conf value unfilled. So the assertion is against the catalog's own
+    text, not against a constant restated here.
+    """
+    assert CMANGOS is not None
+    written = "\n".join(
+        f"{key} = {value}"
+        for patch in CMANGOS.conf.files.values()
+        for key, value in patch.keys.items()
+    )
+    assert "{{DB_PASSWORD}}" in written, "no shipped conf value names the secret; test is vacuous"
+    tokens = engine(Recorder())._secret_tokens(context(tmp_path / "srv"))
+    assert set(cmangos.secret_token_map(native.Secrets(db_password=DB_PASSWORD))) == {"DB_PASSWORD"}
+    assert composegen.fill(written, tokens).count(DB_PASSWORD) == written.count("{{DB_PASSWORD}}")
+
+
+def test_no_dockerfile_template_names_the_secret_the_conf_mapping_carries() -> None:
+    """A tripwire over the shipped templates, third in a line of three protections.
+
+    It is not what stands between the mapping and the secret, and since 7.3 it
+    is not even second. `_write_dockerfile` renders from `_public_tokens()`,
+    which has no secret in it; `dockerfile.SECRET_TOKENS` refuses the token BY
+    NAME and drops the key, for any mapping any caller hands over; and this
+    test says the shipped six templates are clean. The refusal says the
+    seventh cannot happen wherever it is put.
+
+    Which is the correction this test needed. A reviewer defeated the version
+    that globbed `*/native/` by planting
+    `catalog/installers/shared/cmangos/Dockerfile.tmpl` spelling
+    `ENV DB_PASSWORD={{DB_PASSWORD}}`: the guard passed, the whole suite passed,
+    and `render()` returned a Dockerfile with the password in it. That folder is
+    not hypothetical — the compose templates for all three CMaNGOS games live
+    there, and `NativeInstall.dockerfile_dir` is an unvalidated `str | None`. So
+    the walk is now the whole installers tree rather than one directory shape;
+    `test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret`
+    is the property version of the same sentence.
+    """
+    root = resources.installers_dir()
+    templates = sorted(root.rglob("Dockerfile.tmpl")) + sorted(root.rglob("dockerignore.tmpl"))
+    assert templates, "no Dockerfile templates found; this test would pass vacuously"
+    assert len(templates) >= 6, "the three shipped CMaNGOS pairs, at least"
+    for path in templates:
+        assert "{{DB_PASSWORD}}" not in path.read_text(encoding="utf-8"), path
+
+
+def test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's bypass of the test above, reproduced and now refused.
+
+    The glob is a LOCATION; the refusal is a PROPERTY. The bypass planted
+    `catalog/installers/shared/cmangos/Dockerfile.tmpl` spelling
+    `ENV DB_PASSWORD={{DB_PASSWORD}}` — a folder the old `*/native/` glob never
+    walked, and not a hypothetical one: the compose templates for all three
+    CMaNGOS games already live at `shared/cmangos/`, and `dockerfile_dir` is an
+    unvalidated `str | None`. With that file in place the guard test above and
+    the whole suite passed clean while `render()` returned a Dockerfile with the
+    password in it. The glob is widened to the whole tree as a tripwire; this is
+    the guarantee.
+
+    §29's VALUE rule has nothing to say here, deliberately: `DB_PASSWORD` is one of the
+    tokens `render()` DROPS, so a declared secret riding under it is the mapping working
+    as designed, and this test would be about the wrong refusal if it fired. What refuses
+    the render is the template naming `{{DB_PASSWORD}}`.
+
+    Rendered from the REAL `_secret_tokens()` mapping — the SECRET-bearing one,
+    deliberately, and not the one `_write_dockerfile` now passes. 7.3 took the
+    password out of the build-context mapping; if this test followed it there,
+    `render()`'s own refusal would stop being proved by anything and could be
+    deleted green. Defence in depth is only defence while something still
+    attacks it.
+    """
+    folder = tmp_path / "shared" / "cmangos"
+    folder.mkdir(parents=True)
+    (folder / "Dockerfile.tmpl").write_text(
+        f"{composegen.GENERATED_MARKER} - do not hand-edit.\n"
+        "FROM debian:12\nENV DB_PASSWORD={{DB_PASSWORD}}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (folder / "dockerignore.tmpl").write_text(
+        f"{composegen.GENERATED_MARKER} - do not hand-edit.\n*\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    ctx = context(tmp_path / "srv")
+    tokens = engine(Recorder())._secret_tokens(ctx)
+    assert tokens["DB_PASSWORD"] == DB_PASSWORD, "the secret-bearing set, on purpose"
+    with pytest.raises(dockerfile.DockerfileError, match="DB_PASSWORD") as caught:
+        dockerfile.render(folder, tokens, secrets=ctx.secrets)
+    assert DB_PASSWORD not in str(caught.value)
+    # The refusal's own words, not the belt's. Dropping the key from the mapping ALSO
+    # stops the render — as an unfilled placeholder — so without this line the test
+    # would stay green with the by-name refusal deleted, which is the bug it is here for.
+    assert "docker history" in str(caught.value)
+
+
+def test_the_write_dockerfile_stage_refuses_a_bland_key_carrying_the_install_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§29's VALUE half, driven through the STAGE and not through `render()`.
+
+    The RED, measured against the shipped module on m910q 2026-09-05 on a copy of the
+    tree at `0cc637c7`: with `Secrets` declaring one field, `SOAP_PASSWORD` was refused
+    and `BUILD_ARG` was not —
+
+        BUILD_ARG -> ACCEPTED, secret in text: True
+                     write() accepted it: ['Dockerfile', '.dockerignore']
+                     Dockerfile on disk contains the secret: True
+                     the line it wrote: ['ENV BUILD_ARG=tbc-0123456789abcdef']
+
+    — because the only rule reading the mapping read the NAME of the key.
+
+    **The leak here takes the route §29 measured rather than a literal.** The helper
+    below reads the password back with `self.resolve_secrets(server_dir)`, which is the
+    live first-install route recorded in `_public_tokens`'s own docstring: `db-password`
+    (`STAGE_NAMES` index 1) has already written the plaintext into that folder by the
+    time `write-dockerfile` (index 2) runs, so that public inherited method no longer
+    mints — it reads the install's real secret off disk. Run here, not described, and the
+    assertion that the two match is what stops this from going quietly vacuous if the
+    stage order or the password plan changes.
+
+    **Driven through `_write_dockerfile` because a guard proved only at the function is a
+    guard nobody has shown the production path reaches**
+    ([[reviews-check-functions-not-call-sites]]). The `secrets=ctx.secrets` argument is
+    passed by exactly one line in `yulon/`; delete it and this test fails, because the
+    parameter is required rather than optional.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    ctx = context(server_dir)
+    list(eng._db_password(ctx))
+    real = CmangosInstaller._public_tokens
+
+    def leaky(self: CmangosInstaller, sd: Path) -> dict[str, str]:
+        return {**real(self, sd), "BUILD_ARG": self.resolve_secrets(sd).db_password}
+
+    monkeypatch.setattr(CmangosInstaller, "_public_tokens", leaky)
+    assert leaky(eng, server_dir)["BUILD_ARG"] == DB_PASSWORD, (
+        "the leak did not reach the install's real password, so this test would be about "
+        "a literal rather than about the route §29 measured"
+    )
+    with pytest.raises(InstallerError, match="BUILD_ARG") as caught:
+        list(eng._write_dockerfile(ctx))
+    said = str(caught.value)
+    assert DB_PASSWORD not in said, "the refusal a user reads must not print the password"
+    assert "DB_PASSWORD" in said, "it names the declaration the value belongs to"
+    assert not (server_dir / "Dockerfile").exists(), "and nothing was laid down"
+    assert not (server_dir / ".dockerignore").exists()
+
+
+def test_a_password_that_collides_with_a_rendered_value_is_refused_by_naming_the_password_file(
+    tmp_path: Path,
+) -> None:
+    """The false positive, driven through the stage, and the remedy it has to name.
+
+    Nothing is planted in the mapping here. The user's own `.db_password` holds
+    `mariadb:11`, which IS the shipped `DB_IMAGE` value for this entry — so
+    `carries_a_secret()` fires on a key this app puts in the mapping itself, `render()`
+    refuses, and nothing has leaked. Measured on m910q 2026-09-05 over the three shipped
+    `_public_tokens()` mappings: 1046 distinct password strings do this (1031 by
+    containment over the 19 values at or above the floor, 15 by equality below it),
+    `characters`, `tw_logon`, `vanilla-` and `/opt/mangos` among them.
+
+    That surface is the same before and after this test existed — the rule is not narrowed
+    to spare them, because narrowing it is what would open the hole §29 closed. What was
+    wrong was the SENTENCE: until 2026-09-05 it said "Drop the key, or file the value
+    under its declared token", about `DB_IMAGE`, which the user did not write and cannot
+    drop, while the remedy in their hands — their own password — went unnamed. So the
+    assertions here are about the remedy: the file is named with its full path, the words
+    it is offered in, and the cost of changing it (the database volume).
+
+    The two wording assertions below are here because `9bff3e81` rewrote that sentence and
+    left it held by nothing: measured on m910q 2026-09-05, reverting it to
+    "changing that password is the only thing that clears this … was created with the
+    current password" kept all 213 tests in the two files green.
+
+    `render()` cannot say any of that: it is handed a `Secrets` and never a path, for any
+    `template_dir` any entry names. The stage can, which is why `CarriedSecretError` is a
+    subclass caught ahead of the rest and why this test drives `_write_dockerfile` rather
+    than `render()`.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    collides = eng._public_tokens(server_dir)["DB_IMAGE"]
+    assert len(collides) >= dockerfile.MIN_CONTAINED_SECRET, "premise: the containment route"
+    plan = ENTRY.install.password
+    assert plan.file, "premise: this entry keeps its password in a file the user owns"
+    (server_dir / plan.file).write_text(f"{collides}\n", encoding="utf-8")
+    ctx = replace(context(server_dir), secrets=eng.resolve_secrets(server_dir))
+    assert ctx.secrets.db_password == collides, (
+        "premise: the install's real password, read the way the spine reads it, is the "
+        "same string as a value this app renders — nothing was planted in the mapping"
+    )
+
+    with pytest.raises(InstallerError, match="DB_IMAGE") as caught:
+        list(eng._write_dockerfile(ctx))
+    said = str(caught.value)
+    assert collides not in said, "the refusal a user reads must not print the password"
+    assert str(server_dir / plan.file) in said, "it names the file the password is in"
+    remedy = "it says whose the password is and that changing it — not the key — is the remedy"
+    assert "yours" in said, remedy
+    assert "the PASSWORD and not the key" in said, remedy
+    assert "the thing to change is that password" in said, (
+        "and it is offered as the remedy in the user's hands, not as the only one there "
+        "is — a different install folder also clears a collision with `IMAGE_TAG` or "
+        "`PROJECT_NAME`, which is why the absolute wording had to go"
+    )
+    assert eng._db_volume(server_dir) in said, "and what changing it costs"
+    assert "held at the time" in said, (
+        "the volume's password is stated in the past tense: it was created with whatever "
+        "the file held then, which need not be what the file holds now"
+    )
+    assert not (server_dir / "Dockerfile").exists(), "and nothing was laid down"
+
+
+@pytest.mark.parametrize(
+    "password",
+    [DB_PASSWORD, "password"],
+    ids=["generated-shape", "shortest-fixed-in-the-catalog"],
+)
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_no_shipped_public_mapping_collides_with_a_password_the_catalog_can_declare(
+    game: str, password: str, tmp_path: Path
+) -> None:
+    """The false-positive half: the value rule must not refuse a real install.
+
+    Containment is a rule that CAN misfire — a token value that happens to contain the
+    password is refused exactly like a leak. Measured on m910q 2026-09-05 over the 34
+    distinct values these three mappings produce: `password` is contained in none of
+    them, while `mangos` (below `MIN_CONTAINED_SECRET`, so equality-only) is contained in
+    five. Both passwords here are ones the shipped catalog can really declare —
+    `<prefix><16 hex>` for the three generated entries, and `wow-wotlk`'s literal
+    `password`, which is the shortest fixed value anywhere in `catalog.json` and
+    therefore the worst case the floor admits.
+
+    Rendered through the real shipped templates rather than a stand-in pair, because what
+    is asserted is that a real install of each game still runs.
+    """
+    entry = installable(load_catalog().get(game))
+    eng = engine_for(entry, Recorder())
+    native_block = entry.install.native
+    assert native_block is not None and native_block.dockerfile_dir is not None
+    template_dir = resources.installers_dir() / native_block.dockerfile_dir
+    tokens = eng._public_tokens(tmp_path / "srv")
+    text, ignore = dockerfile.render(
+        template_dir, tokens, secrets=native.Secrets(db_password=password)
+    )
+    assert "{{" not in text and "{{" not in ignore
+
+
+def test_image_ref_names_the_built_server_image_and_refuses_an_unknown_service(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    eng = engine(Recorder())
+    refs = composegen.built_image_refs(ENTRY, server_dir, platform_id=lambda: "linux")
+    assert CMANGOS is not None
+    assert eng._image_ref(context(server_dir), CMANGOS.extract.image) in refs
+    with pytest.raises(InstallerError, match="not one of the images"):
+        eng._image_ref(context(server_dir), "no-such-service")
+
+
+def functions_spending(tail_name: str) -> set[str]:
+    """Every function in `cmangos.py` whose body interpolates the module constant `tail_name`.
+
+    Read off the module's own AST rather than counted by hand, because a count
+    in a docstring is what went stale here: this test said "Three refusals" and
+    enumerated three, and the commit that wrote that sentence added a FOURTH
+    user of `CATALOG_ERROR_TAIL` in the same diff (`_secret_tokens()`'s
+    collision refusal, since moved to `DECLARATION_ERROR_TAIL`). A `Name` node
+    is what is looked for, so the mentions inside docstrings — `_data()`'s, and
+    the constants' own — are not counted; only code that spends it is.
+    """
+    tree = ast.parse(inspect.getsource(cmangos))
+    return {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        for inner in ast.walk(node)
+        if isinstance(inner, ast.Name) and inner.id == tail_name
+    }
+
+
+def test_the_family_s_catalog_refusals_end_in_one_tail_and_not_two(
+    tmp_path: Path,
+) -> None:
+    """Every refusal that spends the catalog tail, driven — the set derived, not restated.
+
+    Until 2026-09-01 two ended "That is a catalog error in the app…" and a
+    third "That is a bug in the app's catalog…", 65 lines apart. A second
+    wording for one thing drifts further from the first every time either is
+    edited, which is why `test_sqlplan.py` asserts two of its refusals are the
+    SAME string rather than merely that both complain.
+
+    The list of refusals is now derived from the module rather than counted
+    here, and the reason is this test's own history: it opened "Three refusals
+    …" and named three, in the same commit that gave `CATALOG_ERROR_TAIL` a
+    fourth user. The prose was stale before it was pushed. `functions_spending()`
+    asks the AST instead, so a fifth user turns this red with the name of the
+    function that added it.
+
+    `DECLARATION_ERROR_TAIL` is asserted here too, and against a different
+    owner: `_secret_tokens()`'s collision refusal cannot be caused by any
+    catalog file — both halves of the collision are Python declarations — so it
+    ended in the wrong tail until 2026-09-02. Pinning WHICH functions spend
+    WHICH tail is what keeps that from sliding back.
+
+    `_native()` is deliberately in neither set: its refusal ("has no
+    `install.native` section") carries no tail at all, and whether it should is
+    a separate question this does not settle.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    no_block = ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={
+                    "native": (
+                        ENTRY.install.native.model_copy(update={"cmangos": None})
+                        if ENTRY.install.native is not None
+                        else None
+                    )
+                }
+            )
+        }
+    )
+    no_file = entry_with_password(
+        PasswordPlan.model_construct(mode="generated", value=None, file=None, prefix="tbc-")
+    )
+
+    @dataclass(frozen=True)
+    class ShadowingSecrets(native.Secrets):
+        db_host: str = "not-a-host-but-a-password"
+
+    said: dict[str, str] = {}
+    with pytest.raises(InstallerError) as from_block:
+        engine_for(no_block, Recorder(), volume_exists=refuse_to_answer)._data()
+    said["_data"] = str(from_block.value)
+    with pytest.raises(InstallerError) as from_image:
+        engine(Recorder())._image_ref(context(server_dir), "no-such-service")
+    said["_image_ref"] = str(from_image.value)
+    with pytest.raises(InstallerError) as from_password:
+        eng = engine_for(no_file, Recorder(), volume_exists=refuse_to_answer)
+        list(eng._db_password(context(server_dir)))
+    said["_db_password"] = str(from_password.value)
+    # NOT a raise: `_password_origin_note` RETURNS the sentence appended to
+    # `render()`'s carried-secret refusal. It spends the tail in the branch where
+    # the password is the catalog's own — a collision between that and a rendered
+    # value is an app defect, not something the user can change — so it belongs in
+    # this set, and driving it here is also the only test of that branch.
+    fixed = engine_for(
+        entry_with_password(
+            PasswordPlan.model_construct(mode="fixed", value="password", file=None, prefix="")
+        ),
+        Recorder(),
+        volume_exists=refuse_to_answer,
+    )
+    said["_password_origin_note"] = fixed._password_origin_note(context(server_dir))
+    # Still driven through the STAGE, not through `_patch_text` directly: the
+    # tail moved into that helper on 2026-09-05 when the stage grew a refusal
+    # of its own, and a test that followed it inward would stop proving the
+    # sentence reaches a user. The key is the function the AST finds spending
+    # the tail; the call is the one the install makes.
+    ghost = SourcePatch(file="shared/cmangos/patches/no-such.patch", source=CORE_DEST, reason="x")
+    with pytest.raises(InstallerError) as from_patch:
+        eng = engine_for(without_patches((ghost,)), Recorder(), volume_exists=refuse_to_answer)
+        list(eng._patch_sources(context(server_dir)))
+    said["_patch_text"] = str(from_patch.value)
+
+    assert set(said) == functions_spending("CATALOG_ERROR_TAIL"), (
+        "a function spends the catalog tail that this test does not drive, or drives one "
+        "that no longer spends it; add or remove the case rather than editing this line"
+    )
+    for where, refusal in said.items():
+        assert refusal.endswith(cmangos.CATALOG_ERROR_TAIL), f"{where}: {refusal}"
+        assert refusal != cmangos.CATALOG_ERROR_TAIL, "the tail is a tail, not the whole refusal"
+
+    # The other tail, driven the same way: derived set, then the value.
+    collided = replace(context(server_dir), secrets=ShadowingSecrets(db_password=DB_PASSWORD))
+    declared: dict[str, str] = {}
+    with pytest.raises(InstallerError) as from_collision:
+        engine(Recorder())._secret_tokens(collided)
+    declared["_secret_tokens"] = str(from_collision.value)
+    assert set(declared) == functions_spending("DECLARATION_ERROR_TAIL"), (
+        "a function spends the declaration tail that this test does not drive, or drives "
+        "one that no longer spends it"
+    )
+    for where, refusal in declared.items():
+        assert refusal.endswith(cmangos.DECLARATION_ERROR_TAIL), f"{where}: {refusal}"
+        sent_to_catalog = refusal.endswith(cmangos.CATALOG_ERROR_TAIL)
+        wrong_tail = f"{where} sends the reader to the catalog, which cannot cause this refusal"
+        assert not sent_to_catalog, wrong_tail
+
+
+def test_the_typed_blocks_refuse_a_catalog_that_does_not_carry_them(
+    tmp_path: Path,
+) -> None:
+    """`_native()`/`_data()` name a catalog error in the app, never a machine's."""
+    no_cmangos = ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={
+                    "native": (
+                        ENTRY.install.native.model_copy(update={"cmangos": None})
+                        if ENTRY.install.native is not None
+                        else None
+                    )
+                }
+            )
+        }
+    )
+    eng = CmangosInstaller(
+        no_cmangos,
+        installers_root=resources.installers_dir(),
+        seams=Recorder().seams(platform_id=lambda: "linux"),
+    )
+    with pytest.raises(InstallerError, match="catalog"):
+        eng._data()
+    no_native = ENTRY.model_copy(
+        update={"install": ENTRY.install.model_copy(update={"native": None})}
+    )
+    bare = CmangosInstaller(
+        no_native,
+        installers_root=resources.installers_dir(),
+        seams=Recorder().seams(platform_id=lambda: "linux"),
+    )
+    with pytest.raises(InstallerError, match="install.native"):
+        bare._native()
+
+
+def test_user_args_ask_platform_py_through_the_seam_and_not_the_real_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--user uid:gid` on Linux, nothing on Docker Desktop — and the SEAM decides which.
+
+    `platform.container_user_args()`'s own docstring warns that its
+    `platform_id` default is bound at import, so an engine that called it with
+    no argument would ask the real host. On this Windows runner that mistake is
+    invisible without the fake ids: `os.getuid` does not exist, so the wrong
+    answer and the right one are both `()`. The ids are what make the two
+    distinguishable, which is the only reason this test can fail.
+    """
+    monkeypatch.setattr(platform.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(platform.os, "getgid", lambda: 1001, raising=False)
+    assert engine(Recorder())._user_args() == ("--user", "1000:1001")
+    assert engine(Recorder(), platform_id=lambda: "macos")._user_args() == ()
+    assert engine(Recorder(), platform_id=lambda: "windows")._user_args() == ()
+
+
+# -- _stream ----------------------------------------------------------------
+
+
+def test_stream_interleaves_the_sink_and_the_generator_without_buffering() -> None:
+    """Both halves arrive as they are produced, and the caller sees one stream."""
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        sink("container said one")
+        yield "progress one"
+        sink("container said two")
+        yield "progress two"
+
+    got = list(engine(Recorder())._stream(call, cancel=None))
+    assert got == [
+        "container said one",
+        "progress one",
+        "container said two",
+        "progress two",
+    ]
+
+
+def test_stream_yields_each_line_before_the_next_is_produced() -> None:
+    """Not a list at the end: the consumer gets line one while the worker is still on line two."""
+    released = threading.Event()
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        yield "first"
+        assert released.wait(HANG_BOUND), "the consumer had not been handed line one"
+        yield "second"
+
+    stream = engine(Recorder())._stream(call, cancel=None)
+    assert next(stream) == "first"
+    released.set()
+    assert next(stream) == "second"
+    with pytest.raises(StopIteration):
+        next(stream)
+
+
+def test_stream_re_raises_an_installer_error_untouched_and_wraps_anything_else() -> None:
+    """The stage-kind modules' own refusals are the sentence the user reads; a bug is not.
+
+    Asserted by EQUALITY, not by `match=`. The wrapper spells the original
+    exception into its own message, so `match="Finished tiles are kept"` is
+    satisfied by the wrapped copy just as well and a `_stream` that wrapped
+    everything would pass it — the loose-assertion shape, caught by mutation.
+    """
+
+    def refuses(sink: docker.OutputSink) -> Iterator[str]:
+        yield "starting"
+        raise InstallerError("mmaps was stopped. Finished tiles are kept.")
+
+    with pytest.raises(InstallerError) as raised:
+        list(engine(Recorder())._stream(refuses, cancel=None))
+    assert str(raised.value) == "mmaps was stopped. Finished tiles are kept."
+
+    def breaks(sink: docker.OutputSink) -> Iterator[str]:
+        raise ZeroDivisionError("division by zero")
+        yield ""  # pragma: no cover - unreachable, keeps this a generator
+
+    with pytest.raises(InstallerError, match="the step could not be run: division by zero"):
+        list(engine(Recorder())._stream(breaks, cancel=None))
+
+
+WORKER_THREAD = "yulon-cmangos-output"
+
+
+def _live_workers() -> list[str]:
+    """Every `_stream()` worker still alive, by thread name — §21's question, asked directly."""
+    return [t.name for t in threading.enumerate() if t.name == WORKER_THREAD]
+
+
+def test_abandoning_the_stream_stops_its_worker_with_no_cancel_from_the_caller() -> None:
+    """bug-checklist §21: abandon WITHOUT setting the cancel, and no live worker may remain.
+
+    The RED, before `stop_abandoned_worker()`:
+
+        AssertionError: assert ['yulon-cmangos-output'] == []
+
+    The abandonment this stands for is real: `log_panel._StreamWorker` breaks
+    out of its `for`, dropping the last reference to the generator chain. What
+    made that survivable was `LogPanel.stop()` setting the cancel event BEFORE
+    asking the worker to stop — an ordering in a different file, which nothing
+    here could keep. This test sets no cancel at all, so a return to the
+    ordering-only mitigation fails it.
+
+    The worker waits on the cancel event because that is what
+    `run_container(cancel=…)` does underneath every real `call`; the `HANG_BOUND`
+    wait is only so a broken fix fails instead of hanging the suite.
+    """
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        yield "started"
+        assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
+        yield "unreachable for a consumer that has gone"
+
+    generator = engine(Recorder())._stream(call, cancel=cancel)
+    assert next(generator) == "started"
+    assert WORKER_THREAD in _live_workers(), "the worker should be running at this point"
+
+    generator.close()
+
+    assert _live_workers() == []
+
+
+def test_finishing_the_stream_normally_does_not_set_the_cancel_event() -> None:
+    """The other direction, and the one that would be dangerous to get wrong.
+
+    `stop_abandoned_worker()` sets the caller's own cancel event. On the normal
+    path the worker has already put its sentinel and is one statement from
+    returning, so a `finally` that fired there would mark a stage that
+    SUCCEEDED as stopped — and the `_check_cancel()` right after each call site
+    would raise "was stopped" over a finished extraction. Hence an
+    `except BaseException` clause on the abandonment path rather than a
+    `finally`, and hence this test. (The clause said `except GeneratorExit`
+    when this docstring was written and was widened on 2026-09-04 — see
+    `test_an_interrupt_thrown_into_the_stream_stops_its_worker_too` — which
+    changes nothing here: what matters is that it is on the exception path and
+    not a `finally`, and this test is what says so.)
+    """
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        sink("container said one")
+        yield "progress one"
+
+    assert list(engine(Recorder())._stream(call, cancel=cancel)) == [
+        "container said one",
+        "progress one",
+    ]
+    assert not cancel.is_set()
+
+
+def test_a_worker_that_ignores_the_cancel_is_left_rather_than_waited_for(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The bound is on the ABANDONER. §21 rejects a bare `join()` in as many words.
+
+    A worker that never honours the cancel is exactly the case where an
+    unbounded join would hold the abandoning thread for the hours the run has
+    left. `ABANDONED_WORKER_SECONDS` is monkeypatched down: what is under test
+    is that `close()` returns after roughly the BOUND and not after the
+    worker's own lifetime, and paying the shipped five seconds to say so would
+    put another load-sensitive test into the suite (§33).
+    """
+    monkeypatch.setattr(native, "ABANDONED_WORKER_SECONDS", 0.2)
+    release = threading.Event()
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        yield "started"
+        assert release.wait(HANG_BOUND), "the test never released the deaf worker"
+        yield "released"
+
+    generator = engine(Recorder())._stream(call, cancel=cancel)
+    assert next(generator) == "started"
+    try:
+        with caplog.at_level("WARNING"):
+            started = time.monotonic()
+            generator.close()
+            elapsed = time.monotonic() - started
+        assert elapsed < HANG_BOUND / 3, "close() waited for the worker instead of for the bound"
+        assert WORKER_THREAD in _live_workers(), "this worker is deaf by construction"
+        assert any("did not stop within" in record.message for record in caplog.records)
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == WORKER_THREAD:
+                thread.join(timeout=HANG_BOUND)
+    assert _live_workers() == []
+
+
+def test_an_interrupt_thrown_into_the_stream_stops_its_worker_too() -> None:
+    """A Ctrl+C that lands INSIDE this frame is an abandonment as well (bug-checklist §21).
+
+    `install_wiring.main()` sits in `for line in engine.run(...)`, and the
+    thread it runs on spends its time blocked in `lines.get()` here — so a
+    Ctrl+C is raised at that line, inside the generator frame, as a
+    `KeyboardInterrupt`: a `BaseException`, but not a `GeneratorExit`.
+    Measured on m910q 2026-09-04 against the `except GeneratorExit` hook, with
+    `generator.throw(KeyboardInterrupt())`:
+
+        AssertionError: assert ['yulon-cmangos-output'] == []
+
+    The hook never fired and the worker was left running: the §21 state, one
+    exception type to the side of the test that closed it.
+    """
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> Iterator[str]:
+        yield "started"
+        assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
+        yield "unreachable for a consumer that has gone"
+
+    generator = engine(Recorder())._stream(call, cancel=cancel)
+    assert next(generator) == "started"
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            generator.throw(KeyboardInterrupt())
+        assert _live_workers() == []
+    finally:
+        cancel.set()
+        for thread in threading.enumerate():
+            if thread.name == WORKER_THREAD:
+                thread.join(timeout=HANG_BOUND)
+
+
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """Every bound here must be spelled `HANG_BOUND`, and nothing else.
+
+    The audit five test files already run on themselves (bug-checklist §33),
+    opted into here on 2026-09-05. The §21 tests above added
+    `cancel.wait(10)`, `release.wait(30)` and `thread.join(timeout=10)` to a
+    file whose only previous bound was a typed `released.wait(5)` — a number at
+    a call site carries no argument for its size, and these waits are the only
+    thing in this file a loaded box can move.
+
+    **What this audit cannot see, stated so the price is known.**
+    `time.monotonic()` is in the set because the deaf-worker test measures
+    elapsed time as its ASSERTION, and that costs this file the strongest thing
+    the audit does elsewhere: a NEW hand-built deadline here would not change
+    the set. The `monkeypatch.setattr(native, "ABANDONED_WORKER_SECONDS", 0.2)`
+    is not read either, and should not be — it is the SUBJECT's bound being
+    shrunk, not one this file waits on. `conftest.spelled_bounds` documents the
+    rest of its reading.
+
+    **Measured both ways on m910q 2026-09-05.** A bare `time.sleep(3)` appended
+    to this file fails this test — `Extra items in the left set: '3'`. The same
+    bound spelled through an alias (`import time as _t` then `_t.sleep(3)`)
+    left it at `1 passed`: `conftest.spelled_bounds` matches the SPELLING
+    `time.sleep`, so an aliased import is invisible to it in every file that
+    runs this audit, not only here.
+    """
+    assert spelled_bounds(__file__) == {"HANG_BOUND", "time.monotonic()"}
+
+
+# -- the Recorder's new doubles ---------------------------------------------
+
+
+def test_the_sql_doubles_take_the_distro_the_sql_plan_always_passes(
+    tmp_path: Path,
+) -> None:
+    """`sqlplan.apply()` passes `wsl_distro=` UNCONDITIONALLY; a fake without it is a TypeError.
+
+    Driven through the real `apply()` rather than called directly, because
+    "does this double satisfy `ExecStdin`?" is a question only the caller can
+    answer at runtime.
+    """
+    rec = Recorder()
+    phase = SQL.phases[0]
+    run = sqlplan.PhaseRun(
+        phase=phase,
+        schema="mangos",
+        path=None,
+        statement="SELECT 1;",
+        gzip=False,
+        rel="statement 1",
+    )
+    lines: list[str] = []
+    said = list(
+        sqlplan.apply(
+            (run,),
+            container="tbc-db",
+            client="mariadb",
+            password=DB_PASSWORD,
+            exec_stdin=rec.exec_stdin,
+            sink=lines.append,
+            cancel=None,
+            wsl_distro="Ubuntu-24.04",
+        )
+    )
+    assert said
+    assert rec.sql_calls == ["SELECT 1;"]
+    assert rec.distros == ["Ubuntu-24.04"], "the double dropped the distro instead of recording it"
+
+
+def test_the_query_double_answers_verbatim_so_one_empty_row_is_not_no_rows() -> None:
+    """`docker.sql_query()` returns stdout WITH its trailing newline; the double must too.
+
+    Under `--skip-column-names` one row holding the empty string prints `"\\n"`
+    and no rows print `""`. A fake whose answer can never carry a newline
+    cannot tell those two apart, and telling them apart is the whole of the
+    marker gate's `absent`/`populated` split.
+    """
+    rec = Recorder()
+    assert rec.query_answer == "20000\n"
+    assert rec.sql_query("tbc-db", "mariadb", DB_PASSWORD, "mangos", "SELECT COUNT(*)") == "20000\n"
+    assert rec.sql_query("tbc-db", "mariadb", DB_PASSWORD, None, "SELECT 1", wsl_distro="U") == (
+        "20000\n"
+    )
+    assert rec.distros == [None, "U"]
+
+    no_rows = Recorder(query_answer="")
+    one_empty_row = Recorder(query_answer="\n")
+    ask = ("tbc-db", "mariadb", DB_PASSWORD, "mangos", "SELECT marker FROM t")
+    assert len(no_rows.sql_query(*ask).splitlines()) == 0
+    assert len(one_empty_row.sql_query(*ask).splitlines()) == 1
+
+
+def test_the_failing_sql_switch_answers_the_way_the_client_does() -> None:
+    rec = Recorder(failing_sql="DROP")
+    import io
+
+    ok = rec.exec_stdin("tbc-db", ["mariadb"], io.BytesIO(b"SELECT 1;\n"), env={})
+    bad = rec.exec_stdin("tbc-db", ["mariadb"], io.BytesIO(b"DROP TABLE t;\n"), env={})
+    assert ok.returncode == 0
+    assert bad.returncode == 1 and "ERROR 1064" in bad.stderr
+
+
+def test_the_run_container_double_lays_exactly_what_the_real_plan_counts(
+    tmp_path: Path,
+) -> None:
+    """The fixture's folder names are the catalog's, not a convenient invention.
+
+    A `produce` naming a folder no tool produces is a test that cannot fail:
+    `extract.shortfall()` counts the folders the plan's `produces` names, and
+    the mmaps stage counts `mmaps` against `min_files`.
+    """
+    assert CMANGOS is not None
+    wanted: dict[str, int] = {}
+    for tool in CMANGOS.extract.tools:
+        wanted.update(tool.produces)
+    wanted["mmaps"] = CMANGOS.mmaps.min_files
+    assert Recorder().produce == wanted
+
+    rec = Recorder()
+    out = tmp_path / "out"
+    out.mkdir()
+    spec = docker.ContainerRun(
+        image="yulon.local/cmangos-tbc-server:t",
+        argv=("/opt/mangos/bin/tools/ad",),
+        mounts=(docker.Mount(out, "/out"),),
+    )
+    lines: list[str] = []
+    result = rec.run_container(spec, sink=lines.append)
+    assert result.returncode == 0
+    assert rec.container_runs == [spec]
+    assert lines == ["/opt/mangos/bin/tools/ad ran"]
+    assert extract.file_count(out / "dbc") == 100
+    assert extract.file_count(out / "mmaps") == 500
+
+
+def test_the_run_container_double_leaves_nothing_when_the_run_failed(
+    tmp_path: Path,
+) -> None:
+    """A tool that exited non-zero produced nothing; a double that still fills `/out` hides that."""
+    rec = Recorder(run_result=docker.AttachedRun(1, ("segfault",)))
+    out = tmp_path / "out"
+    out.mkdir()
+    rec.run_container(
+        docker.ContainerRun(image="i", argv=("ad",), mounts=(docker.Mount(out, "/out"),)),
+        sink=lambda line: None,
+    )
+    assert list(out.iterdir()) == []
+
+
+def extract_run(client: Path, out: Path) -> docker.ContainerRun:
+    """The shape K.5 will ask the double for: the client `:ro` FIRST, `/out` second.
+
+    Two mounts in an order where "the first mount" and "the `/out` mount" are
+    different directories, because that is the only arrangement in which the
+    double's choice between them is observable. Every other `ContainerRun` in
+    this file carries a single mount, so a `Recorder` that ignored `guest` and
+    filled `spec.mounts[0]` would answer all of them correctly.
+    """
+    return docker.ContainerRun(
+        image="yulon.local/cmangos-tbc-server:t",
+        argv=("/opt/mangos/bin/tools/ad",),
+        mounts=(
+            docker.Mount(client, "/client", read_only=True),
+            docker.Mount(out, "/out"),
+        ),
+        workdir="/out",
+    )
+
+
+def test_the_run_container_double_lays_its_output_under_out_and_not_under_the_first_mount(
+    tmp_path: Path,
+) -> None:
+    """A double that cannot express the real run's shape cannot be asked about it.
+
+    The real extraction run mounts two directories — the user's client
+    read-only and the server's `data/` at `/out` — and `Recorder.run_container`
+    picks the second by `guest == "/out"`. With one mount per fixture that
+    selection is never exercised: replacing it with `spec.mounts[0].host`
+    passed all 1774 tests (2026-09-01). The client half is what makes it fail,
+    and it is also the half whose emptiness is the extraction stage's safety
+    argument — an interrupted tool must leave nothing in the user's client.
+    """
+    rec = Recorder()
+    client = client_folder(tmp_path)
+    out = tmp_path / "srv" / "data"
+    out.mkdir(parents=True)
+    spec = extract_run(client, out)
+    assert spec.mounts[0].guest != "/out", "the fixture must not be single-mount-shaped"
+
+    before = sorted(p.name for p in (client / "Data").iterdir())
+    assert rec.run_container(spec, sink=lambda line: None).returncode == 0
+    assert rec.container_runs == [spec]
+    assert extract.file_count(out / "dbc") == 100
+    assert extract.file_count(out / "mmaps") == 500
+    # Nothing landed on the read-only mount, and nothing beside it either.
+    assert sorted(p.name for p in client.iterdir()) == ["Data"]
+    assert sorted(p.name for p in (client / "Data").iterdir()) == before
+
+
+def test_the_copy_double_answers_for_one_conf_file_and_for_the_whole_etc_directory(
+    tmp_path: Path,
+) -> None:
+    rec = Recorder()
+    one = tmp_path / "etc" / "mangosd.conf.dist"
+    rec.copy_from_image("img", "/opt/mangos/etc/mangosd.conf.dist", one)
+    assert 'LoginDatabaseInfo = "old"' in one.read_text(encoding="utf-8")
+    whole = tmp_path / "all"
+    rec.copy_from_image("img", "/opt/mangos/etc", whole)
+    assert sorted(p.name for p in whole.iterdir()) == sorted(rec.conf_dist)
+    assert rec.copied == [
+        ("img", "/opt/mangos/etc/mangosd.conf.dist", one),
+        ("img", "/opt/mangos/etc", whole),
+    ]
+
+
+def test_the_volume_double_answers_about_this_machine_and_not_about_the_name() -> None:
+    rec = Recorder()
+    assert not rec.volume_exists("tbc-abc_db-data")
+    rec.volumes.add("tbc-abc_db-data")
+    assert rec.volume_exists("tbc-abc_db-data")
+    assert not rec.volume_exists("other_db-data")
+
+
+def test_the_seams_carry_every_new_double_through_to_the_engine() -> None:
+    """Additive fields, wired: an engine built from `seams()` reaches the Recorder, not docker."""
+    rec = Recorder()
+    seams = rec.seams(platform_id=lambda: "linux")
+    assert seams.run_container == rec.run_container
+    assert seams.copy_from_image == rec.copy_from_image
+    assert seams.exec_stdin == rec.exec_stdin
+    assert seams.sql_query == rec.sql_query
+    assert seams.volume_exists == rec.volume_exists
+    # Not `docker`'s: a seam that fell back to the default would reach a daemon.
+    assert seams.run_container != docker.run_container
+    assert seams.volume_exists != docker.volume_exists
+
+
+# -- the stages that are bound today ----------------------------------------
+
+
+def test_the_bound_stages_run_in_order_and_record_the_recorded_ones(
+    tmp_path: Path,
+) -> None:
+    """End to end over the whole tuple; K.7 inserted `import` between them.
+
+    Also drives `lay_sql`/`on_clone`, so the SQL fixtures the import spends are
+    proved to land under the source that owns them — and it is the only test
+    here that reaches `_write_dockerfile`, `_extract`, `_mmaps` and `_import`
+    through `run()` rather than by calling the bodies, so each `Stage` really
+    is wired to its method and the two long stages really do sit after the
+    build.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    said = install(rec, server_dir, client)
+    assert [line for line in said if line.startswith("--- ")] == [
+        "--- clone-sources",
+        "--- patch-sources",
+        "--- db-password",
+        "--- write-dockerfile",
+        "--- generate-compose",
+        "--- build",
+        "--- extract",
+        "--- mmaps",
+        "--- conf",
+        "--- start-db",
+        "--- import",
+        "--- up",
+        "--- ready",
+    ]
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None
+    assert state.completed == (
+        "clone-sources",
+        "patch-sources",
+        "write-dockerfile",
+        "generate-compose",
+        "build",
+        "extract",
+        "mmaps",
+        "conf",
+        "import",
+    )
+    # The pair really landed, from the whole install rather than from a direct
+    # call to the body, and the password is in neither: the stage renders from
+    # `_public_tokens()`, which never held it, and `dockerfile.render()`'s own
+    # by-name refusal stands behind that.
+    for name in ("Dockerfile", ".dockerignore"):
+        built = (server_dir / name).read_text(encoding="utf-8")
+        assert built.startswith(composegen.GENERATED_MARKER)
+        assert DB_PASSWORD not in built
+    # `db-password` ran — the file is there — and is deliberately NOT in the
+    # record. The FILE is the evidence a secret exists; a state file that
+    # claimed one would survive the file being deleted, and the next run would
+    # mint a second password over a live database.
+    assert (server_dir / ".db_password").is_file()
+    assert "db-password" not in state.completed
+    assert state.family == "cmangos"
+    assert [spec.dest for spec in rec.clones] == [
+        server_dir / "src" / "mangos-tbc",
+        server_dir / "src" / "mangos-tbc" / "src" / "modules" / "Bots",
+        server_dir / "src" / "tbc-db",
+    ]
+    # `on_clone` laid the plan's own files, each under the source that owns it:
+    # a literal path and a plain glob under the core, a gzipped one under the
+    # content repo, and one under the NESTED playerbots dest. That the run
+    # finished at all is the proof of the last one's timing — laid by the core
+    # clone instead, `src/mangos-tbc/src/modules/Bots` would have had files in
+    # it before its own clone and the spine would have refused it by name.
+    assert (server_dir / "src/mangos-tbc/sql/base/realmd.sql").is_file()
+    assert (server_dir / "src/mangos-tbc/sql/updates/mangos/0001.sql").is_file()
+    dump = server_dir / "src/tbc-db/Full_DB/TBCDB_0002.sql.gz"
+    assert gzip.decompress(dump.read_bytes()).endswith(b"SELECT 2;\n")
+    assert (server_dir / "src/mangos-tbc/src/modules/Bots/sql/world/0001.sql").is_file()
+
+
+def test_clone_sources_consults_the_record_under_its_own_stage_name(
+    tmp_path: Path,
+) -> None:
+    """`stage_clone_sources` needs `recorded_as`; without the family's own name it re-clones.
+
+    A resume that fetches and resets the user's checkout on every press is the
+    incident this argument exists for (`stage_clone_sources`'s docstring).
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    install(rec, server_dir, client)
+    first = len(rec.clones)
+    again = Recorder()
+    again.remotes = dict(rec.remotes)
+    said = install(again, server_dir, client)
+    assert first == 3
+    assert again.clones == [], "\n".join(said)
+    assert any("already in src/mangos-tbc" in line for line in said)
+
+
+# -- patch-sources ------------------------------------------------------------
+
+VMAP_SUBDIR = PurePosixPath("contrib/vmap_extractor/vmapextract")
+CORE_DEST = CMANGOS.patches[0].source if CMANGOS.patches else "src/mangos-tbc"
+EXTRACTOR_FILES = ("gameobject_extract.cpp", "model.cpp", "vmapexport.cpp", "vmapexport.h")
+
+
+def extractor_file(server_dir: Path, name: str) -> Path:
+    return server_dir / CORE_DEST / VMAP_SUBDIR / name
+
+
+def without_patches(patches: tuple[SourcePatch, ...]) -> CatalogEntry:
+    """`ENTRY` with its `cmangos.patches` replaced."""
+    assert ENTRY.install.native is not None and CMANGOS is not None
+    return ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={
+                    "native": ENTRY.install.native.model_copy(
+                        update={"cmangos": CMANGOS.model_copy(update={"patches": patches})}
+                    )
+                }
+            )
+        }
+    )
+
+
+def test_patch_sources_edits_the_core_checkout_the_clone_made_and_is_recorded(
+    tmp_path: Path,
+) -> None:
+    """Through `run()`: the checkout ends up byte-for-byte what `git apply` produced on m910q."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    said = install(rec, server_dir, client_folder(tmp_path))
+    for name in EXTRACTOR_FILES:
+        assert (
+            extractor_file(server_dir, name).read_bytes()
+            == (VMAP_FIXTURE / "patched" / name).read_bytes()
+        ), name
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None and "patch-sources" in state.completed
+    block = said[said.index("--- patch-sources") : said.index("--- db-password")]
+    assert any("Patched" in line and "gameobject_extract.cpp" in line for line in block), block
+    assert any(CMANGOS.patches[0].reason in line for line in block), block
+
+
+def test_a_second_press_finds_the_fix_present_and_rewrites_nothing(tmp_path: Path) -> None:
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    install(rec, server_dir, client)
+    stamps = {n: extractor_file(server_dir, n).stat().st_mtime_ns for n in EXTRACTOR_FILES}
+    again = Recorder()
+    again.remotes = dict(rec.remotes)
+    said = install(again, server_dir, client)
+    assert any("already carries" in line for line in said), said
+    assert not any("Patched" in line for line in said)
+    assert {n: extractor_file(server_dir, n).stat().st_mtime_ns for n in EXTRACTOR_FILES} == stamps
+
+
+def test_the_record_is_not_what_skips_the_patch(tmp_path: Path) -> None:
+    """A deleted checkout is re-cloned by `clone-sources` on its own disk evidence, and the
+    record of THIS stage survives that; consulting it would leave the fresh clone unpatched
+    with a state file saying otherwise. So the body reads the file, never the record."""
+    server_dir = tmp_path / "srv"
+    rec = Recorder()
+    (server_dir / CORE_DEST / ".git").mkdir(parents=True)
+    lay_sources(server_dir)(server_dir / CORE_DEST)
+    ctx = context(server_dir, completed=("clone-sources", "patch-sources"))
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("Patched" in line for line in said), said
+    assert (
+        extractor_file(server_dir, "gameobject_extract.cpp").read_bytes()
+        == (VMAP_FIXTURE / "patched" / "gameobject_extract.cpp").read_bytes()
+    )
+
+
+def test_a_moved_upstream_refuses_by_file_and_line_before_anything_is_built(
+    tmp_path: Path,
+) -> None:
+    """The refusal names the file and the line, is the sentence the user reads, and stops the
+    install at this stage: no Dockerfile, no build, no record of the stage."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    sources = lay_sources(server_dir)
+    sql = lay_sql(server_dir, SQL)
+
+    def on_clone(dest: Path) -> None:
+        sql(dest)
+        sources(dest)
+        moved = extractor_file(server_dir, "gameobject_extract.cpp")
+        if moved.is_file():
+            body = moved.read_text(encoding="utf-8")
+            moved.write_text(
+                body.replace("fixedName = GetPlainName(origPath.c_str());", "fixedName = X();"),
+                encoding="utf-8",
+            )
+
+    rec.on_clone = on_clone
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    message = str(caught.value)
+    assert "contrib/vmap_extractor/vmapextract/gameobject_extract.cpp" in message
+    assert "line 24" in message
+    assert "nothing was changed" in message
+    assert "build" not in rec.calls
+    assert not (server_dir / "Dockerfile").exists()
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None
+    assert "clone-sources" in state.completed and "patch-sources" not in state.completed
+    # Atomic across the patch: the model.cpp hunks would have applied and were not written.
+    assert (
+        extractor_file(server_dir, "model.cpp").read_bytes()
+        == (VMAP_FIXTURE / "model.cpp").read_bytes()
+    )
+
+
+def test_an_entry_with_no_patches_says_so_and_touches_nothing(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = CmangosInstaller(without_patches(()), seams=Recorder().seams(platform_id=lambda: "linux"))
+    said = list(eng._patch_sources(context(server_dir)))
+    assert said == ["This server carries no source patches."]
+    assert sorted(p.name for p in server_dir.iterdir()) == []
+
+
+def test_a_patch_file_the_catalog_names_but_the_tree_lacks_is_a_catalog_error(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    (server_dir / CORE_DEST).mkdir(parents=True)
+    ghost = SourcePatch(
+        file="shared/cmangos/patches/nothing-here.patch", source=CORE_DEST, reason="x"
+    )
+    eng = CmangosInstaller(
+        without_patches((ghost,)), seams=Recorder().seams(platform_id=lambda: "linux")
+    )
+    with pytest.raises(InstallerError) as caught:
+        list(eng._patch_sources(context(server_dir)))
+    assert "nothing-here.patch" in str(caught.value)
+    assert str(caught.value).endswith(cmangos.CATALOG_ERROR_TAIL)
+
+
+# -- patch-sources against an install that predates it ------------------------
+
+
+OLD_TWELVE_STAGE_COMPLETED = (
+    "clone-sources",
+    "write-dockerfile",
+    "generate-compose",
+    "build",
+    "extract",
+    "mmaps",
+    "conf",
+    "import",
+)
+"""Every recorded stage of a CMaNGOS install made before `patch-sources` existed.
+
+Not invented: read on m910q 2026-09-05 out of the four state files on that box.
+`~/tbc-7.4c/.yulon-install.json` (wow-tbc) and `~/vanilla-75b/.yulon-install.json`
+(wow-vanilla) hold this list exactly; `~/vanilla-75` stops at `build` and
+`~/tortoise-server` at `generate-compose`. Three of the four record `build`, and
+NONE of them records `patch-sources` -- so on the first press after this lane
+merges, `patch-sources` is the one stage a finished install has never run.
+"""
+
+
+def old_install(
+    rec: Recorder, server_dir: Path, *, completed: Sequence[str] = OLD_TWELVE_STAGE_COMPLETED
+) -> None:
+    """A server folder as a build from before this stage existed left it.
+
+    Everything a finished install has: the checkouts on disk with their
+    `origin` known to the Recorder (which is what makes `already_cloned()`
+    leave them alone -- a resume of a real install does not re-clone, and a
+    test that re-cloned would be laying the source tree through a path the
+    case under test does not take), the SQL the import stage reads, and the
+    state file. So a press on this folder can only be stopped by the stage
+    under test.
+    """
+    sql = lay_sql(server_dir, SQL)
+    for source in ENTRY.emulator.sources:
+        dest = server_dir / source.dest
+        (dest / ".git").mkdir(parents=True, exist_ok=True)
+        rec.remotes[dest] = source.url
+        sql(dest)
+    lay_sources(server_dir)(server_dir / CORE_DEST)
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id=ENTRY.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="cmangos",
+            completed=tuple(completed),
+        ),
+    )
+
+
+def test_the_state_file_this_stage_has_to_survive_records_a_build_and_no_patch_sources(
+    tmp_path: Path,
+) -> None:
+    """The premise of the two tests below, asserted rather than assumed."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    on_disk = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert on_disk["completed"] == list(OLD_TWELVE_STAGE_COMPLETED)
+    assert "patch-sources" not in on_disk["completed"]
+    assert "build" in on_disk["completed"] and "extract" in on_disk["completed"]
+    # And the stage is still one this build knows, so the record round-trips
+    # rather than landing in `unknown`.
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None and state.unknown == ()
+    assert state.completed == OLD_TWELVE_STAGE_COMPLETED
+
+
+def test_a_press_on_an_install_built_before_the_patch_refuses_and_says_what_to_press(
+    tmp_path: Path,
+) -> None:
+    """The defect: patch the source, then skip the build that would have compiled it.
+
+    Before the refusal, a press on `~/tbc-7.4c` would have logged
+    `Patched contrib/vmap_extractor/vmapextract/gameobject_extract.cpp.`,
+    recorded `patch-sources`, and then skipped `build` (recorded, images
+    present) -- leaving a source tree carrying the fix, an image that does not,
+    and vmaps still missing 14.8% of their placements. Nothing in the run said
+    so.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    pre = {n: extractor_file(server_dir, n).read_bytes() for n in EXTRACTOR_FILES}
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec)._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
+    message = str(caught.value)
+    assert cmangos.REBUILD_ACTION in message, message
+    assert "install again" in message, message
+    assert "nothing was changed" in message.lower(), message
+    assert {n: extractor_file(server_dir, n).read_bytes() for n in EXTRACTOR_FILES} == pre
+
+
+def test_the_refusal_names_an_action_the_server_tab_actually_offers() -> None:
+    """A remedy sentence naming a button that is not there is worse than no sentence."""
+    from yulon.ui import controller_view
+
+    assert cmangos.REBUILD_ACTION == controller_view.REMOVE_IDLE
+
+
+def finished_extraction(rec: Recorder, server_dir: Path, client: Path) -> Path:
+    """Run the extract and mmaps stages once, so `data/` carries the evidence and the files.
+
+    A finished install has more than a state file: `data/.yulon-extract.json`
+    vouching for four tools, and the folders they filled. Driving the two
+    stages is how this fixture gets an evidence file the module's own rules
+    call satisfied -- writing one by hand would be a fixture agreeing with
+    itself about `plan_hash`, the client facts and the argv digests, which are
+    exactly the four things the skip turns on.
+
+    Returns the evidence file, which is the thing the remedy tells a user to
+    delete.
+    """
+    list(engine(rec)._extract(context(server_dir, client)))
+    list(engine(rec)._mmaps(context(server_dir, client)))
+    evidence = server_dir / cmangos.DATA_DIR / extract.EVIDENCE_FILE
+    assert evidence.is_file()
+    return evidence
+
+
+def remedy_steps(message: str, server_dir: Path) -> tuple[tuple[str, ...], tuple[Path, ...]]:
+    """What a user following this refusal would type and delete -- read out of the sentence.
+
+    Parsed rather than restated, so a remedy that stops naming an image, stops
+    naming a path, or goes back to naming the install folder cannot be followed
+    by this test at all.
+
+    A LIST of paths since 2026-09-05, and that change is the review's finding
+    in one signature. The sentence named one file; deleting it re-ran an
+    extraction that `vmap_extractor` then refused to start into the
+    `Buildings/` the first extraction had filled, and the press that followed
+    the advice ended wedged. Whatever the sentence names is what the tests
+    below delete and nothing else, so a sentence that goes back to naming one
+    path still has to leave a press that finishes.
+    """
+    images = re.search(r"`docker image rm ([^`]+)`", message)
+    delete = re.search(r"and delete (\S+(?: and \S+)*), then install", message)
+    assert images is not None and delete is not None, message
+    # The FOLDER, not a path inside it -- the remedy names paths under it, and
+    # `delete <server_dir>/data/...` is the sentence working as intended.
+    folder = re.escape(f"delete {server_dir}") + r"(?![/\\])"
+    for hit in re.finditer(folder, message):
+        assert message[: hit.start()].endswith("Do not "), (
+            "the remedy tells the user to delete the install folder, which is where "
+            f"the database password lives: {message}"
+        )
+    named = tuple(Path(part) for part in delete.group(1).split(" and "))
+    for path in named:
+        assert server_dir in path.parents, f"the remedy names something outside the install: {path}"
+    return tuple(images.group(1).split()), named
+
+
+def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
+    tmp_path: Path,
+) -> None:
+    """Follow the sentence, verbatim, and land on a patched, rebuilt install with its characters.
+
+    The BLOCKER this replaced, re-derived on m910q 2026-09-05 before the
+    rewrite (`run()` driven twice around the old sentence, this same fixture):
+    press 1 refused with "use “Stop and remove containers…” on the Server tab,
+    delete .../srv, and install it again"; the containers went (no `-v` --
+    `docker.remove_staged()` keeps the volume by design) and so did the folder,
+    taking `.db_password` with it, since that file lives inside it; the volume
+    `yulon-wow-tbc-ffb3ef7e_db-data` was still there, and `install_id()`
+    hashes the ABSOLUTE path, so the reinstall came back to the same volume
+    name (ffb3ef7e before and after the `rmtree`); press 2 stopped at
+    `_db_password` -- "that database cannot be opened again: `docker volume rm
+    ...` deletes it, and every character in it". `_db_password`'s own docstring
+    had already refused to send anyone round that loop.
+
+    THE SECOND BLOCKER, found by the review of the replacement (m910q
+    2026-09-05) and the reason this test is not the one it was: taking away the
+    image and the evidence file re-ran the extraction over a `data/Buildings`
+    the first extraction had filled, and `vmap_extractor` refuses to start when
+    that folder holds `dir` or `dir_bin` -- so the press bought a recompile and
+    then died at "Your output directory seems to be polluted, please use an
+    empty directory!", with the re-created evidence recording `dbc and maps`
+    alone so every later press died there too. This test could not see it,
+    because the double it drives fabricated anonymous files and never those
+    two. It writes them now (`support_native.Recorder.run_container`) and
+    refuses on them, which is what makes the run below a measurement rather
+    than a restatement.
+
+    What is asserted here is the whole of the replacement: everything the
+    sentence names is taken away and nothing else is, and the next press
+    compiles, patches, extracts again and finishes, with the password file
+    byte-identical, the volume untouched and the import left alone.
+    """
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    volume = f"{composegen.project_name(ENTRY.id, server_dir, platform_id=lambda: 'linux')}_db-data"
+    rec = Recorder(volumes={volume}, probe_answers=[IMPORTED], db_started=True)
+    old_install(rec, server_dir)
+    password = server_dir / ".db_password"
+    password.write_text("hunter2\n", encoding="utf-8")
+    evidence = finished_extraction(rec, server_dir, client)
+
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    images, doomed = remedy_steps(str(caught.value), server_dir)
+    ctx = context(server_dir, client, completed=OLD_TWELVE_STAGE_COMPLETED)
+    assert images == engine(rec).built_image_refs(ctx), str(caught.value)
+    buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
+    assert doomed == (evidence, buildings), str(caught.value)
+    # The shape a real one is in, not a shape only this suite can make: `dir_bin`
+    # is appended from the extractor's first tile and `temp_gameobject_models` is
+    # written by the last call in its `main()`, while `dir` -- the other name the
+    # tool STATS -- has no writer under `contrib` at either pinned revision and is
+    # on none of the three real installs measured on m910q.
+    assert (buildings / extract.DIR_BIN).is_file(), "the fixture is not a finished extraction"
+    assert (buildings / extract.GAMEOBJECT_MODELS).is_file(), "the extraction never finished"
+    assert not (buildings / extract.DIR_INDEX).exists(), "no extraction writes a `dir`"
+
+    # Exactly the remedy, and nothing else: the containers go, the images the
+    # sentence named go, and each path it named goes. The folder stays, and so
+    # does everything under data/ the sentence did not name.
+    rec.containers.clear()
+    rec.images = False
+    for path in doomed:
+        shutil.rmtree(path) if path.is_dir() else path.unlink()
+    assert (server_dir / cmangos.DATA_DIR / "vmaps").is_dir(), "the remedy took vmaps/ with it"
+    rec.calls.clear()
+    rec.container_runs.clear()
+
+    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    assert "build" in rec.calls, said
+    assert [run.argv[0].rsplit("/", 1)[-1] for run in rec.container_runs] == [
+        "ad",
+        "vmap_extractor",
+        "vmap_assembler",
+        "MoveMapGen",
+    ], "the maps were not extracted again, so the fix is still not in the vmaps"
+    assert all(
+        extractor_file(server_dir, name).read_bytes()
+        == (VMAP_FIXTURE / "patched" / name).read_bytes()
+        for name in EXTRACTOR_FILES
+    )
+    assert said[-1].endswith(f"installed and running in {server_dir}"), said[-1]
+    assert password.read_text(encoding="utf-8") == "hunter2\n", "the password file was rewritten"
+    assert rec.volumes == {volume}, "the database volume was removed or replaced"
+    assert "They are already imported; leaving them alone." in said, said
+
+
+def test_the_refusal_says_why_the_install_folder_is_the_one_thing_not_to_delete(
+    tmp_path: Path,
+) -> None:
+    """The loop is named in the sentence, not left for the user to walk into.
+
+    `remedy_steps` refuses a message that tells anyone to delete the folder;
+    this asserts the other half -- that the reason is spelled out, with the
+    file and the volume named, so a user who was about to do it anyway knows
+    what it costs. The three facts it rests on were each read out of this tree
+    on 2026-09-05: `.db_password` is `install.password.file`, which is a path
+    under the server directory; `docker.remove_staged()` passes no `-v`; and
+    `composegen.install_id()` digests the absolute path, so the same folder
+    comes back to the same volume.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec)._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
+    message = str(caught.value)
+    plan = ENTRY.install.password
+    assert plan.file is not None and plan.file in message, message
+    assert f"Do not delete {server_dir}" in message, message
+    assert engine(rec)._db_volume(server_dir) in message, message
+    assert "Removing the containers keeps that volume" in message, message
+
+
+def test_a_fixed_password_entry_is_told_the_other_true_thing_about_deleting_the_folder(
+    tmp_path: Path,
+) -> None:
+    """No `.db_password` to lose, and still not a fresh start -- the volume comes back.
+
+    Unreachable from shipped data (every CMaNGOS entry carrying a patch has a
+    `generated` password), so it is driven here rather than left as a branch
+    nobody has read. The wording must not name a password file that does not
+    exist, which is the mistake the branch is there to avoid.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    fixed = entry_with_password(
+        PasswordPlan.model_construct(mode="fixed", value="password", file=None, prefix="")
+    )
+    with pytest.raises(InstallerError) as caught:
+        list(
+            engine_for(fixed, rec)._patch_sources(
+                context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+            )
+        )
+    message = str(caught.value)
+    assert ".db_password" not in message, message
+    assert "comes straight back to" in message, message
+    assert engine_for(fixed, rec)._db_volume(server_dir) in message, message
+
+
+def test_removing_only_the_image_rebuilds_but_leaves_the_old_maps_where_they_were(
+    tmp_path: Path,
+) -> None:
+    """Why the remedy names the evidence file as well as the image.
+
+    The control for the test above. Take away the image and nothing else, and
+    the press does compile the patched source -- and then skips the extraction,
+    because that skip is `data/.yulon-extract.json`'s to make and not the state
+    file's, so the maps the new binary would have written are not written and
+    the doodads are still missing. One press, two halves, and only the first
+    one is bought by `docker image rm`.
+    """
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    rec = Recorder(probe_answers=[IMPORTED], db_started=True)
+    old_install(rec, server_dir)
+    (server_dir / ".db_password").write_text("hunter2\n", encoding="utf-8")
+    finished_extraction(rec, server_dir, client)
+
+    rec.images = False
+    rec.calls.clear()
+    rec.container_runs.clear()
+    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    assert "build" in rec.calls, said
+    assert all(
+        extractor_file(server_dir, name).read_bytes()
+        == (VMAP_FIXTURE / "patched" / name).read_bytes()
+        for name in EXTRACTOR_FILES
+    )
+    assert [run.argv[0].rsplit("/", 1)[-1] for run in rec.container_runs] == []
+    assert sum("already extracted" in line for line in said) == 3, said
+
+
+def test_the_remedy_names_the_buildings_folder_only_when_it_is_there_to_block_the_re_extract(
+    tmp_path: Path,
+) -> None:
+    """An install that never finished an extraction is not told to delete a folder it has not got.
+
+    The pair the sentence is assembled from: `extract.clear_before_rerun()`
+    reads the `data/` in front of it, so the remedy grows the folder when a
+    finished extraction is what makes the press die and says nothing about it
+    otherwise. A remedy naming a path that is not there reads as a mistake, and
+    a user who cannot find it has no way to tell which half of the sentence to
+    trust.
+    """
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    old_install(rec, server_dir)
+    ctx = context(server_dir, client, completed=OLD_TWELVE_STAGE_COMPLETED)
+    buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
+    assert not buildings.exists()
+
+    with pytest.raises(InstallerError) as bare:
+        list(engine(rec)._patch_sources(ctx))
+    _, doomed = remedy_steps(str(bare.value), server_dir)
+    assert doomed == (server_dir / cmangos.DATA_DIR / extract.EVIDENCE_FILE,), str(bare.value)
+    assert extract.BUILDINGS_DIR not in str(bare.value), str(bare.value)
+
+    finished_extraction(rec, server_dir, client)
+    with pytest.raises(InstallerError) as after:
+        list(engine(rec)._patch_sources(ctx))
+    _, grown = remedy_steps(str(after.value), server_dir)
+    assert grown[-1] == buildings, str(after.value)
+    plan = engine(rec)._data().extract
+    assert extract.clear_before_rerun(plan, server_dir / cmangos.DATA_DIR) == (buildings,)
+
+
+def test_the_images_the_refusal_says_to_remove_are_the_ones_it_asked_the_daemon_about(
+    tmp_path: Path,
+) -> None:
+    """A `docker image rm` on a tag this install does not have is worse than no advice.
+
+    The message and the skip decision both come from
+    `built_image_refs()` -- the relationship, not the value, is what this
+    asserts: whatever the daemon was asked about is what the user is told to
+    remove. Two call sites each spelling `composegen.built_image_refs(...)`
+    would pass every value test and still be able to drift.
+    """
+    asked: list[tuple[str, ...]] = []
+
+    def images_built(refs: Sequence[str]) -> bool:
+        asked.append(tuple(refs))
+        return True
+
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    eng = engine(rec, images_built=images_built)
+    with pytest.raises(InstallerError) as caught:
+        list(eng._patch_sources(context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)))
+    named, _ = remedy_steps(str(caught.value), server_dir)
+    assert asked == [named], (asked, named)
+    assert named, "the refusal named no image at all"
+
+
+def test_the_whole_press_stops_at_patch_sources_and_never_reaches_the_build(
+    tmp_path: Path,
+) -> None:
+    """Through `run()`: the refusal is the sentence, and no later stage runs."""
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    client = client_folder(tmp_path)
+    old_install(rec, server_dir)
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    assert cmangos.REBUILD_ACTION in str(caught.value)
+    assert "build" not in rec.calls
+    assert rec.container_runs == []
+    state = native.read_state(server_dir, valid=engine(rec).stage_names())
+    assert state is not None and "patch-sources" not in state.completed
+    assert (
+        extractor_file(server_dir, "gameobject_extract.cpp").read_bytes()
+        == (VMAP_FIXTURE / "gameobject_extract.cpp").read_bytes()
+    )
+
+
+def test_a_recorded_build_whose_images_are_gone_is_patched_because_the_build_will_re_run(
+    tmp_path: Path,
+) -> None:
+    """The refusal is `stage_build`'s own skip rule, asked one stage earlier.
+
+    `stage_build` skips only when the record AND the images agree, so a
+    recorded build whose images the user has deleted recompiles -- and a
+    recompile picks the patch up. Refusing on the record alone would have
+    turned that into a dead end for no reason.
+    """
+    rec = Recorder(images=False)
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    ctx = context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("Patched" in line for line in said), said
+    assert (
+        extractor_file(server_dir, "gameobject_extract.cpp").read_bytes()
+        == (VMAP_FIXTURE / "patched" / "gameobject_extract.cpp").read_bytes()
+    )
+
+
+def test_docker_refusing_to_say_whether_the_images_exist_patches_rather_than_refuses(
+    tmp_path: Path,
+) -> None:
+    """`images_built` answers None, `stage_build` rebuilds on None, so the patch is wanted."""
+    rec = Recorder(images=None)
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    ctx = context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("Patched" in line for line in said), said
+
+
+def test_an_old_install_whose_checkout_already_carries_the_fix_is_not_refused(
+    tmp_path: Path,
+) -> None:
+    """Nothing would change, so there is nothing to be inconsistent about.
+
+    This is the shape every press after the first takes, including the press
+    that follows a fresh install of this build -- so a refusal keyed on the
+    record alone would fire on every ordinary second press of a working
+    install.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "srv"
+    old_install(rec, server_dir)
+    for name in EXTRACTOR_FILES:
+        extractor_file(server_dir, name).write_bytes((VMAP_FIXTURE / "patched" / name).read_bytes())
+    ctx = context(server_dir, completed=OLD_TWELVE_STAGE_COMPLETED)
+    said = list(engine(rec)._patch_sources(ctx))
+    assert any("already carries" in line for line in said), said
+    assert not any("Patched" in line for line in said)
+
+
+def test_the_extraction_stage_reports_the_doodad_placement_check_after_the_vmap_tools(
+    tmp_path: Path,
+) -> None:
+    """Option C of the write-up, as the gate that proves the patch took: one line after the
+    tools have run, a warning when a model file is spelled in a way the reader never asks
+    for, and nothing at all when there is no `dir_bin` to read."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    ctx = context(server_dir, client)
+    said = list(engine(rec)._extract(ctx))
+    assert not any("dir_bin" in line or line.startswith("warning:") for line in said), said
+    buildings = server_dir / cmangos.DATA_DIR / extract.BUILDINGS_DIR
+    assert buildings.is_dir(), "the double filled Buildings/ and the check still had nothing"
+    (buildings / "Model001.m2").write_bytes(b"VMAP")
+    (buildings / "INNBED.M2").write_bytes(b"VMAP")
+    (buildings / extract.DIR_BIN).write_bytes(b"\x00Model001.m2\x00Model001.m2\x00")
+    said = list(engine(rec)._extract(ctx))
+    warning = next(line for line in said if line.startswith("warning:"))
+    assert "1 of the 2" in warning and "case-sensitive" in warning
+    assert said.index(warning) < said.index("Extraction finished.")
+
+
+# -- the copy a Stop reads ---------------------------------------------------
+
+
+def test_the_build_cancel_note_is_said_at_the_build_and_not_before_every_stage(
+    tmp_path: Path,
+) -> None:
+    """It is copy about the BUILD, and the spine says it for whichever stage claims it.
+
+    `stages()` is where this family claims it, and `cancel_note=` is one
+    keyword: dropping it left all 23 tests in this file green (2026-09-01), so
+    the sentence a user reads when they press Stop three hours into a compile
+    was nobody's. Two properties, because the AzerothCore incident it mirrors
+    (`test_families_azerothcore.py`, review 2026-08-23) was not a missing
+    sentence but a misplaced one — said as the second line of every install, so
+    a user who stopped during the 2.4 GB clone was told Docker was finishing a
+    build step. `OPENING_NOTE` is the line that is true of every stage; this
+    one belongs to the build alone, and the spine emits it directly under the
+    stage banner.
+    """
+    rec = Recorder(images=False)
+    said = install(rec, tmp_path / "srv", client_folder(tmp_path))
+    assert native.OPENING_NOTE in said
+    assert said.index(native.OPENING_NOTE) == 1
+    build_at = said.index("--- build")
+    # Said at the build: the banner, then the note, and nothing between them.
+    assert said[build_at + 1] == native.BUILD_CANCEL_NOTE
+    # Not before every stage: no earlier stage carries it, and no later one either.
+    assert said.count(native.BUILD_CANCEL_NOTE) == 1
+    assert native.BUILD_CANCEL_NOTE not in said[:build_at]
+
+
+# -- db-password -------------------------------------------------------------
+
+
+def db_volume(server_dir: Path) -> str:
+    """`<compose project>_db-data` — recomputed here rather than asked of the engine.
+
+    The engine's `_db_volume()` is the code under test, so these tests build the
+    name from `composegen.project_name()` and the key the shared template
+    declares. `test_the_module_constants_are_the_shared_template_s_own_spellings`
+    is what ties `db-data` to `base.yml.tmpl`.
+    """
+    project = composegen.project_name(ENTRY.id, server_dir, platform_id=lambda: "linux")
+    return f"{project}_db-data"
+
+
+def entry_with_password(plan: PasswordPlan) -> CatalogEntry:
+    """`ENTRY` carrying a different `install.password`, still installable on linux."""
+    return ENTRY.model_copy(update={"install": ENTRY.install.model_copy(update={"password": plan})})
+
+
+def engine_for(entry: CatalogEntry, rec: Recorder, **overrides: object) -> CmangosInstaller:
+    return CmangosInstaller(
+        entry,
+        installers_root=resources.installers_dir(),
+        seams=rec.seams(**{"platform_id": lambda: "linux", **overrides}),
+    )
+
+
+def refuse_to_answer(name: str) -> bool:
+    """A `volume_exists` seam that fails the test if it is called at all.
+
+    `AssertionError` and not `DockerCommandError`: the stage catches the latter
+    and turns it into a refusal, which would hide the call being made.
+    """
+    raise AssertionError(f"the daemon was asked about {name}")
+
+
+def test_db_password_writes_the_generated_secret_with_the_trailing_newline_the_spine_strips(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    said = list(engine(Recorder())._db_password(context(server_dir)))
+    assert ENTRY.install.password.file is not None
+    secret = server_dir / ENTRY.install.password.file
+    assert secret.read_bytes() == (DB_PASSWORD + "\n").encode("utf-8")
+    assert secret.read_text(encoding="utf-8").strip() == DB_PASSWORD
+    assert any(ENTRY.install.password.file in line for line in said), said
+
+
+def test_the_line_that_says_the_password_was_written_says_to_back_the_file_up(
+    tmp_path: Path,
+) -> None:
+    """The advice is the warning that this file is the way back into the database.
+
+    The stage writes the file once and says one sentence about it; the refusal
+    that explains what the file was worth is only reached after it is already
+    gone, which is too late to act on. So the advice is load-bearing where it
+    stands, and it is pinned by its own words rather than left to the
+    filename assertion above.
+
+    Dropping "Back that file up" from the success line survived the whole
+    suite before this test existed (mutation M16, 2026-09-01).
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    said = list(engine(Recorder())._db_password(context(server_dir)))
+    assert len(said) == 1, said
+    assert "Back that file up" in said[0]
+    assert db_volume(server_dir) in said[0]
+
+
+def test_db_password_turns_a_write_that_fails_into_a_sentence_and_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """A stage that raises `OSError` reaches the user as a traceback, not as a refusal.
+
+    The failure is a real one rather than a patched call: `.db_password` is a
+    DIRECTORY here, so `os.open()` raises before a byte is written
+    (`IsADirectoryError` on POSIX, `PermissionError` on Windows — both
+    `OSError`). `Path.is_file()` is False for a directory, so the stage takes
+    the same write branch it takes for a missing file, which is the branch
+    under test.
+
+    `__cause__` is asserted, not just the type: the sentence is only useful
+    while it still carries what the operating system said, and `raise ... from
+    exc` is what keeps that.
+
+    Removing the `except OSError` wrapper made nothing in the suite red before
+    this test existed (mutation M14, 2026-09-01).
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    assert ENTRY.install.password.file is not None
+    (server_dir / ENTRY.install.password.file).mkdir()
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(Recorder())._db_password(context(server_dir)))
+    assert isinstance(refusal.value.__cause__, OSError)
+    assert ENTRY.install.password.file in str(refusal.value)
+    assert "could not be written" in str(refusal.value)
+
+
+def test_db_password_keeps_a_secret_file_that_is_already_there_and_never_asks_docker(
+    tmp_path: Path,
+) -> None:
+    """A resume must not mint a second password, and must not need a daemon to know that.
+
+    The second context carries a DIFFERENT secret on purpose: an mtime is a
+    coarse oracle (an overwrite inside one filesystem timestamp tick moves
+    nothing), while the bytes on disk answer differently the second time only
+    if the stage really left them alone.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    ctx = context(server_dir)
+    list(engine(Recorder())._db_password(ctx))
+    assert ENTRY.install.password.file is not None
+    secret = server_dir / ENTRY.install.password.file
+    other = replace(ctx, secrets=native.Secrets(db_password="a-completely-different-secret"))
+    again = list(engine(Recorder(), volume_exists=refuse_to_answer)._db_password(other))
+    assert secret.read_text(encoding="utf-8").strip() == DB_PASSWORD
+    assert any("already" in line for line in again), again
+
+
+def file_aces(path: Path) -> list[str]:
+    """The access-control entries `icacls` lists for `path`, one string per entry.
+
+    The listing is the block before the first blank line; the first entry
+    shares its line with the path, and a wrapped continuation of a long entry
+    carries no `:(`, so the entries are the lines that do.
+
+    Callers read these for the `(I)` inherited flag and never for a principal:
+    the names are localised. Measured on PKGAME-LAPTOP (Windows 11 26200,
+    Norwegian, CPython 3.13.14, 2026-09-01) the built-in groups printed as
+    `NT-MYNDIGHET\\SYSTEM` and `BUILTIN\\Administratorer`, so a test matching
+    `BUILTIN\\Users` there would fail for the language and not for the ACL.
+    """
+    listing = subprocess.run(
+        ["icacls", str(path)], capture_output=True, text=True, check=True
+    ).stdout
+    return [line.strip() for line in listing.split("\n\n")[0].splitlines() if ":(" in line]
+
+
+def test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl_on_windows(
+    tmp_path: Path,
+) -> None:
+    """What the 0600 the writer asks for actually buys, per platform — measured, not assumed.
+
+    Measured on PKGAME-LAPTOP, Windows 11 26200, CPython 3.13.14, 2026-09-01,
+    and reproduced there on 2026-09-01 while this assertion was written:
+    `os.open(path, O_WRONLY|O_CREAT|O_TRUNC, 0o600)` leaves `st_mode & 0o777`
+    at `0o666`, byte-identical to a plain `open(path, "w")`, and every ACE
+    `icacls` prints for the file carries `(I)` — the file has no entry of its
+    own and grants exactly what its folder grants. Under a folder granting
+    `BUILTIN\\Users:(RX)` the secret is readable by every local user. A
+    following `os.chmod(path, 0o600)` changes neither.
+
+    So the mode is a POSIX guarantee and nothing more, and both halves are
+    asserted here rather than only described. The Windows half turns red the
+    day `_write_secret` grows the explicit DACL its "Open: Windows ACLs" note
+    weighs, because an entry granted that way is not inherited and carries no
+    `(I)`. That red was produced rather than reasoned about, on PKGAME-LAPTOP
+    on 2026-09-01: `icacls <file> /inheritance:r /grant:r <user>:(F)` over a
+    file written exactly as this stage writes it left one entry,
+    `PKGAME-LAPTOP\\perzi:(F)`, which this assertion rejects. It is recorded
+    because Linux CI skips this branch and can never show it.
+
+    The CONSTANT is asserted as well as the file, because on Windows it is the
+    only thing that can be: the bytes on disk read `0o666` whatever the writer
+    asked for, so a widened `SECRET_FILE_MODE` is invisible there. That half is
+    an inspection rather than an observation, and it is here so the widening
+    cannot land green on a Windows machine and be caught only by Linux CI.
+    """
+    from yulon.catalog.families import cmangos
+
+    assert cmangos.SECRET_FILE_MODE == 0o600
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    list(engine(Recorder())._db_password(context(server_dir)))
+    assert ENTRY.install.password.file is not None
+    secret = server_dir / ENTRY.install.password.file
+    mode = secret.stat().st_mode & 0o777
+    if os.name == "nt":
+        assert mode == 0o666, "Windows started honouring the mode: re-read _write_secret's note"
+        aces = file_aces(secret)
+        assert aces, f"icacls listed no entry for {secret}; the parse, not the ACL, is wrong"
+        assert all("(I)" in ace for ace in aces), aces
+    else:
+        assert mode == cmangos.SECRET_FILE_MODE
+
+
+def test_db_password_asks_about_the_volume_name_compose_gives_this_install(
+    tmp_path: Path,
+) -> None:
+    """One name, and it is `<project>_db-data` — the string `docker volume ls` prints."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    asked: list[str] = []
+
+    def watch(name: str) -> bool:
+        asked.append(name)
+        return False
+
+    list(engine(Recorder(), volume_exists=watch)._db_password(context(server_dir)))
+    assert asked == [db_volume(server_dir)]
+
+
+def test_db_password_refuses_when_the_file_is_gone_but_the_volume_exists(
+    tmp_path: Path,
+) -> None:
+    """The volume was initialised with the password the file held; a new one locks us out."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    rec.volumes.add(db_volume(server_dir))
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._db_password(context(server_dir)))
+    assert ".db_password" in str(refusal.value)
+    assert db_volume(server_dir) in str(refusal.value)
+    assert not (server_dir / ".db_password").exists()
+
+
+VOLUME_DELETING_PAIRS = (("volume", "rm"), ("volume", "prune"))
+"""Consecutive argv words that delete a named volume, whatever surrounds them."""
+
+
+def volume_deleting_spellings(source: str) -> list[tuple[str, str]]:
+    """Every place `source` spells a docker command that would delete a named volume.
+
+    Two forms, tagged `"argv"` and `"text"`, because one module's argument list
+    is another's shell line: a list or tuple of string constants running
+    `volume rm`/`volume prune`, or a `down` carrying `-v`/`--volumes`; and any
+    string constant containing those same words separated by single spaces.
+
+    Both forms are searched because either alone is blind to the other —
+    `["volume", "rm", name]` and `"docker volume rm"` are the same action, and
+    a text search sees only the second. `-v` counts only beside `down`: on its
+    own it is a bind mount, which every `docker run` in this app passes.
+
+    Syntax, not behaviour: this reads source and cannot say whether the line
+    runs. That is the point — it is meant to fire while the action is being
+    written, before anyone wires it to a button.
+    """
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.List | ast.Tuple):
+            words = [
+                el.value
+                for el in node.elts
+                if isinstance(el, ast.Constant) and isinstance(el.value, str)
+            ]
+            pairs = list(zip(words, words[1:], strict=False))
+            if any(pair in pairs for pair in VOLUME_DELETING_PAIRS) or (
+                "down" in words and ("-v" in words or "--volumes" in words)
+            ):
+                found.append(("argv", " ".join(words)))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            said = " ".join(node.value.split()).lower()
+            if any(
+                phrase in said
+                for phrase in ("volume rm", "volume prune", "down -v", "down --volumes")
+            ):
+                found.append(("text", " ".join(node.value.split())[:100]))
+    return found
+
+
+def app_modules() -> list[Path]:
+    """Every `.py` file the shipped `yulon` package contains."""
+    return sorted(Path(yulon.__file__).parent.rglob("*.py"))
+
+
+def test_the_live_volume_refusal_names_a_way_to_delete_the_volume_the_server_tab_will_not(
+    tmp_path: Path,
+) -> None:
+    """The refusal may not send the user to a button that keeps volumes by design.
+
+    `controller_view`'s removal action is "Stop and remove containers…", and
+    `docker.remove_staged()` passes no `-v` on purpose
+    (`test_remove_staged_never_passes_a_flag_that_would_delete_a_volume`); its
+    own armed warning says "the database lives in a Docker volume, which is
+    kept". A refusal naming that button would send the user round a loop
+    ending at this same message, so it names the command that does the job
+    instead.
+
+    The tripwire is the SCAN, not the wording check under it. Every module the
+    `yulon` package ships is read for a docker command that deletes a named
+    volume — in argv form anywhere, and in prose everywhere but this family's
+    own file, where the refusal and the note above it say the words on
+    purpose. It goes red the day any part of the app grows such an action, the
+    Server tab included, at which point this refusal should point at it rather
+    than at a terminal.
+
+    The wording check is kept because it says which sentence the loop would
+    have ended at, but it is not what fails:
+    `test_the_scan_sees_a_volume_deleting_action_the_wording_check_is_blind_to`
+    is the reproduction of it passing with the action present.
+    """
+    from yulon.ui import controller_view
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    rec.volumes.add(db_volume(server_dir))
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._db_password(context(server_dir)))
+    said = str(refusal.value)
+    assert f"docker volume rm {db_volume(server_dir)}" in said
+    assert "Server tab" not in said
+    assert "volume, which is kept" in inspect.getsource(controller_view)
+
+    own_file = Path(inspect.getsourcefile(CmangosInstaller) or "").resolve()
+    offenders = [
+        f"{path.name}: {kind} {spelling}"
+        for path in app_modules()
+        for kind, spelling in volume_deleting_spellings(path.read_text(encoding="utf-8"))
+        if not (kind == "text" and path.resolve() == own_file)
+    ]
+    assert offenders == [], offenders
+
+
+A_NEW_SERVER_TAB_ACTION = '''
+
+DELETE_VOLUME_IDLE = "Delete the database and start over…"
+
+
+def delete_the_database_volume(name: str) -> None:
+    """Exactly the action this refusal's premise says the app does not have."""
+    docker._run(["volume", "rm", name])
+'''
+"""A plausible volume-deleting action, appended to `controller_view`'s real source.
+
+It breaks one rule and one only: it spells a docker argv that deletes a named
+volume. Its constant, its name and its docstring are the ordinary ones such an
+action would carry, so nothing but the argv can be what a scan reacts to.
+"""
+
+
+def test_the_scan_sees_a_volume_deleting_action_the_wording_check_is_blind_to() -> None:
+    """Why the wording check is not the tripwire, reproduced rather than argued.
+
+    Run 2026-09-01 (K.3 review, and again here): with a real volume-deleting
+    action present in `controller_view`, `"volume, which is kept" in source`
+    is still true, because that substring belongs to the REMOVE_IDLE warning
+    and an ADDED action removes nothing. A test whose name promised to go red
+    the day the Server tab grew such an action was therefore green with the
+    action sitting in the file. Only the scan reacts to it.
+    """
+    from yulon.ui import controller_view
+
+    clean = inspect.getsource(controller_view)
+    grown = clean + A_NEW_SERVER_TAB_ACTION
+
+    assert volume_deleting_spellings(clean) == []
+    # The old assertion, applied to the grown module: green, and it should not be.
+    assert "volume, which is kept" in grown
+    assert [kind for kind, _ in volume_deleting_spellings(grown)] == ["argv"]
+
+
+def test_db_password_refuses_when_docker_will_not_say_whether_the_volume_exists(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+
+    def unanswerable(name: str) -> bool:
+        raise docker.DockerCommandError("Cannot connect to the Docker daemon")
+
+    with pytest.raises(InstallerError, match="cannot prove") as refusal:
+        list(engine(Recorder(), volume_exists=unanswerable)._db_password(context(server_dir)))
+    assert "Cannot connect to the Docker daemon" in str(refusal.value)
+    assert not (server_dir / ".db_password").exists()
+
+
+def test_db_password_refuses_when_there_is_no_docker_cli_at_all(tmp_path: Path) -> None:
+    """`DockerCliMissingError` subclasses `DockerCommandError` and lands in the same branch.
+
+    Deliberate. Preflight already refuses a machine with no Docker, so reaching
+    here means Docker went away mid-install; the outcome is the one that
+    matters — nothing is written — and the sentence carries
+    `DOCKER_CLI_MISSING_HELP` verbatim, which is the actionable half. A second
+    branch would buy a second wording for an identical outcome and would drop
+    the volume name from it.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+
+    def no_cli(name: str) -> bool:
+        raise docker.DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(Recorder(), volume_exists=no_cli)._db_password(context(server_dir)))
+    assert platform.DOCKER_CLI_MISSING_HELP in str(refusal.value)
+    assert db_volume(server_dir) in str(refusal.value)
+    assert not (server_dir / ".db_password").exists()
+
+
+def test_db_password_writes_nothing_for_a_fixed_password(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    entry = entry_with_password(PasswordPlan(mode="fixed", value="password"))
+    eng = engine_for(entry, Recorder(), volume_exists=refuse_to_answer)
+    said = list(eng._db_password(context(server_dir)))
+    assert list(server_dir.iterdir()) == []
+    assert any("fixed" in line for line in said), said
+
+
+def test_db_password_calls_a_generated_plan_with_no_file_a_catalog_error(
+    tmp_path: Path,
+) -> None:
+    """Not "this server uses a fixed password" — that sends the user looking in the wrong place.
+
+    Two fences already stand in front of this one: `PasswordPlan`'s validator
+    refuses the shape, and `resolve_secrets()` refuses it again before stage 1.
+    `model_construct` is what gets past them, and the branch is kept because
+    `plan.file` is `str | None` and mypy is owed a narrowing. What it must not
+    do is name the wrong defect on the way past.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    broken = PasswordPlan.model_construct(mode="generated", value=None, file=None, prefix="tbc-")
+    eng = engine_for(entry_with_password(broken), Recorder(), volume_exists=refuse_to_answer)
+    with pytest.raises(InstallerError) as refusal:
+        list(eng._db_password(context(server_dir)))
+    said = str(refusal.value)
+    assert "catalog" in said
+    assert "fixed" not in said
+    assert list(server_dir.iterdir()) == []
+
+
+def test_db_password_is_a_stage_that_is_never_recorded_and_follows_patch_sources() -> None:
+    """Never recorded because the FILE is the evidence; a state file must not claim a secret.
+
+    It followed `clone-sources` directly until 2026-09-05, when `patch-sources`
+    went in between: the patch edits the checkout the clone just made and
+    nothing else, so it belongs before the first stage that reads anything
+    off this machine's state, and a secret must not be minted on a run that
+    is about to refuse over a moved upstream.
+    """
+    stages = engine(Recorder()).stages()
+    names = [stage.name for stage in stages]
+    assert names.index("patch-sources") == names.index("clone-sources") + 1
+    assert names.index("db-password") == names.index("patch-sources") + 1
+    stage = next(s for s in stages if s.name == "db-password")
+    assert stage.recorded is False
+
+
+# -- write-dockerfile -------------------------------------------------------
+
+
+def rooted(root: Path, rec: Recorder, entry: CatalogEntry | None = None) -> CmangosInstaller:
+    """An engine reading its templates from `root` instead of the shipped installers tree.
+
+    `engine()` pins `resources.installers_dir()`, which is what most of this
+    file wants; the write-dockerfile tests that plant a template need the other
+    root, and one that is writable.
+    """
+    return CmangosInstaller(
+        entry if entry is not None else ENTRY,
+        installers_root=root,
+        seams=rec.seams(platform_id=lambda: "linux"),
+    )
+
+
+def plant_templates(root: Path, body: str, ignore: str = "*\n") -> Path:
+    """Lay a marked `Dockerfile.tmpl`/`dockerignore.tmpl` pair where `wow-tbc`'s block points."""
+    assert ENTRY.install.native is not None
+    folder = root / str(ENTRY.install.native.dockerfile_dir)
+    folder.mkdir(parents=True)
+    marker = f"{composegen.GENERATED_MARKER} - do not hand-edit.\n"
+    (folder / "Dockerfile.tmpl").write_text(marker + body, encoding="utf-8", newline="\n")
+    (folder / "dockerignore.tmpl").write_text(marker + ignore, encoding="utf-8", newline="\n")
+    return folder
+
+
+def test_write_dockerfile_renders_the_marked_pair_from_the_entry_template(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    said = list(engine(Recorder())._write_dockerfile(context(server_dir)))
+    built = (server_dir / "Dockerfile").read_text(encoding="utf-8")
+    ignore = (server_dir / ".dockerignore").read_text(encoding="utf-8")
+    assert built.startswith(composegen.GENERATED_MARKER)
+    assert ignore.startswith(composegen.GENERATED_MARKER)
+    assert "{{" not in built and "{{" not in ignore
+    assert CMANGOS is not None
+    assert f"-j{CMANGOS.dockerfile.make_jobs}" in built
+    assert f"CMAKE_INSTALL_PREFIX={PurePosixPath(CMANGOS.conf.source_dir).parent}" in built
+    assert ".git" in ignore
+    assert said == ["Wrote Dockerfile", "Wrote .dockerignore"]
+
+
+def test_write_dockerfile_hands_the_renderer_the_public_mapping_and_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 7.3 contract change (A6), asserted as behaviour rather than defended in a docstring.
+
+    A6 specified ONE mapping for the Dockerfile, the conf tables, the SQL and
+    verify alike, and K.4 handed it over whole with `DB_PASSWORD` in it. 7.3
+    splits it by capability: this stage gets `_public_tokens()`, and the
+    equality below is what says so — not "a mapping without `DB_PASSWORD`",
+    which would still be satisfied by a mapping carrying a secret under some
+    other name.
+
+    The sentinel test above is the property version; this one pins the
+    identity, so a stage that built its own nearly-right mapping instead of
+    asking for the public one is caught here even if that mapping happens to
+    be secret-free today.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    seen: list[dict[str, str]] = []
+    real = dockerfile.render
+
+    def spy(
+        template_dir: Path, tokens: Mapping[str, str], *, secrets: native.Secrets
+    ) -> tuple[str, str]:
+        seen.append(dict(tokens))
+        return real(template_dir, tokens, secrets=secrets)
+
+    monkeypatch.setattr(dockerfile, "render", spy)
+    eng = engine(Recorder())
+    ctx = context(server_dir)
+    list(eng._write_dockerfile(ctx))
+    assert seen == [eng._public_tokens(server_dir)], "the public mapping itself, not a near copy"
+    assert "DB_PASSWORD" not in seen[0]
+    for name in ("Dockerfile", ".dockerignore"):
+        assert DB_PASSWORD not in (server_dir / name).read_text(encoding="utf-8")
+
+
+def test_write_dockerfile_reports_a_template_that_names_the_secret_without_quoting_it(
+    tmp_path: Path,
+) -> None:
+    """A planted template spelling `{{DB_PASSWORD}}` reaches the user as one sentence.
+
+    The reviewer's bypass (`shared/cmangos/`) proved a location guard is not the
+    protection; this is the same template through THIS stage, so the refusal is
+    shown to survive the trip out to `run()`'s `InstallerError` — and to arrive
+    without the password in it, since that string is what a failure dialog
+    invites the user to paste into a bug report.
+    """
+    root = tmp_path / "installers"
+    plant_templates(root, "FROM debian:12\nENV DB_PASSWORD={{DB_PASSWORD}}\n")
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    with pytest.raises(InstallerError) as refusal:
+        list(rooted(root, Recorder())._write_dockerfile(context(server_dir)))
+    said = str(refusal.value)
+    assert "DB_PASSWORD" in said and "docker history" in said
+    assert DB_PASSWORD not in said
+    assert list(server_dir.iterdir()) == [], "nothing written on a refusal"
+
+
+def test_write_dockerfile_skips_an_identical_rerun_that_no_state_file_recorded(
+    tmp_path: Path,
+) -> None:
+    """The skip comes from the CONTENT on disk, not from the record — proved by withholding it.
+
+    `dockerfile.write()` compares the text it is about to write with the text
+    already there and returns only the paths it actually wrote; this stage
+    consults `ctx.state` for nothing at all. So the re-run is given a context
+    with an EMPTY `completed`, and it still skips: a test that passed
+    `completed=["write-dockerfile"]` here would read as evidence of a
+    state-driven skip that does not exist.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    list(eng._write_dockerfile(context(server_dir)))
+    before = {
+        name: (server_dir / name).stat().st_mtime_ns for name in ("Dockerfile", ".dockerignore")
+    }
+    ctx = context(server_dir)
+    assert ctx.state.completed == ()
+    again = list(eng._write_dockerfile(ctx))
+    assert {
+        name: (server_dir / name).stat().st_mtime_ns for name in ("Dockerfile", ".dockerignore")
+    } == before
+    assert again == [
+        "Dockerfile is already exactly what this install needs.",
+        ".dockerignore is already exactly what this install needs.",
+    ]
+
+
+def test_write_dockerfile_says_what_happened_to_both_files_when_only_one_changed(
+    tmp_path: Path,
+) -> None:
+    """Four combinations, two files: no line may be true of the pair while naming one.
+
+    The stage speaks about each file by name every time, rather than collapsing
+    "nothing changed" into one sentence the way `stage_generate_compose` does
+    over three compose files. With two files the collapsed line is either a
+    claim about the Dockerfile that is really about both, or silence about the
+    file that did not move — and this test is the case that shows the
+    difference: the `.dockerignore` is untouched here, and a reader who was
+    told only "Wrote Dockerfile" would have no way to know that.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+    list(eng._write_dockerfile(context(server_dir)))
+    marker = (server_dir / "Dockerfile").read_text(encoding="utf-8").splitlines()[0]
+    (server_dir / "Dockerfile").write_text(f"{marker}\nFROM scratch\n", encoding="utf-8")
+    ignore_before = (server_dir / ".dockerignore").stat().st_mtime_ns
+    said = list(eng._write_dockerfile(context(server_dir)))
+    assert said == [
+        "Wrote Dockerfile",
+        ".dockerignore is already exactly what this install needs.",
+    ]
+    assert (server_dir / ".dockerignore").stat().st_mtime_ns == ignore_before
+
+
+def test_write_dockerfile_refuses_a_file_it_did_not_write_and_leaves_it_exactly_as_it_was(
+    tmp_path: Path,
+) -> None:
+    """One rule broken: the file in the way carries no generated-file marker."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    (server_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    with pytest.raises(InstallerError, match="Dockerfile") as refusal:
+        list(engine(Recorder())._write_dockerfile(context(server_dir)))
+    assert "not written by Yu'lon" in str(refusal.value)
+    assert (server_dir / "Dockerfile").read_text(encoding="utf-8") == "FROM scratch\n"
+    assert not (server_dir / ".dockerignore").exists(), "the pair is judged before either is laid"
+
+
+def test_write_dockerfile_calls_an_entry_with_no_dockerfile_dir_a_catalog_error(
+    tmp_path: Path,
+) -> None:
+    """`dockerfile_dir` is an unvalidated `str | None`; `wow-wotlk` really ships `None`."""
+    assert ENTRY.install.native is not None
+    blank = ENTRY.model_copy(
+        update={
+            "install": ENTRY.install.model_copy(
+                update={"native": ENTRY.install.native.model_copy(update={"dockerfile_dir": None})}
+            )
+        }
+    )
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    with pytest.raises(InstallerError, match="dockerfile_dir") as refusal:
+        list(rooted(tmp_path, Recorder(), blank)._write_dockerfile(context(server_dir)))
+    assert "catalog error in the app" in str(refusal.value)
+    assert list(server_dir.iterdir()) == []
+
+
+def test_write_dockerfile_passes_the_modules_sentence_through_and_names_the_class_of_anything_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two arms, two conventions, both deliberate.
+
+    `DockerfileError` already carries the sentence a user reads, so it is
+    passed through unchanged — `stage_generate_compose` treats
+    `ComposeGenError` the same way. The broad arm is the one that cannot know
+    what it caught, and there `str(exc)` alone is what J.4 rejected next door
+    (`sqlplan._read_failure`): a bare `OSError` says `[Errno 13] ...` with no
+    word for WHICH failure it was, so the class is named and the sentence says
+    what was being attempted. The arm is defence in depth — `dockerfile.py`
+    wraps every `OSError` it can raise today — and it exists because `run()`
+    catches `InstallerError` and nothing else, so an escape is a traceback in
+    the user's face rather than a dialog.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    eng = engine(Recorder())
+
+    def refuse(*args: object, **kwargs: object) -> tuple[Path, ...]:
+        raise dockerfile.DockerfileError("that file is not ours to replace")
+
+    monkeypatch.setattr(dockerfile, "write", refuse)
+    with pytest.raises(InstallerError) as passed_through:
+        list(eng._write_dockerfile(context(server_dir)))
+    assert str(passed_through.value) == "that file is not ours to replace"
+
+    def blow_up(*args: object, **kwargs: object) -> tuple[Path, ...]:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(dockerfile, "write", blow_up)
+    with pytest.raises(InstallerError) as wrapped:
+        list(eng._write_dockerfile(context(server_dir)))
+    assert "OSError" in str(wrapped.value)
+    assert "No space left on device" in str(wrapped.value)
+    assert ENTRY.name in str(wrapped.value)
+
+
+def test_write_dockerfile_is_recorded_and_sits_between_db_password_and_generate_compose() -> None:
+    """Recorded, though the record is not what skips it: the pinned order is the contract."""
+    stages = engine(Recorder()).stages()
+    names = [stage.name for stage in stages]
+    assert names.index("db-password") + 1 == names.index("write-dockerfile")
+    assert names.index("write-dockerfile") + 1 == names.index("generate-compose")
+    stage = next(s for s in stages if s.name == "write-dockerfile")
+    assert stage.recorded is True
+    assert stage.cancel_note == "", "only `build` costs anything to stop (A4)"
+
+
+# -- extract + mmaps ----------------------------------------------------------
+
+
+def _expected_user_args() -> tuple[str, ...]:
+    """What `platform.container_user_args()` answers for the Linux engine `engine()` builds.
+
+    Asked of `platform.py` rather than spelled out, because the uid:gid policy
+    is `test_platform.py`'s to prove and the question here is only whether the
+    engine's answer reaches the container spec. Not a tautology: the seam says
+    `linux`, so on a Linux runner this is a real `--user uid:gid` pair and an
+    engine that handed `run_plan` nothing would be caught. On a Windows runner
+    both sides are `()` and the assertion buys nothing there — which is why
+    `test_user_args_ask_platform_py_through_the_seam_and_not_the_real_host` is
+    the test that proves the policy, with faked ids.
+    """
+    return tuple(platform.container_user_args(platform_id=lambda: "linux"))
+
+
+def _mmaps_runs(rec: Recorder) -> list[docker.ContainerRun]:
+    """Every recorded run whose argv is the mmaps plan's — the generator, never a tool."""
+    assert CMANGOS is not None
+    return [run for run in rec.container_runs if run.argv == CMANGOS.mmaps.argv]
+
+
+def _every_string_in(value: object) -> Iterator[str]:
+    """Every string reachable from one `ContainerRun` field, however it is nested.
+
+    Written to be exhaustive by CONSTRUCTION rather than by a list somebody
+    keeps current: a dataclass is walked field by field (so `Mount.host` is
+    reached inside `mounts`), a mapping gives up its keys as well as its values
+    (so an `-e CLIENT=…` name is not a blind spot), any other iterable is
+    walked, and anything else is rendered with `str()` rather than skipped.
+    Nothing returns early on a type it does not recognise, which is the only way
+    a field added after this was written is still audited.
+    """
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Path):
+        yield str(value)
+    elif is_dataclass(value) and not isinstance(value, type):
+        for member in fields(value):
+            yield from _every_string_in(getattr(value, member.name))
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from _every_string_in(key)
+            yield from _every_string_in(item)
+    elif isinstance(value, Iterable):
+        for item in value:
+            yield from _every_string_in(item)
+    else:
+        yield str(value)
+
+
+def _spoken_by_field(run: docker.ContainerRun) -> dict[str, tuple[str, ...]]:
+    """What each of `ContainerRun`'s fields says, keyed by field name.
+
+    `dataclasses.fields()` is the enumeration; the field NAMES are only carried
+    so a failure says which field leaked, never to choose which ones to look at.
+    """
+    return {
+        member.name: tuple(_every_string_in(getattr(run, member.name))) for member in fields(run)
+    }
+
+
+def test_extract_runs_every_tool_read_only_as_the_user_in_out(tmp_path: Path) -> None:
+    """Audit by field: client `:ro` at /client, data rw at /out, cwd /out, `--user` on Linux."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    eng = engine(rec)
+    said = list(eng._extract(context(server_dir, client)))
+    assert CMANGOS is not None
+    tools = CMANGOS.extract.tools
+    assert [run.argv for run in rec.container_runs] == [tool.argv for tool in tools]
+    for run in rec.container_runs:
+        mounts = {m.guest: m for m in run.mounts}
+        assert mounts["/client"].host == client and mounts["/client"].read_only is True
+        assert mounts["/out"].host == server_dir / "data" and mounts["/out"].read_only is False
+        assert run.workdir == "/out"
+        assert run.user_args == _expected_user_args()
+        assert run.image == eng._image_ref(context(server_dir), CMANGOS.extract.image)
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is not None
+    assert [record.name for record in evidence.tools] == [tool.name for tool in tools]
+    assert evidence.client_path == str(client.resolve())
+    assert evidence.required_file_size is not None, "the required file's size is the resume rule"
+    assert any("Extraction finished" in line for line in said)
+
+
+def test_extract_needs_the_client_folder(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    with pytest.raises(InstallerError, match="client"):
+        list(engine(rec)._extract(context(server_dir, None)))
+    assert rec.container_runs == [], "nothing was run against a client that was never given"
+
+
+def test_extract_second_run_skips_finished_tools_and_redoes_only_the_lost_one(
+    tmp_path: Path,
+) -> None:
+    """The data/ folders plus the completion records drive the gate — not the state file."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._extract(context(server_dir, client)))
+    first = len(rec.container_runs)
+    assert first == 3, "a skip is only observable once something has actually run"
+    list(eng._extract(context(server_dir, client, completed=["extract"])))
+    assert len(rec.container_runs) == first, "every tool had a record and its counts; none re-ran"
+    assert CMANGOS is not None
+    lost = next(iter(CMANGOS.extract.tools[0].produces))
+    for path in (server_dir / "data" / lost).iterdir():
+        path.unlink()
+    list(eng._extract(context(server_dir, client, completed=["extract"])))
+    reran = rec.container_runs[first:]
+    assert [run.argv for run in reran] == [CMANGOS.extract.tools[0].argv]
+
+
+def test_extract_refuses_a_tool_that_exits_zero_with_a_shortfall(
+    tmp_path: Path,
+) -> None:
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    rec.produce = {name: 3 for name in rec.produce}
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._extract(context(server_dir, client)))
+    assert str(ENTRY.client.build) in str(refusal.value), "the refusal names the client build"
+    assert len(rec.container_runs) == 1, "the first tool fell short; nothing after it ran"
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is None or evidence.tools == (), "a record for a failed tool is never written"
+
+
+def test_extract_refuses_a_failed_tool_naming_it(tmp_path: Path) -> None:
+    """Named for the TOOL's name, so that is what is asserted — not the fixture's own echo.
+
+    Until 2026-09-01 the match was `expansion.MPQ`, which is the tail this test
+    itself put into `run_result` and which comes back in the refusal's "last
+    words". That is the fixture answering itself: the refusal could stop naming
+    the tool entirely and this test would still be green. The name comes off
+    the plan rather than being typed, so a renamed tool cannot leave a literal
+    behind that nothing produces.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    assert CMANGOS is not None
+    failed = CMANGOS.extract.tools[0]
+    rec = Recorder()
+    rec.run_result = docker.AttachedRun(2, ("ad: cannot open /client/Data/expansion.MPQ",))
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._extract(context(server_dir, client_folder(tmp_path))))
+    message = str(refusal.value)
+    assert failed.name in message, f"the refusal does not name the tool that failed: {message}"
+    assert "expansion.MPQ" in message, "the tool's own last words are quoted too"
+    assert len(rec.container_runs) == 1, "the first tool failed; nothing after it ran"
+
+
+def test_mmaps_runs_the_generator_over_data_and_records_it(tmp_path: Path) -> None:
+    """mmaps needs extraction evidence first (`run_mmaps` refuses without it), so extract runs."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._extract(context(server_dir, client)))
+    extracted = len(rec.container_runs)
+    said = list(eng._mmaps(context(server_dir)))
+    assert CMANGOS is not None
+    mmaps_runs = rec.container_runs[extracted:]
+    assert [run.argv for run in mmaps_runs] == [CMANGOS.mmaps.argv]
+    run = mmaps_runs[0]
+    assert {m.guest: m.host for m in run.mounts} == {"/out": server_dir / "data"}
+    assert run.workdir == "/out"
+    assert run.user_args == _expected_user_args()
+    assert run.image == eng._image_ref(context(server_dir), CMANGOS.extract.image)
+    assert len(list((server_dir / "data" / "mmaps").iterdir())) >= CMANGOS.mmaps.min_files
+    assert any("Map generation finished" in line for line in said)
+    list(eng._mmaps(context(server_dir, completed=["mmaps"])))
+    assert len(rec.container_runs) == extracted + 1, "an evidenced mmaps run is not repeated"
+
+
+def test_mmaps_refuses_before_any_extraction(tmp_path: Path) -> None:
+    server_dir = tmp_path / "srv"
+    (server_dir / "data").mkdir(parents=True)
+    rec = Recorder()
+    with pytest.raises(InstallerError, match="no extraction evidence"):
+        list(engine(rec)._mmaps(context(server_dir)))
+    assert rec.container_runs == []
+
+
+def test_no_mmaps_container_is_handed_anything_that_names_the_users_client(
+    tmp_path: Path,
+) -> None:
+    """`run_mmaps` deletes `data/mmaps`; this is the call site that keeps the client away from it.
+
+    Three legs held the guarantee inside `extract.py` before anything called
+    it: `run_mmaps`'s signature takes no client path, `MMAPS_DIR` is a single
+    relative component, and `MmapPlan` carries no folder field. This engine is
+    the first caller, and the leg it owns is the one that cannot be seen by
+    reading the call — `data_dir=ctx.server_dir / DATA_DIR` and
+    `data_dir=ctx.client_dir` are the same shape on the page, and the second
+    would hand `shutil.rmtree` a folder inside somebody's game install.
+
+    So the spec is audited by field rather than by eye — and the fields are
+    ENUMERATED off `ContainerRun` rather than listed here. Until 2026-09-01
+    they were listed: argv, the env VALUES, workdir, image, plus the mounts,
+    five of the eight. This mutant, in `_mmaps`, passed that audit:
+
+        user_args = (*self._user_args(), "-v", f"{ctx.client_dir}:/client:ro")
+
+    It hands the mmaps container the user's client as a real bind. Measured
+    that day on `yulon-ubuntu`: run alone, this test reported `1 passed`; the
+    file went red only at `test_mmaps_runs_the_generator_over_data_and_records_it`,
+    which pins `run.user_args` for its own unrelated reason. A guarantee a
+    neighbour happens to hold is not held by the test named for it, so the
+    walk now covers `user_args`, `ulimits`, `security_args` and env KEYS, and a
+    ninth field on the day it is added.
+
+    The `ctx` handed to `_mmaps` here DOES carry a client dir, deliberately — a
+    body that reached for `ctx.client_dir` would find one rather than a `None`
+    that fails for a different reason — and the client sits beside the server
+    dir under `tmp_path`, so neither is an ancestor of the other.
+
+    Both spellings of the client path are looked for, because a body that said
+    `ctx.client_dir.resolve()` would otherwise slip through wherever `tmp_path`
+    is reached by a link.
+
+    An `is_relative_to(client)` leg over the mounts stood here until
+    2026-09-01 and was REMOVED rather than repaired. It was lexical, so a `..`
+    component or a symlinked `data/` walked past it; and made non-lexical with
+    `.resolve()` it still could not fail under this fixture, because the exact
+    mount equality on the line above already settles the `mounts` field and
+    nothing here builds a link. It was catching nothing either way, which is
+    worse than absent — a line that reads as a guard is counted as one. The
+    resolved question is asked where a fixture actually builds the link:
+    `test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_runs`.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._extract(context(server_dir, client)))
+    list(eng._mmaps(context(server_dir, client)))
+    runs = _mmaps_runs(rec)
+    assert len(runs) == 1
+    for run in runs:
+        assert [(m.host, m.guest) for m in run.mounts] == [(server_dir / "data", "/out")]
+        spoken = _spoken_by_field(run)
+        seen = {text for texts in spoken.values() for text in texts}
+        assert (
+            str(server_dir / "data") in seen and run.image in seen
+        ), "the field walk found neither the data mount nor the image, so it audited nothing"
+        for field_name, texts in spoken.items():
+            for text in texts:
+                for spelling in (str(client), str(client.resolve())):
+                    assert spelling not in text, f"{field_name} names the client: {text!r}"
+
+
+def test_a_data_folder_that_leads_out_of_the_install_is_refused_before_anything_runs(
+    tmp_path: Path,
+) -> None:
+    """`data/` may be a link, and a link is where `rmtree` goes. Both stages, both attempts.
+
+    The fixture violates exactly one rule: `data/` under the server directory
+    resolves outside it. Everything else is a valid install — a real server
+    folder, a client that passes the TBC `ClientSpec`, a seam that answers
+    `linux` — so a refusal here can only be about the link.
+
+    What it cost while nothing refused, measured on this branch on 2026-09-01
+    before `_data_dir()` existed: `mkdir(parents=True, exist_ok=True)` returns
+    happily on a pre-existing symlink, `run_mmaps()` then hands
+    `shutil.rmtree` `data/mmaps` down the link, and the client's own folder was
+    gone afterwards. The sibling shape — `data/mmaps` itself being the link —
+    survives, because `shutil` refuses with "Cannot call rmtree on a symbolic
+    link"; that is `shutil`'s rule about its own last component and it says
+    nothing about the parent.
+
+    Asked TWICE, because a refusal that quietly repairs what it refuses would
+    answer differently the second time: both calls must refuse the same way and
+    the client must still be whole after both.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    kept = client / "Data" / "common.MPQ"
+    data = server_dir / "data"
+    try:
+        data.symlink_to(client, target_is_directory=True)
+    except (
+        OSError,
+        NotImplementedError,
+    ):  # pragma: no cover - needs privilege on Windows
+        pytest.skip("cannot create a directory symlink on this machine")
+    if data.resolve() == data:  # pragma: no cover - resolution disabled
+        pytest.skip("symlinks are not resolved on this filesystem")
+    rec = Recorder()
+    eng = engine(rec)
+    for attempt in (1, 2):
+        for stage in (eng._extract, eng._mmaps):
+            with pytest.raises(InstallerError) as refusal:
+                list(stage(context(server_dir, client)))
+            said = str(refusal.value)
+            assert str(data) in said, f"attempt {attempt}: the refusal does not name the link"
+            assert (
+                str(client.resolve()) in said
+            ), f"attempt {attempt}: the refusal does not say where the link leads"
+            # Scoped to the STAGE since 2026-09-05. "Nothing was run and
+            # nothing was removed" was a claim about the press, and the press
+            # runs `build` before either stage that calls `_data_dir()` --
+            # measured through `run()` on yulon-fedora 2026-09-05, "The build
+            # finished." lands four log lines above the extract stage's own
+            # refusal. `rec.container_runs` below is the fact half; this is the
+            # words half, and for one round only the fact half was asserted.
+            assert (
+                "This stage ran nothing and removed nothing." in said
+            ), f"attempt {attempt}: {said}"
+            assert (
+                "Nothing was run and nothing was removed" not in said
+            ), f"attempt {attempt}: {said}"
+        assert rec.container_runs == [], f"attempt {attempt}: a container ran over a linked data/"
+        assert kept.is_file(), f"attempt {attempt}: the client lost content to a refused install"
+
+
+def test_extract_and_mmaps_carry_the_stage_kinds_own_cancel_notes() -> None:
+    notes = {s.name: s.cancel_note for s in engine(Recorder()).stages()}
+    assert notes["extract"] == extract.EXTRACT_CANCEL_NOTE
+    assert notes["mmaps"] == extract.MMAPS_CANCEL_NOTE
+    assert "only the tool that was interrupted" in notes["extract"]
+    assert "restarts from the beginning" in notes["mmaps"]
+
+
+def test_the_selinux_answer_reaches_every_extraction_container_and_no_mmaps_one(
+    tmp_path: Path,
+) -> None:
+    """`label:disable` where the client is mounted; never on the one container without one.
+
+    Two facts in one test because they are one decision taken twice, in
+    opposite directions, and neither is safe to read off the other:
+
+    * The extraction containers hold the USER's client, which lives outside the
+      server directory and which no `chcon` of ours ever reaches; on an
+      enforcing box a confined container is denied it outright
+      (`yulon-fedora-gate`, Fedora 44, Docker 29.7.2, 2026-09-01). They get the
+      flag, and the ANSWER comes from the seam. **Not because `run_plan`'s
+      parameter is import-bound** — this docstring said so until 2026-09-01 and
+      it was false, twice over: that default is `None` and the module attribute
+      is looked up inside the call (`extract.py:755`), so a `monkeypatch` of
+      `platform.selinux_enforcing` would be seen either way. What the two
+      engines below prove is the thing that IS true: the two host shapes differ
+      only in what the SEAM answers, so an engine that asked the module instead
+      would give both of them the runner's own answer and the two would agree
+      instead of differing. `_extract`'s docstring carries the interpreter
+      output that settled it.
+    * The mmaps container binds `data/` under the server directory and nothing
+      else, and `stage_generate_compose` has already relabelled that directory,
+      so it is readable and writable while confined. The flag would turn a
+      container's confinement off to buy nothing at all, and `run_mmaps` is
+      right to omit it. What transfers from the extract stage is the evidence,
+      not the decision.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    client = client_folder(tmp_path)
+    disable = ("--security-opt", "label:disable")
+
+    fedora = Recorder()
+    eng = engine(fedora, selinux_enforcing=lambda: True)
+    list(eng._extract(context(server_dir, client)))
+    tools = list(fedora.container_runs)
+    list(eng._mmaps(context(server_dir)))
+    assert tools, "no extraction container ran, so this proves nothing about either half"
+    for run in tools:
+        assert run.security_args == (*extract.EXTRACT_HARDENING, *disable)
+    for run in _mmaps_runs(fedora):
+        assert run.security_args == extract.EXTRACT_HARDENING
+        assert "label:disable" not in run.security_args
+
+    ubuntu = Recorder()
+    other = tmp_path / "srv2"
+    other.mkdir()
+    list(engine(ubuntu, selinux_enforcing=lambda: False)._extract(context(other, client)))
+    for run in ubuntu.container_runs:
+        assert run.security_args == extract.EXTRACT_HARDENING
+
+
+def test_the_relabel_that_lets_mmaps_run_confined_happens_before_the_first_extraction(
+    tmp_path: Path,
+) -> None:
+    """A guard whose correctness is its POSITION in a sequence; a reorder must fail here.
+
+    `run_mmaps` carries no `label:disable` because its one bind, `data/` under
+    the server directory, inherits `container_file_t` from the relabel
+    `stage_generate_compose` does. That relabel was confirmed on
+    `yulon-fedora-gate` (Fedora 44, Enforcing, Docker 29.7.2, 2026-09-01); what
+    was NOT confirmed until these two stages were bound is that it happens
+    FIRST, because until then there was no pipeline to ask.
+
+    So both halves are asserted, and the live one is the point: a reorder of
+    `stages()` that looked like housekeeping would move a confined container in
+    front of the `chcon` that makes its bind readable, and the symptom would be
+    a Fedora install that fails hours in with a permission error. It fails here
+    instead.
+    """
+    rec = Recorder()
+
+    def relabel(path: Path) -> bool:
+        rec.calls.append("relabel")
+        return rec.relabel(path)
+
+    server_dir = tmp_path / "srv"
+    install(
+        rec,
+        server_dir,
+        client_folder(tmp_path),
+        selinux_enforcing=lambda: True,
+        relabel=relabel,
+    )
+    assert rec.relabelled == [server_dir], "the Fedora shape did not relabel; nothing was ordered"
+    first_container = next(i for i, call in enumerate(rec.calls) if call.startswith("run:"))
+    assert rec.calls.index("relabel") < first_container
+    names = [stage.name for stage in engine(rec).stages()]
+    assert names.index("generate-compose") < names.index("extract") < names.index("mmaps")
+    pinned = CmangosInstaller.STAGE_NAMES
+    assert pinned.index("generate-compose") < pinned.index("extract") < pinned.index("mmaps")
+
+
+# -- conf ---------------------------------------------------------------------
+
+
+def test_conf_copies_dist_files_out_of_the_server_image_once_and_patches_them(
+    tmp_path: Path,
+) -> None:
+    """One round trip to the image, then every key in the table set from `_secret_tokens()`.
+
+    Both streams are asserted against the catalog's OWN table rather than a
+    list spelled here, so a file added to `conf.files` has to show up in each
+    of them; a stage that copied one file and forgot another says so by name
+    instead of by a count.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    eng = engine(rec)
+    said = list(eng._conf(context(server_dir)))
+    assert CMANGOS is not None
+    image_ref = eng._image_ref(context(server_dir), CMANGOS.extract.image)
+    # Exactly one copy, of the built server image: "once" is the assertion, and
+    # `all(...)` over an empty list would have been true of a stage that copied
+    # nothing at all.
+    assert [image for image, _src, _dest in rec.copied] == [image_ref]
+    assert all(src.startswith(CMANGOS.conf.source_dir) for _image, src, _dest in rec.copied)
+    assert [line for line in said if line.startswith("Copied")] == [
+        f"Copied {name} out of the server image." for name in CMANGOS.conf.files
+    ]
+    assert [line for line in said if line.startswith("Patched")] == [
+        f"Patched {name}." for name in CMANGOS.conf.files
+    ]
+    etc = server_dir / "etc"
+    mangosd = (etc / "mangosd.conf").read_text(encoding="utf-8")
+    assert f'LoginDatabaseInfo = "{ENTRY.containers.db};3306;' in mangosd
+    assert DB_PASSWORD in mangosd
+    assert f"WorldServerPort = {ENTRY.ports.world}" in mangosd, "the per-install tokens too"
+    assert "{{" not in mangosd
+    assert "Other = 1" in mangosd, "keys the table does not name are left alone"
+    # The password is in the FILE because the emulator reads files. It is in no
+    # line this stage yields, and in no conf whose table never asks for it.
+    assert not [line for line in said if DB_PASSWORD in line]
+    assert DB_PASSWORD not in (etc / "ahbot.conf").read_text(encoding="utf-8")
+
+
+def test_conf_second_run_never_recopies_and_keeps_the_users_own_edit(
+    tmp_path: Path,
+) -> None:
+    """Copy-once is decided by the files on disk, and the copy double is not idempotent.
+
+    A second `copy_from_image` would append to `rec.copied` AND overwrite the
+    appended line, so neither half can cover for the other: the double answers
+    differently the second time in both records.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._conf(context(server_dir)))
+    copies = len(rec.copied)
+    assert copies, "nothing was copied the first time, so a second run proves nothing"
+    mangosd = server_dir / "etc" / "mangosd.conf"
+    with mangosd.open("a", encoding="utf-8") as fh:
+        fh.write("Rate.XP.Kill = 3\n")
+    again = list(eng._conf(context(server_dir, completed=["conf"])))
+    assert len(rec.copied) == copies, "an existing file is patched in place, never re-copied"
+    assert "Rate.XP.Kill = 3" in mangosd.read_text(encoding="utf-8")
+    assert not [line for line in again if line.startswith(("Copied", "Patched"))]
+    assert any("already" in line for line in again), "every patched key read back equal"
+
+
+def test_conf_asks_the_files_and_not_the_record_whether_to_copy(tmp_path: Path) -> None:
+    """A state file saying `conf` is finished does not stop the first copy.
+
+    The stage is recorded, but the record is not what skips it — the same rule
+    `write-dockerfile` is written against. `materialise()` looks at `etc/`, so
+    a state file that outlived the files it describes cannot leave an install
+    with no confs at all.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    list(engine(rec)._conf(context(server_dir, completed=["conf"])))
+    assert rec.copied
+    assert (server_dir / "etc" / "mangosd.conf").is_file()
+
+
+def test_conf_wraps_a_docker_failure_in_the_install_sentence(tmp_path: Path) -> None:
+    """Docker's own words kept, inside a sentence saying which step they belong to."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+
+    def broken(image: str, src: str, dest: Path) -> None:
+        raise docker.DockerCommandError("docker create exited 125: no such image")
+
+    with pytest.raises(InstallerError, match="no such image") as caught:
+        list(engine(Recorder(), copy_from_image=broken)._conf(context(server_dir)))
+    assert "could not be copied out of the server image" in str(caught.value)
+
+
+def test_conf_passes_the_modules_own_refusal_through_and_leaves_no_half_built_etc(
+    tmp_path: Path,
+) -> None:
+    """One `.dist` missing from the image: the module's sentence, not a second one round it.
+
+    `InstallerError` subclasses `RuntimeError`, so an `except` broadened round
+    `materialise()` would catch this refusal and wrap it inside "the
+    configuration files could not be copied…", reading as a broken machine for
+    what is the catalog and the image disagreeing.
+
+    The empty `etc/` is `materialise()`'s all-or-nothing rule seen from the
+    family, and it is the half that would be invisible later: a file that
+    exists is never re-copied, so a partial copy would be sailed straight past
+    by the next resume.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    del rec.conf_dist["ahbot.conf.dist"]
+    with pytest.raises(InstallerError) as caught:
+        list(engine(rec)._conf(context(server_dir)))
+    message = str(caught.value)
+    assert message.startswith("the built image ")
+    assert "ahbot.conf.dist" in message
+    assert "could not be copied out of the server image" not in message
+    assert not list((server_dir / "etc").glob("*.conf"))
+
+
+def test_conf_says_which_file_could_not_be_patched_and_does_not_say_it_twice(
+    tmp_path: Path,
+) -> None:
+    """A conf that cannot be READ keeps `apply_table()`'s own sentence, naming the path.
+
+    The one rule this fixture breaks is that `etc/mangosd.conf` is a directory
+    rather than a file — it EXISTS, so `materialise()` leaves it alone (a file
+    that is there is never re-copied), and `_read()` is what trips. That is the
+    only way to reach the re-raise arm without editing the catalog, and without
+    it the arm has no test: an `InstallerError` falling through to the broad
+    clause below it would be wrapped in "could not be patched", which names the
+    directory instead of the file and says the failure twice.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    eng = engine(rec)
+    list(eng._conf(context(server_dir)))
+    mangosd = server_dir / "etc" / "mangosd.conf"
+    mangosd.unlink()
+    mangosd.mkdir()
+    copies = len(rec.copied)
+    with pytest.raises(InstallerError) as caught:
+        list(eng._conf(context(server_dir)))
+    message = str(caught.value)
+    assert message.startswith(f"{mangosd} could not be read")
+    assert "could not be patched" not in message, "the module's sentence was wrapped in a second"
+    assert len(rec.copied) == copies, "a file that exists is not re-copied, directory or not"
+
+
+def test_the_conf_this_stage_leaves_behind_carries_the_mode_the_module_asks_for(
+    tmp_path: Path,
+) -> None:
+    """Owner-only on POSIX through both writers; a measured no-op on Windows (§24).
+
+    `conf.CONF_MODE` and the two writers are `test_conf.py`'s to prove. What is
+    asked here is the composition: that the file this STAGE leaves behind went
+    through `materialise()` and `apply_table()` rather than being written
+    beside them. `mangosd.conf` is copied and then patched on a first run, so
+    it has been through both.
+
+    Measured on PKGAME-LAPTOP, Windows 11 26200, CPython 3.13.14, 2026-09-01:
+    a file created by `write_text`, moved with `shutil.move` and chmodded
+    (`materialise`'s shape) and one written, chmodded and `os.replace`d
+    (`_write`'s shape) both read back `st_mode & 0o777 == 0o666`. The mode does
+    nothing there and the ACL is whatever the parent folder grants — that is
+    `pyplan/bug-checklist.md` §24, open, and not fixed by this task. The
+    assertion records what was measured rather than what the mode was for.
+    """
+    from yulon.catalog.families import conf as conf_kind
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    list(engine(Recorder())._conf(context(server_dir)))
+    mode = (server_dir / "etc" / "mangosd.conf").stat().st_mode & 0o777
+    if os.name == "nt":
+        assert mode == 0o666, "Windows started honouring the mode: re-read bug-checklist §24"
+    else:
+        assert mode == conf_kind.CONF_MODE
+
+
+def test_conf_is_recorded_and_sits_between_mmaps_and_start_db() -> None:
+    """Order and bookkeeping, because each is one keyword in `stages()`."""
+    stages = engine(Recorder()).stages()
+    names = [stage.name for stage in stages]
+    at = names.index("mmaps")
+    assert names[at + 1 : at + 3] == ["conf", "start-db"]
+    conf_stage = next(stage for stage in stages if stage.name == "conf")
+    assert conf_stage.recorded
+    assert conf_stage.cancel_note == "", "a copy and a patch are seconds; a Stop costs nothing"
+
+
+# -- import -------------------------------------------------------------------
+
+
+IMPORTED_OLDER_PLAN = docker.ImportState(
+    "imported",
+    f"{sqlplan.MARKER_TABLE} holds plan 0000000000000000; this app's plan differs",
+    complete=True,
+)
+"""A finished import recorded by a DIFFERENT plan than the one this app ships.
+
+`MarkerGate` reads any marker row as `imported` whatever its hash, and the hash
+lives in `detail`, which the family never parses. The fixture is the
+interesting one for that reason: a mismatched hash is a finished import from an
+older app, not a reason to import over it.
+"""
+
+
+def server_with_sql(tmp_path: Path) -> Path:
+    """A server dir holding every file the shipped plan names, under the source that owns it."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    lay = lay_sql(server_dir, SQL)
+    for source in ENTRY.emulator.sources:
+        dest = server_dir / source.dest
+        dest.mkdir(parents=True, exist_ok=True)
+        lay(dest)
+    return server_dir
+
+
+def ready_to_import(*answers: docker.ImportState) -> Recorder:
+    """A Recorder whose database container is up, answering the probe as told.
+
+    `db_started` is what lets `Recorder.probe()` give any answer but
+    `unreadable` — the real probe reaches the databases through `docker exec`,
+    so with nothing running it cannot say `absent` either. The import stage
+    runs after `start-db` for exactly that reason.
+    """
+    rec = Recorder()
+    rec.db_started = True
+    rec.probe_answers = list(answers)
+    return rec
+
+
+def plan_files_in_order() -> list[str]:
+    """The first line of every dump the plan applies, in the order `expand()` must apply them.
+
+    Derived from the plan rather than written out: phases in data order, then
+    each pattern's own files, and `lay_sql` names each file after its own path
+    so the line the client receives says which file it is. Statements are not
+    here — they carry no `-- <path>` line — and that is what makes the caller's
+    filter honest.
+    """
+    order: list[str] = []
+    for phase in SQL.phases:
+        for pattern in list(phase.files) + list((phase.into_each or {}).values()):
+            if "*" in pattern:
+                names = [pattern.replace("*", f"{n:04d}") for n in (1, 2)]
+            else:
+                names = [pattern]
+            order += [f"-- {name}" for name in names]
+    return order
+
+
+def entry_with_sql(plan: SqlPlan) -> CatalogEntry:
+    """`ENTRY` carrying a different `install.native.cmangos.sql`, still installable on linux."""
+    assert ENTRY.install.native is not None and CMANGOS is not None
+    data = CMANGOS.model_copy(update={"sql": plan})
+    native_block = ENTRY.install.native.model_copy(update={"cmangos": data})
+    return ENTRY.model_copy(
+        update={"install": ENTRY.install.model_copy(update={"native": native_block})}
+    )
+
+
+def engine_with_sql(plan: SqlPlan, rec: Recorder, **overrides: object) -> CmangosInstaller:
+    """An engine over a patched SQL plan, carrying the same test gate `engine()` attaches."""
+    eng = engine_for(entry_with_sql(plan), rec, **overrides)
+    eng._test_gate = native.CallableGate(rec.probe, rec.reset)  # type: ignore[attr-defined]
+    return eng
+
+
+def one_statement_plan(*statements: str) -> SqlPlan:
+    """The shipped plan with its phases replaced by one statement-only phase.
+
+    Statements and no files, so nothing has to be laid on disk and what is
+    asserted is the text that reached the client rather than a glob's ordering.
+    """
+    return SQL.model_copy(
+        update={
+            "phases": (SqlPhase(name="tokens", into=ENTRY.databases.world, statements=statements),)
+        }
+    )
+
+
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_schemas_answers_for_every_database_name_the_shipped_plan_spells(
+    game: str,
+) -> None:
+    """Keyed by NAME and not by role (A10): `sqlplan` looks the plan's own spellings up here.
+
+    Enumerated off the plan, so the question asked is the one
+    `sqlplan._check_plan_schemas()` asks — a name it cannot find is a refusal
+    raised before a single directory is listed, which would put the import's
+    failure two stages away from the mapping that caused it.
+
+    `Databases.schema_map()` is the role-keyed mapping this must not be: it
+    answers `world` -> `mangos`, and every name below is on the wrong side of
+    that arrow.
+
+    Over all three CMaNGOS entries, because the plan and the `databases` block
+    are two independently written halves of every entry and they agree only by
+    hand. Tortoise's plan spells `tw_world` where TBC's and vanilla's spell
+    `mangos`, and its `create` is empty where theirs lists four names — so the
+    entry whose names differ most is the one a `wow-tbc`-only check said
+    nothing about. The refusal half — a name the mapping does not carry — is
+    `test_sqlplan.py`'s, and is not repeated here.
+    """
+    entry = load_catalog().get(game)
+    native_block = entry.install.native
+    assert native_block is not None and native_block.cmangos is not None, game
+    plan = native_block.cmangos.sql
+    schemas = engine_for(entry, Recorder())._schemas()
+    named = {
+        *plan.create,
+        plan.marker_db,
+        *(rule.db for rule in plan.verify),
+        *(data.db for data in plan.player_data),
+    }
+    for phase in plan.phases:
+        if phase.into is not None:
+            named.add(phase.into)
+        named.update(phase.into_each or {})
+    assert named, f"{game}'s plan names no database at all; this fixture proves nothing"
+    assert named <= set(schemas), sorted(named - set(schemas))
+    assert all(schemas[name] == name for name in named)
+
+
+def test_schemas_carries_the_entrys_databases_and_nothing_the_entry_does_not_own() -> None:
+    """The other half: a name outside the entry is absent, so `sqlplan` can refuse it."""
+    schemas = engine(Recorder())._schemas()
+    db = ENTRY.databases
+    assert set(schemas) == {db.auth, db.characters, db.world, *db.extra}
+    assert "acore_world" not in schemas
+
+
+def test_the_import_applies_the_plans_dumps_in_the_plans_own_order(
+    tmp_path: Path,
+) -> None:
+    """Phases in data order; within a phase, each pattern's files in natural order."""
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    fed = [line for line in rec.sql_calls if line.startswith("-- ")]
+    assert fed == plan_files_in_order()
+
+
+def test_phase_zero_creates_the_plans_schemas_before_the_first_dump_is_streamed(
+    tmp_path: Path,
+) -> None:
+    """`create_schemas()` first, and it creates the plan's OWN names.
+
+    The first thing the client is handed names the first schema `create` lists,
+    which is what a mapping keyed by role could not produce: it would raise on
+    the lookup instead, and nothing would be created at all.
+    """
+    db = DB_FACTS
+    rec = ready_to_import(ABSENT)
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    first = SQL.create[0]
+    assert rec.sql_calls[0] == (
+        f"CREATE DATABASE IF NOT EXISTS `{first}` CHARACTER SET {db.charset};"
+    )
+    dumps = [i for i, line in enumerate(rec.sql_calls) if line.startswith("-- ")]
+    assert dumps and min(dumps) > 0
+    # About the LOG and nothing else. The sentence is built from `db.user` itself, so
+    # it reads the same whatever `create_schemas()` was handed — what the DATABASE was
+    # told is asserted off the script in
+    # `test_phase_zero_grants_to_the_user_the_entry_says_the_emulator_connects_as`.
+    assert any(db.user in line for line in said), "the log does not say whose user it was"
+
+
+def test_phase_zero_grants_to_the_user_the_entry_says_the_emulator_connects_as(
+    tmp_path: Path,
+) -> None:
+    """The account named in the SCRIPT, not the account named in the log line.
+
+    The stage yields "... and the <user> user." built from `db.user` itself, so
+    an assertion over what it SAID is satisfied by the family repeating its own
+    sentence whatever `create_schemas()` was handed. What the database was told
+    is the script, and the account lines are line 2 onward of it — `CREATE
+    DATABASE` is line 1 and was all this file could see until 2026-09-02.
+
+    The account and its grants are read together because that is the defect
+    that lives between them: the emulator connects as the entry's user while
+    the privileges were granted to another, and the server then starts and
+    cannot read its world. Every account the script names is enumerated rather
+    than one line matched, so a second account added below reads as a failure
+    instead of passing unseen.
+    """
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    phase_zero = rec.sql_scripts[0]
+    assert phase_zero.startswith("CREATE DATABASE "), phase_zero
+    named = set(re.findall(r"'([^']*)'@'%'", phase_zero))
+    assert named == {DB_FACTS.user}, phase_zero
+    granted = [line for line in phase_zero.splitlines() if line.startswith("GRANT ")]
+    assert granted, phase_zero
+    assert all(f"TO '{DB_FACTS.user}'@'%'" in line for line in granted), granted
+
+
+def test_every_database_the_import_speaks_to_is_asked_with_this_installs_password(
+    tmp_path: Path,
+) -> None:
+    """The secret resolved once at the top of the stage, read off every seam it reaches.
+
+    That one local is the `MYSQL_PWD` of phase 0, of every dump `apply()`
+    streams and of the marker, the `IDENTIFIED BY` the app user is given, and
+    `verify()`'s own connection secret. A password this install did not mint is
+    refused by all of them — and the stage would still yield exactly the same
+    sentences, because nothing it says carries the secret. Nothing here reads
+    the log for that reason.
+
+    `sql_secrets` is what ARRIVED at the double (`env["MYSQL_PWD"]` at
+    `exec_stdin`, the `password` argument at `sql_query`), so a call carrying
+    the wrong secret is visible even where the script it sent spells none. Both
+    seams are asserted to have been reached, or the enumeration could narrow to
+    one of them and still pass.
+    """
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert {"sql", "query"} <= set(rec.calls), rec.calls
+    assert len(rec.sql_secrets) == len(rec.sql_calls), rec.sql_calls
+    assert set(rec.sql_secrets) == {DB_PASSWORD}
+    identified = [
+        line
+        for script in rec.sql_scripts
+        for line in script.splitlines()
+        if "IDENTIFIED BY" in line
+    ]
+    assert identified, "the app user was never given a password"
+    assert all(f"IDENTIFIED BY '{DB_PASSWORD}'" in line for line in identified), identified
+
+
+def test_the_completion_marker_is_written_after_every_verify_rule_and_last_of_all(
+    tmp_path: Path,
+) -> None:
+    """The ordering the next install press depends on.
+
+    `MarkerGate` reads a marker row as `imported` whatever else is true, so a
+    marker written before the checks — or before the last dump — would leave a
+    hollow world that every later press skips. Both halves are asserted over
+    the same run because they are one ordering, not two.
+    """
+    rec = ready_to_import(ABSENT)
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    marker_at = next(i for i, s in enumerate(rec.sql_calls) if sqlplan.MARKER_TABLE in s)
+    asked = {rule.query for rule in SQL.verify}
+    verify_ats = [i for i, s in enumerate(rec.sql_calls) if s in asked]
+    assert len(verify_ats) == len(SQL.verify), rec.sql_calls
+    assert marker_at > max(verify_ats)
+    assert marker_at == len(rec.sql_calls) - 1
+    assert said[-1] == "The databases are imported and marked complete."
+
+
+def test_the_import_asks_the_databases_what_state_they_are_in_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """The spine probes; the family watches that answer rather than asking again.
+
+    A second probe is a second question. Between the two the databases can have
+    become something else, and the branch this stage then takes would not be
+    the branch the spine's table took — the spine would have said "run" over a
+    database this stage then treats as finished, or the reverse.
+    """
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.calls.count("probe") == 1, rec.calls
+
+
+def test_the_remembering_gate_keeps_the_last_answer_and_has_none_before_the_first_probe() -> None:
+    """What `_import` reads instead of asking the databases a second question.
+
+    The family branches on `gate.last` once `stage_import()` has returned, so
+    this wrapper has to answer four things: nothing at all before a probe, the
+    inner gate's OWN answer passed through rather than replaced, the LAST of
+    several answers rather than the first — a wrapper keeping the first would
+    hand the family the state from before the reset instead of the state after
+    it — and a `reset()` that reaches the inner gate and is not itself an
+    answer about the databases.
+
+    Driven through the real `CallableGate`, which is the gate an install
+    actually wraps, and the inner pair records what it was asked, so a second
+    probe smuggled in here reads as an extra entry rather than as the same
+    answer twice.
+    """
+    remaining = [PARTIAL, IMPORTED]
+    asked: list[str] = []
+
+    def probe() -> docker.ImportState:
+        asked.append("probe")
+        return remaining.pop(0)
+
+    def reset() -> tuple[str, ...]:
+        asked.append("reset")
+        return (ENTRY.databases.world,)
+
+    gate = cmangos._Remembering(native.CallableGate(probe, reset))
+    assert gate.last is None, "it answered about databases nobody had asked about"
+    assert gate.probe() is PARTIAL
+    assert gate.last is PARTIAL
+    assert gate.reset() == (ENTRY.databases.world,)
+    assert gate.last is PARTIAL, "a reset is not an answer about what the databases hold"
+    assert gate.probe() is IMPORTED
+    assert gate.last is IMPORTED
+    assert asked == ["probe", "reset", "probe"]
+
+
+def test_the_import_leaves_a_finished_one_alone_even_when_an_older_plan_wrote_it(
+    tmp_path: Path,
+) -> None:
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.sql_calls == [], "nothing was sent to the database"
+    assert any("leaving them alone" in line for line in said), said
+
+
+def test_the_import_leaves_a_populated_database_that_is_complete_alone(
+    tmp_path: Path,
+) -> None:
+    """`populated` + `complete` is a finished import, and it is not the `imported` branch.
+
+    It has to be read off the SAME answer the spine's table returned on: the
+    spine returns for it without importing, so a family recognising only
+    `imported` would go on and run the whole plan over a database with a
+    person's characters in it.
+    """
+    full = docker.ImportState("populated", "every schema has tables and rows", complete=True)
+    rec = ready_to_import(full)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.sql_calls == []
+
+
+def test_the_import_clears_a_half_written_database_before_it_runs(
+    tmp_path: Path,
+) -> None:
+    rec = ready_to_import(PARTIAL, IMPORTED)
+    rec.reset_answer = (ENTRY.databases.world,)
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.calls.index("reset") < rec.calls.index("sql")
+    assert any(f"Cleared {ENTRY.databases.world}" in line for line in said), said
+    assert any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls), "and the import then ran"
+
+
+def test_the_import_refuses_a_database_that_already_holds_somebodys_data(
+    tmp_path: Path,
+) -> None:
+    rec = ready_to_import(POPULATED_HALF)
+    with pytest.raises(InstallerError, match="already hold data"):
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.sql_calls == []
+
+
+def test_the_import_refuses_a_database_that_could_not_be_asked(tmp_path: Path) -> None:
+    """No `db_started`, so the probe answers `unreadable` the way the real one does."""
+    rec = Recorder()
+    with pytest.raises(InstallerError, match="could not be asked"):
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert rec.sql_calls == []
+
+
+def test_a_warn_phase_failure_names_the_file_by_its_server_relative_path_and_carries_on(
+    tmp_path: Path,
+) -> None:
+    """`on_error: warn` is the scripts' `2>/dev/null` made visible, not made fatal."""
+    phase = next(p for p in SQL.phases if p.on_error == "warn" and p.files)
+    failing = phase.files[0].replace("*", "0001")
+    rec = ready_to_import(ABSENT)
+    rec.failing_sql = f"-- {failing}"
+    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert any(failing in line for line in said), said
+    assert any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls), "the import still finished"
+
+
+def test_a_fail_phase_failure_stops_the_import_and_leaves_no_marker(
+    tmp_path: Path,
+) -> None:
+    phase = next(p for p in SQL.phases if p.on_error == "fail" and p.files)
+    failing = phase.files[0].replace("*", "0001")
+    rec = ready_to_import(ABSENT)
+    rec.failing_sql = f"-- {failing}"
+    with pytest.raises(InstallerError, match=re.escape(failing)):
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
+
+
+def test_a_verify_shortfall_refuses_and_writes_no_marker(tmp_path: Path) -> None:
+    """The count the database answered reaches the refusal, and no marker is written.
+
+    `4242` fails the first rule, passes the second, and appears nowhere else in
+    the sentence: the family's summary of the RULES quotes every `min` and every
+    query, so a refusal that had lost `verify()`'s own answer would still name
+    the rule. The number is the only part that can only have come from the
+    database.
+    """
+    rec = ready_to_import(ABSENT)
+    rec.query_answer = "4242\n"
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    said = str(refusal.value)
+    assert "4242" in said, said
+    assert SQL.verify[0].query in said
+    assert "No completion marker was written" in said
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
+
+
+def test_a_verify_rule_that_could_not_be_answered_is_a_refusal_and_not_a_marker(
+    tmp_path: Path,
+) -> None:
+    """A database that will not answer is not a database that answered zero."""
+
+    def unanswerable(*args: object, **kwargs: object) -> str:
+        raise docker.DockerCommandError("Error: No such container: yulon-tbc-db")
+
+    rec = ready_to_import(ABSENT)
+    with pytest.raises(InstallerError, match="No such container"):
+        list(engine(rec, sql_query=unanswerable)._import(context(server_with_sql(tmp_path))))
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
+
+
+def test_a_phase_statement_reaches_the_client_with_its_tokens_filled_in(
+    tmp_path: Path,
+) -> None:
+    """Statements are filled through the one `composegen.fill`; dumps never are.
+
+    The value asserted is one only the install knows — the entry's database
+    user — arriving in the text the client was handed, rather than that a fill
+    happened.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(ABSENT)
+    plan = one_statement_plan("SELECT '{{DB_USER}}' AS who")
+    list(engine_with_sql(plan, rec)._import(context(server_dir)))
+    assert f"SELECT '{DB_FACTS.user}' AS who" in rec.sql_calls, rec.sql_calls
+
+
+def test_a_phase_statement_naming_the_password_is_filled_from_the_secret_half(
+    tmp_path: Path,
+) -> None:
+    """The shipped Tortoise plan writes `IDENTIFIED BY '{{DB_PASSWORD}}'` as a statement.
+
+    So the import spends `_secret_tokens()` and not `_public_tokens()`. Handed
+    the public half, `expand()` refuses the unknown token and nothing is
+    applied at all — which is why the assertion is that the password ARRIVED,
+    and not that some mapping was passed.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(ABSENT)
+    plan = one_statement_plan("CREATE USER 'x'@'%' IDENTIFIED BY '{{DB_PASSWORD}}'")
+    list(engine_with_sql(plan, rec)._import(context(server_dir)))
+    assert f"CREATE USER 'x'@'%' IDENTIFIED BY '{DB_PASSWORD}'" in rec.sql_calls, rec.sql_calls
+
+
+def test_a_stop_arriving_during_the_last_dump_is_caught_before_verify_and_the_marker(
+    tmp_path: Path,
+) -> None:
+    """The window `sqlplan.apply()` cannot close, because it checks cancel BEFORE each run.
+
+    A Stop pressed while the last file is streaming is seen by nothing inside
+    `apply()` — there is no run left after it to check it — so `apply()`
+    returns normally, and without the family's own check the stage would go on
+    to verify the databases and write the completion marker for an import the
+    user stopped. The marker is what makes that permanent: the next press reads
+    a marker row as `imported` and leaves the half-loaded world alone.
+
+    The Stop is set from inside the seam, on the way out of the last run, so
+    the window is the real one rather than a cancel that was pending all along
+    — and that run is asserted to have gone out, which is what says the refusal
+    came from after `apply()` rather than from inside it. The two checks word
+    it differently and that is what tells them apart: `sqlplan._check_cancel`
+    says "The import was stopped", the spine's says "the install was stopped".
+
+    Over a one-statement plan, because the trigger has to fire on the run
+    `apply()` has no successor for, and only a plan short enough to name its
+    own last run makes that identifiable without the test re-deriving
+    `expand()`'s ordering. Written first against the shipped plan's last DUMP,
+    which failed on 2026-09-02 with `sqlplan`'s wording: `expand()` puts a
+    phase's statements before its files, so dumps are not where that plan ends
+    and the Stop was caught one run early, inside `apply()`.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(ABSENT)
+    stop = threading.Event()
+    last = "SELECT 'the last run this plan has'"
+    inner = rec.exec_stdin
+
+    def exec_stdin(
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        proc = inner(container, argv, source, env=env, wsl_distro=wsl_distro)
+        if rec.sql_calls[-1] == last:
+            stop.set()
+        return proc
+
+    eng = engine_with_sql(one_statement_plan(last), rec, exec_stdin=exec_stdin)
+    with pytest.raises(InstallerError, match="the install was stopped"):
+        list(eng._import(context(server_dir, cancel=stop)))
+    assert last in rec.sql_calls, "the Stop was meant to arrive after the last run went out"
+    asked = {rule.query for rule in SQL.verify}
+    assert not [s for s in rec.sql_calls if s in asked], "the databases were checked anyway"
+    assert not [s for s in rec.sql_scripts if sqlplan.MARKER_TABLE in s], "a marker was written"
+
+
+def test_a_marker_that_could_not_be_written_arrives_as_the_modules_own_sentence(
+    tmp_path: Path,
+) -> None:
+    """`write_marker()` has already named the marker; wrapping it would name it twice.
+
+    `sqlplan._run_sql()` turns both of its failures into an `InstallerError`
+    that is already the sentence a user reads. The clause below it catches
+    `RuntimeError` and `InstallerError` is one, so without the narrow arm ahead
+    of it the refusal arrives folded inside a second sentence with a class name
+    in the middle of it — "The import finished but its completion marker could
+    not be written (InstallerError: The import stopped while writing the import
+    marker: ERROR 1064 ...)".
+
+    The switch is the marker table's own name, and the fixture asserts that
+    exactly one script this install streamed contained it, so the refusal under
+    test is the marker's and not some dump's.
+    """
+    rec = ready_to_import(ABSENT)
+    rec.failing_sql = sqlplan.MARKER_TABLE
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    hit = [s for s in rec.sql_scripts if rec.failing_sql in s]
+    assert hit == [rec.sql_scripts[-1]], "the switch failed something other than the marker"
+    said = str(refusal.value)
+    assert said.startswith("The import stopped while writing the import marker: "), said
+    assert "could not be written" not in said, said
+    assert "InstallerError" not in said, said
+
+
+def test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else(
+    tmp_path: Path,
+) -> None:
+    """A4: the spine says every stage's note, so the body yields none of its own.
+
+    Read off a whole install rather than off `stages()`, because a
+    `cancel_note=` keyword that is present but bound to the wrong stage reads
+    identically in the tuple — the shape of the AzerothCore incident
+    `test_the_build_cancel_note_is_said_at_the_build_and_not_before_every_stage`
+    is written against.
+    """
+    rec = Recorder()
+    said = install(rec, tmp_path / "srv", client_folder(tmp_path))
+    at = said.index("--- import")
+    assert said[at + 1] == native.IMPORT_CANCEL_NOTE
+    assert said.count(native.IMPORT_CANCEL_NOTE) == 1
+
+
+def test_import_is_recorded_and_sits_between_start_db_and_up() -> None:
+    """Order and bookkeeping, because each is one keyword in `stages()`."""
+    stages = engine(Recorder()).stages()
+    names = [stage.name for stage in stages]
+    at = names.index("start-db")
+    assert names[at + 1 : at + 3] == ["import", "up"]
+    stage = next(s for s in stages if s.name == "import")
+    assert stage.recorded, "a finished import must not be re-run by a resume"
+
+
+def test_the_real_gate_asks_this_installs_container_with_this_installs_password(
+    tmp_path: Path,
+) -> None:
+    """The one run of the unpatched `_gate()`; `gated` replaces it everywhere else here.
+
+    A `MarkerGate` built against another install's container answers `absent`
+    for a database that is full, and the import then runs again over a working
+    server — `MarkerGate`'s own docstring says so. Its wiring is therefore
+    asserted by what reached the seam, not by the class of the object returned.
+
+    The schema names in the answer are the second half: `self._names` is what
+    `_plan_schemas(plan, schemas)` made of the plan through `_schemas()`, so a
+    gate handed the wrong mapping could not have produced them.
+    """
+    seen: list[tuple[str, str, str, str | None, str]] = []
+
+    def spy(
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
+    ) -> str:
+        seen.append((container, client, password, schema, statement))
+        return ""  # no databases at all on this server yet
+
+    rec = Recorder()
+    state = REAL_GATE(engine(rec, sql_query=spy), context(tmp_path)).probe()
+    assert seen, "the gate asked the database nothing"
+    # One question per plan schema, and every one of them to the SAME place: it is a
+    # call going somewhere else that this asserts against, not the number of calls.
+    assert set(seen) == {
+        (
+            ENTRY.container_spec().db,
+            DB_FACTS.client,
+            DB_PASSWORD,
+            None,
+            "SHOW DATABASES",
+        )
+    }
+    assert state.state == "absent"
+    for name in {*SQL.create, SQL.marker_db, *(rule.db for rule in SQL.verify)}:
+        assert name in state.detail, state.detail
+
+
+# -- the one guard on a Tortoise password ------------------------------------
+
+
+def test_the_compose_scalar_set_is_the_only_guard_on_the_tortoise_password(
+    tmp_path: Path,
+) -> None:
+    """`wow-tortoise`'s `sql.create` is empty, so `create_schemas()`'s value checks never run.
+
+    Measured 2026-09-02 against a mutant that dropped the single quote from
+    `composegen._UNSAFE_SCALAR_CHARS`: a `.db_password` holding
+    `tortoise-a'b--x` rendered into the compose files, into `.env` and into both
+    conf files, and `IDENTIFIED BY 'tortoise-a'b--x'` reached the SQL stream.
+    The whole suite stayed green through it. `resolve_secrets()` takes an
+    existing file AS WRITTEN, so the value is the user's, not this app's.
+
+    The neighbour is `sqlplan._refuse_unquotable()`, which holds the quote too.
+    It is asserted unreached twice over: `create_schemas()` is handed the same
+    bad password and an `exec_stdin` that fails the test if it is called at all,
+    and the refusal that does arrive is pinned to composegen's words rather than
+    to sqlplan's.
+    """
+    entry = installable(load_catalog().get("wow-tortoise"))
+    native_block = entry.install.native
+    assert native_block is not None and native_block.cmangos is not None
+    plan = native_block.cmangos.sql
+    assert plan.create == (), "the premise: with a `create` list this test would prove nothing"
+
+    bad = "tortoise-a'b--x"
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    password_file = entry.install.password.file
+    assert password_file is not None, "a generated plan names the file it persists to"
+    (server_dir / password_file).write_text(bad + "\n", encoding="utf-8")
+    eng = engine_for(entry, Recorder())
+    assert eng.resolve_secrets(server_dir).db_password == bad, "the file is read as written"
+
+    def never_executed(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("create_schemas() ran a statement for a plan with no `create` list")
+
+    sqlplan.create_schemas(
+        plan,
+        container=entry.containers.db,
+        client="mysql",
+        password=bad,
+        # The identity map over the plan's own database NAMES, which is what
+        # `sqlplan` looks every one of them up in; `entry.schema_map()` is keyed
+        # by role and answers for none of them.
+        schemas=eng._schemas(),
+        user=native_block.db.user,
+        charset=native_block.db.charset,
+        exec_stdin=never_executed,
+    )
+
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(
+            game_id=entry.id,
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family="cmangos",
+        ),
+        cancel=None,
+        secrets=native.Secrets(db_password=bad),
+    )
+    with pytest.raises(InstallerError) as caught:
+        list(eng.stage_generate_compose(ctx))
+    said = str(caught.value)
+    assert "cannot be written into a compose file safely" in said
+    assert "into SQL safely" not in said, "that is sqlplan's refusal, not the one under test"
+    assert repr("'") in said, "the refusal must name the character it refused"
+
+
+def test_the_stage_hands_the_generator_the_success_codes_the_entry_declares(
+    tmp_path: Path,
+) -> None:
+    """The WIRE between the catalog and the stage, which nothing else asserts.
+
+    `9c93ad6e` gave `MmapPlan` a `success_codes` field, set `[1]` on
+    `wow-tortoise` because that fork's MoveMapGen returns 1 when it finishes,
+    and made `run_mmaps` consult it. It shipped with four mutations killed and a
+    gap none of them touched: every one of those tests either called
+    `run_mmaps` DIRECTLY with a plan built in the test, or read the field off
+    the catalog without executing anything. `_mmaps()` below passes `data.mmaps`
+    whole, and a mutant that narrowed it there --
+
+        extract.run_mmaps(replace(data.mmaps, success_codes=(0,)), ...)
+
+    -- restores the original four-hour-Tortoise-failure end to end while every
+    one of those tests stays green. Value proven present in the catalog, value
+    proven honoured by the function, and the wire between them unasserted. A
+    review named it (2026-09-03).
+
+    So this drives the real Tortoise entry through the real stage with a
+    generator that exits 1, and requires the stage to call that a success. The
+    extraction ahead of it exits 0, because `run_mmaps` refuses without
+    extraction evidence and this test is not about that refusal.
+    """
+    entry = installable(load_catalog().get("wow-tortoise"))
+    native = entry.install.native
+    assert native is not None and native.cmangos is not None
+    assert native.cmangos.mmaps.success_codes == (
+        1,
+    ), "this test is only meaningful while wow-tortoise declares a non-zero success code"
+
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = Recorder()
+    eng = engine_for(entry, rec)
+    list(eng._extract(context(server_dir, client_folder(tmp_path))))
+    extracted = len(rec.container_runs)
+
+    # The generator finishes and says so the way its own source does. The
+    # double is told 1 means "it worked" for the same reason the catalog is:
+    # otherwise it writes no output and this test measures the fixture's
+    # assumption rather than the stage's behaviour.
+    rec.run_result = docker.AttachedRun(1, ("Movemap build is complete!",))
+    rec.success_returncodes = (1,)
+    said = list(eng._mmaps(context(server_dir)))
+
+    assert len(rec.container_runs) == extracted + 1, "the generator did not run"
+    assert any("Map generation finished" in line for line in said), said
+    evidence = extract.read_evidence(server_dir / "data")
+    assert evidence is not None and evidence.record_for(extract.MMAPS_TOOL) is not None, (
+        "a Tortoise generator that reported the status its own source calls success was "
+        "treated as a failure by the stage"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The update-level check (2026-09-03).
+#
+# The `core updates` phase is `on_error: warn`. On the live Vanilla gate 171 of
+# its 172 files failed with `ERROR 1054 Unknown column 'required_<previous>'`
+# and the install ended "WoW Vanilla is installed and running". Asked afterwards,
+# the database turned out to be at the NEWEST update of all four schemas -- the
+# base dump already contained them, and each file's first statement renames the
+# previous file's column, so a dump already past them cannot apply them again.
+#
+# The defect is not that run. It is that the harmless reading and the
+# catastrophic one -- a realm genuinely 171 updates behind, with `warn` covering
+# a broken world -- print the SAME transcript, and nothing asked the question
+# that separates them.
+
+
+def test_the_import_asks_every_flagged_schema_what_update_level_it_reached(
+    tmp_path: Path,
+) -> None:
+    """One question per schema, naming the column the LAST file applied leaves behind.
+
+    The expectation is read off the runs `apply()` streamed, not off a second
+    evaluation of the plan's globs: a glob resolved twice can disagree with
+    itself (a file added between the two, a different working directory) and
+    the check would then be about a file nobody imported. `lay_sql` writes
+    `0001.sql` and `0002.sql` per glob, so `0002` is what the phase ended on
+    and `required_0002` is what the schema must carry.
+    """
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+
+    flagged = [p for p in SQL.phases if p.assert_update_level]
+    assert flagged, "wow-tbc carries the flag on its core updates phase; this test is about it"
+    # `into_each`'s keys are manifest names where the entry declares one and the
+    # physical schema otherwise, which is exactly what `_schema()` resolves at
+    # import time -- `mangos`, `realmd`, `characters` and `logs` are their own
+    # names on this entry. Resolved the same way here rather than assumed either way.
+    resolve = ENTRY.schema_map()
+    schemas = sorted(
+        resolve.get(name, name) for phase in flagged for name in (phase.into_each or {})
+    )
+    asked = [s for s in rec.sql_calls if "information_schema.columns" in s]
+    assert len(asked) == len(schemas), f"{len(asked)} questions for {len(schemas)} schemas: {asked}"
+    for schema in schemas:
+        assert any(
+            f"table_schema='{schema}'" in s for s in asked
+        ), f"{schema} was never asked what update level it is at: {asked}"
+    assert all(
+        "column_name='required_0002'" in s for s in asked
+    ), "the column asked for is not the one the phase's LAST file leaves behind: " + str(asked)
+
+
+def test_a_schema_that_never_reached_its_update_level_refuses_and_writes_no_marker(
+    tmp_path: Path,
+) -> None:
+    """The failure the 171 warnings could have been, told as a refusal instead of a success line.
+
+    Everything else about this run passes -- every `VerifyRule` count is met,
+    every file "applied" -- and the only thing wrong is the one thing the old
+    instruments could not see. The refusal names the column and the file it came
+    from, because "which update did it stop at" is the actionable half: a user
+    reading it can look in `sql/updates/` and see how far behind they are.
+    """
+    rec = ready_to_import(ABSENT)
+    rec.column_answer = "0\n"
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    said = str(refusal.value)
+    assert "required_0002" in said, said
+    assert "is not at the update level" in said, said
+    assert "No completion marker was written" in said, said
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls), (
+        "the marker was written over a schema that never finished its update chain, which "
+        "makes every later install press skip the import entirely"
+    )
+
+
+def test_an_update_level_that_could_not_be_asked_is_a_refusal_not_a_pass(
+    tmp_path: Path,
+) -> None:
+    """Same rule as `verify()`: unanswerable is never satisfied.
+
+    This runs immediately before the marker that makes the import skippable
+    forever, so a question that could not be put is the one answer that must
+    not be read as yes.
+    """
+    rec = ready_to_import(ABSENT)
+    rec.column_answer = ""
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    assert "0 rows" in str(refusal.value), str(refusal.value)
+    assert not any(sqlplan.MARKER_TABLE in s for s in rec.sql_calls)
+
+
+def test_a_phase_without_the_flag_is_never_asked_about_its_update_level(
+    tmp_path: Path,
+) -> None:
+    """The check is opt-in per phase, and the opt-out has to be real.
+
+    `content updates` is also `on_error: warn` and also a pile of numbered
+    files, but its dump carries its own `content_*` column rather than the
+    `required_*` chain, so the same question asked of it would be a wrong
+    question confidently answered. The flag is what keeps them apart.
+    """
+    unflagged = [p for p in SQL.phases if not p.assert_update_level and (p.files or p.into_each)]
+    assert unflagged, "the plan has phases without the flag; this test compares against them"
+    rec = ready_to_import(ABSENT)
+    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    asked = [s for s in rec.sql_calls if "information_schema.columns" in s]
+    resolve = ENTRY.schema_map()
+    flagged_schemas = {
+        resolve.get(name, name)
+        for phase in SQL.phases
+        if phase.assert_update_level
+        for name in (phase.into_each or {})
+    }
+    for statement in asked:
+        assert any(f"table_schema='{schema}'" in statement for schema in flagged_schemas), (
+            "a schema no flagged phase targets was asked about its update level: " + statement
+        )
+
+
+def test_the_flag_cannot_be_set_on_a_phase_that_applies_no_files() -> None:
+    """A `statements` phase has no filename to read a level off, so the flag is refused.
+
+    Allowing it would make the flag dead text on such a phase -- present,
+    meaning nothing, and reading as a check that had been made.
+    """
+    from pydantic import ValidationError
+
+    from yulon.catalog.catalog import SqlPhase
+
+    with pytest.raises(ValidationError, match="last file applied"):
+        SqlPhase(
+            name="realm row",
+            into="realmd",
+            statements=("DELETE FROM realmlist;",),
+            assert_update_level=True,
+        )
+
+
+def test_the_shipped_cmangos_entries_assert_the_update_level_of_their_core_updates() -> None:
+    """The flag has to be in the catalog, not merely available in the model.
+
+    `wow-tortoise` is deliberately absent: it has no `core updates` phase at
+    all -- its core applies its own migrations through
+    `Database.AutoUpdate.Path`, which is a different mechanism with a different
+    table -- so requiring the flag of every CMaNGOS entry would be requiring it
+    of a phase that does not exist.
+    """
+    from yulon.catalog.catalog import load_catalog
+
+    for game in ("wow-tbc", "wow-vanilla"):
+        native_block = load_catalog().get(game).install.native
+        assert native_block is not None and native_block.cmangos is not None
+        phases = {phase.name: phase for phase in native_block.cmangos.sql.phases}
+        core = phases.get("core updates")
+        assert core is not None, f"{game} no longer has the phase this test is about"
+        assert core.on_error == "warn", (
+            f"{game} core updates is no longer `warn`; if it now fails on the first error "
+            "the update-level check is belt and braces rather than the only instrument"
+        )
+        assert core.assert_update_level, (
+            f"{game} core updates can fail 171 of 172 files and still report the install "
+            "finished; without this flag nothing asks the database which reading it was"
+        )
+
+
+def test_a_cancelled_tbc_install_offers_the_users_own_compose_file(tmp_path: Path) -> None:
+    """The real path the copy's blocker was found on, driven here so it cannot come back.
+
+    `f9dec5ef` had `installer.cancelled_install_message()` decide that a
+    `native.STATE_FILE` in the folder PROVED the folder was empty when the
+    attempt began, and therefore that any compose file the app did not write
+    "came down with the server's source". Reproduced on m910q 2026-09-05
+    through this engine, into a folder holding a user's own `.git`,
+    `my-notes.txt` and `docker-compose.yml`: the record was written, the modal
+    told the user their own file came down with the clone, said "There is no
+    server behind that file", and withheld the `Use existing...` offer that
+    `attach_existing()` would have honoured.
+
+    Two engine facts make that wording impossible for this family, and both are
+    read off THIS run rather than restated. Every clone spec the engine handed
+    the seam lands under `src/`, so nothing this install downloads can put a
+    file at the server root -- asserted against the specs, not against the
+    catalog, because the catalog is what the copy already reads and an
+    assertion over it would only agree with itself. And the record is there
+    anyway, written by `_run_one()` after `clone-sources`, in a folder that was
+    never empty -- which is exactly why the copy may not read it as proof of
+    emptiness.
+
+    That second fact is a defect in the engine, not a design: `_claim_folder()`
+    exempts any folder holding a `.git`, and only a `dest: "."` family redeems
+    that exemption at the clone, so this install walks into a user's checkout.
+    Filed in `pyplan/checklist.md`, NOT fixed here. Closing it will not turn
+    this test red: what is asserted below is what the user is told and that the
+    user's own file survived, and the record assertion carries the sentence to
+    read if it ever stops being true.
+    """
+    rec = Recorder()
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / ".git").mkdir()
+    (server / "my-notes.txt").write_text("mine\n", encoding="utf-8")
+    (server / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    cancel = threading.Event()
+    rec.on_clone = lay_sql(server, SQL)
+    lines: list[str] = []
+    with pytest.raises(InstallerError):
+        for line in engine(rec).run(
+            InstallOptions(server_dir=server, client_dir=client_folder(tmp_path)),
+            cancel=cancel,
+        ):
+            lines.append(line)
+            if "Sources are in place" in line:
+                cancel.set()
+
+    assert rec.clones, "no clone was asked for, so this run says nothing about where they land"
+    assert all(spec.dest != server for spec in rec.clones), (
+        "a TBC clone was pointed at the server dir itself, which is the one thing that would "
+        "make the 'came down with the server's source' wording true here: "
+        + repr([str(spec.dest) for spec in rec.clones])
+    )
+    assert (server / native.STATE_FILE).is_file(), (
+        "the premise is gone -- the engine no longer records a stage in a folder that was not "
+        "empty. If that is because the `.git` exemption is now redeemed for CMaNGOS, this "
+        "test's setup is the fix's own test case and should move there"
+    )
+    assert (server / "my-notes.txt").is_file(), "the user's own file was removed by this run"
+
+    note = cancelled_install_message(ENTRY, server)
+    assert "came down with the server's source" not in note, (
+        "the app called the user's own compose file a clone artefact, in a folder holding the "
+        "user's own checkout: " + note
+    )
+    assert "no server behind that file" not in note, note
+    assert "Use existing" in note, (
+        "the folder `attach_existing()` accepts got no offer to attach it: " + note
+    )
+    assert f"Delete {server}" not in note and f"delete {server}" not in note, note

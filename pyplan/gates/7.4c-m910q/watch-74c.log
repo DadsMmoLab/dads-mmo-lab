@@ -1,0 +1,25 @@
+23:25:21  watching /home/pk/tbc-74c.log for the import stage (kill after 8 SQL files)
+23:30:21  heartbeat 15: at stage --- build
+23:35:21  heartbeat 30: at stage --- build
+23:40:22  heartbeat 45: at stage --- build
+23:45:22  heartbeat 60: at stage --- build
+23:50:22  heartbeat 75: at stage --- build
+23:55:22  heartbeat 90: at stage --- build
+00:00:23  heartbeat 105: at stage --- build
+00:05:23  heartbeat 120: at stage --- extract
+00:10:24  heartbeat 135: at stage --- mmaps
+00:15:24  heartbeat 150: at stage --- mmaps
+00:20:25  heartbeat 165: at stage --- mmaps
+00:25:25  heartbeat 180: at stage --- mmaps
+00:30:26  heartbeat 195: at stage --- mmaps
+00:35:27  heartbeat 210: at stage --- mmaps
+00:40:27  heartbeat 225: at stage --- mmaps
+00:45:28  heartbeat 240: at stage --- mmaps
+00:50:29  heartbeat 255: at stage --- mmaps
+00:55:29  heartbeat 270: at stage --- mmaps
+01:00:30  heartbeat 285: at stage --- mmaps
+01:05:31  heartbeat 300: at stage --- mmaps
+01:10:32  heartbeat 315: at stage --- mmaps
+01:11:52  KILLING pid 826323 after 22 SQL files - this is the interruption
+01:11:57  killed; process still present: False
+01:11:57  the databases now hold part of the plan and no marker

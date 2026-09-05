@@ -13,6 +13,7 @@ ordering.
 
 from __future__ import annotations
 
+import atexit
 import errno
 import importlib
 import os
@@ -21,6 +22,7 @@ import re
 import subprocess
 import sys
 import threading
+import weakref
 from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
 
@@ -31,6 +33,123 @@ logger = get_logger(__name__)
 # How long to wait for a terminated/killed child and its stderr-reader thread
 # to actually finish, when a `stream()` generator is abandoned early.
 _SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+class _Child:
+    """What the exit hook needs from a `stream()` it cannot close: the process it started.
+
+    `_stream_lines()` fills `proc` in once `Popen` has returned, so it is None
+    for a generator nobody has started — which has no child to end.
+    """
+
+    __slots__ = ("proc",)
+
+    def __init__(self) -> None:
+        self.proc: subprocess.Popen[str] | None = None
+
+
+# Every `stream()` generator handed out and not yet collected, with the child
+# it started. Weak in the generator, so holding one here can never be the
+# reason a caller's generator stays alive, and so an abandoned generator that
+# the cycle collector reaches during the program's normal life drops out on
+# its own.
+_LIVE_STREAMS: weakref.WeakKeyDictionary[Generator[str, None, None], _Child] = (
+    weakref.WeakKeyDictionary()
+)
+_LIVE_STREAMS_LOCK = threading.Lock()
+
+
+def _register(generator: Generator[str, None, None], child: _Child) -> None:
+    """Put `generator` under the exit hook's eye, with the holder its body reports `proc` in."""
+    with _LIVE_STREAMS_LOCK:
+        _LIVE_STREAMS[generator] = child
+
+
+def _end_child(proc: subprocess.Popen[str]) -> None:
+    """Terminate `proc` if it is still running, and kill it if terminate is not enough."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def _close_abandoned_streams() -> None:
+    """Close every still-open `stream()` generator at `atexit` — or end its child, if it cannot.
+
+    Measured on m910q, 2026-09-04, CPython 3.11.15: a driver that took five
+    lines off `docker.follow_logs()` and `break`d, without closing the
+    iterator, exited **134 (SIGABRT)**:
+
+        Fatal Python error: _enter_buffered_busy: could not acquire lock for
+        <_io.BufferedReader name=5> at interpreter shutdown, possibly due to
+        daemon threads
+        Python runtime state: finalizing
+          Garbage-collecting
+          File ".../yulon/runner.py", line 236 in stream
+
+    The abandoned generator survived to interpreter shutdown and was finalised
+    by the shutdown garbage collection. By then the `_drain_stderr` daemon
+    thread was blocked in `read()` holding the `BufferedReader`'s lock and
+    could no longer be resumed — a daemon thread that asks for the GIL after
+    finalisation has begun is exited on the spot, lock still held. `join()`
+    therefore timed out and `proc.stderr.close()` hit a lock nobody would ever
+    release; CPython treats that as a fatal error rather than a hang.
+
+    `atexit` callbacks run BEFORE that finalisation: the interpreter is intact
+    and daemon threads still get the GIL. Two shapes were measured on the same
+    box and day. A generator held SUSPENDED at a `yield` — the driver above —
+    was closed here, its `finally` ran the terminate-and-join, and the driver
+    exited 0. A generator whose frame another thread was RUNNING — the app's
+    shape: `native._pump()`'s worker inside `docker.run_attached()`, blocked
+    in `readline()` inside this generator — refused the close:
+
+        ValueError: generator already executing
+
+    That was logged at debug and nothing else happened: the `finally` never
+    ran, and the child was still alive with PPID 1 after the driver had gone
+    (`test_runner.py`, both shapes). A frame that is executing cannot be
+    entered from here, so its CHILD is ended directly instead; the thread
+    that owns the frame then leaves its read on EOF and runs the `finally`
+    itself, on a process that has already exited.
+
+    Rejected: **not closing `proc.stderr` when the reader is still alive.** It
+    moves the abort rather than removing it — the `BufferedReader`'s
+    deallocation calls `close()` itself, that call takes the same lock and
+    reaches the same `_enter_buffered_busy`. Measured on the same box and the
+    same reproducer: still 134, still `_enter_buffered_busy`, now reported at
+    the end of the `finally` instead of at the `close()` line. Also rejected:
+    making the reader a non-daemon thread, so `threading._shutdown()` would
+    join it before finalisation. Nothing has terminated the child at that
+    point, so the join lasts as long as the child does — a launcher that will
+    not close is worse than one that aborts on close.
+    """
+    with _LIVE_STREAMS_LOCK:
+        pending = list(_LIVE_STREAMS.items())
+    for generator, child in pending:
+        try:
+            generator.close()
+        except ValueError as exc:
+            # Refused, not failed: another thread is inside this frame. The
+            # child is ended whatever `gi_running` says NOW — the frame may
+            # have reached its `yield` since the refusal, and a suspended
+            # generator whose child has exited finishes on its own next
+            # `next()`; one whose child is still running does not.
+            logger.debug(f"an abandoned stream() is being run by another thread at exit: {exc}")
+            if child.proc is not None:
+                _end_child(child.proc)
+        except BaseException as exc:  # noqa: BLE001 - exiting; nothing may escape
+            # The generator's own `finally` failed. Logged rather than swallowed
+            # silently, but never re-raised: an exception here would be reported
+            # as an error during shutdown for a generator that is not ours to
+            # police, and the generators after it in `pending` still need
+            # closing.
+            logger.debug(f"could not close an abandoned stream() at exit: {exc}")
+
+
+atexit.register(_close_abandoned_streams)
 
 
 def _cwd_arg(cwd: Path | None) -> str | None:
@@ -99,11 +218,13 @@ def child_env(env: Mapping[str, str] | None = None) -> dict[str, str] | None:
                  (required by /usr/lib/libcurl.so.4)
         git   -> libpcre2-8.so.0: no version information available
 
-    bash dies outright, so `installer.bash_available()` - which runs
-    `bash -c "exit 0"` and is the FIRST subprocess an install makes - answers
-    False, and the user is told "this machine has no working bash" about a
-    machine whose bash is fine. curl loses HTTPS entirely, which is what
-    "refuses to download files" looks like from the outside.
+    bash died outright, so `installer.bash_available()` - which ran
+    `bash -c "exit 0"` and was the FIRST subprocess an install made - answered
+    False, and the user was told "this machine has no working bash" about a
+    machine whose bash was fine. That probe went with the bash engine in 7.2;
+    the leak is unchanged and still reaches every child. curl loses HTTPS
+    entirely, which is what "refuses to download files" looks like from the
+    outside.
 
     PyInstaller saves the pre-launch value as `<VAR>_ORIG` for exactly this
     purpose. Restoring it (or removing the variable when there was nothing to
@@ -152,6 +273,21 @@ def stream(
     `close()` is part of the contract, and a caller that stops early should say
     so (`contextlib.closing`) rather than leave it to refcounting.
 
+    A caller that does NOT say so is still owed an exit that is not a crash.
+    Every generator handed out is registered weakly in `_LIVE_STREAMS`, and
+    `_close_abandoned_streams()` closes whatever is left at `atexit` — the last
+    moment at which the cleanup above can still run — or, for a frame that
+    another thread is executing right then, ends the child it started. Its
+    docstring carries the measured abort, the measured refusal, and the two
+    alternatives that were rejected. This function is a plain function
+    returning a generator, not a generator function, purely so the
+    registration happens at the call; nothing else about it changed — the body
+    is still lazy, so no process starts until the first `next()`. Both halves
+    of that sentence are owned by
+    `test_runner.py::test_stream_registers_at_the_call_and_starts_no_process_until_the_first_next`,
+    added 2026-09-05 when the meta review found the laziness half claimed by a
+    comment and asserted by nothing.
+
     Args:
         command: The argv list to execute (no shell interpolation).
         cwd: Optional working directory for the child process.
@@ -176,6 +312,16 @@ def stream(
         OSError: If `command`'s executable cannot be found/started (propagates
             directly from `subprocess.Popen`).
     """
+    child = _Child()
+    generator = _stream_lines(command, cwd, merge_stderr=merge_stderr, child=child)
+    _register(generator, child)
+    return generator
+
+
+def _stream_lines(
+    command: list[str], cwd: Path | None = None, *, merge_stderr: bool = False, child: _Child
+) -> Generator[str, None, None]:
+    """`stream()`'s body. Private so that no caller can skip the registration."""
     logger.debug(f"stream() called: command={command} cwd={cwd} merge_stderr={merge_stderr}")
     proc = subprocess.Popen(
         command,
@@ -188,6 +334,7 @@ def stream(
         env=child_env(),
         creationflags=creationflags(),
     )
+    child.proc = proc
     stderr_lines: list[str] = []
 
     def _drain_stderr() -> None:
@@ -219,13 +366,7 @@ def stream(
         # already exited and the reader thread has already finished) AND on
         # early abandonment via GeneratorExit — where it does the real work of
         # not leaking a running child process or a stuck reader thread.
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+        _end_child(proc)
         if reader is not None:
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
         if proc.stdout is not None:
@@ -570,10 +711,11 @@ def interact(
         if prompt is not None:
             # The marker proves the child is blocked on the ONE prompt we know
             # about. Everything printed before it is unrelated output that
-            # merely shares the buffer, and `respond()`'s rules are unanchored
-            # `search`es — so giving them the whole buffer let a bare
-            # `PromptRule(r"\(y/n\)", "y")` answer sudo's password read with
-            # "y". Measured: a child printing `Reset the keyring? (y/n) \r` and
+            # merely shares the buffer, and a `respond()` built from unanchored
+            # `search`es — as the bash engine's rule table was until 7.2 — got
+            # the whole buffer, so its bare `(y/n)` catch-all answered sudo's
+            # password read with "y". Measured: a child printing
+            # `Reset the keyring? (y/n) \r` and
             # then the marker got `GOT:y` and `ask()` was never called, which is
             # the pre-6.1.5 symptom arriving by a new route. Slicing for `ask`
             # alone was half a fix (review, 2026-08-23).
@@ -607,9 +749,9 @@ def interact(
                     #
                     # This used to require an EMPTY buffer, so a script whose
                     # last line had no trailing newline never took it — and on
-                    # cancel those bytes were dropped, which is exactly the text
-                    # `Installer.run()` builds its failure message from. Yield
-                    # them, then stop (review, 2026-08-23).
+                    # cancel those bytes were dropped, which was exactly the
+                    # text the bash engine's `run()` built its failure message
+                    # from. Yield them, then stop (review, 2026-08-23).
                     logger.debug("child exited; ending the read rather than waiting for EOF")
                     if buffer:
                         yield buffer

@@ -84,7 +84,7 @@ def applier(
     """
     runner: SqlRunner | None = sql
     if runner is None:
-        runner = DockerSql(docker_ctl.SPEC.db, db_root_password)
+        runner = DockerSql(docker_ctl.SPEC.db, db_root_password, client=docker_ctl.DB_CLIENT)
     return Applier(server_dir, git=git, sql=runner, client_dir=client_dir, dbc=dbc)
 
 

@@ -1,61 +1,63 @@
-"""Install orchestrator (Phase 3a): drive one catalog entry's existing `install-*.sh`.
+"""Install options, errors, the engine protocol and the one dispatch (roadmap 3.1 → 7.2).
 
-Phase 3a wraps the scripts we already ship instead of reimplementing them
-(README §7/§9): the orchestrator resolves the entry's script, answers the
-script's prompts from a typed rule table so no shell interaction is needed,
-and streams the output up to whoever is listening (a CLI today, the
-`log_panel` in Phase 4). This module never downloads anything itself — the
-user's own client directory is *passed in* (README §3a) — and it never
-contains per-game logic: what differs per game is `catalog.json` data.
+Until Phase 7 this module drove one catalog entry's bash `install-*.sh` on a
+pty and answered its prompts from a rule table. 7.2 deleted that lineage — the
+scripts, the rule table, the responder, the bash probe — and every entry now
+installs through a family engine on `native.StagedInstaller`. What is left is
+deliberately small: what the user decided (`InstallOptions`), what can go
+wrong (`InstallerError` and its subclasses), how a folder is recognised as
+holding an install (`compose_file()`), what a view can drive (`InstallEngine`),
+and `installer_for()`, the ONE place a catalog entry becomes an engine.
+Nothing in this module runs a subprocess or prompts.
 
-That is a claim about this module, not about the whole install. An earlier
-wording said "never downloads client assets" full stop, which is not true of
-what it drives: the WotLK script fetches AzerothCore's own client-data archive
-(maps, vmaps, mmaps, DBC) into a Docker volume, which is why `wow-wotlk` is the
-one entry with `requires_client_dir` false and is never asked for a folder.
-That archive is server-side data, not the client a player logs in with, and
-nothing here ships or fetches the latter (review, 2026-08-23).
-
-Docker provisioning is wired in (roadmap 3.3 → 5.1): if no daemon answers,
-`platform.ensure_docker()` is asked to provide one; when it cannot (needs a
-reboot, a password, a manual install) that is a clean, logged, catchable
-`DockerUnavailableError` carrying the report's manual steps — never a crash
-or a silent hang.
+`platform_names()`/`unsupported_platform_message()` stay because the engine's
+preflight words its off-platform refusal with them; `docker_unavailable()` and
+`provision_lines()` stay because the engine reports provisioning with them, and
+they live here rather than in `native.py` so that the sentence a user reads
+about Docker has one author; `cancelled_install_message()` stays because
+`catalog_view.py` shows it after Stop, and `generated_compose_files()` beside
+it because that copy's "Use existing…" half turns on which compose files the
+engine itself wrote — a different question from `compose_file()`'s, and one
+this module was answering with `compose_file()` until 2026-09-05. The copy asks
+BOTH: `compose_file()` is what `attach_existing()` gates on, so it is what
+decides whether the folder can be adopted at all, and a message that told the
+user to delete a folder the app would adopt was the cost of asking only the
+other one.
 """
 
 from __future__ import annotations
 
-import os
-import re
-import secrets
-import shutil
-import subprocess
-import sys
 import threading
-from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from yulon import docker, platform, resources, runner
+from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-# Where `catalog.json`'s install scripts resolve from (roadmap 6.0).
+# Where the families' compose templates resolve from: `catalog/installers/<templates>/`.
 DEFAULT_INSTALLERS_ROOT = resources.installers_dir()
 
 # Every filename Docker Compose accepts for a project's compose file, in its own
 # precedence order.
 #
-# Not ours to shorten: the app only ever looked for `docker-compose.yml`, which
-# is what the WotLK and Tortoise scripts write - while the TBC and Vanilla ones
-# write `compose.yml`. The result was that a finished install of those two was
-# invisible to "Use existing..." AND was thrown away by the remember check at
-# the end of a multi-hour install, both reporting that nothing was installed.
-# Being stricter than the tool we drive buys nothing and costs exactly that.
+# Not ours to shorten. The app only ever looked for `docker-compose.yml`, which
+# was what the WotLK and Tortoise scripts wrote - while the TBC and Vanilla ones
+# wrote `compose.yml`. A finished install of those two was therefore invisible
+# to "Use existing..." AND was thrown away by the remember check at the end of a
+# multi-hour install, both reporting that nothing was installed.
+#
+# 7.2 deleted those scripts. Every family now renders its compose through
+# `composegen`, whose `BASE_FILE` is `docker-compose.yml`, so nothing Yu'lon
+# writes today is called `compose.yml`. The list stays anyway, and not out of
+# caution: installs made before 7.2 are on real disks with that name, and
+# "Use existing..." adopts a folder whatever wrote it. Being stricter than the
+# tool we drive would buy nothing and would cost exactly what it cost then.
 COMPOSE_FILENAMES: tuple[str, ...] = (
     "compose.yaml",
     "compose.yml",
@@ -84,16 +86,14 @@ def compose_file(server_dir: Path) -> Path | None:
     return None
 
 
-# How many of the script's last output lines a failure message carries (roadmap 6.1).
-_ERROR_TAIL_LINES = 12
-# What the scripts see as their terminal when the app was not started from one.
-DEFAULT_TERM = "xterm-256color"
-
-
-# The stable half of `Installer.sudo_marker`. The token after it is random and
-# per-install, so this prefix is the only part a module-level prompter can match
-# on - and matching is what keeps sudo's prompt hidden while the two y/n consent
-# rules stay visible (review, 2026-08-28).
+# How the app recognised sudo's own password prompt: the bash engine set
+# `SUDO_PROMPT` to this prefix plus a random per-install token, so an exact
+# match proved the text came from sudo rather than from build output, in any
+# locale. 7.2 deleted that engine and the native path asks through
+# `platform.SUDO_PASSWORD_QUESTION` instead, so nothing writes this spelling
+# any more — but `install_wiring._terminal_prompter()` and `ui.widgets.prompt`
+# still recognise it, and a prompt that is not recognised as sudo's is one
+# echoed to the screen as it is typed (review, 2026-08-28).
 SUDO_PROMPT_PREFIX = "[sudo via Yu'lon "
 
 
@@ -155,11 +155,36 @@ def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableErr
     """
     details = " ".join(report.manual_steps) or "; ".join(report.skipped)
     if report.docker_group == "granted":
+        # The remedy this branch reads out is `platform.DOCKER_GROUP_RELOGIN_STEP`,
+        # arriving through `details`. The fallback under it never rendered for a
+        # user: `_ensure_docker_linux()` is the only producer of `granted`, and
+        # it appends that step to `manual_steps` for the outcome unconditionally,
+        # so `details` was non-empty on every report that ever reached here
+        # (checked against `platform.py`, 2026-09-02).
+        #
+        # Kept anyway, and deliberately NOT folded into the static sentence
+        # above. This function words a `ProvisionReport` and cannot see who
+        # built one — `manual_steps` defaults to `()` — so without the fallback
+        # a hand-built or future report would tell the user their session cannot
+        # see the group and then name nothing to do about it. Writing the remedy
+        # inline instead, the way the `already-member` branch below does, would
+        # print it TWICE for the report production actually sends: that is the
+        # duplication the 2026-08-31 review found on that other branch, and the
+        # reason `platform.py` keeps the step out of `already-member`'s steps.
+        #
+        # So the sentence under test is the one production produces:
+        # `test_regroup.py::test_the_restart_is_offered_before_the_logout`
+        # asserts the ordering against a report CARRYING that step, and keeps a
+        # second case for the empty-steps fallback rather than only that one.
         return DockerNeedsReLoginError(
             "Docker is installed and set up. It cannot be used from this session yet: your "
             "account was added to the docker group, and a session that was already open does "
             "not pick up a new group. "
-            + (details or "Log out and back in, then start the install again.")
+            + (
+                details
+                or "Restart Yu'lon and start the install again. Log out and back in if a "
+                "restart is not enough."
+            )
         )
     if report.docker_group == "already-member":
         # Two causes, and the report cannot tell them apart, so both are named,
@@ -176,9 +201,10 @@ def docker_unavailable(report: platform.ProvisionReport) -> DockerUnavailableErr
         return DockerNeedsReLoginError(
             "Docker is installed and your account is already in the docker group, but this "
             "session still cannot reach the daemon. A session that was open before the group "
-            "was granted does not pick it up: log out and back in, then start the install "
-            "again. If you have already done that, the Docker service is not running - start "
-            "it and try again." + (f" {details}" if details else "")
+            "was granted does not pick it up: restart Yu'lon and start the install again, or "
+            "log out and back in if a restart is not enough. If you have already done that, "
+            "the Docker service is not running - start it and try again."
+            + (f" {details}" if details else "")
         )
     return DockerUnavailableError(
         "Docker isn't available and could not be set up automatically. "
@@ -208,192 +234,16 @@ def provision_lines(report: platform.ProvisionReport) -> Iterator[str]:
 
 @dataclass(frozen=True)
 class InstallOptions:
-    """What the user decided before clicking install."""
+    """What the user decided before clicking install.
+
+    `reinstall` left with the rule table in 7.2: the only thing that ever read
+    it was the bash "Remove it and start fresh?" rule, and the native engine
+    never removes a folder — it resumes into it or refuses it
+    (`StagedInstaller._guard`).
+    """
 
     server_dir: Path | None = None
     client_dir: Path | None = None
-    reinstall: bool = False
-
-
-class AskTheUser:
-    """A rule's answer when the app has no business choosing. See `PROMPT_RULES`."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return "ASK_THE_USER"
-
-
-ASK_THE_USER = AskTheUser()
-"""Route this prompt to the person, because neither answer is the app's to give.
-
-Not a general escape hatch: a rule that opens a dialog is the shape that made
-the old prompt heuristic dangerous, so the bar is narrow and stated. A question
-qualifies only if its two answers cost the user different things that the app
-cannot weigh for them, and only if its pattern pins the QUESTION rather than
-the subject — every rule here is an unanchored `re.search` over a line, first
-match wins, so "matches the words" and "matches the question" are not the same
-bar. In practice that means ending the pattern at the `(y/n)` suffix
-`ask_yes_no` prints, which is the one thing a warning paragraph about the same
-subject never carries (this used to claim an EXACT whole-line match, which
-nothing here enforces — review, 2026-08-23).
-
-Two clear it today. The installers' docker-group question: yes grants
-root-equivalent access silently — the precise thing upstream's 1.4.4 security
-change added consent for — while no leaves the user outside the docker group,
-so the launcher's own `docker` calls fail with permission denied and the app
-has quietly broken itself instead. And immutable Fedora's rpm-ostree question,
-which reboots the machine ten seconds after a yes.
-"""
-
-
-@dataclass(frozen=True)
-class PromptRule:
-    """`pattern` (regex, searched in the ANSI-stripped prompt) → the stdin answer."""
-
-    pattern: str
-    answer: str | Callable[[InstallOptions], str] | AskTheUser
-    note: str = ""
-
-
-# How the app answers the scripts' questions. First match wins. Optional and
-# destructive offers are declined; everything that merely gates progress is
-# accepted. The shared prompt helpers (`ask_yes_no`, `press_enter`,
-# `choose_install_dir`) are identical across the four installers, so one
-# table serves all of them.
-#
-# Read the last rule as the real policy: anything ending in `(y/n)` that no
-# earlier rule claims is answered YES, unseen. That is not a safe default, it
-# is a workable one — a question nobody answers parks the install forever,
-# because nothing here has a timeout — so every destructive question a script
-# can ask has to be named ABOVE it, and a new one that is not named is
-# consented to on the user's behalf. Two were found that way while driving a
-# real install through the Catalog's own button (2026-08-23); see their rules.
-PROMPT_RULES: tuple[PromptRule, ...] = (
-    PromptRule(
-        r"Install path:",
-        lambda o: o.server_dir.as_posix() if o.server_dir else "",
-        "blank = the script's default dir; POSIX form — the scripts run under bash",
-    ),
-    PromptRule(
-        r"Enter path to your .*client folder",
-        lambda o: o.client_dir.as_posix() if o.client_dir else "",
-        "the user's own client (README §3a)",
-    ),
-    PromptRule(
-        r"Remove it and start fresh\?", lambda o: "y" if o.reinstall else "n", "existing server dir"
-    ),
-    PromptRule(r"Type yes to reset the keyring", "yes", "Steam Deck pacman keyring repair"),
-    # Anchored: `respond()` sees every line, and the scripts also print
-    # "Leave blank and press ENTER to use the default location." — an
-    # unanchored match answered that *hint* and the blank line was consumed
-    # by the `Install path:` prompt (Phase 3 live-gate finding, 2026-08-20).
-    PromptRule(r"^\s*Press ENTER", "", "'to continue' / 'when done creating accounts'"),
-    PromptRule(r"press ENTER to shut down", "", "end of install: let the script finish"),
-    PromptRule(r"Continue anyway\?", "n", "the script found the wrong client"),
-    PromptRule(r"Open the GitHub README", "n"),
-    PromptRule(r"Download wow-manage\.sh", "n"),
-    PromptRule(r"stop the server now\?", "n"),
-    # Declined on purpose, and it must sit above the `(y/n)` catch-all that
-    # would otherwise answer "y". The installer scripts now OFFER to stop
-    # whatever is holding the server ports, which is the right question to put
-    # to a person at a terminal - but not one the app may answer on their
-    # behalf: the thing it would stop is a server someone may be playing on
-    # this second, and no install is worth that. The GUI makes the same offer
-    # itself, on the tab, where the user can see what they are agreeing to
-    # (`controller_view._offer_to_stop_the_other_server`).
-    PromptRule(
-        r"Stop the other server and continue\?",
-        "n",
-        "the app never stops a running server to get an install through",
-    ),
-    # Must sit ABOVE the `(y/n)` catch-all, which would otherwise answer "y" and
-    # grant root-equivalent access without anyone being asked — exactly what
-    # upstream's 1.4.4 security change exists to prevent (it removed the
-    # `/etc/sudoers.d/docker-nopasswd` rule and made group membership a
-    # consented step). The pattern requires the `(y/n)` suffix so it matches the
-    # QUESTION and not the paragraph of warning the script prints above it.
-    PromptRule(
-        r"to the docker group.*\(y/n\)",
-        ASK_THE_USER,
-        "root-equivalent; neither answer is the app's to give",
-    ),
-    # Also above the catch-all, which answered both of these "y" until this
-    # gate read the scripts line by line looking for what the button would say
-    # on a machine unlike the test box (2026-08-23).
-    #
-    # Declined, not asked: `snap remove docker` takes away a working Docker the
-    # user installed themselves, with every container and volume on it, and the
-    # only reason the installer wants it gone is that IT cannot use snap
-    # Docker. Saying no costs an exit with the script's own instruction to
-    # remove it by hand ("Cannot continue with snap Docker"), which the 6.1
-    # failure dialog now shows verbatim; saying yes costs data nobody agreed to
-    # lose.
-    #
-    # Both carry the `(y/n)` suffix for the same reason the docker-group rule
-    # does: `respond()` is handed every complete line, and on a quiet partial
-    # line with no sudo marker it is handed the whole pending buffer. An
-    # unanchored `search` therefore matches a reworded warning paragraph, a
-    # summary echo, or a future script edit that prints the phrase for
-    # information — writing "n" into a child that is not reading (which
-    # desynchronises the next real prompt) or opening a modal dialog over
-    # ordinary build output. No such line exists in today's scripts; the fix is
-    # for the next rule someone adds by copying these (review, 2026-08-23).
-    PromptRule(
-        r"Remove snap Docker.*\(y/n\)",
-        "n",
-        "would remove the user's own Docker install; the script says how to do it by hand",
-    ),
-    # Asked, not decided: this one REBOOTS the machine ten seconds later
-    # (`sudo systemctl reboot`, immutable Fedora / Bazzite path). The app
-    # cannot know what else is open, and declining silently is no better — the
-    # script then exits 0 having installed nothing. This is the second
-    # `ASK_THE_USER` and the bar it clears is the same as the first's: an
-    # exact question, printed as a whole line, whose two answers cost the user
-    # different things that only they can weigh.
-    PromptRule(
-        r"Install Docker via rpm-ostree and reboot now.*\(y/n\)",
-        ASK_THE_USER,
-        "reboots the machine in 10s; neither answer is the app's to give",
-    ),
-    PromptRule(r"\(y/n\)", "y"),
-)
-
-
-def make_responder(
-    options: InstallOptions,
-    rules: tuple[PromptRule, ...] = PROMPT_RULES,
-    ask: runner.Prompter | None = None,
-) -> runner.Responder:
-    """Build the `runner.Responder` that answers prompts per `rules` for `options`.
-
-    `ask` is consulted only for a rule whose answer is `ASK_THE_USER` — two of
-    them today, each pinned to its question by an unanchored `re.search`, not by
-    the whole-line match this used to claim, for the reason given there. Without an `ask`
-    (the CLI harness), such a prompt is DECLINED: refusing a privilege change is
-    recoverable and visible, granting one silently is neither.
-    """
-    compiled = [(re.compile(r.pattern, re.IGNORECASE), r) for r in rules]
-
-    def respond(line: str) -> str | None:
-        for regex, rule in compiled:
-            if not regex.search(line):
-                continue
-            if isinstance(rule.answer, AskTheUser):
-                if ask is None:
-                    logger.warning(f"no prompter for {line.strip()!r}; declining")
-                    return "n"
-                reply = ask(line.strip())
-                # A dismissed dialog is not consent.
-                answer = "y" if reply and reply.strip().lower() in ("y", "yes") else "n"
-                logger.info(f"user was asked about {line.strip()!r} and answered {answer!r}")
-                return answer
-            answer = rule.answer(options) if callable(rule.answer) else rule.answer
-            logger.debug(f"prompt {line.strip()!r} → {answer!r}")
-            return answer
-        return None
-
-    return respond
 
 
 _PLATFORM_NAMES: dict[str, str] = {"windows": "Windows", "macos": "macOS", "linux": "Linux"}
@@ -418,8 +268,43 @@ def unsupported_platform_message(entry: CatalogEntry, platform_id: str) -> str:
     )
 
 
-def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
-    """What Stop actually did, and what it did not (roadmap 6.5 "honest cancel copy").
+def generated_compose_files(server_dir: Path) -> tuple[str, ...]:
+    """The compose files in `server_dir` that THIS app wrote, by name, in `-f` order.
+
+    Not `compose_file()`, and the difference is the whole point. That one asks
+    "could Compose bring something up here?", which is the right question for
+    "Use existing…" adopting a folder of unknown provenance, and it answers on
+    any of the four filenames Compose itself accepts. This asks "did the
+    engine's own compose stage run?", and on a cancelled install the two
+    disagree: the AzerothCore repository ships a `docker-compose.yml` at its
+    root, so a WotLK `clone-core` lays one down before `composegen` writes a
+    byte (`composegen.write_plan()`'s `replaceable` argument exists for exactly
+    that file).
+
+    Measured on yulon-ubuntu 2026-09-05: a WotLK install stopped 20 s into
+    `clone-core` left a folder whose only compose file was upstream's own,
+    git-tracked and unmodified
+    (`pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`).
+    That is one family on one box. Whether the CMaNGOS repositories ship one
+    too has not been measured, and nothing here needs it to: the question this
+    function answers is about the marker, not about upstream's habits, so a
+    family whose source ships no compose file simply never exercises the
+    disagreement.
+
+    `composegen.is_ours()` is the marker rule and is reused rather than
+    respelled, but it cannot be called alone here: it answers True for a file
+    that is not there, which is right for "may I write this?" and exactly
+    backwards for "is this here and mine?". Hence the `is_file()` first.
+    """
+    return tuple(
+        name
+        for name in composegen.COMPOSE_FILES
+        if (server_dir / name).is_file() and composegen.is_ours(server_dir / name)
+    )
+
+
+def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
+    """What Stop actually did, what it did not, and which button to press next.
 
     Three things are easy to imply and all three are false. The app has not
     remembered the folder — which it did until this existed. Stopping undoes
@@ -438,101 +323,316 @@ def cancelled_install_message(entry_name: str, server_dir: Path) -> str:
     the folder and lets the user look, rather than asserting a state it cannot
     know (install gate, 2026-08-23).
 
-    The recovery advice is split on the compose file, because one sentence was
-    being used for two opposite situations and was wrong in the first. It used
-    to say "Press Install again and choose {server_dir} to carry on", which
-    walks a pre-build cancel straight back into the bug the cancel fix exists to
-    remove: the script's line 961 finds no built worldserver image, takes the
-    existing-folder branch, asks "Remove it and start fresh? (y/n):" — and
-    `PROMPT_RULES` answers "n", because `InstallOptions.reinstall` is False and
-    nothing in the GUI ever sets it. The script prints "Keeping existing install
-    — exiting." and exits 0, which the view reads as a SUCCESS: it pins a
-    compose project name into the half-cloned folder and remembers a server that
-    does not exist. Roadmap 6.5 item 1 (a staged, resumable install) is unbuilt,
-    so nothing here may promise resumption.
+    **The advice below is two independent halves, and each is decided by the
+    thing that actually gates it.** They were one split on `compose_file()`
+    until the 7.10 widget-cancel run drove the whole path with real clicks
+    (yulon-ubuntu 2026-09-05, `pyplan/gates/7.2-ubuntu-2026-09-05/`): 15 checks
+    green, and a modal that got both halves wrong on the folder in front of it.
 
-    After the build the same sentence is correct — 961 finds the images and
-    genuinely skips the compile — and there Stop throws away work: a build the
-    app now refuses to remember, with containers left running and no tab able to
-    stop them. The app cannot tell the two apart at this moment without asking
-    Docker, and asking is not safe enough to decide on: without a pin, compose
-    derives the project from the folder's basename, so a second install in a
-    same-named folder answers for this one (see `docker.install_project()`). So
-    the copy names the evidence it does have — whether the source is on disk —
-    and gives the action for each case, including "Use existing…", which needs
-    only that compose file and was never mentioned (review, 2026-08-23).
+    *"Use existing…"* is offered when, and only when, `compose_file()` answers.
+    That is not a preference: `attach_existing()` gates on exactly that reading,
+    so an offer made on anything else is an offer the app then refuses.
+    `generated_compose_files()` chooses the WORDING, and it took two goes to get
+    that division right. The 7.10 split asked `compose_file()` alone and so
+    fired on the `docker-compose.yml` the clone stage brings down with the
+    source (`widget-cancel-folder-after.txt`: that file, nothing built, and a
+    modal telling the user to adopt it — which `attach_existing()` would have
+    done, growing a tab for a server that did not exist). `2a4f0cab` moved the
+    offer onto `generated_compose_files()` and was worse in the other
+    direction: a folder with `.git`, `src/` and an UNMARKED
+    `docker-compose.yml` — a bash-era install, a hand-written compose file,
+    anything from before 7.2, since nothing before 7.2 marked what it wrote —
+    got no offer at all and was told to delete itself, while `attach_existing()`
+    would have adopted it. It also left `ours` deciding an offer on its own, and
+    `ours` does not imply `compose_file()`: `docker-compose.override.yml` is in
+    `composegen.COMPOSE_FILES` and not in `COMPOSE_FILENAMES`, so a folder
+    holding a marked override and no base rendered "nothing is lost" and
+    "Delete <dir>" in consecutive sentences
+    (`test_the_app_never_says_nothing_is_lost_about_a_folder_it_names_for_deletion`).
+    That folder shape has NO install that produces it, and the branch for it
+    says so: `composegen.write_plan()` walks `(BASE_FILE, OVERRIDE_FILE,
+    BUILD_FILE)` in that order and always writes or keeps the base first, so
+    the only route is a base file deleted by hand. Measured, not assumed — and
+    then re-measured, because the first measurement stopped being true of the
+    commit that shipped it. With `raise AssertionError` as this branch's body,
+    the whole suite on m910q 2026-09-05 (`__pycache__` purged both sides,
+    `pytest -q -p no:randomly`) is `2 failed, 2565 passed, 9 skipped`, and BOTH
+    entrants are tests: this branch's own
+    `test_the_app_never_says_nothing_is_lost_about_a_folder_it_names_for_deletion`
+    and the 40-shape sweep
+    `test_no_folder_shape_is_offered_adoption_and_deletion_at_once`, whose
+    marked-override/no-record shape lands here. 2576 tests were collected;
+    nothing among the other 2574 reaches this branch. Run twice: once on the
+    content this paragraph was written against, and once on `e4fcc17e` — the
+    commit that carries it, minus this sentence — which is the checkout to
+    reproduce it from, and gave the same three numbers and the same two names.
+
+    That paragraph said "the single entrant was the test written for it" and
+    quoted `1 failed, 2562 passed, 9 skipped` until 2026-09-05 — a run taken
+    three tests before the sweep in the same commit existed, and written into
+    the commit that falsified it. The number moved, the conclusion did not: no
+    production path enters here. It stays because a hand-deleted base is a
+    folder a person can be standing in front of, and the alternative render for
+    it is a flat "Delete <dir>" over this app's own files.
+
+    **A record does NOT prove the folder began empty, and the copy said it
+    did.** The unmarked-compose wording puts two readings to the user —
+    installed before this attempt, or brought down by this attempt's clone. For
+    a few hours on 2026-09-05 a branch here claimed `native.STATE_FILE` settled
+    that, on the ground that `_claim_before_writing()` writes one only when
+    `started_empty` is true and that the one non-empty folder `_claim_folder()`
+    lets past — a `.git` — is stopped at the clone by
+    `refuse_unowned_checkout()`. Measured on m910q 2026-09-05, that is false
+    for three of the four shipped games. `wow-tbc` driven through
+    `CmangosInstaller.run()` into a folder holding a user's own `.git`,
+    `my-notes.txt` and `docker-compose.yml`, Stop pressed after
+    `clone-sources`: the record was there and the modal told the user their own
+    file "came down with the server's source". `_run_one()` writes the record
+    after EVERY recorded stage, `started_empty` or not, and
+    `refuse_unowned_checkout()` only ever sees the server dir when a source's
+    `dest` IS the server dir — `"."`, which of the shipped entries only
+    `wow-wotlk` spells. TBC, Vanilla and Tortoise clone into `src/`, so nothing
+    asks about the folder itself at all.
+
+    **The discriminator is the family's clone layout, so the family is an
+    input.** Hence `entry` where this took a display name until 2026-09-05.
+    Where a source lands in the server dir itself, an unmarked compose file
+    there with a record beside it did come down with the clone on every route
+    the ENGINE can take, and the routes were enumerated rather than waved at.
+    The clone itself is one: upstream's `docker-compose.yml` is a git-tracked
+    file of `mod-playerbots/azerothcore-wotlk`, read off a real install in
+    `pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`. A
+    checkout already in the folder is the other, and
+    `refuse_unowned_checkout()` refuses one before any stage records anything
+    (`test_the_clone_artefact_reading_is_given_only_where_the_clone_lands_there`).
+    A THIRD route is outside that enumeration and this branch reads it wrong:
+    the user's own hand. Delete this app's marked compose files from a finished
+    `wow-wotlk` install, drop an unmarked `docker-compose.yml` in, press Install
+    — it resumes on the record — and press Stop, and the modal says their file
+    "came down with the server's source". Not driven on 2026-09-05 and its
+    window is unmeasured, because the same fact that makes route one true means
+    a resumed clone stage may overwrite the dropped-in file before the cancel is
+    read. Filed in `pyplan/checklist.md` as the route not covered rather than
+    left here as one that cannot exist: the sentence said "the only other way
+    into that folder is a checkout" until 2026-09-05, and an absolute is what
+    this whole docstring is a record of getting wrong.
+
+    Where no source lands there, nothing this attempt downloads can put a
+    compose file at the root, so it was already there and the adoption is the
+    right offer, record or no record
+    (`test_no_source_of_a_shipped_game_is_cloned_into_the_server_dir_except_wotlks`).
+    Only the first case with no record leaves two readings nothing on disk
+    separates, and there both are said and the user looks.
+
+    The engine defect underneath this is not the copy's to fix and is not fixed
+    here: `_claim_folder()` exempts any folder holding a `.git`, and only a
+    `dest: "."` family redeems that exemption at the clone, so a CMaNGOS
+    install runs to completion inside a user's own checkout (measured the same
+    day; `pyplan/checklist.md`). Both branches above stay true whichever way
+    that is closed, because neither reads the record for emptiness.
+
+    *"Press Install again"* is offered on the same record, which is not implied
+    by source on disk: a folder can hold a whole checkout and no record. What
+    the copy must NOT do is explain that with a story about `clone-core`. It
+    used to say a clone still running when Stop was pressed "takes that record
+    with it", which is a defect being described as a design — the record is
+    removed at the START of `clone-core` on every fresh install, whether or not
+    anyone presses Stop, because `_clone_core()` clones into the server dir and
+    the seam empties a destination it is about to clone into
+    (`test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`).
+    A message is not the place to file that.
+
+    **The refusal names the check that actually stops the folder in front of
+    it.** Two different ones, and the copy gave both of them the git reason
+    until 2026-09-05. With a `.git`: `refuse_unowned_checkout()`, whose reason
+    IS fetch-and-reset over a checkout that may be yours — measured, `python -m
+    yulon.install_wiring wow-wotlk --server-dir …` exited 1 with "there is
+    already a git checkout of … and there is no record here of an install this
+    app made" (`cycle2-pressA2-refused-existing-checkout.log`). Without one:
+    `_claim_folder()`'s "is not empty and was not created by this app", raised
+    in preflight, where there is no checkout to fetch and nothing to reset. Both
+    are driven at a call site in
+    `test_the_engine_refuses_the_folder_a_cancelled_clone_leaves`.
+
+    **"nothing is lost" and a deletion never appear in one message, and one
+    shared reading is what used to put them there.** `2a4f0cab` argued the pair
+    was impossible because `adoptable` decided both the offer and the delete;
+    deciding both on one reading is exactly what makes them SIMULTANEOUS.
+    Measured on m910q 2026-09-05 on a folder holding a marked
+    `docker-compose.yml` and no record — the shape a user reaches by deleting
+    `native.STATE_FILE`, which is what the UNKNOWN refusal tells them to do —
+    the render carried "nothing is lost" and "delete <dir>" two sentences
+    apart. The rule is now on the SENTENCE, not on a reading:
+    `promised_nothing_lost` is the first branch's own condition, named once,
+    and the remedy names a deletion only where it is False. Asserted over every
+    reachable folder shape rather than on the one that was reported, in
+    `test_no_folder_shape_is_offered_adoption_and_deletion_at_once`.
+
+    With the record there the resume is real and was measured the same night:
+    "Using /home/pk/gate72-cycle2 (resuming)", "Already finished: clone-core,
+    clone-modules, generate-compose" (`cycle2-pressB.log:26`).
+
+    The pre-7.2 wording is gone for good and must not come back. The bash
+    installer's line 961 found no built worldserver image, took the
+    existing-folder branch, asked "Remove it and start fresh? (y/n):" — and
+    `PROMPT_RULES` answered "n", because `InstallOptions.reinstall` was False and
+    nothing in the GUI ever set it. The script printed "Keeping existing install
+    — exiting." and exited 0, which the view read as a SUCCESS: it pinned a
+    compose project name into a half-cloned folder and remembered a server that
+    did not exist. 7.2 deleted that engine.
     """
-    lead = (
-        f"Stop was pressed, so {entry_name} has NOT been remembered as an install and the app "
+    # Local import: `native.py` imports this module for the options and the
+    # errors, so naming it at module scope would be a cycle.
+    from yulon.catalog import native
+
+    parts = [
+        f"Stop was pressed, so {entry.name} has NOT been remembered as an install and the app "
         f"will not show a tab for it. Stopping undoes nothing and tidies nothing away — look "
         f"in {server_dir} to see what the installer had got to (a download it was in the "
         "middle of may have removed its own leftovers; anything already finished stays). If "
         "the build had started, Docker keeps finishing the step it was on in the background — "
         "that is deliberate, and the finished pieces are what make a second attempt much "
         "faster, so do not clear Docker's build cache to tidy up."
+    ]
+    record = server_dir / native.STATE_FILE
+    # This attempt got at least one recorded stage in, or started in a folder
+    # that was its to fill. NOT evidence that the folder began empty:
+    # `_run_one()` writes this after every recorded stage regardless
+    # (measured on `wow-tbc`, m910q 2026-09-05 — see the docstring).
+    claimed = record.is_file()
+    # Whether a clone of THIS game's sources lands in the server dir itself,
+    # which is the only way a compose file this app did not write can be there
+    # because this attempt put it there. `EmulatorSource.dest` documents `"."`
+    # as exactly that; normalised rather than compared to the literal, because
+    # `"./"` passes that field's validator and means the same folder.
+    clones_into_server_dir = any(
+        PurePosixPath(source.dest) == PurePosixPath(".") for source in entry.emulator.sources
     )
-    if compose_file(server_dir) is not None:
-        return (
-            f"{lead} The source is there. If the build had already finished, the server may "
-            f'be built and even running: press "Use existing…", choose '
-            f"{server_dir}, and the app will manage it from a tab — nothing is lost. If the "
-            "build had not finished, pressing Install again will NOT carry on from where it "
-            "stopped: the installer finds the folder, offers to wipe it, and the app declines, "
-            f"so it exits having done nothing. Delete {server_dir} first in that case."
-        )
-    return (
-        f"{lead} The installer had not got as far as writing a compose file "
-        f"(compose.yml or docker-compose.yml), so there "
-        "is nothing there for the app to manage and nothing to resume. Pressing Install again "
-        f"will not pick up where it stopped — delete {server_dir} if it still exists, then "
-        "start over."
+    # Where the sources DO go when they do not go here — named in the copy so
+    # "nothing this install downloads goes there" is checkable by the user.
+    sources_land_in = next(
+        (
+            source.dest
+            for source in entry.emulator.sources
+            if PurePosixPath(source.dest) != PurePosixPath(".")
+        ),
+        "",
     )
-
-
-def host_package_manager() -> str | None:
-    """The Linux package manager that picks the script variant; None off Linux."""
-    if not sys.platform.startswith("linux"):
-        return None
-    return platform.linux_package_manager()
-
-
-def bash_available(run: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> bool:
-    """True if a `bash` that can actually run a script is on PATH.
-
-    Being on PATH is not enough on Windows, for two different reasons measured
-    on real machines:
-
-    - On a Windows that has had WSL enabled at some point, `bash.exe` is the
-      Store alias for WSL and fails with `execvpe(/bin/bash)` when no distro is
-      installed. Docker Desktop's own WSL distros do not provide one.
-    - On a genuinely clean Windows 11 (25H2, build 26200, measured 2026-08-22)
-      there is no `bash.exe` at all — not in System32, not as an execution
-      alias — so this returns False at the `which()` line and never runs
-      anything.
-
-    Both end at "no usable bash", which is why the probe runs the binary
-    instead of trusting PATH. Note that `which()` alone is actively misleading
-    on Windows for a different reason: `shutil.which("python")` returns a
-    truthy path to a zero-byte Store alias on a machine with no Python at all,
-    so any future interpreter probe needs this same shape.
-    """
-    if shutil.which("bash") is None:
-        return False
-    call = run if run is not None else runner.run
+    ours = generated_compose_files(server_dir)
+    # What `attach_existing()` gates on, asked here for the same reason it is
+    # asked there — it is the whole of whether "Use existing…" can take this
+    # folder — and NOT conflated with `ours`, which is whether this app wrote
+    # what is in it.
+    adoptable = compose_file(server_dir)
+    # `refuse_unowned_checkout()`'s input, which is what decides WHICH refusal
+    # the next press meets. A pure `is_dir()`, exactly as the engine asks it.
+    has_checkout = (server_dir / ".git").is_dir()
     try:
-        return call(["bash", "-c", "exit 0"]).returncode == 0
-    except OSError:
-        return False
+        leftovers = bool(
+            server_dir.is_dir() and native._listing(server_dir, ignoring=native.STATE_FILE)
+        )
+    except InstallerError:
+        # A folder this app cannot list is a folder `_claim_folder()` cannot
+        # list either, and it refuses on the same `OSError` — so the refusal
+        # branch is the true answer here, not the fallback it looks like.
+        # `native._listing()` is called rather than a bare `iterdir()` for that
+        # reason: the engine's answer to "is this folder empty" and the copy's
+        # must not be able to differ, including on the folder neither of them
+        # can read. Both answers are driven, on one unreadable folder, in
+        # `test_a_folder_the_copy_cannot_list_is_refused_rather_than_called_empty`.
+        leftovers = True
 
+    # The one branch that says "nothing is lost", named once so the two places
+    # that have to agree with it — the "If it had not" opener and the remedy —
+    # cannot drift from it. They did: `adoptable` alone gated the delete, and
+    # `adoptable` alone is true in this branch too.
+    promised_nothing_lost = adoptable is not None and bool(ours)
 
-NO_BASH_HELP = (
-    "The installers are shell scripts and this machine has no working `bash`. "
-    "Install one (or repair the existing install), reopen the app, and try again."
-)
-# Deliberately platform-neutral: `preflight()` refuses on the platform gate
-# BEFORE this check, so the old Windows/WSL advice was unreachable — and by
-# roadmap 6.3 it is also wrong, since native Windows drives Docker Desktop's
-# WSL2 backend rather than running the bash script in a distro.
+    if promised_nothing_lost:
+        parts.append(
+            f"The compose files this app writes are there ({', '.join(ours)}), so if the build "
+            f'had already finished the server may be built and even running: press "Use '
+            f'existing…", choose {server_dir}, and the app will manage it from a tab — nothing '
+            "is lost."
+        )
+    elif ours:
+        parts.append(
+            f"Compose files this app wrote are there ({', '.join(ours)}), but "
+            f"{composegen.BASE_FILE} is not, and that is the one Compose loads — so "
+            f'"Use existing…" cannot take {server_dir} as it stands.'
+        )
+    elif adoptable is not None and not clones_into_server_dir:
+        # Nothing this attempt downloads can have put that file at the root, so
+        # there is no second reading to put to the user and no reason to
+        # withhold an adoption `attach_existing()` would make.
+        parts.append(
+            f"There is a {adoptable.name} in {server_dir} that this app did not write, and "
+            f"nothing this install downloads goes there — {entry.name}'s source is cloned into "
+            f"{sources_land_in}/ under it. So that file was already there before this attempt: "
+            f'press "Use existing…", choose {server_dir}, and the app will manage it from a '
+            "tab."
+        )
+    elif adoptable is not None and claimed:
+        parts.append(
+            f"There is a {adoptable.name} in {server_dir} that this app did not write, and it "
+            f"came down with the server's source: {entry.name}'s source is cloned into that "
+            f"folder itself, and {record} is this attempt's own record of having got that far. "
+            "There is no server behind that file."
+        )
+    elif adoptable is not None:
+        parts.append(
+            f"There is a compose file in {server_dir} that this app did not write "
+            f"({adoptable.name}). If it was already there before this attempt — a server "
+            f"installed by an older version of this app, or one you set up by hand — press "
+            f'"Use existing…", choose {server_dir}, and the app will manage it from a tab. If '
+            f"this attempt was downloading into an empty folder, that file came down with the "
+            "server's source and there is no server behind it."
+        )
+    if claimed:
+        # "If it had not" only when the sentence before it is the one that said
+        # "if the build had already finished" — which is the first branch, not
+        # merely `ours`: on a folder with an override of ours and no base the
+        # sentence above says the opposite, and the conditional would refer to
+        # a promise nobody made.
+        opener = (
+            "If it had not, press Install again" if promised_nothing_lost else "Press Install again"
+        )
+        parts.append(
+            f"{opener} and choose {server_dir}: the installer carries on from the "
+            f"last stage recorded in {record}, and a stage is only skipped after what it left "
+            "on disk has been checked."
+        )
+    elif leftovers:
+        why = (
+            "it holds a git checkout: with no record here of an install this app made, the app "
+            "cannot tell its own half-finished download from a checkout you made yourself, so "
+            "it stops rather than run `git fetch` and `git reset --hard` over your work"
+            if has_checkout
+            else "it has files in it: the app will not write into a folder that is not empty "
+            "and was not created by this app"
+        )
+        # A deletion is named only where the message has NOT already said
+        # "nothing is lost" about this folder. Chosen on that sentence rather
+        # than on `adoptable`, which is true in the branch that says it.
+        if promised_nothing_lost:
+            remedy = f'Use "Use existing…" on {server_dir} instead; nothing here needs deleting.'
+        elif adoptable is not None:
+            remedy = (
+                f"If there is no server in it after all, delete {server_dir} and press Install "
+                "again to start over."
+            )
+        else:
+            remedy = f"Delete {server_dir}, then press Install again to start over."
+        parts.append(
+            f"Do not press Install again on this folder — the app will refuse it. There is no "
+            f"{native.STATE_FILE} in {server_dir}, {why}. {remedy}"
+        )
+    else:
+        parts.append(
+            f"There is nothing in {server_dir} to carry on from. Press Install again and "
+            "choose it to start over."
+        )
+    return " ".join(parts)
 
 
 # `docker_available()` used to live here as `runner.run(["docker", "info"])`,
@@ -544,281 +644,12 @@ NO_BASH_HELP = (
 # `ensure_docker()` had just proved that it is.
 
 
-class Installer:
-    """Coordinate a full server install for a single catalog entry.
-
-    Seams (`docker_check`, `ensure_docker`, `interact`) exist so the control
-    flow is testable without Docker, a network, or a two-hour build.
-    """
-
-    def __init__(
-        self,
-        entry: CatalogEntry,
-        *,
-        installers_root: Path = DEFAULT_INSTALLERS_ROOT,
-        docker_check: Callable[[], bool] = platform.docker_ready,
-        ensure_docker: Callable[..., platform.ProvisionReport] = platform.ensure_docker,
-        interact: Callable[..., Iterator[str]] = runner.interact,
-        env: Mapping[str, str] | None = None,
-        package_manager: Callable[[], str | None] = host_package_manager,
-        bash_check: Callable[[], bool] = bash_available,
-        platform_id: Callable[[], str] = platform.detect,
-    ) -> None:
-        self.entry = entry
-        self.installers_root = installers_root
-        self._docker_check = docker_check
-        self._ensure_docker = ensure_docker
-        self._interact = interact
-        self._env = env
-        self._package_manager = package_manager
-        self._bash_check = bash_check
-        self._platform_id = platform_id
-        # Per-install, so one install's marker cannot answer another's, and
-        # random so no script output can imitate it. The wording around the
-        # token matters too: this string is the LABEL of the one dialog in the
-        # app that asks for the user's password, so it has to read as sudo
-        # asking, not as a bare hex token (review, 2026-08-22).
-        self.sudo_marker = f"{SUDO_PROMPT_PREFIX}{secrets.token_hex(8)}] password:"
-
-    @property
-    def script(self) -> Path:
-        """Absolute path of the install script for this host.
-
-        The catalog's `script` is the pacman/SteamOS one; `script_variants`
-        names the Debian/Fedora ports (Phase 3 live-gate finding, 2026-08-20:
-        on Ubuntu the default script would call `pacman`).
-        """
-        return self.installers_root / self.entry.install.script_for(self._package_manager())
-
-    def script_env(self) -> dict[str, str]:
-        """The environment the script runs in: ours, plus `env` overrides, a `TERM`, a sudo prompt.
-
-        The scripts call `clear`/`tput`, which exit non-zero when `TERM` is unset
-        — and a desktop-launched app has no `TERM` (Phase 3 live-gate finding,
-        2026-08-20: `TERM environment variable not set.` → exit 1 before the
-        first prompt). The ANSI output this enables is stripped by `runner`.
-
-        `SUDO_PROMPT` is how the launcher recognises sudo's password prompt
-        without guessing. sudo prints this string verbatim instead of "[sudo]
-        password for pk:", so a marker containing a random token is proof the
-        text came from sudo — no regex over build output, and no dependence on
-        the user's locale, which "[sudo] password for" would have (a Danish box
-        prints "[sudo] adgangskode for pk:").
-        """
-        env = dict(os.environ)
-        if not env.get("TERM"):  # unset OR empty — some session managers export TERM=""
-            env["TERM"] = DEFAULT_TERM
-        # Everything above is a preference and `env` may override it. Everything
-        # below is not.
-        if self._env:
-            env.update(self._env)
-        # `SUDO_PROMPT` is a protocol identifier, not a setting: it is one half
-        # of a matched pair with `ask_marker`, and letting a caller replace it
-        # desynchronises the two, so the prompt is never recognised and the
-        # install hangs with no dialog — the exact pre-6.1.5 failure
-        # (review, 2026-08-22).
-        env["SUDO_PROMPT"] = self.sudo_marker
-        # The script now runs on a terminal, which re-arms every apt/dpkg path
-        # that gates on isatty(): needrestart's service-restart menu and dpkg's
-        # conffile prompt both render full-screen ncurses dialogs, neither
-        # carries the marker, and no PROMPT_RULES entry answers them — so the
-        # install would park on one with Stop as the only way out. Under the old
-        # pipe transport those paths were non-interactive by accident; now they
-        # are non-interactive on purpose (review, 2026-08-22).
-        env.setdefault("DEBIAN_FRONTEND", "noninteractive")
-        env.setdefault("NEEDRESTART_MODE", "a")
-        env.setdefault("NEEDRESTART_SUSPEND", "yulon")
-        return env
-
-    def preflight(
-        self,
-        options: InstallOptions,
-        cancel: threading.Event | None = None,
-        *,
-        ask: runner.Prompter | None = None,
-    ) -> None:
-        """Everything that must be true before a single line of the script runs.
-
-        Raises `InstallerError` (script missing, client dir required but not
-        given) or `DockerUnavailableError` — which no longer means "provisioning
-        is unbuilt". This method CALLS `platform.ensure_docker()` when no daemon
-        answers, and raises only when what came back cannot be used yet: a
-        reboot is required, or the daemon still does not answer on a re-check.
-        The report's manual steps ride the message (roadmap 3.3 → 5.1). `cancel`, when set, is
-        passed through to Docker provisioning so its ready-poll can be
-        interrupted (a stop mid-provision must not leave a worker sleeping).
-
-        `ask` reaches Docker provisioning for two questions, in this order:
-        whether to join the docker group, which is root-equivalent, and — on
-        Linux, once a privileged step reports that it needs one — the sudo
-        password (`platform.SudoSession`, 7.1). It has to arrive here rather
-        than only in `run()`, because provisioning happens HERE — before the
-        script starts. That ordering is why the scripts' own consent gate could
-        never fire on the machine it was written for: `ensure_docker()` had
-        already joined the group, so the script found the user a member and
-        never asked (found 2026-08-24). This said "one question" until the sudo
-        password landed beside it on another branch (merge review, 2026-08-31).
-
-        The body is `_preflight_lines()` so that `run()` can SHOW what
-        provisioning did while this method keeps returning None. Same shape as
-        `native.StagedInstaller`, and for the same reason: the lines are the
-        report a user needs and they were reaching one of the two engines.
-        """
-        for _ in self._preflight_lines(options, cancel, ask):
-            pass
-
-    def _preflight_lines(
-        self,
-        options: InstallOptions,
-        cancel: threading.Event | None,
-        ask: runner.Prompter | None = None,
-    ) -> Iterator[str]:
-        """`preflight()`'s body, yielding what provisioning did as it happens.
-
-        Yielded rather than collected and returned: a refusal below stops the
-        generator, and the lines said BEFORE it are exactly the ones that
-        explain it. Collecting them into a list for `run()` to yield afterwards
-        would lose every one of them on the failing path.
-        """
-        here = self._platform_id()
-        if not self.entry.install.supports(here):
-            # Before ANY subprocess: the script would fast-fail on its own
-            # `[[ "$OSTYPE" == "linux-gnu"* ]]` gate and leave the user with a
-            # bare "exited with status 1" (roadmap 6.1).
-            raise UnsupportedPlatformError(unsupported_platform_message(self.entry, here))
-        if not self.script.is_file():
-            raise InstallerError(f"install script not found: {self.script}")
-        if not self._bash_check():
-            raise InstallerError(NO_BASH_HELP)
-        if self.entry.install.requires_client_dir and options.client_dir is None:
-            raise InstallerError(
-                f"{self.entry.name} needs the folder of your {self.entry.client.version} "
-                f"client (build {self.entry.client.build}) — pick it first; the app never "
-                "downloads game clients"
-            )
-        if options.client_dir is not None and not options.client_dir.is_dir():
-            raise InstallerError(f"client folder does not exist: {options.client_dir}")
-        # Before Docker, because Docker provisioning is what asks for the
-        # password. The scripts refuse this set themselves - `case "$SERVER_DIR"
-        # in /|"$HOME"|/home|...` - but they refuse it AFTER their own sudo
-        # prompt and after Docker discovery, so a folder that was never going to
-        # work cost the user a password and a wait (live gate, 2026-08-25).
-        # None means "let the script pick its own default", which is by
-        # construction a dedicated subfolder and never one of these.
-        if options.server_dir is not None:
-            folder_problem = platform.server_dir_problem(options.server_dir)
-            if folder_problem is not None:
-                raise InstallerError(folder_problem)
-        if not self._docker_check():
-            report = self._ensure_docker(cancel=cancel, ask=ask)
-            # Three of the four catalog entries have no `install.native` block,
-            # so `installer_for()` hands them to THIS engine — and the half of
-            # D1 that says what provisioning did was wired into the other one
-            # only (review, 2026-08-31).
-            yield from provision_lines(report)
-            if report.reboot_required:
-                raise DockerUnavailableError(
-                    "Docker's prerequisites were installed but a reboot is needed first. "
-                    + " ".join(report.manual_steps)
-                )
-            if not report.docker_ready and not self._docker_check():
-                raise docker_unavailable(report)
-
-    def run(
-        self,
-        options: InstallOptions | None = None,
-        *,
-        cancel: threading.Event | None = None,
-        ask: runner.Prompter | None = None,
-    ) -> Iterator[str]:
-        """Run the install, yielding output lines live; answers prompts itself.
-
-        Once the script itself is running, `ask` is consulted for exactly one
-        thing: `sudo` asking for a password during the distro package steps. No
-        rule in `PROMPT_RULES` can ever know it, so without `ask` the script
-        stops dead there — which is what installing on Linux did (`sudo -v` at
-        the top of the Ubuntu script, guarded by `exit 1`, so it failed seconds
-        in with "Could not cache sudo credentials. Aborting."). Before that,
-        `preflight()` is handed the same `ask` and Docker provisioning may put
-        its own two questions to it; see that method.
-
-        Two things make that work, and both are needed:
-
-        * The script runs on a pseudo-terminal. sudo reads its password from
-          /dev/tty, not stdin, precisely so a piped stdin cannot feed it one —
-          measured: a child reading stdin answers through a pipe, the same child
-          reading /dev/tty does not.
-        * `SUDO_PROMPT` (see `script_env()`) makes sudo announce itself with a
-          random marker, so the prompt is recognised by an exact match instead
-          of a guess about what a prompt looks like.
-
-        Raises `InstallerError` if the script exits non-zero (after yielding
-        everything it printed), or any `preflight()` error before it starts.
-        Setting `cancel` interrupts the script (see `runner.interact()`).
-        """
-        opts = options or InstallOptions()
-        yield from self._preflight_lines(opts, cancel, ask)
-        logger.info(f"installing {self.entry.id} via {self.script}")
-        tail: deque[str] = deque(maxlen=_ERROR_TAIL_LINES)
-
-        def stopped() -> bool:
-            return cancel is not None and cancel.is_set()
-
-        try:
-            for line in self._interact(
-                ["bash", str(self.script)],
-                cwd=self.script.parent,
-                # `ask` reaches the rules as well as `interact()`. The rules
-                # need it for exactly one question — the docker-group consent
-                # added by the installers' 1.4.4 security change, which arrives
-                # as a COMPLETE line (the script `echo`s it, then reads), so
-                # `interact()`'s blocked-partial-line path never sees it.
-                respond=make_responder(opts, ask=ask),
-                ask=ask,
-                ask_marker=self.sudo_marker,
-                env=self.script_env(),
-                terminal=True,
-                cancel=cancel,
-            ):
-                text = runner.strip_ansi(line).strip()
-                if text:
-                    tail.append(text)
-                yield line
-            if stopped():
-                # `interact()` RETURNS on cancel rather than raising, so this
-                # used to fall through to "install of wow-wotlk finished" — in
-                # the app log, which is the file a user pastes into a bug
-                # report, for an install they had just stopped 2.3 GB into a
-                # clone (install gate, 2026-08-23).
-                return
-        except subprocess.CalledProcessError as exc:
-            # Never just "exited with status N": the script's own last words are
-            # the only thing that tells the user what went wrong (roadmap 6.1).
-            said = "\n".join(tail)
-            detail = f"\n\nIt last said:\n{said}" if said else ""
-            raise InstallerError(
-                f"{self.script.name} exited with status {exc.returncode}.{detail}"
-            ) from exc
-        finally:
-            # In a `finally` because a cancel has two shapes and the other one
-            # never reaches the line above. `_StreamWorker.run()` breaks its
-            # loop on the first line that arrives AFTER Stop, and breaking drops
-            # the last reference to this generator — so CPython closes it and
-            # `GeneratorExit` is raised at the `yield`, which the `except` above
-            # does not catch. That shape left the app log with no ending line at
-            # all: "installing wow-wotlk via ..." and then nothing (review,
-            # 2026-08-23).
-            if stopped():
-                logger.info(f"install of {self.entry.id} was cancelled")
-        logger.info(f"install of {self.entry.id} finished")
-
-
 class InstallEngine(Protocol):
-    """What a catalog view can drive, whichever engine it got.
+    """What a catalog view can drive, whichever family engine it got.
 
-    Both `Installer` (the bash script) and every `native.StagedInstaller`
-    family satisfy it, which is the whole reason `catalog_view.py`,
-    `log_panel.py` and the job runner needed no changes for roadmap 6.2.
+    Every `native.StagedInstaller` family satisfies it, which is the whole
+    reason `catalog_view.py`, `log_panel.py` and the job runner needed no
+    changes for roadmap 6.2 or Phase 7.
     """
 
     def preflight(
@@ -846,41 +677,38 @@ def installer_for(
     import_probe: docker.ImportProbe | None = None,
     reset_unfinished: docker.ResetUnfinished | None = None,
 ) -> InstallEngine:
-    """The engine that installs `entry` on THIS platform. The only place that decides.
+    """The engine that installs `entry`. The only place that decides.
 
-    Script versus family, read from `catalog.json` rather than from what OS
-    this is (style-guide §3, amendment A1): an entry with an `install.native`
-    block is installed by its family engine on every platform it supports; an
-    entry without one still runs its bash script, until 7.2 deletes that path
-    (`Install.uses_script()`/`is_native()` are untouched here and go in 7.2).
-    The platform refusal is unchanged from roadmap 6.1 and lives in each
-    engine's `preflight()`, so an unsupported click is refused by whoever
-    calls it.
+    One rule since 7.2, read from `catalog.json` rather than from what OS this
+    is (style-guide §3): `install.native.family` names the engine, through
+    `families.family_for()`. The platform is NOT consulted here — every family
+    engine runs on every platform, and an entry that does not support this one
+    (`install.platforms`) is refused by the engine's own preflight, from the
+    one place that words it (`unsupported_platform_message()`). That keeps the
+    refusal on the worker thread with the rest of preflight, where the view
+    already expects it (`catalog_view.start_install()` calls this factory
+    synchronously and never expects it to raise for a shipped entry).
 
-    There is a third state, because the DATA for a game arrives before the
-    engine that reads it: 7.3 writes the three CMaNGOS games' `native` blocks
-    in its first group and registers the family that consumes them four groups
-    later. An entry read on the block alone is therefore, for the length of
-    that gap, taken away from the bash script that installs it today and handed
-    an "install family this app does not have" refusal instead — a working path
-    traded for a dead end, so that code nobody has written yet can not run. So
-    the question here is whether THIS BUILD HAS the family
-    (`families.is_registered()`), not whether the entry names one, and an entry
-    whose family is missing goes back to its script. It says so in the log, in
-    a line naming the family and the script: a fallback nobody can see is how a
-    misspelled family becomes a week of wondering why the new engine never
-    runs. When there is no script left to fall back to, `family_for()` raises
-    the sentence it already raises, unchanged — an entry with neither an engine
-    nor a script IS the app bug that sentence describes.
+    Until 7.2 there was a second rule and a third state. An entry with no
+    `native` block ran its bash script, and an entry whose family THIS BUILD
+    had no engine for fell back to that script rather than being refused —
+    a bridge that existed because catalog data arrives before the engine that
+    reads it, and it did between G.4 and K.8. K.8 registered `cmangos`, which
+    left every shipped entry dispatching to a family engine and the fallback
+    reachable by nothing; F.3 deleted the script it fell back to. An entry
+    whose family is unregistered now gets `family_for()`'s "install family this
+    app does not have" sentence, which is what that state has always been.
 
-    That middle branch is a bridge with a demolition date on it. 7.2 deletes
-    the script path, which is the thing it falls back to, so it goes out with
-    the same commit and this returns to deciding on one fact again.
+    An entry with no `native` block cannot be given an engine at all: there is
+    no family to name. That is a catalog-authoring error, not the user's, so it
+    is raised here rather than deferred; `test_catalog.py` pins that every
+    shipped entry with a non-empty `platforms` carries a `native` block, so the
+    app's Install button — disabled off `platforms` — cannot reach this branch.
+    The CLI harness (`install_wiring.main()`) can, and catches it (exit 1).
 
     `import_probe`/`reset_unfinished` are per-game seams the CALLER supplies
-    (`install_wiring.py`), because `catalog/` must not import a controller
-    package. They are ignored on the script path, which runs its import
-    through the script.
+    (`install_wiring.py` wires `controller_wow_wotlk.repair`), because
+    `catalog/` must not import a controller package.
 
     Imported inside the function on purpose: `native.py` imports this module
     for `InstallOptions` and the error types, so naming it at module scope
@@ -888,18 +716,16 @@ def installer_for(
     exceptions and a dataclass — buys nothing but an import.
     """
     from yulon.catalog import native
-    from yulon.catalog.families import family_for, is_registered
+    from yulon.catalog.families import family_for
 
-    block = entry.install.native
-    if block is None:
-        return Installer(entry, installers_root=installers_root, platform_id=platform_id)
-    if not is_registered(block.family) and entry.install.script:
-        logger.info(
-            f"{entry.id} names install family {block.family!r}, which has no engine in this "
-            f"build; installing it with {entry.install.script} instead"
+    if entry.install.native is None:
+        raise InstallerError(
+            f"{entry.name} cannot be installed yet: its catalog entry has no `install.native` "
+            "section. Nothing was started."
         )
-        return Installer(entry, installers_root=installers_root, platform_id=platform_id)
-    return family_for(entry)(
+    engine = family_for(entry)
+    logger.debug(f"{entry.id} installs through {engine.__name__}")
+    return engine(
         entry,
         installers_root=installers_root,
         import_probe=import_probe,

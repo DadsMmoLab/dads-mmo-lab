@@ -3185,10 +3185,15 @@ def test_the_bind_mount_probe_mounts_the_folder_and_tells_no_from_no_answer(
         return _completed(returncode=1, stderr="invalid mount config")
 
     monkeypatch.setattr(docker.runner, "run", refuse_the_mount)
-    assert docker.bind_mount_ok(server_dir, "alpine/git") is False
+    # The seam is stated here, as it is above: this test is not about
+    # SELinux, and a call that omits it takes the answer of whatever box the
+    # suite runs on — green only because every runner so far is non-enforcing
+    # (bug-checklist §27). A Fedora runner would have put `label:disable` into
+    # the argv these fakes record.
+    assert docker.bind_mount_ok(server_dir, "alpine/git", selinux_enforcing=lambda: False) is False
     # 124 is what `runner.run()` reports for a command that never answered.
     monkeypatch.setattr(docker.runner, "run", answer(124, stderr="timed out after 30.0s"))
-    assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+    assert docker.bind_mount_ok(server_dir, "alpine/git", selinux_enforcing=lambda: False) is None
 
 
 def _probe_argv(
@@ -3256,6 +3261,55 @@ def test_a_selinux_answer_that_could_not_be_read_does_not_disable_labels(
     assert "label:disable" not in _probe_argv(monkeypatch, tmp_path, enforcing=None)
 
 
+def test_the_bind_probe_asks_the_selinux_seam_the_module_holds_at_call_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A test that patches `platform.selinux_enforcing` has to be SEEN in here.
+
+    The three tests above hand the answer in through `selinux_enforcing=`, so
+    not one of them could tell that `bind_mount_ok`'s own default was BOUND AT
+    IMPORT — the trap `platform.container_user_args()` documents against
+    itself, and the one a previous audit misattributed to `extract.run_plan()`.
+    Asked of the interpreter on m910q against the unchanged file (2026-09-04):
+
+        signature(docker.bind_mount_ok).parameters["selinux_enforcing"].default
+            is platform.selinux_enforcing
+        -> True
+
+    while the same question of `extract.run_plan` answered `None`, because that
+    one resolves the module attribute at call time. This test pins the second
+    shape.
+
+    **What is asserted is that the patched seam is CALLED and that its answer
+    ARRIVES in the argv** — not that the parameter exists. Counting the calls is
+    the half that makes this fail on every host instead of only a non-enforcing
+    one: with the default bound at import the REAL host is asked, and on a
+    Fedora runner that would have produced `label:disable` by luck and passed a
+    test that only read the argv.
+    """
+    (tmp_path / "already-here.txt").write_text("x", encoding="utf-8")
+    seen: list[list[str]] = []
+    asked: list[str] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _completed(stdout="already-here.txt\n")
+
+    def enforcing() -> bool:
+        asked.append("asked")
+        return True
+
+    monkeypatch.setattr(docker.runner, "run", run)
+    monkeypatch.setattr(docker.platform, "selinux_enforcing", enforcing)
+    # No `selinux_enforcing=` here, deliberately: this is the production call
+    # shape. `preflight._default_bind_probe` passes no seam either, which is why
+    # the import binding was latent rather than live — the default ran and asked
+    # the real host, which was the right answer by accident.
+    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is True
+    assert asked == ["asked"]
+    assert seen[-1][:5] == ["docker", "run", "--rm", "--security-opt", "label:disable"]
+
+
 def test_a_probe_that_never_reached_the_mount_is_unchecked_not_a_refusal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3300,7 +3354,7 @@ def test_a_probe_that_never_reached_the_mount_is_unchecked_not_a_refusal(
         )
 
     monkeypatch.setattr(docker.runner, "run", run)
-    assert docker.bind_mount_ok(server_dir, "alpine/git") is None
+    assert docker.bind_mount_ok(server_dir, "alpine/git", selinux_enforcing=lambda: False) is None
     assert [a[1:3] for a in asked] == [["run", "--rm"], ["image", "inspect"]]
 
 
@@ -3322,7 +3376,10 @@ def test_a_mount_the_daemon_refused_with_the_image_in_hand_is_still_a_refusal(
         return _completed(returncode=125, stderr="Mounts denied: the path is not shared from OS X")
 
     monkeypatch.setattr(docker.runner, "run", run)
-    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
+    assert (
+        docker.bind_mount_ok(tmp_path / "wow", "alpine/git", selinux_enforcing=lambda: False)
+        is False
+    )
 
 
 def test_a_listing_with_entries_in_it_is_a_listing_however_ls_exited(
@@ -3374,7 +3431,10 @@ def test_a_listing_with_entries_in_it_is_a_listing_however_ls_exited(
         )
 
     monkeypatch.setattr(docker.runner, "run", run)
-    assert docker.bind_mount_ok(tmp_path / "wow-server", "alpine/git") is True
+    assert (
+        docker.bind_mount_ok(tmp_path / "wow-server", "alpine/git", selinux_enforcing=lambda: False)
+        is True
+    )
 
 
 def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(
@@ -3390,7 +3450,10 @@ def test_the_bind_mount_probe_catches_the_silently_empty_mount_it_exists_for(
     """
     (tmp_path / "the-host-can-see-this").write_text("x", encoding="utf-8")
     monkeypatch.setattr(docker.runner, "run", lambda *a, **k: _completed(returncode=0, stdout="\n"))
-    assert docker.bind_mount_ok(tmp_path / "wow", "alpine/git") is False
+    assert (
+        docker.bind_mount_ok(tmp_path / "wow", "alpine/git", selinux_enforcing=lambda: False)
+        is False
+    )
 
 
 def test_the_probe_walks_up_to_a_directory_that_has_something_in_it(tmp_path: Path) -> None:
@@ -3962,6 +4025,40 @@ def test_a_bare_run_is_just_rm_image_and_command() -> None:
     """No mounts, no user, no env: nothing is emitted for a field left at its default."""
     spec = docker.ContainerRun(image="busybox:1.36", argv=("true",))
     assert spec.to_argv() == ["run", "--rm", "busybox:1.36", "true"]
+
+
+def test_the_security_args_reach_the_argv_verbatim_and_before_the_image() -> None:
+    """The container-level security decision, spelled by whoever took it.
+
+    `platform.label_disable_args()` answers in docker options already, and this
+    field carries that answer through unchanged — respelling it here would be a
+    second spelling of one security decision. It has to land before the image
+    name: docker stops reading its own options there, so a `--security-opt`
+    after it would be handed to the tool as an argument.
+    """
+    spec = docker.ContainerRun(
+        image="busybox:1.36",
+        argv=("true",),
+        security_args=("--security-opt", "label:disable", "--network", "none"),
+    )
+    argv = spec.to_argv()
+    assert _flag_values(argv, "--security-opt") == ["label:disable"]
+    assert _flag_values(argv, "--network") == ["none"]
+    assert argv.index("--security-opt") < argv.index("busybox:1.36")
+
+
+def test_a_run_that_never_started_is_told_apart_from_one_that_exited_127() -> None:
+    """Both halves of the sentinel, because `docker run` returns the CONTAINER's status.
+
+    127 is what a shell reports for "command not found", and an image asked for
+    a binary it does not hold produces exactly that — so the code alone would
+    read a working Docker as a missing one.
+    """
+    help_text = docker.platform.DOCKER_CLI_MISSING_HELP
+    assert docker.cli_missing_run(docker.AttachedRun(127, (help_text,)))
+    assert not docker.cli_missing_run(docker.AttachedRun(127, ("exec ad: no such file",)))
+    assert not docker.cli_missing_run(docker.AttachedRun(127, ()))
+    assert not docker.cli_missing_run(docker.AttachedRun(0, (help_text,)))
 
 
 def test_a_relative_mount_source_is_refused_before_docker_sees_it() -> None:
@@ -5080,3 +5177,294 @@ def test_the_password_reaches_no_log_line_on_the_way_to_the_database(
     assert "hunter2" not in caplog.text
     # And not in what the child was spawned with, nor in the result's own `args`.
     assert "hunter2" not in " ".join(_FakePopen.instances[-1].command)
+
+
+# --- volume_exists(): the one question the CMaNGOS `db-password` refusal needs ---
+#
+# The three outcomes below were taken from a live daemon (Docker 29.6.2, Windows)
+# rather than from memory, because the whole function is a claim about Docker's
+# wording. Captured 2026-09-01:
+#
+#   $ docker volume inspect --format {{.Name}} k1-no-such-9f3a
+#   exit 1, stderr: Error response from daemon: get k1-no-such-9f3a: no such volume
+#   $ docker volume inspect --format {{.Name}} k1-probe-vol-9f3a   # after `volume create`
+#   exit 0, stdout: k1-probe-vol-9f3a
+#   $ DOCKER_HOST=tcp://127.0.0.1:2999 docker volume inspect --format {{.Name}} anything_db-data
+#   exit 1, stderr: error during connect: Get "http://127.0.0.1:2999/v1.55/volumes/anything_db-data":
+#                   dial tcp 127.0.0.1:2999: connectex: No connection could be made because the
+#                   target machine actively refused it.
+#
+# Note the last one: a daemon that will not talk exits 1, exactly like a missing
+# volume does, and on Windows it does NOT say "Cannot connect to the Docker
+# daemon at unix://..." - that is the Linux socket wording. So the two are told
+# apart by the stderr TEXT and by nothing else, which is why the absent branch
+# matches a substring and everything else refuses.
+
+_DAEMON_SAYS_ABSENT = "Error response from daemon: get missing_db-data: no such volume"
+"""Verbatim from the live daemon above, with only the volume name changed."""
+
+_DAEMON_WILL_NOT_TALK = (
+    'error during connect: Get "http://127.0.0.1:2999/v1.55/volumes/anything_db-data": '
+    "dial tcp 127.0.0.1:2999: connectex: No connection could be made because the "
+    "target machine actively refused it."
+)
+"""Verbatim from a live CLI pointed at a dead daemon, on the OS the launcher ships to."""
+
+# The two wordings below are why the absent branch matches "no such VOLUME" and
+# not the shorter "no such". Both are unanswerable states whose stderr carries
+# the shorter phrase, and both were captured from a live CLI rather than
+# imagined - the elided socket path and hostname are filled in here, the rest is
+# as it was printed:
+#
+#   Linux, daemon stopped (the commonest unanswerable state there is):
+#     failed to connect to the docker API at unix://...: connect: no such file
+#     or directory
+#   Windows, DOCKER_HOST naming a host that does not resolve:
+#     failed to connect to the docker API at tcp://...: lookup ...: no such host
+#
+# Neither says "Cannot connect to the Docker daemon": that is an older Docker's
+# unix-socket wording, and the current one opens identically for tcp and unix,
+# so the prefix does not identify the platform either.
+
+_DAEMON_STOPPED_ON_LINUX = (
+    "failed to connect to the docker API at unix:///var/run/docker.sock: "
+    "connect: no such file or directory"
+)
+"""A stopped Linux daemon. Carries "no such"; a looser phrase reads it as "absent"."""
+
+_DAEMON_HOST_DOES_NOT_RESOLVE = (
+    "failed to connect to the docker API at tcp://not-a-daemon.invalid:2375: "
+    "lookup not-a-daemon.invalid: no such host"
+)
+"""A DOCKER_HOST that does not resolve. Also carries "no such"; also not an answer."""
+
+_WSL_GONE_STDOUT = (
+    "T\x00h\x00e\x00r\x00e\x00 \x00i\x00s\x00 \x00n\x00o\x00 \x00"
+    "d\x00i\x00s\x00t\x00r\x00i\x00b\x00u\x00t\x00i\x00o\x00n\x00"
+    " \x00w\x00i\x00t\x00h\x00 \x00t\x00h\x00e\x00 \x00s\x00u\x00"
+    "p\x00p\x00l\x00i\x00e\x00d\x00 \x00n\x00a\x00m\x00e\x00.\x00"
+    "\n\x00\n\x00E\x00r\x00r\x00o\x00r\x00 \x00c\x00o\x00d\x00e\x00"
+    ":\x00 \x00W\x00s\x00l\x00/\x00S\x00e\x00r\x00v\x00i\x00c\x00"
+    "e\x00/\x00W\x00S\x00L\x00_\x00E\x00_\x00D\x00I\x00S\x00T\x00"
+    "R\x00O\x00_\x00N\x00O\x00T\x00_\x00F\x00O\x00U\x00N\x00D\x00"
+    "\n\x00\n\x00"
+)
+"""wsl.exe's complaint about a deleted distro, as `runner.run()` hands it over.
+
+UTF-16LE decoded as UTF-8, so every ASCII character trails a NUL - and written
+to STDOUT with stderr empty, which is why the seam that quotes stderr printed
+`exited 4294967295: ` and stopped. Same capture as `tests/test_wsl.py`
+(2026-08-26); duplicated rather than imported because a fixture that two suites
+share is a fixture either of them can quietly reshape.
+"""
+
+
+def _volume_proc(
+    returncode: int, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(["docker", "volume", "inspect"], returncode, stdout, stderr)
+
+
+def _volume_double(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], str | None]]:
+    """Stand in for `_docker`, recording the argv AND the daemon it was aimed at.
+
+    The distro is recorded because the module's completeness guard is an AST walk
+    over the signature: a `volume_exists()` that accepts `wsl_distro` and then
+    drops it on the floor keeps that guard green while asking Docker Desktop
+    about a WSL-resident install's volume - which answers "no such volume", the
+    one answer that tells the caller it is safe to write a new password over a
+    database initialised with the old one.
+    """
+    seen: list[tuple[list[str], str | None]] = []
+
+    def answering(
+        argv: list[str],
+        cwd: Path | None = None,
+        timeout: float | None = None,
+        *,
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append((argv, wsl_distro))
+        name = argv[-1]
+        if name == "wow-tbc-1234abcd_db-data":
+            return _volume_proc(0, stdout=f"{name}\n")
+        if name == "missing_db-data":
+            return _volume_proc(1, stderr=_DAEMON_SAYS_ABSENT)
+        return _volume_proc(1, stderr=_DAEMON_WILL_NOT_TALK)
+
+    monkeypatch.setattr(docker, "_docker", answering)
+    return seen
+
+
+def test_volume_exists_tells_absent_from_unanswerable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`no such volume` is an answer; a daemon that will not talk is not one (7.3 db-password).
+
+    The two failures exit 1 identically - so if the middle branch were widened to
+    "any failure means absent", the CMaNGOS installer would write a freshly
+    generated password over a database it can no longer open, on nothing more
+    than a daemon hiccup.
+    """
+    seen = _volume_double(monkeypatch)
+    assert docker.volume_exists("wow-tbc-1234abcd_db-data") is True
+    assert docker.volume_exists("missing_db-data") is False
+    with pytest.raises(docker.DockerCommandError, match="actively refused"):
+        docker.volume_exists("anything_db-data")
+    # Audit by argv: one `volume inspect` per question, the name last, never a shell.
+    argvs = [argv for argv, _ in seen]
+    assert all(argv[:3] == ["volume", "inspect", "--format"] for argv in argvs), argvs
+    assert [argv[-1] for argv in argvs] == [
+        "wow-tbc-1234abcd_db-data",
+        "missing_db-data",
+        "anything_db-data",
+    ]
+    assert [distro for _, distro in seen] == [None, None, None]
+
+
+@pytest.mark.parametrize(
+    ("what", "said"),
+    [
+        ("a stopped Linux daemon", _DAEMON_STOPPED_ON_LINUX),
+        ("a DOCKER_HOST that does not resolve", _DAEMON_HOST_DOES_NOT_RESOLVE),
+    ],
+)
+def test_volume_exists_refuses_a_no_such_that_is_not_a_volume(
+    what: str, said: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "no such volume" is the answer; "no such ANYTHING ELSE" is not (7.3 db-password).
+
+    The existing unanswerable fixture is refused for two reasons at once - it
+    exits 1 AND it carries none of the phrase - so widening the match from "no
+    such volume" to "no such" leaves it green. These two inputs violate exactly
+    one rule: they are non-zero, they are not the missing-CLI sentinel, they are
+    not wsl.exe's missing-distro code, and the ONLY thing standing between them
+    and the destructive `return False` is the three words after "no such". Both
+    are states a Linux user hits by having the daemon off.
+
+    Asserted as a RAISE, not as `is False`: refusing is the whole contract, and
+    an assertion on the return value would pass for a function that had already
+    told the CMaNGOS installer it may overwrite a live database's password.
+    """
+    assert "no such" in said.lower(), f"{what} no longer exercises the boundary at all"
+    assert "no such volume" not in said.lower(), f"{what} is a genuine absent answer"
+    monkeypatch.setattr(docker, "_docker", lambda *a, _s=said, **k: _volume_proc(1, stderr=_s))
+    with pytest.raises(docker.DockerCommandError, match="no such"):
+        docker.volume_exists("anything_db-data")
+
+
+def test_volume_exists_explains_a_deleted_distro_rather_than_a_bare_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fourth seam. `_run()` translates this; `volume_exists` did not.
+
+    `volume_exists` reads its own exit codes instead of going through `_run()`,
+    because the absent answer IS a non-zero exit - so it also inherited none of
+    `_run()`'s translation. Measured against a WSL distro that no longer exists,
+    the two seams disagreed on the same input:
+
+        volume_exists(...)  'docker volume inspect yulon-x_db-data exited 4294967295: '
+        _run(...)           'The WSL distro ... no longer exists - it was deleted...'
+
+    That empty-after-the-colon message is the exact regression
+    `wsl.missing_distro_problem` was written to end: wsl.exe complains on STDOUT
+    in UTF-16, and this seam quotes stderr.
+    """
+    from yulon import wsl
+
+    monkeypatch.setattr(
+        docker,
+        "_docker",
+        lambda *a, **k: _volume_proc(4294967295, stdout=_WSL_GONE_STDOUT, stderr=""),
+    )
+    monkeypatch.setattr(wsl, "distro_states", lambda: (wsl.Distro("other-distro", True),))
+    # ^ never reached with this stdout - the error code settles it - but patched
+    # so a regression that starts polling wsl.exe here cannot do it for real.
+
+    with pytest.raises(docker.DockerCommandError) as raised:
+        docker.volume_exists("yulon-x_db-data", wsl_distro="dml-arch")
+
+    said = str(raised.value)
+    assert "dml-arch" in said and "no longer exists" in said, said
+    assert "4294967295" not in said, "the raw exit code is still what the user reads"
+
+
+def test_every_seam_that_asks_about_a_missing_distro_is_named_where_it_is_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`missing_distro_problem`'s docstring said "three of those seams". There were four.
+
+    The count went stale the moment `volume_exists` grew the same need, and a
+    number written down in another module is exactly the kind of fact that
+    cannot notice. So the docstring names its callers instead of counting them,
+    and this derives that list from `docker.py` itself.
+
+    What this pins is documentation against code, not "a new seam must ask" -
+    that second property cannot be spelled as an AST rule here without firing on
+    the forty-odd raise sites that reach `_run()` and therefore already ask.
+    """
+    from yulon import wsl
+
+    tree = ast.parse(Path(docker.__file__).read_text(encoding="utf-8"))
+    seams = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(call.func, ast.Attribute) and call.func.attr == "missing_distro_problem"
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+        )
+    }
+    assert seams == {"_run", "follow_logs", "run_attached", "volume_exists"}, seams
+
+    doc = wsl.missing_distro_problem.__doc__ or ""
+    unnamed = sorted(name for name in seams if f"`{name}()`" not in doc)
+    assert not unnamed, f"{unnamed} ask this and are not named in its docstring"
+
+
+def test_volume_exists_asks_the_daemon_the_install_actually_lives_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The distro must ARRIVE at the seam, not merely be accepted by the signature.
+
+    A WSL-resident install's `db-data` volume lives on that distro's daemon.
+    Asked of Docker Desktop instead, `docker volume inspect` answers "no such
+    volume" - which this function reports as False, the branch that says "safe to
+    write a new password". The wrong-daemon bug and the destructive branch are
+    the same branch, so the forward is pinned here rather than left to the
+    signature-shaped completeness guard.
+    """
+    seen = _volume_double(monkeypatch)
+    assert docker.volume_exists("missing_db-data", wsl_distro="dml-arch") is False
+    assert [distro for _, distro in seen] == ["dml-arch"], seen
+
+
+def test_volume_exists_without_a_cli_raises_the_missing_cli_help(
+    no_docker: list[list[str]],
+) -> None:
+    """No docker at all is its own error, not "the daemon refused to say".
+
+    `DockerCliMissingError` subclasses `DockerCommandError`, so the generic
+    refusal would satisfy a looser `raises(DockerCommandError)`; naming the
+    subclass is what makes this distinguish the two. The condition is produced by
+    the fixture rather than mimicked, and `no_docker == []` proves nothing was
+    spawned to find it out.
+
+    The last assertion is why the ORDER of the two checks inside `volume_exists`
+    is not pinned by a test: swapping them is an equivalent mutation while the
+    sentinel's help text carries no "no such volume", so no input can tell the
+    two orders apart. Should that ever stop being true, this line goes red -
+    and at that moment the ordering becomes load-bearing, because a missing CLI
+    would otherwise be reported as an absent volume.
+    """
+    from yulon import platform
+
+    with pytest.raises(docker.DockerCliMissingError):
+        docker.volume_exists("x_db-data")
+    assert no_docker == []
+    assert "no such volume" not in platform.DOCKER_CLI_MISSING_HELP.lower()
+
+
+def test_volume_exists_forwards_its_distro_per_the_completeness_rule() -> None:
+    """The module rule, spelled out for the function that answers it."""
+    assert "volume_exists" not in _DAEMON_AGNOSTIC
+    assert "wsl_distro" in _seam_reachers()["volume_exists"]

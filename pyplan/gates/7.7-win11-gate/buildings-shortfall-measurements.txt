@@ -1,0 +1,104 @@
+Lane 7.7 -- Vanilla Buildings/ count gap, Windows (yulon-win11-gate) vs Linux (m910q)
+Measured 2026-09-04 11:15-11:30 CEST. Every number below came from the command shown.
+
+SOURCES
+  Windows : yulon-win11-gate  C:\gate\vanilla-server\data\Buildings   (server running, untouched)
+  Linux   : m910q             /home/pk/vanilla-75/data/Buildings      (read-only; nothing changed)
+  Log     : C:\gate\vanilla77.log, copied to vanilla77.log here (1,775,158 bytes / 27,488 lines)
+
+1. THE DIFF (a count is not a diff)
+  ssh yulon-win11-gate "dir /b ...\Buildings" | sort  -> windows-buildings.txt   3913 lines
+  ssh m910q "ls -1 .../Buildings | sort"              -> linux-buildings.txt     5076 lines
+  comm -23 linux windows -> only-linux.txt            1163 lines   (in Linux, not Windows)
+  comm -13 linux windows -> only-windows.txt             0 lines   (in Windows, not Linux)
+
+  Extension split of the 1163 missing: 1163 .m2, 0 .M2, 0 .wmo.
+  Totals by extension:
+    Linux   2796 .m2   1464 .M2   814 .wmo   + dir_bin + temp_gameobject_models = 5076
+    Windows 1633 .m2   1464 .M2   814 .wmo   + dir_bin + temp_gameobject_models = 3913
+  All 814 .wmo identical on both sides.
+
+2. THE GAP IS CASE-FOLDING, EXACTLY
+  unique case-insensitive names, Linux list   : 3913
+  unique case-insensitive names, Windows list : 3913
+  Windows file count                          : 3913     <-- equal, to the file
+  Of the 1163 Linux-only names, how many have a case-insensitive twin present on
+  Windows: 1163 / 1163.  Mapping in collision-pairs.txt, e.g.
+      Abbeyshelf01.m2  ->  ABBEYSHELF01.M2
+      Ahn_Qiraj_Doorplug.m2 -> AHN_QIRAJ_DOORPLUG.M2
+
+3. THE TWIN PAIRS ARE BYTE-IDENTICAL  (pair-compare.txt)
+  md5 + size of every one of the 1163 pairs, computed on m910q where both spellings exist:
+      SAME  1163
+      DIFF     0
+  => the Windows extraction loses ZERO unique bytes. 1163 duplicate copies collapsed
+     into their twin by NTFS case-insensitivity.
+
+4. THE EXTRACTOR'S OWN WARNINGS DO NOT ACCOUNT FOR ANYTHING
+  vanilla77.log:
+      "Warning: Some models could not be extracted, see below"                 x2
+      "Could not find file of model World\Generic\Quilboar\Passive Doodads\
+       Leantos\Razorfen_Leanto03.m2"                                           x2  (one model)
+      "Extract for VMAPs05. Work complete. No errors."                         x1
+      "vmap extract: done (Buildings: 3913 files)"
+      2031 "not found" lines: 2029 are mmaps' offmesh.txt, 1 is the model above,
+      1 is "Git repository not found" from cmake.
+  m910q /home/pk/vmap75.log has the identical single unfound model.
+  vmap_extractor ran ONCE on Windows: 19:32:18 -> 20:55:57 (83 min), no retry, no crash.
+  On Linux it printed "Work complete. No errors." then exited 139 (SIGSEGV at exit);
+  the retry refused with "Your output directory seems to be polluted"; install failed.
+
+5. THE WINDOWS RUN IS THE MORE COMPLETE ONE -- dir_bin
+  Buildings/dir_bin       Windows 36,635,438 B     Linux 31,072,203 B   (Windows +5,563,235)
+  Buildings/temp_gameobject_models  24,991 B  on both.
+  Model names scanned out of each dir_bin (regex over printable runs ending .m2/.M2/.wmo):
+      distinct names        Windows 3348    Linux 2981
+      name occurrences      Windows 503,722 Linux 429,016   (Windows +74,706 placements)
+      names in Windows not in Linux : 367   (all .m2)   -> dirbin-win-only-names.txt
+      names in Linux not in Windows :   0
+  Not a tail truncation: 284 of the 367 first appear BELOW byte 31,072,203.
+  Of the 367:
+      296 exist on Linux ONLY as ALL-CAPS (e.g. INNBED.M2, no Innbed.m2)  -> dirbin-win-only-capsonly.txt
+       71 exist on Linux in mixed case too (order-dependent miss)
+        0 exist in neither spelling
+  Witness on m910q:  ls Innbed.m2 -> No such file;  ls INNBED.M2 -> 840 bytes.
+
+6. CAUSE, IN THE SOURCE  (m910q /home/pk/vanilla-75/src/mangos-classic, git 8ec338a1)
+  contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:9  ExtractSingleModel()
+      fixedName = GetPlainName(origPath);      // RAW name from the WMO MODN chunk
+      // .MDX -> .M2 by erase(len-2,2)+append("2")  =>  INNBED.MDX -> INNBED.M2
+      // fixnamen()/fixname2() are NOT applied to the output filename
+  contrib/vmap_extractor/vmapextract/model.cpp:242  Doodad::ExtractSet()
+      sprintf(ModelInstName, "%s", GetPlainName(&doodadData.Paths[doodad.NameIndex]));
+      fixnamen(ModelInstName, nlen);           // INNBED.MDX -> Innbed.mdx
+      fixname2(ModelInstName, nlen);
+      ... ".mdx"/".mdl" -> ".m2"               // => Innbed.m2
+      FILE* input = fopen(tempname, "r+b");    // Buildings/Innbed.m2
+      if (!input) continue;                    // <-- SILENT DROP of the placement
+  wmo.cpp:85 MODN handler memcpy()s DoodadData.Paths BEFORE fixnamen() mutates the
+  scratch buffer, so ExtractSet always re-derives the fixed spelling from the raw one.
+
+  The extractor writes the file as INNBED.M2 and later looks for Innbed.m2.
+  NTFS resolves that; ext4 does not, and the doodad is dropped without a message.
+
+VERDICT
+  There is no Windows shortfall. 3,913 is the correct, complete count for a
+  case-insensitive filesystem; the 1,163 "missing" entries are duplicate byte-identical
+  copies of files that are present under their other spelling. The direction of the
+  defect is the reverse of the premise: the LINUX extraction is the deficient one, missing
+  74,706 WMO-interior doodad placements (+17.4% on Windows) because of the upstream
+  case bug above.
+
+  Ours to fix: nothing on the Windows side. Do NOT "fix" the count.
+  Upstream (CMaNGOS vmap_extractor): ExtractSingleModel() should apply fixnamen()/
+  fixname2() to fixedName before writing the file, so the write and the later fopen()
+  agree; and Doodad::ExtractSet()'s `continue` should at minimum count and report the
+  drops instead of failing silently.
+  Ours to fix if we do not carry a patch: a Buildings/ count is not a valid cross-platform
+  equality check. Compare case-insensitively, or compare dir_bin/vmaps instead.
+
+OPEN, NOT OWNED BY THIS LANE
+  Windows vmaps=6077 files (43 .vmtree, 1249 .vmtile, rest .vmo), mmaps=2009, maps=2429,
+  dbc=158, Cameras=10 -- all four extract tools recorded finished in
+  C:\gate\vanilla-server\data\.yulon-extract.json. The Linux side never reached vmap
+  assemble, so there is no Linux vmaps/mmaps to compare against.

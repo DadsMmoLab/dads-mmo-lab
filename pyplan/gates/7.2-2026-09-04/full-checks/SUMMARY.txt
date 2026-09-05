@@ -1,0 +1,24 @@
+﻿full checks for the 7.2 gate line
+host        : YULON-WIN11-GAT
+tree        : C:\gate\checks-badee625\pylauncher  (git archive of badee6255965f2ba8e05ad2306dcdc6126e5880b)
+interpreter : C:/Users/pk/co/dads-mmo-lab-yulon-phase7/pylauncher/.venv/Scripts/python.exe
+started UTC : 2026-09-04T11:00:27.3259612Z
+
+ruff                 exit 0        0.3s   ruff.txt
+black                exit 0        1.3s   black.txt
+mypy-native          exit 0        0.9s   mypy-native.txt
+mypy-win32           exit 0        0.9s   mypy-win32.txt
+mypy-darwin          exit 0       17.5s   mypy-darwin.txt
+pytest               exit 0      208.4s   pytest.txt
+pytest-integration   exit 1      271.1s   pytest-integration.txt
+
+finished UTC: 2026-09-04T11:08:47.7293273Z
+
+--- copy-back verification (added on the laptop after the copy) ---
+8 files copied from C:/gate/checks-badee625/out2 on yulon-win11-gate.
+Line counts compared on both machines, counting blank lines on both sides:
+  black.txt 17, mypy-darwin.txt 10, mypy-native.txt 10, mypy-win32.txt 10,
+  pytest.txt 46, pytest-integration.txt 307, ruff.txt 10, SUMMARY.txt 15 (before this note).
+Every count equal. run-checks-as-run.ps1 here is C:/gate/checks-badee625/run-checks2.ps1 there.
+Note for whoever repeats this: PowerShell's `Get-Content | Measure-Object -Line` does NOT count
+blank lines, so it reported 277 and 13 for the two files with blanks. `@(Get-Content).Count` does.

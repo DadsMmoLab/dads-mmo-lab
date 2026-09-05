@@ -11,6 +11,7 @@ import functools
 import importlib
 import json
 import os
+import shlex
 import shutil
 import socket
 import ssl
@@ -19,7 +20,7 @@ import sys
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
@@ -611,8 +612,7 @@ _DOCKER_READY_POLL_SECONDS = 3.0
 # has wedged costs a couple of poll rounds rather than the whole budget.
 _DOCKER_PROBE_SECONDS = 10.0
 _MANUAL_DOCKER_DESKTOP = (
-    "Download and install Docker Desktop by hand: "
-    "https://www.docker.com/products/docker-desktop/"
+    "Download and install Docker Desktop by hand: https://www.docker.com/products/docker-desktop/"
 )
 # The sentence that is true wherever a TLS check fails on a box like the one in
 # the downloads block below: the root store, not the network, is what broke, and
@@ -1342,8 +1342,8 @@ DOCKER_GROUP_UNASKED_STEP = (
 )
 
 DOCKER_GROUP_RELOGIN_STEP = (
-    "Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo, "
-    "then click Install again."
+    "Restart Yu'lon so {user} can use Docker without sudo, then click Install again. "
+    "Log out and back in if a restart is not enough."
 )
 """Shown only where it is true: after a join that ran, or for an existing member.
 
@@ -1358,10 +1358,11 @@ answer was yes. Saying otherwise would promise an install that cannot start.
 def _explicit_yes(reply: str | None) -> bool:
     """Only a deliberate yes is consent. A dismissed dialog is not.
 
-    The same reading `make_responder()` applies to the installers' version of
-    this question, deliberately written the same way here: silence, an empty
-    string and a closed dialog all mean no, because refusing a privilege change
-    is recoverable and visible while granting one by accident is neither.
+    The same reading the bash engine's rule table applied to the installers'
+    version of this question, deliberately written the same way here and kept
+    after 7.2 deleted that table: silence, an empty string and a closed dialog
+    all mean no, because refusing a privilege change is recoverable and visible
+    while granting one by accident is neither.
     """
     return reply is not None and reply.strip().lower() in ("y", "yes")
 
@@ -1385,6 +1386,176 @@ def _docker_group_member(do: RunCmd, user: str) -> bool:
     if proc.returncode != 0:
         return False
     return "docker" in proc.stdout.split()
+
+
+REGROUP_ENV = "YULON_REGROUP"
+"""Set on a process that is already the product of a docker-group re-exec.
+
+Read by `docker_group_reexec()` before anything else, and the only thing between
+a machine where `sg` runs but does not deliver the group and an unbounded exec
+loop. A marker rather than a counter, because one re-exec either works or is
+never going to.
+"""
+
+
+def _process_group_names(gids: Iterable[int]) -> set[str]:
+    """Names for the gids THIS PROCESS carries; a gid with no group row is skipped.
+
+    Imported dynamically for the reason `_linux_user()` spells out at length:
+    `grp` is POSIX-only and this file is type-checked for Windows as well.
+
+    A gid with no `/etc/group` entry is not an error and must not raise. A group
+    deleted while a session was open leaves exactly that, and this runs on every
+    start, so the one machine in that state would fail to launch at all.
+    """
+    grp = importlib.import_module("grp")
+    names: set[str] = set()
+    for gid in gids:
+        try:
+            names.add(str(grp.getgrgid(gid).gr_name))
+        except KeyError:
+            continue
+    return names
+
+
+def docker_group_reexec(
+    *,
+    run: RunCmd | None = None,
+    which: Callable[[str], str | None] | None = None,
+    orig_argv: list[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+    getgroups: Callable[[], list[int]] | None = None,
+    platform_id: Callable[[], PlatformId] = detect,
+) -> list[str] | None:
+    """The argv that restarts this process holding the docker group, or None.
+
+    A user just added to the `docker` group cannot use Docker from the session
+    that was already open, because supplementary groups are process
+    CREDENTIALS: set once, by PAM at login, and nothing propagates a later
+    `usermod` into a process that is already running. Every message in this
+    module answered that with "log out and back in".
+
+    It does not need a logout. `sg` is setgid-root and calls `setgroups()`, so a
+    process it starts is built from the group DATABASE rather than from
+    inherited credentials -- and the database is current the moment `usermod`
+    returns.
+
+    Measured on `yulon-ubuntu`, 2026-09-02, sampling both facts once a second
+    from a single process across a `usermod` that ran at t=5: `os.getgroups()`
+    did not contain the new group in ANY of the eighteen samples after the join,
+    while `id -nG <user>` contained it from t=6 onward. That gap is this
+    function's predicate, and it is why the two sides are read from two
+    different places instead of from one convenient one.
+
+    Returns None -- "nothing to regain, carry on" -- on every path but the one
+    it exists for, cheapest test first:
+
+    * **not Linux.** Windows needs a REBOOT, not a re-exec: `wsl --install`
+      turns on optional features that load at boot, which
+      `_ensure_docker_windows()` already reports as `reboot_required`. macOS has
+      no docker group at all.
+    * **already re-executed**, per `REGROUP_ENV`.
+    * **no `sg` on PATH.** It ships in `passwd`/`shadow-utils` on every distro
+      this project targets, but a stripped container image can be without it.
+    * **this process already HAS the group** -- the common case by a wide
+      margin, and the reason the whole check is cheap enough to run every start.
+    * **the database does not have it either**, so no join has happened and a
+      re-exec would gain nothing. `ensure_docker()` owns that case.
+
+    `sys.orig_argv` rather than a reconstruction from `sys.argv`: it is the
+    literal command line this interpreter was started with, so `-m yulon.x`
+    comes back as `-m yulon.x` rather than as a path to a file inside a package,
+    and a frozen build comes back as the app binary. It can hold a RELATIVE
+    interpreter path (measured: `['.venv/bin/python', '-c', ...]`), which is
+    correct here only because `sg` does not change directory -- if that ever
+    stops being true this must resolve argv[0] first.
+
+    `sg` takes ONE command string, so the argv is joined with `shlex.join`. That
+    is the single quoting site in this design, and it is the reason the design
+    is a re-exec at all: the alternative considered was wrapping every docker
+    subcommand in `sg` instead, which would have routed argv carrying the
+    database password through a shell on every call rather than once through a
+    command line that carries no secret.
+    """
+    if platform_id() != "linux":
+        return None
+    env = os.environ if environ is None else environ
+    if env.get(REGROUP_ENV):
+        return None
+    # Root already reaches the docker socket; there is nothing to regain, and
+    # asking would compare two different accounts. `_linux_user(None)` returns
+    # `$SUDO_USER` when euid is 0, so under `sudo` the database half of the
+    # predicate is about the invoking user while `os.getgroups()` is about root
+    # -- both answer yes, the predicate is permanently true, and a GUI that
+    # gates on it offers a pointless restart for every unrelated install
+    # failure (review, 2026-09-02).
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and geteuid() == 0:
+        return None
+    find = _which if which is None else which
+    sg = find("sg")
+    if sg is None:
+        logger.info("no `sg` on PATH; the docker group cannot be picked up without a logout")
+        return None
+    if getgroups is not None:
+        gids = list(getgroups())
+    else:
+        # `getattr`, the same shape `container_user_args()` uses for `os.getuid`:
+        # `os.getgroups` is POSIX-only and this file is type-checked for Windows
+        # too, where the direct call is `Module has no attribute "getgroups"`.
+        # Caught by CI's `mypy --platform win32` pass and by nothing else -- the
+        # Linux run, the test suite and `ruff` were all green on it.
+        #
+        # Reachable only on a host that says it is Linux and has no
+        # `os.getgroups`, which is the same impossible-but-checked case the
+        # `--user` builder guards. Refusing is the safe direction: without the
+        # gids there is no way to tell "already has the group" from "does not",
+        # and guessing the second restarts a launcher that had nothing to gain.
+        read = getattr(os, "getgroups", None)
+        if read is None:
+            logger.warning("this host says it is linux but has no os.getgroups; not restarting")
+            return None
+        gids = list(read())
+    if "docker" in _process_group_names(gids):
+        return None
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
+    if not _docker_group_member(do, _linux_user(None)):
+        return None
+    command = list(sys.orig_argv) if orig_argv is None else list(orig_argv)
+    if not command:
+        # `sys.orig_argv` is never empty on a real interpreter; an injected one
+        # can be, and `sg docker -c ""` would exit 0 having started nothing,
+        # which reads from the outside exactly like a launcher that vanished.
+        return None
+    return [sg, "docker", "-c", shlex.join(command)]
+
+
+def restart_under_docker_group(reexec: Callable[[], list[str] | None] | None = None) -> bool:
+    """Replace this process with one holding the docker group. Does not return on success.
+
+    False means nothing was done and the caller carries on: either there was
+    nothing to regain (`docker_group_reexec()` said None) or the exec itself
+    failed. Neither is fatal — without the group the install refuses with a
+    sentence that says what to do, which is exactly where this user stood before
+    any of this existed.
+
+    The marker goes in BEFORE `os.execv`, not after. `execv` does not return, so
+    a marker set afterwards is a marker never set at all, and the machine where
+    `sg` runs without delivering the group gets a process that replaces itself
+    forever and never draws a window. It is removed again if the exec raises, so
+    nothing downstream reads a re-exec that did not happen.
+    """
+    argv = (docker_group_reexec if reexec is None else reexec)()
+    if argv is None:
+        return False
+    logger.info("restarting under `sg docker` to pick up the docker group")
+    os.environ[REGROUP_ENV] = "1"
+    try:
+        os.execv(argv[0], argv)
+    except OSError as exc:
+        os.environ.pop(REGROUP_ENV, None)
+        logger.warning(f"could not restart under `sg docker`: {exc}")
+    return False
 
 
 def linux_package_manager(
@@ -3430,8 +3601,7 @@ def _reserved_dir_reason(server_dir: Path) -> str | None:
             )
     if any(one.as_posix() in _RESERVED_SERVER_DIRS for one in spellings):
         return (
-            f"{server_dir} is a system directory. Pick a folder under your home directory "
-            "instead."
+            f"{server_dir} is a system directory. Pick a folder under your home directory instead."
         )
     if any(
         len(one.parts) == 2 and one.parts[1].lower() in _RESERVED_WINDOWS_DIRS for one in spellings

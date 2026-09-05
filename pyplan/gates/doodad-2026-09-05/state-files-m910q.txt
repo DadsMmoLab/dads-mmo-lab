@@ -1,0 +1,81 @@
+# Every .yulon-install.json on m910q, read 2026-09-05. None records patch-sources.
+
+== /home/pk/tbc-7.4c/.yulon-install.json
+{
+  "version": 1,
+  "game_id": "wow-tbc",
+  "family": "cmangos",
+  "install_id": "37f13213",
+  "completed": [
+    "clone-sources",
+    "write-dockerfile",
+    "generate-compose",
+    "build",
+    "extract",
+    "mmaps",
+    "conf",
+    "import"
+  ],
+  "last_error": "",
+  "updated_unix": 1788477973
+}
+
+   data/.yulon-extract.json vouches for: ['dbc and maps', 'vmap extract', 'vmap assemble', 'mmaps']
+
+== /home/pk/vanilla-75b/.yulon-install.json
+{
+  "version": 1,
+  "game_id": "wow-vanilla",
+  "family": "cmangos",
+  "install_id": "06ced116",
+  "completed": [
+    "clone-sources",
+    "write-dockerfile",
+    "generate-compose",
+    "build",
+    "extract",
+    "mmaps",
+    "conf",
+    "import"
+  ],
+  "last_error": "",
+  "updated_unix": 1788516894
+}
+
+   data/.yulon-extract.json vouches for: ['dbc and maps', 'vmap extract', 'vmap assemble', 'mmaps']
+
+== /home/pk/vanilla-75/.yulon-install.json
+{
+  "version": 1,
+  "game_id": "wow-vanilla",
+  "family": "cmangos",
+  "install_id": "0baff6f3",
+  "completed": [
+    "clone-sources",
+    "write-dockerfile",
+    "generate-compose",
+    "build"
+  ],
+  "last_error": "vmap extract failed (exit 1), and that was already the one retry the plan's recipe asks for. Its last words were: Your output directory seems to be polluted, please use an empty directory!",
+  "updated_unix": 1788481989
+}
+
+   data/.yulon-extract.json vouches for: ['dbc and maps']
+
+== /home/pk/tortoise-server/.yulon-install.json
+{
+  "version": 1,
+  "game_id": "wow-tortoise",
+  "family": "cmangos",
+  "install_id": "58c6fd1c",
+  "completed": [
+    "clone-sources",
+    "write-dockerfile",
+    "generate-compose"
+  ],
+  "last_error": "the build failed (exit 1). Its last words were: \u2026LLOW_TURTLE_ADDONS=ON \\ / 75 | >>>         -DBUILD_PLAYERBOTS=ON / 76 | / -------------------- / failed to solve: process \"/bin/sh -c cmake ..         -DCMAKE_INSTALL_PREFIX=/opt/tortoise         -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON         -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON         -DBUILD_PLAYERBOTS=ON\" did not complete successfully: exit code: 1",
+  "updated_unix": 1788378289
+}
+
+   data/.yulon-extract.json: absent
+

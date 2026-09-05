@@ -1,0 +1,9 @@
+==== captured Sat 09/05/2026  1:03:02.72 box-local, box shows PST 
+/tortoise-db StartedAt=2026-09-05T06:41:46.706576897Z RestartCount=0 Status=running
+/tortoise-realmd StartedAt=2026-09-05T06:41:58.375988926Z RestartCount=0 Status=running
+/tortoise-mangosd StartedAt=2026-09-05T06:41:58.391526726Z RestartCount=0 Status=running
+tortoise-realmd	Up About an hour	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+tortoise-mangosd	Up About an hour	0.0.0.0:8090->8090/tcp, [::]:8090->8090/tcp
+tortoise-db	Up About an hour (healthy)	127.0.0.1:3306->3306/tcp
+2026-09-05T07:41:17.697512007Z World server is up and running! Loading time: 59 minutes 18 seconds
+Enter password: ERROR 1045 (28000): Access denied for user 'mangos'@'localhost' (using password: NO)

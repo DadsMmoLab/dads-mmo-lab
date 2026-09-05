@@ -19,13 +19,23 @@ having a log file is a degraded app; not starting is no app. So the file
 handler falls back to the temp dir and then to nothing, and records why in
 `file_log_problem()` for a caller that has a way to tell the user.
 
-This module is imported once from `main.py` entry points; nothing else
-configures logging.
+`configure(config_dir=...)` is called by EVERY entry point a user can run, and
+by nothing else. There are two — `main.py` and `yulon/install_wiring.py` — and
+for a while there was one: measured 2026-09-05 on `yulon-ubuntu`, after the
+whole 7.2 gate had been driven through the CLI harness,
+`~/.local/share/yulon/` did not exist, because the call appeared once in the
+tree and that once was the GUI. The entry point with nowhere to print kept a
+file; the entry point whose only other record is a terminal the user closes
+kept nothing, and a gate criterion that asked for a count out of `yulon.log`
+was scored against a file that had never been written. `test_install_wiring.py`
+now enumerates the runnable modules and fails on the DISAGREEMENT, in either
+direction, rather than on a missing call.
 """
 
 from __future__ import annotations
 
 import logging
+import sys
 import tempfile
 import threading
 from logging.handlers import RotatingFileHandler
@@ -39,6 +49,15 @@ _lock = threading.Lock()
 _stderr_configured = False
 _file_configured = False
 _file_problem: str | None = None
+_stderr_handler: logging.Handler | None = None
+"""The stderr handler this module added, kept so `stderr_level` can find it again.
+
+Not a convenience. Every module does `logger = get_logger(__name__)` at import,
+which builds this handler long before any `main()` runs, so a level named by a
+later `configure()` has to reach the handler that is ALREADY THERE — a level
+applied only to a handler this call had just created would apply to nothing at
+all in the one case that asks for one (`install_wiring.main()`).
+"""
 
 
 def file_log_problem() -> str | None:
@@ -68,6 +87,7 @@ def configure(
     config_dir: Path | None = None,
     *,
     level: int = logging.INFO,
+    stderr_level: int | None = None,
     log_format: str = _DEFAULT_FORMAT,
     date_format: str = _DATE_FORMAT,
     max_bytes: int = 5 * 1024 * 1024,
@@ -89,11 +109,19 @@ def configure(
         config_dir: Directory to write the rotating `yulon.log` to. If omitted,
             only the stderr handler is (re-)ensured.
         level: Root logging level.
+        stderr_level: Floor for the STDERR handler only, leaving the file at
+            `level`. Opt-in, and omitted by `main.py`: the GUI's stderr is a
+            developer's console and keeps every INFO line it always had. The CLI
+            harness passes `WARNING` because its stage lines are already on
+            stdout, and a gate runs it as `> log 2>&1` — logging them at INFO
+            through this handler printed every line of a 30-minute install
+            twice. Applied to the handler however old it is; see
+            `_stderr_handler`.
         log_format/date_format: `logging` format strings.
         max_bytes: RotatingFileHandler max file size before rotation.
         backup_count: Number of rotated log files retained.
     """
-    global _stderr_configured, _file_configured, _file_problem
+    global _stderr_configured, _file_configured, _file_problem, _stderr_handler
 
     with _lock:
         root = logging.getLogger()
@@ -101,10 +129,15 @@ def configure(
         formatter = logging.Formatter(log_format, datefmt=date_format)
 
         if not _stderr_configured:
-            stderr_handler = logging.StreamHandler()
-            stderr_handler.setFormatter(formatter)
-            root.addHandler(stderr_handler)
+            _stderr_handler = logging.StreamHandler()
+            _stderr_handler.setFormatter(formatter)
+            root.addHandler(_stderr_handler)
             _stderr_configured = True
+        if stderr_level is not None and _stderr_handler is not None:
+            # Outside the `if` above on purpose: by the time a `main()` names a
+            # level, the handler is the one that module-scope `get_logger()`
+            # built at import time.
+            _stderr_handler.setLevel(stderr_level)
 
         if config_dir is not None and not _file_configured:
             wanted = Path(config_dir)
@@ -163,7 +196,7 @@ def _reset_for_tests() -> None:
     Test-only helper (avoids leaking global root-logger state across the test
     suite — see `tests/test_log.py`). Not part of the public API.
     """
-    global _stderr_configured, _file_configured, _file_problem
+    global _stderr_configured, _file_configured, _file_problem, _stderr_handler
     with _lock:
         root = logging.getLogger()
         for handler in list(root.handlers):
@@ -173,3 +206,32 @@ def _reset_for_tests() -> None:
         _stderr_configured = False
         _file_configured = False
         _file_problem = None
+        _stderr_handler = None
+
+
+def use_utf8_streams() -> None:
+    """Make stdout/stderr encode UTF-8, replacing what they cannot.
+
+    Windows gives a redirected stream cp1252, and this app's own messages carry
+    characters cp1252 has no place for -- `apply.py` alone writes `->` as a real
+    arrow in six sentences. Writing one raises `UnicodeEncodeError` and takes the
+    process down.
+
+    Measured 2026-09-03 on `yulon-win11`: `python -m yulon.install_wiring
+    wow-wotlk` reached the end of preflight and died with
+    `'charmap' codec can't encode character '→' in position 210`. The GUI
+    entry point had carried this fix since the provisioning work; the CLI harness
+    every gate runs through had never had it, so no Windows gate could get past
+    the first non-ASCII line.
+
+    `errors="replace"` rather than letting it raise: a diagnostic that kills the
+    thing it is diagnosing is worse than one with a "?" in it. A stream that
+    cannot be re-wrapped is left alone.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):  # a stream that cannot be re-wrapped
+                pass

@@ -1,0 +1,20 @@
+Script started on 2026-08-31 14:28:54+02:00 [COMMAND="/home/pk/press.sh" TERM="tmux-256color" TTY="/dev/pts/0" COLUMNS="200" LINES="50"]
+Installing WoW WotLK into /home/pk/wowserver
+You can stop this at any time. Nothing is written outside the folder below, and starting the install again continues from the last step that finished — only the step that was interrupted runs again.
+Checking Docker.
+Docker is not answering yet. Setting it up - this can mean downloading Docker Desktop and waiting for its engine, up to a few minutes with no output. You can stop at any time.
+Yu'lon can add 'pk' to the docker group, so it can use Docker without asking for your password every time.
+
+Heads up: membership in the docker group is effectively full root access on this machine. A docker user can, for example, mount your entire disk inside a container and change any file.
+
+If you say yes: you'll need to log out and back in once before it takes effect, then click Install again.
+If you say no: Yu'lon still installs Docker Engine, but it runs docker directly (never through sudo), so it cannot install or manage a server here until you join the group yourself: sudo usermod -aG docker pk, then log out and back in.
+
+Yu'lon never creates passwordless sudo rules and never changes the docker socket's permissions.
+
+Add 'pk' to the docker group (grants root-equivalent access)? (y/n):  y
+2026-08-31 14:29:29 INFO [yulon.platform] docker group consent for pk: granted
+2026-08-31 14:30:19 ERROR [__main__] install failed: Docker isn't available and could not be set up automatically. Log out and back in (or run `newgrp docker`) so pk can use Docker without sudo, then click Install again.
+install failed: Docker isn't available and could not be set up automatically. Log out and back in (or run `newgrp docker`) so pk can use Docker without sudo, then click Install again.
+
+Script done on 2026-08-31 14:30:19+02:00 [COMMAND_EXIT_CODE="1"]

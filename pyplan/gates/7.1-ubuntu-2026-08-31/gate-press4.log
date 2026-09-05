@@ -1,0 +1,62 @@
+Script started on 2026-08-31 15:15:50+02:00 [COMMAND="/home/pk/press4.sh" TERM="tmux-256color" TTY="/dev/pts/0" COLUMNS="200" LINES="50"]
+Installing WoW WotLK into /home/pk/wowserver
+You can stop this at any time. Nothing is written outside the folder below, and starting the install again continues from the last step that finished — only the step that was interrupted runs again.
+Checking Docker.
+[pass] Docker: the daemon answered
+[pass] memory: Docker's VM has 19.5 GB
+[warn] CPU vs memory: 15 CPUs means 16 parallel compilers at about 2 GB each, and 19.5 GB affords about 9 Either raise the memory, or set Docker Desktop to 8 CPUs — the job count comes from the CPU count and cannot be set any other way.
+[warn] free space on Docker's disk: 53 GB free; 75 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+[warn] free space on the server folder: 53 GB free; 75 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+[pass] the server folder: /home/pk/wowserver looks usable
+[pass] sharing the folder with Docker: a container can read /home/pk/wowserver
+[pass] SELinux: not enforcing
+[warn] the server's ports: something on this machine is already listening on 3724, 8085 If the server cannot start, that is the first thing to look at.
+Using /home/pk/wowserver (resuming)
+Already finished: clone-core, clone-modules, generate-compose, build, client-data, import
+2026-08-31 15:15:53 INFO [yulon.platform] holding this machine awake for the build: systemd-inhibit --what=idle:sleep --who=Yu'lon --why=installing a server sleep infinity
+--- clone-core
+2026-08-31 15:15:53 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wowserver:/git -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into /home/pk/wowserver
+Cloning mod-playerbots/azerothcore-wotlk into /home/pk/wowserver (this is a large repository)
+It is already cloned; updating it instead.
+2026-08-31 15:15:54 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wowserver:/git -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 fetch origin Playerbot` into /home/pk/wowserver
+2026-08-31 15:15:56 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wowserver:/git -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 reset --hard FETCH_HEAD` into /home/pk/wowserver
+mod-playerbots/azerothcore-wotlk is in place.
+--- clone-modules
+2026-08-31 15:15:58 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wowserver/modules/mod-playerbots:/git -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into /home/pk/wowserver/modules/mod-playerbots
+Cloning mod-playerbots/mod-playerbots into modules/mod-playerbots
+2026-08-31 15:15:59 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wowserver/modules/mod-playerbots:/git -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 fetch --depth=1 origin master` into /home/pk/wowserver/modules/mod-playerbots
+2026-08-31 15:16:01 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wowserver/modules/mod-playerbots:/git -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 reset --hard FETCH_HEAD` into /home/pk/wowserver/modules/mod-playerbots
+Modules are in place.
+--- generate-compose
+2026-08-31 15:16:02 INFO [yulon.git] containerized git: `run --rm -v /home/pk/wowserver:/git -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 status --porcelain -- docker-compose.yml` into /home/pk/wowserver
+Replacing the docker-compose.yml that came with the repository; it is unchanged from what git has, so `git checkout` brings it back.
+Wrote docker-compose.yml
+--- build
+Stopping now leaves Docker finishing the build step it is already on, in the background. That is deliberate: the work it has done is kept, and starting this install again picks up from there instead of compiling it all a second time.
+The server is already built; skipping the compile.
+--- client-data
+The part of the download that finished is kept: the fetch resumes from where it stopped.
+Fetching server data (ac-client-data-init). The download resumes if it is interrupted.
+Attaching to ac-client-data-init
+ac-client-data-init  | yulon: client data v20.0 already installed
+
+[Kac-client-data-init exited with code 0
+Server data is in place.
+--- start-db
+Starting the database, which the import writes into.
+The database is up.
+--- import
+Databases left half-written are detected and cleared before the import is run again, so nothing here has to be undone by hand.
+The databases read as populated: 100 rows in acore_auth.account, 1000 rows in acore_characters.characters
+They are already imported; leaving them alone.
+--- up
+Starting the server.
+2026-08-31 15:16:05 INFO [yulon.docker] start_staged(): `compose up -d --no-deps ac-database ac-authserver ac-worldserver` in /home/pk/wowserver
+--- ready
+Waiting for the database.
+Waiting for the world server to finish loading (this can take many minutes).
+The server is up.
+2026-08-31 15:16:06 INFO [yulon.catalog.native] install of wow-wotlk finished
+WoW WotLK is installed and running in /home/pk/wowserver
+
+Script done on 2026-08-31 15:16:06+02:00 [COMMAND_EXIT_CODE="0"]

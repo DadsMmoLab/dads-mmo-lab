@@ -1,0 +1,45 @@
+ac-authserver  | [0m[36mHalting process...
+ac-authserver  | [0m[36mClosing down DatabasePool 'acore_auth'. Waiting for 0 queries to finish...
+ac-authserver  | [0m[36mAsynchronous connections on DatabasePool 'acore_auth' terminated. Proceeding with synchronous connections.
+ac-authserver  | [0m[36mAll connections on DatabasePool 'acore_auth' closed.
+ac-authserver  | [0mcp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
+ac-authserver  | cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
+ac-authserver  | Starting authserver...
+ac-authserver  | [36mAzerothCore rev. 47960183bb03+ 2026-08-28 21:04:11 +0200 (Playerbot branch) (Unix, RelWithDebInfo, Static) (authserver)
+ac-authserver  | [0m[36m<Ctrl-C> to stop.
+ac-authserver  | 
+ac-authserver  | [0m[36m   █████╗ ███████╗███████╗██████╗  ██████╗ ████████╗██╗  ██╗
+ac-authserver  | [0m[36m  ██╔══██╗╚══███╔╝██╔════╝██╔══██╗██╔═══██╗╚══██╔══╝██║  ██║
+ac-authserver  | [0m[36m  ███████║  ███╔╝ █████╗  ██████╔╝██║   ██║   ██║   ███████║
+ac-authserver  | [0m[36m  ██╔══██║ ███╔╝  ██╔══╝  ██╔══██╗██║   ██║   ██║   ██╔══██║
+ac-authserver  | [0m[36m  ██║  ██║███████╗███████╗██║  ██║╚██████╔╝   ██║   ██║  ██║
+ac-authserver  | [0m[36m  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝
+ac-authserver  | [0m[36m                                 ██████╗ ██████╗ ██████╗ ███████╗
+ac-authserver  | [0m[36m                                ██╔════╝██╔═══██╗██╔══██╗██╔════╝
+ac-authserver  | [0m[36m                                ██║     ██║   ██║██████╔╝█████╗
+ac-authserver  | [0m[36m                                ██║     ██║   ██║██╔══██╗██╔══╝
+ac-authserver  | [0m[36m                                ╚██████╗╚██████╔╝██║  ██║███████╗
+ac-authserver  | [0m[36m                                 ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝
+ac-authserver  | 
+ac-authserver  | [0m[36m     AzerothCore 3.3.5a  -  www.azerothcore.org
+ac-authserver  | 
+ac-authserver  | [0m[36m> Using configuration file       /azerothcore/env/dist/etc/authserver.conf
+ac-authserver  | [0m[36m> Using SSL version:             OpenSSL 3.0.13 30 Jan 2024 (library: OpenSSL 3.0.13 30 Jan 2024)
+ac-authserver  | [0m[36m> Using Boost version:           1.83.0
+ac-authserver  | [0m[36m 
+ac-authserver  | [0m[36m> Config: Found config value 'Updates.EnableDatabases' from environment variable 'AC_UPDATES_ENABLE_DATABASES'.
+ac-authserver  | [0m[33m> AUTOUPDATER: Automatic database updates are disabled for all databases in the config! This is not recommended!
+ac-authserver  | [0m[36m> Config: Found config value 'LoginDatabaseInfo' from environment variable 'AC_LOGIN_DATABASE_INFO'.
+ac-authserver  | [0m[36mOpening DatabasePool 'acore_auth'. Asynchronous connections: 1, synchronous connections: 1.
+ac-authserver  | [0m[36mMySQL client library: 8.0.46
+ac-authserver  | [0m[36mMySQL server ver: 8.4.11 
+ac-authserver  | [0m[36mConnected to MySQL database at ac-database
+ac-authserver  | [0m[36mMySQL client library: 8.0.46
+ac-authserver  | [0m[36mMySQL server ver: 8.4.11 
+ac-authserver  | [0m[36mConnected to MySQL database at ac-database
+ac-authserver  | [0m[36mDatabasePool 'acore_auth' opened successfully. 2 total connections running.
+ac-authserver  | [0m[36m 
+ac-authserver  | [0m[36mStarted auth database connection pool.
+ac-authserver  | [0m[36mLoading IP Location Database...
+ac-authserver  | [0m[36m 
+ac-authserver  | [0m[36mAdded realm "AzerothCore" at 172.30.55.119:8085.

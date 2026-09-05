@@ -1,0 +1,52 @@
+=== sweep_driver3.py ===
+started (local): 2026-09-04T12:39:00+02:00
+command: /home/pk/gate0904/venv/bin/python /home/pk/gate710/drivers/sweep_driver3.py
+---
+2026-09-04 12:39:26 INFO [yulon.controller_wow_wotlk.maintenance] backed up 4 database(s) into /home/pk/wowserver/sql_scripts/backups: acore_auth (79574 bytes), acore_characters (9349240 bytes), acore_playerbots (61979183 bytes), acore_world (306374348 bytes)
+2026-09-04 12:39:26 INFO [yulon.controller_wow_wotlk.maintenance] restore of 20260904_123901_acore_auth.sql refused: ac-worldserver, ac-authserver are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.
+ac-authserver
+ac-worldserver
+2026-09-04 12:40:08 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/wowserver/sql_scripts/backups: acore_auth (79724 bytes)
+2026-09-04 12:40:08 WARNING [yulon.controller_wow_wotlk.maintenance] restoring acore_auth from /home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_auth.sql
+2026-09-04 12:40:13 INFO [yulon.controller_wow_wotlk.maintenance] restored acore_auth from /home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_auth.sql
+2026-09-04 12:40:13 INFO [yulon.docker] start_staged(): `compose up -d --no-deps ac-database ac-authserver ac-worldserver` in /home/pk/wowserver
+
+==================== Backup: services.backup() live, while server is running ====================
+BackupReport: BackupReport(directory=PosixPath('/home/pk/wowserver/sql_scripts/backups'), dumps=(Dump(database='acore_auth', path=PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_auth.sql'), size_bytes=79574), Dump(database='acore_characters', path=PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_characters.sql'), size_bytes=9349240), Dump(database='acore_playerbots', path=PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_playerbots.sql'), size_bytes=61979183), Dump(database='acore_world', path=PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_world.sql'), size_bytes=306374348)), missing_core=(), server_was_running=True)
+dumps: [('acore_auth', PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_auth.sql'), 79574), ('acore_characters', PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_characters.sql'), 9349240), ('acore_playerbots', PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_playerbots.sql'), 61979183), ('acore_world', PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_world.sql'), 306374348)]
+[OK] backup() -> 4 dump(s) in /home/pk/wowserver/sql_scripts/backups, server_was_running=True
+
+==================== Verify: maintenance.verify_dump() on each dump ====================
+  verify_dump(20260904_123901_acore_auth.sql) -> 79574 bytes
+  verify_dump(20260904_123901_acore_characters.sql) -> 9349240 bytes
+  verify_dump(20260904_123901_acore_playerbots.sql) -> 61979183 bytes
+  verify_dump(20260904_123901_acore_world.sql) -> 306374348 bytes
+[OK] verify_dump() passed for all 4 dump(s)
+
+==================== Restore refusal: plan_restore() while world/auth are running ====================
+plan.refusals (should be non-empty, server running): ('ac-worldserver, ac-authserver are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+[OK] plan_restore() correctly refused while running: ('ac-worldserver, ac-authserver are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+
+==================== Stopping ac-authserver + ac-worldserver only (db stays up, as restore requires) ====================
+[OK] docker stop ac-authserver ac-worldserver succeeded
+
+==================== Restore: plan_restore() + restore() with db up, world/auth down ====================
+plan2.refusals (should now be empty): ()
+plan2.databases: ('acore_auth',) token: ba57881c664c4133
+[OK] plan_restore() allowed the restore with world/auth stopped
+RestoreReport: RestoreReport(backup=PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_auth.sql'), databases=('acore_auth',), safety_backup=(PosixPath('/home/pk/wowserver/sql_scripts/backups/20260904_124007_pre-restore_acore_auth.sql'),))
+[OK] restore() succeeded: restored ('acore_auth',) from /home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_auth.sql
+
+==================== Restarting the install (controller.start()) ====================
+[OK] controller.start() issued
+
+
+=== SUMMARY (phase 3) ===
+OK backup() -> 4 dump(s) in /home/pk/wowserver/sql_scripts/backups, server_was_running=True
+OK verify_dump() passed for all 4 dump(s)
+OK plan_restore() correctly refused while running: ('ac-worldserver, ac-authserver are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+OK docker stop ac-authserver ac-worldserver succeeded
+OK plan_restore() allowed the restore with world/auth stopped
+OK restore() succeeded: restored ('acore_auth',) from /home/pk/wowserver/sql_scripts/backups/20260904_123901_acore_auth.sql
+OK controller.start() issued
+--- exit code: 0   elapsed: 75s   finished: 2026-09-04T12:40:15+02:00

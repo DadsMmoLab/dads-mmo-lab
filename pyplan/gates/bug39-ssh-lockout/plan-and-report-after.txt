@@ -1,0 +1,70 @@
+2026-09-04 05:22:47 INFO [yulon.networking] networking lan for wow-wotlk: 2 done, 2 skipped (1 refused), 0 manual
+2026-09-04 05:22:47 INFO [yulon.networking] networking lan for wow-wotlk: 4 done, 1 skipped (0 refused), 0 manual
+2026-09-04 05:22:47 INFO [yulon.networking] networking lan for wow-wotlk: 2 done, 2 skipped (1 refused), 0 manual
+2026-09-04 05:22:47 INFO [yulon.networking] networking lan for wow-wotlk: 2 done, 2 skipped (1 refused), 0 manual
+2026-09-04 05:22:47 INFO [yulon.networking] networking lan for wow-wotlk: 3 done, 1 skipped (0 refused), 0 manual
+--- what the LAN tile plans today (default: nothing turns the firewall on)
+  plan.firewall_commands = [['ufw', 'allow', '3724/tcp'], ['ufw', 'allow', '8085/tcp']]
+  plan.ssh_ports         = []
+  plan.refusals          = 1 entry/entries
+      Yu'lon opened the game ports in ufw's rule list but did NOT run `ufw enable`: turning a firewall on can only take reachability away, it is no part of making a server reachable, and on a machine you reach over SSH it takes away your own way in — which is exactly what it did to the box that found this (bug-checklist §39). ufw is left as you had it. To turn it on yourself, allow your SSH port FIRST: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
+  plan.warnings          = 1 entry/entries
+      Yu'lon opened the game ports in ufw's rule list but did NOT run `ufw enable`: turning a firewall on can only take reachability away, it is no part of making a server reachable, and on a machine you reach over SSH it takes away your own way in — which is exactly what it did to the box that found this (bug-checklist §39). ufw is left as you had it. To turn it on yourself, allow your SSH port FIRST: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
+  plan.manual_steps      = []
+  report.done            = ['ufw allow 3724/tcp', 'ufw allow 8085/tcp']
+  report.skipped         = 2 entry/entries
+      Yu'lon opened the game ports in ufw's rule list but did NOT run `ufw enable`: turning a firewall on can only take reachability away, it is no part of making a server reachable, and on a machine you reach over SSH it takes away your own way in — which is exactly what it did to the box that found this (bug-checklist §39). ufw is left as you had it. To turn it on yourself, allow your SSH port FIRST: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
+      realmlist not updated (no DB access): UPDATE acore_auth.realmlist SET address='172.30.55.119', localAddress='172.30.55.119' WHERE id=1;
+  report.refusals        = 1 entry/entries
+
+--- enable asked for, on a box reached over SSH on port 2222
+  plan.firewall_commands = [['ufw', 'allow', '3724/tcp'], ['ufw', 'allow', '8085/tcp'], ['ufw', 'allow', '2222/tcp'], ['ufw', '--force', 'enable']]
+  plan.ssh_ports         = [2222]
+  plan.refusals          = 0 entry/entries
+  plan.warnings          = 1 entry/entries
+      ufw is being turned ON, and SSH (port 2222) is allowed through it so this machine stays reachable. That port was read from the running system, not from sshd_config. Every other inbound connection will be blocked.
+  plan.manual_steps      = []
+  report.done            = ['ufw allow 3724/tcp', 'ufw allow 8085/tcp', 'ufw allow 2222/tcp', 'ufw --force enable']
+  report.skipped         = 1 entry/entries
+      realmlist not updated (no DB access): UPDATE acore_auth.realmlist SET address='172.30.55.119', localAddress='172.30.55.119' WHERE id=1;
+  report.refusals        = 0 entry/entries
+
+--- enable asked for, session over SSH, sshd's port could not be established
+  plan.firewall_commands = [['ufw', 'allow', '3724/tcp'], ['ufw', 'allow', '8085/tcp']]
+  plan.ssh_ports         = []
+  plan.refusals          = 1 entry/entries
+      REFUSED to enable ufw: this session arrived over SSH (SSH_CONNECTION is set) and the port sshd is listening on could not be established. The game ports are in ufw's rule list and nothing was enabled. Allow your SSH port and enable it yourself: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
+  plan.warnings          = 1 entry/entries
+      REFUSED to enable ufw: this session arrived over SSH (SSH_CONNECTION is set) and the port sshd is listening on could not be established. The game ports are in ufw's rule list and nothing was enabled. Allow your SSH port and enable it yourself: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
+  plan.manual_steps      = []
+  report.done            = ['ufw allow 3724/tcp', 'ufw allow 8085/tcp']
+  report.skipped         = 2 entry/entries
+      REFUSED to enable ufw: this session arrived over SSH (SSH_CONNECTION is set) and the port sshd is listening on could not be established. The game ports are in ufw's rule list and nothing was enabled. Allow your SSH port and enable it yourself: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
+      realmlist not updated (no DB access): UPDATE acore_auth.realmlist SET address='172.30.55.119', localAddress='172.30.55.119' WHERE id=1;
+  report.refusals        = 1 entry/entries
+
+--- enable asked for, listener table unreadable (ss missing, or not root)
+  plan.firewall_commands = [['ufw', 'allow', '3724/tcp'], ['ufw', 'allow', '8085/tcp']]
+  plan.ssh_ports         = []
+  plan.refusals          = 1 entry/entries
+      REFUSED to enable ufw: this machine's listening sockets could not be read, so Yu'lon cannot tell whether enabling ufw would cut an SSH login. The game ports are in ufw's rule list and nothing was enabled. Allow your SSH port and enable it yourself: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
+  plan.warnings          = 1 entry/entries
+      REFUSED to enable ufw: this machine's listening sockets could not be read, so Yu'lon cannot tell whether enabling ufw would cut an SSH login. The game ports are in ufw's rule list and nothing was enabled. Allow your SSH port and enable it yourself: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
+  plan.manual_steps      = []
+  report.done            = ['ufw allow 3724/tcp', 'ufw allow 8085/tcp']
+  report.skipped         = 2 entry/entries
+      REFUSED to enable ufw: this machine's listening sockets could not be read, so Yu'lon cannot tell whether enabling ufw would cut an SSH login. The game ports are in ufw's rule list and nothing was enabled. Allow your SSH port and enable it yourself: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
+      realmlist not updated (no DB access): UPDATE acore_auth.realmlist SET address='172.30.55.119', localAddress='172.30.55.119' WHERE id=1;
+  report.refusals        = 1 entry/entries
+
+--- enable asked for, nothing listens for SSH: the guide's three commands, unchanged
+  plan.firewall_commands = [['ufw', 'allow', '3724/tcp'], ['ufw', 'allow', '8085/tcp'], ['ufw', '--force', 'enable']]
+  plan.ssh_ports         = []
+  plan.refusals          = 0 entry/entries
+  plan.warnings          = 0 entry/entries
+  plan.manual_steps      = []
+  report.done            = ['ufw allow 3724/tcp', 'ufw allow 8085/tcp', 'ufw --force enable']
+  report.skipped         = 1 entry/entries
+      realmlist not updated (no DB access): UPDATE acore_auth.realmlist SET address='172.30.55.119', localAddress='172.30.55.119' WHERE id=1;
+  report.refusals        = 0 entry/entries
+

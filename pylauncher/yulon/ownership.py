@@ -34,6 +34,14 @@ class Ownership(Enum):
     case where it acts most freely. It fails closed everywhere it is reached;
     see `catalog.native.StagedInstaller.claimed_this_folder()` for what that
     bought, and `apply.read_clone_claim()` for the second place it buys it.
+
+    The "written by a version this one cannot read" case listed above had NO
+    producer until 2026-09-02: nothing compared a state file's `version` to
+    `STATE_VERSION`, so a newer record parsed as `OWNED` and was resumed and
+    rewritten. `catalog.native.read_claim()` produces it now, and it is the one
+    `UNKNOWN` that carries a `reason`, because the generic refusal tells the
+    user to delete the file -- advice that would destroy a record written by a
+    NEWER version rather than an unreadable one.
     """
 
     UNCLAIMED = "unclaimed"

@@ -1,0 +1,54 @@
+=== Mutation testing: does each test actually bite? ===
+tree: C:/gate/bug39-mut (a copy; the shared checkout is not touched)
+
+M1 the enable is no longer withheld by default
+  The exact defect: plan() emits `ufw --force enable` again.
+  KILLED
+    FAILED tests/test_networking.py::test_the_lan_step_does_not_turn_the_firewall_on_by_itself
+    FAILED tests/test_networking.py::test_the_boot_time_enable_is_withheld_with_the_live_one
+    2 failed, 73 passed in 1.36s
+
+M2 an unreadable listener table is treated as an empty one
+  The probe cannot see, and the guard enables anyway.
+  KILLED
+    FAILED tests/test_networking.py::test_an_ssh_port_that_cannot_be_established_refuses_the_enable[listener table unreadable]
+    1 failed, 74 passed in 42.52s
+
+M3 the refusal is recorded but the enable still runs
+  Says the right thing, does the wrong thing.
+  KILLED
+    FAILED tests/test_networking.py::test_an_ssh_port_that_cannot_be_established_refuses_the_enable[remote session, port unknown]
+    FAILED tests/test_networking.py::test_an_ssh_port_that_cannot_be_established_refuses_the_enable[listener table unreadable]
+    2 failed, 73 passed in 0.92s
+
+M4 apply() trusts the plan's declaration instead of checking the rule landed
+  The SSH rule failed; the enable behind it runs anyway.
+  KILLED
+    FAILED tests/test_networking.py::test_apply_does_not_enable_ufw_when_the_ssh_rule_did_not_land
+    1 failed, 74 passed in 0.86s
+
+M5 only ufw's own enable is withheld, not systemd's
+  The lockout returns one reboot later on SteamOS.
+  KILLED
+    FAILED tests/test_networking.py::test_the_boot_time_enable_is_withheld_with_the_live_one
+    FAILED tests/test_networking.py::test_what_counts_as_turning_the_firewall_on[command2-True]
+    FAILED tests/test_networking.py::test_what_counts_as_turning_the_firewall_on[command3-True]
+    FAILED tests/test_networking.py::test_what_counts_as_turning_the_firewall_on[command4-True]
+    4 failed, 71 passed in 0.94s
+
+M6 the refusal is not copied into the report's skipped list
+  Exactly the invisibility the 7.1 gate hit: skipped was empty.
+  KILLED
+    FAILED tests/test_networking.py::test_the_lan_step_does_not_turn_the_firewall_on_by_itself
+    FAILED tests/test_networking.py::test_an_ssh_port_that_cannot_be_established_refuses_the_enable[remote session, port unknown]
+    FAILED tests/test_networking.py::test_an_ssh_port_that_cannot_be_established_refuses_the_enable[listener table unreadable]
+    3 failed, 72 passed in 0.92s
+
+M7 SSH_CONNECTION's port is ignored (sshd_config-style guessing)
+  The one port provably admitting this operator is dropped.
+  KILLED
+    FAILED tests/test_networking.py::test_ssh_connection_names_the_port_this_session_actually_arrived_on
+    FAILED tests/test_networking.py::test_a_session_over_ssh_still_names_its_port_when_ss_is_missing
+    2 failed, 73 passed in 0.89s
+
+7/7 mutations killed

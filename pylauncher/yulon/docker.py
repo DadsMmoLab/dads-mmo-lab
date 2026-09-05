@@ -630,6 +630,75 @@ def container_exists(container: str, *, wsl_distro: str | None = None) -> bool:
     return any(line.strip() == container for line in proc.stdout.splitlines())
 
 
+def volume_exists(name: str, *, wsl_distro: str | None = None) -> bool:
+    """Does a named volume exist on this daemon? Raises when Docker would not say.
+
+    Asked by the CMaNGOS family's `db-password` stage before it writes a NEW
+    generated password: a `db-data` volume that already exists was initialised
+    with the password `.db_password` used to hold, and a fresh secret would lock
+    the install out of its own database. So "no such volume" is a real answer
+    (write the file), "it exists" is a refusal, and a daemon that cannot be
+    asked is neither — the caller must refuse rather than guess, the same rule
+    `_refuse_foreign_containers()` applies to container names.
+
+    `_docker()` rather than `_run()` on purpose: `_run()` raises on any non-zero
+    exit, and the absent answer IS a non-zero exit, so the branch this function
+    exists for would be unreachable through it.
+
+    The distro is not optional decoration. A WSL-resident install's volume lives
+    on that distro's daemon; asked of Docker Desktop instead, `docker volume
+    inspect` answers "no such volume" — the one answer that tells the caller it
+    is safe to overwrite the password of a database that is sitting right there.
+    The wrong-daemon bug and the destructive branch are the same branch.
+
+    The substring is what tells the two failures apart, and they are otherwise
+    identical: on a live daemon a missing volume is `exit 1, Error response from
+    daemon: get <name>: no such volume`, while a CLI that cannot reach a daemon
+    is *also* exit 1. Matching on the exit code would call the second one
+    "absent" — so only the wording decides, and anything unrecognised refuses.
+
+    Three unreachable wordings, all observed rather than remembered:
+
+    - Windows, a `DOCKER_HOST` nothing is listening on:
+      `error during connect: ... connectex: No connection could be made ...`
+    - Linux, the daemon stopped — the commonest of the three:
+      `failed to connect to the docker API at unix://...: connect: no such file
+      or directory`
+    - a `DOCKER_HOST` whose name does not resolve:
+      `failed to connect to the docker API at tcp://...: lookup ...: no such host`
+
+    Older Docker said `Cannot connect to the Docker daemon at unix://...` for
+    the second; current Docker opens tcp and unix failures identically, so the
+    prefix names neither the platform nor the transport.
+
+    **Which is why the match is `no such volume` and not `no such`.** Two of the
+    three above carry the shorter phrase, and shortening it — the obvious "be
+    robust to wording changes" edit — turns a stopped Linux daemon into "safe to
+    write a new password over a database you can still see".
+    """
+    proc = _docker(["volume", "inspect", "--format", "{{.Name}}", name], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        return True
+    if _cli_missing(proc):
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    said = proc.stderr.strip()
+    # `.lower()` is tolerance, not a captured requirement: every wording seen has
+    # been lowercase. It is kept because dropping it can only turn an answer into
+    # a refusal, and left untested because the only input that would exercise it
+    # is one no daemon has printed (see `test_volume_exists_refuses_a_no_such...`).
+    if "no such volume" in said.lower():
+        return False
+    # Same question `_run()` asks one line before its own raise, and for the same
+    # reason: a deleted distro makes wsl.exe complain on STDOUT and exit
+    # 0xFFFFFFFF, so this message was `docker volume inspect x_db-data exited
+    # 4294967295: ` — nothing after the colon. `volume_exists` reads its own exit
+    # codes rather than going through `_run()`, so it inherited none of that.
+    problem = wsl.missing_distro_problem(wsl_distro, proc.returncode, proc.stdout)
+    if problem is not None:
+        raise DockerCommandError(problem)
+    raise DockerCommandError(f"docker volume inspect {name} exited {proc.returncode}: {said}")
+
+
 def start_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
     """Start this install's long-running services, and only those.
 
@@ -2351,6 +2420,26 @@ class AttachedRun:
     tail: tuple[str, ...] = ()
 
 
+def cli_missing_run(run: AttachedRun) -> bool:
+    """True if this result is "there was no docker CLI to run", not something a command said.
+
+    `_cli_missing()`'s rule for the streamed shape, and public because the
+    callers that need it are stages in other modules: a tool that never started
+    and a tool that started and failed are different sentences to a user, and
+    only this module knows which returncode and which text mean the first one.
+
+    Both halves are checked, for `_cli_missing()`'s reason and one more of its
+    own. `docker run` and `docker exec` return the CONTAINER's status, so 127 —
+    "command not found" — is a status a real container genuinely produces when
+    the image does not hold the binary it was asked for. That is the extraction
+    stage's most likely 127 by some distance, and reading it as "Docker is not
+    installed" would send the user to reinstall a Docker that is working.
+    """
+    return run.returncode == _CLI_MISSING_RETURNCODE and run.tail == (
+        platform.DOCKER_CLI_MISSING_HELP,
+    )
+
+
 def run_attached(
     argv: list[str],
     cwd: Path,
@@ -2636,7 +2725,7 @@ def bind_mount_ok(
     *,
     timeout: float = BIND_PROBE_TIMEOUT_SECONDS,
     wsl_distro: str | None = None,
-    selinux_enforcing: Callable[[], bool | None] = platform.selinux_enforcing,
+    selinux_enforcing: Callable[[], bool | None] | None = None,
 ) -> bool | None:
     """Can a container actually see the chosen folder? None = could not ask.
 
@@ -2678,6 +2767,29 @@ def bind_mount_ok(
     whole of that story. Measured on a clean Fedora 44 box (2026-08-30): every
     install was refused here, one line after `[pass] SELinux`, and told to
     check a Docker Desktop setting that does not exist on Docker Engine.
+
+    `selinux_enforcing` is resolved at CALL time rather than bound as a
+    default, which is `extract.run_plan()`'s shape and is copied from it. The
+    default here USED to be `platform.selinux_enforcing` itself, so a test
+    that patched the module attribute was not seen — the trap
+    `platform.container_user_args()` documents against itself, and this
+    function was the real instance of it. Asked of the interpreter on m910q
+    before the change (2026-09-04):
+
+        signature(bind_mount_ok).parameters["selinux_enforcing"].default
+            is platform.selinux_enforcing        -> True
+        the same question of extract.run_plan    -> None
+
+    It was latent rather than live, and by luck rather than by wiring: the
+    production caller `preflight._default_bind_probe` passes no seam, so the
+    bound default ran and asked the real host, which was the right answer by
+    accident; under test it never ran at all, because `test_preflight.py`
+    fakes one level up. The rejected alternative was to leave this default
+    alone and thread a seam down from `preflight` instead — that fixes the one
+    caller there is and leaves the same default waiting for the next one, and
+    it would not have made this function's own tests state the machine's
+    answer. Nothing about a real install changes either way: `None` here asks
+    the same `platform.selinux_enforcing` the bound default was.
     """
     mount = _first_populated_ancestor(server_dir)
     if mount is None:
@@ -2698,8 +2810,9 @@ def bind_mount_ok(
     # turned into a refusal. **Every native install, on every platform, was
     # refused** (found by the Windows file-sharing gate 2026-08-24, then
     # reproduced on Linux — it was never Windows-specific).
+    ask = selinux_enforcing if selinux_enforcing is not None else platform.selinux_enforcing
     proc = _docker(
-        ["run", "--rm", *_probe_selinux_argv(selinux_enforcing), "--entrypoint", "ls"]
+        ["run", "--rm", *_probe_selinux_argv(ask), "--entrypoint", "ls"]
         + ["-v", f"{mount}:/probe:ro", image, "-A", "/probe"],
         timeout=timeout,
         wsl_distro=wsl_distro,
@@ -2843,7 +2956,7 @@ class ContainerRun:
     command line is world-readable. A secret goes through `exec_stdin()`, which
     forwards it from this process's environment and never spells it.
 
-    There is deliberately no field for `git.py`'s `_READ_ONLY_CONTAINER_ARGS`
+    There is deliberately no field NAMING `git.py`'s `_READ_ONLY_CONTAINER_ARGS`
     (`--network none --cap-drop ALL --security-opt no-new-privileges
     --read-only`). Those exist there because that container is handed a
     STRANGER'S repository — content this app did not make, which gets to choose
@@ -2852,7 +2965,7 @@ class ContainerRun:
     output to a bind mount; `--read-only` and a dropped capability set are not
     free there, and none of it has been measured against the extraction tools.
     A caller that wants hardening states it, and states why, at its own call
-    site rather than getting it silently from here.
+    site — which is what `security_args` is for.
     """
 
     image: str
@@ -2862,6 +2975,31 @@ class ContainerRun:
     env: Mapping[str, str] = field(default_factory=dict)
     user_args: tuple[str, ...] = ()
     ulimits: tuple[str, ...] = ()
+    security_args: tuple[str, ...] = ()
+    """The caller's container-level security decision, verbatim, or nothing.
+
+    `user_args`'s twin, and passed the same way and for the same reason: the
+    policy has one home in `platform` — `container_user_args()` there,
+    `label_disable_args()` here — and this module knows nothing about a
+    platform's rules (style-guide §3). Both answers arrive already spelled as
+    docker options so that neither decision is respelled at the seam.
+
+    **This is where the SELinux answer for a `docker run` lives, and `Mount` is
+    where it does not.** Measured on `yulon-fedora-gate` (Fedora 44, Enforcing,
+    Docker 29.7.2, 2026-09-01): a confined container cannot read the user's game
+    client at all, because the client is the user's own directory outside the
+    server folder, so no `chcon` of ours ever reaches it. The mount-suffix fix
+    is not available — `:z` and `:Z` RECURSIVELY relabel their source, and the
+    source here is somebody's game install — while `--security-opt
+    label:disable` read the client and left its context byte-identical. It is a
+    property of the RUN, not of one mount: the extraction container holds both
+    the client it must not touch and the `data/` it must write, and one
+    container-wide flag serves both.
+
+    Empty by default and emitted verbatim, so a run that states nothing gets
+    nothing: turning a container's confinement off is a decision, and a default
+    would be one nobody took.
+    """
 
     def to_argv(self) -> list[str]:
         """The `docker` argv (without the program name), fields in a fixed order.
@@ -2878,17 +3016,20 @@ class ContainerRun:
         `ContainerGit._capture()` — which is `run`, `--rm`, options, `-v`, `-w`,
         image, then theirs.
 
-        The user args sit right after `--rm` here rather than just before the
-        image as `git.py` places them. Docker reads its own options in any order
-        up to the image name, so the position carries no meaning; the test
-        audits by flag rather than by index for the same reason.
+        The user args, and the security args behind them, sit right after `--rm`
+        here rather than just before the image as `git.py` places them. Docker
+        reads its own options in any order up to the image name, so the position
+        carries no meaning; the test audits by flag rather than by index for the
+        same reason. Both go in verbatim: they arrive from `platform` already
+        spelled as options, and re-spelling either here would be a second
+        spelling of a decision that has one home.
 
         Raises:
             ValueError: a mount's host path is not absolute. Docker refuses a
                 relative bind source with a daemon-side error that names
                 neither the field nor the caller; refusing here does both.
         """
-        argv = ["run", "--rm", *self.user_args]
+        argv = ["run", "--rm", *self.user_args, *self.security_args]
         for limit in self.ulimits:
             argv += ["--ulimit", limit]
         for mount in self.mounts:

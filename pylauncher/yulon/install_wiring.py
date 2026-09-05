@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import logging
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -36,7 +38,7 @@ from yulon.catalog.installer import (
     InstallOptions,
     installer_for,
 )
-from yulon.log import get_logger
+from yulon.log import configure, get_logger, use_utf8_streams
 
 logger = get_logger(__name__)
 
@@ -107,8 +109,18 @@ def import_gate_for(
     from yulon.controller_wow_wotlk import repair as wotlk_repair
 
     password = fixed_db_password(entry)
-    sql = DockerSql(spec.db, password, schemas=entry.schema_map(), wsl_distro=wsl_distro)
-    mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro)
+    # `client=` on BOTH. This function is entry-driven -- it builds the import
+    # gate for whichever game is being installed, not for WotLK -- so an
+    # unbound seam here falls back to `mysql` on the three CMaNGOS games, which
+    # run MariaDB and ship no such binary, whenever the container cannot be
+    # probed. Found by an audit of every construction site after the same
+    # defect had been fixed in the controller packages and then again in the UI
+    # (review, 2026-09-03).
+    client = native.db.client if (native := entry.install.native) is not None else None
+    sql = DockerSql(
+        spec.db, password, schemas=entry.schema_map(), wsl_distro=wsl_distro, client=client
+    )
+    mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro, client=client)
 
     def probe() -> docker.ImportState:
         return wotlk_repair.import_state(sql, mysql)
@@ -159,11 +171,15 @@ def _terminal_prompter(prompt: str) -> str:
     an install can raise, and the others are consent questions — "Add '$USER'
     to the docker group (grants root-equivalent access)?", "Install Docker via
     rpm-ostree and reboot now?" — which a person must be able to see themselves
-    answering. Two spellings are secret, not one: the bash `Installer` builds
-    its sudo prompt with a random marker behind `SUDO_PROMPT_PREFIX`, and the
-    native path asks `platform.SUDO_PASSWORD_QUESTION` through `SudoSession`.
-    The harness this replaced knew only the first, so on the native path a root
-    password would have been echoed to the terminal as it was typed.
+    answering. Two spellings are secret, not one, and both are still matched.
+    The bash engine set `SUDO_PROMPT` to a random marker behind
+    `SUDO_PROMPT_PREFIX`; 7.2 deleted that engine, so nothing writes that
+    spelling today and only the native path's
+    `platform.SUDO_PASSWORD_QUESTION`, asked through `SudoSession`, arrives
+    here. The prefix is kept rather than dropped because it costs one `in` test
+    and the failure it guards against is a root password echoed to the terminal
+    as it is typed — which is what the harness this replaced did on the native
+    path, knowing only the first spelling.
     """
     if not sys.stdin.isatty():
         sys.stderr.write(f"no terminal to answer {prompt.strip()!r}; declining\n")
@@ -177,41 +193,134 @@ def main(argv: list[str] | None = None) -> int:
     """CLI harness: `python -m yulon.install_wiring <game-id> [--server-dir] [--client-dir]`.
 
     Streams the engine's lines to stdout and exits 1 with the user-readable
-    error on failure — an engine that cannot be built for this game on this
-    platform included (7.2 makes `installer_for()` raise for that) — and 2
-    for an unknown game. The Catalog tab drives the same `run()`; this is how
-    a gate is run from a terminal on a test VM. There is no `--reinstall`:
-    the harness never re-answers the existing-server-dir question, and 7.2
-    deletes `InstallOptions.reinstall`.
+    error on failure — an engine that cannot be built for this game included,
+    which since 7.2 is what `installer_for()` raises for an entry with no
+    `install.native` block — and 2 for an unknown game. Building the engine is
+    INSIDE the `try` for that reason (A1): a refusal that escaped it left the
+    harness printing a traceback instead of the sentence written for a person.
+    The Catalog tab drives the same `run()`; this is how a gate is run from a
+    terminal on a test VM. There is no `--reinstall`: the harness never
+    re-answered the existing-server-dir question, and 7.2 deleted
+    `InstallOptions.reinstall` along with the rule that read it.
 
     `--installers-root` is not in the contract's CLI spelling and is not a
     product surface: it lets a gate point the engine at a checkout's templates
     instead of a packaged bundle's.
+
+    Writes the same `yulon.log` as `main.py`, into the same `config_dir()`.
+    What holds them to that is a test that RUNS every module this app can be
+    started as — three of them since `python -m yulon` became a driven row on
+    2026-09-05, not the two this sentence used to name — and fails on the
+    disagreement rather than on either missing call; see the `configure()`
+    call below.
     """
+    # Before ANY output. Windows hands a redirected stream cp1252, and this
+    # harness prints whatever the engine yields -- which includes real arrows.
+    # Measured on yulon-win11 2026-09-03: the install died at the end of
+    # preflight on `→`, so no Windows gate could reach a stage at all.
+    use_utf8_streams()
     parser = argparse.ArgumentParser(prog="yulon.install_wiring")
     parser.add_argument("game", help="catalog id, e.g. wow-wotlk")
     parser.add_argument("--server-dir", type=Path, default=None)
     parser.add_argument("--client-dir", type=Path, default=None)
     parser.add_argument("--installers-root", type=Path, default=DEFAULT_INSTALLERS_ROOT)
     args = parser.parse_args(argv)
+    # The same `yulon.log` the GUI writes, for the entry point that needs it
+    # more. Measured on `yulon-ubuntu` 2026-09-05: after the entire 7.2 gate —
+    # every step of it driven through this harness — `~/.local/share/yulon/`
+    # did not exist, because `configure(config_dir=...)` appeared exactly once
+    # in the tree and that once was `main.py`. A headless install is what a
+    # gate box, a Steam Deck shortcut and every scripted install run, and when
+    # one fails the terminal is often already closed.
+    #
+    # `stderr_level=WARNING` is what makes logging the stage lines below
+    # affordable: they are on stdout already, a gate runs this as
+    # `> log 2>&1`, and an INFO record through the stderr handler would print
+    # every line of a 30-minute install twice. The file takes the run, the
+    # terminal takes what went wrong.
+    #
+    # REJECTED — and this is an argument for NOT adding something, not for the
+    # level above: a reporter of this harness's own, the CLI's answer to
+    # `main.py`'s `_warn_about_the_log_file()` dialog. `main.py` needs one
+    # because the frozen build is `console=False` and its stderr reaches
+    # nobody, so a dialog is the only channel that survives packaging. This
+    # harness already HAS the channel: `configure()` logs its own
+    # `file_log_problem()` at WARNING, which is exactly the level named here,
+    # so the sentence is on the terminal without another line of code. A
+    # second reporter would be a duplicate of a message that is not even about
+    # the install, on the one entry point whose output a gate reads line by
+    # line. `test_a_harness_run_that_could_not_open_its_log_says_so_rather_
+    # than_dying` is what holds the channel open.
+    #
+    # AFTER `parse_args`, so `--help` and a bad flag stay pure: they exit
+    # without creating a config dir on a box that only asked for usage. Held
+    # by `test_usage_and_a_bad_flag_leave_no_config_dir_behind`, which was
+    # written 2026-09-05 after a review pointed out that moving this call up
+    # three lines as a tidy would have broken it in silence.
+    configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)
+    logger.info(
+        "install harness: game=%s server_dir=%s client_dir=%s",
+        args.game,
+        args.server_dir,
+        args.client_dir,
+    )
     try:
         entry = load_catalog().get(args.game)
     except KeyError:
         sys.stderr.write(f"unknown game {args.game!r}\n")
         return 2
     options = InstallOptions(server_dir=args.server_dir, client_dir=args.client_dir)
+    # One event per run, as the Catalog tab makes one per install. It is the
+    # only seam that stops a bridge worker whose consumer has gone: a `run()`
+    # given no event leaves `_pump()`'s worker running on abandonment
+    # (bug-checklist §21), and until 2026-09-04 this harness gave none — the
+    # one install path every gate box runs was the case §21's own closing test
+    # could not pass.
+    cancel = threading.Event()
     try:
         engine = installer_for_app(entry, installers_root=args.installers_root)
         # `ask=` is not optional. Provisioning asks the docker-group consent and
         # the sudo password through it, and a run given no prompter answers
         # neither — which on a password-sudo box is the hang above.
-        for line in engine.run(options, ask=_terminal_prompter):
+        for line in engine.run(options, cancel=cancel, ask=_terminal_prompter):
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
+            # Streamed first, recorded second: stdout is what a gate is reading
+            # live, and the file is what is read afterwards. These lines are the
+            # whole reason the file is worth opening — an install that failed
+            # 20 minutes in is answerable only by which stages it got through.
+            logger.info("%s", line)
     except InstallerError as exc:
+        # Both, and not a duplicate to be tidied away: the record is what puts
+        # the sentence in `yulon.log` (and carries a timestamp), and the plain
+        # write is what reaches whatever `sys.stderr` is at this moment —
+        # a handler binds its stream when it is constructed, at import, which
+        # is before any redirection a caller or a test does.
         logger.error(f"install failed: {exc}")
         sys.stderr.write(f"install failed: {exc}\n")
         return 1
+    except KeyboardInterrupt:
+        # Ctrl+C, in either of the two places it can land. Measured on m910q
+        # 2026-09-05, both of them through the real `main()`, the worker was
+        # already stopped by the time this handler ran:
+        #
+        #   * inside `engine.run()`'s frame — where this thread spends an
+        #     install, blocked in the bridge's `lines.get()`. The generator's
+        #     own `except BaseException` calls `stop_abandoned_worker()` there.
+        #   * inside the `sys.stdout.write` above. The `for` loop's iterator is
+        #     the only reference to that generator, so unwinding to this
+        #     handler drops it and CPython closes it: the SAME hook runs, as a
+        #     `GeneratorExit`, and it runs BEFORE this line
+        #     (`test_install_wiring.py`). An earlier version of this comment
+        #     said that case "reaches no hook"; that was measured false.
+        #
+        # `cancel.set()` is kept anyway, because it costs nothing and does not
+        # depend on refcounting: setting a set event is a no-op, and the only
+        # reader is a worker that is already stopping. 130 is what a shell
+        # reports for a SIGINT exit.
+        cancel.set()
+        sys.stderr.write("install stopped\n")
+        return 130
     return 0
 
 

@@ -630,5 +630,13 @@ def sql_for(db_root_password: str, container: str = docker_ctl.SPEC.db) -> SqlSe
     Here rather than at the call site so the account path and the module applier
     reach the database the same way (`modules.applier()` builds the same
     `DockerSql`), instead of a second connection story growing beside it.
+
+    The client spelling is bound here for the reason `DockerMysql.client`
+    records: `mysql_client()` asks the container and believes it, but falls
+    back to its first candidate when it cannot ask at all, and unbound that is
+    `mysql` -- which `mariadb:11` does not ship. Found by driving the real path
+    on 2026-09-03: creating an account on the live TBC server printed
+    `client=None` on the seam, one module over from where the same gap had just
+    been fixed in `maintenance.mysql_for()`.
     """
-    return DockerSql(container, db_root_password)
+    return DockerSql(container, db_root_password, client=docker_ctl.DB_CLIENT)

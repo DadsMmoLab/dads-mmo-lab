@@ -1,0 +1,94 @@
+=== ccache -s at 2026-09-05T00:07:09+02:00 : T0 baseline: clean-ssh + press 1 (Docker just installed), before any build on this box
+#5 8.676   ccache libhiredis1.1.0
+#5 9.289 Get:2 http://archive.ubuntu.com/ubuntu noble/universe amd64 ccache amd64 4.9.1-1 [592 kB]
+#5 10.55 Selecting previously unselected package ccache.
+#5 10.55 Preparing to unpack .../ccache_4.9.1-1_amd64.deb ...
+#5 10.58 Unpacking ccache (4.9.1-1) ...
+#5 10.82 Setting up ccache (4.9.1-1) ...
+#5 10.87 Updating symlinks in /usr/lib/ccache ...
+#5 DONE 11.4s
+#6 0.482 Local storage:
+#6 0.482   Cache size (GiB): 0.0 / 5.0 ( 0.00%)
+#6 0.482 --- du
+#6 0.483 4.0K	/ccache
+#6 DONE 0.6s
+#7 DONE 1.4s
+
+=== ccache -s at 2026-09-05T00:31:22+02:00 : T1: after the mid-build SIGKILL of press 2 (edge >= 0)
+#5 8.809   ccache libhiredis1.1.0
+#5 9.454 Get:2 http://archive.ubuntu.com/ubuntu noble/universe amd64 ccache amd64 4.9.1-1 [592 kB]
+#5 10.68 Selecting previously unselected package ccache.
+#5 10.68 Preparing to unpack .../ccache_4.9.1-1_amd64.deb ...
+#5 10.70 Unpacking ccache (4.9.1-1) ...
+#5 10.91 Setting up ccache (4.9.1-1) ...
+#5 10.95 Updating symlinks in /usr/lib/ccache ...
+#5 DONE 11.2s
+#6 0.458 Local storage:
+#6 0.458   Cache size (GiB): 0.0 / 5.0 ( 0.00%)
+#6 0.458 --- du
+#6 0.469 4.0K	/ccache
+#6 DONE 0.5s
+#7 DONE 1.2s
+
+=== ccache -s at 2026-09-05T01:14:44+02:00 : T2: after press 3 completed the whole 1834-edge build
+#5 8.837   ccache libhiredis1.1.0
+#5 9.449 Get:2 http://archive.ubuntu.com/ubuntu noble/universe amd64 ccache amd64 4.9.1-1 [592 kB]
+#5 10.62 Selecting previously unselected package ccache.
+#5 10.63 Preparing to unpack .../ccache_4.9.1-1_amd64.deb ...
+#5 10.66 Unpacking ccache (4.9.1-1) ...
+#5 10.88 Setting up ccache (4.9.1-1) ...
+#5 10.92 Updating symlinks in /usr/lib/ccache ...
+#5 DONE 11.2s
+#6 0.507 Local storage:
+#6 0.507   Cache size (GiB): 0.0 / 5.0 ( 0.00%)
+#6 0.507 --- du
+#6 0.533 4.0K	/ccache
+#6 DONE 0.6s
+#7 DONE 1.2s
+
+=== ccache -s at 2026-09-05T01:21:10+02:00 : cycle2 T0: after docker builder prune -af, before the throwaway build (v2 probe, no --no-cache)
+#1 DONE 0.1s
+#2 DONE 1.9s
+#3 DONE 0.1s
+#4 DONE 0.2s
+#5 DONE 12.0s
+#6 0.464 probe-1788564070109347127
+#6 0.468 Local storage:
+#6 0.468   Cache size (GiB): 0.0 / 5.0 ( 0.00%)
+#6 0.468 --- du
+#6 0.469 4.0K	/ccache
+#6 DONE 0.5s
+#7 DONE 1.1s
+
+=== ccache -s at 2026-09-05T01:36:37+02:00 : cycle2 T1: after the mid-build SIGKILL of press A3 (edge >= 600)
+#3 DONE 0.1s
+#4 DONE 0.1s
+#6 0.307 probe-1788564997555100206
+#6 0.327 Cacheable calls:    590 / 590 (100.0%)
+#6 0.327   Hits:               0 / 590 ( 0.00%)
+#6 0.327   Misses:           590 / 590 (100.0%)
+#6 0.327 Local storage:
+#6 0.327   Cache size (GiB): 0.2 / 5.0 ( 4.26%)
+#6 0.327   Hits:               0 / 590 ( 0.00%)
+#6 0.327   Misses:           590 / 590 (100.0%)
+#6 0.327 --- du
+#6 0.341 340M	/ccache
+#6 DONE 0.4s
+#7 DONE 0.9s
+
+=== ccache -s at 2026-09-05T01:55:57+02:00 : cycle2 T2: after press B finished the build
+#3 DONE 0.0s
+#4 DONE 0.1s
+#6 0.304 probe-1788566157096621190
+#6 0.318 Cacheable calls:    2400 / 2400 (100.0%)
+#6 0.318   Hits:              590 / 2400 (24.58%)
+#6 0.318   Misses:           1810 / 2400 (75.42%)
+#6 0.318 Local storage:
+#6 0.318   Cache size (GiB):  0.5 /  5.0 ( 9.02%)
+#6 0.318   Hits:              590 / 2400 (24.58%)
+#6 0.318   Misses:           1810 / 2400 (75.42%)
+#6 0.318 --- du
+#6 0.339 584M	/ccache
+#6 DONE 0.5s
+#7 DONE 0.7s
+

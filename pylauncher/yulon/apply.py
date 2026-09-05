@@ -281,13 +281,61 @@ _CLIENT_NAMES: dict[str, tuple[str, ...]] = {
     "mysql": ("mysql", "mariadb"),
     "mysqldump": ("mysqldump", "mariadb-dump"),
 }
-"""What each tool may be called inside the database container, best guess first."""
+"""Every name each tool may have inside the database container, AzerothCore's first.
 
-_client_cache: dict[tuple[str, str], str] = {}
+The order is the order the container is asked in, and it is only a guess. A
+caller that knows which client this game's image ships passes it, and
+`_candidates()` moves that spelling to the front — see `_DECLARED_SPELLINGS`."""
+
+_DECLARED_SPELLINGS: dict[str, dict[str, str]] = {
+    "mysql": {"mysql": "mysql", "mariadb": "mariadb"},
+    "mysqldump": {"mysql": "mysqldump", "mariadb": "mariadb-dump"},
+}
+"""How each declared `install.native.db.client` spells each tool.
+
+The catalog's `DbFacts.client` is one of `mysql` / `mariadb` and names the
+FAMILY, not a binary: the dump tool of the `mariadb` family is `mariadb-dump`,
+not `mariadb`. This table is where that translation lives, so no caller has to
+know that `mysqldump` and `mariadb-dump` are the pair.
+
+A `tool` or a `client` this table does not know leaves `_CLIENT_NAMES`' order
+untouched rather than inventing a name."""
+
+_client_cache: dict[tuple[str, str, str], str] = {}
+"""Resolved names, keyed by container, tool AND declared client.
+
+The client is in the key because it decides the ORDER the container is asked
+in, and the order decides the answer for an image that ships both spellings
+(`command -v a || command -v b` short-circuits on the first that exists)."""
 
 
-def mysql_client(db_container: str, tool: str = "mysql") -> str:
+def _candidates(tool: str, client: str | None) -> tuple[str, ...]:
+    """Every spelling of `tool`, with the one this game's entry declares first.
+
+    The declared spelling is put in FRONT of the others rather than used
+    instead of them, which is the whole difference between reading the catalog
+    and trusting it: an image that has been rebuilt, or an entry whose `client`
+    was written from the image tag rather than from the image, still resolves
+    to the binary that is actually in the container. What the declaration buys
+    is the case where nobody can be asked — see `mysql_client()`'s fallback.
+    """
+    names = _CLIENT_NAMES.get(tool, (tool,))
+    declared = _DECLARED_SPELLINGS.get(tool, {}).get(client or "")
+    if declared is None or declared not in names:
+        return names
+    return (declared, *(name for name in names if name != declared))
+
+
+def mysql_client(db_container: str, tool: str = "mysql", *, client: str | None = None) -> str:
     """The name `db_container` actually answers to for `tool`.
+
+    `client` is the catalog's `install.native.db.client` for this game, or None
+    from a caller that does not hold an entry. It changes two things and
+    nothing else: which spelling is tried first, and — the reason 7.9 asks for
+    it — which one is used when the container cannot be asked at all. Left to
+    the guess, that fallback is `mysql`, and a CMaNGOS install on `mariadb:11`
+    has no such binary, so every statement afterwards died with `executable
+    file not found` rather than with a database error.
 
     **`mariadb:11` ships neither `mysql` nor `mysqldump`.** MariaDB deprecated
     the `mysql*` symlinks and removed them in 11, leaving only `mariadb` and
@@ -304,11 +352,11 @@ def mysql_client(db_container: str, tool: str = "mysql") -> str:
     Falls back to the first candidate when the probe cannot run at all, so a
     daemon hiccup produces the same failure it always did rather than a new one.
     """
-    key = (db_container, tool)
+    key = (db_container, tool, client or "")
     cached = _client_cache.get(key)
     if cached is not None:
         return cached
-    candidates = _CLIENT_NAMES.get(tool, (tool,))
+    candidates = _candidates(tool, client)
     resolved = _probe_client(db_container, candidates)
     if resolved is None:
         return candidates[0]
@@ -426,6 +474,20 @@ class DockerSql:
     overridden from `CatalogEntry.schema_map()` for a game whose schemas are
     named anything else. It is per-instance rather than a module constant
     because one process can hold two installs of different cores at once.
+    """
+    client: str | None = None
+    """Which client family this server's database image ships: `install.native.db.client`.
+
+    The sibling of `schemas` and carried for the same reason — a per-install
+    fact that used to be a literal in this file. `schemas` says which database
+    to connect to; this says which BINARY does the connecting, and on a CMaNGOS
+    install both were AzerothCore's.
+
+    None means "nothing was declared", and the resolver then keeps the order it
+    always had, so every caller that passes nothing behaves exactly as it did.
+    It is a hint and not an instruction either way: `mysql_client()` still asks
+    the container, and this only decides the order and the answer when the
+    container cannot be asked.
     """
 
     def run_file(self, db: Db, path: Path) -> None:
@@ -553,7 +615,7 @@ class DockerSql:
             "-e",
             "MYSQL_PWD",  # value taken from OUR env by `docker exec`, not written here
             self.db_container,
-            mysql_client(self.db_container),
+            mysql_client(self.db_container, client=self.client),
             "-uroot",
             *extra,
             self._schema(db),

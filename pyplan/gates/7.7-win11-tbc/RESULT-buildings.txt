@@ -1,0 +1,18 @@
+THE PREDICTION HELD, TO THE FILE.
+
+Written into PREDICTION-before-the-run.txt at 14:21 CEST, while the install was still cloning:
+  "Buildings 5431 (1,740 FEWER than Linux — the case-folded count, to the file)"
+
+What the installer printed at 08:51 PDT / 17:51 CEST, hours later:
+  vmap extract: done (Buildings: 5431 files)
+
+  Linux (m910q, /home/pk/tbc-7.4c) : 7,171 files, 5,431 unique when case is folded
+  Windows (yulon-win11-gate)       : 5,431 files
+  difference                       : 1,740 — exactly the number of case-insensitive
+                                     duplicate names in the Linux extraction
+
+So the Vanilla finding generalises to TBC, and it was a PREDICTION on this run rather than a
+reading taken afterwards: a Windows `Buildings` count BELOW the Linux one, by exactly the number
+of case-folding collisions, is the expected result on NTFS and not a shortfall. `dbc` (185) and
+`maps` (3,586), which have no case collisions on Linux, came out equal on Windows, as the same
+model predicts. `Cameras` (13) likewise.

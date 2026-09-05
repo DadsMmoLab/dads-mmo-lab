@@ -9,27 +9,69 @@ and may not contain. Anything AzerothCore-shaped lives in
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
+import shutil
 import subprocess
 import threading
+import time
 import traceback
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 
-from tests.support_native import ENTRY, IMPORTED, PARTIAL, TBC, Recorder, install
-from yulon import docker, platform, resources
+import yulon
+from tests.conftest import spelled_bounds
+from tests.support_native import (
+    ENTRY,
+    IMPORTED,
+    PARTIAL,
+    TBC,
+    Recorder,
+    install,
+    lay_patch_sources,
+)
+from yulon import docker, install_wiring, networking, platform, resources, runner
+from yulon.apply import ApplyError
 from yulon.catalog import composegen, native, preflight
-from yulon.catalog.catalog import CatalogEntry, ReadyMarkers
+from yulon.catalog.catalog import CatalogEntry, ReadyMarkers, load_catalog
 from yulon.catalog.families import FAMILIES, family_for
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
-from yulon.catalog.installer import DockerUnavailableError, InstallerError, InstallOptions
+from yulon.catalog.installer import (
+    DockerUnavailableError,
+    InstallerError,
+    InstallOptions,
+    installer_for,
+)
+from yulon.controller_wow_wotlk.maintenance import MaintenanceError
 
 ORDER = ("clone-sources", "build", "import", "up")
 CANARY = "hunter2-a2-canary"
+
+HANG_BOUND = 30.0
+"""A DEADLOCK BREAKER for every thread wait here, not an assertion about speed.
+
+Each wait it sizes is for a fake `call` on a `_pump()` worker to be released,
+or for that thread to end — an `Event.set()` away in a healthy run. Measured on
+m910q (4 cores) 2026-09-05, the six `_pump()` abandonment tests below run
+together on an idle box: `6 passed, 83 deselected in 0.40s`.
+
+Large on purpose: the bound is on THIS process while the contention is on the
+box, and bug-checklist §33 records what a stopwatch-sized bound cost — 60
+seconds against a run measured at 0.16s went red under 15-way load, and the run
+it happened in was read as a real failure. Deleting the bounds is not an option
+either: `_pump()`'s worker is only released by the cancel event this fix sets,
+so a regression with no bound is a suite that never returns, which CI reports
+as a stuck job rather than a red one.
+
+The two proofs that a bound was NOT waited out are written against a fraction
+of `native.ABANDONED_WORKER_SECONDS` — the bound they say was skipped — rather
+than against a number of their own, so neither can drift from what it disproves.
+"""
 
 
 # -- the state file ---------------------------------------------------------
@@ -40,7 +82,10 @@ def test_the_state_file_round_trips_the_family(tmp_path: Path) -> None:
     native.write_state(
         tmp_path,
         native.InstallState(
-            game_id="wow-wotlk", install_id="abcd1234", family="azerothcore", completed=("build",)
+            game_id="wow-wotlk",
+            install_id="abcd1234",
+            family="azerothcore",
+            completed=("build",),
         ),
     )
     state = native.read_state(tmp_path, valid=ORDER)
@@ -59,7 +104,12 @@ def test_a_state_file_written_before_family_existed_reads_as_an_empty_family(
     """`version` stays 1: the key is additive, and an old file is not a refusal."""
     (tmp_path / native.STATE_FILE).write_text(
         json.dumps(
-            {"version": 1, "game_id": "wow-wotlk", "install_id": "abc", "completed": ["build"]}
+            {
+                "version": 1,
+                "game_id": "wow-wotlk",
+                "install_id": "abc",
+                "completed": ["build"],
+            }
         ),
         encoding="utf-8",
     )
@@ -107,7 +157,105 @@ def test_read_state_keeps_only_the_stage_names_the_entry_has(tmp_path: Path) -> 
     assert state.completed == ("build",)
 
 
-def test_the_same_file_reads_differently_for_two_entries_stage_tuples(tmp_path: Path) -> None:
+def test_an_unknown_stage_name_survives_a_read_and_a_write(tmp_path: Path) -> None:
+    """A downgrade must not strip the newer build's progress off disk.
+
+    `read_state` filtered unknown names out and `write_state` then persisted the
+    filtered tuple, so an older Yu'lon opening a newer install PERMANENTLY removed
+    the names it did not recognise — and the "Already finished: ..." line printed
+    the filtered list, so nothing said so. Resuming on the newer build afterwards
+    redid whatever those stages were, which for this family includes a multi-hour
+    compile. Bug-checklist section 23; fixed 2026-09-02.
+
+    Asserts the round trip through the FILE rather than the object, because the
+    file is what the other build reads. The two halves stay separate on the way
+    in — this build must not act on a stage it cannot interpret — and are rejoined
+    on the way out.
+    """
+    (tmp_path / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": "wow-tbc",
+                "install_id": "abc",
+                "completed": ["build", "a-stage-from-the-future"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = native.read_state(tmp_path, valid=ORDER)
+    assert state is not None
+    assert state.completed == ("build",), "an uninterpretable stage must not become a skip"
+    assert state.unknown == ("a-stage-from-the-future",)
+
+    native.write_state(tmp_path, state)
+    on_disk = json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))["completed"]
+    assert (
+        "a-stage-from-the-future" in on_disk
+    ), "the older build wrote the newer build's progress out of existence"
+
+
+def test_recording_a_stage_does_not_drop_the_names_this_build_cannot_read(
+    tmp_path: Path,
+) -> None:
+    """The lossy path was a WRITE, so the write that happens every stage is the one to pin.
+
+    `with_stage()` rebuilds `completed` from `order`, and a future name is by
+    definition not in `order`. If `unknown` did not ride along beside it, the very
+    first stage an older build completed would erase the newer one's record — the
+    same defect as the read-side filter, reached by the commoner route.
+    """
+    (tmp_path / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": "wow-tbc",
+                "install_id": "abc",
+                "completed": ["clone-core", "a-stage-from-the-future"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = native.read_state(tmp_path, valid=ORDER)
+    assert state is not None
+    native.write_state(tmp_path, state.with_stage("build", ORDER))
+
+    on_disk = json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))["completed"]
+    assert "build" in on_disk and "clone-core" in on_disk, "the ordinary record still works"
+    assert "a-stage-from-the-future" in on_disk, "recording a stage erased the future one"
+
+
+def test_a_stage_this_build_cannot_read_is_reported_rather_than_dropped_in_silence(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Keeping the name is not enough if nobody is told why a resume looks short.
+
+    The user-facing "Already finished" line prints `completed`, which by design
+    excludes these. Without a log line the only visible symptom is an install that
+    appears to have done less than it did, with nothing naming the cause.
+    """
+    (tmp_path / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": "wow-tbc",
+                "install_id": "abc",
+                "completed": ["build", "a-stage-from-the-future"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
+        native.read_state(tmp_path, valid=ORDER)
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "a-stage-from-the-future" in m for m in said
+    ), f"the dropped name was never reported: {said}"
+
+
+def test_the_same_file_reads_differently_for_two_entries_stage_tuples(
+    tmp_path: Path,
+) -> None:
     """`valid` is per entry, so "known stage" is not a property of the module.
 
     The rejection above must be the `valid` argument doing the work and not a
@@ -175,13 +323,113 @@ def test_ownership_is_three_answers_and_a_file_nobody_can_read_is_never_the_midd
         assert native.read_state(broken, valid=ORDER) is None, damage
 
 
+def _a_newer_builds_state_file(server_dir: Path) -> dict[str, object]:
+    """What a Yu'lon one version ahead of this one would have written here.
+
+    Additive keys and an additive stage name, because `STATE_VERSION`'s own
+    docstring names additive keys as the evolution path - and they are exactly
+    what a rewrite from this build destroyed.
+    """
+    return {
+        "version": native.STATE_VERSION + 1,
+        "game_id": ENTRY.id,
+        "family": AzerothCoreInstaller.family,
+        "install_id": composegen.install_id(server_dir, platform_id=lambda: "macos"),
+        "completed": ["clone-core", "rotate-secrets"],
+        "last_error": "",
+        "updated_unix": 1756000000,
+        "client_dir": "/home/somebody/wow-client",
+        "secrets_rotated_unix": 1756800000,
+    }
+
+
+def test_a_state_file_from_a_newer_build_is_the_unknown_ownership_nothing_produced(
+    tmp_path: Path,
+) -> None:
+    """`Ownership.UNKNOWN` names "written by a version this one cannot read" as one of its cases.
+
+    Until 2026-09-02 no code path produced it: `_parse_state()` read `version`
+    and never compared it to anything, so a file from a newer build parsed as
+    `OWNED` and was resumed. This is that case's producer.
+
+    Its neighbour is the version this build DOES understand, and the boundary
+    is `>` rather than `>=`: a file at `STATE_VERSION` must still be `OWNED`,
+    which is every install anyone has today.
+    """
+    newer = tmp_path / "newer"
+    newer.mkdir()
+    (newer / native.STATE_FILE).write_text(
+        json.dumps(_a_newer_builds_state_file(newer)), encoding="utf-8"
+    )
+    claim = native.read_claim(newer, valid=AzerothCoreInstaller.STAGE_NAMES)
+    assert claim.ownership is native.Ownership.UNKNOWN
+    assert claim.state is None
+    assert native.read_state(newer, valid=AzerothCoreInstaller.STAGE_NAMES) is None
+
+    current = tmp_path / "current"
+    current.mkdir()
+    at_this_version = _a_newer_builds_state_file(current) | {"version": native.STATE_VERSION}
+    (current / native.STATE_FILE).write_text(json.dumps(at_this_version), encoding="utf-8")
+    same = native.read_claim(current, valid=AzerothCoreInstaller.STAGE_NAMES)
+    assert same.ownership is native.Ownership.OWNED, "the boundary is `>`, not `>=`"
+
+
+def test_a_newer_builds_state_file_is_refused_and_left_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    """A record this build cannot interpret is not rewritten, and says so in its own words.
+
+    Measured on `f6ed1b9a` with a v2 file resumed by this v1 build:
+
+        keys lost            : ['client_dir', 'secrets_rotated_unix']
+        version still claims : 2
+        unknown stage kept   : True
+
+    `write_state()` rebuilds the payload from a fixed set of keys, so a key it
+    does not know is dropped - and it wrote `version` back UNCHANGED, which made
+    the loss undetectable to the newer build afterwards: the file still claimed
+    to be a v2 record while no longer being one. Section 23 preserved unknown
+    stage NAMES and left the keys open; this closes it by not rewriting the file
+    at all.
+
+    The neighbour is the generic unreadable-file refusal, which tells the user
+    to DELETE the file - the worst possible advice about a working newer
+    install. It is pinned out by name, not merely hoped past.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    path = server_dir / native.STATE_FILE
+    path.write_bytes(
+        (json.dumps(_a_newer_builds_state_file(server_dir), indent=2) + "\n").encode("utf-8")
+    )
+    before = path.read_bytes()
+    rec = Recorder(images=False)
+    with pytest.raises(InstallerError, match="newer version of Yu'lon") as caught:
+        install(rec, server_dir)
+    said = str(caught.value)
+    assert path.read_bytes() == before, "the newer build's record was rewritten"
+    assert rec.calls == [], "the machine was measured before the record was read"
+    assert "delete it and try again" not in said, (
+        "that is the generic unreadable-file refusal, and deleting a newer "
+        "install's record is exactly what must not be advised here"
+    )
+    kept = json.loads(path.read_text(encoding="utf-8"))
+    assert kept["client_dir"] == "/home/somebody/wow-client"
+    assert kept["secrets_rotated_unix"] == 1756800000
+    assert kept["version"] == native.STATE_VERSION + 1
+    assert "rotate-secrets" in kept["completed"]
+
+
 def test_with_stage_orders_by_the_entry_tuple_and_never_records_twice() -> None:
     fresh = native.InstallState(game_id="wow-tbc", install_id="abc", family="cmangos")
     once = fresh.with_stage("import", ORDER).with_stage("clone-sources", ORDER)
     assert once.completed == ("clone-sources", "import")
     assert once.with_stage("import", ORDER) is once
     # A name outside the entry's tuple is dropped, the rule `read_state()` applies too.
-    assert once.with_stage("invent-a-stage", ORDER).completed == ("clone-sources", "import")
+    assert once.with_stage("invent-a-stage", ORDER).completed == (
+        "clone-sources",
+        "import",
+    )
     assert once.with_stage("build", ORDER).last_error == ""
 
 
@@ -345,16 +593,59 @@ def _say(ctx: native.StageContext) -> Iterator[str]:
 def test_families_maps_each_id_to_its_class_and_an_unknown_one_is_a_sentence() -> None:
     assert FAMILIES["azerothcore"] is AzerothCoreInstaller
     assert family_for(ENTRY) is AzerothCoreInstaller
-    # TBC used to stand in for "no native block at all". Since G.4 it stands in
-    # for the other refusal: the block is there and names `cmangos`, whose class
-    # K.8 registers. `installer_for()` never reaches this for TBC — an
-    # unregistered family goes back to the script — but `family_for()` is public
-    # and still owes a sentence rather than a `KeyError`.
+    # TBC stood in for this refusal from G.4 until K.8, when `cmangos` was
+    # registered and TBC became a family this build DOES have. The refusal is
+    # about a family id with no class behind it, so the stand-in is now an entry
+    # carrying one. `model_copy` does not re-validate, which is the only way past
+    # `Literal["azerothcore", "cmangos"]` — and the reason no catalog file can
+    # produce this state, which is why the branch is defence and not a code path
+    # a user reaches.
+    assert TBC.install.native is not None
+    stranger = TBC.model_copy(
+        update={
+            "install": TBC.install.model_copy(
+                update={"native": TBC.install.native.model_copy(update={"family": "nosuchlineage"})}
+            )
+        }
+    )
     with pytest.raises(InstallerError, match="install family this app does not have"):
-        family_for(TBC)
+        family_for(stranger)
     bare = TBC.model_copy(update={"install": TBC.install.model_copy(update={"native": None})})
     with pytest.raises(InstallerError, match="install.native"):
         family_for(bare)
+
+
+def test_every_shipped_native_entry_reaches_the_class_its_family_id_names() -> None:
+    """Catalog, registry and engine joined to each other, instead of each to a literal.
+
+    Three facts have to agree before an Install press reaches an engine at all:
+    the entry's `install.native.family`, the class `FAMILIES` maps that id to,
+    and that class's own `family` attribute — which the spine asserts against
+    the entry before it writes anything (see
+    `test_a_family_must_agree_with_the_entry_about_its_family`). Nothing joined
+    them. On 2026-09-02 K.8 added one line to `FAMILIES` and five tests went
+    red, and every one of them had written one side of that join down by hand.
+
+    Enumerated over `load_catalog().games`, not over a list of ids: an entry
+    added to `catalog.json` whose family has no engine is exactly the
+    disagreement this exists for, and a hand-kept list is the one thing
+    guaranteed not to notice it.
+
+    Through `installer_for()` rather than `family_for()`, so what is proved is
+    dispatch and not a dictionary lookup. Until F.3 the fallback branch handed
+    an entry whose family was unregistered back to the bash `Installer`, which
+    is not a `StagedInstaller` and had no `family` at all; F.3 deleted that
+    branch, and the isinstance below is what would have caught it.
+    """
+    entries = [entry for entry in load_catalog().games if entry.install.native is not None]
+    assert entries, "the shipped catalog has no native entry left to check"
+    for entry in entries:
+        block = entry.install.native
+        assert block is not None
+        engine = installer_for(entry, platform_id=lambda: "linux")
+        assert isinstance(engine, native.StagedInstaller), f"{entry.id} fell back to the script"
+        assert engine.family == block.family, entry.id
+        assert engine.entry is entry, entry.id
 
 
 def test_a_family_must_agree_with_the_entry_about_its_family(tmp_path: Path) -> None:
@@ -386,7 +677,10 @@ def test_a_stage_tuple_may_not_repeat_a_name_or_claim_preflight_or_guard() -> No
 def test_an_unrecorded_stage_is_never_written_down(tmp_path: Path) -> None:
     rec = Recorder()
     family = _family(
-        lambda me: (native.Stage("always", _say), native.Stage("never", _say, recorded=False))
+        lambda me: (
+            native.Stage("always", _say),
+            native.Stage("never", _say, recorded=False),
+        )
     )
     server_dir = tmp_path / "wow"
     lines = list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
@@ -395,6 +689,67 @@ def test_an_unrecorded_stage_is_never_written_down(tmp_path: Path) -> None:
     assert state is not None
     assert state.completed == ("always",)
     assert state.family == "azerothcore"
+
+
+def test_a_finished_install_says_so_last_and_says_where(tmp_path: Path) -> None:
+    """The sentence a user reads when the install ends, asserted by anything at all.
+
+    Nothing in the suite read it before 2026-09-02: `grep "is installed and
+    running"` over `tests/` found no hit, so the last line of every successful
+    install was free to change or disappear silently. That is not hypothetical
+    here — the line exists BECAUSE it went missing once. The comment above it
+    records why: this path used to log nothing at the end, and a tester on
+    yulon-win11 (2026-08-28) read a seven-minute readiness wait as "the install
+    was not remembered", because the only sign a run had ended was the
+    compose-project pin.
+
+    Asserts three things a support question depends on: that it is there, that it
+    names the SERVER DIRECTORY (the one fact that distinguishes two installs of
+    the same game), and that it is LAST — a success line with stage output after
+    it reads as a run that carried on and then stopped for an unsaid reason.
+    """
+    rec = Recorder()
+    family = _family(lambda me: (native.Stage("only", _say),))
+    server_dir = tmp_path / "wow"
+    lines = list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+
+    ending = [line for line in lines if "is installed and running" in line]
+    assert len(ending) == 1, f"expected exactly one closing line, got {ending}"
+    assert str(server_dir) in ending[0], (
+        "the closing line does not say which folder, so two installs of the same "
+        f"game are indistinguishable in a log: {ending[0]!r}"
+    )
+    assert (
+        lines[-1] == ending[0]
+    ), f"something is said after the install claims to be finished: {lines[-1]!r}"
+
+
+def test_a_failed_install_never_says_it_finished(tmp_path: Path) -> None:
+    """The other half, which is the half that would actually hurt.
+
+    A closing line that survives a raising stage would tell a user their server is
+    installed and running when it is not, and send them looking for a working
+    install rather than at the error. Pinned separately from the success case
+    because the two can fail independently: moving the yield above the `try` would
+    keep this green while breaking the ordering, and moving it inside the `try`
+    would keep the ordering while breaking this.
+    """
+    rec = Recorder()
+
+    def _boom(ctx: native.StageContext) -> Iterator[str]:
+        yield "starting"
+        raise InstallerError("the build died")
+
+    family = _family(lambda me: (native.Stage("build", _boom),))
+    engine = _build(rec, family)
+    said: list[str] = []
+    with pytest.raises(InstallerError):
+        for line in engine.run(InstallOptions(server_dir=tmp_path / "wow")):
+            said.append(line)
+
+    assert not [
+        line for line in said if "is installed and running" in line
+    ], f"a failed install announced success: {said}"
 
 
 def test_the_cancel_note_is_said_by_the_spine_right_after_the_stage_heading(
@@ -481,7 +836,13 @@ def test_a_state_file_the_guard_cannot_read_stops_the_install_instead_of_startin
     rec = Recorder(images=False)
     with pytest.raises(InstallerError, match="cannot read"):
         install(rec, server_dir)
-    assert rec.calls == ["gather"], rec.calls
+    # Nothing ran at all - no machine check, no clone, no build, no container.
+    # A flag set to the right value would not be evidence of that; an empty call
+    # log is. It read `["gather"]` until 2026-09-02, which recorded the defect as
+    # if it were the contract: the machine was measured, and Docker provisioned
+    # first, before this folder was judged - and the refusal then says `Nothing
+    # was written` about a machine that had just had packages installed on it.
+    assert rec.calls == [], rec.calls
     # Never deleted or rewritten: a file this engine cannot read may not be its
     # own, and the message asks the user to decide.
     assert (server_dir / native.STATE_FILE).read_text(encoding="utf-8") == "{not json"
@@ -505,9 +866,17 @@ def test_preflight_hands_the_client_dir_to_gather(tmp_path: Path) -> None:
     assert seen["client_dir"] == client
     assert seen["platform_id"] is installer._seams.platform_id
     assert seen["docker_ready"] is installer._seams.docker_ready
+    # The folder rule as well, since C1. The engine now refuses a bad folder
+    # before it provisions anything, and `evaluate()` still judges the same
+    # folder from `Facts`; handing the seam down is what stops those two
+    # asking different functions - an engine could otherwise refuse a folder
+    # that its own report went on to pass.
+    assert seen["dir_problem"] is installer._seams.dir_problem
 
 
-def test_the_real_gather_takes_the_client_dir_and_ignores_it_until_7_3(tmp_path: Path) -> None:
+def test_the_real_gather_takes_the_client_dir_and_ignores_it_until_7_3(
+    tmp_path: Path,
+) -> None:
     """The seam's default must accept what the spine passes it, or only the double does.
 
     `Seams.gather` is typed `Callable[..., Facts]`, so mypy cannot see this
@@ -522,6 +891,250 @@ def test_the_real_gather_takes_the_client_dir_and_ignores_it_until_7_3(tmp_path:
     )
     assert facts.platform_id == "macos"
     assert facts.docker_ready is False
+
+
+def test_the_real_gather_takes_the_folder_rule_the_engine_hands_it(
+    tmp_path: Path,
+) -> None:
+    """The seam the engine threads must reach `Facts`, not a default underneath it.
+
+    The same blind spot as the client-dir test above: `Seams.gather` is typed
+    `Callable[..., Facts]`, so mypy sees no keyword at the seam and the double
+    in `support_native.py` swallows every kwarg. A `dir_problem=` the real
+    `gather()` silently ignored would leave the engine refusing a folder its own
+    report then passed, and only this call would notice.
+    """
+    facts = preflight.gather(
+        ENTRY,
+        tmp_path,
+        platform_id=lambda: "macos",
+        docker_ready=lambda: False,
+        dir_problem=lambda path: f"{path} is the canary folder",
+    )
+    assert facts.dir_problem == f"{tmp_path} is the canary folder"
+
+
+def test_preflight_refuses_a_reserved_folder_before_it_provisions_anything() -> None:
+    """The folder rule fires BEFORE `ensure_docker()`, not from the report after it.
+
+    Both halves of preflight know this rule and until C1 only the late one ran:
+    `evaluate()` reads `Facts.dir_problem`, `Facts` come from `gather()`, and
+    `gather()` runs after provisioning. Picking the home folder on a clean Linux
+    box therefore bought the docker-group consent dialog, a sudo password typed
+    into Yu'lon's own dialog and a package install, and only then "Cannot use
+    '/home/pk' as the install location" - measured on Fedora 44, 2026-08-25,
+    against the shell installer this engine replaced. The native engine
+    inherited that order in 7.1, and F.3 deleted the last test that named it.
+
+    `provisioned == []` is the assertion that matters, and the doubles are
+    arranged so that it is the one that fails. The `gather` double reads the
+    folder rule through the seam it is handed, exactly as the real one does, so
+    an engine with the early check removed STILL refuses with these words and
+    still matches `home folder itself`; the only thing that changes is that it
+    refuses second. A refusal test that stopped at `pytest.raises` would pass
+    against that engine, and would be a test of the union of every rule on this
+    path rather than of one of them.
+    """
+    rec = Recorder(images=False)
+    provisioned: list[str] = []
+    gathered: list[Path] = []
+
+    def ensure_docker(**_kwargs: object) -> platform.ProvisionReport:
+        provisioned.append("ensure_docker")
+        # The generous answer - a provisioner that SUCCEEDED - so that nothing
+        # further down refuses for a reason of its own and the order is the only
+        # thing this test can fail on.
+        return platform.ProvisionReport(platform="linux", docker_ready=True)
+
+    def gather(entry: object, server_dir: Path, **kwargs: object) -> preflight.Facts:
+        gathered.append(server_dir)
+        rule = kwargs["dir_problem"]
+        assert callable(rule)
+        return replace(rec.gather(entry, server_dir), dir_problem=rule(server_dir))
+
+    installer = _build(
+        rec,
+        AzerothCoreInstaller,
+        # No daemon answering, so provisioning is the very next thing this
+        # engine would do - which is what makes an empty list evidence.
+        docker_ready=lambda: False,
+        ensure_docker=ensure_docker,
+        gather=gather,
+    )
+    home = Path.home()
+    assert platform.server_dir_problem(home) is not None, "the rule under test must hold here"
+    with pytest.raises(InstallerError, match="home folder itself") as caught:
+        installer.preflight(InstallOptions(server_dir=home))
+    assert provisioned == [], "a sudo/consent dialog was reached before the folder was judged"
+    assert gathered == [], "the machine was measured before the folder was judged"
+    # preflight's own words, so the early refusal and the late one cannot drift.
+    assert "Pick a different folder and try again. Nothing was written." in str(caught.value)
+
+
+# -- the guard rules that need no daemon -------------------------------------
+#
+# `_guard()` ran in one piece AFTER `_preflight_lines()` had finished - which
+# means after `ensure_docker()` (a sudo password, the docker-group consent and
+# a package install) and after `gather()` (docker ps, a port scan, and a
+# bind-mount probe that pulls an image). Most of its rules are pure filesystem
+# reads. Recorded seam order on a real run, 2026-09-02:
+#
+#     dir_problem -> None | "Checking Docker." | docker_ready -> False
+#     ensure_docker   <- sudo password + docker-group consent + package install
+#     preflight.gather
+#     REFUSED: ...\server is not empty and was not created by this app.
+#              Nothing was written.
+#
+# "Nothing was written" was untrue of the machine by the time it was said.
+# `7cb3bf17` hoisted exactly one sibling rule, `dir_problem`, and left these
+# below it; the suite's only ordering assertion covered that one rule.
+#
+# `_refuse_foreign_containers()` is deliberately NOT among them and stays late:
+# it asks the daemon which compose project owns a container wearing our names,
+# so it cannot be answered before there is a daemon. Every case below asserts
+# it was not reached either, which is what keeps this parametrisation from
+# quietly growing a rule that has to stay where it is.
+
+
+def _state_file_at(server_dir: Path, **fields: object) -> None:
+    """A state file whose `install_id` is the one this folder really has, plus `fields`."""
+    server_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "version": native.STATE_VERSION,
+        "game_id": ENTRY.id,
+        "family": AzerothCoreInstaller.family,
+        "install_id": composegen.install_id(server_dir, platform_id=lambda: "macos"),
+        "completed": [],
+    }
+    payload.update(fields)
+    (server_dir / native.STATE_FILE).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _an_unreadable_state_file(server_dir: Path) -> None:
+    server_dir.mkdir(parents=True)
+    (server_dir / native.STATE_FILE).write_text("{ not json at all", encoding="utf-8")
+
+
+def _a_record_made_for_another_folder(server_dir: Path) -> None:
+    _state_file_at(server_dir, install_id="made-somewhere-else")
+
+
+def _another_games_install(server_dir: Path) -> None:
+    _state_file_at(server_dir, game_id=TBC.id)
+
+
+def _an_install_of_another_family(server_dir: Path) -> None:
+    _state_file_at(server_dir, family="cmangos")
+
+
+def _a_folder_with_somebody_elses_files(server_dir: Path) -> None:
+    server_dir.mkdir(parents=True)
+    (server_dir / "somebody-elses-work.txt").write_text("mine", encoding="utf-8")
+
+
+DAEMONLESS_GUARD_RULES = (
+    pytest.param(_an_unreadable_state_file, "cannot read", id="unreadable-state-file"),
+    pytest.param(
+        _a_record_made_for_another_folder,
+        "made for a different folder",
+        id="copied-folder",
+    ),
+    pytest.param(_another_games_install, "already holds an install of", id="another-game"),
+    pytest.param(_an_install_of_another_family, "was installed as", id="another-family"),
+    pytest.param(
+        _a_folder_with_somebody_elses_files,
+        "is not empty and was not created by this app",
+        id="not-empty",
+    ),
+)
+"""Every `_guard()` rule that is a pure filesystem read, with the words unique to it.
+
+The words matter as much as the arrangement: five times in this phase a test
+passed because a NEIGHBOURING rule refused first, and every rule here has four
+neighbours that would also refuse this folder if the arrangement were sloppy.
+"""
+
+
+@pytest.mark.parametrize(("arrange", "words"), DAEMONLESS_GUARD_RULES)
+def test_a_guard_rule_that_needs_no_daemon_refuses_before_docker_is_provisioned(
+    arrange: Callable[[Path], None], words: str, tmp_path: Path
+) -> None:
+    """A refusal that says "Nothing was written" must be true of the machine when it is said.
+
+    The generous answers throughout - a provisioner that SUCCEEDS, a folder the
+    hoisted `dir_problem` rule is happy with - so that nothing further down can
+    refuse for a reason of its own and the ORDER is the only thing this can fail
+    on. An empty `provisioned` is evidence because there is no daemon answering,
+    which makes provisioning the very next thing this engine would do.
+    """
+    provisioned: list[str] = []
+    gathered: list[Path] = []
+    asked_about: list[str] = []
+    rec = Recorder(images=False)
+
+    def ensure_docker(**_kwargs: object) -> platform.ProvisionReport:
+        provisioned.append("ensure_docker")
+        return platform.ProvisionReport(platform="linux", docker_ready=True)
+
+    def gather(entry: object, server_dir: Path, **_kwargs: object) -> preflight.Facts:
+        gathered.append(server_dir)
+        return rec.gather(entry, server_dir)
+
+    def container_exists(name: str) -> bool:
+        asked_about.append(name)
+        return False
+
+    server_dir = tmp_path / "wow"
+    arrange(server_dir)
+    assert platform.server_dir_problem(server_dir) is None, (
+        "the arrangement must not trip `dir_problem`, the sibling rule already hoisted - "
+        "it would refuse first and this would prove nothing about the rule under test"
+    )
+    installer = _build(
+        rec,
+        AzerothCoreInstaller,
+        docker_ready=lambda: False,
+        ensure_docker=ensure_docker,
+        gather=gather,
+        container_exists=container_exists,
+    )
+    with pytest.raises(InstallerError, match=words):
+        installer.preflight(InstallOptions(server_dir=server_dir))
+    assert provisioned == [], "a sudo/consent dialog was reached before the folder was judged"
+    assert gathered == [], "the machine was measured before the folder was judged"
+    assert asked_about == [], (
+        "the daemon was asked which project owns our container names - that is "
+        "`_refuse_foreign_containers()`, which is not this rule and cannot be hoisted"
+    )
+
+
+def test_the_guard_rule_that_needs_a_daemon_still_runs_after_provisioning(
+    tmp_path: Path,
+) -> None:
+    """The other half of the split: hoisting all of `_guard()` would break this one.
+
+    `_refuse_foreign_containers()` asks `container_project()` which compose
+    project owns a container wearing this entry's names. There is no answer to
+    that before there is a daemon, so it stays below provisioning - and an
+    empty folder, which every daemonless rule above is happy with, is exactly
+    the case that reaches it.
+    """
+    rec = Recorder(containers={ENTRY.containers.world: "somebody-elses-project"})
+    provisioned: list[str] = []
+
+    def ensure_docker(**_kwargs: object) -> platform.ProvisionReport:
+        provisioned.append("ensure_docker")
+        return platform.ProvisionReport(platform="linux", docker_ready=True)
+
+    installer = _build(
+        rec,
+        AzerothCoreInstaller,
+        docker_ready=lambda: False,
+        ensure_docker=ensure_docker,
+    )
+    with pytest.raises(InstallerError, match="belongs to another install"):
+        list(installer.run(InstallOptions(server_dir=tmp_path / "wow")))
+    assert provisioned == ["ensure_docker"], "this rule needs the daemon it was provisioned for"
 
 
 # -- the forwarded prompter, all the way down to the sudo dialog ---------------
@@ -827,7 +1440,9 @@ def test_stage_clone_sources_clones_every_source_at_its_dest_and_refuses_what_it
     assert (hand_made / "my-own-patches.cpp").read_text(encoding="utf-8") == "mine"
 
 
-def _owned_context(server_dir: Path) -> tuple[native.StagedInstaller, native.StageContext]:
+def _owned_context(
+    server_dir: Path,
+) -> tuple[native.StagedInstaller, native.StageContext]:
     """An install that has claimed `server_dir`, and the context its stages are handed.
 
     The state file and `ctx.state` are the SAME record, which is the arrangement
@@ -878,7 +1493,9 @@ def test_the_one_path_that_could_destroy_a_users_work_no_longer_needs_three_copi
     assert installer.refuse_unowned_checkout(ctx, fresh, "https://example/core.git", None) is None
 
 
-def test_a_state_file_damaged_during_the_install_is_not_ownership_either(tmp_path: Path) -> None:
+def test_a_state_file_damaged_during_the_install_is_not_ownership_either(
+    tmp_path: Path,
+) -> None:
     """`_guard()` refuses `UNKNOWN` before stage 1, so reaching it later means mid-run damage.
 
     That is precisely why `claimed_this_folder()` re-reads the folder instead of
@@ -904,7 +1521,8 @@ def test_a_state_file_damaged_during_the_install_is_not_ownership_either(tmp_pat
     # something replaced it while this run was going, and the identity
     # `_guard()` validated is the only thing worth comparing it to.
     native.write_state(
-        server_dir, native.InstallState(game_id=ENTRY.id, install_id="someone-else", family="")
+        server_dir,
+        native.InstallState(game_id=ENTRY.id, install_id="someone-else", family=""),
     )
     assert installer.claimed_this_folder(ctx) is native.Ownership.UNKNOWN
 
@@ -933,7 +1551,9 @@ def test_stage_start_db_starts_the_database_even_for_an_entry_with_no_import_ser
 def _gated(rec: Recorder) -> type[native.StagedInstaller]:
     """start-db, then an import stage with NO service: the branch table, then the family's SQL."""
 
-    def sql(me: native.StagedInstaller) -> Callable[[native.StageContext], Iterator[str]]:
+    def sql(
+        me: native.StagedInstaller,
+    ) -> Callable[[native.StageContext], Iterator[str]]:
         def body(ctx: native.StageContext) -> Iterator[str]:
             yield from me.stage_import(ctx, native.CallableGate(rec.probe, rec.reset), None)
             yield "applying sql"
@@ -1004,7 +1624,10 @@ def test_ready_markers_are_filled_and_escaped_unless_the_catalog_says_regex(
     assert ENTRY.install.native is not None
     markers = ENTRY.install.native.ready
     assert markers.regex is False
-    tokens = {"REALM_HOST": native.INSTALL_REALM_HOST, "WORLD_PORT": str(ENTRY.ports.world)}
+    tokens = {
+        "REALM_HOST": native.INSTALL_REALM_HOST,
+        "WORLD_PORT": str(ENTRY.ports.world),
+    }
     assert seen[0].world == re.escape(composegen.fill(markers.world, tokens))
     assert markers.auth is not None
     filled_auth = composegen.fill(markers.auth, tokens)
@@ -1022,15 +1645,21 @@ def test_ready_markers_are_filled_and_escaped_unless_the_catalog_says_regex(
 
 
 def test_the_catalogue_timeout_wins_over_the_docker_default() -> None:
-    """Two contract-mandated numbers meet here: 600 from the data, 480 in `docker.py`.
+    """Two contract-mandated numbers meet here: the data's, and 480 in `docker.py`.
 
-    `ReadyMarkers.timeout_s` is 600 and `docker.ReadySpec`'s own default is
-    480. A spec built from catalogue data uses the data (A.2 review finding),
-    and the numbers must actually differ or this pins nothing.
+    A spec built from catalogue data uses the DATA (A.2 review finding), not
+    `docker.ReadySpec`'s own 480. The data's number is read from
+    `ReadyMarkers` rather than restated: it was written as the literal 600 and
+    that is what the field defaulted to, so raising the default to 1800 after a
+    measurement disproved 600 failed this test for a reason it is not about.
+    The guard below keeps it meaningful -- the two numbers must actually differ
+    or this pins nothing (review, 2026-09-02).
     """
-    spec = _build(Recorder(), AzerothCoreInstaller)._ready_spec(ReadyMarkers(world="ready..."))
+    markers = ReadyMarkers(world="ready...")
+    spec = _build(Recorder(), AzerothCoreInstaller)._ready_spec(markers)
     assert docker.ReadySpec(world="x").timeout == 480.0
-    assert spec.timeout == 600.0
+    assert markers.timeout_s != 480, "the data must differ from docker's default"
+    assert spec.timeout == float(markers.timeout_s)
 
 
 def test_a_broken_ready_pattern_is_refused_where_it_is_read_not_mid_poll() -> None:
@@ -1055,7 +1684,9 @@ def test_an_unfillable_ready_marker_is_a_sentence_not_a_traceback() -> None:
         installer._ready_spec(ReadyMarkers(world="{{NO_SUCH_TOKEN}}"))
 
 
-def test_pumped_output_arrives_in_order_and_before_the_stage_ends(tmp_path: Path) -> None:
+def test_pumped_output_arrives_in_order_and_before_the_stage_ends(
+    tmp_path: Path,
+) -> None:
     """`_pump` streams a push-style docker call; nothing is collected into a list first."""
     rec = Recorder(images=False)
     lines = install(rec, tmp_path / "wow")
@@ -1179,11 +1810,18 @@ def test_the_filesystem_is_probed_for_the_folder_the_binds_actually_live_in(
         probed.append(path)
         return "btrfs"
 
-    install(Recorder(images=False), server_dir, selinux_enforcing=lambda: True, fs_type=fs_type)
+    install(
+        Recorder(images=False),
+        server_dir,
+        selinux_enforcing=lambda: True,
+        fs_type=fs_type,
+    )
     assert probed == [server_dir]
 
 
-def test_a_label_is_never_appended_to_a_bind_that_already_carries_a_mode(tmp_path: Path) -> None:
+def test_a_label_is_never_appended_to_a_bind_that_already_carries_a_mode(
+    tmp_path: Path,
+) -> None:
     """`:ro:z` is not a mount spec; the legal spelling is `:ro,z`, and Docker refuses the first.
 
     The label is spliced onto the end of a bind line as a bare suffix, so a
@@ -1200,7 +1838,10 @@ def test_a_label_is_never_appended_to_a_bind_that_already_carries_a_mode(tmp_pat
     """
     server_dir = tmp_path / "wow"
     install(
-        Recorder(images=False), server_dir, selinux_enforcing=lambda: True, fs_type=lambda p: "ext4"
+        Recorder(images=False),
+        server_dir,
+        selinux_enforcing=lambda: True,
+        fs_type=lambda p: "ext4",
     )
     labelled = [
         line.strip()
@@ -1234,3 +1875,1357 @@ def test_a_relabel_that_fails_is_a_warning_line_not_a_refusal(tmp_path: Path) ->
     assert any("could not be relabelled" in line for line in lines)
     assert any("chcon -Rt container_file_t" in line for line in lines)
     assert "start" in rec.calls
+
+
+# -- a refusal that is not an InstallerError ---------------------------------
+#
+# `run()` catches `InstallerError` and nothing else, and composegen's
+# `ComposeGenError` is not one: both subclass `RuntimeError` independently, so
+# neither `except` clause can ever see the other's refusal. Everything below
+# drives the real `install_wiring.main()`, because the two things that break
+# when such a refusal escapes a stage body are both invisible from inside one --
+# the traceback the caller gets instead of a sentence, and the `last_error` that
+# is then never recorded.
+#
+# `generate-compose` is bound to the SPINE's own body by every family, so this
+# is not one game's defect. It was reproduced through the CLI on `wow-wotlk`,
+# the only game with green live gates, as well as on the CMaNGOS side.
+
+UNFILLED_TOKEN = "YULON_UNFILLED_TOKEN"
+"""A placeholder no `entry_tokens()` mapping will ever hold, so `fill()` refuses on it."""
+
+UNFILLED_PLACEHOLDER = f"{{{{{UNFILLED_TOKEN}}}}}"
+"""The token as a template spells it - derived, so template and assertion cannot drift."""
+
+
+def _installers_with_an_unfilled_token(entry: CatalogEntry, tmp_path: Path) -> Path:
+    """A copy of the shipped installers tree whose compose template names a token nobody fills.
+
+    `fill()`'s refusal and not `_refuse_unsafe()`'s, because this one is
+    reachable on BOTH families: `wow-wotlk`'s database password is fixed in the
+    catalog and safe, so the password refusal can never fire for it. It is also
+    the honest shape of the real failure - an `--installers-root` pointed at an
+    incomplete checkout, or a bundle that shipped short.
+
+    Only the compose template is touched. A wholesale broken tree would be
+    refused one stage earlier by CMaNGOS's `write-dockerfile`, whose
+    `DockerfileError` IS translated, and the test would then go green on the
+    neighbour while proving nothing about this stage.
+    """
+    native_block = entry.install.native
+    assert native_block is not None, f"{entry.id} has no native block to render"
+    root = tmp_path / "installers"
+    shutil.copytree(resources.installers_dir(), root)
+    template = root / native_block.templates / "base.yml.tmpl"
+    template.write_text(
+        template.read_text(encoding="utf-8") + f"\n# {UNFILLED_PLACEHOLDER}\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def _cli_engine_over(rec: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point `install_wiring.installer_for_app` at the real family engine over `rec`.
+
+    `main()`, the entry, the family, the spine and the templates are all real;
+    only the machine underneath is a double. `installers_root` is taken from the
+    keyword `main()` passes down, which is what keeps `--installers-root` the
+    trigger rather than a fixture reaching around the CLI.
+    """
+
+    def build(entry: CatalogEntry, **kwargs: object) -> native.StagedInstaller:
+        root = kwargs["installers_root"]
+        assert isinstance(root, Path)
+        linux = entry.model_copy(
+            update={"install": entry.install.model_copy(update={"platforms": ("linux",)})}
+        )
+        # `patch-sources` (2026-09-05) edits the checkout the clone left behind,
+        # and this double's clone leaves only `.git`; without the tree the patch
+        # was written against, every CMaNGOS run here stops one stage after the
+        # clone and never reaches the stage under test.
+        rec.on_clone = lay_patch_sources(linux)
+        return family_for(linux)(
+            linux,
+            installers_root=root,
+            import_probe=rec.probe,
+            reset_unfinished=rec.reset,
+            seams=rec.seams(platform_id=lambda: "linux"),
+        )
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", build)
+
+
+@pytest.mark.parametrize("game_id", ["wow-wotlk", "wow-tbc"])
+def test_a_compose_refusal_reaches_the_cli_as_a_sentence_and_is_recorded(
+    game_id: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A `ComposeGenError` out of `render()` is a refusal, and every refusal is an `InstallerError`.
+
+    Measured on `f6ed1b9a` before the fix, for both games: `main()` raised
+    `ComposeGenError` from `native.py:1309`, the harness printed a traceback
+    where its own docstring promises "the sentence written for a person", and
+    because `run()`'s `except InstallerError` never fired, `_record_error` did
+    not run - the state file kept `"last_error": ""` where every other stage
+    failure records its sentence.
+
+    The rule under test is `fill()`'s. Its neighbour on this path is
+    `write_plan()`'s refusal, which was the one `ComposeGenError` already
+    translated, so the message is pinned to the first and the compose files are
+    asserted absent: a run that reached the neighbour would fail here rather
+    than pass on the neighbour's words.
+    """
+    entry = load_catalog().get(game_id)
+    server_dir = tmp_path / "server"
+    root = _installers_with_an_unfilled_token(entry, tmp_path)
+    _cli_engine_over(Recorder(images=False), monkeypatch)
+    try:
+        code = install_wiring.main(
+            [game_id, "--server-dir", str(server_dir), "--installers-root", str(root)]
+        )
+    except Exception as exc:
+        pytest.fail(
+            f"a compose refusal escaped install_wiring.main() as {type(exc).__name__}: "
+            + "".join(traceback.format_exception(exc)).strip()
+        )
+    streamed = capsys.readouterr()
+    refusal = f"unfilled compose placeholder {UNFILLED_PLACEHOLDER}"
+    assert code == 1
+    assert f"install failed: {refusal}" in streamed.err
+    assert "--- generate-compose" in streamed.out, "the run never reached the stage under test"
+    assert "was not written by Yu'lon" not in streamed.err, "that is write_plan()'s refusal"
+    for name in composegen.COMPOSE_FILES:
+        path = server_dir / name
+        assert not path.exists() or not composegen.is_ours(path), (
+            f"{name} carries the generated marker, so write_plan() ran - the refusal under "
+            "test is render()'s, one call earlier"
+        )
+    recorded = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert recorded["last_error"] == refusal, (
+        "the refusal was not recorded, so `run()`'s `except InstallerError` never saw it "
+        "and `_record_error` did not run"
+    )
+
+
+# -- a folder that will not list ---------------------------------------------
+#
+# Every "may this install write here?" rule in the engine is decided by listing
+# a directory, and `Path.iterdir()` raises `OSError` for reasons that have
+# nothing to do with what the folder holds: a permission change, an unreadable
+# mount, a vanished drive, a stale UNC path into a WSL distro. The app really
+# does reach folders that way - `Identification.UNVERIFIED` exists in the UI for
+# exactly that - so this is not an exotic input.
+#
+# Untranslated it is the blocker's shape again: a traceback where the harness
+# promises a sentence, and no `last_error` at the stage sites. The sites are
+# ENUMERATED rather than described, because they are what the fix is about; a
+# fifth one added later without the helper is caught by
+# `test_every_folder_listing_in_the_package_is_accounted_for`.
+
+
+@dataclass(frozen=True)
+class _ListingSite:
+    """One place the engine lists a folder to decide whether it may write into it.
+
+    `neighbour` is the refusal that site makes when the listing SUCCEEDS and
+    finds files. It is asserted absent from the run under test and present from
+    the paired readable run, so a fixture that never reached the site cannot
+    pass on the neighbour's words - and a fixture that reached nothing at all
+    cannot pass either.
+    """
+
+    site: str
+    game_id: str
+    folder: str
+    """Relative to the server dir; empty is the server dir itself."""
+
+    stage: str | None
+    """The stage the refusal comes from, or None for the guard, which precedes them all."""
+
+    neighbour: str
+
+
+_LISTING_SITES = (
+    _ListingSite(
+        "_claim_folder",
+        "wow-wotlk",
+        "",
+        None,
+        "is not empty and was not created by this app",
+    ),
+    _ListingSite(
+        "_clone_core",
+        "wow-wotlk",
+        "",
+        "clone-core",
+        "has files in it but is not a checkout",
+    ),
+    _ListingSite(
+        "_clone_modules",
+        "wow-wotlk",
+        "modules/mod-playerbots",
+        "clone-modules",
+        "has files in it but is not a checkout",
+    ),
+    _ListingSite(
+        "stage_clone_sources",
+        "wow-tbc",
+        "src/mangos-tbc",
+        "clone-sources",
+        "has files in it but is not a checkout",
+    ),
+)
+"""Every folder listing that decides whether this engine may write somewhere.
+
+Two are the spine's own - `_claim_folder`, which all four shipped games reach
+through preflight and `_guard()`, and `stage_clone_sources`, which the three
+CMaNGOS games bind - and two are AzerothCore's, the game with green live gates.
+Written out rather than derived from the code: these ARE the list under test,
+and a parametrisation computed from it would delete its own case the moment a
+site went missing.
+"""
+
+
+def _claimable(server_dir: Path, entry: CatalogEntry, **fields: object) -> None:
+    """Write the state file that makes `server_dir` this install's own, resuming.
+
+    Without it `_claim_folder()` refuses a non-empty, non-git folder during
+    preflight and no stage runs at all - that is the FIRST site below, and it
+    would otherwise hide the three under it.
+    """
+    native_block = entry.install.native
+    assert native_block is not None, f"{entry.id} has no native block"
+    server_dir.mkdir(parents=True, exist_ok=True)
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id=entry.id,
+            # `_cli_engine_over()` pins the engine to linux and the id is
+            # derived from the path THROUGH that seam; a mismatch is refused as
+            # a copied install, one rule before anything here.
+            install_id=composegen.install_id(server_dir, platform_id=lambda: "linux"),
+            family=native_block.family,
+            **fields,  # type: ignore[arg-type]
+        ),
+    )
+
+
+def _prepare_listing_site(site: _ListingSite, rec: Recorder, server_dir: Path) -> Path:
+    """Build the tree that puts a run at `site`, and return the folder that run will list."""
+    entry = load_catalog().get(site.game_id)
+    folder = server_dir / site.folder if site.folder else server_dir
+    if site.site == "_claim_folder":
+        server_dir.mkdir(parents=True, exist_ok=True)
+        return folder
+    if site.site == "_clone_modules":
+        _claimable(server_dir, entry, completed=("clone-core",))
+        (server_dir / ".git").mkdir(exist_ok=True)
+        rec.remotes[server_dir] = entry.emulator.sources[0].url
+    else:
+        _claimable(server_dir, entry)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _unlistable(monkeypatch: pytest.MonkeyPatch, folder: Path, error: OSError) -> None:
+    """Make ONE directory refuse to list itself, the way a real unreadable one does.
+
+    Scoped to a single path rather than replacing `Path.iterdir` wholesale: the
+    run lists other folders on its way past this one, and a blanket refusal
+    would stop it somewhere else entirely and prove nothing about the site.
+    """
+    listing = Path.iterdir
+
+    def refuse(self: Path) -> Iterator[Path]:
+        if self == folder:
+            raise error
+        return listing(self)
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+
+
+def _refusal_from(captured: str) -> str:
+    """The sentence `install_wiring.main()` wrote for a person, without its prefix."""
+    for line in captured.splitlines():
+        if line.startswith("install failed: "):
+            return line[len("install failed: ") :]
+    raise AssertionError(f"main() wrote no refusal at all; it wrote {captured!r}")
+
+
+@pytest.mark.parametrize("site", _LISTING_SITES, ids=lambda site: site.site)
+def test_a_folder_that_will_not_list_is_a_refusal_and_not_a_traceback(
+    site: _ListingSite,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`iterdir()` raises `OSError`, which is not an `InstallerError` and never was one.
+
+    Measured on `697adca6` at all four sites: `install_wiring.main()` raised
+    `PermissionError` out of the list comprehension, the harness printed a
+    traceback where its own docstring promises "the sentence written for a
+    person", and at the three stage sites `run()`'s `except InstallerError`
+    never fired, so the state file kept `"last_error": ""`.
+
+    The guard site's second half is deliberately the opposite assertion.
+    `_claim_folder()` runs from preflight and from `_guard()`, both OUTSIDE
+    `run()`'s `try`, because its refusals concern a state file that may be
+    somebody else's - so nothing may be written there, and this asserts the
+    folder was left exactly as empty as it was found.
+
+    The paired readable run is what proves the fixture reached the site at all:
+    the same tree with one thing changed answers with the site's NEIGHBOURING
+    rule, which the first half asserts absent.
+    """
+    server_dir = tmp_path / "unreadable" / "server"
+    rec = Recorder(images=False)
+    folder = _prepare_listing_site(site, rec, server_dir)
+    _cli_engine_over(rec, monkeypatch)
+    _unlistable(monkeypatch, folder, PermissionError(13, "Permission denied"))
+    try:
+        code = install_wiring.main([site.game_id, "--server-dir", str(server_dir)])
+    except Exception as exc:
+        pytest.fail(
+            f"an unreadable folder escaped install_wiring.main() as {type(exc).__name__}: "
+            + "".join(traceback.format_exception(exc)).strip()
+        )
+    streamed = capsys.readouterr()
+    refusal = _refusal_from(streamed.err)
+    assert code == 1
+    assert refusal.startswith(f"{folder} could not be listed"), refusal
+    assert "Permission denied" in refusal, "the refusal drops what the machine actually said"
+    assert site.neighbour not in refusal, "that is the sentence for a folder that COULD be read"
+    if site.stage is None:
+        assert "--- " not in streamed.out, "the guard refused, so no stage may have started"
+        assert not (server_dir / native.STATE_FILE).exists(), (
+            "a state file was written into a folder the guard had just refused; the guard sits "
+            "outside `run()`'s `try` precisely so that cannot happen"
+        )
+    else:
+        assert f"--- {site.stage}" in streamed.out, "the run never reached the stage under test"
+        recorded = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+        assert recorded["last_error"] == refusal, (
+            "the refusal was not recorded, so `run()`'s `except InstallerError` never saw it "
+            "and `_record_error` did not run"
+        )
+
+    readable = tmp_path / "readable" / "server"
+    other = Recorder(images=False)
+    theirs = _prepare_listing_site(site, other, readable)
+    (theirs / "somebody-elses-work.txt").write_text("mine", encoding="utf-8")
+    _cli_engine_over(other, monkeypatch)
+    assert install_wiring.main([site.game_id, "--server-dir", str(readable)]) == 1
+    assert site.neighbour in _refusal_from(capsys.readouterr().err), (
+        "the same tree with that folder READABLE never reached this site's own rule, so the "
+        "half above proved nothing about this site"
+    )
+
+
+_LISTING_CALLS = frozenset(
+    {"iterdir", "scandir", "listdir", "glob", "rglob", "walk", "iglob", "fwalk"}
+)
+"""The eight standard-library spellings of "what is in this folder" this audit reads.
+
+Eight, enumerated. It said "every spelling a Python file can use" until
+2026-09-05, and one word refuted that twice in a row:
+`iterdir`/`scandir`/`listdir` was the whole set that morning, which left the
+audit unable to fail on the class it enumerates; `glob`/`rglob`/`walk` closed
+the class the first review reported; `iglob`/`fwalk` closed the two the NEXT
+review walked straight past it with. An enumerated set can be checked and an
+absolute cannot, so this one is enumerated and
+`test_the_listing_audit_sees_every_spelling_it_names` drives all eight through
+`_listing_sites()` on a file written for them. Anything outside the eight -- a
+third-party walker, a subprocess `ls` -- this audit does not see and does not
+claim to.
+
+Measured on m910q 2026-09-05, `__pycache__` purged both sides, over this file's
+two audit tests plus `tests/test_installer.py` (25 tests, all green
+unmutated). `installer.py`'s write decision -- `native._listing(server_dir,
+ignoring=native.STATE_FILE)` -- respelled `server_dir.glob("*")` gives
+`2 failed, 23 passed` with `test_every_folder_listing_in_the_package_is_accounted_for`
+among them; respelled `glob.iglob(str(server_dir / "*"))` it gives
+`3 failed, 22 passed`, the audit again (the third is
+`test_the_script_lineage_is_gone`, which the mutation's own `import glob` trips
+-- the module surface is enumerated too). What the audit CANNOT see was read
+off `_listing_sites()` on the same mutated tree rather than inferred from the
+run: with the six spellings of that morning it returns 12 sites and NOT
+`("catalog/installer.py", "cancelled_install_message")`; with these eight it
+returns 13 and does. The audit is an equality against that set, so a site it
+does not return is a site it cannot fail on.
+"""
+
+
+def _listing_sites(root: Path) -> set[tuple[str, str]]:
+    """Every directory listing under `root`, as (file, the function it is in).
+
+    Asked of the syntax tree rather than of the text, because the comments
+    explaining the fixes name `iterdir()` too and a grep would match those.
+
+    Descended rather than `ast.walk`ed, and that is the part that had a hole:
+    `ast.walk` plus `isinstance(node, ast.FunctionDef)` sees only listings whose
+    call is an ATTRIBUTE inside a plain `def`. A listing at module level, one in
+    an `async def`, and `listdir(x)` after `from os import listdir` were all
+    invisible -- three more ways to spell the defect past an audit whose own
+    docstring says "every". `<module>` is a real scope name here for that
+    reason, not a placeholder.
+    """
+    sites: set[tuple[str, str]] = set()
+
+    def descend(node: ast.AST, enclosing: str, rel: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = (
+                child.name
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef)
+                else enclosing
+            )
+            if isinstance(child, ast.Call):
+                func = child.func
+                if isinstance(func, ast.Attribute):
+                    named = func.attr
+                elif isinstance(func, ast.Name):
+                    named = func.id
+                else:
+                    named = ""
+                if named in _LISTING_CALLS:
+                    sites.add((rel, enclosing))
+            descend(child, inner, rel)
+
+    for path in sorted(root.rglob("*.py")):
+        rel = str(path.relative_to(root)).replace("\\", "/")
+        descend(ast.parse(path.read_text("utf-8")), "<module>", rel)
+    return sites
+
+
+_ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("catalog/native.py", "_listing"): (
+        "the write decision itself: it translates the OSError into a refusal, because the "
+        "caller's next move on 'empty' is a clone whose seam removes what it finds"
+    ),
+    ("catalog/families/clientdir.py", "_to_depth"): (
+        "reads a client folder the user chose; `mpq_files()` needs the OSError raw so an "
+        "unreadable `Data/` is not reported as too few archives"
+    ),
+    ("catalog/families/clientdir.py", "locale_dirs"): (
+        "same folder, same reason - what a repack stripped, not what may be written"
+    ),
+    ("catalog/families/extract.py", "file_count"): (
+        "counts what a tool produced; a listing it cannot make is logged and counts as short, "
+        "which re-runs the tool rather than skipping it"
+    ),
+    ("catalog/families/extract.py", "doodad_placements"): (
+        "lists the `Buildings/` this app's own extractor just filled, to count how many of the "
+        "models the index places; its `except OSError` logs and answers None, which is 'no "
+        "check ran' and warns about nothing - nothing is written on the strength of it"
+    ),
+    ("catalog/families/sqlplan.py", "_listing"): (
+        "reads `Updates/` in the sources; FileNotFoundError is a real answer there (no such "
+        "directory) and every other OSError stops the install regardless of `on_error`"
+    ),
+    ("apply.py", "_require_own_clone"): (
+        "IS a write decision, and the one entry here that is not an exoneration: it lists a "
+        "clone dir under the server dir to decide whether the module applier may write there, "
+        "and raises `<rel> already has files in it and was not put there by this app`. "
+        "Measured on m910q 2026-09-05 - the method has no `except` of any kind, and the same "
+        "expression on a chmod-000 folder raises a raw `PermissionError [Errno 13]`, so an "
+        "unreadable clone dir reaches the user as a traceback. Not routed through "
+        "`native._listing()` from here because that raises `InstallerError` while every "
+        "caller of this one translates `ApplyError`; filed in `pyplan/checklist.md`"
+    ),
+    ("apply.py", "_undeploy"): (
+        "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
+        "removes exactly those names; reads a folder this app filled, decides no write into it"
+    ),
+    ("apply.py", "_patches"): (
+        "resolves a manifest's `patch.file` glob to real paths; a pattern that matches nothing "
+        "is reported as `patch target missing: <path>` by name, never as an emptiness verdict"
+    ),
+    ("apply.py", "_run_sql"): (
+        "resolves a manifest's `sql path` glob the same way, with the same by-name refusal"
+    ),
+    ("docker.py", "_first_populated_ancestor"): (
+        "walks up a path looking for a directory that HAS something in it, to tell a real "
+        "mount from an empty mount point; its own `except OSError` logs and answers None, "
+        "which is the honest 'cannot tell' this probe is allowed to give"
+    ),
+    ("networking.py", "write_client_realmlist"): (
+        "globs `Data/*/realmlist.wtf` in the USER'S client to find the file to write; a glob "
+        "matching nothing falls back to `Data/enUS/`, and the write itself is to a named file"
+    ),
+    ("ui/controller_view.py", "refresh_backups"): (
+        "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
+        "nothing"
+    ),
+}
+"""Every directory listing in the package, and why it is not `native._listing()`.
+
+`native._listing()`'s docstring claimed to be the only place this engine lists a
+directory, and the audit under it read `native` and `azerothcore` only -- so the
+five sixths of the engine that contradicted the sentence were never asked. The
+root was widened to `yulon/catalog/` on 2026-09-05 and to the whole of `yulon/`
+the same day, when a review pointed out that `apply.py` makes the same write
+decision with a bare `iterdir()` one directory up and the audit could not see
+it: "this engine" was still a wider claim than its evidence, one level out.
+
+Written out rather than derived: the map IS the claim, and one computed from the
+code would agree with whatever the code did.
+
+A reason per site, because "is this a write decision?" is the only question that
+matters here and it cannot be answered by counting. One entry says NO -- the
+`apply.py` clone guard -- because a map that could only hold exonerations would
+be somewhere to hide a finding rather than somewhere to record it.
+"""
+
+
+def test_every_folder_listing_in_the_package_is_accounted_for() -> None:
+    """One translation for the install engine's write decision, a named reason for the rest.
+
+    Four sites carried the same untranslated listing and were found one at a
+    time; a fifth appeared in `installer.py` on 2026-09-05.
+
+    The whole package is walked, not a hand-picked pair of modules and not the
+    `catalog/` subtree. That is the difference between an audit and a spot
+    check: a listing this cannot see is a listing nothing checks, and the
+    sentence it would falsify is three screens away in another file.
+    """
+    root = Path(yulon.__file__ or "").parent
+    assert _listing_sites(root) == set(_ACCOUNTED_LISTINGS), (
+        "a folder listing in this package is not in the map above. If it decides whether the "
+        "app may write somewhere it belongs in `native._listing()`; if it does not, add it "
+        "with the reason, and check that `_listing()`'s docstring still tells the truth"
+    )
+
+
+_SPELLING_PROBE = '''\
+"""One listing per spelling `_LISTING_CALLS` names, plus the scopes it claims to reach."""
+
+import glob
+import os
+from os import listdir
+
+
+AT_MODULE_LEVEL = list(os.scandir("."))
+
+
+def probe_iterdir(p):
+    return list(p.iterdir())
+
+
+def probe_scandir(p):
+    return list(os.scandir(p))
+
+
+def probe_listdir(p):
+    return listdir(p)
+
+
+def probe_glob(p):
+    return list(p.glob("*"))
+
+
+def probe_rglob(p):
+    return list(p.rglob("*"))
+
+
+def probe_walk(p):
+    return list(os.walk(p))
+
+
+def probe_iglob(p):
+    return list(glob.iglob(str(p) + "/*"))
+
+
+def probe_fwalk(p):
+    return list(os.fwalk(p))
+
+
+async def probe_in_an_async_def(p):
+    return [entry for entry in p.rglob("*")]
+
+
+def probe_not_a_listing(p):
+    return p.read_text(encoding="utf-8")
+'''
+
+
+def test_the_listing_audit_sees_every_spelling_it_names(tmp_path: Path) -> None:
+    """The instrument's own scope, checked rather than asserted in prose.
+
+    `_LISTING_CALLS`' docstring is the audit's whole value: the map below it is
+    only as complete as the set of spellings that reaches it. Twice on
+    2026-09-05 that docstring said "every spelling" and a one-word respelling
+    walked past -- `glob` the first time, `glob.iglob` the second -- and both
+    times the audit stayed green while the write decision it exists to find had
+    moved. Prose cannot be run, so the claim is driven here instead.
+
+    Written out literally rather than generated from `_LISTING_CALLS`, which is
+    the difference between a probe and a tautology: a probe built from the set
+    shrinks with the set and agrees with whatever the set says. This file is
+    fixed, the expected sites are fixed, and the two are tied to the set by the
+    second assertion. Both assertions are load-bearing, and each was reddened on
+    m910q 2026-09-05, `__pycache__` purged both sides, over the same 25-test
+    subset: dropping `iglob` and `fwalk` back out of `_LISTING_CALLS` gives
+    `1 failed, 24 passed` on the SITE-SET assertion, naming
+    `('probe.py', 'probe_iglob')` and `('probe.py', 'probe_fwalk')` as the sites
+    that vanished; adding a ninth spelling with no `probe_` function for it
+    gives `1 failed, 24 passed` on the DRIFT assertion instead, naming the
+    spelling nothing probes.
+
+    The scopes are here for the same reason `<module>` is a real key: an
+    `async def` site and a `from os import listdir` name-form call were both
+    invisible before the walker descended, and `probe_not_a_listing` is the
+    negative control -- an audit that flags everything is not an audit.
+    """
+    probe = tmp_path / "probe.py"
+    probe.write_text(_SPELLING_PROBE, encoding="utf-8")
+
+    sites = _listing_sites(tmp_path)
+
+    assert sites == {
+        ("probe.py", "<module>"),
+        ("probe.py", "probe_iterdir"),
+        ("probe.py", "probe_scandir"),
+        ("probe.py", "probe_listdir"),
+        ("probe.py", "probe_glob"),
+        ("probe.py", "probe_rglob"),
+        ("probe.py", "probe_walk"),
+        ("probe.py", "probe_iglob"),
+        ("probe.py", "probe_fwalk"),
+        ("probe.py", "probe_in_an_async_def"),
+    }, (
+        "a spelling or a scope this audit claims to read walked past it. `probe_not_a_listing` "
+        "must be absent and every other site present; a missing `probe_<name>` means "
+        "`_LISTING_CALLS` no longer names that spelling, and the audit below cannot fail on it"
+    )
+
+    spellings_probed = {
+        name.removeprefix("probe_") for _, name in sites if name.startswith("probe_")
+    } - {"in_an_async_def"}
+    assert spellings_probed == set(_LISTING_CALLS), (
+        "`_LISTING_CALLS` and the probe file have drifted. Add the new spelling to "
+        "`_SPELLING_PROBE` with a `probe_<spelling>` function, or this set is a claim nothing "
+        "checks"
+    )
+
+
+# -- a reset that will not finish --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MaintenanceError("the schemas could not be listed"),
+        ApplyError("DROP DATABASE acore_world was refused"),
+        RuntimeError("this install holds player data, so nothing was dropped."),
+    ],
+    ids=["MaintenanceError", "ApplyError", "RuntimeError"],
+)
+def test_a_reset_that_fails_reaches_the_cli_as_a_sentence_and_is_recorded(
+    error: Exception,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`gate.reset()` on the `partial` branch, whose seam raises three things and none is ours.
+
+    The three are `reset_unfinished()`'s own `Raises:` list, enumerated because
+    that list is the thing under test: `MaintenanceError` and `ApplyError` are
+    independent `RuntimeError` subclasses and the bare `RuntimeError` is
+    deliberately neither, so no `except` clause in the spine could ever have
+    seen them. Measured on `697adca6`: `install_wiring.main()` raised each one
+    through, the harness printed a traceback, and the state file kept
+    `"last_error": ""`.
+
+    Driven on `wow-wotlk` - AzerothCore, the game with green live gates, and the
+    only family whose import gate is the injected `acore_*` pair this seam
+    belongs to.
+
+    The neighbours are the other four answers in the same five-branch table,
+    and the `partial` branch's own second refusal. All are asserted absent, and
+    the probe's own line is asserted present, so a run that took another branch
+    fails here rather than passing on that branch's words. The one-shot is
+    asserted never to have run, because re-importing over a half-written schema
+    is the destruction this branch exists to prevent.
+    """
+    server_dir = tmp_path / "server"
+    rec = Recorder(images=False, probe_answers=[PARTIAL, IMPORTED], reset_error=error)
+    _cli_engine_over(rec, monkeypatch)
+    try:
+        code = install_wiring.main(["wow-wotlk", "--server-dir", str(server_dir)])
+    except Exception as exc:
+        pytest.fail(
+            f"a failed reset escaped install_wiring.main() as {type(exc).__name__}: "
+            + "".join(traceback.format_exception(exc)).strip()
+        )
+    streamed = capsys.readouterr()
+    refusal = _refusal_from(streamed.err)
+    assert code == 1
+    assert "reset" in rec.calls, "the run never reached the call under test"
+    assert f"The databases read as {PARTIAL.state}: {PARTIAL.detail}" in streamed.out
+    expected = "The half-written databases could not be cleared, so the import was not run: "
+    assert refusal == expected + str(error)
+    assert "nothing was found to clear" not in refusal, "that is the empty-tuple refusal below it"
+    neighbours = ("already hold data", "could not be asked")
+    assert not any(
+        words in refusal for words in neighbours
+    ), "those are the `populated` and `unreadable` branches, which this run never took"
+    assert "one-shot:ac-db-import" not in rec.calls, (
+        "the import ran over databases that were never cleared, which is the 28-second "
+        "success that leaves `acore_world` permanently unimportable"
+    )
+    recorded = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert recorded["last_error"] == refusal, (
+        "the refusal was not recorded, so `run()`'s `except InstallerError` never saw it "
+        "and `_record_error` did not run"
+    )
+
+
+def test_a_finished_install_drops_the_previous_runs_failure(tmp_path: Path) -> None:
+    """A success must not leave the last failure's sentence in the state file.
+
+    `InstallState.with_stage()` clears `last_error`, and until 2026-09-02 that
+    was the only thing that did -- so it cleared nothing on the run where it
+    matters most. It returns `self` untouched when the stage is already in
+    `completed`, and an unrecorded stage never reaches it, so a RESUME that
+    finishes every remaining stage records nothing new and clears nothing.
+
+    Seen on m910q the same day: WoW TBC printed "WoW TBC is installed and
+    running", three containers up, and `.yulon-install.json` still said
+    `"last_error": "The server started but never reported ready..."` with
+    `updated_unix` freshly bumped -- a working install describing itself as a
+    failed one, on exactly the retry-after-failure path where someone is most
+    likely to believe it.
+
+    Shaped as that resume rather than as a fresh install: the recorded stage is
+    ALREADY done before this run starts, so `with_stage()`'s early return is
+    taken and the only remaining stage is unrecorded. A test that drove a first
+    run would pass against the broken code, because there `with_stage()` clears
+    the field on the way past.
+    """
+    rec = Recorder()
+    family = _family(
+        lambda me: (
+            native.Stage("always", _say),
+            native.Stage("never", _say, recorded=False),
+        )
+    )
+    server_dir = tmp_path / "wow"
+
+    # Run once so "always" is recorded, then plant a failure the way
+    # `_record_error` does.
+    list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+    state = native.read_state(server_dir, valid=("always", "never"))
+    assert state is not None
+    native.write_state(server_dir, replace(state, last_error="the server never reported ready"))
+    assert native.read_state(server_dir, valid=("always", "never")).last_error  # type: ignore[union-attr]
+
+    list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+
+    after = native.read_state(server_dir, valid=("always", "never"))
+    assert after is not None
+    assert after.last_error == "", (
+        "a finished install left the previous failure in the state file: " f"{after.last_error!r}"
+    )
+    assert after.completed == ("always",), "clearing the error must not disturb what was done"
+
+
+def test_a_state_file_deleted_mid_install_is_not_written_back_at_the_end(
+    tmp_path: Path,
+) -> None:
+    """Finishing must not RE-CREATE a record the user removed while it ran.
+
+    `_clear_error` ends a successful run by rewriting the state file without the
+    previous failure's sentence. `write_state` does
+    `mkdir(parents=True, exist_ok=True)`, so with no guard it will happily
+    recreate a file -- and a folder -- that is not there any more. The next
+    press then meets `_guard()`, which refuses on the strength of the record the
+    previous run just wrote: a folder the user emptied by hand becomes
+    permanently un-installable.
+
+    Its sibling `_record_error` has carried that guard all along; `_clear_error`
+    got it from a review on 2026-09-02, and nothing asserted it -- deleting the
+    guard left the whole suite green.
+
+    The deletion is done by an UNRECORDED stage, which is what makes this the
+    real path rather than a contrivance: unrecorded stages run on every attempt,
+    they are the last four CMaNGOS stages, and they are exactly where a
+    long-running install is when someone reaches for the folder.
+    """
+    rec = Recorder()
+    server_dir = tmp_path / "wow"
+    passes: list[int] = []
+
+    def _delete_the_record(ctx: native.StageContext) -> Iterator[str]:
+        # Only on the SECOND pass. An unrecorded stage runs on every attempt --
+        # that is what unrecorded means -- so deleting unconditionally would
+        # take the record away at the end of the first run too, leaving nothing
+        # to plant a failure in. The first version of this test did exactly
+        # that and failed on its own setup.
+        passes.append(1)
+        if len(passes) > 1:
+            (ctx.server_dir / native.STATE_FILE).unlink()
+        yield "the record is gone"
+
+    family = _family(
+        lambda me: (
+            native.Stage("always", _say),
+            native.Stage("never", _delete_the_record, recorded=False),
+        )
+    )
+
+    # First run records "always" and leaves a state file behind.
+    list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+    state = native.read_state(server_dir, valid=("always", "never"))
+    assert state is not None
+    native.write_state(server_dir, replace(state, last_error="the server never reported ready"))
+    assert (server_dir / native.STATE_FILE).is_file()
+
+    # Second run: "always" is already done, "never" deletes the record, and the
+    # install finishes successfully.
+    list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
+
+    assert not (
+        server_dir / native.STATE_FILE
+    ).exists(), "a finished install wrote back a state file the run itself had deleted"
+
+
+# -- the address the realm advertises when the install ends -----------------
+#
+# bug-checklist §35, driven on real hardware 2026-09-02: a TBC server this app
+# installed on m910q was joined from another PC over Tailscale, auth succeeded,
+# the realm list arrived, and the world connect could not — the realmlist row
+# still said 127.0.0.1, so the client had been told the world server was on its
+# own machine. Every part of the fix existed; nothing on the install path ran
+# any of it. These tests are about the closing step that now does.
+
+
+def _advertising(rec: Recorder, server_dir: Path, **overrides: object) -> list[str]:
+    """A whole successful install of a one-stage family, with the seams `overrides` says."""
+    family = _family(lambda me: (native.Stage("only", _say),))
+    return list(_build(rec, family, **overrides).run(InstallOptions(server_dir=server_dir)))
+
+
+def _statements(rec: Recorder) -> list[str]:
+    """Everything sent through the WRITE seam, whole — `sql_calls` also holds queries."""
+    return rec.sql_scripts
+
+
+def test_the_install_ends_by_advertising_the_address_the_seam_detected(
+    tmp_path: Path,
+) -> None:
+    """The UPDATE reaches the SQL seam, carrying the detected address and nothing else.
+
+    The defect in one assertion. Before this step existed the install sent no
+    statement at all, so `_statements(rec) == []` was the shipped behaviour and
+    every server it produced was reachable only from the machine it was on.
+
+    Asserted against `networking.realmlist_sql()`'s own output rather than a
+    string typed here, because that builder is what the Networking tab already
+    spends and the two must not drift into writing different rows.
+
+    Mutations this catches: sending `INSTALL_REALM_HOST` instead of the detected
+    address (the bug itself), asking with no password (`sql_secrets`), and
+    dropping the write while keeping the reassuring line — the line and the
+    statement are asserted over the same run.
+    """
+    rec = Recorder()
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "100.78.24.50")
+
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.78.24.50", "100.78.24.50")]
+    assert "127.0.0.1" not in _statements(rec)[0], "the loopback was written as the realm address"
+    assert rec.sql_secrets[-1] == "password", "it asked the database with no password"
+    assert [line for line in said if "now advertises 100.78.24.50" in line], said
+
+
+def test_the_line_a_user_reads_names_the_address_they_have_to_type(
+    tmp_path: Path,
+) -> None:
+    """The address is the one thing the reader has to carry away, so it is IN the sentence.
+
+    A player joining from another PC types this into their client's realmlist;
+    an install that changed the row and said only "networking configured" leaves
+    them with nothing to type and no way to find it. It is also what makes the
+    line falsifiable — a message that named no address would pass every other
+    test here while advertising the wrong one.
+
+    Breaks on any mutation that drops the interpolation, and on one that names
+    the address only once: the count asserts both mentions, the fact and the
+    instruction, because dropping the second is how the sentence stops telling
+    anybody what to do with it.
+    """
+    rec = Recorder()
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "192.168.1.25")
+    line = next(line for line in said if "now advertises" in line)
+    assert line.count("192.168.1.25") == 2, line
+    assert "realmlist" in line, f"it never says what the address is for: {line!r}"
+
+
+@pytest.mark.parametrize("detected", [None, "127.0.0.1", "", "not an address!"])
+def test_no_detectable_address_is_a_sentence_and_never_a_guess(
+    tmp_path: Path, detected: str | None
+) -> None:
+    """No address means: say what is owed, write nothing, and finish successfully.
+
+    Three separate refusals to get wrong. Guessing writes a plausible address
+    into a live auth database and produces the §35 outage with the app's own
+    fingerprints on it. Failing the install would be a lie — every stage passed
+    and the server is running. Saying nothing leaves a user with a server only
+    they can reach and no idea why.
+
+    `127.0.0.1` is in the list because it is an address a detector really
+    returns: `platform.detect_lan_ip()` filters it on its local branch and its
+    WSL branch, which asks Windows, does not.
+
+    Mutations this catches: treating `None` as "already correct" and skipping
+    silently (no line is said), writing whatever was detected (a statement
+    appears), asking the database about a row nothing was going to change
+    (`sql_calls`), and raising instead of saying (the closing line disappears).
+    """
+    rec = Recorder()
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: detected)
+
+    assert native.REALM_ADDRESS_UNKNOWN in said
+    assert _statements(rec) == [], "an undetectable address was written to the database anyway"
+    assert rec.sql_calls == [], "the database was asked about a row nothing was going to change"
+    assert "Networking tab" in native.REALM_ADDRESS_UNKNOWN, "it does not say where the fix is"
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+def test_a_row_that_is_already_reachable_is_left_alone_whatever_it_says(
+    tmp_path: Path,
+) -> None:
+    """The question is REACHABILITY, not equality with the LAN address.
+
+    This test asserted equality until 2026-09-03, and the rule it encoded was
+    wrong in a way that cost real users their servers. `networking.apply()`
+    exists so somebody can advertise a PUBLIC address for internet play; every
+    ordinary resume of the installer runs this step again; and comparing the row
+    against the LAN address meant the resume overwrote that public address with
+    a LAN one — while printing "players on other machines can reach this
+    server", which was the exact opposite of what had just happened. A review
+    drove it through the real engine and caught it.
+
+    So the three cases below are the rule:
+
+    * a row holding the detected LAN address is left alone;
+    * a row holding a DIFFERENT but reachable address is ALSO left alone —
+      this is the case the old rule got wrong, and it is why the test is no
+      longer named after equality;
+    * a row where ANY column is still loopback is written, because one loopback
+      among them still sends somebody to their own machine. WotLK's realmlist
+      has `address` and `localAddress` and `realmlist_sql()` writes both, so a
+      single-column fixture would survive a version that checked only the first.
+    """
+    same = Recorder(realm_row="10.1.2.3\t10.1.2.3\n")
+    said = _advertising(same, tmp_path / "wow", lan_ip=lambda: "10.1.2.3")
+    assert _statements(same) == [], "a row that was already correct was written again"
+    assert [line for line in said if "already advertises 10.1.2.3" in line], said
+
+    public = Recorder(realm_row="203.0.113.9\t192.168.1.25\n")
+    spoke = _advertising(public, tmp_path / "internet", lan_ip=lambda: "192.168.1.25")
+    assert (
+        _statements(public) == []
+    ), "a public address somebody set for internet play was overwritten with a LAN one"
+    assert [line for line in spoke if "203.0.113.9" in line], spoke
+
+    half = Recorder(realm_row=f"10.1.2.3\t{native.INSTALL_REALM_HOST}\n")
+    _advertising(half, tmp_path / "second", lan_ip=lambda: "10.1.2.3")
+    assert _statements(half) == [
+        networking.realmlist_sql(ENTRY, "10.1.2.3", "10.1.2.3")
+    ], "a localAddress still on the loopback was read as nothing to change"
+
+
+def _no_docker_cli(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    raise docker.DockerCliMissingError("docker: command not found")
+
+
+@pytest.mark.parametrize("how", ["rejected", "unreachable"])
+def test_an_update_that_fails_says_so_and_leaves_the_install_successful(
+    tmp_path: Path, how: str
+) -> None:
+    """A realm row that could not be written is a sentence, never a failed install.
+
+    By the time this runs the server is built, imported, started and has
+    reported ready, and the user has been told so. Turning that into an
+    `InstallerError` would send somebody to delete a working server, and would
+    write a `last_error` into the state file of an install that finished — the
+    exact wrong label `_clear_error()` exists to remove.
+
+    Both ways it can fail, because they arrive differently: the client rejecting
+    the statement is a non-zero exit with stderr, and a database that could not
+    be asked at all is a `DockerCommandError` raised OUT of the seam — the arm
+    that would otherwise escape `run()` as a traceback from three lines above
+    the closing message.
+
+    Mutations this catches: letting either failure propagate (the closing line
+    disappears and `run()` raises), and swallowing it silently (nothing names
+    the address that is still owed).
+    """
+    rec = Recorder(failing_sql="UPDATE")
+    overrides: dict[str, object] = {"lan_ip": lambda: "100.78.24.50"}
+    if how == "unreachable":
+        overrides["exec_stdin"] = _no_docker_cli
+    said = _advertising(rec, tmp_path / "wow", **overrides)
+
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+    unhappy = [line for line in said if "could not be set to 100.78.24.50" in line]
+    assert len(unhappy) == 1, said
+    assert "Networking tab" in unhappy[0], unhappy[0]
+    recorded = json.loads((tmp_path / "wow" / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert recorded["last_error"] == "", "a finished install recorded itself as failed"
+
+
+def test_the_realm_address_is_set_after_the_server_is_ready_and_before_the_last_line(
+    tmp_path: Path,
+) -> None:
+    """Ordering, and each end of it is load-bearing for a different reason.
+
+    AFTER `ready`: `wow-wotlk`'s catalogued `ready.auth` marker is
+    `{{REALM_HOST}}:{{WORLD_PORT}}`, filled with `INSTALL_REALM_HOST` — the auth
+    server prints the address the realmlist row holds. Advertise the LAN IP
+    before that wait and a perfectly healthy server never prints the line being
+    waited for, so the install fails on a 1800-second timeout. This is the one
+    ordering constraint that turns the fix into a worse outage than the bug.
+
+    BEFORE the closing line: `test_a_finished_install_says_so_last_and_says_where`
+    pins that line as the last thing said, because a success message with output
+    after it reads as a run that carried on and then stopped for an unsaid
+    reason.
+
+    The marker assertion is not decoration either: it is the evidence for the
+    first paragraph, so a catalog edit that stops waiting on the loopback makes
+    this test say so instead of leaving a stale justification in a docstring.
+    """
+    rec = Recorder()
+
+    def wait_ready(spec: docker.ContainerSpec, ready: docker.ReadySpec) -> bool:
+        rec.calls.append("wait-ready")
+        return True
+
+    # The spine's REAL `ready` stage, not a stand-in: the wait this test is
+    # about is the one every family binds, and a double for it could be ordered
+    # correctly while the real one was not.
+    family = _family(
+        lambda me: (
+            native.Stage("only", _say),
+            native.Stage("ready", me.stage_ready, recorded=False),
+        )
+    )
+    engine = _build(rec, family, lan_ip=lambda: "10.1.2.3", wait_ready=wait_ready)
+    said = list(engine.run(InstallOptions(server_dir=tmp_path / "wow")))
+    assert ENTRY.install.native is not None
+    assert native.INSTALL_REALM_HOST in composegen.fill(
+        ENTRY.install.native.ready.auth or "",
+        {"REALM_HOST": native.INSTALL_REALM_HOST, "WORLD_PORT": str(ENTRY.ports.world)},
+    ), "this entry no longer waits on the loopback address; re-derive the ordering above"
+    assert rec.calls.index("wait-ready") < rec.calls.index("sql"), rec.calls
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+# -- the build's skip rule, asked from outside the build ----------------------
+
+
+@pytest.mark.parametrize(
+    ("recorded", "images", "skipped"),
+    [
+        (True, True, True),
+        (True, False, False),
+        (True, None, False),
+        (False, True, False),
+        (False, False, False),
+        (False, None, False),
+    ],
+    ids=(
+        "recorded+present",
+        "recorded+gone",
+        "recorded+unknown",
+        "fresh+present",
+        "fresh+gone",
+        "fresh+unknown",
+    ),
+)
+def test_build_would_be_skipped_answers_exactly_what_stage_build_then_does(
+    tmp_path: Path, recorded: bool, images: bool | None, skipped: bool
+) -> None:
+    """One rule, two callers, all six states -- because the second caller is a REFUSAL.
+
+    `CmangosInstaller._patch_sources()` refuses to edit a source tree when this
+    predicate says the compile is not going to happen. That refusal is only
+    ever right while the predicate agrees with the stage it is predicting, and
+    the two live 400 lines apart in this file. So the prediction and the
+    outcome are driven together over every value the seam can return, including
+    the `None` that means "the daemon would not say" -- the state where
+    guessing wrong costs a user an unnecessary dead end in one direction and a
+    silently unpatched build in the other.
+    """
+    rec = Recorder(images=images)
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    installer = AzerothCoreInstaller(ENTRY, seams=rec.seams())
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(
+            ENTRY.id, "abc", "azerothcore", completed=("build",) if recorded else ()
+        ),
+        cancel=None,
+        secrets=native.Secrets(db_password="pw"),
+    )
+    assert installer.build_would_be_skipped(ctx) is skipped
+    said = list(installer.stage_build(ctx))
+    compiled = "build" in rec.calls
+    assert compiled is not skipped
+    assert any("skipping the compile" in line for line in said) is skipped
+
+
+# -- _pump's abandonment (bug-checklist §21) ---------------------------------
+#
+# `_pump()` and the CMaNGOS family's `_stream()` are the same bridge, and the
+# same claims are asserted separately against each: "byte-identical in
+# structure" is exactly what let this hole ship in two places at once, so one
+# test standing for both would be the same mistake in the suite.
+
+
+PUMP_THREAD = "yulon-install-output"
+
+
+def _pumping(rec: Recorder) -> AzerothCoreInstaller:
+    """An engine built only to reach `_pump()`; no seam of it is used by these tests."""
+    return AzerothCoreInstaller(ENTRY, seams=rec.seams())
+
+
+def _live_pump_workers() -> list[str]:
+    """Every `_pump()` worker still alive, by thread name — §21's question, asked directly."""
+    return [thread.name for thread in threading.enumerate() if thread.name == PUMP_THREAD]
+
+
+def test_abandoning_the_pump_stops_its_worker_with_no_cancel_from_the_caller() -> None:
+    """bug-checklist §21: abandon WITHOUT setting the cancel, and no live worker may remain.
+
+    The RED, before `stop_abandoned_worker()`:
+
+        AssertionError: assert ['yulon-install-output'] == []
+
+    `_pump()` carries the build and the import, so what it leaked was a running
+    `docker compose build` — hours of it — pushing into a queue nobody would
+    ever read again. The only thing preventing that was `LogPanel.stop()`
+    happening to set the cancel event before it asked its worker to stop, an
+    ordering in another file that nothing here could keep. This test sets no
+    cancel at all, so a return to the ordering-only mitigation fails it.
+    """
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> docker.AttachedRun:
+        sink("building")
+        assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
+        return docker.AttachedRun(0, ("built",))
+
+    generator = _pumping(Recorder())._pump(call, cancel=cancel)
+    assert next(generator) == "building"
+    assert PUMP_THREAD in _live_pump_workers(), "the worker should be running at this point"
+
+    generator.close()
+
+    assert _live_pump_workers() == []
+
+
+def test_finishing_the_pump_normally_does_not_set_the_cancel_event() -> None:
+    """A stage that SUCCEEDED must not be left holding a set cancel event.
+
+    `_check_run()` is handed `_pump()`'s return value and then reads that same
+    event. A `finally` that set it on the way out of a build that finished
+    would turn that build into "the install was stopped" — which is why the
+    hook is an `except` clause on the abandonment path and not a `finally`.
+    (That clause said `except GeneratorExit` when this docstring was written
+    and was widened to `except BaseException` on 2026-09-04 — see
+    `test_an_interrupt_thrown_into_the_pump_stops_its_worker_too` — which
+    changes nothing here: what this test pins is that the normal path, which
+    leaves the loop by `break`, reaches no hook at all.)
+    """
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> docker.AttachedRun:
+        sink("building")
+        return docker.AttachedRun(0, ("built",))
+
+    assert list(_pumping(Recorder())._pump(call, cancel=cancel)) == ["building"]
+    assert not cancel.is_set()
+
+
+def test_a_worker_abandoned_during_interpreter_finalisation_is_not_waited_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While finalising, the join can only ever time out, so it is not attempted.
+
+    A daemon thread that asks for the GIL after finalisation has begun is
+    exited on the spot and can never reach its cancel check, so joining it
+    would spend `ABANDONED_WORKER_SECONDS` learning nothing — once per
+    abandoned generator, on the way out of the app. Driven through the real
+    `stop_abandoned_worker()` rather than read off the branch, against a worker
+    that is ALIVE and deaf, with a clock: "not waited for" is a duration, and
+    the shipped bound is left in place so that a return to joining costs the
+    full `ABANDONED_WORKER_SECONDS` and fails the proof below — which is
+    written as a fifth of that same constant rather than as a number of its
+    own, so it cannot come to allow the very wait it exists to refuse. The
+    cancel event staying clear is the other observable difference between the
+    two paths.
+    """
+    monkeypatch.setattr(native.sys, "is_finalizing", lambda: True)
+    cancel = threading.Event()
+    release = threading.Event()
+    deaf = threading.Thread(target=lambda: release.wait(HANG_BOUND), name=PUMP_THREAD, daemon=True)
+    deaf.start()
+    try:
+        started = time.monotonic()
+        native.stop_abandoned_worker(deaf, cancel, what="the install output")
+        elapsed = time.monotonic() - started
+
+        assert (
+            elapsed < native.ABANDONED_WORKER_SECONDS / 5
+        ), f"waited {elapsed:.2f}s for a worker finalisation will not release"
+        assert deaf.is_alive(), "the deaf worker is alive by construction"
+        assert not cancel.is_set()
+    finally:
+        release.set()
+        deaf.join(timeout=HANG_BOUND)
+
+
+def test_the_abandoner_bound_is_the_streams_own_shutdown_timeout() -> None:
+    """`ABANDONED_WORKER_SECONDS` IS `runner._SHUTDOWN_TIMEOUT_SECONDS`, not a copy of it.
+
+    Both answer the same question one layer apart — how long the thread that
+    walked away from a container may be held while the container is told to
+    stop — and a copy of the number would let the two drift while the docstring
+    went on saying they agree.
+
+    **The equality alone cannot say that, and until 2026-09-05 this test
+    claimed it could.** Two floats are equal whether one was imported or typed
+    a second time, so `ABANDONED_WORKER_SECONDS = 5.0` passes it exactly as the
+    import does — the assertion is about today's VALUE, and the docstring above
+    is about the SOURCE. The source is therefore read: the module-level binding
+    in `native.py` must still be spelled as the other module's name. Measured
+    on m910q 2026-09-05, replacing that binding with the literal `5.0` in a
+    scratch copy left the equality at `1 passed` and failed the source check —
+    which is the mutation the docstring's word "copy" names.
+    """
+    assert native.ABANDONED_WORKER_SECONDS == runner._SHUTDOWN_TIMEOUT_SECONDS
+    bindings = [
+        ast.unparse(node.value)
+        for node in ast.parse(Path(native.__file__).read_text(encoding="utf-8")).body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "ABANDONED_WORKER_SECONDS"
+            for target in node.targets
+        )
+    ]
+    assert bindings == ["runner._SHUTDOWN_TIMEOUT_SECONDS"], bindings
+
+
+def test_an_interrupt_thrown_into_the_pump_stops_its_worker_too() -> None:
+    """A Ctrl+C that lands INSIDE this frame is an abandonment as well (bug-checklist §21).
+
+    `install_wiring.main()` sits in `for line in engine.run(...)`, and the
+    thread it runs on spends an install blocked in `lines.get()` here — so a
+    Ctrl+C is raised at that line, inside the generator frame, as a
+    `KeyboardInterrupt`: a `BaseException`, but not a `GeneratorExit`.
+    Measured on m910q 2026-09-04 against the `except GeneratorExit` hook, with
+    `generator.throw(KeyboardInterrupt())`:
+
+        AssertionError: assert ['yulon-install-output'] == []
+
+    The hook never fired and the worker was left running: the §21 state, one
+    exception type to the side of the test that closed it.
+    """
+    cancel = threading.Event()
+
+    def call(sink: docker.OutputSink) -> docker.AttachedRun:
+        sink("building")
+        assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
+        return docker.AttachedRun(0, ("built",))
+
+    generator = _pumping(Recorder())._pump(call, cancel=cancel)
+    assert next(generator) == "building"
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            generator.throw(KeyboardInterrupt())
+        assert _live_pump_workers() == []
+    finally:
+        cancel.set()
+        for thread in threading.enumerate():
+            if thread.name == PUMP_THREAD:
+                thread.join(timeout=HANG_BOUND)
+
+
+def test_abandoning_the_pump_with_no_cancel_event_leaves_the_worker_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The `cancel=None` branch, reached the way production would reach it: by abandonment.
+
+    A bridge handed no event has no seam to pull. It says so at WARNING and
+    returns at once — it does not join, because nothing would end the worker
+    and the join could only spend the bound before saying the same thing. Both
+    halves are asserted with the shipped bound in place: a join here would
+    cost five seconds and fail the clock. Until 2026-09-04 the only caller on
+    this branch outside the suite was the CLI harness; `install_wiring.main()`
+    now passes an event of its own, so what reaches this branch is a test that
+    passes `None`, and the branch is kept for the sake of the next caller that
+    forgets.
+    """
+    release = threading.Event()
+
+    def call(sink: docker.OutputSink) -> docker.AttachedRun:
+        sink("building")
+        assert release.wait(HANG_BOUND), "the test never released the worker"
+        return docker.AttachedRun(0, ("built",))
+
+    generator = _pumping(Recorder())._pump(call, cancel=None)
+    assert next(generator) == "building"
+    try:
+        with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
+            started = time.monotonic()
+            generator.close()
+            elapsed = time.monotonic() - started
+        assert (
+            elapsed < native.ABANDONED_WORKER_SECONDS / 5
+        ), f"close() spent {elapsed:.2f}s on a worker nothing could stop"
+        assert PUMP_THREAD in _live_pump_workers(), "with no event, the worker is left running"
+        assert any(
+            "abandoned with no cancel event" in record.getMessage() for record in caplog.records
+        ), [record.getMessage() for record in caplog.records]
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == PUMP_THREAD:
+                thread.join(timeout=HANG_BOUND)
+    assert _live_pump_workers() == []
+
+
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """Every bound here must be spelled `HANG_BOUND`, and nothing else.
+
+    The audit five test files already run on themselves (bug-checklist
+    §33), opted into here on 2026-09-05. The §21 tests above added
+    `cancel.wait(10)`, `release.wait(30)` and `thread.join(timeout=10)` to a
+    file that had no wall-clock bound at all before them — a number at a call
+    site carries no argument for its size, and these waits are the only thing
+    in this file a loaded box can move.
+
+    **What this audit cannot see, stated so the price is known.**
+    `time.monotonic()` is in the set because two tests here measure elapsed
+    time as their ASSERTION, and that costs this file the strongest thing the
+    audit does elsewhere: a NEW hand-built deadline here would not change the
+    set. The two `native.ABANDONED_WORKER_SECONDS / 5` proofs are not read
+    either, and should not be — a comparison is not a call, and they are
+    derived from the SUBJECT's bound rather than typed, which is the same
+    protection by another route. `conftest.spelled_bounds` documents the rest
+    of its reading.
+
+    **Measured both ways on m910q 2026-09-05.** A bare `time.sleep(3)` appended
+    to this file fails this test — `Extra items in the left set: '3'`. The same
+    bound spelled through an alias (`import time as _t` then `_t.sleep(3)`)
+    left it at `1 passed`: `conftest.spelled_bounds` matches the SPELLING
+    `time.sleep`, so an aliased import is invisible to it in every file that
+    runs this audit, not only here.
+    """
+    assert spelled_bounds(__file__) == {"HANG_BOUND", "time.monotonic()"}

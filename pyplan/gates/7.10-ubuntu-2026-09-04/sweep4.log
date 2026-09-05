@@ -1,0 +1,31 @@
+=== sweep_driver4.py ===
+started (local): 2026-09-04T12:43:16+02:00
+command: /home/pk/gate0904/venv/bin/python /home/pk/gate710/drivers/sweep_driver4.py
+---
+2026-09-04 12:43:18 INFO [yulon.networking] networking lan for wow-wotlk: 4 done, 0 skipped, 0 manual
+
+==================== Networking: apply(lan) -- firewall helpers + realmlist updater, live ====================
+plan: NetworkPlan(mode='lan', game_id='wow-wotlk', lan_ip='172.30.55.119', public_ip=None, ports=(3724, 8085), firewall='ufw', firewall_commands=(('ufw', 'allow', '3724/tcp'), ('ufw', 'allow', '8085/tcp'), ('ufw', '--force', 'enable')), portproxy_commands=(), realmlist_sql="UPDATE acore_auth.realmlist SET address='172.30.55.119', localAddress='172.30.55.119' WHERE id=1;", client_realmlist='172.30.55.119', manual_steps=(), warnings=(), firewall_state=None)
+firewall_commands: (('ufw', 'allow', '3724/tcp'), ('ufw', 'allow', '8085/tcp'), ('ufw', '--force', 'enable'))
+realmlist_sql: UPDATE acore_auth.realmlist SET address='172.30.55.119', localAddress='172.30.55.119' WHERE id=1;
+manual_steps: ()
+NetworkReport.done: ('ufw allow 3724/tcp', 'ufw allow 8085/tcp', 'ufw --force enable', 'realmlist → 172.30.55.119')
+NetworkReport.skipped: ()
+restart_required: True
+[OK] network_apply(lan) -> done=('ufw allow 3724/tcp', 'ufw allow 8085/tcp', 'ufw --force enable', 'realmlist → 172.30.55.119') skipped=()
+
+==================== Networking: write_client_realmlist() (round-trips a client file) ====================
+wrote: /home/pk/gate0904/sweep_fake_client/Data/enUS/realmlist.wtf content: set realmlist 192.168.1.50
+
+[OK] write_client_realmlist() wrote /home/pk/gate0904/sweep_fake_client/Data/enUS/realmlist.wtf with correct address
+
+==================== Interrupted-restore bookkeeping: interrupted_restore() / forget_interrupted() ====================
+interrupted_restore(): None
+[OK] interrupted_restore() -> None (None expected: our restore completed cleanly)
+
+
+=== SUMMARY (phase 4) ===
+OK network_apply(lan) -> done=('ufw allow 3724/tcp', 'ufw allow 8085/tcp', 'ufw --force enable', 'realmlist → 172.30.55.119') skipped=()
+OK write_client_realmlist() wrote /home/pk/gate0904/sweep_fake_client/Data/enUS/realmlist.wtf with correct address
+OK interrupted_restore() -> None (None expected: our restore completed cleanly)
+--- exit code: 0   elapsed: 2s   finished: 2026-09-04T12:43:18+02:00

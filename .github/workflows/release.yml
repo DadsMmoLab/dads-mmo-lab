@@ -211,10 +211,11 @@ jobs:
           ARCH=x86_64 ./appimagetool "$APPDIR" "Yulon-${YULON_REF}-x86_64.AppImage"
           mkdir -p release && mv Yulon-*.AppImage release/
 
-          # A PLAIN TARBALL BESIDE THE APPIMAGE, because an AppImage cannot run
-          # without FUSE and there is no packaging trick that removes that.
+          # A PLAIN TARBALL BESIDE THE APPIMAGE, because an AppImage mounts
+          # itself with FUSE and the two routes that would move that off the
+          # user's machine both cost more than a second file.
           #
-          # A statically linked runtime was tried first and does NOT fix it,
+          # ROUTE 1, a statically linked runtime. Tried, and it does NOT fix it,
           # measured on a clean Arch box 2026-08-25: static linking removes the
           # libfuse LIBRARY dependency, but mounting still shells out to the
           # `fusermount3` setuid helper, so the artifact died exactly as before
@@ -222,8 +223,28 @@ jobs:
           # neither fuse2 nor fuse3 by default; Fedora is fine only because it
           # ships fuse3, which is luck rather than a contract.
           #
+          # ROUTE 2, a runtime that falls back to extract-and-run. Read up
+          # 2026-09-04, because the obvious next idea is "surely newer
+          # appimagetool does this now". It does not: `--appimage-extract-and-run`
+          # and APPIMAGE_EXTRACT_AND_RUN are both read on the RUNNING machine, so
+          # neither can be baked in here, and the runtime appimagetool embeds
+          # fails rather than falling back. A third-party runtime that does fall
+          # back exists (VHSgunzo/uruntime, MIT, x86_64 + aarch64, fed in with
+          # `--runtime-file`), and its fallback is `URUNTIME_EXTRACT=2` — an
+          # environment variable on the user's machine again. The price is a
+          # non-upstream binary in the one path that publishes, bought for a
+          # switch the stuck user still has to set. Not taken.
+          #
+          # Still true on 2026-09-04: the release AppImage sha256 `cb7c1b7e75…`
+          # was refused on `yulon-arch` before the interpreter existed, and the
+          # same file with `--appimage-extract-and-run` started and reached the
+          # update check — `pyplan/gates/7.1-arch/71-arch-appimage.log`.
+          #
           # So the honest answer is a second artifact rather than a cleverer
-          # first one: untar it and run ./yulon.
+          # first one: untar it and run ./yulon. `pylauncher/README.md` tells the
+          # user which file to take and why, and
+          # `tests/test_linux_artifact_prereqs.py` fails if this line goes away
+          # and leaves that page promising a file nothing builds.
           tar -czf "release/Yulon-${YULON_REF}-x86_64.tar.gz" -C dist yulon
 
       # -------------------------------------------------------- Windows

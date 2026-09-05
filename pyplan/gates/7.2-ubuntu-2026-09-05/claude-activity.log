@@ -1,0 +1,19 @@
+23:59:06  gate-71-72: box restored from clean-ssh at 23:57:34; cloning pjerra/dads-mmo-lab at 2f39a6d9 to ~/gate72 and making a venv (requirements.txt only). Nothing installed yet.
+00:00:18  gate-71-72: clean-ssh has no python3-venv; apt-get install python3.12-venv (box preparation, recorded), then venv + requirements.txt
+00:01:58  gate-71-72: press 1 of the 7.2 sequence (consent + re-login refusal expected), unit gate72-press1, log ~/gate72-press1.log
+00:07:09  gate-71-72: ccache probe T0 (docker build of a 3-line ubuntu:24.04+ccache image reading the /ccache cache mount) under sg docker; then the 7.10 widget-cancel run into ~/gate72-cancel-install
+00:07:41  gate-71-72: 7.10 widget cancel run starting (unit gate72-widget-cancel): Install click into ~/gate72-cancel-install, Stop during clone-core, offscreen Qt, under sg docker
+00:15:37  gate-71-72: press 2 of the 7.2 sequence under sg docker (unit gate72-press2, log ~/gate72-press2.log); kill watcher armed as unit gate72-killwatch, SIGKILL at the first ninja edge >= 900
+00:31:37  gate-71-72: press 2 SIGKILLed mid-build (edge >= 0); ~/gate72-kill-record.txt; ccache T1 taken
+00:32:19  gate-71-72: press 3 (resume after the SIGKILL at edge 1226/1834) under sg docker, unit gate72-press3, log ~/gate72-press3.log; runs to ready
+01:14:43  gate-71-72: press 3 reached ready (exit 0, 01:09:56); ccache T2 probe, then the cache-mount diagnostic (busybox builds only), server left running
+01:17:46  gate-71-72: cache-mount diagnostic 2 (busybox builds, no --no-cache) -- does --no-cache isolate cache mounts on this daemon?
+01:20:46  gate-71-72: cycle 2 for the ccache clause -- real stack STOPPED (containers kept), docker builder prune -af, then kill+resume on the throwaway folder ~/gate72-cancel-install with v2 probes (no --no-cache)
+01:21:51  gate-71-72: cycle 2 press A on ~/gate72-cancel-install (unit gate72-c2-pressA), kill watcher at edge >= 600 (unit gate72-c2-killwatch)
+01:23:00  gate-71-72: real install containers removed (compose down, volumes+images kept) so the throwaway build can run; cycle 2 press A2 (unit gate72-c2-pressA2), kill at edge >= 600
+01:24:05  gate-71-72: re-press on the cancelled folder REFUSED (already a git checkout, no record) -- a finding for the cancel copy; cycle 2 moves to a fresh folder ~/gate72-cycle2 (unit gate72-c2-pressA3), kill at edge >= 600
+01:36:39  gate-71-72: cycle 2 press B (resume) on ~/gate72-cycle2, unit gate72-c2-pressB; finished-watcher kills it at The build finished
+01:36:41  gate-71-72: press 2 SIGKILLed mid-build (edge >= 600); ~/gate72-kill-record.txt; ccache T1 taken
+01:55:59  gate-71-72: cycle 2 press B build finished and unit killed before start-db; T2 taken
+01:56:37  gate-71-72: cycle 2 done; removing the throwaway (846544ff) container/images/volumes and both throwaway folders; bringing the real stack back with the engine own compose up
+01:58:55  gate-71-72: stack back (World Initialized 1m19s); account through ControllerServices, compose config capture from ~/wowserver (no -f), final state; then the sampler is stopped and the box is LEFT RUNNING with the finished install

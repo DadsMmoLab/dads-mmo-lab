@@ -30,7 +30,7 @@ from yulon.catalog.native import (
     Stage,
     StageContext,
     StagedInstaller,
-    _same_repo,
+    _listing,
 )
 
 
@@ -92,7 +92,7 @@ class AzerothCoreInstaller(StagedInstaller):
         # this body and two others, which left the method whose docstring calls
         # itself "the one path in this engine that could still destroy a user's
         # work" unable to protect itself (review, 2026-08-31).
-        if existing is not None and not _same_repo(existing, source.url):
+        if existing is not None and not git.same_repo(existing, source.url):
             raise InstallerError(
                 f"{server_dir} is already a git checkout of {existing}, not of {source.url}. "
                 "Nothing was changed. Install into an empty folder instead."
@@ -103,7 +103,7 @@ class AzerothCoreInstaller(StagedInstaller):
             # deletes a non-git destination before cloning, and the guard that
             # protects a user's files should still be there after somebody
             # reorders the stages.
-            leftovers = [item.name for item in server_dir.iterdir() if item.name != STATE_FILE]
+            leftovers = _listing(server_dir, ignoring=STATE_FILE)
             if leftovers:
                 raise InstallerError(
                     f"{server_dir} has files in it but is not a checkout of {source.url}, so it "
@@ -151,12 +151,12 @@ class AzerothCoreInstaller(StagedInstaller):
             dest = ctx.server_dir / source.dest
             has_git = (dest / ".git").is_dir()
             existing = self._remote_of(dest)
-            if existing is not None and not _same_repo(existing, source.url):
+            if existing is not None and not git.same_repo(existing, source.url):
                 raise InstallerError(
                     f"{dest} is a checkout of {existing}, not of {source.url}. Nothing was "
                     "changed."
                 )
-            if not has_git and dest.is_dir() and any(dest.iterdir()):
+            if not has_git and dest.is_dir() and _listing(dest):
                 raise InstallerError(
                     f"{dest} has files in it but is not a checkout of {source.url}, so it was "
                     "left alone. Move that folder aside and try again."
@@ -198,7 +198,10 @@ class AzerothCoreInstaller(StagedInstaller):
             return
         yield f"Fetching server data ({service}). The download resumes if it is interrupted."
         run = yield from self._pump(
-            lambda sink: self._seams.one_shot(service, ctx.server_dir, sink=sink, cancel=ctx.cancel)
+            lambda sink: self._seams.one_shot(
+                service, ctx.server_dir, sink=sink, cancel=ctx.cancel
+            ),
+            cancel=ctx.cancel,
         )
         self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
         yield "Server data is in place."

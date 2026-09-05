@@ -1,0 +1,42 @@
+catalog entry: wow-wotlk / WoW WotLK
+services: ControllerServices from ControllerServices.for_entry -- the GUI's own object
+services.create_account -> <function _for_wotlk.<locals>.<lambda> at 0x7e0dc49ce340>
+
+=== THE CALL: services.create_account('yulon', <password>, 3)
+2026-09-05 01:58:57 INFO [yulon.controller_wow_wotlk.accounts] creating account YULON
+2026-09-05 01:58:57 INFO [yulon.controller_wow_wotlk.accounts] granting GM level 3 to account 101
+AccountResult: AccountResult(username='YULON', account_id=101, created=True, gm_level=3)
+
+=== the row, read by a different route
+$ docker exec ac-database mysql -e "SELECT id, username FROM acore_auth.account WHERE username='YULON';"
+exit 0
+101	YULON
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+$ docker exec ac-database mysql -e 'SELECT id, username FROM acore_auth.account ORDER BY id DESC LIMIT 5;'
+exit 0
+101	YULON
+100	RNDBOT99
+99	RNDBOT98
+98	RNDBOT97
+97	RNDBOT96
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+$ docker exec ac-database mysql -e 'SELECT COUNT(*) FROM acore_auth.account;'
+exit 0
+101
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+$ docker exec ac-database mysql -e "SELECT id, gmlevel, RealmID FROM acore_auth.account_access WHERE id=(SELECT id FROM acore_auth.account WHERE username='YULON');"
+exit 0
+101	3	-1
+mysql: [Warning] Using a password on the command line interface can be insecure.
+
+=== the SAME call again: convergence, not a second account
+2026-09-05 01:58:58 INFO [yulon.controller_wow_wotlk.accounts] account YULON already exists (id 101), keeping its password
+AccountResult: AccountResult(username='YULON', account_id=101, created=False, gm_level=3)
+$ docker exec ac-database mysql -e "SELECT COUNT(*) FROM acore_auth.account WHERE username='YULON';"
+exit 0
+1
+mysql: [Warning] Using a password on the command line interface can be insecure.
+

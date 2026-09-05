@@ -1,0 +1,126 @@
+=== state-before restore of clean-ssh, taken 2026-09-04T23:55:45+02:00 by lane gate-71-72
+--- uptime
+ 23:55:45 up  9:19,  2 users,  load average: 1.26, 1.35, 1.49
+--- docker --version
+Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+--- systemctl is-active docker
+active
+--- id -Gn
+pk adm cdrom sudo dip plugdev users lpadmin docker
+--- ls -ld ~/wowserver
+drwxrwxr-x 20 pk docker 4096 Sep  4 20:08 /home/pk/wowserver
+--- install state file
+{
+  "version": 1,
+  "game_id": "wow-wotlk",
+  "family": "azerothcore",
+  "install_id": "243c46e3",
+  "completed": [
+    "clone-core",
+    "clone-modules",
+    "generate-compose",
+    "build",
+    "client-data",
+    "import"
+  ],
+  "last_error": "",
+  "updated_unix": 1788545314
+}
+--- git HEAD of ~/wowserver
+413bea61a Merge pull request #244 from mod-playerbots/test-staging
+--- docker ps -a
+CONTAINER ID   IMAGE                                              COMMAND                  CREATED       STATUS                   PORTS                                                                   NAMES
+aad49e1321c7   yulon.local/ac-wotlk-worldserver:native-243c46e3   "/usr/bin/env bash /…"   4 hours ago   Up 4 hours               127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp   ac-worldserver
+08931086ecab   yulon.local/ac-wotlk-authserver:native-243c46e3    "/usr/bin/env bash /…"   4 hours ago   Up 4 hours               0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp                             ac-authserver
+839aef3f71d7   yulon.local/ac-wotlk-db-import:native-243c46e3     "/usr/bin/env bash /…"   4 hours ago   Exited (0) 4 hours ago                                                                           ac-db-import
+6b4e82e5186e   mysql:8.4                                          "docker-entrypoint.s…"   4 hours ago   Up 4 hours (healthy)     127.0.0.1:3306->3306/tcp, 33060/tcp                                     ac-database
+13116f92a0a9   yulon.local/ac-wotlk-client-data:native-243c46e3   "/bin/bash -c 'set -…"   4 hours ago   Exited (0) 4 hours ago                                                                           ac-client-data-init
+--- docker images
+WARNING: This output is designed for human readability. For machine-readable output, please use --format.
+IMAGE                                                                                ID             DISK USAGE   CONTENT SIZE   EXTRA
+alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26   c0280cf95723        138MB         37.3MB        
+mysql:8.4                                                                            b3b90af2a655       1.12GB          255MB   U    
+yulon.local/ac-wotlk-authserver:native-243c46e3                                      fb7b9b890ee0        336MB         80.2MB   U    
+yulon.local/ac-wotlk-client-data:native-243c46e3                                     32e25884bf6b        147MB         36.6MB   U    
+yulon.local/ac-wotlk-db-import:native-243c46e3                                       d300a0f227a1       1.57GB          335MB   U    
+yulon.local/ac-wotlk-worldserver:native-243c46e3                                     d067617bc2fe       1.03GB          259MB   U    
+--- docker volume ls
+DRIVER    VOLUME NAME
+local     yulon-wow-wotlk-243c46e3_client-data
+local     yulon-wow-wotlk-243c46e3_db-data
+--- df -h ~
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2        97G   41G   52G  44% /
+--- free -g
+               total        used        free      shared  buff/cache   available
+Mem:              19           7           0           0          12          11
+Swap:              7           0           7
+--- ufw
+Status: inactive
+--- listening
+LISTEN 0      4096                       0.0.0.0:22         0.0.0.0:*          
+LISTEN 0      4096                     127.0.0.1:7878       0.0.0.0:*          
+LISTEN 0      4096                       0.0.0.0:3724       0.0.0.0:*          
+LISTEN 0      4096                     127.0.0.1:3306       0.0.0.0:*          
+LISTEN 0      4096                       0.0.0.0:8085       0.0.0.0:*          
+LISTEN 0      4096                          [::]:22            [::]:*          
+LISTEN 0      4096                          [::]:3724          [::]:*          
+LISTEN 0      4096                          [::]:8085          [::]:*          
+--- realmlist
+1	AzerothCore	100.71.125.58	100.71.125.58	8085
+--- accounts
+101
+--- tailscale
+100.71.125.58
+--- checkout
+a13a5de Snapshot before a laptop restart: four lanes' work in flight, unreviewed
+--- home
+total 700
+drwxr-x--- 20 pk   pk       4096 Sep  4 23:55 .
+drwxr-xr-x  3 root root     4096 Aug 21 22:40 ..
+-rw-r--r--  1 pk   pk        220 Mar 31  2024 .bash_logout
+-rw-r--r--  1 pk   pk       3771 Mar 31  2024 .bashrc
+drwx------ 13 pk   pk       4096 Sep  4 19:27 .cache
+-rw-rw-r--  1 pk   pk        567 Sep  4 23:55 claude-activity.log
+-rw-rw-r--  1 pk   pk       9322 Sep  4 23:54 compose-config-0904clean.raw.json
+-rw-rw-r--  1 pk   pk       7430 Sep  4 23:54 compose-config-0904clean.yml
+drwx------ 12 pk   pk       4096 Sep  4 14:42 .config
+drwx------  3 pk   docker   4096 Sep  4 19:36 .docker
+drwxrwxr-x  7 pk   pk       4096 Sep  4 19:27 gate71
+-rw-r--r--  1 pk   pk       2718 Sep  4 20:20 gate71-account-driver.py
+-rw-rw-r--  1 pk   pk       6824 Sep  4 19:30 gate71-press1.log
+-rw-rw-r--  1 pk   docker 535958 Sep  4 20:13 gate71-press2.log
+-rw-rw-r--  1 pk   pk      12907 Sep  4 20:22 gate71-realm-and-account.log
+drwxrwxr-x  3 pk   pk       4096 Sep  4 22:57 lanes
+drwx------  4 pk   pk       4096 Aug 21 23:11 .local
+-rw-r--r--  1 pk   pk      15437 Sep  4 19:28 press-driver.py
+-rw-r--r--  1 pk   pk        807 Mar 31  2024 .profile
+-rwxr-xr-x  1 pk   pk       3594 Sep  4 20:21 realm_and_account.sh
+drwx------  2 pk   pk       4096 Aug 21 23:03 .ssh
+-rw-rw-r--  1 pk   pk       4541 Sep  4 23:55 state-before-restore-0905.txt
+-rw-r--r--  1 pk   pk          0 Aug 21 23:09 .sudo_as_admin_successful
+drwxrwxr-x 20 pk   docker   4096 Sep  4 20:08 wowserver
+drwxrwxr-x  2 pk   pk       4096 Sep  4 23:44 yulon-runs
+--- bash-lineage files and logs
+ls: cannot access '/home/pk/dads-mmo-lab-install-*.log': No such file or directory
+100996 bash -c echo "$(date +%H:%M:%S)  gate-71-72: compose config captured from ~/wowserver (read-only, no -f); next: state-before probe, then restore clean-ssh for the 7.2 press sequence" >> ~/claude-activity.log; { echo "=== state-before restore of clean-ssh, taken $(date -Is) by lane gate-71-72"; echo "--- uptime"; uptime; echo "--- docker --version"; docker --version; echo "--- systemctl is-active docker"; systemctl is-active docker; echo "--- id -Gn"; id -Gn; echo "--- ls -ld ~/wowserver"; ls -ld ~/wowserver; echo "--- install state file"; cat ~/wowserver/.yulon-install.json; echo "--- git HEAD of ~/wowserver"; git -C ~/wowserver log --oneline -1; echo "--- docker ps -a"; docker ps -a; echo "--- docker images"; docker images; echo "--- docker volume ls"; docker volume ls; echo "--- df -h ~"; df -h ~; echo "--- free -g"; free -g; echo "--- ufw"; sudo ufw status | head -3; echo "--- listening"; ss -ltn | grep -E ":(3724|8085|3306|7878|22) "; echo "--- realmlist"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT id,name,address,localAddress,port FROM acore_auth.realmlist" 2>/dev/null; echo "--- accounts"; docker exec ac-database mysql -uroot -ppassword -N -e "SELECT COUNT(*) FROM acore_auth.account" 2>/dev/null; echo "--- tailscale"; tailscale ip -4 2>/dev/null; echo "--- checkout"; git -C ~/gate71 log --oneline -1; echo "--- home"; ls -la ~ | grep -v "^d.*\(Desktop\|Documents\|Downloads\|Music\|Pictures\|Public\|Templates\|Videos\|snap\)"; echo "--- bash-lineage files and logs"; ls ~/dads-mmo-lab-install-*.log 2>&1; pgrep -af "install-.*\.sh|dml-start|wow-manage" || echo "no bash-lineage process"; echo "--- other lanes"; ls -la ~/lanes ~/yulon-runs; cat ~/claude-activity.log; echo "--- who"; who; } > ~/state-before-restore-0905.txt 2>&1; cat ~/state-before-restore-0905.txt
+--- other lanes
+/home/pk/lanes:
+total 12
+drwxrwxr-x  3 pk pk 4096 Sep  4 22:57 .
+drwxr-x--- 20 pk pk 4096 Sep  4 23:55 ..
+drwxrwxr-x  6 pk pk 4096 Sep  4 19:27 refute3-namespace
+
+/home/pk/yulon-runs:
+total 8
+drwxrwxr-x  2 pk pk 4096 Sep  4 23:44 .
+drwxr-x--- 20 pk pk 4096 Sep  4 23:55 ..
+[lane B] TBC install running on yulon-win11-gate; see pyplan/gates/7.7-win11-tbc
+19:27:11  7.1 gate: clean-ssh box, preparing checkout for the WotLK install
+19:31:15  7.1 gate: press 2 under sg docker (the re-login), full WotLK install
+19:34:41  installing tailscale so the laptop client can reach the realm directly
+2026-09-04T21:53:34Z lane/doodad: reading commit ids out of /home/pk/wowserver (read-only)
+23:55:45  gate-71-72: compose config captured from ~/wowserver (read-only, no -f); next: state-before probe, then restore clean-ssh for the 7.2 press sequence
+--- who
+pk       seat0        2026-09-04 14:36 (login screen)
+pk       tty2         2026-09-04 14:36 (tty2)

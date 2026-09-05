@@ -1,0 +1,13 @@
+17:41:46  gate box ready: 7.1 Fedora gate starting
+17:43:08  PRESS 1: Docker provisioning on a clean box (dnf, SELinux enforcing, password sudo)
+17:55:35  PRESS 1 (retry, pty driver): dnf provisioning under enforcing SELinux
+17:58:25  press 1 passed; rebooting for the group to take effect
+17:59:25  PRESS 2: full WotLK install under SELinux enforcing
+18:21:57  PRESS 2 retry: both SELinux fixes in place
+19:38:40  re-press: measuring resume on a finished install
+19:39:29  7.1 Fedora gate finished; powering off
+19:57:36  hardened-read check done; powering off
+20:30:20  Linux console gate: two commands + detach check
+20:38:27  LAN step + account, for a real client login from the laptop
+00:05:03  console+port+client-login gates recorded; powering off to free memory for the Arch gate
+[claude] 7.1 packaged-artifact gate: AppImage from run 33803191903 (6a8afb07)

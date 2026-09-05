@@ -18,6 +18,19 @@ is reported as "unchecked — that is not a pass".
 come from the earlier Rust launcher's incidents, are carried as data in
 `catalog.json` (`install.native`), and the first live gates exist to replace
 them with measurements — see `catalog.NativeInstall`.
+
+The free-space floors in particular are still UNVERIFIED, and this module is
+not where they could be changed. The 40/60 GB pair is `rust-prior-art.md` §3
+verbatim, with no measurement recorded behind it; the CMaNGOS entries' 20/30
+pair came from the 7.3 plan, and on a one-drive box the two halves add to the
+same 40/60. What the gate boxes DID measure, on 2026-09-02, is the half a `du`
+can attribute to one install: `du -sh` on a finished server folder answered
+2.3 GB for `~/wow-server` and 2.8 GB for `~/vanilla-server` on yulon-ubuntu,
+and 3.9 GB for `~/tbc-server` on m910q — folders named by hand during the
+gates, so which game each holds is read off the name rather than off an install
+record. The Docker side could not be attributed at all: both boxes hold several
+installs' images and one shared build cache. So nothing here proposes a better
+number, and the installs that warned at 51 GB free went on to succeed.
 """
 
 from __future__ import annotations
@@ -30,7 +43,7 @@ from typing import Literal
 
 from yulon import docker, git, platform
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry, ClientSpec
+from yulon.catalog.catalog import CatalogEntry, ClientSpec, NativeInstall
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -153,8 +166,8 @@ def gather(
     bind_mount_ok: Callable[[Path], bool | None] | None = None,
     port_conflicts: Callable[[], list[str]] | None = None,
     probe_port: Callable[[str, int], platform.PortProbe] = platform.probe_tcp,
-    selinux: Callable[[], bool | None] = platform.selinux_enforcing,
-    fs_type: Callable[[Path], str | None] = platform.filesystem_type,
+    selinux: Callable[[], bool | None] | None = None,
+    fs_type: Callable[[Path], str | None] | None = None,
 ) -> Facts:
     """Ask the machine everything `evaluate()` needs, refusing to invent an answer.
 
@@ -200,8 +213,32 @@ def gather(
             listening.append(port)
     # SELinux is a Linux fact. Off Linux the questions are not asked, so the
     # check below can tell "not applicable" from "could not read it".
-    enforcing = selinux() if here == "linux" else None
-    server_fs = fs_type(server_dir) if here == "linux" else None
+    #
+    # BOTH Linux seams are resolved against `platform` here, at call time, the
+    # way `_default_bind_probe()` -> `docker.bind_mount_ok()` has since
+    # 2026-09-04. Both defaults used to be the module functions themselves, so
+    # one patch of `platform.*` was not seen here at all. Asked of the
+    # interpreter on m910q, `selinux` on 2026-09-04 and `fs_type` on 2026-09-05
+    # (it was the one this pass found still bound):
+    #
+    #     signature(gather).parameters["selinux"].default
+    #         is platform.selinux_enforcing        -> True   (2026-09-04)
+    #     signature(gather).parameters["fs_type"].default
+    #         is platform.filesystem_type          -> True   (2026-09-05)
+    #
+    # `fs_type` was the sharper of the two, because `ContainerGit` had already
+    # been moved to a late lookup: one patch of `platform.filesystem_type` on
+    # m910q, 2026-09-05, gave `ContainerGit()._ask_filesystem(Path("/tmp"))
+    # -> 'btrfs'` while this line handed back the real host's 'ext2/ext3' and
+    # the fake counted no call at all — one call chain answering one platform
+    # question two ways, which is the defect bug-checklist §27 names.
+    # `test_gather_asks_both_linux_seams_the_module_holds_at_call_time` failed
+    # against that file (`asked == ['selinux']`, one entry short) and pins both
+    # late lookups now.
+    ask_selinux = selinux if selinux is not None else platform.selinux_enforcing
+    ask_fs = fs_type if fs_type is not None else platform.filesystem_type
+    enforcing = ask_selinux() if here == "linux" else None
+    server_fs = ask_fs(server_dir) if here == "linux" else None
     # The server folder is probed here rather than inside the `Facts(...)` call
     # below, so that the two bind probes run in the order they are reported.
     # Left inline it would be the client that goes first: the client block sits
@@ -372,19 +409,22 @@ def evaluate(entry: CatalogEntry, server_dir: Path, facts: Facts) -> Report:
         )
     checks: list[Check] = [_docker_check(facts)]
     checks.append(_ram_check(facts, native.min_ram_gb, native.warn_ram_gb))
-    checks.append(_cpu_check(facts))
+    checks.append(_cpu_check(native, facts))
     refuse_root, warn_root = native.min_data_root_gb, native.warn_data_root_gb
     refuse_dir, warn_dir = native.min_server_dir_gb, native.warn_server_dir_gb
     if facts.same_volume:
         # One pool, so each floor is not enough on its own — they add.
         refuse_root, warn_root = native.floors_gb(same_volume=True)
         refuse_dir, warn_dir = refuse_root, warn_root
-    checks.append(
-        _space_check("Docker's disk", facts.data_root_free, refuse_root, warn_root, facts)
-    )
-    checks.append(
-        _space_check("the server folder", facts.server_dir_free, refuse_dir, warn_dir, facts)
-    )
+    if facts.same_volume and facts.platform_id != "macos":
+        checks.append(_one_volume_space_check(facts, refuse_root, warn_root))
+    else:
+        checks.append(
+            _space_check("Docker's disk", facts.data_root_free, refuse_root, warn_root, facts)
+        )
+        checks.append(
+            _space_check("the server folder", facts.server_dir_free, refuse_dir, warn_dir, facts)
+        )
     checks.append(_folder_check(facts, server_dir))
     checks.append(_bind_check(facts, server_dir))
     checks.append(_selinux_check(facts))
@@ -449,28 +489,148 @@ def _ram_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
     return Check("memory", "pass", f"Docker's VM has {gigabytes:.1f} GB")
 
 
-def _cpu_check(facts: Facts) -> Check:
-    """Warn when the CPU count outruns the memory, and name the number to set.
+JOBS_CHECK = "compiler jobs vs memory"
+"""What the parallelism row is called.
 
-    Never a refusal: this is a machine that will build, slowly or not at all,
-    depending on a setting the user can change. Upstream's Dockerfile hardcodes
-    `-j $(nproc+1)` INSIDE the RUN, so no build argument can change the job
-    count — the only lever is the CPU count Docker Desktop is given.
+It was "CPU vs memory" until 2026-09-02, and the rename is the finding rather
+than a tidy-up: on every CMaNGOS entry the CPU count is not one of the two
+things being compared. See `_build_jobs()`.
+"""
+
+
+def _build_jobs(native: NativeInstall, cpus: int) -> tuple[int, bool]:
+    """How many compilers this entry's build runs, and whether the CPU count decides it.
+
+    Two families, two answers, and reading only the first is what made this
+    check speak about a build that was not running. AzerothCore's upstream
+    Dockerfile hardcodes `-j $(nproc+1)` INSIDE the RUN, so there the job count
+    does follow the CPU count and no build argument can change it. Every
+    CMaNGOS entry builds from a `Dockerfile.tmpl` this repo ships, whose `-j` is
+    the `{{MAKE_JOBS}}` token `composegen` fills from
+    `cmangos.dockerfile.make_jobs` — data, and the same number on a 4-core box
+    and a 64-core one.
+
+    `native.cmangos` is the key rather than `family` or `dockerfile_dir`,
+    because it is the field `composegen` itself reads to fill that token: the
+    two cannot come to different conclusions about which build this is.
+    """
+    if native.cmangos is not None:
+        return native.cmangos.dockerfile.make_jobs, False
+    return cpus + 1, True
+
+
+def _cpu_check(native: NativeInstall, facts: Facts) -> Check:
+    """Warn when the build's parallel compilers outrun the memory. Never a refusal.
+
+    Three things were wrong with the sentence this used to print, and the
+    verdict was not one of them.
+
+    It stays a WARN because it was measured non-predictive rather than wrong:
+    the Ubuntu gate (2026-08-31, defect D4) ran 16 parallel compilers against
+    19.5 GB — a box this check warns about — and the AzerothCore build finished
+    with nothing OOM-killed. The 2 GB-per-job figure is AzerothCore's own,
+    carried in `catalog.py`, and one roomy box completing does not refute it for
+    a 6 GB one, so the warning stayed and the certainty in its wording went.
+
+    That same gate recorded the second fault: it advised "set Docker Desktop to
+    8 CPUs" on a box running Docker Engine, which has no such pane and no CPU
+    setting at all. The remedy is now written for the engine the user has, the
+    way `_bind_remedy()` already was.
+
+    The third is why this function now takes an entry. It read only `facts`, so
+    it printed the identical CPU-derived sentence for every game; on the box
+    that warned on 2026-09-02 (15 CPUs, 19.5 GB) the Vanilla entry it also
+    installed compiles with `make -j2` fixed in `catalog.json`, so the "16
+    parallel compilers" it named were nobody's build.
     """
     if facts.vm is None:
-        return Check("CPU vs memory", "unchecked", "Docker would not say what its VM has")
-    jobs = facts.vm.cpus + 1
+        return Check(JOBS_CHECK, "unchecked", "Docker would not say what its VM has")
     affordable = int(facts.vm.memory_bytes / GIB // 2)
+    gigabytes = facts.vm.memory_bytes / GIB
+    jobs, from_cpus = _build_jobs(native, facts.vm.cpus)
     if jobs > affordable and affordable >= 1:
         return Check(
-            "CPU vs memory",
+            JOBS_CHECK,
             "warn",
-            f"{facts.vm.cpus} CPUs means {jobs} parallel compilers at about 2 GB each, and "
-            f"{facts.vm.memory_bytes / GIB:.1f} GB affords about {affordable}",
-            f"Either raise the memory, or set Docker Desktop to {max(affordable - 1, 1)} CPUs "
-            "— the job count comes from the CPU count and cannot be set any other way.",
+            f"this build compiles with {jobs} parallel jobs at about 2 GB each, and "
+            f"{gigabytes:.1f} GB affords about {affordable}",
+            _jobs_remedy(facts, affordable, from_cpus=from_cpus),
         )
-    return Check("CPU vs memory", "pass", f"{facts.vm.cpus} CPUs against {affordable} affordable")
+    return Check(
+        JOBS_CHECK, "pass", f"{jobs} parallel jobs against about {affordable} the memory affords"
+    )
+
+
+def _jobs_remedy(facts: Facts, affordable: int, *, from_cpus: bool) -> str:
+    """What to actually do about it, on the engine and the build the user has.
+
+    Only one of the four cases can offer the CPU number: a build whose `-j`
+    follows the CPU count, on an engine with a pane that sets it. A CMaNGOS
+    build's job count is data and lowering the CPU count would not change it,
+    and Docker Engine has no CPU setting to lower — it hands the container every
+    host CPU. Naming a number to set in either case is the D4 shape: advice that
+    cannot be carried out reads as the app being confused about the machine it
+    is standing on.
+
+    The measured counter-example is deliberately in the sentence. A user who
+    reads "this may be killed" and is then told there is nothing to set needs to
+    know it is a caution and not a forecast, or the only remaining move looks
+    like abandoning the install.
+    """
+    outran = "A build this far ahead of its memory has finished before, so this is a caution."
+    if not from_cpus:
+        return (
+            "This game's Dockerfile fixes the job count, so the CPU count is not the lever: give "
+            f"Docker more memory before a long build. {outran}"
+        )
+    if facts.platform_id == "linux":
+        return (
+            "Docker Engine has no CPU setting to lower — the build sees every CPU on this "
+            "machine — so more memory, or swap it can fall back on, is the lever here. "
+            f"{outran}"
+        )
+    return (
+        f"Either raise the memory, or set Docker Desktop to {max(affordable - 1, 1)} CPUs — this "
+        f"build takes its job count from the CPU count and it cannot be set any other way. "
+        f"{outran}"
+    )
+
+
+ONE_VOLUME_SPACE = "Docker's disk and the server folder"
+"""The `what` of the single row a one-drive machine gets, instead of two identical ones.
+
+Spelled so the row is still named "free space on Docker's disk …": that phrase
+is what a caller looking for the data-root row matches on.
+"""
+
+
+def _one_volume_space_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
+    """The one-drive case: one pool, one measurement, one row.
+
+    Two rows here were two spellings of a single fact. Both readings come off
+    the same filesystem, both floors have already been replaced by the added
+    pair (`NativeInstall.floors_gb`), so the pair printed the same free space
+    against the same figure, word for word — and a log that says a thing twice
+    reads as two things to go and fix. Measured on both gate boxes on
+    2026-09-02: yulon-ubuntu carries `/var/lib/docker` and `/home` on one
+    `/dev/sda2`, m910q on one `/dev/nvme0n1p3`, so this is the ordinary shape of
+    a Linux test box rather than an edge case.
+
+    The SMALLER of the two readings, not the first one. On one volume they
+    should be equal; they are two `statvfs` calls at two moments, and if they
+    disagree the smaller is the one that can refuse. `None` from one of them is
+    a reading that was not taken, not a zero — only both missing makes the row
+    unchecked.
+
+    macOS never gets here (`evaluate()` sends it down the two-row path) because
+    there the two rows are not duplicates: "Docker's disk" is the host volume
+    holding a sparse VM image behind its own cap, so an ample reading there is
+    `unchecked` while the same number for the server folder is a genuine pass.
+    Collapsing them would quietly promote the first to the second.
+    """
+    readings = [free for free in (facts.data_root_free, facts.server_dir_free) if free is not None]
+    free = min(readings) if readings else None
+    return _space_check(ONE_VOLUME_SPACE, free, refuse_gb, warn_gb, facts)
 
 
 def _space_check(

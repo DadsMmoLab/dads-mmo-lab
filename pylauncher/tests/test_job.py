@@ -16,8 +16,19 @@ import time
 import pytest
 from PySide6.QtCore import QObject, Slot
 
-from tests.conftest import process_events
+from tests.conftest import HANG_BOUND_MS, pump_until, spelled_bounds
 from yulon.ui.widgets.job import LineRelay, ThreadedJobRunner, run_inline
+
+STILL_RUNNING = 0.2
+"""How long the job in `test_wait_joins_running_jobs` keeps running. Not a deadline.
+
+The assertion there is that `wait()` JOINS a job, so the job must still be
+running when `wait()` is called, and this is what keeps it so. It points the
+way `DWELL_PROOF` does in `test_log_panel.py`: a slower box only makes the job
+more surely still running. Measured on m910q 2026-09-04: `runner(...)` and
+`runner.wait(...)` are one statement apart on the calling thread, and the
+whole test reported `0.20s call`, which is this number plus the join.
+"""
 
 
 class _Receiver(QObject):
@@ -46,12 +57,6 @@ class _Receiver(QObject):
         self.threads.append(threading.get_ident())
 
 
-def _pump_until(predicate: object, timeout: float = 10.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and not predicate():  # type: ignore[operator]
-        process_events(20)
-
-
 def test_threaded_runner_actually_runs_the_work_and_answers_on_the_gui_thread(
     qapp: object,
 ) -> None:
@@ -65,11 +70,11 @@ def test_threaded_runner_actually_runs_the_work_and_answers_on_the_gui_thread(
         return "hello"
 
     runner(work, receiver.done, receiver.failed)
-    _pump_until(lambda: receiver.results)
+    pump_until(lambda: bool(receiver.results), "the result reached the receiver")
     assert receiver.results == ["hello"], "the job never ran (weak-reference regression)"
     assert worker_threads and worker_threads[0] != threading.get_ident()  # ran off the GUI thread
     assert receiver.threads == [threading.get_ident()]  # answered ON the GUI thread
-    assert runner.wait(5000) is True
+    assert runner.wait(HANG_BOUND_MS) is True
 
 
 def test_threaded_runner_reports_failures_instead_of_raising(qapp: object) -> None:
@@ -80,18 +85,18 @@ def test_threaded_runner_reports_failures_instead_of_raising(qapp: object) -> No
         raise RuntimeError("no docker")
 
     runner(boom, receiver.done, receiver.failed)
-    _pump_until(lambda: receiver.errors)
+    pump_until(lambda: bool(receiver.errors), "the failure reached the receiver")
     assert receiver.results == []
     assert isinstance(receiver.errors[0], RuntimeError) and "no docker" in str(receiver.errors[0])
-    runner.wait(5000)
+    assert runner.wait(HANG_BOUND_MS) is True
 
 
 def test_wait_joins_running_jobs(qapp: object) -> None:
     """`wait()` exists so the app can join jobs before Qt tears down (a live QThread aborts)."""
     receiver = _Receiver()
     runner = ThreadedJobRunner(receiver)
-    runner(lambda: time.sleep(0.2), receiver.done, receiver.failed)
-    assert runner.wait(10_000) is True
+    runner(lambda: time.sleep(STILL_RUNNING), receiver.done, receiver.failed)
+    assert runner.wait(HANG_BOUND_MS) is True
 
 
 def test_a_line_relay_delivers_on_the_gui_thread_whoever_emits(qapp: object) -> None:
@@ -117,7 +122,7 @@ def test_a_line_relay_delivers_on_the_gui_thread_whoever_emits(qapp: object) -> 
     worker = threading.Thread(target=emit_from_a_worker)
     worker.start()
     worker.join()
-    _pump_until(lambda: receiver.lines)
+    pump_until(lambda: bool(receiver.lines), "the line reached the receiver")
 
     assert emitted_from and emitted_from[0] != threading.get_ident(), "emitted on the GUI thread"
     assert receiver.lines == ["applying acore_world"]
@@ -146,3 +151,16 @@ def test_run_inline_does_not_swallow_exit_signals(bad: type[BaseException]) -> N
 
     with pytest.raises(bad):
         run_inline(raiser, lambda _r: None, lambda _e: None)
+
+
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """Every bound here must be spelled as one of the named ones, and nothing else.
+
+    The same audit `test_log_panel.py` runs on itself, for the same reason: the
+    bounds are the only thing in this file a loaded box can move, and a number
+    typed at a call site carries no docstring. Until 2026-09-04 this file kept
+    its own copy of the log panel's pump helper with `timeout: float = 10.0`,
+    a `runner.wait(5000)` whose result was thrown away, and no audit at all --
+    appending `gate.wait(5.0)` to it left 7 passed on m910q that day.
+    """
+    assert spelled_bounds(__file__) == {"HANG_BOUND_MS", "STILL_RUNNING"}

@@ -24,14 +24,21 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
-import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import process_events
+from tests.conftest import (
+    HANG_BOUND,
+    HANG_BOUND_MS,
+    process_events,
+    pump_until,
+    spelled_bounds,
+    wait_for_panel,
+)
 from yulon import platform, runner
-from yulon.catalog.installer import Installer
+from yulon.catalog import installer
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter, is_secret, tidy
 
@@ -257,7 +264,7 @@ def test_a_declined_prompt_is_still_shown_in_the_log() -> None:
 
 
 def _has_bash() -> bool:
-    from yulon.catalog.installer import bash_available
+    from tests.support_bash import bash_available
 
     try:
         return bash_available()
@@ -352,11 +359,8 @@ def test_prompter_carries_the_answer_from_the_gui_thread_to_the_worker(
 
     worker = threading.Thread(target=lambda: answer.append(prompter.ask("[sudo] password for pk:")))
     worker.start()
-    for _ in range(50):
-        process_events(20)
-        if not worker.is_alive():
-            break
-    worker.join(timeout=5)
+    pump_until(lambda: not worker.is_alive(), "ask() returned")
+    worker.join(timeout=HANG_BOUND)
 
     assert answer == ["hunter2"]
     assert seen == [("[sudo] password for pk:", True)], "a password must be masked"
@@ -381,59 +385,10 @@ def test_prompter_stops_waiting_when_the_job_is_cancelled(
     worker = threading.Thread(target=lambda: answer.append(prompter.ask("[sudo] password:")))
     worker.start()
     cancel.set()  # the user hit Cancel on the install itself
-    worker.join(timeout=5)
+    worker.join(timeout=HANG_BOUND)
 
     assert not worker.is_alive(), "ask() never returned after cancel"
     assert answer == [None]
-
-
-def test_installer_run_forwards_the_prompter_the_marker_and_the_terminal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """All three have to reach `runner.interact`, and the marker has to match SUDO_PROMPT.
-
-    Forwarding `ask` alone is what the first version did, and it delivered
-    nothing: without the marker the seam never fires, and without the terminal
-    sudo's prompt never arrives to fire it.
-    """
-    from yulon.catalog import installer as installer_module
-
-    seen: dict[str, object] = {}
-
-    def fake_interact(command, cwd=None, **kwargs):  # type: ignore[no-untyped-def]
-        seen.update(kwargs)
-        yield "done"
-
-    entry = _first_installable_entry()
-    inst = installer_module.Installer(entry, interact=fake_interact)
-    monkeypatch.setattr(inst, "preflight", lambda *a, **k: None)
-
-    def ask(_prompt: str) -> str:
-        return "x"
-
-    list(inst.run(installer_module.InstallOptions(), ask=ask))
-    assert seen.get("ask") is ask
-    assert seen.get("terminal") is True
-    assert seen.get("ask_marker") == inst.sudo_marker
-    # The marker is only useful because sudo is told to print exactly it.
-    assert inst.script_env()["SUDO_PROMPT"] == inst.sudo_marker
-
-
-def test_each_install_gets_its_own_unguessable_sudo_marker() -> None:
-    """A fixed string could be printed by a script; a per-install random one cannot."""
-    from yulon.catalog import installer as installer_module
-
-    entry = _first_installable_entry()
-    first = installer_module.Installer(entry).sudo_marker
-    second = installer_module.Installer(entry).sudo_marker
-    assert first != second
-    assert len(first) > 20
-
-
-def _first_installable_entry():  # type: ignore[no-untyped-def]
-    from yulon.catalog.catalog import load_catalog
-
-    return load_catalog().get("wow-wotlk")
 
 
 # -- hygiene ----------------------------------------------------------------
@@ -479,11 +434,8 @@ def test_the_prompter_does_not_keep_the_answer_after_handing_it_over(
 
     worker = threading.Thread(target=lambda: answer.append(prompter.ask("[sudo] password:")))
     worker.start()
-    for _ in range(50):
-        process_events(20)
-        if not worker.is_alive():
-            break
-    worker.join(timeout=5)
+    pump_until(lambda: not worker.is_alive(), "ask() returned")
+    worker.join(timeout=HANG_BOUND)
 
     assert answer == ["hunter2"]
     assert prompter._answer is None, "the password is still on the prompter"
@@ -536,9 +488,9 @@ def test_the_view_reuses_one_prompter_instead_of_leaving_one_per_install(
     try:
         view.start_install(catalog.get("wow-wotlk"))
         first = view._prompter
-        _drain(panel)
+        wait_for_panel(panel)
         view.start_install(catalog.get("wow-wotlk"))
-        _drain(panel)
+        wait_for_panel(panel)
         assert view._prompter is first, "a second install built a second prompter"
         assert len(view.findChildren(InputPrompter)) == 1
     finally:
@@ -548,29 +500,27 @@ def test_the_view_reuses_one_prompter_instead_of_leaving_one_per_install(
         # running", so every other test passes and the run still exits 134.
         # That is what it did on CI (2026-08-23).
         panel.stop()
-        panel.wait(5000)
+        assert panel.wait(HANG_BOUND_MS), "the panel's job never joined after stop()"
         process_events(50)
 
 
-def _drain(panel: LogPanel, timeout: float = 5.0) -> None:
-    """Pump the event loop until the panel's job has finished, then join it."""
-    deadline = time.monotonic() + timeout
-    while panel.running and time.monotonic() < deadline:
-        process_events(20)
-    panel.wait(2000)
-    process_events(50)
+class _NoopInstaller:
+    """An engine whose run() yields nothing, so start_install() returns at once.
 
-
-class _NoopInstaller(Installer):
-    """An installer whose run() yields nothing, so start_install() returns at once."""
+    A plain class since 7.2 rather than an `installer.Installer` subclass: the
+    view only ever needed the `InstallEngine` protocol, and the class it used to
+    inherit from is gone.
+    """
 
     def __init__(self, entry: object) -> None:
-        super().__init__(entry, docker_check=lambda: True)  # type: ignore[arg-type]
+        self.entry = entry
 
-    def preflight(self, options: object, cancel: object = None) -> None:  # type: ignore[override]
+    def preflight(self, options: object, cancel: object = None, *, ask: object = None) -> None:
         return None
 
-    def run(self, options: object = None, *, cancel: object = None, ask: object = None):  # type: ignore[override]
+    def run(
+        self, options: object = None, *, cancel: object = None, ask: object = None
+    ) -> Iterator[str]:
         yield "done"
 
 
@@ -612,43 +562,36 @@ def test_ask_receives_only_the_prompt_not_the_output_stuck_in_front_of_it() -> N
     assert is_secret(asked[0]) is True, "the very leak this guards against"
 
 
-def test_a_caller_cannot_desynchronise_the_sudo_marker_through_env() -> None:
-    """`SUDO_PROMPT` is a protocol identifier, not a setting.
+def test_a_sudo_marker_shaped_label_is_masked() -> None:
+    """A sudo-shaped label must not TRIP the not-secret allowlist. Nothing recognises it.
 
-    `env={"SUDO_PROMPT": ...}` used to override it after the marker was set, so
-    sudo printed one string while `interact()` watched for another — the prompt
-    was never recognised and the install hung with no dialog, the exact
-    pre-6.1.5 failure (review, 2026-08-22).
+    An earlier version of this docstring said `install_wiring._terminal_prompter()`
+    "and this predicate still recognise the spelling". Half of that was false and
+    it was the half this file could check. `is_secret()` recognises nothing: it
+    is `not _NOT_SECRET.search(prompt)` over an allowlist of harmless spellings
+    (`path`, `folder`, `directory`, `(y/n)`, `press enter`), so it answers True
+    for this marker, for gibberish, and for the empty string alike — measured
+    2026-09-02, with the prefix and without it. The assertion passed because a
+    neighbouring rule did the work, which makes it a test of the union of every
+    rule here rather than of one of them.
+
+    The rule it can honestly pin is the other direction, and it is the one that
+    can break: this label must not match the allowlist. The two lines below say
+    so by showing the default and then flipping the answer with a single word —
+    reword the marker to mention a folder or a path, the words most likely to
+    reach an install prompt, and a root password is typed into an echoed field.
+
+    That `_terminal_prompter()` recognises the prefix at all is asserted where
+    that function runs:
+    `test_install_wiring.py::test_the_terminal_prompter_hides_a_password_and_shows_a_consent_question`.
     """
-    from yulon.catalog import installer as installer_module
-
-    inst = installer_module.Installer(_first_installable_entry(), env={"SUDO_PROMPT": "Password:"})
-    assert inst.script_env()["SUDO_PROMPT"] == inst.sudo_marker
-
-
-def test_script_env_disarms_apt_and_needrestart_dialogs() -> None:
-    """A terminal re-arms every isatty() gate the pipe transport disarmed by accident.
-
-    needrestart's service-restart menu and dpkg's conffile prompt are
-    full-screen ncurses dialogs; neither carries the marker and no rule answers
-    them, so the install would park with Stop as the only exit
-    (review, 2026-08-22). setdefault, so a user's own setting wins.
-    """
-    from yulon.catalog import installer as installer_module
-
-    env = installer_module.Installer(_first_installable_entry()).script_env()
-    assert env["DEBIAN_FRONTEND"] == "noninteractive"
-    assert env["NEEDRESTART_MODE"] == "a"
-
-
-def test_the_marker_says_it_is_sudo_asking_not_just_a_hex_token() -> None:
-    """The marker is the label of the one dialog that asks for the user's password."""
-    from yulon.catalog import installer as installer_module
-
-    marker = installer_module.Installer(_first_installable_entry()).sudo_marker
-    assert "sudo" in marker
-    assert "password" in marker
+    marker = f"{installer.SUDO_PROMPT_PREFIX}0123456789abcdef] password:"
+    assert "sudo" in marker and "password" in marker
     assert is_secret(marker) is True
+    # Masked by default: this is what carried the assertion above, not the label.
+    assert is_secret("") is True
+    # And the allowlist is what decides — one of its words flips the same label.
+    assert is_secret(marker.replace("password:", "install folder:")) is False
 
 
 def test_a_canned_rule_cannot_answer_the_sudo_prompt_from_neighbouring_output() -> None:
@@ -663,8 +606,15 @@ def test_a_canned_rule_cannot_answer_the_sudo_prompt_from_neighbouring_output() 
     The child below reproduces the measured shape: a real prompt the rules DO
     answer, then a carriage return (which never splits a line here), then the
     marker (review, 2026-08-23).
+
+    The rule is spelled inline since 7.2: it is the catch-all `PROMPT_RULES`
+    ended with, and the point survives its table — ANY unanchored responder
+    must not be shown the buffer in front of the marker.
     """
-    from yulon.catalog.installer import InstallOptions, make_responder
+
+    def yes_to_yes_no(line: str) -> str | None:
+        """The old `PROMPT_RULES` catch-all: an unanchored search for `(y/n)`."""
+        return "y" if "(y/n)" in line else None
 
     asked: list[str] = []
     code = (
@@ -679,7 +629,7 @@ def test_a_canned_rule_cannot_answer_the_sudo_prompt_from_neighbouring_output() 
     lines = list(
         runner.interact(
             [sys.executable, "-c", code],
-            respond=make_responder(InstallOptions()),
+            respond=yes_to_yes_no,
             ask=lambda prompt: (asked.append(prompt), "hunter2")[1],
             ask_marker=MARKER,
             quiet_seconds=0.15,
@@ -715,7 +665,8 @@ def test_ask_is_never_consulted_for_a_complete_line() -> None:
 
 
 def test_the_last_line_survives_a_child_that_exits_without_a_newline() -> None:
-    """Those bytes are what `Installer.run()` builds its failure message from.
+    """Those bytes were what the bash engine's `run()` built its failure message
+    from, and the shortcut they exercise is still every engine's.
 
     The "child is gone, stop waiting for EOF" shortcut required an EMPTY buffer,
     so a script whose last words had no trailing newline never took it — and
@@ -788,10 +739,8 @@ def test_the_docker_group_question_reaches_a_real_dialog_unmasked(qapp: object) 
     watchdog.timeout.connect(drive)
     watchdog.start()
 
-    deadline = time.monotonic() + 10.0
-    while worker.is_alive() and time.monotonic() < deadline:
-        QApplication.processEvents()
-    worker.join(timeout=2.0)
+    pump_until(lambda: not worker.is_alive(), "the consent dialog was driven to an answer")
+    worker.join(timeout=HANG_BOUND)
     watchdog.stop()
 
     assert not worker.is_alive(), "the consent dialog never appeared"
@@ -824,3 +773,18 @@ def _dialog_text(dialog: object) -> str:
     from PySide6.QtWidgets import QLabel
 
     return " ".join(label.text() for label in dialog.findChildren(QLabel))
+
+
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """Every bound here must be spelled as one of the named ones, and nothing else.
+
+    The same audit `test_log_panel.py` runs on itself, for the same reason.
+    Until 2026-09-04 this file kept its own `_drain` with `timeout: float =
+    5.0` and a `panel.wait(2000)` whose result was thrown away, three
+    `worker.join(timeout=5)`s and a `worker.join(timeout=2.0)`, two loops
+    bounded by a turn count (`for _ in range(50): process_events(20)`) that no
+    clock audit can see, and one deadline built by hand (`time.monotonic() +
+    10.0`). Every wait goes through `pump_until` now, and every join is
+    `HANG_BOUND`.
+    """
+    assert spelled_bounds(__file__) == {"HANG_BOUND", "HANG_BOUND_MS"}

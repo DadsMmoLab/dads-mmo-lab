@@ -1,0 +1,152 @@
+=== state-before ===
+taken (local): 2026-09-04T12:38:50+02:00
+--- docker ps ---
+ac-worldserver	Up 34 minutes	127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
+ac-authserver	Up 15 minutes	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+ac-database	Up 40 minutes (healthy)	127.0.0.1:3306->3306/tcp, 33060/tcp
+--- listening 3724/8085/3306 ---
+LISTEN 0      4096       127.0.0.1:3306       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:3724       0.0.0.0:*          
+LISTEN 0      4096         0.0.0.0:8085       0.0.0.0:*          
+LISTEN 0      4096            [::]:3724          [::]:*          
+LISTEN 0      4096            [::]:8085          [::]:*          
+--- schema table counts (auth/characters/world/playerbots) ---
+acore_auth	22
+acore_characters	111
+acore_playerbots	30
+acore_world	315
+--- gate account row ---
+101	GATE0904
+1	RNDBOT0
+2	RNDBOT1
+11	RNDBOT10
+12	RNDBOT11
+13	RNDBOT12
+14	RNDBOT13
+15	RNDBOT14
+16	RNDBOT15
+17	RNDBOT16
+18	RNDBOT17
+19	RNDBOT18
+20	RNDBOT19
+3	RNDBOT2
+21	RNDBOT20
+22	RNDBOT21
+23	RNDBOT22
+24	RNDBOT23
+25	RNDBOT24
+26	RNDBOT25
+27	RNDBOT26
+28	RNDBOT27
+29	RNDBOT28
+30	RNDBOT29
+4	RNDBOT3
+31	RNDBOT30
+32	RNDBOT31
+33	RNDBOT32
+34	RNDBOT33
+35	RNDBOT34
+36	RNDBOT35
+37	RNDBOT36
+38	RNDBOT37
+39	RNDBOT38
+40	RNDBOT39
+5	RNDBOT4
+41	RNDBOT40
+42	RNDBOT41
+43	RNDBOT42
+44	RNDBOT43
+45	RNDBOT44
+46	RNDBOT45
+47	RNDBOT46
+48	RNDBOT47
+49	RNDBOT48
+50	RNDBOT49
+6	RNDBOT5
+51	RNDBOT50
+52	RNDBOT51
+53	RNDBOT52
+54	RNDBOT53
+55	RNDBOT54
+56	RNDBOT55
+57	RNDBOT56
+58	RNDBOT57
+59	RNDBOT58
+60	RNDBOT59
+7	RNDBOT6
+61	RNDBOT60
+62	RNDBOT61
+63	RNDBOT62
+64	RNDBOT63
+65	RNDBOT64
+66	RNDBOT65
+67	RNDBOT66
+68	RNDBOT67
+69	RNDBOT68
+70	RNDBOT69
+8	RNDBOT7
+71	RNDBOT70
+72	RNDBOT71
+73	RNDBOT72
+74	RNDBOT73
+75	RNDBOT74
+76	RNDBOT75
+77	RNDBOT76
+78	RNDBOT77
+79	RNDBOT78
+80	RNDBOT79
+9	RNDBOT8
+81	RNDBOT80
+82	RNDBOT81
+83	RNDBOT82
+84	RNDBOT83
+85	RNDBOT84
+86	RNDBOT85
+87	RNDBOT86
+88	RNDBOT87
+89	RNDBOT88
+90	RNDBOT89
+10	RNDBOT9
+91	RNDBOT90
+92	RNDBOT91
+93	RNDBOT92
+94	RNDBOT93
+95	RNDBOT94
+96	RNDBOT95
+97	RNDBOT96
+98	RNDBOT97
+99	RNDBOT98
+100	RNDBOT99
+--- realmlist ---
+1	AzerothCore	172.30.55.119	172.30.55.119	8085
+--- ufw ---
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 3724/tcp                   ALLOW IN    Anywhere                  
+[ 2] 8085/tcp                   ALLOW IN    Anywhere                  
+[ 3] 22                         ALLOW IN    Anywhere                  
+[ 4] 3724/tcp (v6)              ALLOW IN    Anywhere (v6)             
+[ 5] 8085/tcp (v6)              ALLOW IN    Anywhere (v6)             
+[ 6] 22 (v6)                    ALLOW IN    Anywhere (v6)             
+
+--- disk ---
+/dev/sda2        97G   53G   40G  58% /
+--- install state ---
+{
+  "version": 1,
+  "game_id": "wow-wotlk",
+  "family": "azerothcore",
+  "install_id": "243c46e3",
+  "completed": [
+    "clone-core",
+    "clone-modules",
+    "generate-compose",
+    "build",
+    "client-data",
+    "import"
+  ],
+  "last_error": "",
+  "updated_unix": 1788516268
+}

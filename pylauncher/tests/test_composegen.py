@@ -74,6 +74,38 @@ def keys_in(text: str) -> set[str]:
     return found
 
 
+def service_names(compose_text: str) -> set[str]:
+    """Keys directly under `services:` — and ONLY there.
+
+    `networks:` and `volumes:` keys sit at the same two-space indent, so a whole-file
+    regex would count `tbc-net` and `db-data` as services; the scan stops at the next
+    top-level key.
+
+    Module-level rather than beside the CMaNGOS tests it was written for: the G.3
+    cross-check reads the service keys of EVERY shipped entry, WotLK included.
+
+    The key pattern excludes `_` deliberately, and the direction of that mistake is
+    the reason it is left alone (bug-checklist §30, noted 2026-09-02): a service key
+    spelled with an underscore would read as UNDEFINED, so the cross-check would
+    fail loudly on a file that is fine, rather than pass quietly on one that is not.
+    Widening it would be the permissive direction, and no shipped template writes an
+    underscored key — every service name here is `<prefix>-<role>`.
+    """
+    names: set[str] = set()
+    inside = False
+    for line in compose_text.splitlines():
+        if re.match(r"^services:\s*$", line):
+            inside = True
+            continue
+        if inside and re.match(r"^\S", line):
+            break
+        if inside:
+            match = re.match(r"^  ([A-Za-z0-9-]+):\s*$", line)
+            if match:
+                names.add(match.group(1))
+    return names
+
+
 def render(server_dir: Path) -> composegen.ComposePlan:
     return composegen.render(
         ENTRY, server_dir, templates_root=TEMPLATES, platform_id=lambda: "macos"
@@ -311,23 +343,84 @@ def test_a_missing_template_says_which_file(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("password", ['pass"word', "pass$word", "pass;word", "pass#word"])
-def test_a_password_that_cannot_be_spliced_is_refused(tmp_path: Path, password: str) -> None:
+UNSAFE_SCALAR_REASONS = {
+    "$": "opens another compose interpolation",
+    '"': "ends the quoted, semicolon-separated database field list",
+    "\\": "escapes the next character inside that quoted string",
+    ";": "splits the database field list",
+    "#": "truncates a bare YAML value at a comment",
+    "{": "opens a `${...}` interpolation",
+    "}": "ends a `${VAR:-default}` early",
+    "\r": "a line end that YAML and the SQL client both act on, and that a paste hides",
+    "\n": "splices arbitrary YAML, and closes a joined SQL line to write the next one",
+    "\t": "is not legal YAML indentation",
+    "'": "closes `IDENTIFIED BY '<pw>'` in the SQL a plan with no `create` list writes",
+}
+"""Why each character is in `_UNSAFE_SCALAR_CHARS`, restated here ON PURPOSE.
+
+A parametrisation derived from the constant shrinks with the constant, so it
+can never see a narrowing. Measured 2026-09-02 on `f6ed1b9a`: deleting the
+single quote — one character — from `_UNSAFE_SCALAR_CHARS` left the whole suite
+passing, byte-identical to baseline, because the four cases the old
+parametrisation restated did not include it. Deleting the `_refuse_unsafe()`
+CALL was killed by four tests; narrowing the set it reads was silent. Something
+outside the constant has to hold its membership, and a reason per character is
+what makes that a review rather than a magic literal.
+
+`test_every_unsafe_scalar_character_is_refused_*` then drives every member
+through the real refusal, so this table cannot claim a character the code does
+not enforce either.
+"""
+
+
+def test_the_unsafe_scalar_set_is_exactly_the_characters_with_a_reason() -> None:
+    """The membership pin. Narrowing the set is loud here and nowhere else."""
+    assert composegen._UNSAFE_SCALAR_CHARS == frozenset(UNSAFE_SCALAR_REASONS)
+
+
+@pytest.mark.parametrize("char", sorted(composegen._UNSAFE_SCALAR_CHARS))
+def test_every_unsafe_scalar_character_is_refused_in_the_database_password(
+    tmp_path: Path, char: str
+) -> None:
     """Refused rather than escaped: the same scalar lands in two contexts at once.
 
     A bare YAML value and a quoted, semicolon-separated one, with compose's own
     interpolation running on top of both — no single escaping survives all of
     it, and this is an install-time option the user can simply spell
-    differently.
+    differently. Derived from the constant, so a character ADDED to the set
+    arrives here with a case of its own; the membership pin above is what
+    covers a character taken out.
     """
     with pytest.raises(composegen.ComposeGenError, match="database root password"):
         composegen.render(
             ENTRY,
             tmp_path / "wow",
             templates_root=TEMPLATES,
-            db_password=password,
+            db_password=f"pass{char}word",
             platform_id=lambda: "macos",
         )
+
+
+@pytest.mark.parametrize("char", sorted(composegen._UNSAFE_SCALAR_CHARS))
+def test_every_unsafe_scalar_character_is_refused_in_a_world_env_value(
+    tmp_path: Path, char: str
+) -> None:
+    """`_env_block()` reads the same constant, and its values are catalog data, not a secret.
+
+    The second call site, driven through `render()` rather than through the
+    private function, because what is under test is that the same set guards
+    both — the password refusal one line earlier must not be what answers, so
+    the message names the variable and not the password.
+    """
+    with pytest.raises(composegen.ComposeGenError, match="the value of AC_A_TEST_SETTING") as bad:
+        composegen.render(
+            ENTRY,
+            tmp_path / "wow",
+            templates_root=TEMPLATES,
+            world_env={"AC_A_TEST_SETTING": f"on{char}off"},
+            platform_id=lambda: "macos",
+        )
+    assert "database root password" not in str(bad.value), "the password refusal answered instead"
 
 
 def test_write_plan_refuses_a_compose_file_it_did_not_write(tmp_path: Path) -> None:
@@ -485,23 +578,31 @@ def test_every_installer_writes_the_bot_population_that_was_decided() -> None:
     sweep rather than a list of five paths: a sixth installer, or a seventh
     spelling in an existing one, is caught the day it is added rather than the
     day someone counts the bots that logged in.
+
+    Until 7.2 the sweep matched the five bash installers, twice each, and held
+    those ten numbers to `BOT_POPULATION`. Those files are gone and nothing
+    under `catalog/installers/` writes the number any more, so the sweep now
+    expects nothing and exists to catch a NEW shipped file that hard-codes one.
+    The `catalog.json` assertions below it are the ones with teeth today.
     """
+    scanned = 0
     written: dict[str, list[str]] = {}
     for path in sorted(TEMPLATES.rglob("*")):
         if not path.is_file():
             continue
+        scanned += 1
         text = path.read_text(encoding="utf-8", errors="replace")
         found = [m.group("ac") or m.group("cmangos") for m in _BOT_POPULATION_WRITE.finditer(text)]
         if found:
             written[path.relative_to(TEMPLATES).as_posix()] = found
 
-    assert written == {
-        "wow-tbc/install-wow-tbc.sh": [BOT_POPULATION, BOT_POPULATION],
-        "wow-vanilla/install-wow-vanilla.sh": [BOT_POPULATION, BOT_POPULATION],
-        "wow-wotlk/install-wow-wotlk-fedora.sh": [BOT_POPULATION, BOT_POPULATION],
-        "wow-wotlk/install-wow-wotlk-ubuntu.sh": [BOT_POPULATION, BOT_POPULATION],
-        "wow-wotlk/install-wow-wotlk.sh": [BOT_POPULATION, BOT_POPULATION],
-    }, "an installer ships a bot population that is not the one that was decided"
+    # An empty expectation is satisfied by scanning nothing at all, which is
+    # what a moved or renamed installers root would produce.
+    assert scanned >= 12, f"{TEMPLATES} holds {scanned} files; this sweep is looking nowhere"
+    assert written == {}, (
+        "a file under catalog/installers/ hard-codes a bot population; the number "
+        f"belongs in catalog.json, which says {BOT_POPULATION}"
+    )
 
     # The sixth place is the native path's data, which the scan above cannot
     # see: it lives in `catalog.json`, not under `catalog/installers/`.
@@ -725,6 +826,49 @@ def test_fill_is_the_one_public_substitution_and_refuses_a_leftover_token() -> N
     assert composegen._fill is composegen.fill, "the old private name is an alias, not a copy"
 
 
+def test_an_unfilled_placeholder_is_named_and_never_quotes_what_was_substituted() -> None:
+    """The message says WHICH token, and quotes no filled text — because filled text is
+    where the secret is.
+
+    `fill()` substitutes every token first and only then looks for a leftover `{{`, so a
+    window of the RESULT can hold a value that was filled in. On the shipped Tortoise
+    statement that leaked eight characters of a constant prefix; one shape over — a token
+    the template comments out next to an unfilled one — it is the whole password, in a
+    user-facing error whose tail invites the user to report it.
+
+    The name is also simply the better message: every caller (`conf`, `sqlplan`,
+    `native`'s ready markers) re-raises this text about a file the traceback never names,
+    and "unfilled placeholder `{{NOPE}}`" beats forty characters of context.
+    """
+    secret = "tortoise-0123456789abcdef"
+    with pytest.raises(composegen.ComposeGenError) as caught:
+        composegen.fill("SELECT {{NOPE}} /*{{DB_PASSWORD}}*/", {"DB_PASSWORD": secret})
+    assert "{{NOPE}}" in str(caught.value)
+    assert secret not in str(caught.value)
+    with pytest.raises(composegen.ComposeGenError) as caught:
+        composegen.fill(
+            "CREATE USER '{{DB_USER}}'@'%' IDENTIFIED BY '{{DB_PASSWORD}}'",
+            {"DB_PASSWORD": secret},
+        )
+    assert "{{DB_USER}}" in str(caught.value)
+    assert secret not in str(caught.value)
+
+
+def test_a_leftover_brace_with_no_token_to_name_says_which_of_the_two_it_is() -> None:
+    """Two leftovers have no token name to report, and they have different remedies.
+
+    A `{{` the template spells but never closes as a `{{TOKEN}}` is a template bug, and
+    the template is quoted for it — template text is data in this repo, never a secret.
+    A `{{` a filled VALUE carried in is not the template's fault at all, and quoting it
+    is exactly the leak above, so it is described rather than shown.
+    """
+    with pytest.raises(composegen.ComposeGenError, match="not a closed"):
+        composegen.fill("root: {{ DB_HOST }}\n", {"DB_HOST": "db"})
+    with pytest.raises(composegen.ComposeGenError, match="a filled value") as caught:
+        composegen.fill("root: {{X}}\n", {"X": "{{oops"})
+    assert "oops" not in str(caught.value)
+
+
 # -- generated-password mode: the secret lives in .env and nowhere else --------
 
 
@@ -939,8 +1083,15 @@ def test_the_family_tokens_come_from_the_entry(tmp_path: Path) -> None:
     assert "schemas: acore_auth acore_world acore_characters acore_playerbots" in plan.base
     # `ac-db` is this synthetic template's own `db` behind the real prefix, NOT a
     # container WotLK has (its three are ac-database/-authserver/-worldserver). What
-    # the prefix must rebuild for a real entry is asserted over the shipped catalog by
-    # `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry`.
+    # the prefix must produce for a real entry is cross-checked over the shipped catalog
+    # by `test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file`,
+    # which compares the names an entry SELECTS against the service keys its rendered base
+    # DEFINES — for the three CMaNGOS entries those keys are `{{CONTAINER_PREFIX}}<service>`,
+    # so a wrong prefix is what makes the two sides fail to meet. It is not the check this
+    # comment cited until 2026-09-02, which was
+    # `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry`:
+    # that one rebuilt names from `containers.services` instead of reading what was
+    # written, and was replaced for exactly that reason (bug-checklist §26, §30).
     assert "prefix: ac-db" in plan.base, "the common prefix of the three container names"
     assert f"build: {ENTRY.client.build}" in plan.base
 
@@ -977,52 +1128,120 @@ def test_tokens_a_family_does_not_have_stay_unfilled_and_therefore_loud(tmp_path
         )
 
 
-# -- G.3: the container prefix rebuilds the names it is derived from ----------
+# -- G.3: every service the catalog selects is a service the file defines ------
 
 
-@pytest.mark.parametrize(
-    "entry", load_catalog().games, ids=[game.id for game in load_catalog().games]
-)
-def test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_entry(
-    entry: CatalogEntry,
+def test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file(
+    tmp_path: Path,
 ) -> None:
-    """The invariant `_container_prefix()`'s docstring promises, over the real catalog.
+    """The two sides compared against each other, instead of each against a literal.
 
-    `{{CONTAINER_PREFIX}}` exists so a shared CMaNGOS template can write
-    `container_name: {{CONTAINER_PREFIX}}db` for service `db` and get the entry's own
-    `containers.db`. Nothing downstream re-checks that: `fill()` refuses an unfilled
-    placeholder, never a filled-but-wrong one, so a catalog entry that broke the naming
-    convention would render a compose file naming a container no service owns and the
-    first report would be `docker compose up`.
+    `docker.start_staged()` runs `compose up -d --no-deps <compose_services()...>`,
+    `repair_import()` selects `import_service`, and the native engine selects
+    `containers.client_data`; compose answers `no such service` and fails the install
+    for a name its file does not define. Nothing joined the two sides, and on
+    2026-09-01 they disagreed for three of the four shipped entries: `catalog.json`
+    declared `containers.services` as `db`/`realmd`/`mangosd` for TBC, Vanilla and
+    Tortoise, while `shared/cmangos/base.yml.tmpl` renders those services as
+    `{{CONTAINER_PREFIX}}db` and friends — `tbc-db`, `tbc-realmd`, `tbc-mangosd`.
+    Not live only because `FAMILIES` registered `azerothcore` alone; K.8 registers
+    `CmangosInstaller`, and that install would have died at the first `compose up`.
 
-    Gated on `containers.services`, NOT on the presence of a native block: the block is
-    what makes the token reachable through `render()`, but today only WotLK has one and
-    only the CMaNGOS entries follow the prefix convention, so a native-gated test would
-    skip every entry that this invariant is about and pass while proving nothing.
-    `containers.services` is exactly the list of suffixes the templates put the prefix
-    in front of, so the entries that declare it are the entries the invariant covers.
+    Two tests had covered this ground and neither could fail for it. The one that
+    read a compose file at all read the *bash* installer's, not the generated one;
+    its replacement asserted the catalog's literals in one half and the rendered
+    names in the other, and passed with both, because it never compared them. This
+    one renders through `composegen.render()` and reads the service keys back out —
+    the only form of the check that can see a disagreement.
+
+    Replaces `test_the_container_prefix_rebuilds_the_container_names_of_every_shipped_
+    entry`, which reconstructed what a template *would* write from
+    `containers.services` rather than reading what it did write. Every entry with a
+    native block, so WotLK — whose services and containers coincide, and whose spec
+    therefore keeps the default — guards the convention it established.
     """
-    services = entry.containers.services
-    if services is None:
-        pytest.skip(
-            f"{entry.id} does not declare containers.services, so each container is named "
-            "after its own service (AzerothCore) and there is no suffix to rebuild from"
+    catalog = load_catalog()
+    examined = 0
+    checked = 0
+    # Collected, not asserted inside the loop: an `assert` on the first bad entry
+    # stops the sweep, and the three CMaNGOS entries were wrong together — a run
+    # that named only TBC would have been read as one entry's typo.
+    problems: list[str] = []
+    for entry in catalog.games:
+        if entry.install.native is None:
+            continue
+        plan = composegen.render(
+            entry,
+            tmp_path / entry.id,
+            templates_root=TEMPLATES,
+            db_password="0123456789abcdef",
+            platform_id=lambda: "linux",
         )
-    prefix = composegen._container_prefix(entry)
-    assert prefix, f"{entry.id} has no shared container prefix at all"
-    rebuilt = tuple(prefix + service for service in services)
-    assert rebuilt == (entry.containers.db, entry.containers.auth, entry.containers.world), (
-        f"{entry.id}'s templates would write {rebuilt} where its containers are "
-        f"{(entry.containers.db, entry.containers.auth, entry.containers.world)}"
+        defined = service_names(plan.base)
+        spec = entry.container_spec()
+        selected = list(spec.compose_services())
+        if spec.import_service:
+            selected.append(spec.import_service)
+        if entry.containers.client_data:
+            selected.append(entry.containers.client_data)
+        # Assert the entry SELECTED something before checking what it selected.
+        # Without this the sweep is vacuous in the one direction that matters:
+        # the reviewer mutated `ContainerSpec.compose_services()` to
+        # `return self.services` -- empty for every shipped entry now that none
+        # declares one -- and `selected`, `missing` and `problems` were all empty
+        # while this test passed. The entry count below could not see it, because
+        # four entries really had been rendered. This is the standing rule landing
+        # on the test that inherited three deleted tests' weight: assert the value
+        # ARRIVES, never that the loop ran.
+        assert selected, (
+            f"{entry.id} selected no compose services at all, so this entry "
+            "compared nothing; `ContainerSpec.compose_services()` is answering empty"
+        )
+        checked += len(selected)
+        missing = [name for name in selected if name not in defined]
+        if missing:
+            problems.append(
+                f"{entry.id} selects {missing}, but its rendered docker-compose.yml "
+                f"defines {sorted(defined)}"
+            )
+        examined += 1
+    assert not problems, (
+        "`docker compose up` answers `no such service` and the install stops there:\n  "
+        + "\n  ".join(problems)
+    )
+    # A sweep that renders nothing passes just as quietly as one that renders four
+    # correct files. Every shipped entry has a native block today, so the count is
+    # the entry count and not merely "more than none".
+    #
+    # Deliberately NOT `== 4`. A hard-coded number here rots on the fifth game
+    # while catching nothing extra: a broken fifth entry is reported by the
+    # `assert not problems` above, which fires first -- verified by mutation,
+    # 2026-09-02, by narrowing the sweep to one entry AND breaking that entry, and
+    # watching the failure come from `not problems` rather than from this line.
+    assert examined == len(catalog.games) > 0, (
+        f"the cross-check examined {examined} of {len(catalog.games)} shipped entries; "
+        "an entry without a native block renders nothing and is silently uncovered"
+    )
+    assert checked >= 3 * examined, (
+        f"only {checked} service names were compared across {examined} entries; "
+        "each shipped entry names at least a db, an auth and a world container, so "
+        "a lower number means something answered with an empty selection"
     )
 
 
-def test_the_shipped_catalog_still_has_entries_the_prefix_invariant_covers() -> None:
-    """The skip above must not be able to empty the invariant out without anyone noticing."""
-    covered = [game.id for game in load_catalog().games if game.containers.services is not None]
-    assert covered, (
-        "no shipped entry declares containers.services, so the container-prefix invariant "
-        "skipped every entry and asserted nothing"
+def with_containers(db: str, auth: str, world: str) -> CatalogEntry:
+    """A copy of the shipped TBC entry wearing three other container names.
+
+    Module-level because two tests need it and they need it to agree: one pins what
+    `_container_prefix()` answers for a shape, the other renders the same shape and
+    reads the service keys back. Written apart, they could have drifted onto
+    different names and each gone on passing.
+    """
+    tbc = load_catalog().get("wow-tbc")
+    return tbc.model_copy(
+        update={
+            "containers": tbc.containers.model_copy(update={"db": db, "auth": auth, "world": world})
+        }
     )
 
 
@@ -1033,53 +1252,189 @@ def test_a_container_prefix_that_cannot_be_derived_is_refused_not_guessed() -> N
     character (`""`), one name a literal prefix of the others (`"db"`, so
     `{{CONTAINER_PREFIX}}db` renders `dbdb`), and an accidental character-wise prefix
     that eats the separator (`"abc"`). None of them raise on their own.
+
+    Only the first is refused here, and the last two are asserted to be ANSWERED
+    rather than left unmentioned. Until 2026-09-04 they raised too, but only
+    because every fixture below also carried `services=("db","realmd","mangosd")`
+    and the rebuild branch compared against that — a declaration no shipped entry
+    has had since 2026-09-01 and one this module now refuses outright
+    (bug-checklist §30). Nothing in the entry names the suffix a template writes,
+    so `dbdb` cannot be told from `tbc-db` at this level; the shape that catches
+    the other two is
+    `test_a_commonprefix_the_template_does_not_share_is_caught_by_the_rendered_file`,
+    which renders them and reads the service keys back.
+
+    Characterisation, not a discriminator of the §30 fix: measured 2026-09-04 on
+    m910q with the pre-§30 `composegen.py` (the rebuild branch restored, md5
+    86ffd5ba3e8f21ab10a66c33864a40b8) this test passed unchanged — with no
+    `services` on the fixtures the old branch never ran either. The test that
+    fails on that file is
+    `test_an_entry_this_module_renders_may_not_declare_compose_services`.
     """
-    tbc = load_catalog().get("wow-tbc")
-    assert tbc.containers.services == ("db", "realmd", "mangosd")
-
-    def with_containers(db: str, auth: str, world: str) -> CatalogEntry:
-        return tbc.model_copy(
-            update={
-                "containers": tbc.containers.model_copy(
-                    update={"db": db, "auth": auth, "world": world}
-                )
-            }
-        )
-
     with pytest.raises(composegen.ComposeGenError, match="share no common prefix"):
         composegen._container_prefix(with_containers("mysql", "authserver", "worldserver"))
-    with pytest.raises(composegen.ComposeGenError, match="rebuilds dbdb"):
-        composegen._container_prefix(with_containers("db", "dbauth", "dbworld"))
-    with pytest.raises(composegen.ComposeGenError, match="rebuilds abcdb"):
-        composegen._container_prefix(with_containers("abc-db", "abcd-realmd", "abcx-mangosd"))
-    assert composegen._container_prefix(with_containers("x-db", "x-realmd", "x-mangosd")) == "x-"
+    assert composegen._container_prefix(with_containers("db", "dbauth", "dbworld")) == "db"
+    eaten = with_containers("abc-db", "abcd-realmd", "abcx-mangosd")
+    assert composegen._container_prefix(eaten) == "abc"
+    accepted = with_containers("x-db", "x-realmd", "x-mangosd")
+    # Twice: the fixture is rebuilt per call and the function is pure, so a second
+    # ask must answer the same thing. A helper that mutated the entry it copied
+    # from would pass once and diverge here.
+    assert composegen._container_prefix(accepted) == "x-"
+    assert composegen._container_prefix(accepted) == "x-"
+
+
+@pytest.mark.parametrize(
+    ("containers", "prefix"),
+    [
+        (("db", "dbauth", "dbworld"), "db"),
+        (("abc-db", "abcd-realmd", "abcx-mangosd"), "abc"),
+    ],
+    ids=["one-name-is-the-prefix", "the-separator-is-eaten"],
+)
+def test_a_commonprefix_the_template_does_not_share_is_caught_by_the_rendered_file(
+    tmp_path: Path, containers: tuple[str, str, str], prefix: str
+) -> None:
+    """Where the two shapes `_container_prefix()` cannot judge DO get caught, measured.
+
+    §30 recommended deleting the rebuild branch on the grounds that "the cross-check
+    now covers the separator-eaten case". That was a claim about a test, and this is
+    the measurement behind it: both shapes are rendered through the real shared
+    CMaNGOS templates and the service keys are read back out of the text. They come
+    out as the prefix in front of the template's own literal suffixes — `dbdb`,
+    `abcdb` and friends — and share not one name with what the entry would hand
+    `compose up`, which is the disagreement
+    `test_every_service_the_catalog_selects_is_defined_in_the_rendered_compose_file`
+    reports for every shipped entry.
+
+    Asserting `defined` in full rather than "the container names are missing from
+    it": a helper that answered the empty set would satisfy the disjointness on its
+    own, and the point is that the file really does define three services under
+    names nobody selects.
+
+    Characterisation, not a discriminator of the §30 fix: measured 2026-09-04 on
+    m910q with the pre-§30 `composegen.py` (the rebuild branch restored, md5
+    86ffd5ba3e8f21ab10a66c33864a40b8) both parametrisations passed unchanged —
+    nothing here declares `services`, so neither the old branch nor the new
+    refusal is reached. It pins what the templates render for these shapes; the
+    test that fails on the old file is
+    `test_an_entry_this_module_renders_may_not_declare_compose_services`.
+    """
+    entry = with_containers(*containers)
+    # Not refused at generation time -- that is the whole subject of the test.
+    assert composegen._container_prefix(entry) == prefix
+    plan = render_generated(entry, tmp_path / "wow")
+    defined = service_names(plan.base)
+    assert defined == {prefix + suffix for suffix in ("db", "realmd", "mangosd")}
+    selected = set(entry.container_spec().compose_services())
+    assert selected == set(containers), "with no declaration, the selection IS the container names"
+    assert not selected & defined, (
+        f"{sorted(selected)} would be handed to `compose up`, and the rendered file "
+        f"defines {sorted(defined)}: every one of them answers `no such service`"
+    )
+
+
+def test_an_entry_this_module_renders_may_not_declare_compose_services(tmp_path: Path) -> None:
+    """RED for bug-checklist §30: the rule accepted the declaration that breaks `compose up`.
+
+    Probed on the shipped `wow-tbc` entry, the rebuild branch was satisfiable only
+    by the defect §26 fixed. `("tbc-db","tbc-realmd","tbc-mangosd")` — the names
+    `compose up` has to be given, because the template's service keys ARE the
+    container names — was refused, since `tbc-` in front of them rebuilds
+    `tbc-tbc-db`. `("db","realmd","mangosd")` — the declaration that would have
+    killed three installs at `no such service` — was accepted, and
+    `compose_services()` then answered those three bare suffixes.
+
+    Both shapes are refused now, and for the same reason: for an entry rendered
+    from these templates the field has no correct value at all. Asserted through
+    `render()` as well as against the function, because a refusal nothing reaches
+    is not a refusal — `entry_tokens()` is the only caller in the app.
+
+    This is the one test of the three added for §30 that discriminates: measured
+    2026-09-04 on m910q with the pre-§30 `composegen.py` restored (md5
+    86ffd5ba3e8f21ab10a66c33864a40b8) it failed at the first `raises` — `correct`
+    was refused with the rebuild text, which does not name `containers.services`.
+    """
+    tbc = load_catalog().get("wow-tbc")
+
+    def declaring(services: tuple[str, str, str]) -> CatalogEntry:
+        return tbc.model_copy(
+            update={"containers": tbc.containers.model_copy(update={"services": services})}
+        )
+
+    correct = declaring((tbc.containers.db, tbc.containers.auth, tbc.containers.world))
+    the_bug = declaring(("db", "realmd", "mangosd"))
+    for entry in (correct, the_bug):
+        with pytest.raises(composegen.ComposeGenError, match=r"containers\.services") as raised:
+            composegen._container_prefix(entry)
+        message = str(raised.value)
+        # The old refusal text was a set of instructions for reproducing §26 —
+        # "Name every container after its service with one shared prefix in front
+        # of it" — handed to whoever adds the fifth game. Pinned so the sentence
+        # cannot come back.
+        assert "after its service" not in message
+        assert "Delete containers.services" in message
+        with pytest.raises(composegen.ComposeGenError, match=r"containers\.services"):
+            composegen.entry_tokens(entry)
+        with pytest.raises(composegen.ComposeGenError, match=r"containers\.services"):
+            render_generated(entry, tmp_path / "wow")
+
+
+@pytest.mark.parametrize(
+    "containers",
+    [("db", "dbauth", "dbworld"), ("abc-db", "abcd-realmd", "abcx-mangosd")],
+    ids=["one-name-is-the-prefix", "the-separator-is-eaten"],
+)
+def test_the_refusal_names_no_service_the_rendered_file_does_not_define(
+    tmp_path: Path, containers: tuple[str, str, str]
+) -> None:
+    """RED 2026-09-04 on m910q (§30, round 2): the replacement refusal taught the bug again.
+
+    §30's headline complaint was that the refusal text read as instructions for
+    reproducing §26. The first rewrite refused the declaration and then, in the same
+    sentence, named the entry's three container names as "the names compose must be
+    given". Reproduced against the real `shared/cmangos` templates with containers
+    `db`/`dbauth`/`dbworld` and a declaration on top:
+
+        REFUSAL: wow-tbc declares containers.services (db, realmd, mangosd), but ...
+                 The names compose must be given are db, dbauth, dbworld ...
+        service keys the shared/cmangos template would write: ['dbdb', 'dbmangosd', 'dbrealmd']
+
+    Three names in the advice, three different services in the file it had just
+    described; every name in the advice answers `no such service`. The suffixes the
+    template writes are not known to `_container_prefix()`, so the only service names
+    a refusal could print honestly are ones it has seen rendered, and it has seen
+    none — so it prints none. Held to that the only way it can be: the same shape is
+    rendered here, the service keys read back, and every container name the file does
+    NOT define must be absent from the message.
+
+    The declared services are three words that are neither container names nor
+    service keys, so the echo of the declaration cannot collide with the check: with
+    `("db","realmd","mangosd")` declared, the word `db` would be in the message
+    legitimately, as the thing the entry said.
+    """
+    shape = with_containers(*containers)
+    declaring = shape.model_copy(
+        update={
+            "containers": shape.containers.model_copy(update={"services": ("one", "two", "three")})
+        }
+    )
+    with pytest.raises(composegen.ComposeGenError, match=r"containers\.services") as raised:
+        composegen._container_prefix(declaring)
+    message = str(raised.value)
+    defined = service_names(render_generated(shape, tmp_path / "wow").base)
+    undefined = set(containers) - defined
+    assert undefined == set(containers), "the shapes were chosen so no container name is a key"
+    for name in sorted(undefined):
+        assert not re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", message), (
+            f"the refusal names {name!r}, and the rendered file defines {sorted(defined)}: "
+            "following the advice answers `no such service`"
+        )
 
 
 # -- G.5: the shared CMaNGOS compose templates ---------------------------------
 
 CMANGOS_ENTRIES = [load_catalog().get(g) for g in ("wow-tbc", "wow-vanilla", "wow-tortoise")]
-
-
-def service_names(compose_text: str) -> set[str]:
-    """Keys directly under `services:` — and ONLY there.
-
-    `networks:` and `volumes:` keys sit at the same two-space indent, so a whole-file
-    regex would count `tbc-net` and `db-data` as services; the scan stops at the next
-    top-level key.
-    """
-    names: set[str] = set()
-    inside = False
-    for line in compose_text.splitlines():
-        if re.match(r"^services:\s*$", line):
-            inside = True
-            continue
-        if inside and re.match(r"^\S", line):
-            break
-        if inside:
-            match = re.match(r"^  ([A-Za-z0-9-]+):\s*$", line)
-            if match:
-                names.add(match.group(1))
-    return names
 
 
 def render_generated(entry: CatalogEntry, server_dir: Path) -> composegen.ComposePlan:
@@ -1109,7 +1464,17 @@ def test_the_shared_cmangos_templates_render_for_every_family_entry(
 
 
 def test_the_cmangos_services_are_named_after_their_containers(tmp_path: Path) -> None:
-    """`ContainerSpec.services` keeps its default, so `compose up -d --no-deps <db>` works."""
+    """The rendered file's service keys ARE the entry's container names.
+
+    This is the template's side of the AzerothCore convention, asserted against the
+    entry's own three names rather than against literals. `compose up -d --no-deps
+    <db>` then works with `ContainerSpec.services` left at its default — which is what
+    the entry does today, having stopped declaring `containers.services` on 2026-09-01;
+    the docstring here used to state that as a fact while the catalog was overriding it
+    with `db`/`realmd`/`mangosd`, and neither this test nor the catalog's own could see
+    the disagreement. `test_every_service_the_catalog_selects_is_defined_in_the_rendered_
+    compose_file` is the one that now compares the two sides.
+    """
     entry = load_catalog().get("wow-tbc")
     plan = render_generated(entry, tmp_path / "wow")
     services = service_names(plan.base)
@@ -1215,6 +1580,16 @@ def test_every_cmangos_entry_has_a_dockerfile_pair_that_fills_from_its_tokens(
     wider mapping — because that is all a build-time render has: the image is
     built before any per-install secret or port is in hand. A template reaching
     for `DB_PASSWORD` therefore raises here, not in front of a user.
+
+    That last sentence is load-bearing and fragile, so: it holds only because
+    `entry_tokens()` never contains `DB_PASSWORD`, which makes a template that
+    spelled the token fail here as UNFILLED. Filling from the installer's real
+    mapping instead — the plausible "make this realistic" edit — would delete
+    the check silently. Note that since 7.3 the realistic mapping is
+    `CmangosInstaller._public_tokens()`, which has no secret in it either, so
+    the edit would look harmless AND still delete the check. Do not; and if you
+    do, the guarantee is still `dockerfile.SECRET_TOKENS`' by-name refusal,
+    covered in `test_dockerfile.py` and `test_families_cmangos.py`.
     """
     native = cmangos_native(entry)
     template_dir = TEMPLATES / str(native.dockerfile_dir)

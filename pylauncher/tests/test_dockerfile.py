@@ -18,14 +18,16 @@ project can ship silently:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from yulon import resources
-from yulon.catalog import composegen
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, load_catalog
-from yulon.catalog.families import dockerfile
+from yulon.catalog.families import dockerfile, family_for
 
 TOKENS = {"CORE_DIR": "/opt/mangos", "MAKE_JOBS": "2", "CLIENT_BUILD": "8606"}
 """`CLIENT_BUILD` is deliberately unused by the stand-in templates: `fill()` refuses an
@@ -69,7 +71,7 @@ def server_dir(root: Path) -> Path:
 
 
 def test_render_fills_tokens_and_starts_both_files_with_the_marker(tmp_path: Path) -> None:
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     assert text.startswith(composegen.GENERATED_MARKER + "\n")
     assert ignore.startswith(composegen.GENERATED_MARKER + "\n")
     assert "-DCMAKE_INSTALL_PREFIX=/opt/mangos /src" in text and "make -j2" in text
@@ -91,7 +93,9 @@ def test_render_does_not_stack_a_second_marker_on_a_template_that_has_one(
     at the top of every generated Dockerfile — the plan's own draft did exactly that. The
     guarantee is "the marker is there", not "the marker is added".
     """
-    text, ignore = dockerfile.render(shipped(entry), composegen.entry_tokens(entry))
+    text, ignore = dockerfile.render(
+        shipped(entry), composegen.entry_tokens(entry), secrets=SECRETS
+    )
     for name, rendered in ((dockerfile.DOCKERFILE, text), (dockerfile.DOCKERIGNORE, ignore)):
         assert rendered.startswith(composegen.GENERATED_MARKER), name
         assert rendered.count(composegen.GENERATED_MARKER) == 1, name
@@ -103,14 +107,16 @@ def test_render_does_not_stack_a_second_marker_on_a_template_that_has_one(
 @pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
 def test_render_of_a_shipped_template_carries_no_carriage_return(entry: CatalogEntry) -> None:
     """The worktree copy is CRLF under `core.autocrlf=true`; the render is not."""
-    text, ignore = dockerfile.render(shipped(entry), composegen.entry_tokens(entry))
+    text, ignore = dockerfile.render(
+        shipped(entry), composegen.entry_tokens(entry), secrets=SECRETS
+    )
     assert "\r" not in text and "\r" not in ignore
 
 
 def test_render_normalises_a_crlf_template_to_lf(tmp_path: Path) -> None:
     folder = templates(tmp_path)
     (folder / "Dockerfile.tmpl").write_bytes(DOCKERFILE_BODY.replace("\n", "\r\n").encode())
-    text, _ = dockerfile.render(folder, TOKENS)
+    text, _ = dockerfile.render(folder, TOKENS, secrets=SECRETS)
     assert "\r" not in text
     assert "RUN make -j2\n" in text
 
@@ -119,12 +125,819 @@ def test_render_refuses_an_unknown_token(tmp_path: Path) -> None:
     folder = templates(tmp_path)
     (folder / "Dockerfile.tmpl").write_text("FROM x\nRUN {{NOT_A_TOKEN}}\n", encoding="utf-8")
     with pytest.raises(dockerfile.DockerfileError, match="NOT_A_TOKEN"):
-        dockerfile.render(folder, TOKENS)
+        dockerfile.render(folder, TOKENS, secrets=SECRETS)
+
+
+# -- render: the secret may not reach a generated file ------------------------
+
+SECRET = "tbc-0123456789abcdef"
+"""Shaped like the real one: `<password.prefix><hex>`, as `.db_password` holds it and as
+`CmangosInstaller._secret_tokens()` carries it to the conf tables.
+
+Every mapping below is built by these tests, not by production: since 7.3 nothing in
+`yulon/` hands `render()` a secret — `_write_dockerfile` passes `_public_tokens()`. What
+this file proves is that the renderer refuses one anyway, for the caller who someday
+passes the wider set."""
+
+SECRETS = native.Secrets(db_password=SECRET)
+"""The declaration every `render()` call below hands over, and the VALUE half's premise.
+
+`render()` takes it keyword-only and REQUIRED, so this constant appears at all 40-odd
+call sites in this file rather than at the handful that are about secrets — which is the
+point of it being required: a call that forgets it does not lose the guard, it fails.
+`test_a_caller_that_forgets_the_secrets_argument_fails_instead_of_losing_the_guard`
+holds that at runtime, where a silenced type checker cannot get past it."""
+
+NOT_THE_SECRET = "hunter2-a-value-this-declaration-never-held"
+"""What the NAME-rule fixtures below leak, and why it is not `SECRET`.
+
+Every one of them used to hand `SECRET` — the declared password — under a
+secret-sounding key, and each would therefore violate TWO rules now that the value half
+exists: the key announces a secret, AND the value IS the declared secret. The value rule
+runs first, so those tests would have gone on passing with `SECRET_NAME_WORDS` deleted
+entirely, proving the wrong rule. One rule per fixture: these carry a value the
+declaration has never held, so only the NAME can be what refuses them. Long and
+unlike a password on purpose — it also has to clear `MIN_CONTAINED_SECRET`'s equality
+floor from the other side, i.e. not accidentally BE any declared value."""
+
+
+def test_render_refuses_a_dockerfile_template_that_names_the_password_token(
+    tmp_path: Path,
+) -> None:
+    """The decision `composegen.generate()` took for the compose files, taken here too.
+
+    A compose file holding the secret is a file the user owns: delete it, rotate, done. A
+    Dockerfile holding it is baked into a content-addressed image layer, so `docker
+    history` prints it long after the file is gone and undoing it means hunting every
+    image built from that layer. So this is refused BY NAME, the way `generate()` refuses
+    it, rather than being left to `fill()` — which minds an unfilled placeholder and has
+    no opinion at all about a spelled one.
+
+    The mapping deliberately CARRIES `DB_PASSWORD`: that is the shape K.4 hands over, and
+    it is what makes this fixture violate exactly one rule. Without the key the template
+    would fail as merely unfilled and the test would prove nothing about the refusal.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV DB_PASSWORD={{DB_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(
+        dockerfile.DockerfileError, match=r"DB_PASSWORD.*Dockerfile\.tmpl"
+    ) as caught:
+        dockerfile.render(folder, {**TOKENS, "DB_PASSWORD": SECRET}, secrets=SECRETS)
+    assert "docker history" in str(caught.value), "the refusal's own words, not fill()'s"
+    assert SECRET not in str(caught.value), "a refusal about a secret does not print it"
+
+
+def test_render_refuses_a_dockerignore_template_that_names_the_password_token(
+    tmp_path: Path,
+) -> None:
+    """Both halves fill from the same mapping through the same `fill()`, and `write()`
+    lays the `.dockerignore` with a plain `write_text` (0644), so the second half needs
+    the refusal as much as the first. Named by its own path: a pair is not one file."""
+    folder = templates(tmp_path)
+    (folder / "dockerignore.tmpl").write_text(
+        "*\n!src/core\n# root pw {{DB_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(
+        dockerfile.DockerfileError, match=r"DB_PASSWORD.*dockerignore\.tmpl"
+    ) as caught:
+        dockerfile.render(folder, {**TOKENS, "DB_PASSWORD": SECRET}, secrets=SECRETS)
+    assert "docker history" in str(caught.value)
+    assert "Dockerfile.tmpl" not in str(caught.value), "the half that was fine is not accused"
+    assert SECRET not in str(caught.value)
+
+
+def test_render_never_hands_the_secret_to_the_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Belt to the refusal's braces, as `generate()` does it: the key is dropped from the
+    mapping `fill()` sees, so a template that spelled the token would fail as UNFILLED
+    even with the refusal gone. Asserted at the seam, because with the refusal in place
+    there is no rendered text that could show the difference.
+    """
+    seen: list[dict[str, str]] = []
+    real = composegen.fill
+
+    def spy(text: str, tokens: Mapping[str, str]) -> str:
+        seen.append(dict(tokens))
+        return real(text, tokens)
+
+    monkeypatch.setattr(composegen, "fill", spy)
+    text, ignore = dockerfile.render(
+        templates(tmp_path), {**TOKENS, "DB_PASSWORD": SECRET}, secrets=SECRETS
+    )
+    assert len(seen) == 2, "one call per template half"
+    for tokens in seen:
+        assert "DB_PASSWORD" not in tokens
+        assert tokens["CORE_DIR"] == "/opt/mangos", "the rest of the mapping is untouched"
+    assert SECRET not in text and SECRET not in ignore
+
+
+@dataclass(frozen=True)
+class _TwoSecrets:
+    """A stand-in secret declaration with two fields, for the derivation rule alone."""
+
+    db_password: str
+    soap_password: str
+
+
+def test_the_refused_tokens_are_derived_from_the_secret_declarations_fields() -> None:
+    """`SECRET_TOKENS` is `secret_tokens(native.Secrets)`, not a list somebody maintains.
+
+    Two links, one assertion each. The synthetic type shows the RULE generalises past the
+    single field `Secrets` happens to declare today — one token per field, the field name
+    upper-cased — which a set built from one real field could never show. The equality
+    shows the shipped constant is that function applied to the real declaration: written
+    out as a literal instead, it survives untouched while `native.Secrets` grows a second
+    field, and that combination is exactly the mutation that found the one-name version
+    (added `soap_password` to `Secrets`; the whole suite stayed green).
+    """
+    assert dockerfile.secret_tokens(_TwoSecrets) == {"DB_PASSWORD", "SOAP_PASSWORD"}
+    assert dockerfile.SECRET_TOKENS == dockerfile.secret_tokens(native.Secrets)
+    assert "DB_PASSWORD" in dockerfile.SECRET_TOKENS, "today's declaration, refused"
+
+
+@pytest.mark.parametrize("token", sorted(dockerfile.SECRET_TOKENS))
+def test_every_token_the_secret_declaration_produces_is_refused_in_a_template(
+    token: str, tmp_path: Path
+) -> None:
+    """One case per field of `native.Secrets`, generated from the declaration itself.
+
+    A secret added there brings its own case here with nothing to remember, which is what
+    deriving the set buys. The parametrize list IS the current answer, so this docstring
+    does not restate it; the test below is what shows the machinery carries a second one.
+
+    NOT the guard against an empty `SECRET_TOKENS`. Measured 2026-09-01 by mutating
+    `secret_tokens()` to `return frozenset()`: pytest's default for an empty parameter set
+    is SKIP, so this test silently vanishes rather than failing. What caught that mutant
+    was the sibling assertion `"DB_PASSWORD" in dockerfile.SECRET_TOKENS` in the test
+    above. A parametrized test cannot guard the non-emptiness of its own parameters.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV X={{" + token + "}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(dockerfile.DockerfileError, match=token) as caught:
+        dockerfile.render(folder, {**TOKENS, token: SECRET}, secrets=SECRETS)
+    assert "docker history" in str(caught.value)
+    assert SECRET not in str(caught.value)
+
+
+def test_render_refuses_a_template_naming_a_second_declared_secret_not_just_the_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever `SECRET_TOKENS` holds is refused — the defeat that made the set a set.
+
+    Measured on the unfixed code (b8973c52), where the refusal was one hard-coded name:
+    a template spelling `{{SOAP_PASSWORD}}`, with that key in the mapping the caller hands
+    over whole, rendered `ENV SOAP_PASSWORD=tbc-0123456789abcdef` into the Dockerfile and
+    the whole suite stayed green.
+
+    The SET is patched rather than `native.Secrets` because the declaration is read once,
+    at import; the derivation from the declaration is the test above, and this is the
+    other link. One rule violated: the template spells a refused token. The key is in the
+    mapping, so `fill()` would have been perfectly happy with it.
+    """
+    monkeypatch.setattr(dockerfile, "SECRET_TOKENS", frozenset({"DB_PASSWORD", "SOAP_PASSWORD"}))
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV SOAP_PASSWORD={{SOAP_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(
+        dockerfile.DockerfileError, match=r"SOAP_PASSWORD.*Dockerfile\.tmpl"
+    ) as caught:
+        dockerfile.render(folder, {**TOKENS, "SOAP_PASSWORD": SECRET}, secrets=SECRETS)
+    assert "docker history" in str(caught.value), "the refusal's own words, not fill()'s"
+    assert SECRET not in str(caught.value), "a refusal about a secret does not print it"
+
+
+def test_render_drops_every_refused_token_from_the_mapping_it_fills_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The belt covers the whole set, not the first entry: neither key reaches `fill()`.
+
+    Same seam as the single-key test above, over two tokens, because a belt written as one
+    `!=` comparison passes that one and lets everything else through.
+    """
+    monkeypatch.setattr(dockerfile, "SECRET_TOKENS", frozenset({"DB_PASSWORD", "SOAP_PASSWORD"}))
+    seen: list[dict[str, str]] = []
+    real = composegen.fill
+
+    def spy(text: str, tokens: Mapping[str, str]) -> str:
+        seen.append(dict(tokens))
+        return real(text, tokens)
+
+    monkeypatch.setattr(composegen, "fill", spy)
+    secrets = {"DB_PASSWORD": SECRET, "SOAP_PASSWORD": "tbc-fedcba9876543210"}
+    text, ignore = dockerfile.render(templates(tmp_path), {**TOKENS, **secrets}, secrets=SECRETS)
+    assert len(seen) == 2, "one call per template half"
+    for tokens in seen:
+        assert not (secrets.keys() & tokens.keys()), "no refused key reaches the substitution"
+        assert tokens["CORE_DIR"] == "/opt/mangos", "the rest of the mapping is untouched"
+    for value in secrets.values():
+        assert value not in text and value not in ignore
+
+
+def test_a_spaced_placeholder_is_refused_as_unfilled_and_not_by_the_secret_rule(
+    tmp_path: Path,
+) -> None:
+    """`{{ DB_PASSWORD }}` is refused too — by `fill()`, and the message has to say so.
+
+    `composegen.fill()` substitutes by literal `out.replace("{{" + key + "}}", value)`,
+    so the spaced spelling is never matched at all, with or without the key in the
+    mapping. A `{{` therefore survives and `fill()` raises "not a closed placeholder". The
+    by-name refusal never sees it either, for the same reason: it looks for the exact
+    `{{DB_PASSWORD}}`.
+
+    WITHDRAWN, from the docstring this replaces: "the belt is what does it ... a change to
+    the belt would turn this near-miss into a rendered password silently". Both sentences
+    were false, and were disproved by mutation on 2026-09-01: with the belt removed
+    (`safe = dict(tokens)`) this test PASSED, while
+    `test_render_never_hands_the_secret_to_the_substitution` and
+    `test_render_drops_every_refused_token_from_the_mapping_it_fills_with` failed. Those
+    two guard the belt; this one never did. A test's stated reason for existing is not
+    checked by running it, which is how a false one got past review here.
+
+    What it does pin, and the reason to keep it: WHICH rule fired, "unfilled" and "not a
+    closed", and NOT "docker history". A near-miss reported as a secret violation would
+    send the next reader to the wrong guard.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV PW={{ DB_PASSWORD }}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(dockerfile.DockerfileError, match="not a closed") as caught:
+        dockerfile.render(folder, {**TOKENS, "DB_PASSWORD": SECRET}, secrets=SECRETS)
+    said = str(caught.value)
+    assert "unfilled" in said, "fill()'s rule fired, not the by-name refusal's"
+    assert "docker history" not in said
+    assert SECRET not in said
+
+
+# -- render: a secret the declaration never named -----------------------------
+
+
+def test_render_refuses_a_secret_bearing_token_the_declaration_never_named(
+    tmp_path: Path,
+) -> None:
+    """The bug-checklist §29 probe, run as a test.
+
+    `SECRET_TOKENS` is derived from `native.Secrets`, which is the right coupling and is
+    not this. The mapping handed to `render()` is built BY HAND, and a key in it that
+    corresponds to no `Secrets` field is invisible to a by-name refusal — the caller did
+    not have to use the dataclass at all.
+
+    Measured against the real module on m910q, 2026-09-04, before this rule existed, and
+    the lines are §29's own probe reproduced:
+
+        Secrets fields          : ['db_password']
+        SECRET_TOKENS           : ['DB_PASSWORD']
+        render() with an undeclared secret key -> type _Rendered | secret in text: True
+        write() accepted it: ['Dockerfile', '.dockerignore']
+        Dockerfile on disk contains the secret: True
+        the line it wrote: ['ENV SOAP_PASSWORD=tbc-0123456789abcdef']
+
+    `write()` had nothing to say because the text really was `render()`'s own output: the
+    provenance rule inherits `render()`'s refusal whole, so a hole in `render()` is a hole
+    in `write()` too. One rule violated by this fixture: the mapping carries a
+    secret-bearing name that is not a `Secrets` field.
+
+    **The value it leaks is `NOT_THE_SECRET` and not `SECRET`, which is a change from
+    what §29's probe actually ran.** The probe put the install's own password under
+    `SOAP_PASSWORD`, so once the VALUE half landed that fixture violated two rules at
+    once and — the value rule running first — would have kept passing with
+    `SECRET_NAME_WORDS` deleted outright. The probe's own shape is preserved by
+    `test_a_key_that_trips_both_rules_is_reported_by_the_one_that_proved_it`; this one
+    keeps the NAME rule honest by leaking something the declaration has never held.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV SOAP_PASSWORD={{SOAP_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(dockerfile.DockerfileError, match="SOAP_PASSWORD") as caught:
+        dockerfile.render(folder, {**TOKENS, "SOAP_PASSWORD": NOT_THE_SECRET}, secrets=SECRETS)
+    said = str(caught.value)
+    assert "reads as a secret" in said, "the NAME rule fired, not the template rule"
+    assert "native.Secrets" in said, "and it says where a real secret is declared"
+    assert NOT_THE_SECRET not in said, "a refusal about a secret does not print it"
+
+
+def test_render_refuses_the_undeclared_secret_name_even_when_no_template_spells_it(
+    tmp_path: Path,
+) -> None:
+    """The rule reads the MAPPING, not the rendered text, and that is the whole point.
+
+    §29's opening sentence about the case it replaced is *"nothing exploited it; the
+    exposure was one template edit away"*. A guard that only fired once a template spelled
+    the token would be a guard against today's templates — the same LOCATION-shaped
+    protection that was defeated twice already (a template planted in `shared/cmangos/`,
+    then `--installers-root` pointing the engine at a tree no glob walks). A build-context
+    mapping carrying an undeclared secret is the defect; what the templates happen to
+    spend today is not part of it.
+
+    One rule violated: the same undeclared name. The templates here are the stand-in pair,
+    which spells `CORE_DIR` and `MAKE_JOBS` and nothing else, so `fill()` would have been
+    perfectly happy and the render would have succeeded.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match="SOAP_PASSWORD") as caught:
+        dockerfile.render(
+            templates(tmp_path), {**TOKENS, "SOAP_PASSWORD": NOT_THE_SECRET}, secrets=SECRETS
+        )
+    assert "reads as a secret" in str(caught.value)
+
+
+@pytest.mark.parametrize("word", sorted(dockerfile.SECRET_NAME_WORDS))
+def test_every_word_that_announces_a_secret_is_refused_as_a_token_name(
+    word: str, tmp_path: Path
+) -> None:
+    """One case per word in the vocabulary, generated from the vocabulary itself.
+
+    This proves that every word the set holds is really reachable through `render()`; it
+    proves nothing about a word the set has LOST. A word deleted from `SECRET_NAME_WORDS`
+    takes its own case away with it, and the run narrows SILENTLY: measured 2026-09-04 on
+    m910q, the set cut from six words to three gave `58 passed` against `61 passed` and
+    zero failures. (This docstring said the opposite in the commit that added it — "this
+    goes red rather than silently narrowing" — and that sentence was measured false.) The
+    empty set is the same shape one step further: pytest SKIPS a test whose parameter
+    list is empty, measured on the sibling
+    `test_every_token_the_secret_declaration_produces_is_refused_in_a_template` on
+    2026-09-01. Both are held by the literal list in
+    `test_the_secret_name_vocabulary_spells_every_word_and_the_measured_leaks` below,
+    outside the parametrize, which is the only test that knows a word by name.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match=f"CUSTOM_{word}"):
+        dockerfile.render(
+            templates(tmp_path), {**TOKENS, f"CUSTOM_{word}": NOT_THE_SECRET}, secrets=SECRETS
+        )
+
+
+VOCABULARY = frozenset(
+    {"PASSWORD", "PASSWD", "SECRET", "CREDENTIAL", "APIKEY", "PRIVATEKEY", "PRIVKEY"}
+)
+"""Every word of `SECRET_NAME_WORDS`, restated as literals so a deletion has a witness.
+
+A superset check, not equality: a word ADDED to the set arrives in the parametrized
+per-word test on its own and needs nothing here, while a word DELETED is exactly what that
+test cannot see."""
+
+
+def test_the_secret_name_vocabulary_spells_every_word_and_the_measured_leaks() -> None:
+    """Each word by name, and the three leaks that have actually been measured.
+
+    All three filed the secret under a `*PASSWORD` name — `SOAP_PASSWORD` (§29's probe,
+    2026-09-02) and `ROOT_PASSWORD` twice (M15 on 2026-09-01, M-R2 on 2026-09-02, both
+    recorded in `CmangosInstaller._public_tokens`'s docstring). That is what the
+    vocabulary is fitted to.
+
+    The literal list is the whole reason this test exists beside the parametrized one:
+    that one is generated FROM the set, so it shrank with the set — six words to three,
+    `58 passed` against `61`, zero failures, measured 2026-09-04 on m910q while this test
+    still named only `PASSWORD`. Deleting `CREDENTIAL` from the set with this list in
+    place was the RED that proved the list: `AssertionError: frozenset({'CREDENTIAL'})`,
+    `1 failed, 67 passed`, same box, same day.
+    """
+    missing = VOCABULARY - dockerfile.SECRET_NAME_WORDS
+    assert not missing, missing
+    for leaked in ("SOAP_PASSWORD", "ROOT_PASSWORD", "DB_ROOT_PASSWORD"):
+        assert dockerfile.announces_a_secret(leaked), leaked
+
+
+@pytest.mark.parametrize("key", ["soap_password", "Root_Password", "api_key", "privkey"])
+def test_the_case_of_a_key_is_not_a_way_past_the_name_rule(key: str, tmp_path: Path) -> None:
+    """`soap_password` is `SOAP_PASSWORD`; the rule folds case before it looks.
+
+    Every other case in this file hands the rule a key already in upper case, so the
+    `.upper()` in `announces_a_secret()` was a surviving mutant: dropped, the file stayed
+    `61 passed` on m910q, 2026-09-04. These four are the keys that fail without it, and
+    the refusal names the key as the caller spelled it.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match=key):
+        dockerfile.render(templates(tmp_path), {**TOKENS, key: NOT_THE_SECRET}, secrets=SECRETS)
+
+
+@pytest.mark.parametrize("key", ["PRIVKEY", "PRIV_KEY", "SSH_PRIVKEY"])
+def test_privkey_is_the_keystroke_the_underscore_rule_argued_about(
+    key: str, tmp_path: Path
+) -> None:
+    """`PRIVKEY` is `PRIVATEKEY` with three letters dropped, which nobody reads as a decision.
+
+    The underscore rule's own principle — a difference of one keystroke is not a security
+    decision — reached `PRIVATE_KEY` and stopped at the vocabulary: probed against the
+    real module on m910q, 2026-09-04, with `PRIVATEKEY` the only spelling in the set,
+    `PRIVKEY -> ACCEPTED, secret in text: True` and `PRIV_KEY` the same. `PRIVKEY` is a
+    word of its own in `SECRET_NAME_WORDS` for that reason; `PRIVATEKEY` does not contain
+    it, so squashing could never have reached it.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match=key):
+        dockerfile.render(templates(tmp_path), {**TOKENS, key: NOT_THE_SECRET}, secrets=SECRETS)
+
+
+@pytest.mark.parametrize("key", ["API_KEY", "APIKEY", "PRIVATE_KEY", "PRIVATEKEY"])
+def test_the_underscore_is_not_a_way_past_the_name_rule(key: str, tmp_path: Path) -> None:
+    """`API_KEY` and `APIKEY` are one name, so the rule squashes `_` before it looks.
+
+    Written as a plain substring test over the key as spelled, `APIKEY` would be caught and
+    `API_KEY` would not — and the difference between them is a keystroke nobody would read
+    as a security decision.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match=key):
+        dockerfile.render(templates(tmp_path), {**TOKENS, key: NOT_THE_SECRET}, secrets=SECRETS)
+
+
+def test_a_declared_secret_is_reported_by_the_template_rule_and_not_by_the_name_rule(
+    tmp_path: Path,
+) -> None:
+    """`DB_PASSWORD` announces a secret AND is declared, and only one refusal may fire.
+
+    The name rule exists for the names `SECRET_TOKENS` cannot cover; for a declared field
+    the older machinery is strictly better — the key is DROPPED from the mapping `fill()`
+    sees, and a template spelling it is refused by its own path. Reporting a declared
+    secret as "not a field of native.Secrets" would send the next reader to add a field
+    that is already there.
+
+    One rule violated: the template spells a refused token. The key is declared, so the
+    name rule has nothing to say about it.
+    """
+    folder = templates(tmp_path)
+    (folder / "Dockerfile.tmpl").write_text(
+        "FROM debian:12\nENV DB_PASSWORD={{DB_PASSWORD}}\n", encoding="utf-8", newline="\n"
+    )
+    with pytest.raises(dockerfile.DockerfileError) as caught:
+        dockerfile.render(folder, {**TOKENS, "DB_PASSWORD": SECRET}, secrets=SECRETS)
+    said = str(caught.value)
+    assert "Dockerfile.tmpl" in said and "docker history" in said, "the template rule"
+    assert "reads as a secret" not in said, "and not the name rule as well"
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_no_catalog_token_a_shipped_entry_produces_reads_as_a_secret(entry: CatalogEntry) -> None:
+    """The rule must not refuse the mapping production actually renders from.
+
+    `composegen.entry_tokens()` is the catalog-derived half of
+    `CmangosInstaller._public_tokens()`; the per-install half it is merged with
+    (`PROJECT_NAME`, `IMAGE_PREFIX`, `IMAGE_TAG`, the three ports, `REALM_HOST`) is string
+    literals in `families/cmangos.py`, another module's file, and is exercised through the
+    `write-dockerfile` stage in `test_families_cmangos.py` rather than restated here.
+    """
+    offenders = sorted(
+        key for key in composegen.entry_tokens(entry) if dockerfile.announces_a_secret(key)
+    )
+    assert offenders == [], f"{entry.id} would be refused by the name rule"
+
+
+# -- render: a secret the caller filed under a name that announces nothing ----
+#
+# The VALUE half of `pyplan/bug-checklist.md` §29. Everything above reads a token NAME;
+# nothing above can see a password spelled `BUILD_ARG`, and the probe that says so is
+# quoted in the first test below.
+
+
+@pytest.mark.parametrize("key", ["BUILD_ARG", "EXTRA", "FOO", "CORE_DIR"])
+def test_render_refuses_a_bland_key_carrying_the_declared_secret(key: str, tmp_path: Path) -> None:
+    """§29's VALUE half, and the RED it was still open on.
+
+    Measured against the shipped module on m910q, 2026-09-05, on a copy of the tree at
+    `0cc637c7`, `Secrets` declaring one field:
+
+        SOAP_PASSWORD  -> REFUSED: "SOAP_PASSWORD: each of those reads as a secret ..."
+        BUILD_ARG      -> ACCEPTED, secret in text: True
+                          write() accepted it: ['Dockerfile', '.dockerignore']
+                          Dockerfile on disk contains the secret: True
+                          the line it wrote: ['ENV BUILD_ARG=tbc-0123456789abcdef']
+        EXTRA          -> ACCEPTED, secret in text: True
+        FOO            -> ACCEPTED, secret in text: True
+
+    Only the spelling of the key was guarded. `CORE_DIR` is in the list because it is not
+    a made-up name at all — it is a token the shipped templates really spend, so the rule
+    has to be about the value and not about which keys look invented.
+
+    One rule violated by this fixture: the mapping files a declared secret's VALUE under
+    a key this renderer does not drop. The name announces nothing, so the name rule has
+    nothing to say — asserted below, not assumed.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match=key) as caught:
+        dockerfile.render(templates(tmp_path), {**TOKENS, key: SECRET}, secrets=SECRETS)
+    said = str(caught.value)
+    assert "DB_PASSWORD" in said, "it names the declaration the value belongs to"
+    assert "docker history" in said, "and why a Dockerfile is the expensive place for it"
+    assert "reads as a secret" not in said, "the VALUE rule fired, not the name rule"
+    assert not dockerfile.announces_a_secret(key), "this key must not be catchable by name"
+
+
+def test_the_refusal_about_a_carried_secret_never_prints_the_secret(tmp_path: Path) -> None:
+    """A refusal that echoes the password moves it from a file into a log and a dialog.
+
+    Not only printed — PERSISTED. `_write_dockerfile` re-raises this as
+    `InstallerError(str(exc))`, and `StagedInstaller.run()` catches `InstallerError` and
+    calls `_record_error(server_dir, state, str(exc))`, which writes that sentence into
+    the install state file as `last_error` (`native.py`, verified 2026-09-05; the symbols
+    are cited rather than the line numbers, which move). `native._without()` — the
+    redaction that does exist — is spent in exactly one place, the realmlist SQL log
+    line, and not on this path. So the refusal's own words are the whole of the
+    protection here. Checked over the message, its `repr`, and the exception's `args`.
+    """
+    with pytest.raises(dockerfile.DockerfileError) as caught:
+        dockerfile.render(templates(tmp_path), {**TOKENS, "BUILD_ARG": SECRET}, secrets=SECRETS)
+    assert SECRET not in str(caught.value)
+    assert SECRET not in repr(caught.value)
+    assert not [arg for arg in caught.value.args if SECRET in str(arg)]
+
+
+def test_a_secret_buried_inside_a_longer_value_is_refused_as_well(tmp_path: Path) -> None:
+    """Containment, not equality: a leak does not have to be tidy to be a leak.
+
+    `--db-pass=<the password>` under `BUILD_ARG` reaches the same image layer as the bare
+    value would, and `docker history` prints the whole line. Equality alone waves it
+    through, which is why `carries_a_secret()` is containment above
+    `MIN_CONTAINED_SECRET`.
+    """
+    buried = f"--db-pass={SECRET} --verbose"
+    with pytest.raises(dockerfile.DockerfileError, match="BUILD_ARG") as caught:
+        dockerfile.render(templates(tmp_path), {**TOKENS, "BUILD_ARG": buried}, secrets=SECRETS)
+    assert SECRET not in str(caught.value)
+    assert buried not in str(caught.value), "nor the string it was buried in"
+
+
+def test_a_key_that_trips_both_rules_is_reported_by_the_one_that_proved_it(
+    tmp_path: Path,
+) -> None:
+    """§29's original probe — `SOAP_PASSWORD` holding the real password — trips two rules.
+
+    Only one sentence can be printed, and the order is a decision. The value rule reports
+    something PROVED by comparison against the declaration ("this is the value declared
+    as DB_PASSWORD"); the name rule reports a guess about spelling ("this READS as a
+    secret"), and its remedy — rename it, or declare it — is the wrong advice for a key
+    holding the install's actual password, which has to go rather than be renamed.
+
+    This is also what keeps the sibling name-rule tests honest: they had to stop leaking
+    `SECRET` when this ordering landed, or they would have been passing on this rule's
+    behaviour while claiming to prove theirs.
+    """
+    with pytest.raises(dockerfile.DockerfileError, match="SOAP_PASSWORD") as caught:
+        dockerfile.render(templates(tmp_path), {**TOKENS, "SOAP_PASSWORD": SECRET}, secrets=SECRETS)
+    said = str(caught.value)
+    assert "the value declared as DB_PASSWORD" in said, "the rule that proved it"
+    assert "reads as a secret" not in said, "not the one that guessed"
+    assert SECRET not in said
+
+
+def test_the_declared_token_may_carry_its_own_secret_and_nothing_else_may(
+    tmp_path: Path,
+) -> None:
+    """The exemption is the tokens this module DROPS, which is the whole point of them.
+
+    `_secret_tokens()` exists to carry the password to the consumers that need it, and
+    `test_a_dockerfile_template_the_glob_cannot_see_still_cannot_bake_the_secret` hands
+    that mapping to `render()` on purpose. So a value under `DB_PASSWORD` is not an
+    offence — the key is dropped two lines later. The same value under any other name is.
+    """
+    text, ignore = dockerfile.render(
+        templates(tmp_path), {**TOKENS, "DB_PASSWORD": SECRET}, secrets=SECRETS
+    )
+    assert SECRET not in text and SECRET not in ignore, "dropped, not rendered"
+    with pytest.raises(dockerfile.DockerfileError, match="BUILD_ARG"):
+        dockerfile.render(
+            templates(tmp_path / "again"),
+            {**TOKENS, "BUILD_ARG": SECRET},
+            secrets=SECRETS,
+        )
+
+
+def test_a_secret_declared_only_on_a_subclass_is_refused_under_its_own_token_too(
+    tmp_path: Path,
+) -> None:
+    """The exemption reads `SECRET_TOKENS`, not the fields of the instance, and must.
+
+    `SECRET_TOKENS` comes from `native.Secrets`, so a subclass's extra field has no token
+    in it — meaning `render()` would NOT drop such a key and would fill it straight into
+    the build context. Exempting "every token the instance declares" would therefore have
+    opened a hole rather than closed one: the value rule would wave `API_TOKEN` through
+    and nothing downstream would remove it.
+
+    One rule violated: a declared secret's value under a key this module does not drop.
+    That the key is that secret's own declared name is exactly what does not save it.
+    """
+
+    @dataclass(frozen=True)
+    class TwoSecrets(native.Secrets):
+        api_token: str = "second-secret-6b2d0f11"
+
+    secrets = TwoSecrets(db_password=SECRET)
+    assert "API_TOKEN" not in dockerfile.SECRET_TOKENS, "premise: nothing drops this key"
+    with pytest.raises(dockerfile.DockerfileError, match="API_TOKEN") as caught:
+        dockerfile.render(
+            templates(tmp_path), {**TOKENS, "API_TOKEN": secrets.api_token}, secrets=secrets
+        )
+    assert secrets.api_token not in str(caught.value)
+
+
+def test_a_caller_that_forgets_the_secrets_argument_fails_instead_of_losing_the_guard(
+    tmp_path: Path,
+) -> None:
+    """§29 rejected an OPTIONAL `secrets=`, and it was right to; this is the other object.
+
+    An optional parameter defaults to "none declared", so the second caller — the one who
+    copies the `render()` line without the `secrets=` on it — gets a green render with no
+    value rule at all, and nothing anywhere says the guard stopped running. That is
+    [[guards-that-prove-declarations]] a fifth time.
+
+    Keyword-only and required means the same slip is a `TypeError` at the call, before a
+    template is read. Written as a runtime test and not as a note about mypy: `render()`
+    is reached through `getattr` in nothing today, but a `# type: ignore` on the call site
+    is one line, and a type checker is not what runs in the user's install.
+    """
+    with pytest.raises(TypeError, match="secrets"):
+        dockerfile.render(templates(tmp_path), TOKENS)  # type: ignore[call-arg]
+
+
+def test_an_empty_declared_secret_does_not_make_every_value_a_match(tmp_path: Path) -> None:
+    """`"" in anything` is True, so an unguarded containment refuses every install.
+
+    Measured on m910q 2026-09-05 over the 34 distinct values the three shipped CMaNGOS
+    `_public_tokens()` mappings produce: the empty string is contained in all 34. An
+    empty password is not a secret; it is a declaration nobody filled in, and refusing on
+    it would turn that into an install that cannot run.
+    """
+    empty = native.Secrets(db_password="")
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=empty)
+    assert "{{" not in text and "{{" not in ignore
+    assert not dockerfile.carries_a_secret("anything at all", "")
+    assert not dockerfile.carries_a_secret("", ""), "not even an empty value equals it"
+
+
+def test_a_one_character_secret_is_matched_only_where_it_is_the_whole_value(
+    tmp_path: Path,
+) -> None:
+    """Below `MIN_CONTAINED_SECRET` it is equality, so `a` does not condemn `/opt/mangos`.
+
+    Measured on m910q 2026-09-05 over the same 34 shipped values, with
+    `server_dir=/tmp/fixedsrv/srv`: 31 of the 36 single alphanumeric characters are
+    contained in at least one, and `a` alone is in 14 of them (`/opt/mangos`,
+    `characters`, …). Containment at that length is not a strict rule, it is an install
+    that can never run. The directory is named because four of those values (two per
+    mapping, `IMAGE_TAG` and `PROJECT_NAME`) carry an 8-hex digest of it and both counts
+    move with it — this docstring said 30 and 16 until
+    2026-09-05, from a run under per-game temporary directories. What does not move is
+    that some single character is in some value, which is the whole argument.
+
+    Equality still fires, which is the half worth keeping: every leak ever measured into
+    this mapping put the password in verbatim under some other key, and that shape is
+    caught whatever its length.
+    """
+    tiny = native.Secrets(db_password="a")
+    assert "a" in TOKENS["CORE_DIR"], "premise: containment would refuse this render"
+    text, _ = dockerfile.render(templates(tmp_path), TOKENS, secrets=tiny)
+    assert "/opt/mangos" in text
+    with pytest.raises(dockerfile.DockerfileError, match="BUILD_ARG"):
+        dockerfile.render(templates(tmp_path / "again"), {**TOKENS, "BUILD_ARG": "a"}, secrets=tiny)
+
+
+def test_the_containment_floor_is_at_or_below_every_secret_this_app_itself_produces(
+    tmp_path: Path,
+) -> None:
+    """`MIN_CONTAINED_SECRET` is answerable to `resolve_secrets()`, not to `catalog.json`.
+
+    **Why this test was rewritten on 2026-09-05.** It used to read the entries whose
+    `install.password.mode == "fixed"` straight out of the catalog and assert the floor
+    EQUALLED the shortest of them. Two things were wrong with that. `catalog.json` is not
+    where the live secret comes from: every entry that renders a Dockerfile is
+    `mode: generated`, and the only `fixed` entry in the shipped catalog is `wow-wotlk`,
+    whose family is `azerothcore` and never calls `render()` — so the value that test
+    inspected was one production never hands the renderer (measured on m910q 2026-09-05:
+    `family_for(wow-wotlk)` is `AzerothCoreInstaller`, and `dockerfile.render` is called
+    from one place in `yulon/`, `CmangosInstaller._write_dockerfile`). And `==` is not the
+    invariant: the floor must not EXCEED the shortest secret it has to cover, so
+    lengthening `wow-wotlk`'s password would have turned this red and pointed the reader
+    at raising the floor, which `MIN_CONTAINED_SECRET`'s own docstring argues buys
+    nothing.
+
+    **What it measures instead.** The secret is produced by `resolve_secrets()`, so this
+    calls it, through the real family dispatch, on an empty server dir — the mint route
+    for a `generated` entry, the catalog value for a `fixed` one. Measured that way on
+    m910q 2026-09-05: `wow-tbc` 20, `wow-vanilla` 24, `wow-tortoise` 25, `wow-wotlk` 8.
+    Only the LENGTHS are asserted, because a minted password is 16 random hex digits and
+    the value differs on every call while its length does not — this answers the same the
+    second time.
+
+    The floor's lower bound is asserted here too, and it is the half that is about the
+    data being rendered rather than about the data being declared: `mangos` is six
+    characters and is contained in five shipped token values, so a floor at or below 6
+    would refuse every CMaNGOS install outright.
+
+    What this does NOT cover is a password the USER wrote, which `resolve_secrets()`
+    returns as written and which has no floor at all —
+    `test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence`.
+    """
+    produced: dict[str, int] = {}
+    for entry in load_catalog().games:
+        folder = tmp_path / entry.id
+        folder.mkdir()
+        produced[entry.id] = len(family_for(entry)(entry).resolve_secrets(folder).db_password)
+    assert produced, (
+        "the shipped catalog produced no entry at all, so this test would pass vacuously; "
+        "load_catalog() is what to look at, not the floor"
+    )
+    shortest = min(produced, key=lambda game: produced[game])
+    assert dockerfile.MIN_CONTAINED_SECRET <= produced[shortest], (
+        f"{shortest}'s password is {produced[shortest]} characters and the floor is "
+        f"{dockerfile.MIN_CONTAINED_SECRET}, so that install's real secret is compared by "
+        "EQUALITY only and a leak that buries it inside a longer value passes. Lower the "
+        "floor to cover it — do not raise that entry's password to suit the floor — and "
+        "re-read MIN_CONTAINED_SECRET's lower bound first: at or below 6 it refuses every "
+        "CMaNGOS install."
+    )
+    assert dockerfile.carries_a_secret("prefix-password-suffix", "password"), "at the floor"
+    assert not dockerfile.carries_a_secret("/opt/mangos", "mangos"), "below it, equality only"
+    assert dockerfile.carries_a_secret("mangos", "mangos"), "and equality still fires"
+
+
+def test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_silence(
+    tmp_path: Path,
+) -> None:
+    """The route the floor cannot cover, measured rather than promised.
+
+    `resolve_secrets()` takes an existing `<server_dir>/<password.file>` AS WRITTEN, so
+    the secret handed to `render()` on a returning install is whatever that file holds —
+    any length, including shorter than the floor. §29's residue said "no shipped entry
+    declares one, and the floor test goes red the day one is added", which is true of the
+    catalog route and says nothing about this one. This is the fixture that violates the
+    floor's premise: a password of three characters, arriving the way production's does.
+
+    What is asserted is the consequence and its limit, not a hope. Below the floor the
+    comparison is equality: the verbatim leak — the shape all four measured leaks into
+    this mapping have had — is still refused, and the buried one (`--db-pass=abc …`) is
+    NOT seen. That second assertion is the honest half; it is what would have to change if
+    the floor were ever made to depend on the file.
+
+    **Where below-floor acceptance through `render()` is pinned, and why not here.**
+    `9bff3e81` added a second, unguarded `render()` call to this test on the buried value,
+    with a comment saying the floor's deletion would make it raise. Measured on m910q
+    2026-09-05 at that commit: with the `len(secret) < MIN_CONTAINED_SECRET` branch deleted
+    from `carries_a_secret()` the two files ran `3 failed, 210 passed` and this test died on
+    the `assert not dockerfile.carries_a_secret(...)` above the added call; deleting the
+    added call and re-running the same mutation gave the same 3 failures with the same ids,
+    so it killed nothing, and the comment's claim was refuted by the code it sat in. The
+    seam at below-floor length was already pinned before that commit, by
+    `test_a_one_character_secret_is_matched_only_where_it_is_the_whole_value` in this file:
+    a one-character secret, contained in `CORE_DIR`, driven through `render()` and asserted
+    to come back rendered (`/opt/mangos` in the text). Cited by name and not by line,
+    because this file's line numbers move.
+    """
+    entry = load_catalog().get("wow-tbc")
+    plan = entry.install.password
+    assert plan.mode == "generated" and plan.file, "premise: this entry's secret comes from a file"
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    (server_dir / plan.file).write_text("abc\n", encoding="utf-8")
+
+    secret = family_for(entry)(entry).resolve_secrets(server_dir).db_password
+    assert secret == "abc", "the file is what production reads, and it was read"
+    assert len(secret) < dockerfile.MIN_CONTAINED_SECRET, "and it is below the floor"
+
+    assert dockerfile.carries_a_secret(secret, secret), "verbatim under another key is refused"
+    assert not dockerfile.carries_a_secret(f"--db-pass={secret} --verbose", secret), (
+        "buried in a longer value it is NOT — the floor exists because containment on a "
+        "three-character string would refuse every install, and this is what that costs"
+    )
+    with pytest.raises(dockerfile.DockerfileError, match="BUILD_ARG"):
+        dockerfile.render(
+            templates(tmp_path), {**TOKENS, "BUILD_ARG": secret}, secrets=native.Secrets(secret)
+        )
+
+
+def test_no_value_that_carries_a_secret_reaches_the_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The property behind both halves, asserted at the seam `fill()` is called through.
+
+    The refusal and the key-drop are two mechanisms; what they are FOR is one sentence —
+    nothing `fill()` is handed carries a declared secret. Asserted here over the mapping
+    that actually reaches `fill()`, so an exemption widened without widening the drop
+    (which is the mistake
+    `test_a_secret_declared_only_on_a_subclass_is_refused_under_its_own_token_too`
+    describes) fails here as well, as a value rather than as a key.
+    """
+    seen: list[dict[str, str]] = []
+    real = composegen.fill
+
+    def spy(text: str, tokens: Mapping[str, str]) -> str:
+        seen.append(dict(tokens))
+        return real(text, tokens)
+
+    monkeypatch.setattr(composegen, "fill", spy)
+    dockerfile.render(templates(tmp_path), {**TOKENS, "DB_PASSWORD": SECRET}, secrets=SECRETS)
+    assert len(seen) == 2, "one call per template half"
+    for tokens in seen:
+        carried = [
+            key for key, value in tokens.items() if dockerfile.carries_a_secret(value, SECRET)
+        ]
+        assert not carried, carried
 
 
 def test_render_names_a_missing_template(tmp_path: Path) -> None:
     with pytest.raises(dockerfile.DockerfileError, match="Dockerfile.tmpl"):
-        dockerfile.render(tmp_path, TOKENS)
+        dockerfile.render(tmp_path, TOKENS, secrets=SECRETS)
 
 
 def test_render_names_the_missing_ignore_template_and_not_the_dockerfile(tmp_path: Path) -> None:
@@ -132,7 +945,7 @@ def test_render_names_the_missing_ignore_template_and_not_the_dockerfile(tmp_pat
     folder = templates(tmp_path)
     (folder / "dockerignore.tmpl").unlink()
     with pytest.raises(dockerfile.DockerfileError, match="dockerignore.tmpl") as caught:
-        dockerfile.render(folder, TOKENS)
+        dockerfile.render(folder, TOKENS, secrets=SECRETS)
     assert "Dockerfile.tmpl" not in str(caught.value)
 
 
@@ -142,7 +955,7 @@ def test_render_names_the_missing_ignore_template_and_not_the_dockerfile(tmp_pat
 def test_write_lays_both_files_and_a_second_identical_write_touches_nothing(
     tmp_path: Path,
 ) -> None:
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     written = dockerfile.write(server, text, ignore)
     assert written == (server / "Dockerfile", server / ".dockerignore")
@@ -158,7 +971,7 @@ def test_write_lays_both_files_with_lf_endings(tmp_path: Path) -> None:
     CRLF Dockerfile is a portability bug the tests above would never see: every string
     comparison in this file goes through `read_text()`, which translates it back.
     """
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     dockerfile.write(server, text, ignore)
     assert b"\r" not in (server / "Dockerfile").read_bytes()
@@ -167,10 +980,12 @@ def test_write_lays_both_files_with_lf_endings(tmp_path: Path) -> None:
 
 
 def test_write_rewrites_a_marked_file_whose_text_changed(tmp_path: Path) -> None:
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     dockerfile.write(server, text, ignore)
-    newer, _ = dockerfile.render(templates(tmp_path / "v2"), {**TOKENS, "MAKE_JOBS": "4"})
+    newer, _ = dockerfile.render(
+        templates(tmp_path / "v2"), {**TOKENS, "MAKE_JOBS": "4"}, secrets=SECRETS
+    )
     assert dockerfile.write(server, newer, ignore) == (server / "Dockerfile",)
     assert "make -j4" in (server / "Dockerfile").read_text(encoding="utf-8")
 
@@ -183,7 +998,7 @@ def test_write_rewrites_a_marked_file_that_is_byte_for_byte_crlf(tmp_path: Path)
     exactly the state a `git add` / `git checkout` round-trip of a generated file, or an
     editor with the wrong default, leaves behind.
     """
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     (server / "Dockerfile").write_bytes(text.replace("\n", "\r\n").encode())
     assert dockerfile.write(server, text, ignore) == (
@@ -203,10 +1018,12 @@ def test_write_reads_each_file_once_so_a_flaky_read_cannot_accuse_the_user(
     accusation about the user's folder that the first read had already disproved. The
     file here is readable exactly once.
     """
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     dockerfile.write(server, text, ignore)
-    newer, _ = dockerfile.render(templates(tmp_path / "v2"), {**TOKENS, "MAKE_JOBS": "4"})
+    newer, _ = dockerfile.render(
+        templates(tmp_path / "v2"), {**TOKENS, "MAKE_JOBS": "4"}, secrets=SECRETS
+    )
 
     real_open = Path.open
     reads: dict[str, int] = {}
@@ -226,7 +1043,9 @@ def test_write_reads_each_file_once_so_a_flaky_read_cannot_accuse_the_user(
 @pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
 def test_a_shipped_pair_renders_and_writes_end_to_end(entry: CatalogEntry, tmp_path: Path) -> None:
     """The real thing: catalog tokens, shipped templates, a fresh server dir."""
-    text, ignore = dockerfile.render(shipped(entry), composegen.entry_tokens(entry))
+    text, ignore = dockerfile.render(
+        shipped(entry), composegen.entry_tokens(entry), secrets=SECRETS
+    )
     server = server_dir(tmp_path)
     assert dockerfile.write(server, text, ignore) == (
         server / "Dockerfile",
@@ -242,7 +1061,7 @@ def test_a_shipped_pair_renders_and_writes_end_to_end(entry: CatalogEntry, tmp_p
 
 
 def test_write_refuses_a_dockerfile_it_did_not_write(tmp_path: Path) -> None:
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     (server / "Dockerfile").write_text("FROM somebody-elses:image\n", encoding="utf-8")
     with pytest.raises(dockerfile.DockerfileError, match="not written by Yu'lon") as caught:
@@ -259,7 +1078,7 @@ def test_a_foreign_dockerignore_stops_the_dockerfile_from_being_written(tmp_path
     build context — and the retry after the user moves the file aside would find the
     Dockerfile already there and skip it, so the pair could never be proved consistent.
     """
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     (server / ".dockerignore").write_text("node_modules\n", encoding="utf-8")
     with pytest.raises(dockerfile.DockerfileError, match=r"\.dockerignore"):
@@ -275,7 +1094,7 @@ def test_a_marker_below_the_first_line_does_not_make_a_file_ours(tmp_path: Path)
     merely quotes it — has not handed the engine permission to delete it. The first line
     is the one place a marker cannot arrive by accident.
     """
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     theirs = f"FROM somebody-elses:image\n# copied from {composegen.GENERATED_MARKER}\n"
     (server / "Dockerfile").write_text(theirs, encoding="utf-8")
@@ -298,7 +1117,7 @@ def test_the_marker_is_composegens_and_not_a_second_spelling(
         f"{composegen.GENERATED_MARKER}\nFROM debian:12\n", encoding="utf-8"
     )
     monkeypatch.setattr(composegen, "GENERATED_MARKER", "# written by something else")
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     with pytest.raises(dockerfile.DockerfileError, match="not written by Yu'lon"):
         dockerfile.write(server, text, ignore)
 
@@ -315,7 +1134,7 @@ def test_write_says_it_could_not_tell_when_the_file_cannot_be_read(
     file was not written by Yu'lon ... point the install at an empty folder" — a claim
     about a file nobody could open, and the wrong remedy for a permission problem.
     """
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     (server / "Dockerfile").write_text(
         f"{composegen.GENERATED_MARKER}\nFROM debian:12\n", encoding="utf-8"
@@ -338,7 +1157,7 @@ def test_write_says_it_could_not_tell_when_the_file_cannot_be_read(
 
 def test_write_says_it_could_not_tell_when_a_directory_is_in_the_way(tmp_path: Path) -> None:
     """A real OS error, unpatched: a folder named `Dockerfile` opens on no platform."""
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     (server / "Dockerfile").mkdir()
     with pytest.raises(dockerfile.DockerfileError, match="could not be read") as caught:
@@ -351,9 +1170,15 @@ def test_write_says_it_could_not_tell_when_a_directory_is_in_the_way(tmp_path: P
 
 
 def test_write_refuses_text_that_carries_no_marker(tmp_path: Path) -> None:
+    """The `.dockerignore` half is `render()`'s own, so the Dockerfile's missing marker is
+    the one thing wrong with this pair. Unmarked text is unrendered text as well — nothing
+    `render()` returns lacks the marker — and the marker check runs FIRST so this failure
+    is reported as the missing marker rather than as unknown provenance."""
+    _, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
-    with pytest.raises(dockerfile.DockerfileError, match="marker"):
-        dockerfile.write(server, "FROM x\n", f"{composegen.GENERATED_MARKER}\n.git\n")
+    with pytest.raises(dockerfile.DockerfileError, match="marker") as caught:
+        dockerfile.write(server, "FROM x\n", ignore)
+    assert "did not come from" not in str(caught.value)
     assert not (server / "Dockerfile").exists()
 
 
@@ -361,19 +1186,140 @@ def test_write_refuses_ignore_text_that_carries_no_marker(tmp_path: Path) -> Non
     """The `.dockerignore` half is guarded too, and by its own name.
 
     An unmarked `.dockerignore` written once is a file this engine can never rewrite:
-    the next install would refuse the whole folder as somebody else's.
+    the next install would refuse the whole folder as somebody else's. The Dockerfile half
+    is `render()`'s own so that the ignore half is the only thing wrong here.
     """
+    text, _ = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
     with pytest.raises(dockerfile.DockerfileError, match=r"\.dockerignore") as caught:
-        dockerfile.write(server, f"{composegen.GENERATED_MARKER}\nFROM x\n", "*\n")
+        dockerfile.write(server, text, "*\n")
     assert "marker" in str(caught.value)
     assert not (server / "Dockerfile").exists() and not (server / ".dockerignore").exists()
 
 
+def test_write_refuses_marked_text_that_did_not_come_from_render(tmp_path: Path) -> None:
+    """The D4 defeat: `write()` is a public entry point and it used to trust its caller.
+
+    Measured on the unfixed code (b8973c52): `write()` was handed marked text reading
+    `ENV PW=tbc-0123456789abcdef`, wrote both files, and the password sat in the build
+    context — it validated the marker it generates itself and nothing about the content.
+    It cannot recognise the value (the secrets live in `native.Secrets`, which never
+    reaches this signature), so what it requires instead is `render()`'s own output, which
+    inherits `render()`'s refusal whole.
+
+    One rule violated: the text is not rendered. It carries the marker, and the folder is
+    empty, so neither of the other two refusals has anything to say about it.
+    """
+    _, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
+    server = server_dir(tmp_path)
+    poisoned = f"{composegen.GENERATED_MARKER}\nFROM debian:12\nENV PW={SECRET}\n"
+    with pytest.raises(dockerfile.DockerfileError, match="did not come from") as caught:
+        dockerfile.write(server, poisoned, ignore)
+    assert "render()" in str(caught.value), "and the sentence says what to do instead"
+    assert list(server.iterdir()) == [], "nothing written on a refusal"
+
+
+def test_write_refuses_rendered_text_that_was_edited_after_it_was_rendered(
+    tmp_path: Path,
+) -> None:
+    """A string operation on rendered text yields a plain `str`, and that is the intent.
+
+    Text edited after the render is not the text `render()` checked, so the guarantee
+    `write()` inherits no longer covers it. The edit here is innocent; the point is that
+    the seam does not care, because it cannot tell an innocent edit from a pasted secret.
+    """
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
+    server = server_dir(tmp_path)
+    with pytest.raises(dockerfile.DockerfileError, match="did not come from"):
+        dockerfile.write(server, text.replace("debian:12", "debian:13"), ignore)
+    assert list(server.iterdir()) == []
+
+
 def test_write_names_the_file_it_could_not_lay_down(tmp_path: Path) -> None:
     """A write that fails (no folder, full disk) is this module's error, not a traceback."""
-    text, ignore = dockerfile.render(templates(tmp_path), TOKENS)
+    text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     missing = tmp_path / "nowhere"
     with pytest.raises(dockerfile.DockerfileError, match="could not be written") as caught:
         dockerfile.write(missing, text, ignore)
     assert str(missing / "Dockerfile") in str(caught.value)
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_every_cmangos_build_forces_http_1_1_before_cmake_runs(entry: CatalogEntry) -> None:
+    """A build that CLONES from GitHub over HTTP/2 fails, so all three forbid HTTP/2.
+
+    The clone is real for TWO of the three: `wow-tbc` and `wow-vanilla` build
+    `cmangos/mangos-tbc` and `cmangos/mangos-classic`, whose
+    `dep/src/CMakeLists.txt` runs `FetchContent_MakeAvailable(zlib)` and so
+    clones madler/zlib at CONFIGURE time, before compiling anything. It is NOT
+    true of `wow-tortoise`: that entry builds `Shyalya/tortoise-wow` branch
+    `playerbots-integration-gh`, whose `dep/src/CMakeLists.txt` is an old MaNGOS
+    file with no FetchContent at all -- its whole zlib handling is `if(WIN32)
+    add_subdirectory(zlib) endif()` over a vendored tree. Tortoise is asserted
+    here anyway and on purpose: the line costs nothing, it covers whatever git
+    that build does run, and three templates that agree beat two that agree plus
+    one exception nobody remembers.
+
+    Measured on `yulon-ubuntu` 2026-09-02, first WoW Vanilla install: three failed
+    clones, `could not read Username for 'https://github.com'` / `expected
+    flush after ref listing`, cmake dead at `Build step for zlib failed: 2`.
+    `git ls-remote` from `alpine/git` on that same box worked, from
+    `ubuntu:22.04` failed, and from `ubuntu:22.04` with `-c
+    http.version=HTTP/1.1` worked.
+
+    Parametrised over all three entries and asserted on the SHIPPED templates,
+    not on a fixture: TBC built fine on m910q with no such line, so a test
+    written against one entry -- or against a template a test authored itself
+    -- would have passed while two real builds stayed broken on any network
+    with this fault.
+
+    ORDER is asserted, not presence. The line is worthless after the cmake step
+    that does the cloning, and `git config` placed below `RUN cmake` is a
+    perfectly plausible edit that presence alone would accept.
+
+    `git.py` makes the same choice for the clones this app performs, measured
+    from the other side on real Windows. This is the build context agreeing
+    with it.
+    """
+    text, _ = dockerfile.render(shipped(entry), composegen.entry_tokens(entry), secrets=SECRETS)
+
+    assert "http.version HTTP/1.1" in text, f"{entry.id} lets its build clone over HTTP/2"
+    # `cmake ..` and not `cmake`: the bare word matches the APT PACKAGE NAME in
+    # the install list first, which sits above this line in every template, so
+    # the loose spelling failed all three entries against a correct fix.
+    assert text.index("http.version HTTP/1.1") < text.index(
+        "cmake .."
+    ), f"{entry.id} sets HTTP/1.1 after the cmake step that does the cloning"
+
+
+@pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
+def test_the_ready_wait_outlasts_a_measured_first_boot(entry: CatalogEntry) -> None:
+    """A slow first boot must not be reported to the user as a failed install.
+
+    Measured on m910q 2026-09-02, WoW TBC, 4 cores, first boot: container
+    started 15:51:15, first `Avg Diff:` at 16:04:28 -- 793 seconds. The entries
+    carried 600, so the install reported
+
+        The server started but never reported ready.
+
+    while all three containers stayed Up and the world server sat idle printing
+    `Avg Diff: 50. Sessions online: 0.` It had been running 44 minutes by the
+    time anyone looked.
+
+    The floor is the MEASURED 793s and not the shipped number, so this fails if
+    anyone lowers the timeout back under a boot that really happened. Being
+    generous costs nothing here: `restart_loop` catches the server that is
+    never coming up, so this value only ever binds on one that is merely slow,
+    and 4 cores is not the slowest machine a user will have.
+
+    All three CMaNGOS entries, though only TBC was timed: they share the family,
+    the boot work and the marker, and Vanilla was mid-build when this was
+    written. If one of them turns out to need more, that is a measurement to
+    take, not a reason to leave the other two under a number already disproved.
+    """
+    ready = entry.install.native.ready
+    assert ready is not None, f"{entry.id} has no ready markers"
+    assert ready.timeout_s >= 793, (
+        f"{entry.id} gives up after {ready.timeout_s}s, under the 793s a TBC first boot "
+        "actually took -- a working server reported as a failed install"
+    )

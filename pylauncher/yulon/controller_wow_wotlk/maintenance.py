@@ -227,10 +227,36 @@ class DockerMysql:
     traceback frame dump in a UI error handler (review, 2026-08-23)."""
     wsl_distro: str | None = None
     """The WSL2 distro this server's docker lives in, if it is not local."""
+    client: str | None = None
+    """This game's declared database client, `install.native.db.client`.
+
+    The same value `apply.DockerSql` carries, threaded here because it is the
+    same question and there is no reason for the two to answer it differently.
+    It is a hint, not an instruction: `mysql_client()` still asks the container
+    `command -v`, and what the container says wins.
+
+    What it buys is the case where the container CANNOT be asked -- no docker
+    CLI, a timeout, an OSError. `mysql_client()` then returns the first
+    candidate, which with no declaration is `mysql`, and `mariadb:11` ships
+    neither `mysql` nor `mysqldump`. Every CMaNGOS entry this app installs is
+    on MariaDB, so unbound the fallback was wrong for three of the four games
+    and a backup died with `executable file not found` -- which reads like a
+    broken database rather than a wrong binary name.
+
+    This was left unbound until 2026-09-03 with a docstring in each CMaNGOS
+    package explaining why it did not matter, on the strength of the probe
+    always being available. `apply.DockerSql` had already been given it, so
+    one rule had two answers in the same codebase (review).
+    """
 
     def databases(self) -> tuple[str, ...]:
         proc = self._exec(
-            [mysql_client(self.db_container), "-uroot", "--batch", "--skip-column-names"],
+            [
+                mysql_client(self.db_container, client=self.client),
+                "-uroot",
+                "--batch",
+                "--skip-column-names",
+            ],
             # Over stdin like `DockerSql.run_statement()`, though this particular
             # statement holds no secret — one rule, not one rule with exceptions.
             input_text="SHOW DATABASES;\n",
@@ -253,7 +279,9 @@ class DockerMysql:
         # No database in argv: a dump taken with `--databases` carries its own
         # `CREATE DATABASE`/`USE`, so the file decides where it lands and there
         # is no second place for that answer to be wrong.
-        proc = self._exec([mysql_client(self.db_container), "-uroot"], stdin=source)
+        proc = self._exec(
+            [mysql_client(self.db_container, client=self.client), "-uroot"], stdin=source
+        )
         if proc.returncode != 0:
             raise MaintenanceError(f"restore failed: {_stderr(proc)}")
 
@@ -303,7 +331,7 @@ class DockerMysql:
         what the guide's own restore line consumes.
         """
         return [
-            mysql_client(self.db_container, "mysqldump"),
+            mysql_client(self.db_container, "mysqldump", client=self.client),
             "-uroot",
             "--single-transaction",
             "--routines",
@@ -366,13 +394,14 @@ def _stderr(proc: subprocess.CompletedProcess[bytes]) -> str:
     return (proc.stderr or b"").decode("utf-8", "replace").strip() or "no error output"
 
 
-def mysql_for(root_password: str) -> DockerMysql:
+def mysql_for(db_root_password: str) -> DockerMysql:
     """A `DockerMysql` bound to the WotLK database container (`docker_ctl.SPEC.db`).
 
     The per-game binding, in the package that owns the per-game facts — the same
-    shape as `docker_ctl.wait_db_healthy_ready()`.
+    shape as `docker_ctl.wait_db_healthy_ready()`. The client spelling is part
+    of that binding: see `DockerMysql.client`.
     """
-    return DockerMysql(docker_ctl.SPEC.db, root_password)
+    return DockerMysql(docker_ctl.SPEC.db, db_root_password, client=docker_ctl.DB_CLIENT)
 
 
 # ------------------------------------------------------------------ backup
@@ -923,6 +952,7 @@ def restore(
     *,
     confirm: str,
     spec: docker.ContainerSpec = docker_ctl.SPEC,
+    core_databases: Sequence[str] = CORE_DATABASES,
     running: RunningNames | None = None,
     wsl_distro: str | None = None,
     now: datetime | None = None,
@@ -995,7 +1025,14 @@ def restore(
         )
     kept = _usable_copies(earlier)
     safety = _safety_backup(
-        plan, mysql, kept, spec=spec, running=running, wsl_distro=wsl_distro, now=now
+        plan,
+        mysql,
+        kept,
+        spec=spec,
+        core_databases=core_databases,
+        running=running,
+        wsl_distro=wsl_distro,
+        now=now,
     )
     unresolved = _still_unresolved(earlier, plan, kept)
 
@@ -1105,6 +1142,7 @@ def _safety_backup(
     kept: dict[str, Path],
     *,
     spec: docker.ContainerSpec,
+    core_databases: Sequence[str],
     running: RunningNames | None,
     wsl_distro: str | None,
     now: datetime | None,
@@ -1147,6 +1185,16 @@ def _safety_backup(
             only=to_dump,
             label="pre-restore",
             spec=spec,
+            # THREADED, and it was not until 2026-09-04. Without it this one
+            # call fell back to AzerothCore's `CORE_DATABASES` default, so a
+            # restore on any CMaNGOS server announced "this install has no
+            # acore_auth, acore_characters, acore_world" while dumping a
+            # perfectly healthy `characters`. It is the only call of `backup()`
+            # in this package that omitted it, and it could not be fixed at the
+            # per-game wrapper, because `restore()` had no such parameter for a
+            # wrapper to bind -- which is why the fix runs three functions deep
+            # rather than one line wide.
+            core_databases=core_databases,
             running=running,
             wsl_distro=wsl_distro,
             now=now,

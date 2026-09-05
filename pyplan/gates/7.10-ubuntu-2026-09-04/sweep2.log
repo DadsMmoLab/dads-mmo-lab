@@ -1,0 +1,55 @@
+=== sweep_driver2.py ===
+started (local): 2026-09-04T12:38:52+02:00
+command: /home/pk/gate0904/venv/bin/python /home/pk/gate710/drivers/sweep_driver2.py
+---
+2026-09-04 12:38:54 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False
+2026-09-04 12:38:54 INFO [yulon.controller_wow_wotlk.console] console → ac-worldserver: ['server', 'info']
+
+==================== Modules: ManifestStore + Applier (GUI 'Modules' tab wiring) ====================
+store: <yulon.manifest_store.ManifestStore object at 0x7dd3c2d130b0> applier: <yulon.apply.Applier object at 0x7dd3c2d13080>
+  kind='module': index loaded, 21 items
+  kind='ale': index loaded, 7 items
+  kind='mod': index loaded, 11 items
+  kind='keg': index loaded, 2 items
+[OK] ManifestStore.load_index() callable for all 4 manifest kinds (module/ale/mod/keg)
+
+==================== Networking: plan(lan) / plan(internet) ====================
+mode=lan: ready=True warnings=()
+[OK] network_plan('lan') -> ready=True
+mode=internet: ready=True warnings=()
+[OK] network_plan('internet') -> ready=True
+
+==================== Maintenance: repair_import() refusal on a populated DB ====================
+current import_state: ImportState(state='populated', detail='101 rows in acore_auth.account, 1000 rows in acore_characters.characters', complete=True)
+repair_import() correctly refused: ac-worldserver, ac-authserver are running. The import rewrites the databases underneath them, and a running worldserver holds characters in memory and saves them back over whatever it finds. Press Stop first, then try again.
+[OK] repair_import() refused on populated DB: ac-worldserver, ac-authserver are running. The import rewrites the databases underneath them, and a running worldserver holds characters in memory and saves them back over whatever it finds. Press Stop first, then try again.
+
+==================== Self-update check ====================
+check_for_update(): UpdateCheck(current='0.6.59', latest='v0.6.59Public', available=False, url='https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v0.6.59Public', error=None)
+[OK] check_for_update() -> current=0.6.59 latest=v0.6.59Public available=False error=None
+
+==================== Console: send_console('server info') ====================
+console reply: ConsoleReply(command='server info', lines=('AzerothCore rev. 47960183bb03+ 2026-08-28 21:04:11 +0200 (Playerbot branch) (Unix, RelWithDebInfo, Static)', 'Connected players: 0. Characters in world: 500.', 'Connection peak: 0.', 'Minimum account security level to log in: 0.', 'Server uptime: 34 minute(s) 25 second(s)', 'Update time diff: 3ms. Last 500 diffs summary:', '|- Mean: 35ms', '|- Median: 7ms', '|- Percentiles (95, 99, max): 118ms, 125ms, 162ms'), prompted=True)
+[OK] send_console('server info') -> ConsoleReply(command='server info', lines=('AzerothCore rev. 47960183bb03+ 2026-08-28 21:04:11 +0200 (Playerbot branch) (Unix, RelWithDebInfo, Static)', 'Connected players: 0. Characters in world: 500.', 'Connection peak: 0.', 'Minimum account security level to log in: 0.', 'Server uptime: 34 minute
+
+==================== Log panel streaming: logs_source() sample ====================
+sample lines: ['\x1b[0m\x1b[36m    priest: 50, avg lvl: 51.2', '\x1b[0m\x1b[36m    dk: 50, avg lvl: 64.1', '\x1b[0m\x1b[36m    shaman: 50, avg lvl: 33.8', '\x1b[0m\x1b[36m    mage: 50, avg lvl: 39.2', '\x1b[0m\x1b[36m    warlock: 50, avg lvl: 33.1']
+[OK] logs_source() yielded 5 live line(s)
+
+
+=== SUMMARY (phase 2) ===
+OK ManifestStore.load_index() callable for all 4 manifest kinds (module/ale/mod/keg)
+OK network_plan('lan') -> ready=True
+OK network_plan('internet') -> ready=True
+OK repair_import() refused on populated DB: ac-worldserver, ac-authserver are running. The import rewrites the databases underneath them, and a running worldserver holds characters in memory and saves them back over whatever it finds. Press Stop first, then try again.
+OK check_for_update() -> current=0.6.59 latest=v0.6.59Public available=False error=None
+OK send_console('server info') -> ConsoleReply(command='server info', lines=('AzerothCore rev. 47960183bb03+ 2026-08-28 21:04:11 +0200 (Playerbot branch) (Unix, RelWithDebInfo, Static)', 'Connected players: 0. Characters in world: 500.', 'Connection peak: 0.', 'Minimum account security level to log in: 0.', 'Server uptime: 34 minute
+OK logs_source() yielded 5 live line(s)
+Fatal Python error: _enter_buffered_busy: could not acquire lock for <_io.BufferedReader name=5> at interpreter shutdown, possibly due to daemon threads
+Python runtime state: finalizing (tstate=0x0000000000ba7748)
+
+Current thread 0x00007dd3cae73080 (most recent call first):
+  Garbage-collecting
+  File "/home/pk/gate0904/checkout/pylauncher/yulon/runner.py", line 236 in stream
+  File "/home/pk/gate0904/checkout/pylauncher/yulon/docker.py", line 2353 in follow_logs
+--- exit code: 134   elapsed: 8s   finished: 2026-09-04T12:39:00+02:00

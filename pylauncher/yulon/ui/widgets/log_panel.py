@@ -13,9 +13,10 @@ never reaches into the runner or into its parent.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterator
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from yulon import runner
@@ -27,6 +28,38 @@ logger = get_logger(__name__)
 LineSource = Callable[[], Iterator[str]]
 
 _MAX_BLOCKS = 5000
+
+_STICK_SLACK_PX = 4
+"""How far off the bottom still counts as "at the bottom".
+
+Qt's scrollbar maximum moves as blocks are added and trimmed, and a value one
+or two pixels short of it is what a scrollbar sitting at the end reports after
+a resize. Requiring exact equality would read a panel that IS following as one
+the user had scrolled away from, and following would stop on its own.
+"""
+
+
+def _clock(now: float) -> str:
+    """Wall-clock `HH:MM:SS` for a line, local time.
+
+    Seconds and no date: the panel is read while something is happening, and
+    what a reader wants from it is "how long has this step been going", which
+    they get by subtracting two of these. A date on every line would push the
+    line's own text past the width of the pane.
+    """
+    return time.strftime("%H:%M:%S", time.localtime(now))
+
+
+def _elapsed(seconds: float) -> str:
+    """`H:MM:SS` since the run started, hours never dropped.
+
+    An install has stages measured in seconds (`conf`) and stages measured in
+    hours (`build`, `mmaps`), so the same field has to carry both without
+    changing shape. `0:00:04` and `4:31:07` line up in a monospace panel, which
+    a `MM:SS` that grew an hours field partway through a run would not.
+    """
+    whole = max(0, int(seconds))
+    return f"{whole // 3600}:{whole % 3600 // 60:02d}:{whole % 60:02d}"
 
 
 class _StreamWorker(QObject):
@@ -86,18 +119,48 @@ class LogPanel(QWidget):
         self._text.setReadOnly(True)
         self._text.setMaximumBlockCount(_MAX_BLOCKS)
         self._status = QLabel("idle", self)
+        # WRAPPED, and the app is unusable without it. This label is handed the
+        # whole of a refusal -- `("finished: " if ok else "FAILED: ") + message`
+        # below -- and an unwrapped QLabel's size hint is as wide as its text.
+        # That hint becomes this panel's minimum width, and the splitter in
+        # `main.py` has to honour it, so the catalog pane next to it is squeezed
+        # to nothing.
+        #
+        # Measured 2026-09-02 on yulon-ubuntu, in a 986px window, with the real
+        # home-folder refusal (196 characters): the catalog pane went from 684px
+        # to 88px and this panel demanded 1478px -- wider than the window. Game
+        # tiles were clipped mid-word and their Install buttons unreachable, so
+        # the only way out was to resize or restart. Found by the owner during
+        # the 7.2 gate, on the first refusal a real user would ever see.
+        self._status.setWordWrap(True)
+        # Elapsed lives HERE, beside Stop, not on every line (owner,
+        # 2026-09-03). One field that ticks answers "how long has this been
+        # going" better than the same number repeated down the panel, and it
+        # keeps answering during the long silences: an hour of `build` emits
+        # lines in bursts, so a per-line elapsed stops moving exactly when the
+        # reader most wants to know the install has not died. This is also the
+        # only place the number can go on updating with nothing to print.
+        self._elapsed_label = QLabel("", self)
+        self._elapsed_label.setToolTip("Time since this job started")
         self._stop_button = QPushButton("Stop", self)
         self._stop_button.setEnabled(False)
         self._stop_button.clicked.connect(self.stop)
 
         header = QHBoxLayout()
         header.addWidget(self._status, 1)
+        header.addWidget(self._elapsed_label)
         header.addWidget(self._stop_button)
         layout = QVBoxLayout(self)
         layout.addLayout(header)
         layout.addWidget(self._text, 1)
 
         self._cancel: threading.Event | None = None
+        self._started_at: float | None = None
+        # One second, because the field it drives has a seconds place; a faster
+        # tick repaints a label that cannot have changed.
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(1000)
+        self._ticker.timeout.connect(self._show_elapsed)
         self._thread: QThread | None = None
         self._worker: _StreamWorker | None = None
         self._stop_requested = False
@@ -154,9 +217,38 @@ class LogPanel(QWidget):
         CSI sequences, so an `ESC(B`-style charset switch leaves the ESC byte
         behind, and that renders as a box glyph.
 
+        **Each line is stamped, and the panel keeps following the bottom.**
+        Both were asked for by the owner on 2026-09-03 while watching a real
+        install: an hour of build output with no clock on it answers neither
+        "when did this step start" nor "how long has it been going", and a
+        panel that stops following makes the newest line the one you cannot
+        see. The stamp is `HH:MM:SS +H:MM:SS` -- wall clock, then time since
+        this run began -- so the cost of a stage is a subtraction the reader can
+        do in their head, and a stalled install is visible as a clock that has
+        stopped moving.
+
+        **Following the bottom is conditional, and that is the whole design.**
+        A panel that always jumps to the end cannot be read while it is
+        running: scrolling up to look at the error that just went past yanks
+        the reader back on the next line. So the position is measured BEFORE
+        the append and restored only if it was already at the end -- scroll up
+        and the panel holds still; scroll back down and it resumes on its own,
+        with no button and nothing to remember.
+
+        The stamp is applied here, at the one place every source arrives,
+        rather than at the yield sites: the install engine's lines are also the
+        gate transcripts and the fixtures dozens of tests compare literally, and
+        a timestamp in those would make every one of them a clock-dependent
+        test. `text()` returns what is displayed, stamps and all.
+
         Thread-safe only from the UI thread; the worker reaches it by signal.
         """
-        self._text.appendPlainText(runner.strip_ansi(line).replace("\x1b", ""))
+        bar = self._text.verticalScrollBar()
+        following = bar.value() >= bar.maximum() - _STICK_SLACK_PX
+        clean = runner.strip_ansi(line).replace("\x1b", "")
+        self._text.appendPlainText(f"[{_clock(time.time())}] {clean}")
+        if following:
+            bar.setValue(bar.maximum())
 
     def run(
         self,
@@ -168,7 +260,7 @@ class LogPanel(QWidget):
         """Start streaming `source()` into the panel. Returns False if a job is already running.
 
         `cancel`, when given, is set by `stop()` so a source that supports it
-        (e.g. `Installer.run(cancel=...)`) can be interrupted even while blocked
+        (e.g. an engine's `run(cancel=...)`) can be interrupted even while blocked
         between lines (review finding, 2026-08-21).
         """
         if self.running:
@@ -177,6 +269,14 @@ class LogPanel(QWidget):
         self._dispose_last_job()
         self._cancel = cancel
         self._stop_requested = False
+        # The zero the elapsed clock counts from. Set on the RUN, not on the
+        # panel or the first line: the same panel is reused for the next
+        # install and for the console, and an elapsed field that kept counting
+        # from whenever the window opened would say four hours into a job that
+        # started a minute ago.
+        self._started_at = time.time()
+        self._show_elapsed()
+        self._ticker.start()
         self._status.setText(title)
         self._stop_button.setEnabled(True)
         # No parent, and held by `in_flight()` until finished: a panel dropped
@@ -280,5 +380,23 @@ class LogPanel(QWidget):
             self._status.setText("cancelled")
         else:
             self._status.setText(("finished: " if ok else "FAILED: ") + message)
+        # Stopped, then shown ONE more time. The ticker is what makes the field
+        # live, and a job that has ended must not go on counting; but the last
+        # value is the run's total, which is the number somebody wants after a
+        # four-hour install, so it is written once more and left standing until
+        # the next `run()` resets it.
+        self._ticker.stop()
+        self._show_elapsed()
         self._stop_button.setEnabled(False)
         self.run_finished.emit(ok, message)
+
+    def _show_elapsed(self) -> None:
+        """Put the run's elapsed time in the header field."""
+        if self._started_at is None:
+            self._elapsed_label.setText("")
+            return
+        self._elapsed_label.setText(_elapsed(time.time() - self._started_at))
+
+    def elapsed_text(self) -> str:
+        """What the header's elapsed field says (tests / accessibility)."""
+        return self._elapsed_label.text()

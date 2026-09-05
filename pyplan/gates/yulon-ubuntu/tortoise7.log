@@ -1,0 +1,65 @@
+Installing WoW Tortoise into /home/pk/tortoise-server
+You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage — that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt — the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+Checking Docker.
+[pass] Docker: the daemon answered
+[pass] memory: Docker's VM has 10.7 GB
+[pass] compiler jobs vs memory: 2 parallel jobs against about 5 the memory affords
+[warn] free space on Docker's disk and the server folder: 40 GB free; 60 GB is the comfortable figure (the server folder and Docker's disk share one drive, so both needs add up)
+[pass] the server folder: /home/pk/tortoise-server looks usable
+[pass] sharing the folder with Docker: a container can read /home/pk/tortoise-server
+[pass] SELinux: not enforcing
+[warn] the server's ports: something on this machine is already listening on 3724, 8090 If the server cannot start, that is the first thing to look at.
+[pass] the client folder: /home/pk/clients/TurtleWoW has a Data directory
+[pass] the client's archives: 21 MPQ archives in /home/pk/clients/TurtleWoW/Data, up to 2 folders deep
+[warn] the client's origin: realmlist.wtf sits at the root of /home/pk/clients/TurtleWoW and there is no locale folder, which is how a repack looks Use a clean client of this expansion if extraction comes up short — repacks have rearranged archives and often extract incompletely.
+[pass] free space next to the client: 40 GB free on the drive holding the client
+[pass] sharing the client with Docker: a container can read the client folder
+Using /home/pk/tortoise-server (resuming)
+Already finished: clone-sources, write-dockerfile, generate-compose, build, extract, mmaps, conf, import
+2026-09-03 12:09:25 INFO [yulon.platform] holding this machine awake for the build: systemd-inhibit --what=idle:sleep --who=Yu'lon --why=installing a server sleep infinity
+--- clone-sources
+2026-09-03 12:09:25 INFO [yulon.git] containerized git: `run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only -v /home/pk/tortoise-server/src/tortoise-wow:/git:ro -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 --no-optional-locks --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.attributesFile=/dev/null -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into /home/pk/tortoise-server/src/tortoise-wow
+Shyalya/tortoise-wow is already in src/tortoise-wow; leaving it exactly as it is.
+2026-09-03 12:09:26 INFO [yulon.git] containerized git: `run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only -v /home/pk/tortoise-server/src/tortoise-wow/src/modules/Eluna:/git:ro -w /git --user 1000:1000 alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 --no-optional-locks --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -c core.attributesFile=/dev/null -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 remote get-url origin` into /home/pk/tortoise-server/src/tortoise-wow/src/modules/Eluna
+ElunaLuaEngine/Eluna is already in src/tortoise-wow/src/modules/Eluna; leaving it exactly as it is.
+Sources are in place.
+--- db-password
+The database password is already in .db_password; keeping it.
+--- write-dockerfile
+Dockerfile is already exactly what this install needs.
+.dockerignore is already exactly what this install needs.
+--- generate-compose
+Wrote .env
+--- build
+Stopping now leaves Docker finishing the build step it is already on, in the background. That is deliberate: the work it has done is kept, and starting this install again picks up from there instead of compiling it all a second time.
+The server is already built; skipping the compile.
+--- extract
+Finished tools are kept; only the tool that was interrupted runs again.
+Extracting server data from /home/pk/clients/TurtleWoW into /home/pk/tortoise-server/data (the client is read-only).
+maps and dbc: already extracted (dbc: 159 files, maps: 2805 files)
+vmap extract: already extracted (Buildings: 5367 files)
+vmap assemble: already extracted (vmaps: 6921 files)
+Extraction finished.
+--- mmaps
+Map generation restarts from the beginning; the extracted maps it reads are kept.
+Generating movement maps (this can take an hour or more).
+mmaps: already generated (mmaps: 2133 files)
+Map generation finished.
+--- conf
+The configuration files already say what this install needs.
+--- start-db
+Starting the database, which the import writes into.
+The database is up.
+--- import
+Databases left half-written are detected and cleared before the import is run again, so nothing here has to be undone by hand.
+The databases read as imported: tw_world.yulon_install records a finished import
+They are already imported; leaving them alone.
+--- up
+Starting the server.
+2026-09-03 12:09:28 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tortoise-db tortoise-realmd tortoise-mangosd` in /home/pk/tortoise-server
+--- ready
+Waiting for the database.
+Waiting for the world server to finish loading (this can take many minutes).
+2026-09-03 12:09:48 WARNING [yulon.docker] tortoise-mangosd printed a line that means it will never be ready: 'Could not open' (matched 'Correct \\*.map files not found|Could not open|Database .* not found'); giving up
+2026-09-03 12:09:48 ERROR [__main__] install failed: The server started but never reported ready. `docker compose logs tortoise-mangosd` in /home/pk/tortoise-server has what it printed, and `docker compose ps` says whether it is restarting over and over — a server that keeps crashing on boot never reaches the line this waits for.
+install failed: The server started but never reported ready. `docker compose logs tortoise-mangosd` in /home/pk/tortoise-server has what it printed, and `docker compose ps` says whether it is restarting over and over — a server that keeps crashing on boot never reaches the line this waits for.

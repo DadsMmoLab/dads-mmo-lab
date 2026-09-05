@@ -1,0 +1,18 @@
+[22:08:05] mutation-reverify agent (wf_23308d3a-4c1-2): baseline suite
+22:13:01 [tortoise-eluna] running test_catalog.py + test_catalog_invariants.py + test_composegen.py after adding the Eluna submodule source to catalog.json
+22:16:16 [tortoise-eluna] re-running test_catalog.py after tightening the ordering assertion
+08:28:25 [mmaps-exitcode] Tortoise generator finished (58 maps, 2075 tiles, 2.5GB) then exited 1. Its source returns 1 ON SUCCESS; CMaNGOS returns 0. Fixing run_mmaps to take success codes from the catalog.
+08:46:44 [7.6] resuming Tortoise install on 9c93ad6 (mmaps exit-code fix). The stage has no record, so it wipes and regenerates ~2.5GB - about 4h.
+08:48:08 [7.6] preflight refused: 33GB free, needs 40GB. Pruning docker build cache (safe - costs only rebuild cache, no install data, no volumes).
+08:49:14 [7.6] removing yulon.local/ac-wotlk-* IMAGES to clear space. Volumes (db-data, client-data) are NOT touched - characters survive. WotLK gate already passed on Linux and on Windows.
+10:56:30 [7.6] worldserver crashes: spell_template has no script_name. Cause found: Database.AutoUpdate.Path points at /opt/tortoise/sql/ but the migrations live in /opt/tortoise/sql/database_updates/{world,character}. Updater skips missing dirs SILENTLY. Testing the corrected path live.
+11:10:20 [7.6] re-running Tortoise from conf onward on a8006b57, so the corrected catalog writes the conf rather than my live sed.
+11:20:36 [7.6] re-running with the playerbot SQL phases; the changed plan hash should force a re-import.
+11:31:31 [7.6] owner approved dropping the four tw_* schemas for a clean import run.
+14:19:56 [7.5] forcing the vmap retry on vanilla by dropping ulimit_stack_unlimited - the flags own documented reason is that the vanilla vmap extractor overflows the default stack and segfaults, which is the crash the retry recipe matches.
+15:19:43 [7.4c] driving the interrupted-import path on vanilla: removing the marker and the bot player rows so the probe reads partial, then letting the installer reset and re-import.
+16:42:05 [7.9] stopping tortoise (port 3724 clash) and resuming the vanilla install to bring it up and exercise the realm advertise there.
+[claude] checking which servers are up (vanilla login question)
+[claude] vanilla realmlist -> tailscale IP so the laptop can reach the world server
+[claude] stopping vanilla stack and shutting down; freeing 11GB for the fedora appimage gate
+01:26:37  Phase 7: rescuing gate logs

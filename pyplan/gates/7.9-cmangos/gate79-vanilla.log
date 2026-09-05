@@ -1,0 +1,92 @@
+game=wow-vanilla server_dir=/home/pk/vanilla-server
+containers: world=vanilla-mangosd auth=vanilla-realmd db=vanilla-db auth_port=3724
+
+====================== baseline ======================
+status: db=False auth=False world=False
+running: {'vanilla-mangosd': False, 'vanilla-realmd': False, 'vanilla-db': False}
+not all up; starting first so the console and backup have a server
+2026-09-04 01:52:13 INFO [yulon.docker] start_staged(): `compose up -d --no-deps vanilla-db vanilla-realmd vanilla-mangosd` in /home/pk/vanilla-server
+running now: {'vanilla-mangosd': True, 'vanilla-realmd': True, 'vanilla-db': True}
+
+====================== console.send_command() -- and what the attach did to the server ======================
+vanilla-mangosd before: {'pid': 8595, 'restarts': 0, 'started_at': '2026-09-03T23:52:19.459875519Z'}
+2026-09-04 01:53:18 INFO [yulon.controller_wow_wotlk.console] console → vanilla-mangosd: ['server', 'info']
+reply.command : 'server info'
+reply.prompted: True
+  | CMaNGOS/0.18 (0000-00-00T00:00:00+00:00 - Git repository not found) for Linux_x64 (little-endian)
+  | Using World DB: Classic DB version 1.12.1 "Melting Pot v2". For Classic core z2815.
+  | Using creature EventAI: ACID 1.12.x (Classic) for CMaNGOS-CLASSIC (1.12.X Client)
+  | Online players: 0 (max: 0) Queued players: 0 (max: 0)
+  | Server uptime: 48 Second(s).
+vanilla-mangosd after:  {'pid': 8595, 'restarts': 0, 'started_at': '2026-09-03T23:52:19.459875519Z'}
+[OK] send_command('server info') answered in 3.60s and left pid/RestartCount/StartedAt unchanged (pid 8595, RestartCount 0)
+[OK] the reply carries 5 line(s) cut on this core's own prompt
+
+====================== backup() -- live, with the server running ======================
+2026-09-04 01:53:28 INFO [yulon.controller_wow_wotlk.maintenance] backed up 5 database(s) into /home/pk/vanilla-server/sql_scripts/backups: characters (70555719 bytes), classiclogs (1647 bytes), logs (4648 bytes), mangos (113674581 bytes), realmd (45551 bytes)
+  dump: characters /home/pk/vanilla-server/sql_scripts/backups/20260904_015322_characters.sql 70555719 bytes
+  dump: classiclogs /home/pk/vanilla-server/sql_scripts/backups/20260904_015322_classiclogs.sql 1647 bytes
+  dump: logs /home/pk/vanilla-server/sql_scripts/backups/20260904_015322_logs.sql 4648 bytes
+  dump: mangos /home/pk/vanilla-server/sql_scripts/backups/20260904_015322_mangos.sql 113674581 bytes
+  dump: realmd /home/pk/vanilla-server/sql_scripts/backups/20260904_015322_realmd.sql 45551 bytes
+  missing_core: ()
+[OK] backup() -> 5 dump(s) (characters, classiclogs, logs, mangos, realmd) in /home/pk/vanilla-server/sql_scripts/backups in 6.3s, server_was_running=True
+
+====================== verify_dump() on every dump ======================
+  verify_dump(20260904_015322_characters.sql) -> 70555719 bytes
+  verify_dump(20260904_015322_classiclogs.sql) -> 1647 bytes
+  verify_dump(20260904_015322_logs.sql) -> 4648 bytes
+  verify_dump(20260904_015322_mangos.sql) -> 113674581 bytes
+  verify_dump(20260904_015322_realmd.sql) -> 45551 bytes
+[OK] verify_dump() passed for all 5 dump(s)
+
+====================== plan_restore() while the server is up -- it must REFUSE ======================
+2026-09-04 01:53:31 INFO [yulon.controller_wow_wotlk.maintenance] restore of 20260904_015322_characters.sql refused: vanilla-mangosd, vanilla-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.
+refusals: ('vanilla-mangosd, vanilla-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+[OK] plan_restore() refused while running: ('vanilla-mangosd, vanilla-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+
+====================== Controller.stop() -- the Stop button, which calls stop_staged() ======================
+2026-09-04 01:53:54 INFO [yulon.docker] stop_staged(): stopped; containers kept for a fast restart
+running after stop: {'vanilla-mangosd': False, 'vanilla-realmd': False, 'vanilla-db': False}
+[OK] stop_staged() took 23.2s and returned True; db, auth and world all down
+
+====================== Controller.start() -- the Start button, which calls start_staged() ======================
+2026-09-04 01:53:54 INFO [yulon.docker] start_staged(): `compose up -d --no-deps vanilla-db vanilla-realmd vanilla-mangosd` in /home/pk/vanilla-server
+running after start: {'vanilla-mangosd': True, 'vanilla-realmd': True, 'vanilla-db': True}
+[OK] start_staged() returned in 6.6s; all three up
+
+====================== time from start_staged() to this game's own ready marker ======================
+[OK] reached ready 45.8s after start_staged() returned
+
+====================== restore round trip: db up, world+auth down ======================
+vanilla-mangosd
+vanilla-realmd
+refusals now: ()
+databases: ('characters',)  size_bytes: 70555719
+interrupted: None
+2026-09-04 01:55:19 WARNING [yulon.controller_wow_wotlk.maintenance] this install has no acore_auth, acore_characters, acore_world; backing up what it does
+2026-09-04 01:55:21 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/vanilla-server/sql_scripts/backups: characters (70629174 bytes)
+2026-09-04 01:55:21 WARNING [yulon.controller_wow_wotlk.maintenance] restoring characters from /home/pk/vanilla-server/sql_scripts/backups/20260904_015322_characters.sql
+2026-09-04 01:55:45 INFO [yulon.controller_wow_wotlk.maintenance] restored characters from /home/pk/vanilla-server/sql_scripts/backups/20260904_015322_characters.sql
+[OK] restore() put back ('characters',) from 20260904_015322_characters.sql in 29.6s (safety backup: ['20260904_015519_pre-restore_characters.sql'])
+
+====================== start again, and confirm the restored server comes back ready ======================
+2026-09-04 01:55:45 INFO [yulon.docker] start_staged(): `compose up -d --no-deps vanilla-db vanilla-realmd vanilla-mangosd` in /home/pk/vanilla-server
+running: {'vanilla-mangosd': True, 'vanilla-realmd': True, 'vanilla-db': True}
+[OK] the restored server reached ready again in 45.9s
+
+====================== SUMMARY ======================
+OK send_command('server info') answered in 3.60s and left pid/RestartCount/StartedAt unchanged (pid 8595, RestartCount 0)
+OK the reply carries 5 line(s) cut on this core's own prompt
+OK backup() -> 5 dump(s) (characters, classiclogs, logs, mangos, realmd) in /home/pk/vanilla-server/sql_scripts/backups in 6.3s, server_was_running=True
+OK verify_dump() passed for all 5 dump(s)
+OK plan_restore() refused while running: ('vanilla-mangosd, vanilla-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+OK stop_staged() took 23.2s and returned True; db, auth and world all down
+OK start_staged() returned in 6.6s; all three up
+OK reached ready 45.8s after start_staged() returned
+OK restore() put back ('characters',) from 20260904_015322_characters.sql in 29.6s (safety backup: ['20260904_015519_pre-restore_characters.sql'])
+OK the restored server reached ready again in 45.9s
+
+TIMES {"console_seconds": 3.6040603909996207, "backup_seconds": 6.309485216999747, "stop_staged_seconds": 23.173907411999608, "start_staged_seconds": 6.622917314000006, "ready_seconds": 45.84451174099922, "restore_seconds": 29.597416644999612, "ready_after_restore_seconds": 45.86992956499944}
+
+10 passed, 0 failed

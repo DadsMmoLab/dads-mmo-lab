@@ -1,0 +1,23 @@
+THE SOURCE IS NOT THE SAME COMMIT ON THE TWO BOXES, AND THE DIFFERENCE IS PROVABLY NOT IN THE
+EXTRACTORS. Measured 2026-09-04, read out of each box's own clone rather than assumed.
+
+  Linux   (m910q, /home/pk/tbc-7.4c/src/mangos-tbc, cloned 2026-09-02)
+          f82e7d679c283b66bc2adc1b751aa1275e655673
+  Windows (yulon-win11-gate, C:\gate\tbc-server\src\mangos-tbc, cloned 2026-09-04 05:19 PDT)
+          0d2ebc3ee41b24f553a8c0d01aefa8fbd394c7b2
+
+Both are `--depth 1` clones of cmangos/mangos-tbc master, taken two days apart, so master moved
+underneath the comparison. This is exactly the variable the Vanilla comparison was able to hold
+(both boxes were on 8ec338a1) and this one is not.
+
+WHAT THE DIFFERENCE IS. GitHub's compare API, f82e7d6...0d2ebc3:
+  ahead_by 1, behind_by 0, total_commits 1
+  files changed: src/game/Entities/Unit.cpp, src/game/Entities/Unit.h, src/game/Spells/Spell.cpp
+
+One commit, three files, all of them core gameplay. NOTHING under `contrib/extractor`,
+`contrib/vmap_extractor`, `contrib/vmap_assembler` or `contrib/mmap` — the four tools whose
+output counts this gate compares — is touched. So the extraction binaries are built from
+identical sources on the two boxes even though the worldserver is not.
+
+Recorded rather than papered over: "same commit" is a claim this run may NOT make, and
+"the extraction tools are the same code" is one it may.

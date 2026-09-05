@@ -1,0 +1,27 @@
+Installing WoW WotLK into C:\gate\wotlk-server
+You can stop this at any time. What an install writes outside the folder below is named here rather than denied: the images this build produces and the volumes holding the database and the server data, which live in Docker's own storage — that is why the checks below look at the space on Docker's disk too; Docker itself, when no daemon answers yet (on Linux: system packages, a service, and the group you are asked about first); and this app's own settings and log, in its config folder. Starting the install again continues from where it stopped: source this app has finished cloning is never fetched, reset or moved, and the build is not run a second time once Docker confirms its images are there. Everything cheap runs again on every attempt — the compose files this app writes are put back the way the catalog says, the server-data download resumes and re-checks itself, and the database and server are started and waited for.
+Checking Docker.
+2026-08-31 19:00:24 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+Docker is not answering yet. Setting it up - this can mean downloading Docker Desktop and waiting for its engine, up to a few minutes with no output. You can stop at any time.
+2026-08-31 19:00:34 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:00:48 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:00:55 INFO [yulon.platform] Docker Desktop found by asking Windows: C:\Program Files\Docker\Docker\Docker Desktop.exe
+2026-08-31 19:01:08 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:01:21 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:01:34 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:01:47 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:02:00 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:02:13 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:02:26 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:02:39 WARNING [yulon.runner] docker did not answer within 9.98399999999856s; giving up
+2026-08-31 19:02:52 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:03:06 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:03:19 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:03:32 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:03:45 WARNING [yulon.runner] docker did not answer within 9.985000000000582s; giving up
+2026-08-31 19:03:58 WARNING [yulon.runner] docker did not answer within 9.984000000000378s; giving up
+Docker setup did: WSL2 present; powershell.exe -NoProfile -Command Start-Process 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+Still to do: Docker Desktop is installed (C:\Program Files\Docker\Docker\Docker Desktop.exe) but its engine has not answered yet — open Docker Desktop, wait for 'Engine running', then try again.
+2026-08-31 19:04:09 WARNING [yulon.runner] docker did not answer within 10.0s; giving up
+2026-08-31 19:04:09 ERROR [__main__] install failed: Docker isn't available and could not be set up automatically. Docker Desktop is installed (C:\Program Files\Docker\Docker\Docker Desktop.exe) but its engine has not answered yet — open Docker Desktop, wait for 'Engine running', then try again.
+install failed: Docker isn't available and could not be set up automatically. Docker Desktop is installed (C:\Program Files\Docker\Docker\Docker Desktop.exe) but its engine has not answered yet — open Docker Desktop, wait for 'Engine running', then try again.

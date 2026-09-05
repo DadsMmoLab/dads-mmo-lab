@@ -1,0 +1,24 @@
+==== captured 2026-09-05T08:17:56Z on yulon-ubuntu, read-only
+ac-worldserver	Up 8 hours	127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
+ac-authserver	Up 8 hours	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+ac-database	Up 8 hours (healthy)	127.0.0.1:3306->3306/tcp, 33060/tcp
+
+-- acore_auth.account (the two accounts the 7.1 gates created)
++-----+-----------+---------------------+------------+--------+---------------+---------------------+
+| id  | username  | last_login          | last_ip    | online | failed_logins | joindate            |
++-----+-----------+---------------------+------------+--------+---------------+---------------------+
+| 101 | YULON     | NULL                | 127.0.0.1  |      0 |             0 | 2026-09-04 23:58:57 |
+| 102 | GATELOGIN | 2026-09-05 05:31:40 | 172.18.0.1 |      0 |             0 | 2026-09-05 05:28:33 |
++-----+-----------+---------------------+------------+--------+---------------+---------------------+
+
+-- acore_auth.realmlist (as it stands now, after the tunnel was taken down)
++----+-------------+---------------+---------------+-----------------+------+
+| id | name        | address       | localAddress  | localSubnetMask | port |
++----+-------------+---------------+---------------+-----------------+------+
+|  1 | AzerothCore | 172.30.55.119 | 172.30.55.119 | 255.255.255.0   | 8085 |
++----+-------------+---------------+---------------+-----------------+------+
+
+-- tailscale
+bash: line 1: tailscale: command not found
+-- ufw
+Status: inactive

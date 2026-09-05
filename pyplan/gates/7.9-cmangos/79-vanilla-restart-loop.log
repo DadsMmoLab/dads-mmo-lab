@@ -1,0 +1,37 @@
+Using commit hash(Git repository not found) committed on 0000-00-00T00:00:00+00:00
+Using configuration file ../etc/mangosd.conf.
+
+<Ctrl-C> to stop.
+World Database total connections: 2
+Could not connect to MySQL database at vanilla-db: Unknown MySQL server host 'vanilla-db' (-3)
+
+Cannot connect to world database vanilla-db;3306;mangos;vanilla-4d53d1e149a307d2;mangos
+[CMaNGOS Classic World server v0.18] id(1) port(8085)
+
+
+       _____     __  __       _   _  _____  ____   _____ 
+      / ____|   |  \/  |     | \ | |/ ____|/ __ \ / ____|
+     | |        | \  / |     |  \| | |  __  |  | | (___  
+     | |ontinued| |\/| | __ _| . ` | | |_ | |  | |\___ \ 
+     | |____    | |  | |/ _` | |\  | |__| | |__| |____) |
+      \_____|   |_|  |_| (_| |_| \_|\_____|\____/ \____/ 
+      http://cmangos.net\__,_|     Doing emulation right!
+
+
+Built on Sep  2 2026 at 16:09:03
+Built for Linux_x64 (little-endian)
+Using commit hash(Git repository not found) committed on 0000-00-00T00:00:00+00:00
+Using configuration file ../etc/mangosd.conf.
+
+<Ctrl-C> to stop.
+World Database total connections: 2
+Could not connect to MySQL database at vanilla-db: Unknown MySQL server host 'vanilla-db' (-3)
+
+Cannot connect to world database vanilla-db;3306;mangos;vanilla-4d53d1e149a307d2;mangos
+exit=1 restarts=8 policy=unless-stopped started=2026-09-04T00:08:48.901536076Z finished=2026-09-04T00:08:49.219275744Z
+vanilla-realmd	Exited (128) 12 minutes ago
+vanilla-mangosd	Exited (1) 3 minutes ago
+vanilla-db	Exited (128) 12 minutes ago
+tortoise-realmd	Up 7 minutes
+tortoise-mangosd	Up 7 minutes
+tortoise-db	Up 10 minutes (healthy)

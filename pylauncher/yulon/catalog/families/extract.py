@@ -9,7 +9,8 @@ client and nothing is `chown`ed afterwards — the two things the TBC script's
 
 Evidence lives in `data/.yulon-extract.json` and a tool is skipped only when
 three things agree: a completion record for THAT tool (name + argv hash,
-written only after exit 0), every `produces` directory holding at least its
+written only after an exit status the plan calls success), every `produces` directory
+holding at least its
 threshold of files, and the stage-level facts (plan hash, client path, the
 required file's size and mtime) matching what this run would write. The
 record is what makes the cancel note true: `ad` killed after 100 of ~700 dbc
@@ -41,12 +42,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+import re
+import shutil
+import threading
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from yulon.catalog.catalog import ExtractPlan, ExtractTool
+from yulon import docker, platform
+from yulon.catalog.catalog import ExtractPlan, ExtractTool, MmapPlan, RetrySpec
+from yulon.catalog.installer import InstallerError
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -59,7 +66,12 @@ HASH_LENGTH = 16
 
 @dataclass(frozen=True)
 class ToolRecord:
-    """One tool finished with exit 0, running exactly this argv, at this time."""
+    """One tool finished, running exactly this argv, at this time.
+
+    "Finished" is the plan's word, not POSIX's: `MmapPlan.success_codes` names
+    which statuses count, because MoveMapGen's convention differs between the
+    upstream trees this app installs (2026-09-03).
+    """
 
     name: str
     argv_hash: str
@@ -305,14 +317,161 @@ def file_count(folder: Path) -> int:
     return total
 
 
+def counts(produces: Mapping[str, int], data_dir: Path) -> dict[str, int]:
+    """`{dir: files present}` — one walk per output folder, taken once and shared.
+
+    Split out of `shortfall()` so the gate and the sentence a user reads come
+    from the SAME walk. Counted twice, a folder that stopped listing between the
+    two calls makes the log line and the refusal disagree about the same number,
+    and the number is the whole content of both.
+    """
+    return {folder: file_count(data_dir / folder) for folder in produces}
+
+
+def _remove_tree(path: Path) -> bool:
+    """Remove `path` and everything under it; False when there was nothing to remove.
+
+    One fallible call answers both questions. `is_dir()` and then `rmtree()` is
+    two reads of one filesystem and therefore two answers that can disagree —
+    the I.3 incident — and here the disagreement decides whether a folder that
+    is still on disk gets generated over.
+
+    `FileNotFoundError` IS the "nothing there" answer, so the first install
+    costs no extra `stat`. Anything else (a `mmaps` that is a file, a folder
+    held open, a permission that says no) is raised for the caller to turn into
+    a refusal, because "the removal did not happen" and "there was nothing to
+    remove" must not arrive at the same place.
+
+    Two callers now, and they are the two removals in this module:
+    `empty_out_dirs()` below, and `run_mmaps()`'s wipe at the foot of the file.
+    """
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def make_out_dirs(produces: Iterable[str], data_dir: Path) -> None:
+    """Create the folders a tool writes into. Not every tool creates its own.
+
+    CMaNGOS's `vmap_assembler Buildings vmaps` does not. It opens
+    `vmaps/000.vmtree` for writing, and with no `vmaps/` there the open fails,
+    the tool prints `Cannot open vmaps/000.vmtree`, carries on into model
+    conversion, fails on the first `.wmo` for the same reason, and exits 1 --
+    so the message a user gets names a model file and not the missing folder.
+
+    Measured on m910q, 2026-09-02, on the first TBC install: the run died there
+    twice, identically. `mkdir vmaps` and re-running the byte-identical
+    `docker run` produced 1869 `.vmtile` files. The directory was the whole of
+    it.
+
+    `data_dir / folder` is where `counts()` looks, so this creates exactly the
+    paths the gate reads -- including a slashed `produces` name, which
+    `parents=True` handles and which the staging script's `cp` form is also
+    documented to land there.
+
+    Creating a folder cannot make a tool look finished: `counts()` counts FILES,
+    so an empty one reads 0 and a shortfall is still a shortfall. Safe to run
+    before every tool, and it is, rather than only before the one known to need
+    it -- the assembler was not special, it was first.
+
+    "Before every tool" means BOTH loops in `run_plan()`. The first version of
+    this call sat only in the main loop, and a retry recipe names tools by name,
+    so it can re-run one the main loop never reached -- which is how the fix
+    missed the single recipe that ships.
+    """
+    for folder in produces:
+        target = data_dir / folder
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise InstallerError(
+                f"{target} could not be created ({exc}), and the tool that writes into it does "
+                "not create it either. Nothing was run. Free up the folder above, or pick a "
+                "different server folder, then try again."
+            ) from exc
+
+
+def empty_out_dirs(produces: Iterable[str], data_dir: Path) -> None:
+    """Remove the folders a tool is about to regenerate. The retry path only, never a first run.
+
+    `make_out_dirs()`'s counterpart, and both exist because of the same sentence
+    read from opposite ends. That one creates and has never removed, deliberately
+    -- "creating a folder cannot make a tool look finished" -- which was the
+    right property for the bug it was written for and is the wrong one for a
+    second attempt at a tool that already wrote into the folder.
+
+    Measured on m910q, 2026-09-04 (`pyplan/gates/7.5-m910q/vmap75-full.log`, and
+    the 7.5 entry in `pyplan/checklist.md`): a forced crash matched
+    `wow-vanilla`'s recipe, `vmap extract` was re-run exactly as the recipe
+    promises, and the re-run died on its first breath --
+
+        Your output directory seems to be polluted, please use an empty directory!
+
+    -- with `data/Buildings` holding the 5,076 files the crashed attempt had
+    written. Nothing emptied them between the two attempts, so the one retry the
+    recipe exists for could not survive the crash it names. The tool asks for an
+    EMPTY directory, not a complete one, so this is not a question of how far the
+    crashed attempt got.
+
+    Deleting somebody's extracted data on a path that fires with no question is
+    not free, and two rules are what keep the price honest. It is called only
+    from the retry pass in `run_plan()`, so a first run that finds files under
+    `data/` leaves them exactly as it found them. And it is called with ONE
+    tool's `produces` immediately before that tool runs, never with the whole
+    recipe's up front: every folder that goes is one the pass is about to write
+    again, and a recipe that dies on its first re-run has then taken one folder
+    rather than all of them.
+
+    Raises:
+        InstallerError: a folder that is there and would not go. Re-running the
+            tool over what this call exists to remove is the gate's own failure
+            with another hour spent reaching it.
+    """
+    for folder in produces:
+        target = data_dir / folder
+        # BEFORE the removal, because this is the one call in this module that
+        # deletes a tree rather than creating one. `produces` keys are free
+        # strings on `ExtractTool` -- the model validates the COUNTS (>= 1) and
+        # nothing about the names -- and `Path.__truediv__` lets an absolute
+        # segment REPLACE the left side outright, so `data_dir / "/etc"` is
+        # `/etc`. `make_out_dirs()` has always joined the same keys and was
+        # harmless doing it, because the worst a bad key bought there was a
+        # directory in the wrong place; the worst it buys here is an `rmtree` of
+        # somebody else's. Catalog data is ours and none of the shipped keys is
+        # anything but a plain relative name, which is exactly why this refuses
+        # instead of sanitising: a key that reaches here and is not under
+        # `data_dir` is a `catalog.json` defect, and the useful thing to do with
+        # it is say so.
+        if data_dir.resolve() not in target.resolve().parents:
+            raise InstallerError(
+                f"the extract plan says a tool produces {folder!r}, which lands at {target} -- "
+                f"outside {data_dir}. Nothing was removed. A produces name is a plain folder "
+                "under the data directory; this one is not, and emptying it would delete "
+                "something this install does not own."
+            )
+        try:
+            _remove_tree(target)
+        except OSError as exc:
+            raise InstallerError(
+                f"{target} could not be emptied ({exc}), and the tool that writes it is being "
+                "run again. An extractor that refuses a folder it did not start empty would "
+                "fail the same way a second time. Nothing was re-run. Close whatever is "
+                "using that folder, or remove it by hand, then try again."
+            ) from exc
+
+
+def short_of(seen: Mapping[str, int], produces: Mapping[str, int]) -> dict[str, tuple[int, int]]:
+    """The threshold rule over counts already taken; no filesystem in it at all."""
+    return {
+        folder: (seen[folder], need) for folder, need in produces.items() if seen[folder] < need
+    }
+
+
 def shortfall(produces: Mapping[str, int], data_dir: Path) -> dict[str, tuple[int, int]]:
     """`{dir: (have, need)}` for every output folder under its threshold; empty means all met."""
-    short: dict[str, tuple[int, int]] = {}
-    for folder, need in produces.items():
-        have = file_count(data_dir / folder)
-        if have < need:
-            short[folder] = (have, need)
-    return short
+    return short_of(counts(produces, data_dir), produces)
 
 
 def tool_satisfied(
@@ -344,7 +503,8 @@ def satisfied(
        client passes every count and every record, because the counts are about
        `data/` and the records are about tools — neither of them looks at the
        client. This is the part that does.
-    2. **The record for THIS tool.** Written only after exit 0, and only for
+    2. **The record for THIS tool.** Written only after an exit status the
+       plan calls success, and only for
        the argv that produced it. `ad` killed after 100 of ~700 dbc files has
        already passed its threshold of 3, so without the record the count gate
        would skip it and the install would finish with a partial set. An edited
@@ -372,3 +532,1268 @@ def satisfied(
     if record is None or record.argv_hash != argv_hash(argv):
         return False
     return not shortfall(produces, data_dir)
+
+
+# ------------------------------------------------ running the plan, one container per tool
+
+CLIENT_MOUNT = "/client"
+"""Where the user's game client is mounted, read-only, in every extraction container."""
+
+OUT_MOUNT = "/out"
+"""Where `<server_dir>/data` is mounted read-write, and the container's working directory."""
+
+EXTRACT_CANCEL_NOTE = "Finished tools are kept; only the tool that was interrupted runs again."
+"""What a Stop costs in the extract stage — true because of the per-tool record."""
+
+EXTRACT_HARDENING: tuple[str, ...] = ("--network", "none", "--security-opt", "no-new-privileges")
+"""Two container options every extraction run gets, whatever the platform says.
+
+The threat is not `git.py`'s ("the repository chooses the program"), but it is
+not nothing either: these tools parse MPQ and WDT files, which are untrusted
+binary input from a client somebody downloaded, and a memory-safety bug in a
+C++ archive reader is the oldest bug there is. Both flags are free against a
+tool that reads a folder and writes another one:
+
+* `--network none` — nothing in an extraction plan resolves a name or opens a
+  socket, the image has no entrypoint script, and a payload that got in through
+  a malformed archive has nowhere to send anything. If a tool ever did want a
+  network the failure is immediate and legible, not silent.
+* `--security-opt no-new-privileges` — one of the two protections `container_t`
+  was providing for free until `container_security_args()` turns it off with
+  `label:disable` (`git.py` records the same pairing for the same reason). The
+  tools exec nothing, least of all anything setuid.
+
+**`--cap-drop ALL` and `--read-only` are deliberately NOT here.** Both change
+what the process may do to the filesystem it must write — `--read-only` its own
+root, `--cap-drop ALL` its ability to write a bind mount whose permissions do
+not already allow it — and on Linux `platform.container_user_args()` has already
+reduced the process to the invoking user, which is where most of `--cap-drop`'s
+value would have come from. What is left is Docker Desktop, where the tool runs
+as the image's root and where none of this can be measured from a test suite.
+`docker.ContainerRun` records that they are unmeasured against these tools;
+adding them on that footing would be shipping an install-blocking risk to buy
+back very little, and `security_args` is where a measured set lands later.
+"""
+
+
+class RunContainer(Protocol):
+    """`docker.run_container`'s shape, as a seam the tests fill with a recorder."""
+
+    def __call__(
+        self, spec: docker.ContainerRun, *, sink: docker.OutputSink, cancel: threading.Event | None
+    ) -> docker.AttachedRun: ...
+
+
+def container_security_args(*, enforcing: bool | None) -> tuple[str, ...]:
+    """Every container-level security option one extraction run gets, from one answer.
+
+    The hardening above, plus `platform.label_disable_args()`'s answer — asked
+    ONCE per plan by `run_plan()` and handed to every tool, so three containers
+    can never get three answers out of one `getenforce` that flickered.
+
+    **The SELinux half is a correctness fix, not defence in depth.** Measured on
+    `yulon-fedora-gate` (Fedora 44, Enforcing, Docker 29.7.2, 2026-09-01): a
+    confined container is DENIED the user's game client outright. `data/` is
+    fine without any label, because `stage_generate_compose` relabels the server
+    directory and `data/` is created under it afterwards and inherits
+    `container_file_t` — but the client is the user's own folder, somewhere else
+    entirely, and no `chcon` of ours ever reaches it. `:z`/`:Z` are not the
+    answer and must never be used on it: they RECURSIVELY relabel their source,
+    which here is somebody's game install, and that is the same reason
+    `docker.bind_mount_ok()`'s probe bans them. `label:disable` read the client
+    and left its context byte-identical, and let `data/` be written as well.
+
+    So this is one flag for the whole run rather than a suffix per mount: the
+    container holds both the folder it must not touch and the folder it must
+    write, and `platform.label_disable_args()` — `git.py`'s read path already
+    asks it — keeps the three answers three. On "could not ask" nothing is
+    added, because turning a container's confinement off is a security decision
+    and taking one on no evidence is what that function exists to prevent.
+    """
+    return (*EXTRACT_HARDENING, *platform.label_disable_args(enforcing=enforcing))
+
+
+STAGE_MOUNT = "/work"
+"""Where the `stage_client` symlink farm is laid: the container's own writable layer.
+
+Deliberately not a third bind and not a tmpfs. `--rm` takes the layer away with
+the container, the farm is symlinks rather than bytes so it costs nothing to
+build, and a third mount would be a third place to get the SELinux answer right
+for — `container_security_args()`'s flag is container-wide precisely so that the
+number of mounts stops mattering.
+"""
+
+STAGE_FAILED_RETURNCODE = 91
+"""What `STAGE_SCRIPT` exits with when the farm could not be laid — before the tool ran.
+
+Read together with `STAGE_FAILED_MARKER` and never alone: 91 is an ordinary
+status a C++ extractor may exit with on its own, and reading it as "the farm
+failed" would tell a user their tool never started when it had run for an hour.
+`docker.cli_missing_run()` demands both halves of its sentinel for the same
+reason and this follows it.
+"""
+
+STAGE_FAILED_MARKER = "yulon: the staged copy of the client could not be built"
+"""The words `STAGE_SCRIPT` prints on that path; the other half of the signal."""
+
+STAGE_SCRIPT = (
+    "mkdir -p /work && cp -rs /client/. /work && cd /work || "
+    '{ echo "yulon: the staged copy of the client could not be built"; exit 91; }; '
+    '"$@"; status=$?; '
+    "for name in $YULON_OUT_DIRS; do "
+    '[ -e "$name" ] && mkdir -p "/out/$name" && cp -r "$name/." "/out/$name/"; '
+    "done; exit $status"
+)
+"""The `stage_client` fallback: a symlink farm of the client inside the container.
+
+For a tool that insists on cwd = client and writes beside `Data/`: `cp -rs` lays
+symlinks to the read-only mount in a folder of the container's own writable
+layer (gone with `--rm`), the tool runs there, and whatever it produced is
+copied to `/out`. The client mount stays `:ro` — the point of the whole model —
+and the argv's `/client` paths are rewritten to `/work` so the tool reads
+through the farm. Data, not code: `stage_client: true`.
+
+Three details are load-bearing and each of them is a wrong sentence avoided:
+
+* **The farm's own failure is not the tool's.** `mkdir`, `cp -rs` and `cd` are
+  one chain, and if any of them gives up the script says so in its own words and
+  exits `STAGE_FAILED_RETURNCODE` WITHOUT running `"$@"`. `_conclude()` then
+  says the tool never ran, rather than reporting a status the tool never
+  produced.
+* **The copy-back is by content into a folder we make.** This bullet used to say
+  the plan's `cp -r "$name" /out/` nests as `/out/Buildings/Buildings` on a
+  second pass. **It does not, and that reason is withdrawn.** Re-measured
+  2026-09-01 on `debian:stable-slim` (GNU coreutils) and `alpine:3.20`
+  (BusyBox), running the plan's script twice against one persistent `/out`:
+  both merged flat into `/out/Buildings/`, identically. A relative source with
+  an existing destination *directory* derives `dest/basename(src)`; only
+  `cp -r "$name" "/out/$name"` nests, which both images also confirmed and
+  which nothing here ever proposed. Anyone who meets `cp -r "$name" /out/` in
+  an older draft should know it is not known-broken.
+
+  The shipped spelling stays on two grounds that survive the re-measurement. It
+  is idempotent across passes by construction rather than by a convention of
+  `cp`'s about trailing components, so the invariant is visible in the line
+  instead of in a manual page. And it is the only one that puts a `produces`
+  name containing a slash where the count gate looks: measured the same day, a
+  `produces` entry `Cameras/Buildings` lands at `/out/Buildings` under the
+  plan's form and at `/out/Cameras/Buildings` under this one, while `counts()`
+  reads `data_dir / folder` — so the plan's form would refuse that install for
+  having produced nothing. No catalog entry names a slashed folder today and
+  nothing in `ExtractTool` forbids one.
+* **`$status` is the tool's.** Saved before the copy loop, so a `[ -e ]` that
+  found nothing cannot turn a failed extraction into a success, and a successful
+  extraction whose output folder is missing still reaches the count gate as
+  "produced too little" rather than as a shell error.
+"""
+
+
+def _staged_argv(argv: Sequence[str]) -> tuple[str, ...]:
+    """The tool's own argv with `/client` paths pointed at the farm instead.
+
+    Whole path components only: `/client` and anything under `/client/` move,
+    while a longer name that merely starts with those letters (`/clientele`) is
+    left alone — a prefix test without the separator would rewrite it into
+    `/workele`.
+    """
+    return tuple(
+        (
+            STAGE_MOUNT + arg[len(CLIENT_MOUNT) :]
+            if arg == CLIENT_MOUNT or arg.startswith(CLIENT_MOUNT + "/")
+            else arg
+        )
+        for arg in argv
+    )
+
+
+def tool_run(
+    plan: ExtractPlan,
+    tool: ExtractTool,
+    *,
+    image_ref: str,
+    client_dir: Path,
+    data_dir: Path,
+    user_args: Sequence[str],
+    security_args: Sequence[str] = (),
+) -> docker.ContainerRun:
+    """The `docker run` for one tool, built by field so a test can assert it by field.
+
+    `--ulimit stack=-1` is data (`ulimit_stack_unlimited`): the vanilla vmap
+    extractor overflows the default stack on some maps and segfaults; nothing
+    else needs it, so nothing else gets it. `stage_client` is data too: it swaps
+    the argv for the `STAGE_SCRIPT` wrapper, the cwd for the farm, and names the
+    tool's output folders in the environment so the script knows what to copy
+    back. Neither changes a mount — the client is `:ro` in both modes.
+
+    `user_args` and `security_args` both arrive already spelled, from
+    `platform.container_user_args()` and `container_security_args()`. Neither is
+    asked for here: this builds a description and asks the machine nothing, so a
+    test gets the same spec on every host it runs on.
+
+    Raises:
+        InstallerError: the plan stages the client and one of this tool's output
+            folders is named with whitespace. `for name in $YULON_OUT_DIRS`
+            splits on it, so the folder would be looked for under two names that
+            do not exist, nothing would be copied back, and the count gate would
+            report the user's client as incomplete for a mistake in our catalog.
+    """
+    argv: tuple[str, ...] = tuple(tool.argv)
+    workdir = OUT_MOUNT
+    env: dict[str, str] = {}
+    if plan.stage_client:
+        loose = sorted(name for name in tool.produces if any(ch.isspace() for ch in name))
+        if loose:
+            raise InstallerError(
+                f"{tool.name} stages the client, and its output folders {loose} are named with "
+                "whitespace, which the staging script splits on — the catalog must name them "
+                "without it."
+            )
+        argv = ("sh", "-c", STAGE_SCRIPT, "sh", *_staged_argv(tool.argv))
+        workdir = STAGE_MOUNT
+        env = {"YULON_OUT_DIRS": " ".join(tool.produces)}
+    return docker.ContainerRun(
+        image=image_ref,
+        argv=argv,
+        mounts=(
+            docker.Mount(client_dir, CLIENT_MOUNT, read_only=True),
+            docker.Mount(data_dir, OUT_MOUNT),
+        ),
+        workdir=workdir,
+        env=env,
+        user_args=tuple(user_args),
+        security_args=tuple(security_args),
+        ulimits=("stack=-1",) if plan.ulimit_stack_unlimited else (),
+    )
+
+
+def _retry_matches(
+    retry: RetrySpec, run: docker.AttachedRun, cancel: threading.Event | None
+) -> bool:
+    """Did this ending look like the one the recipe names — and is another go the right answer?
+
+    Five ways to answer "no", and every one of them is a decision rather than a
+    fall-through:
+
+    * **Exit 0.** Nothing failed; there is nothing to retry.
+    * **The user pressed Stop** — `CANCELLED_RETURNCODE`, or a token set while
+      the tool was exiting. A stopped tool's last lines can say anything,
+      including the very words the recipe matches on, and starting a fresh
+      container after somebody pressed Stop is the one thing the cancel path
+      exists to prevent.
+    * **Nothing was started at all** — no docker CLI. Running a program that is
+      not there a second time is not a recipe for anything.
+    * **Neither the exit status nor the tail matches.** The ordinary "this is a
+      different failure".
+    * **The pattern is not a usable regular expression.** A bug in our catalog,
+      not in the user's machine: it is logged once, loudly, and answered "no
+      retry", so what reaches the user is the tool's own failure — which is
+      true — instead of a `re.error` out of a stage that is otherwise all
+      yielded lines.
+    """
+    if run.returncode == 0 or run.returncode == docker.CANCELLED_RETURNCODE:
+        return False
+    if cancel is not None and cancel.is_set():
+        return False
+    if docker.cli_missing_run(run):
+        return False
+    if run.returncode in retry.when_returncode_in:
+        # The status, before the text, because for the failure this recipe was
+        # written for the text does not exist. `Segmentation fault (core
+        # dumped)` is a SHELL's job-control message; these tools are exec'd as
+        # the container's PID 1 with no shell in between, so a tool that dies of
+        # SIGSEGV writes nothing and the container reports only 139. Measured on
+        # yulon-ubuntu, 2026-09-03: every probe of a signal-killed container
+        # returned zero bytes of output and zero matches for this pattern.
+        return True
+    try:
+        return re.search(retry.when_log_matches, "\n".join(run.tail)) is not None
+    except re.error as exc:
+        logger.warning(
+            f"the retry recipe's pattern {retry.when_log_matches!r} is not a usable regular "
+            f"expression ({exc}), so nothing is re-run and the tool's own failure stands"
+        )
+        return False
+
+
+def _retry_applies(
+    retry: RetrySpec, tool: ExtractTool, run: docker.AttachedRun, cancel: threading.Event | None
+) -> bool:
+    """`_retry_matches`, plus the one thing a matching log is not enough for.
+
+    The recipe must name the tool that just failed. It normally does — Vanilla's
+    names `vmap extract`, which is the thing that segfaults, and `vmap assemble`
+    with it because the assembler's input changed — but a recipe that named only
+    OTHER tools would re-run them, skip past the crash with `continue`, and leave
+    the tool that actually failed with no record and no refusal. Every later tool
+    would then be satisfied, the stage would end with a success line, and the
+    server would fail to load maps hours later. A recipe that cannot cover the
+    failure does not apply to it, and the tool's own failure stands.
+    """
+    if not _retry_matches(retry, run, cancel):
+        return False
+    if tool.name not in retry.tools:
+        logger.warning(
+            f"{tool.name} failed the way the retry recipe describes, but the recipe re-runs "
+            f"{list(retry.tools)}, which does not include it; retrying those would leave the "
+            "tool that failed un-run and report an extraction nobody finished, so its failure "
+            "stands instead"
+        )
+        return False
+    return True
+
+
+def _tool_named(plan: ExtractPlan, name: str) -> ExtractTool:
+    """The plan's tool of that name, or the sentence that says the recipe is wrong.
+
+    `ExtractPlan`'s own validator refuses a recipe naming a tool the plan does
+    not have, so this cannot be reached from `catalog.json`; a plan built in code
+    can still name a stranger, and one sentence beats a `StopIteration` from a
+    generator expression halfway through an extraction.
+    """
+    for tool in plan.tools:
+        if tool.name == name:
+            return tool
+    raise InstallerError(f"the retry recipe names {name!r}, which is not a tool of this plan")
+
+
+def _stage_failed(run: docker.AttachedRun) -> bool:
+    """Did `STAGE_SCRIPT` give up before the tool ran? Both halves, never one."""
+    return run.returncode == STAGE_FAILED_RETURNCODE and any(
+        STAGE_FAILED_MARKER in line for line in run.tail
+    )
+
+
+def run_plan(
+    plan: ExtractPlan,
+    *,
+    image_ref: str,
+    client_dir: Path,
+    data_dir: Path,
+    run_container: RunContainer,
+    user_args: Sequence[str],
+    sink: docker.OutputSink,
+    cancel: threading.Event | None,
+    required_file: str | None = None,
+    client_build: int | None = None,
+    selinux_enforcing: Callable[[], bool | None] | None = None,
+) -> Iterator[str]:
+    """Run every tool the evidence does not vouch for, recording each as it finishes.
+
+    The evidence file is rewritten after every successful tool, not at the end,
+    so a Stop between tools loses nothing — that is the cancel note's whole
+    claim. Evidence written for another client or plan is replaced at the
+    start: its records are worthless, and keeping them would let a count that
+    happens to pass skip a tool that read the wrong archives.
+
+    `required_file` is the client spec's; `client_build` is only spoken, in the
+    shortfall refusal, because the count gate is the real check of the build.
+
+    Every tool the evidence does not vouch for is asked one question
+    (`blocking_output()`) in a single pass BEFORE the first of them is run:
+    would it refuse to start into the folder that is there? Only `vmap extract`
+    can answer yes, and only over a `Buildings/` that still holds `dir` or
+    `dir_bin`. That state is not hypothetical -- it is what a finished install
+    looks like the moment its evidence file is deleted, which is what
+    `cmangos.py`'s patch refusal used to tell people to do. Measured on m910q
+    2026-09-05 through this function: without the question the press died at
+    the container with "Your output directory seems to be polluted, please use
+    an empty directory!", the re-created evidence recorded `dbc and maps`
+    alone, and every later press died the same way with no folder ever named.
+    Nothing is deleted for the user here; the refusal names `data/Buildings`
+    and stops before the container.
+
+    The pass is what makes the refusal's own last claim true. Asked per tool
+    inside the loop, as it was when the check was first written, the plans'
+    `ad`-first order meant a refused press had already run a container to
+    completion and rewritten the evidence file -- under a sentence saying
+    nothing was run and nothing was changed.
+
+    Two of the plan's fields are fallbacks, and both are said out loud rather
+    than done quietly, because "it needed help" and "it went fine" are different
+    facts about somebody's machine:
+
+    * **`retry`** — the vanilla extractors crash on some maps and succeed on the
+      next attempt. When a failure's log matches the recipe, the tools the recipe
+      NAMES run again, once for the whole plan, and the log says which and why.
+      A second matching crash is not retried again: it falls through to the
+      refusal, which says it was already the retry. A crash that does not match
+      is never retried and nothing in the log mentions one. Each re-run tool's
+      output folders are EMPTIED immediately before it runs and said out loud
+      first (`empty_out_dirs`), because the vanilla vmap extractor refuses to
+      start unless its output folder is empty and the crashed attempt had filled
+      it — measured on m910q, 2026-09-04, where that was the whole of why the
+      retry could not survive the crash it exists for.
+    * **`stage_client`** — `tool_run` wraps the tool in `STAGE_SCRIPT`. The
+      wrapper is per-tool and invisible here, except that a farm that could not
+      be built is reported as "the tool never ran" rather than as a status the
+      tool never produced.
+
+    `selinux_enforcing` is the seam for the one question here that is asked of
+    the machine. It is resolved at call time rather than bound as a default, so
+    a test that patches `platform.selinux_enforcing` is actually seen — the trap
+    `platform.container_user_args()` records against itself — and it is asked
+    exactly once, before the first container, for the reason
+    `container_security_args()` gives.
+
+    Raises:
+        InstallerError: a tool failed, was cancelled, could not be started at
+            all, or exited 0 with too few files.
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    ask = selinux_enforcing if selinux_enforcing is not None else platform.selinux_enforcing
+    security_args = container_security_args(enforcing=ask())
+    expected = expected_evidence(plan, client_dir, required_file)
+    current = read_evidence(data_dir)
+    if current is not None and not same_stage(current, expected):
+        yield "the extracted data is for another client or plan; extracting everything again"
+        current = None
+    # Every tool this press would run, asked in ONE pass before any of them
+    # runs and before a single byte under `data/` is written -- the evidence
+    # file below included. Only `vmap extract` can answer, and only over a
+    # `Buildings/` that still holds `dir` or `dir_bin`. That state is not
+    # hypothetical: it is what a finished install looks like the moment its
+    # evidence file is deleted, which is what `cmangos.py`'s patch refusal used
+    # to tell people to do.
+    #
+    # In the loop below instead -- where this check lived until 2026-09-05 --
+    # the refusal was correct and its own sentence was not. The shipped
+    # `wow-tbc` and `wow-vanilla` plans order `dbc and maps` first, so a press
+    # that stopped at `vmap extract` had already run an `ad` container to
+    # completion, under a message reading "Nothing was run and nothing was
+    # changed." Measured through this function on yulon-fedora 2026-09-05, the
+    # same press twice: with the check in the loop it launched `["ad"]` and
+    # rewrote `data/.yulon-extract.json`; with it here it launched `[]` and
+    # `data/` came out byte-identical. On a real client the difference is a
+    # full `ad` -- tens of minutes, and every file under `dbc/` and `maps/`
+    # opened `"wb"` and written again.
+    #
+    # This pass sees exactly the tools the loop below would run, and that takes
+    # BOTH halves of `tool_satisfied` rather than the first one alone. The
+    # record half is the obvious one: it demands a record for that tool's own
+    # argv, and only the tool running writes one. The COUNT half is
+    # `return not shortfall(produces, data_dir)`, and a folder can be filled by
+    # somebody else -- so a tool with a matching record and a short `produces`
+    # would flip to satisfied if an EARLIER tool in the same loop wrote into
+    # that folder. In every shipped plan it cannot: the three tools' `produces`
+    # are disjoint ({dbc, maps} / {Buildings} / {vmaps} for `wow-tbc`,
+    # `wow-vanilla` and `wow-tortoise` alike), which
+    # `test_no_shipped_plan_lets_one_tool_fill_another_tools_produces` asserts
+    # over the catalog rather than leaving it here as a sentence. The retry
+    # pass does not come through here; it empties first.
+    for tool in plan.tools:
+        if tool_satisfied(tool, data_dir, current, expected):
+            continue
+        blocked = blocking_output(tool, data_dir)
+        if blocked is not None:
+            raise InstallerError(blocked_message(tool, blocked))
+    if current is None:
+        current = expected
+        write_evidence(data_dir, current)
+
+    def spec_for(which: ExtractTool) -> docker.ContainerRun:
+        """One `tool_run` for both attempts: a retry is the same container, run again."""
+        return tool_run(
+            plan,
+            which,
+            image_ref=image_ref,
+            client_dir=client_dir,
+            data_dir=data_dir,
+            user_args=user_args,
+            security_args=security_args,
+        )
+
+    retried = False
+    for tool in plan.tools:
+        if tool_satisfied(tool, data_dir, current, expected):
+            seen = counts(tool.produces, data_dir)
+            yield f"{tool.name}: already extracted ({_counts_text(seen)})"
+            continue
+        make_out_dirs(tool.produces, data_dir)
+        yield f"{tool.name}: running {' '.join(tool.argv)}"
+        run = run_container(spec_for(tool), sink=sink, cancel=cancel)
+        if not retried and plan.retry is not None and _retry_applies(plan.retry, tool, run, cancel):
+            # The vanilla extractors crash on some maps and succeed on the next
+            # attempt; the recipe (data) names which tools to run again, once.
+            #
+            # "Once" has two guards and they are not the same guard.
+            # `_retry_applies` is the reachable one: the recipe must cover the
+            # tool that failed, so the pass always re-runs it and always
+            # concludes it. `retried` is structural — with that rule every
+            # recipe tool carries a fresh record when the pass ends, so no later
+            # crash can reach here at all — and it stays because it is what
+            # bounds this to one pass if the rule above is ever relaxed. A
+            # second matching crash inside the pass never comes back here: it
+            # goes straight to _conclude, which refuses it saying it was already
+            # the retry.
+            retried = True
+            names = ", ".join(plan.retry.tools)
+            yield (
+                f"{tool.name} crashed the way the retry recipe expects; running {names} again once"
+            )
+            for name in plan.retry.tools:
+                again = _tool_named(plan, name)
+                # NOT redundant with the call in the outer loop, and the one
+                # place this was missed. A recipe names tools by NAME, so it can
+                # reach a tool the outer loop has not run yet -- `wow-vanilla`'s
+                # is `["vmap extract", "vmap assemble"]`, so a segfault in the
+                # first re-runs the second here, BEFORE the outer loop ever
+                # created `vmaps/`. That is exactly the `Cannot open
+                # vmaps/000.vmtree` this function was changed to prevent, on the
+                # one recipe that ships, reachable by the one crash it exists
+                # for (two independent reviews, 2026-09-02).
+                #
+                # Said BEFORE the removal, not after: this line is the only
+                # warning a user gets that a folder of theirs is about to go, and
+                # one printed afterwards is a receipt. It also survives a removal
+                # that fails, which is how the log names the folder the refusal
+                # below is about.
+                # A tool the evidence already vouches for is left exactly as it
+                # is -- not emptied, not re-run. The case that forces this rule
+                # is the ASSEMBLER crashing rather than the extractor:
+                # `wow-vanilla`'s recipe names both, so the pass reaches `vmap
+                # extract` first, and without this it would delete a `Buildings/`
+                # that was complete and re-extract it for half an hour to arrive
+                # back where it started.
+                #
+                # The three cases come out right for the same reason, which is
+                # that `satisfied()` wants a RECORD for this argv and the counts
+                # to pass, and `_conclude()` is what writes a record:
+                #
+                #   * assembler crashed -- the extractor finished in the outer
+                #     loop and was concluded, so it is satisfied here and is
+                #     skipped, and only `vmaps/` goes;
+                #   * extractor crashed -- the retry branch is taken BEFORE
+                #     `_conclude()`, so there is no record for it, so it is not
+                #     satisfied and its folder is emptied and re-run. That is the
+                #     crash this recipe exists for and it still works;
+                #   * a tool the outer loop has not reached yet -- no record
+                #     either, so it runs, which is the `vmaps/` case the comment
+                #     above was written for.
+                #
+                # `retried` still bounds this to one pass on its own, so skipping
+                # a tool here cannot let a later crash back in.
+                if tool_satisfied(again, data_dir, current, expected):
+                    seen = counts(again.produces, data_dir)
+                    yield (
+                        f"{again.name}: already finished before the crash "
+                        f"({_counts_text(seen)}); leaving it alone"
+                    )
+                    continue
+                yield (
+                    f"{again.name}: emptying {', '.join(again.produces)} before the retry, so it "
+                    "regenerates what the crashed attempt left rather than adding to it"
+                )
+                # One tool's folders, immediately before that tool runs -- see
+                # `empty_out_dirs()` for what was measured and why the whole
+                # recipe's output is NOT taken here in one go.
+                empty_out_dirs(again.produces, data_dir)
+                make_out_dirs(again.produces, data_dir)
+                yield f"{again.name}: retrying {' '.join(again.argv)}"
+                run = run_container(spec_for(again), sink=sink, cancel=cancel)
+                current, seen = _conclude(
+                    again,
+                    run,
+                    data_dir,
+                    current,
+                    cancel,
+                    client_build,
+                    staged=plan.stage_client,
+                    retried=True,
+                )
+                yield f"{again.name}: done ({_counts_text(seen)})"
+            continue
+        current, seen = _conclude(
+            tool, run, data_dir, current, cancel, client_build, staged=plan.stage_client
+        )
+        yield f"{tool.name}: done ({_counts_text(seen)})"
+
+
+def _conclude(
+    tool: ExtractTool,
+    run: docker.AttachedRun,
+    data_dir: Path,
+    current: Evidence,
+    cancel: threading.Event | None,
+    client_build: int | None,
+    *,
+    staged: bool = False,
+    retried: bool = False,
+) -> tuple[Evidence, dict[str, int]]:
+    """Turn one tool's exit into a record, or into the refusal that explains it.
+
+    Five endings, kept five, because the sentence differs for each and four of
+    them are not "the extraction failed":
+
+    1. **Stopped.** `CANCELLED_RETURNCODE`, or a cancel token that was set while
+       the tool was exiting (`run_attached()` only reports the sentinel while it
+       is still reading, so a tool that finished in the same instant comes back
+       0 — recording it and marching on would start the NEXT tool after the user
+       said stop).
+    2. **Never started.** No docker CLI to run at all. "The tool failed" is a
+       sentence about a tool that ran; nothing did, and the help text is the
+       whole answer. `docker.cli_missing_run()` owns that shape, both halves of
+       it, because `docker run` returns the CONTAINER's status and a binary
+       missing inside the image genuinely exits 127.
+    3. **The staged farm could not be laid.** `stage_client` only: `STAGE_SCRIPT`
+       gave up before `"$@"`, so the tool never started and the status is one no
+       tool produced. Both halves of the signal are demanded, and only for a plan
+       that actually stages — a tool is free to exit 91 on its own and to print
+       whatever it likes while doing it.
+    4. **Failed.** Its exit status and its last words, which is all we know —
+       plus, when this attempt WAS the one retry the recipe asks for, that fact.
+       "vmap extract failed (exit 139)" is equally true of the first crash and
+       of the second, and a user who reads it after a second attempt they were
+       not told about goes looking for a first one the message never mentions.
+    5. **Finished and fell short.** Exit 0 with too few files: an incomplete
+       client, the wrong expansion, a `data/` emptied by hand — or a folder
+       nobody could list, which `file_count()` deliberately walks to "too few"
+       so nothing is ever skipped on evidence nobody read. That is right, and it
+       leaves the CAUSE unknown, so the refusal names both possibilities rather
+       than accusing the user's client of a permissions problem in our own
+       output folder.
+
+    Only the fifth counts the folders, and it counts them once: the numbers in
+    the refusal are the numbers the gate read, and so are the ones in the
+    caller's "done" line.
+    """
+    if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
+        raise InstallerError(f"{tool.name} was stopped. {EXTRACT_CANCEL_NOTE}")
+    if docker.cli_missing_run(run):
+        raise InstallerError(
+            f"{tool.name} could not be started, so the client was never read. "
+            f"{docker.last_words(run.tail)}"
+        )
+    if staged and _stage_failed(run):
+        raise InstallerError(
+            f"{tool.name} never ran: the staged copy of the client could not be built inside "
+            f"the container, so no client was read. {docker.last_words(run.tail)}"
+        )
+    if run.returncode != 0:
+        after = ", and that was already the one retry the plan's recipe asks for" if retried else ""
+        raise InstallerError(
+            f"{tool.name} failed (exit {run.returncode}){after}. Its last words were: "
+            f"{docker.last_words(run.tail)}"
+        )
+    seen = counts(tool.produces, data_dir)
+    short = short_of(seen, tool.produces)
+    if short:
+        told = ", ".join(
+            f"{folder}: {have} files, at least {need} expected"
+            for folder, (have, need) in short.items()
+        )
+        build = f" for client build {client_build}" if client_build is not None else ""
+        raise InstallerError(
+            f"{tool.name} finished but produced too little ({told}){build}. The server WILL "
+            f"fail to load maps from this, so nothing was recorded. Check that the client "
+            f"folder is a complete client of the right expansion, and that {data_dir} could "
+            "be read — a folder that could not be listed counts as empty here, and the log "
+            "names it — then try again."
+        )
+    record = ToolRecord(tool.name, argv_hash(tool.argv), int(time.time()))
+    updated = with_record(current, record)
+    write_evidence(data_dir, updated)
+    return updated, seen
+
+
+def _counts_text(seen: Mapping[str, int]) -> str:
+    """Counts already taken, as one clause of a log line."""
+    return ", ".join(f"{folder}: {have} files" for folder, have in seen.items())
+
+
+# ------------------------------------------ the doodad placement check (option C, 2026-09-05)
+
+BUILDINGS_DIR = "Buildings"
+"""Where CMaNGOS-lineage `vmap_extractor`s write model files and the placement index.
+
+A fact about the extractor lineage, not about a game: every shipped CMaNGOS
+entry's `vmap extract` tool produces it and `vmap_assembler` reads it by this
+name. That is a claim about the catalog, which this module does not own, so it
+is a test and not only a sentence --
+`test_every_shipped_cmangos_entry_produces_and_then_reads_the_buildings_dir`
+enumerates the three entries and their tools. Without it the claim could go
+false in silence and take `doodad_placements()` with it: a `produces` key moved
+to another spelling leaves this folder unwritten, the check finds nothing,
+returns `None`, and the stage prints no line at all.
+
+Held here beside `MMAPS_DIR` for the same reason: it names a folder this module
+reads, and a folder name that is data is one edit from being somewhere else.
+"""
+
+DIR_BIN = "dir_bin"
+"""The placement index inside `Buildings/`: one record per placed model, its file name inside.
+
+The one marker a real `Buildings/` actually carries, and it is there from the
+FIRST tile, not the last. Read at both revisions `catalog.json` pins
+(yulon-fedora 2026-09-05, `~/cmangos-probe9`, fetched `--depth 1` by SHA):
+`adtfile.cpp:116-118` and `wdtfile.cpp:49-51` build the name as
+`std::string(szWorkDirWmo) + "/dir_bin"` and open it with `fopen(dirname.c_str(),
+"ab")` -- append, per ADT and per WDT, `fclose`d at the end of each tile
+(`adtfile.cpp:215`, `wdtfile.cpp:115`). So a Stop, a crash or a full disk
+taken any time after the first tile leaves `dir_bin` behind, which is why
+every real install measured on m910q (`~/tbc-7.4c`, `~/vanilla-75b`,
+`~/vanilla-75`) holds it.
+"""
+
+DIR_INDEX = "dir"
+"""The extractor's other dirty-output marker -- and a file no pinned revision writes.
+
+`DIRTY_MARKERS` mirrors the tool's condition, and the tool's condition is an OR
+over `dir` and `dir_bin`, so a `Buildings/` that holds a file called `dir` for
+any reason is refused by the real binary and has to be refused here. But
+nothing under `contrib` creates it: at both pinned revisions
+`git grep -nE '"/dir"' -- contrib` returns exactly ONE hit, the stat check
+itself (`vmapexport.cpp:474` at 8ec338a1, `:524` at f82e7d67), and no real
+install on m910q has one. Kept because the tool keeps it; never treated as
+evidence that an extraction happened.
+"""
+
+GAMEOBJECT_MODELS = "temp_gameobject_models"
+"""What a FINISHED `Buildings/` has that a half-written one does not.
+
+Not a dirty marker -- the stat check above names two paths and this is not one
+of them -- and recorded here because it is the file that separates the two
+states this module keeps having to tell apart. `ExtractGameobjectModels()`
+opens it `fopen((basepath + "temp_gameobject_models").c_str(), "wb")` with
+`basepath = szWorkDirWmo + "/"` (`gameobject_extract.cpp:58` at both pinned
+revisions), and `main()` calls it LAST, after `ExtractWmo()` and after
+`ParsMapFiles()` -- the loop that appends `dir_bin`. So `dir_bin` without
+`temp_gameobject_models` is an interrupted extraction and both together are a
+complete one, which is the pair the doubles in `tests/` write.
+"""
+
+DIRTY_MARKERS: tuple[str, ...] = (DIR_INDEX, DIR_BIN)
+r"""The two names `vmap_extractor`'s `main()` stats before it will start at all.
+
+Read out of the pinned sources on m910q, 2026-09-05, at the two revisions
+`catalog.json` names -- `cmangos/mangos-classic` 8ec338a1
+(`contrib/vmap_extractor/vmapextract/vmapexport.cpp:472-483`) and
+`cmangos/mangos-tbc` f82e7d67 (the same file, :522-533). Re-read at both
+revisions on yulon-fedora 2026-09-05 (`~/probe10`, `git init` + `git fetch
+--depth 1` BY SHA): the twelve lines are byte-identical at the two revisions,
+and the condition is an OR over exactly these two paths -- quoted whole,
+`fflush` included, classic :472-483 / tbc :522-533::
+
+    else
+    {
+        std::string sdir = std::string(szWorkDirWmo) + "/dir";
+        std::string sdir_bin = std::string(szWorkDirWmo) + "/dir_bin";
+        struct stat status;
+        if (!stat(sdir.c_str(), &status) || !stat(sdir_bin.c_str(), &status))
+        {
+            printf("Your output directory seems to be polluted, please use an empty directory!\n");
+            fflush(stdout);
+            return 1;
+        }
+    }
+
+`szWorkDirWmo` is `Buildings`, so the folder the check is about is
+`data/Buildings` and the exit is 1 -- not a signal, which is why no retry
+recipe in the catalog can reach it (`wow-tbc` has none; `wow-vanilla`'s fires
+on `Segmentation fault|core dumped` and returncode 139).
+
+The condition is a CHECK and nothing here writes either path: see `DIR_BIN`
+and `DIR_INDEX` for who writes what, re-read on yulon-fedora 2026-09-05 at
+both revisions. `dir_bin` is appended from the first tile; `dir` has no writer
+under `contrib` at all.
+
+It is the ONLY one of the four tools that refuses a non-empty output folder,
+and that was read again rather than assumed, on yulon-fedora 2026-09-05 at
+both pinned revisions (`~/cmangos-probe9`). None of the other three refuses,
+and none of them REBUILDS everything either, which are different facts:
+
+* `contrib/extractor`'s `ad` creates its folders with `CreateDir()`
+  (`System.cpp:109-116` at 8ec338a1, `:98-105` at f82e7d67) and overwrites
+  what it writes -- `.map` files and every extracted client file go through
+  `fopen(.., "wb")` (`System.cpp:783` and `:890` at 8ec338a1, `:772` and
+  `:879` at f82e7d67). It has ONE output-path `FileExists()`, on
+  `Cameras/` (`:972` at 8ec338a1, `:973` at f82e7d67), and it `continue`s past
+  a camera file that is already there. Its other `FileExists()` calls are
+  about the CLIENT's MPQs;
+* `vmap_assembler`'s `main()` is a couple of dozen lines with two `return 1`s,
+  both for a bad argv or a failed `convertWorld2()`
+  (`contrib/vmap_assembler/vmap_assembler.cpp:30` and `:44` at 8ec338a1, `:30`
+  and `:43` at f82e7d67 -- the same two branches, one line apart because TBC's
+  assembler is not heap-allocated), and `TileAssembler` opens every output with
+  `fopen(.., "wb")` (`src/game/vmap/TileAssembler.cpp:111,162,338`, those three
+  line numbers identical at both revisions);
+* `contrib/mmap`'s `MoveMapGen` has no such check either, and it does not
+  overwrite: `MapBuilder::shouldSkipTile` (`MapBuilder.cpp:1186` at 8ec338a1,
+  `:1204` at f82e7d67) opens the existing `mmaps/<map><y><x>.mmtile`, reads its
+  header, and returns true -- SKIPPING the tile at `:603`/`:610` -- when the
+  magic, the Detour version and the mmap version all match. A tile that is
+  missing, short or stale is rebuilt; a matching one is kept. No user of this
+  module sees the difference, because the mmaps stage wipes `mmaps/` itself
+  when no finished record vouches for it.
+
+A `git grep -i` for "polluted", "dirty" and "empty directory" over
+`contrib/mmap`, `contrib/extractor` and `contrib/vmap_assembler` at both
+revisions returns nothing. So `vmaps/`, `mmaps/`, `dbc/` and `maps/` need no
+emptying for a second extraction, and a remedy that told a user to delete them
+would be charging for work the tools do not ask for.
+"""
+
+DIRTY_OUTPUT_TOOL = "vmap_extractor"
+"""The basename of the one extractor binary this check was READ out of.
+
+`wow-tortoise` is the reason this is a name and not "every tool that produces
+`Buildings/`". Its `vmap extract` produces `Buildings` exactly like the CMaNGOS
+ones and its binary is `/opt/tortoise/bin/vmapextractor` -- a different
+lineage, and its `main()` has no dirty check at all. Read at the revision
+`catalog.json` pins, `Shyalya/tortoise-wow` 7c0fb278 (m910q 2026-09-05, fetched
+`--depth 1` into `~/tortoise-server/src/tortoise-wow` for the reading, since
+that clone stood at 7f2957e0): `tools/vmap_extractor/vmapextract/
+vmapexport.cpp:465-486` goes from `processArgv` straight to `mkdir`, and a
+grep for "polluted" and "empty directory" over that file at that rev counts 0.
+Refusing a Tortoise press would cost a user an extraction over a rule their
+tool does not have -- see
+`pyplan/gates/doodad-2026-09-05/extractor-dirty-output.txt` §4.
+"""
+
+
+def blocking_output(tool: ExtractTool, data_dir: Path) -> Path | None:
+    """The folder this tool would refuse to start into as it stands, or None.
+
+    Asked BEFORE the container, because the alternative is what a user got
+    until 2026-09-05: an hour of build, a container that exits 1 on its first
+    breath, and "Your output directory seems to be polluted, please use an
+    empty directory!" as the whole of the advice -- a sentence that names no
+    folder, in a message about a tool whose output folder is one of three the
+    plan mentions. Measured on m910q 2026-09-05 through this module's own
+    `run_plan()`: from a finished install with `data/.yulon-extract.json`
+    deleted, every press died there, and the press after it died there too,
+    because the re-created evidence file records `dbc and maps` and nothing
+    else. The install was wedged, and nothing in the message led out.
+
+    BOTH halves are demanded, and they answer different questions. The BINARY
+    (`DIRTY_OUTPUT_TOOL`, matched on `argv[0]`'s basename) is what refuses --
+    the rule belongs to the lineage whose source carries it, and `wow-tortoise`
+    produces the same folder with a binary that has no such check. The FOLDER
+    (`BUILDINGS_DIR` in `produces`) is what the refusal is about, and the
+    catalog is what says the tool writes it;
+    `test_every_shipped_cmangos_entry_produces_and_then_reads_the_buildings_dir`
+    keeps those two together. Either half alone would be a guess about a tool
+    nobody read.
+
+    NOT a call to `empty_out_dirs()`, deliberately, and that is the whole of
+    the difference between this and the obvious fix. That function deletes, its
+    docstring forbids it outside the retry pass ("a first run that finds files
+    under `data/` leaves them exactly as it found them"), and what is under
+    `data/Buildings` on a finished install is hours of somebody's extraction.
+    This one only reads, and hands the name to the sentence that asks.
+    """
+    if tool.argv[0].rsplit("/", 1)[-1] != DIRTY_OUTPUT_TOOL:
+        return None
+    if BUILDINGS_DIR not in tool.produces:
+        return None
+    folder = data_dir / BUILDINGS_DIR
+    if any((folder / marker).exists() for marker in DIRTY_MARKERS):
+        return folder
+    return None
+
+
+def clear_before_rerun(plan: ExtractPlan, data_dir: Path) -> tuple[Path, ...]:
+    """Every folder a second extraction over this `data/` would be refused by, in plan order.
+
+    The remedy's half of `blocking_output()`: `cmangos.py`'s refusal names the
+    evidence file whose deletion re-runs the extraction, and it has to name
+    these in the same breath or the press it asks for dies at the first tool
+    that meets one. Empty on a `data/` no extraction has finished, which is why
+    the sentence is assembled from what this returns rather than written out.
+    """
+    found = (blocking_output(tool, data_dir) for tool in plan.tools)
+    return tuple(folder for folder in found if folder is not None)
+
+
+DIRTY_OUTPUT_NOTE = (
+    "That folder holds an extraction this app made, not anything of yours, and deleting it is "
+    "what a second extraction needs: the tool writes it from the client again, which takes "
+    "tens of minutes and touches nothing else under data/."
+)
+"""Said after the refusal below, and after the same folder is named in a remedy elsewhere."""
+
+
+def blocked_message(tool: ExtractTool, folder: Path) -> str:
+    """The refusal, with the folder named -- the sentence the tool's own last words are not.
+
+    The markers are the ones actually THERE, read again here rather than
+    listed. The tool's condition is an OR over two paths and only one of them
+    has a writer: `dir_bin` is appended from the first tile and `dir` is
+    written by nothing under `contrib` at either pinned revision (see
+    `DIR_BIN`, `DIR_INDEX`). So the message a real install gets names `dir_bin`
+    alone -- every `Buildings/` measured on m910q 2026-09-05 holds `dir_bin`
+    and no `dir` -- and listing both would be telling somebody about a file
+    they will not find.
+
+    "The extraction ran nothing and changed nothing under data/" is a claim
+    about the whole EXTRACTION -- every tool in the plan and not only this one
+    -- and it is why `run_plan()` asks every unsatisfied tool this question in
+    one pass before it runs any of them. Asked inside the loop instead, the
+    sentence was false in the one scenario the refusal exists for: the shipped
+    plans put `ad` first, so a press that refused `vmap extract` had already
+    run an `ad` container to completion -- tens of minutes on a real client --
+    and rewritten the evidence file the user had just been told to delete.
+
+    It is scoped to the extraction and not to the PRESS, which is how the
+    fifth pass of 2026-09-05 worded it, because the wider sentence is false:
+    the build stage runs first. Measured on yulon-fedora 2026-09-05 through the real
+    `CmangosInstaller.run()`, in the state this module's own remedy asks for
+    (`docker image rm`, so `images_built` answers False) with
+    `data/.yulon-extract.json` deleted and `data/Buildings` kept, two fixtures
+    -- a pre-`patch-sources` install and a finished modern one -- both logged
+    "compiling" and "The build finished." exactly four log lines above this
+    refusal. The pre-patch press left 12 changed files under the server folder
+    (the four patched extractor sources, `Dockerfile`, `.dockerignore`, three
+    compose files, `.env`, `.yulon-install.json`, and `.db_password` -- the
+    fixture carries none, so the press mints one; an earlier count said 11 and
+    omitted it); the modern one left 1 (`.yulon-install.json`). Re-measured by
+    the round-10 review (`pyplan/gates/doodad-2026-09-05/round10-press-probe.txt`).
+    Neither launched an extraction container and
+    neither changed a byte under `data/`, which is what the narrower sentence
+    claims and what
+    `test_a_refused_extraction_ran_nothing_and_changed_nothing_as_its_sentence_says`
+    asserts. `cmangos.py`'s `_data_dir()` carries the same scope for the same
+    reason.
+    """
+    present = [marker for marker in DIRTY_MARKERS if (folder / marker).exists()]
+    held = " and ".join(present)
+    return (
+        f"{tool.name} cannot run into {folder}: it already holds {held} from an earlier "
+        f"extraction, and this tool refuses to start while that is there "
+        f'("Your output directory seems to be polluted, please use an empty directory!", and '
+        f"it exits without writing anything). The extraction ran nothing and changed nothing "
+        f"under data/. "
+        f"Delete {folder} and press Install again. {DIRTY_OUTPUT_NOTE}"
+    )
+
+
+_MODEL_NAME = re.compile(rb"[A-Za-z0-9_.\-]+\.(?:m2|M2)")
+
+
+@dataclass(frozen=True)
+class DoodadCheck:
+    """What `Buildings/` says about itself: models on disk against models the index places.
+
+    The counts are case-folded on purpose: the defect this exists for is a
+    writer and a reader that disagree about CASE (`pyplan/upstream-cmangos-doodad-drop.md`
+    §4), so a model present as both `INNBED.M2` and `Innbed.m2` is one model.
+    `misspelt` is the sharp signal — files whose name is not what the reader
+    would ask for — and `unplaced` the blunt one the write-up's option C
+    named. Measured on m910q 2026-09-05 against the 1.12.1 client, same
+    extractor commit `8ec338a1`: unpatched 1,464 misspelt / 802 unplaced;
+    patched 0 misspelt / 434 unplaced. So 434 models with no placement is what
+    a CORRECT extraction looks like (GameObjectDisplayInfo models go to
+    `temp_gameobject_models`, not the index), and a warning keyed on
+    `unplaced > 0` would fire on every install for ever. The warning is keyed
+    on `misspelt`, which reads zero after the fix on both filesystems, and the
+    unplaced count rides along as information.
+    """
+
+    extracted: int
+    placed: int
+    unplaced: int
+    misspelt: int
+
+    def line(self) -> str:
+        """One log line: a warning when the reader would miss a file, plain counts otherwise.
+
+        A warning and not a refusal, deliberately. The extraction is not wrong
+        by shape — the server boots, the assembler runs, terrain and building
+        shells are complete — it is short of interior collision geometry, and a
+        refusal here would take a working install away from a user over a
+        defect only a rebuild can mend. What the warning is FOR is the day the
+        `patch-sources` stage silently stops applying (a resume over a state
+        file that lies, an image built from a checkout somebody reset); it says
+        which stage to look at, and it is the only check that would have caught
+        the original defect.
+        """
+        if self.misspelt:
+            return (
+                f"warning: {self.misspelt} of the {self.extracted} models extracted into "
+                f"{BUILDINGS_DIR}/ are spelled in a way the placement index never looks up "
+                f"({self.unplaced} have no placement in {DIR_BIN} at all). On a case-sensitive "
+                "filesystem those placements were dropped silently, which means the source "
+                "patch the patch-sources stage carries did not reach this build. The server "
+                "will run, short of interior collision geometry."
+            )
+        return (
+            f"{BUILDINGS_DIR}/: {self.extracted} models, {self.placed} placed in {DIR_BIN}, "
+            f"{self.unplaced} with no placement; every model file is spelled the way the "
+            "placement index asks for it."
+        )
+
+
+def reader_spelling(name: str) -> str:
+    """`fixnamen()` then `fixname2()` from the extractor's `adtfile.cpp`, ported byte for byte.
+
+    Title-case each alphabetic run, lower-case the last three characters, then
+    underscore every space before them; names under three characters pass
+    through. This is what `Doodad::ExtractSet()` applies to a MODN name before
+    it opens the file, so a file on disk whose name is not a fixed point of it
+    is a file that reader will never open.
+    """
+    raw = bytearray(name.encode("utf-8", errors="surrogateescape"))
+    n = len(raw)
+    if n < 3:
+        return name
+    for i in range(n - 3):
+        prev_alpha = i > 0 and chr(raw[i - 1]).isalpha()
+        if i > 0 and 65 <= raw[i] <= 90 and prev_alpha:
+            raw[i] |= 0x20
+        elif (i == 0 or not prev_alpha) and 97 <= raw[i] <= 122:
+            raw[i] &= ~0x20
+    for i in range(n - 3, n):
+        raw[i] |= 0x20
+    for i in range(n - 3):
+        if raw[i] == 0x20:
+            raw[i] = 0x5F
+    return raw.decode("utf-8", errors="surrogateescape")
+
+
+def doodad_placements(buildings: Path) -> DoodadCheck | None:
+    """Read `Buildings/` and its index; None when there is nothing to compare.
+
+    Names are pulled out of the index's bytes by pattern rather than by parsing
+    its records, because the record layout differs between the WMO writer and
+    the doodad writer and neither is documented; the write-up's own count
+    (§7) was taken the same way, and the numbers this module was measured
+    against are that count's. An index that will not read is logged and is no
+    check — a warning about a folder nobody could open would accuse the
+    extraction of something the disk did.
+    """
+    index = buildings / DIR_BIN
+    try:
+        names = [p.name for p in buildings.iterdir() if p.name.lower().endswith(".m2")]
+        if not index.is_file() or not names:
+            return None
+        raw = index.read_bytes()
+    except OSError as exc:
+        logger.warning(f"{buildings} could not be read for the placement check, skipping it: {exc}")
+        return None
+    on_disk = {name.lower() for name in names}
+    placed = {m.decode("ascii", errors="replace").lower() for m in _MODEL_NAME.findall(raw)}
+    misspelt = sum(1 for name in names if reader_spelling(name) != name)
+    return DoodadCheck(
+        extracted=len(on_disk),
+        placed=len(on_disk & placed),
+        unplaced=len(on_disk - placed),
+        misspelt=misspelt,
+    )
+
+
+# ------------------------------------------------ the mmaps stage: one tool, and one wipe
+
+MMAPS_TOOL = "mmaps"
+"""The name this stage records itself under, in the same evidence file the tools use."""
+
+MMAPS_DIR = "mmaps"
+"""The folder this stage writes, and the folder it removes: `<data_dir>/mmaps`.
+
+Held as a module constant rather than read off `MmapPlan`, deliberately. This
+stage removes a folder, and a catalog field naming that folder would be one
+edit away from naming somewhere else, while a constant is not. `run_mmaps()` is
+given no client path either, so the two inputs to `data_dir / MMAPS_DIR` are the
+server's own data directory and this string. Both of those are pinned where they
+are CHOSEN rather than where they meet — grep for `MmapPlan.model_fields` in
+`tests/test_extract.py` — because an assertion that one happy path removed
+`data/mmaps` would keep passing on the day a field pointed it elsewhere.
+"""
+
+MMAPS_CANCEL_NOTE = (
+    "Map generation restarts from the beginning; the extracted maps it reads are kept."
+)
+"""What a Stop costs in the mmaps stage, yielded by the spine before it begins (A4).
+
+True of a Stop at any moment inside the stage: nothing is recorded until the
+tool exits 0 with enough files, so there is no partial state to resume into, and
+the only folder touched is `mmaps` itself.
+"""
+
+MMAPS_CLEARED_NOTE = (
+    "The mmaps folder was removed before this attempt so generation could start clean, "
+    "so there is no earlier one left to fall back on."
+)
+"""The clause every refusal carries when the wipe already happened — and only then.
+
+A shortfall before a wipe and a shortfall after one are different facts about
+somebody's disk. "map generation failed (exit 139)" is true of both and complete
+about neither: after a wipe the machine is a folder poorer than the sentence
+implies, and the user needs to know that the next attempt is not optional.
+"""
+
+
+def run_mmaps(
+    plan: MmapPlan,
+    *,
+    image_ref: str,
+    data_dir: Path,
+    run_container: RunContainer,
+    user_args: Sequence[str],
+    sink: docker.OutputSink,
+    cancel: threading.Event | None,
+) -> Iterator[str]:
+    """Generate `data/mmaps` from the extracted maps and vmaps, unless the evidence vouches for it.
+
+    The same three-part rule as `run_plan`, asked of the evidence file the
+    extract stage wrote — with one difference that has to be said out loud,
+    because it makes a whole class of check useless here. This stage reads no
+    client, so it has no independently measured facts to compare the file
+    against: it passes `current` as BOTH the evidence and the expectation.
+    `same_stage()`'s four fields therefore agree by construction and can refuse
+    nothing. What can refuse is `satisfied()`'s `client_facts_complete` veto (a
+    bit written by whichever run could not measure the client, read back off the
+    file), the record for THIS argv, and the counts. Whatever notices a swapped
+    client, it is not anything in here: it is `run_plan`, which replaces the
+    whole file — this stage's record included — when the stage facts move.
+
+    Without a record the folder is wiped first. The premise is MoveMapGen's
+    behaviour — it skips maps it already finds output for — which is the 7.3
+    plan's stated reason for the wipe (2026-08-26) and is NOT re-measured here;
+    if it is ever measured false, the wipe stops being justified and this is the
+    paragraph to come back to. Taking it as given, generating over a folder left
+    by an interrupted run produces a permanently partial set that passes every
+    later gate, which is the failure this stage is arranged around.
+
+    Deleting is not free, and the order below is what limits the damage:
+
+    * A cancel token that is already set is answered BEFORE the wipe. That is
+      the one ending where "do not remove it" costs nothing, so it is taken.
+    * A removal that fails refuses on the spot. The alternative — carrying on
+      over a folder that is still there — is the exact failure above.
+    * The four endings that can follow a wipe (stopped, never started, failed,
+      too few files) each say `MMAPS_CLEARED_NOTE` when the wipe happened and do
+      not when it did not. A user whose docker CLI vanished between two stages
+      is told they are now short a folder, rather than being left to find out.
+
+    `required: false` (data) turns a shortfall into a warning AND records the
+    run, so an optional stage that produced little is not regenerated on every
+    resume. The threshold for the skip test is then 0; `min_files` is only what
+    the warning names.
+
+    The counts after the run are taken once and the gate, the refusal and the
+    done line are all made of that one walk, for `counts()`'s reason.
+
+    Raises:
+        InstallerError: no extraction evidence yet, a Stop, a folder that could
+            not be removed, a tool that never started, a tool that failed, or a
+            shortfall on a required plan.
+    """
+    current = read_evidence(data_dir)
+    if current is None:
+        raise InstallerError(
+            f"{data_dir} holds no extraction evidence, so there are no maps to generate movement "
+            "data from. The extract stage has to finish first."
+        )
+    produces = {MMAPS_DIR: plan.min_files if plan.required else 0}
+    if satisfied(MMAPS_TOOL, plan.argv, produces, data_dir, current, current):
+        yield f"mmaps: already generated ({_counts_text(counts(produces, data_dir))})"
+        return
+    if cancel is not None and cancel.is_set():
+        raise InstallerError(
+            f"map generation was stopped before it started, so nothing was removed. "
+            f"{MMAPS_CANCEL_NOTE}"
+        )
+    out = data_dir / MMAPS_DIR
+    try:
+        wiped = _remove_tree(out)
+    except OSError as exc:
+        raise InstallerError(
+            f"{out} could not be removed ({exc}), and MoveMapGen skips every map it finds output "
+            "for — so generating over what is there would leave a permanently partial set that "
+            "looks finished. Nothing was run. Close whatever is using that folder, or remove it "
+            "by hand, then try again."
+        ) from exc
+    cleared = f" {MMAPS_CLEARED_NOTE}" if wiped else ""
+    if wiped:
+        yield "mmaps: removed a folder no finished run vouches for, so generation starts clean"
+    # The wipe above removes `mmaps/` and nothing here put it back, so this
+    # stage reached MoveMapGen with the same missing folder that stopped the
+    # assembler one stage earlier -- see `make_out_dirs()`. Found by reading
+    # rather than by running, and the "no run has reached this stage yet" that
+    # was written alongside it was already wrong: the commit that added this
+    # line was the commit that fixed the extract failure. A WoW TBC install has
+    # since run MoveMapGen through to completion here -- 72 maps, 2819 mmap
+    # files (m910q, 2026-09-02).
+    try:
+        make_out_dirs([MMAPS_DIR], data_dir)
+    except InstallerError as exc:
+        # `make_out_dirs`'s own sentence ends "Nothing was run", which is true
+        # of the TOOL and false of the folder: `_remove_tree` above may already
+        # have deleted `mmaps/`. This stage's docstring promises that every
+        # ending after a wipe says so, and this was the one ending that did not
+        # (review, 2026-09-02).
+        raise InstallerError(f"{exc}{cleared}") from exc
+    yield f"mmaps: running {' '.join(plan.argv)}"
+    run = run_container(
+        docker.ContainerRun(
+            image=image_ref,
+            argv=tuple(plan.argv),
+            mounts=(docker.Mount(data_dir, OUT_MOUNT),),
+            workdir=OUT_MOUNT,
+            user_args=tuple(user_args),
+            security_args=EXTRACT_HARDENING,
+        ),
+        sink=sink,
+        cancel=cancel,
+    )
+    if run.returncode == docker.CANCELLED_RETURNCODE or (cancel is not None and cancel.is_set()):
+        raise InstallerError(f"map generation was stopped.{cleared} {MMAPS_CANCEL_NOTE}")
+    if docker.cli_missing_run(run):
+        raise InstallerError(
+            f"map generation could not be started, so no movement data was written."
+            f"{cleared} {docker.last_words(run.tail)}"
+        )
+    # NOT `!= 0`. "Zero means success" is a POSIX convention, not a promise the
+    # tool made, and MoveMapGen breaks it: the Tortoise fork's main() ends
+    # `return silent ? 1 : finish("Movemap build is complete!", 1)`, so a build
+    # that wrote every map exits 1. The version that hard-coded 0 threw away a
+    # finished 2.5 GB Tortoise run -- 58 maps, 2075 tiles, ~4 hours -- and
+    # reported "map generation failed" while quoting the tool's own last line
+    # saying it had just written a file (yulon-ubuntu, 2026-09-03). The codes
+    # live in the catalog because which ones mean finished is a fact about each
+    # upstream tree, and the three entries do not agree.
+    if run.returncode not in plan.success_codes:
+        expected = ", ".join(str(code) for code in plan.success_codes)
+        raise InstallerError(
+            f"map generation failed (exit {run.returncode}; this server's generator reports "
+            f"{expected} when it finishes).{cleared} Its last words were: "
+            f"{docker.last_words(run.tail)}"
+        )
+    wanted = {MMAPS_DIR: plan.min_files}
+    seen = counts(wanted, data_dir)
+    short = short_of(seen, wanted)
+    if short:
+        have, need = short[MMAPS_DIR]
+        message = f"mmaps holds {have} files where at least {need} were expected"
+        if plan.required:
+            raise InstallerError(
+                f"{message}.{cleared} Creatures would not move properly, so nothing was "
+                "recorded. Check the extracted maps and vmaps, then try again."
+            )
+        if seen.get(MMAPS_DIR, 0) == 0:
+            # NOTHING is not a shortfall, whatever `required` says. `required:
+            # false` means "fewer than we hoped is survivable" -- a solo realm
+            # does not need every map -- and it must not be stretched to cover
+            # a tool that wrote no file at all, because that is a failed run
+            # wearing an optional stage's clothes.
+            #
+            # The stakes are the recording, not the message. Below this branch
+            # the run is written into the evidence file, and for an optional
+            # plan `produces` is `{MMAPS_DIR: 0}` (see the top of this
+            # function), so the skip test afterwards is satisfied by ANY number
+            # of files including none: an empty folder recorded once is an
+            # empty folder for every resume that follows, in silence.
+            #
+            # Reachable in practice only since success codes became data: a
+            # Tortoise run that fails exits 1, which now reads as finished, and
+            # `required: false` then downgrades its emptiness to a warning.
+            # Neither half is wrong alone; stacked they let a failure be
+            # recorded as a success (review, 2026-09-03).
+            raise InstallerError(
+                f"map generation produced no files at all.{cleared} This server treats movement "
+                "maps as optional, but an empty folder is a failed run rather than a small one, "
+                "so nothing was recorded. Check the extracted maps and vmaps, then try again."
+            )
+        yield f"warning: {message}; this server treats movement maps as optional, continuing"
+    record = ToolRecord(MMAPS_TOOL, argv_hash(plan.argv), int(time.time()))
+    write_evidence(data_dir, with_record(current, record))
+    yield f"mmaps: done ({_counts_text(seen)})"

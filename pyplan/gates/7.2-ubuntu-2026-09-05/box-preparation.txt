@@ -1,0 +1,15 @@
+=== box preparation for the 7.2 press sequence, 2026-09-05T00:00:18+02:00
+# clean-ssh ships python3 3.12.3 but not python3.12-venv, so a venv cannot be made without it.
+# The 7.1 clean lane hit the same on 09-04 (its checkout at ~/gate71 had a working .venv), so this is the one apt package the harness itself does not install.
+--- sudo apt-get install -y python3.12-venv
+Unpacking python3.12-venv (3.12.3-1ubuntu0.15) ...
+Setting up python3-setuptools-whl (68.1.2-2ubuntu1.2) ...
+Setting up python3-pip-whl (24.0+dfsg-1ubuntu1.3) ...
+Setting up python3.12-venv (3.12.3-1ubuntu0.15) ...
+--- venv
+yulon importable; PySide6 6.11.2
+pydantic           2.13.5
+pydantic_core      2.46.5
+PySide6            6.11.2
+PySide6_Addons     6.11.2
+PySide6_Essentials 6.11.2

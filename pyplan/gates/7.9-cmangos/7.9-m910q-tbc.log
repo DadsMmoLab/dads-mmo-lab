@@ -1,0 +1,87 @@
+game=wow-tbc server_dir=/home/pk/tbc-7.4c
+containers: world=tbc-mangosd auth=tbc-realmd db=tbc-db auth_port=3724
+
+====================== baseline ======================
+status: db=True auth=True world=True
+running: {'tbc-mangosd': True, 'tbc-realmd': True, 'tbc-db': True}
+
+====================== console.send_command() -- and what the attach did to the server ======================
+tbc-mangosd before: {'pid': 885612, 'restarts': 0, 'started_at': '2026-09-03T23:26:14.761075082Z'}
+2026-09-04 01:46:29 INFO [yulon.controller_wow_wotlk.console] console → tbc-mangosd: ['server', 'info']
+reply.command : 'server info'
+reply.prompted: True
+  | CMaNGOS/0.18 (0000-00-00T00:00:00+00:00 - Git repository not found) for Linux_x64 (little-endian)
+  | Using World DB: TBC-DB 1.11.0 'Vengeance One: A Cmangos Story' for CMaNGOS-TBC
+  | Using creature EventAI: ACID 2.4.3 (The Burning Crusades) for CMaNGOS-TBC (2.4.3 Client)
+  | Online players: 0 (max: 0)
+  | Server uptime: 20 Minute(s) 12 Second(s).
+tbc-mangosd after:  {'pid': 885612, 'restarts': 0, 'started_at': '2026-09-03T23:26:14.761075082Z'}
+[OK] send_command('server info') answered in 3.61s and left pid/RestartCount/StartedAt unchanged (pid 885612, RestartCount 0)
+[OK] the reply carries 5 line(s) cut on this core's own prompt
+
+====================== backup() -- live, with the server running ======================
+2026-09-04 01:46:37 INFO [yulon.controller_wow_wotlk.maintenance] backed up 4 database(s) into /home/pk/tbc-7.4c/sql_scripts/backups: characters (67534312 bytes), logs (4648 bytes), mangos (158550486 bytes), realmd (44739 bytes)
+  dump: characters /home/pk/tbc-7.4c/sql_scripts/backups/20260904_014633_characters.sql 67534312 bytes
+  dump: logs /home/pk/tbc-7.4c/sql_scripts/backups/20260904_014633_logs.sql 4648 bytes
+  dump: mangos /home/pk/tbc-7.4c/sql_scripts/backups/20260904_014633_mangos.sql 158550486 bytes
+  dump: realmd /home/pk/tbc-7.4c/sql_scripts/backups/20260904_014633_realmd.sql 44739 bytes
+  missing_core: ()
+[OK] backup() -> 4 dump(s) (characters, logs, mangos, realmd) in /home/pk/tbc-7.4c/sql_scripts/backups in 4.4s, server_was_running=True
+
+====================== verify_dump() on every dump ======================
+  verify_dump(20260904_014633_characters.sql) -> 67534312 bytes
+  verify_dump(20260904_014633_logs.sql) -> 4648 bytes
+  verify_dump(20260904_014633_mangos.sql) -> 158550486 bytes
+  verify_dump(20260904_014633_realmd.sql) -> 44739 bytes
+[OK] verify_dump() passed for all 4 dump(s)
+
+====================== plan_restore() while the server is up -- it must REFUSE ======================
+2026-09-04 01:46:39 INFO [yulon.controller_wow_wotlk.maintenance] restore of 20260904_014633_characters.sql refused: tbc-mangosd, tbc-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.
+refusals: ('tbc-mangosd, tbc-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+[OK] plan_restore() refused while running: ('tbc-mangosd, tbc-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+
+====================== Controller.stop() -- the Stop button, which calls stop_staged() ======================
+2026-09-04 01:46:42 INFO [yulon.docker] stop_staged(): stopped; containers kept for a fast restart
+running after stop: {'tbc-mangosd': False, 'tbc-realmd': False, 'tbc-db': False}
+[OK] stop_staged() took 3.1s and returned True; db, auth and world all down
+
+====================== Controller.start() -- the Start button, which calls start_staged() ======================
+2026-09-04 01:46:43 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tbc-db tbc-realmd tbc-mangosd` in /home/pk/tbc-7.4c
+running after start: {'tbc-mangosd': True, 'tbc-realmd': True, 'tbc-db': True}
+[OK] start_staged() returned in 6.1s; all three up
+
+====================== time from start_staged() to this game's own ready marker ======================
+[OK] reached ready 73.0s after start_staged() returned
+
+====================== restore round trip: db up, world+auth down ======================
+tbc-mangosd
+tbc-realmd
+refusals now: ()
+databases: ('characters',)  size_bytes: 67534312
+interrupted: None
+2026-09-04 01:48:11 WARNING [yulon.controller_wow_wotlk.maintenance] this install has no acore_auth, acore_characters, acore_world; backing up what it does
+2026-09-04 01:48:12 INFO [yulon.controller_wow_wotlk.maintenance] backed up 1 database(s) into /home/pk/tbc-7.4c/sql_scripts/backups: characters (67628140 bytes)
+2026-09-04 01:48:12 WARNING [yulon.controller_wow_wotlk.maintenance] restoring characters from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_014633_characters.sql
+2026-09-04 01:48:24 INFO [yulon.controller_wow_wotlk.maintenance] restored characters from /home/pk/tbc-7.4c/sql_scripts/backups/20260904_014633_characters.sql
+[OK] restore() put back ('characters',) from 20260904_014633_characters.sql in 15.5s (safety backup: ['20260904_014811_pre-restore_characters.sql'])
+
+====================== start again, and confirm the restored server comes back ready ======================
+2026-09-04 01:48:24 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tbc-db tbc-realmd tbc-mangosd` in /home/pk/tbc-7.4c
+running: {'tbc-mangosd': True, 'tbc-realmd': True, 'tbc-db': True}
+[OK] the restored server reached ready again in 75.3s
+
+====================== SUMMARY ======================
+OK send_command('server info') answered in 3.61s and left pid/RestartCount/StartedAt unchanged (pid 885612, RestartCount 0)
+OK the reply carries 5 line(s) cut on this core's own prompt
+OK backup() -> 4 dump(s) (characters, logs, mangos, realmd) in /home/pk/tbc-7.4c/sql_scripts/backups in 4.4s, server_was_running=True
+OK verify_dump() passed for all 4 dump(s)
+OK plan_restore() refused while running: ('tbc-mangosd, tbc-realmd are running. A restore has to happen with the game servers stopped: the worldserver keeps characters in memory and saves them back, so it would overwrite the restored data within minutes. Stop the server and try again.',)
+OK stop_staged() took 3.1s and returned True; db, auth and world all down
+OK start_staged() returned in 6.1s; all three up
+OK reached ready 73.0s after start_staged() returned
+OK restore() put back ('characters',) from 20260904_014633_characters.sql in 15.5s (safety backup: ['20260904_014811_pre-restore_characters.sql'])
+OK the restored server reached ready again in 75.3s
+
+TIMES {"console_seconds": 3.6078259479254484, "backup_seconds": 4.414437750005163, "stop_staged_seconds": 3.0735016660764813, "start_staged_seconds": 6.097748499945737, "ready_seconds": 73.01292615395505, "restore_seconds": 15.474895393010229, "ready_after_restore_seconds": 75.25843223999254}
+
+10 passed, 0 failed

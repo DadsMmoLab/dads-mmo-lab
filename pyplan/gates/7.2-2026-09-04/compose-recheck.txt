@@ -1,0 +1,70 @@
+=== independent compose re-check, 2026-09-04T12:54:15+02:00, lane 7.2/7.10
+checkout : /home/pk/gate0904/checkout at 81d7311e803745c1659f27aea6610e663aadd891
+server   : /home/pk/wowserver
+docker   : Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+compose  : Docker Compose version 2.40.3+ds1-0ubuntu1~24.04.1
+
+--- route A: docker compose config (YAML), the route the fixture brief did NOT use
+exit 0  lines 219  stderr bytes 0
+
+--- route B: docker compose config --format json, the route the brief documents
+exit 0  bytes 9322  stderr bytes 0
+
+--- the brief's own transform, applied verbatim to route B
+services: ['ac-authserver', 'ac-client-data-init', 'ac-database', 'ac-db-import', 'ac-worldserver']
+absolute /home/ paths remaining: 0
+
+--- byte diff: brief-transform of MY capture  vs  the committed fixture
+differing lines: 38
+  3,4c3,10
+  <     "ac-network": {},
+  <     "default": {}
+  ---
+  >     "ac-network": {
+  >       "ipam": {},
+  >       "name": "yulon-wow-wotlk-243c46e3_ac-network"
+  >     },
+  >     "default": {
+  >       "ipam": {},
+  >       "name": "yulon-wow-wotlk-243c46e3_default"
+  >     }
+  7a14
+  >       "command": null,
+  18a26
+  >       "entrypoint": null,
+  79a88
+  >       "command": null,
+  80a90
+  >       "entrypoint": null,
+  116a127
+  >       "command": null,
+  123a135
+  >       "entrypoint": null,
+  163a176
+  >       "command": null,
+  178a192
+  >       "entrypoint": null,
+  250,251c264,269
+  <     "client-data": {},
+  <     "db-data": {}
+  ---
+  >     "client-data": {
+  >       "name": "yulon-wow-wotlk-243c46e3_client-data"
+  >     },
+  >     "db-data": {
+  >       "name": "yulon-wow-wotlk-243c46e3_db-data"
+  >     }
+
+--- the project's own seam: support_compose.compare()
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+  File "/home/pk/gate0904/checkout/pylauncher/tests/support_compose.py", line 587, in compare
+    mine, its = getattr(ours, field), getattr(theirs, field)
+                ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'dict' object has no attribute 'container_name'
+services on each side: ['ac-authserver', 'ac-client-data-init', 'ac-database', 'ac-db-import', 'ac-worldserver'] | ['ac-authserver', 'ac-client-data-init', 'ac-database', 'ac-db-import', 'ac-worldserver']
+service differences (my capture vs the committed fixture): 0
+stack differences (my capture vs the committed fixture): 1
+    project: the native stack has no `name:`, so its named volumes are keyed by the install directory and two installs can share one database
+control  compare_stack(fixture, fixture): 1 ['project: the native stack has no `name:`, so its named volumes are keyed by the install directory and two installs can share one database']
+control  compare_stack(mine, mine):       1 ['project: the native stack has no `name:`, so its named volumes are keyed by the install directory and two installs can share one database']

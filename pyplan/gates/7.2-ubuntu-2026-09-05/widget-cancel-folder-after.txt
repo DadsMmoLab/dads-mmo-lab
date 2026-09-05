@@ -1,0 +1,25 @@
+=== the cancelled folder after the 7.10 widget cancel, 2026-09-05T00:15:26+02:00
+--- state file
+cat: .yulon-install.json: No such file or directory
+--- is docker-compose.yml upstream's (git-tracked, unmodified) or the engine's?
+docker-compose.yml
+(empty status = tracked and unmodified)
+--- first 3 lines of docker-compose.yml
+# docker-compose.yml for AzerothCore.
+#
+# Start the server with `docker compose up -d --build`
+--- compose files present
+ls: cannot access 'compose*.yml': No such file or directory
+-rw-r--r-- 1 pk docker 7930 Sep  5 00:13 docker-compose.yml
+--- HEAD
+413bea61a Merge pull request #244 from mod-playerbots/test-staging
+--- size
+2.2G	.
+--- untracked files (what the engine wrote, if anything)
+--- ~/wowserver
+ls: cannot access '/home/pk/wowserver': No such file or directory
+--- docker images now
+alpine/git:<none> 138MB
+--- docker ps -a
+--- df
+/dev/sda2        97G   19G   74G  21% /

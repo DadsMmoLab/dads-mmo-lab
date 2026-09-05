@@ -1,0 +1,42 @@
+=== box preparation by lane 7.1, 2026-09-04T11:21:57+02:00
+# The restored checkpoint is NOT clean: it carries a COMPLETE 08-31 install at
+# ~/wowserver (state file completed=[clone-core..import], install_id 243c46e3) and a
+# RUNNING stack (ac-worldserver 5.6GB RSS, ac-authserver, ac-database) holding
+# ports 3724/8085/3306. A fresh install cannot start until both are out of the way.
+--- docker compose down
+ Container ac-worldserver  Stopping
+ Container ac-authserver  Stopping
+ Container ac-authserver  Stopped
+ Container ac-authserver  Removing
+ Container ac-authserver  Removed
+ Container ac-worldserver  Stopped
+ Container ac-worldserver  Removing
+ Container ac-worldserver  Removed
+ Container ac-client-data-init  Stopping
+ Container ac-db-import  Stopping
+ Container ac-client-data-init  Stopped
+ Container ac-client-data-init  Removing
+ Container ac-db-import  Stopped
+ Container ac-db-import  Removing
+ Container ac-client-data-init  Removed
+ Container ac-db-import  Removed
+ Container ac-database  Stopping
+ Container ac-database  Stopped
+ Container ac-database  Removing
+ Container ac-database  Removed
+ Network yulon-wow-wotlk-243c46e3_ac-network  Removing
+ Network yulon-wow-wotlk-243c46e3_default  Removing
+ Network yulon-wow-wotlk-243c46e3_default  Removed
+ Network yulon-wow-wotlk-243c46e3_ac-network  Removed
+--- mv ~/wowserver -> ~/wowserver-0831
+drwxrwxr-x 19 pk pk 4096 Aug 31 15:16 /home/pk/wowserver-0831
+ls: cannot access '/home/pk/wowserver': No such file or directory
+--- docker ps -a after
+CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS    PORTS     NAMES
+--- free -g after
+               total        used        free      shared  buff/cache   available
+Mem:              19           2           7           0          10          17
+Swap:              7           0           7
+--- df -h ~ after
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2        97G   51G   42G  56% /

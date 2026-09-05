@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -13,8 +14,13 @@ from yulon import docker, networking, runner
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
+from yulon.controller_wow_tbc import controller as tbc_controller
+from yulon.controller_wow_tortoise import accounts as tortoise_accounts
+from yulon.controller_wow_tortoise import console as tortoise_console
+from yulon.controller_wow_tortoise import controller as tortoise_controller
+from yulon.controller_wow_vanilla import controller as vanilla_controller
 from yulon.controller_wow_wotlk import console, modules
-from yulon.controller_wow_wotlk.accounts import AccountResult
+from yulon.controller_wow_wotlk.accounts import AccountError, AccountResult
 from yulon.controller_wow_wotlk.console import ConsoleReply
 from yulon.controller_wow_wotlk.maintenance import (
     BackupReport,
@@ -1207,6 +1213,87 @@ def test_the_maintenance_tab_asks_the_distro_s_docker_what_is_running(
     assert not any("could not be found on this machine" in r for r in plan.refusals), plan.refusals
 
 
+def _scan_for_seams_without_a_distro(package: Path, source: Path) -> tuple[set[str], list[str]]:
+    """The matching behind the guard below, over any package and any call site.
+
+    Returns `(accepts, missing)`: every name in `package` that takes a
+    `wsl_distro`, and every call in `source` that names one of them without
+    passing it. A module-level helper rather than a body inline in the guard so
+    the regression test below can run THIS code over a synthetic package - a
+    second copy of the logic would prove nothing about the guard that ships.
+    """
+    import ast
+
+    accepts: set[str] = set()
+    modules: set[str] = set()
+    by_module: dict[str, set[str]] = {}
+    defined_in: dict[str, set[str]] = {}
+    for path in package.rglob("*.py"):
+        modules.add(path.stem)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                defined_in.setdefault(path.stem, set()).add(node.name)
+                args = node.args
+                if any(a.arg == "wsl_distro" for a in args.args + args.kwonlyargs):
+                    # Not dunders: a constructor is spelled by its CLASS name at
+                    # the call site, so matching the bare name `__init__` only
+                    # ever catches somebody else's `super().__init__(parent)`.
+                    if not node.name.startswith("__"):
+                        accepts.add(node.name)
+                        by_module.setdefault(path.stem, set()).add(node.name)
+            elif isinstance(node, ast.ClassDef):
+                defined_in.setdefault(path.stem, set()).add(node.name)
+                if any(
+                    isinstance(stmt, ast.AnnAssign)
+                    and isinstance(stmt.target, ast.Name)
+                    and stmt.target.id == "wsl_distro"
+                    for stmt in node.body
+                ):
+                    accepts.add(node.name)
+                    by_module.setdefault(path.stem, set()).add(node.name)
+
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    missing: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+            receiver = ast.unparse(func.value)
+            # `self.<x>` and `self.services.<x>` are the view calling objects
+            # that were built WITH the distro; they are not the seam.
+            on_self = receiver.startswith("self")
+            # A MODULE-qualified call names exactly one function, and a
+            # package-wide set of bare NAMES cannot tell two of them apart.
+            # `apply` is both `networking.apply(plan, sql=sql)`, which reaches
+            # no daemon and takes no distro, and `sqlplan.apply(...)`, which
+            # reaches one and does - so from 7.3 the scan reported the former
+            # as a seam addressing the wrong docker.
+            #
+            # The exemption is only for a name the receiving module DEFINES
+            # itself and that definition takes no distro. A name that module
+            # merely RE-EXPORTS (`from yulon.apply import DockerSql`) resolves
+            # to a definition somewhere else, so it falls through to the
+            # package-wide check below - as does a bare name, an
+            # object-qualified call, and any receiver that is not a module
+            # stem. Resolving locally where it can is what makes this stricter
+            # than the bare-name scan; skipping what it cannot resolve would
+            # make it looser, and did until 2026-09-01.
+            if receiver in modules and name not in by_module.get(receiver, set()):
+                if name in defined_in.get(receiver, set()):
+                    continue
+        elif isinstance(func, ast.Name):
+            name, on_self = func.id, False
+        else:
+            continue
+        if name not in accepts or on_self:
+            continue
+        if not any(k.arg == "wsl_distro" for k in node.keywords):
+            missing.append(f"{name}() at {source.name}:{node.lineno}")
+    return accepts, missing
+
+
 def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
     """The guard for the test above, so the next seam added cannot be forgotten.
 
@@ -1236,29 +1323,20 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
     either constructor left the whole suite at 1196 passed. A class whose body
     annotates the field is collected by its CLASS name, which is how the call
     site spells it.
-    """
-    import ast
 
+    A MODULE-QUALIFIED CALL IS RESOLVED, AND ONLY WHERE IT RESOLVES. From 7.3
+    `X.f()` is exempt when `X.py` defines `f` itself and that definition takes
+    no distro - which is what keeps `networking.apply(plan, sql=sql)` out of the
+    report. It is NOT exempt when `X` merely re-exports `f` from elsewhere: the
+    first version of that rewrite skipped any name it could not find in `X`,
+    which handed every re-exported seam a free pass the older bare-name scan
+    would have caught. Dormant when found (no such call site existed), fixed
+    anyway - see the regression test below.
+    """
     package = Path(controller_view_module.__file__).parent.parent
-    accepts: set[str] = set()
-    for path in package.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                args = node.args
-                if any(a.arg == "wsl_distro" for a in args.args + args.kwonlyargs):
-                    # Not dunders: a constructor is spelled by its CLASS name at
-                    # the call site, so matching the bare name `__init__` only
-                    # ever catches somebody else's `super().__init__(parent)`.
-                    if not node.name.startswith("__"):
-                        accepts.add(node.name)
-            elif isinstance(node, ast.ClassDef):
-                if any(
-                    isinstance(stmt, ast.AnnAssign)
-                    and isinstance(stmt.target, ast.Name)
-                    and stmt.target.id == "wsl_distro"
-                    for stmt in node.body
-                ):
-                    accepts.add(node.name)
+    accepts, missing = _scan_for_seams_without_a_distro(
+        package, Path(controller_view_module.__file__)
+    )
     assert {
         "send_command",
         "published_bindings",
@@ -1268,29 +1346,86 @@ def test_every_seam_for_wotlk_builds_says_which_daemon_it_means() -> None:
         "DockerMysql",
     } <= accepts, "the scan found no wsl_distro-aware functions, so it would pass on an empty repo"
 
-    source = Path(controller_view_module.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    missing = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute):
-            name = func.attr
-            # `self.<x>` and `self.services.<x>` are the view calling objects
-            # that were built WITH the distro; they are not the seam.
-            on_self = ast.unparse(func.value).startswith("self")
-        elif isinstance(func, ast.Name):
-            name, on_self = func.id, False
-        else:
-            continue
-        if name not in accepts or on_self:
-            continue
-        if not any(k.arg == "wsl_distro" for k in node.keywords):
-            missing.append(f"{name}() at controller_view.py:{node.lineno}")
     assert not missing, "these address the wrong docker on a WSL-resident server: " + ", ".join(
         missing
     )
+
+
+def test_the_seam_guard_sees_a_seam_reached_through_a_re_exporting_module(
+    tmp_path: Path,
+) -> None:
+    """A seam re-exported by another module must not walk past the guard above.
+
+    The 7.3 rewrite resolved `X.f()` against the definitions in `X.py` and
+    skipped the call when it found none - so a module that does
+    `from yulon.apply import DockerSql` and nothing else handed `X.DockerSql()`
+    a free pass, on a name the older bare-name scan flagged. That is the one
+    direction the guard's own docstring swore it would never move.
+
+    Both shapes live in the same synthetic package, because a fix for one that
+    breaks the other is not a fix: `holder.DockerSql(...)` is re-exported and
+    must be reported, `networking.apply(...)` is defined locally without a
+    distro and must not be.
+    """
+    package = tmp_path / "synth"
+    package.mkdir()
+    (package / "apply.py").write_text(
+        "class DockerSql:\n    wsl_distro: str | None = None\n", encoding="utf-8"
+    )
+    # Re-exports the seam and defines nothing of its own - the blind spot.
+    (package / "holder.py").write_text(
+        "from .apply import DockerSql\n\n__all__ = ['DockerSql']\n", encoding="utf-8"
+    )
+    # The 7.3 false positive: two different `apply`s, one of them distro-bearing.
+    (package / "networking.py").write_text("def apply(plan, sql=None):\n    return sql\n", "utf-8")
+    (package / "sqlplan.py").write_text(
+        "def apply(spec, *, wsl_distro=None):\n    return spec\n", encoding="utf-8"
+    )
+    caller = package / "caller.py"
+    caller.write_text(
+        "from . import holder, networking\n"
+        "\n"
+        "def build(plan, sql):\n"
+        "    networking.apply(plan, sql=sql)\n"
+        "    return holder.DockerSql(sql)\n",
+        encoding="utf-8",
+    )
+
+    accepts, missing = _scan_for_seams_without_a_distro(package, caller)
+
+    assert {
+        "DockerSql",
+        "apply",
+    } <= accepts, f"the synthetic package taught the scan nothing: {accepts}"
+    assert missing == ["DockerSql() at caller.py:5"], (
+        "line 5 re-exports its seam through `holder`, and the guard must still see it; "
+        "line 4 is a local `apply` that takes no distro and must stay exempt. "
+        f"got: {missing}"
+    )
+
+
+def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
+    """The 7.3 false positive, pinned by line so the fix above cannot revive it.
+
+    `networking.apply(plan, sql=sql)` at controller_view.py:323 is a different
+    `apply` from `sqlplan.apply(..., wsl_distro=...)`; it reaches no daemon.
+    Asserted here rather than left implicit in the guard's `not missing`, so a
+    regression names the call instead of just reddening the guard - and pinned
+    against the parse, so it fails loudly if that call site ever moves.
+    """
+    import ast
+
+    view = Path(controller_view_module.__file__)
+    calls = {
+        f"{ast.unparse(n.func.value)}.{n.func.attr}:{n.lineno}"
+        for n in ast.walk(ast.parse(view.read_text(encoding="utf-8")))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    assert "networking.apply:323" in calls, "the call this test pins has moved; re-pin it"
+
+    accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
+    assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
+    assert "apply() at controller_view.py:323" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
@@ -1328,20 +1463,32 @@ def test_a_cmangos_install_s_account_path_addresses_its_own_schema(
     assert not any("acore" in " ".join(argv) for argv in seen)
 
 
-def test_a_cmangos_backup_is_told_which_schemas_that_core_has(
+def test_a_cmangos_backup_reaches_that_game_s_own_maintenance_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The call site, not the function: `backup()` takes the names, someone must pass them."""
+    """The call site, not the function: which containers the backup censuses.
+
+    This asserted `core_databases == ("tw_logon", "tw_char", "tw_world")` on a
+    `wotlk_maintenance.backup()` the view called for every game. Since 7.9 the
+    view calls `controller_wow_tortoise.maintenance.backup()`, which binds this
+    game's spec and core databases itself and does not accept another game's —
+    so the fact under test moved from "did the caller pass the right names" to
+    "did the caller reach the right binding". The container it censuses is the
+    observable half of that, and it is the half that decides whether a dump
+    happens at all.
+    """
     tortoise = load_catalog().get("wow-tortoise")
-    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
 
-    def fake_backup(*args: object, **kwargs: object) -> object:
-        seen.update(kwargs)
-        return None
+    with pytest.raises(MaintenanceError) as err:
+        ControllerServices.for_entry(tortoise, tmp_path, None).backup()
 
-    monkeypatch.setattr(controller_view_module.wotlk_maintenance, "backup", fake_backup)
-    ControllerServices.for_wotlk(tortoise, tmp_path, None).backup()
-    assert seen.get("core_databases") == ("tw_logon", "tw_char", "tw_world"), seen
+    assert "tortoise-db" in str(err.value), str(err.value)
+    assert "ac-database" not in str(err.value), "the backup censused AzerothCore's containers"
 
 
 def test_a_cmangos_console_is_sent_its_own_prompt(
@@ -1355,8 +1502,13 @@ def test_a_cmangos_console_is_sent_its_own_prompt(
         seen.update(kwargs)
         return ConsoleReply(command, ())
 
-    monkeypatch.setattr(controller_view_module.wotlk_console, "send_command", fake_send)
-    ControllerServices.for_wotlk(tortoise, tmp_path, None).send_console("server info")
+    # Tortoise's console module binds the shared transport by NAME at import,
+    # so the patch has to go on that module and not on the one it imported
+    # from. Every game's console is exercised together in
+    # `test_each_game_s_console_is_sent_its_own_prompt_and_container` below;
+    # this one stays because it is the report the prompt fact came from.
+    monkeypatch.setattr(tortoise_console, "send_command", fake_send)
+    ControllerServices.for_entry(tortoise, tmp_path, None).send_console("server info")
     assert seen.get("prompt") == "mangos>", seen
     assert seen.get("prompt_precedes_answer") is False, seen
     assert seen.get("container") == "tortoise-mangosd", seen
@@ -1398,7 +1550,20 @@ def test_a_core_that_cannot_be_given_an_account_by_sql_says_so_instead_of_failin
 def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The call site again: `create_account()` takes a scheme, someone must pass it."""
+    """The scheme decides the COLUMNS a row is written into, and a wrong one is silent.
+
+    Writing AzerothCore's salt/verifier into a table that has neither fails
+    loudly; writing this core's `sha_pass_hash` into one that expects SRP6
+    succeeds and produces an account that can never log in. Since 7.9 the
+    scheme is bound by `controller_wow_tortoise.accounts`, which reads it from
+    the same entry, so the fact under test is that the tab reaches THAT writer
+    rather than that the tab remembered to pass a scheme.
+
+    The patch goes on the tortoise package's own name for the shared writer:
+    it binds it at import, so patching the module it was imported from would
+    intercept nothing and this test would pass on the wiring it is here to
+    check.
+    """
     tortoise = load_catalog().get("wow-tortoise")
     seen: dict[str, object] = {}
 
@@ -1406,8 +1571,8 @@ def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
         seen.update(kwargs)
         return AccountResult(username="BOB", account_id=1, created=True, gm_level=0)
 
-    monkeypatch.setattr(controller_view_module.wotlk_accounts, "create_account", fake_create)
-    ControllerServices.for_wotlk(tortoise, tmp_path, None).create_account("bob", "pw", 0)
+    monkeypatch.setattr(tortoise_accounts, "_create_account", fake_create)
+    ControllerServices.for_entry(tortoise, tmp_path, None).create_account("bob", "pw", 0)
     assert seen.get("scheme") == "mangos_sha", seen
 
 
@@ -1568,3 +1733,256 @@ def test_both_db_seams_for_wotlk_builds_are_bound_to_the_distro_they_live_in(
     assert sql_seams and mysql_seams, "a seam was not built at all"
     assert all(seam.wsl_distro is None for seam in sql_seams), "a distro was invented"
     assert all(seam.wsl_distro is None for seam in mysql_seams), "a distro was invented"
+
+
+# ------------------------------------------- one package per game (7.9)
+#
+# Until 7.9 this module imported `controller_wow_wotlk` and used it for every
+# install, so a TBC, Vanilla or Tortoise tab drove AzerothCore's package. Each
+# test below drives the seam the user actually presses and asks what value came
+# out the far end of it — never whether a mapping has a key, which is the shape
+# of assertion that let the old wiring pass for four games at once.
+
+CMANGOS_GAMES = ("wow-tbc", "wow-vanilla", "wow-tortoise")
+"""The three that were being driven by AzerothCore's package.
+
+Two of them are indistinguishable by family, prompt, account scheme and schema
+names — `wow-tbc` and `wow-vanilla` differ only in their container names and
+their images — which is why the dispatch is keyed on the id.
+"""
+
+
+def _every_game() -> list[CatalogEntry]:
+    return list(load_catalog().games)
+
+
+def test_every_game_in_the_catalog_can_be_opened(tmp_path: Path) -> None:
+    """`for_entry()` refuses an id it has no package for, so nothing may be missing.
+
+    The refusal is the right behaviour and it would reach a user as a tab that
+    will not open, so the registry has to cover `catalog.json` and this is
+    where that is established — in CI, rather than on the machine of whoever
+    installs the fifth game.
+    """
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        assert services.controller.spec == entry.container_spec(), entry.id
+
+
+def test_a_game_with_no_controller_package_is_refused_by_name(tmp_path: Path) -> None:
+    """The fallback that made this bug possible was silent; the refusal names the game."""
+    invented = WOTLK.model_copy(update={"id": "wow-cataclysm", "name": "WoW Cataclysm"})
+
+    with pytest.raises(controller_view_module.UnsupportedGameError) as err:
+        ControllerServices.for_entry(invented, tmp_path)
+
+    said = str(err.value)
+    assert "wow-cataclysm" in said and "WoW Cataclysm" in said, said
+    assert "wow-wotlk" in said, "the refusal does not say which games this build can manage"
+
+
+def test_each_game_gets_the_controller_from_its_own_package(tmp_path: Path) -> None:
+    """The four ids reach four different controllers, and each carries its own containers."""
+    services = {
+        entry.id: ControllerServices.for_entry(entry, tmp_path / entry.id)
+        for entry in _every_game()
+    }
+
+    assert isinstance(services["wow-tbc"].controller, tbc_controller.TbcController)
+    assert isinstance(services["wow-vanilla"].controller, vanilla_controller.VanillaController)
+    assert isinstance(services["wow-tortoise"].controller, tortoise_controller.TortoiseController)
+    # WotLK is the base class, which is what the other three subclass, so it is
+    # asserted by exact type: `isinstance` would be true of all four.
+    assert type(services["wow-wotlk"].controller) is Controller
+
+    worlds = {game: s.controller.spec.world for game, s in services.items()}
+    assert len(set(worlds.values())) == len(worlds), f"two games share a worldserver: {worlds}"
+
+
+def test_each_game_waits_for_the_ready_line_its_own_server_prints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_world_container_that_answers: None
+) -> None:
+    """The reason three of the four packages reimplement `wait_ready()` at all.
+
+    `Controller.wait_ready()` builds `docker.azerothcore_ready()`, whose world
+    marker is `ready...`. A mangosd never prints it, so a CMaNGOS install
+    inheriting that method polls for a line that will never come and answers
+    False after the full timeout — the server is up and serving while the app
+    says the install never became ready.
+    """
+    prints = {
+        "wow-wotlk": "ready...",
+        "wow-tbc": "Avg Diff: 15ms",
+        "wow-vanilla": "Avg Diff: 15ms",
+        "wow-tortoise": "World initialized in 12 seconds",
+    }
+    seen: dict[str, docker.ReadySpec] = {}
+
+    def fake_wait(
+        spec: docker.ContainerSpec, ready: docker.ReadySpec, *, wsl_distro: str | None = None
+    ) -> bool:
+        seen[spec.world] = ready
+        return True
+
+    monkeypatch.setattr(docker, "wait_ready_for", fake_wait)
+
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        services.controller.wait_ready("127.0.0.1", 8085)
+        ready = seen[entry.container_spec().world]
+        line = prints[entry.id]
+        assert re.search(ready.world, line), f"{entry.id} would never see its own {line!r}"
+        if entry.id in CMANGOS_GAMES:
+            assert not re.search(
+                ready.world, docker.AZEROTHCORE_READY_WORLD
+            ), f"{entry.id} is still waiting for AzerothCore's ready line"
+
+
+def test_each_game_s_console_is_sent_its_own_prompt_and_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What `Console -> Send` really hands the transport, for each of the four ids.
+
+    The prompt is not decoration: it is what delimits the reply. Sent `AC>` a
+    CMaNGOS server's answer is never found, so every command came back as
+    "no console prompt in the reply window" — and `prompt_precedes_answer`
+    differs too, so even the right prompt on the wrong side returns an empty
+    tuple flagged `prompted=True`.
+    """
+    seen: dict[str, dict[str, object]] = {}
+
+    def fake_send(command: str, **kwargs: object) -> ConsoleReply:
+        seen[str(kwargs.get("container"))] = dict(kwargs)
+        return ConsoleReply(command, ())
+
+    # Two patches for one function: tbc and vanilla reach the shared transport
+    # through the module, tortoise binds the name at import.
+    monkeypatch.setattr(console, "send_command", fake_send)
+    monkeypatch.setattr(tortoise_console, "send_command", fake_send)
+
+    for entry in _every_game():
+        ControllerServices.for_entry(entry, tmp_path / entry.id).send_console("server info")
+        world = entry.container_spec().world
+        assert world in seen, f"{entry.id} sent its command to {sorted(seen)} instead"
+        kwargs = seen[world]
+        assert kwargs["prompt"] == entry.console.prompt, (entry.id, kwargs)
+        assert kwargs["prompt_precedes_answer"] is entry.console.prompt_precedes_answer, (
+            entry.id,
+            kwargs,
+        )
+
+    assert (
+        seen["tbc-mangosd"]["prompt"] != seen["ac-worldserver"]["prompt"]
+    ), "a CMaNGOS console was still sent AzerothCore's prompt"
+
+
+def test_each_game_s_account_form_addresses_its_own_schema_with_its_own_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What `Accounts -> Create` really runs: which container, which binary, which schema.
+
+    Three per-install facts, all of which were AzerothCore's for every game.
+    The schema is why `Unknown database 'acore_auth'` reached CMaNGOS installs;
+    the binary is 7.9's `mysql` -> `db.client`, and `mariadb:11` ships no
+    `mysql` at all, so the statement failed before it reached a database
+    (measured on a live TBC server, 2026-08-26).
+
+    The probe that would otherwise ask the container is answered `None` by
+    `conftest._classic_mysql_client_names`, which is the case this change is
+    for: with nobody to ask, the name used is the one the catalog declares.
+    """
+    for entry in _every_game():
+        seen: list[list[str]] = []
+
+        def fake_run(
+            argv: list[str], __seen: list[list[str]] = seen, **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            __seen.append(argv)
+            # "" first, so the username reads as free; a row afterwards, so the
+            # read-back that follows the INSERT finds the account it just made.
+            return subprocess.CompletedProcess(argv, 0, "" if len(__seen) == 1 else "1", "")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        try:
+            services.create_account("bob", "hunter2", 0)
+        except AccountError:
+            # The fake answers enough rows to build the argv under test, not
+            # necessarily enough to finish every scheme's write.
+            pass
+
+        assert seen, f"{entry.id} sent nothing to the database at all"
+        native = entry.install.native
+        assert native is not None, f"{entry.id} has no native block to declare a client"
+        for argv in seen:
+            client = argv.index("-uroot") - 1
+            assert argv[client] == native.db.client, (entry.id, argv)
+            assert argv[client - 1] == entry.container_spec().db, (entry.id, argv)
+            assert argv[-1] == entry.schema_map()["auth"], (entry.id, argv)
+
+
+def test_each_game_s_restore_plan_censuses_its_own_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The maintenance binding, asked through the callable the Maintenance tab calls.
+
+    `plan_restore()` refuses by container name — a live worldserver, or a
+    database that is not up — and those names are the whole of what the
+    per-game binding supplies. Asked with AzerothCore's spec, a CMaNGOS install
+    is told `ac-database is not running`, which is true, useless, and names a
+    container that will never exist on that machine.
+    """
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        plan = services.plan_restore(tmp_path / "there-is-no-such-dump.sql")
+        refusals = " ".join(plan.refusals)
+        assert f"{entry.container_spec().db} is not running" in refusals, (entry.id, refusals)
+        if entry.id in CMANGOS_GAMES:
+            assert "ac-database" not in refusals, (entry.id, refusals)
+
+
+def test_a_cmangos_tab_has_no_manifest_store_and_says_so(tmp_path: Path) -> None:
+    """`manifests/` holds `wow-wotlk` only, and only that package has a `modules.py`."""
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        if entry.id in CMANGOS_GAMES:
+            assert entry.has_manifests is False, f"{entry.id} gained manifests; wire it a store"
+            assert services.store is None and services.applier is None, entry.id
+        else:
+            assert services.store is not None and services.applier is not None, entry.id
+
+
+def test_a_game_that_names_no_import_service_is_offered_no_repair_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`repairable` is the database's answer; whether the action can run is the entry's.
+
+    `docker.repair_import()`'s first refusal is that this game never said which
+    compose service imports its databases, and only `wow-wotlk` names one. A
+    tab that offered the button on `repairable` alone would arm a two-press
+    destructive gesture whose only possible outcome is that sentence.
+
+    The probe is forced to the one state that DOES offer a repair, so the only
+    thing standing between it and the button is the gate under test.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    assert not tortoise.container_spec().import_service, "the premise of this test is gone"
+
+    view = ControllerView(tortoise, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_repair(view, UNIMPORTED)
+    _db_up(view, ps)
+
+    assert view.repair_button.isHidden(), "offered a repair the action could only refuse"
+    assert view.repair_label.text() == ""
+
+    # The same probe answer, on the game that DOES name an import service.
+    wotlk_view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_repair(wotlk_view, UNIMPORTED)
+    _db_up(wotlk_view, ps)
+    assert not wotlk_view.repair_button.isHidden(), "the gate hid the one repair that works"

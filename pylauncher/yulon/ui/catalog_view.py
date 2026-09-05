@@ -2,8 +2,8 @@
 
 Renders `catalog.json` as one tile per game with an Install button. The view
 delegates: clicking Install asks the user for the server folder (and, where
-the game needs it, their own client folder — README §3a), builds an
-`Installer` through the factory it was given, and streams `installer.run()`
+the game needs it, their own client folder — README §3a), builds an engine
+through the factory it was given, and streams `engine.run()`
 into the `LogPanel`. No Docker, no subprocess, no business logic here
 (style-guide §3); results go up as signals (§5).
 """
@@ -11,7 +11,8 @@ into the `LogPanel`. No Docker, no subprocess, no business logic here
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from enum import Enum
 from pathlib import Path
 
 from PySide6.QtCore import Signal
@@ -47,10 +48,9 @@ logger = get_logger(__name__)
 InstallerFactory = Callable[[CatalogEntry], InstallEngine]
 """What builds the engine for one entry.
 
-The Protocol rather than the `Installer` class since roadmap 6.2: an entry may
-now be installed by the bash script or by the native engine, `installer_for()`
-decides which from `catalog.json` data, and this view is deliberately not told
-what it got — the two have the same `run()`.
+The `InstallEngine` protocol rather than a class: `installer_for()` decides the
+family engine from `catalog.json` data, and this view is deliberately not told
+what it got — every family has the same `run()`.
 """
 DirPicker = Callable[[QWidget, str, Path | None], Path | None]
 
@@ -95,6 +95,47 @@ def _qt_dir_picker(parent: QWidget, title: str, start: Path | None) -> Path | No
     return Path(chosen) if chosen else None
 
 
+SuggestionAsker = Callable[[QWidget, str, Path], bool]
+"""Offer a folder that does not exist yet: True to take it, False to open the picker."""
+
+
+def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
+    """ "Install into this folder?" - Yes takes it, No opens the picker.
+
+    **This exists because a file picker cannot say "make this one".** The
+    suggestion is a folder that by definition does not exist on a first install,
+    and `QFileDialog.getExistingDirectory()` returns only directories that do.
+    `_existing_ancestor()` therefore walks up and opens on the PARENT with
+    nothing filled in, and the name the user has to create was put in the
+    dialog's TITLE - the one place in a window that cannot be clicked and, at 91
+    characters for `wow-server-playerbots`, is truncated by the window manager
+    before it reaches the name (owner, on Fedora 44, 2026-09-03). The app told
+    the user what to make in the one place they could neither read nor act on.
+
+    Asking first turns both symptoms off at once: the folder is named in body
+    text that wraps, and taking it is one button. Nothing is created here -
+    `_existing_ancestor()`'s rule stands, and for its original reason: a picker
+    that makes a directory as a side effect leaves an empty one behind when the
+    user cancels, and this runs before anything has been agreed to. The path is
+    created by the install itself, which is also what claims it (`native.py`,
+    `_claim_before_writing`).
+
+    Default is Yes. The suggestion is right for nearly every install, and the
+    one it is wrong for - a second install of the same game - is a folder the
+    user is already thinking about.
+    """
+    answer = QMessageBox.question(
+        parent,
+        f"Install {game}",
+        f"Install {game} into this new folder?\n\n{suggested}\n\n"
+        "It will be created when the install starts. Choose another folder if "
+        "you would rather put it somewhere else.",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+    )
+    return answer is QMessageBox.StandardButton.Yes
+
+
 def _pin_compose_project(server_dir: Path) -> None:
     """Freeze the compose project name so the folder can be moved later.
 
@@ -119,7 +160,7 @@ run headless, and the logic worth testing is what happens with the answer.
 def _qt_wsl_server_picker(found: tuple[wsl.FoundServer, ...]) -> wsl.FoundServer | None:
     """The real picker: one line per server, chosen by name."""
     labels = [
-        f"{server.project}  —  {server.distro}" f"  ({'running' if server.running else 'stopped'})"
+        f"{server.project}  —  {server.distro}  ({'running' if server.running else 'stopped'})"
         for server in found
     ]
     choice, ok = QInputDialog.getItem(
@@ -136,7 +177,31 @@ def _qt_wsl_server_picker(found: tuple[wsl.FoundServer, ...]) -> wsl.FoundServer
     return found[labels.index(choice)]
 
 
-def _looks_like(entry: CatalogEntry, server_dir: Path) -> bool:
+class Identification(Enum):
+    """What `_identify()` established about a folder: three answers, not two.
+
+    `_looks_like()` answered this question with a bool, and a bool has room for
+    two of the three - so "I could not check" was returned as True and arrived
+    at the caller spelled exactly like "this is that game". The two are not the
+    same claim and the caller has to be able to act on the difference, so they
+    are separate members here.
+    """
+
+    MATCHES = "matches"
+    """The compose file was read and names a container this entry uses."""
+
+    DIFFERENT = "different"
+    """The compose file was read and names none of them - evidence of another game."""
+
+    UNVERIFIED = "unverified"
+    """No evidence either way: no compose file to read, or the read failed.
+
+    Deliberately NOT a refusal. See `_identify()` for why adoption continues on
+    this answer, and what the caller owes the user in exchange.
+    """
+
+
+def _identify(entry: CatalogEntry, server_dir: Path) -> Identification:
     """Does the compose file in `server_dir` name any container this game uses?
 
     Discovery finds compose PROJECTS, not WoW servers - `docker compose ls`
@@ -148,20 +213,59 @@ def _looks_like(entry: CatalogEntry, server_dir: Path) -> bool:
     The catalog's container names are the evidence; the project name is a folder
     name and proves nothing.
 
-    True when the file cannot be read at all. The folder lives inside a distro
-    and is reached over a UNC path, and that read can fail for reasons unrelated
-    to which game it is - refusing on "I could not check" would block the
-    migration this feature exists to provide.
+    `UNVERIFIED` rather than a refusal when the file cannot be read at all. The
+    folder lives inside a distro and is reached over a UNC path, and that read
+    can fail for reasons unrelated to which game it is - refusing on "I could
+    not check" would block the migration this feature exists to provide. That
+    reasoning is unchanged and is why this still does not refuse.
+
+    WITHDRAWN, from the version of this docstring that said True on an
+    unreadable file: "Adopting one under the wrong catalog entry produces a tab
+    whose every button names containers that do not exist" as a statement of the
+    WHOLE cost. It is still a cost, and it is still the one the `DIFFERENT`
+    branch is written for; it is no longer the largest. A folder that merely
+    *looked* adoptable reaches file deletion, which is not an annoyance.
+
+    That chain was re-read link by link on 2026-09-02, in the code rather than
+    from the earlier note, and each link is where it says:
+
+      - `adopt_from_wsl()` below emits `adopted` for an `UNVERIFIED` folder
+        once the user answers yes to the confirm (it was unconditional when
+        this chain was first written, and the chain still holds, because the
+        user can say yes);
+      - `catalog.json` gives `wow-wotlk` `"has_manifests": true`, and it is the
+        only entry of the four that carries it;
+      - `controller_view.ControllerServices.for_wotlk()` passes that same
+        `server_dir` into `wotlk_modules.applier()` when `entry.has_manifests`,
+        and `apply.Applier.__init__` keeps it as `self.server_dir`;
+      - `apply.Applier.install()` clones into
+        `server_dir / CLONE_DIRS[type] / id`, and `git.RunnerGit.clone()`
+        `shutil.rmtree()`s that destination BEFORE the first git invocation.
+
+    The precondition on the deletion, which the earlier note left out: it fires
+    only when the destination already exists AND is not itself a git checkout
+    (`(dest / ".git").is_dir()` sends it down the update path instead). What is
+    deleted is that subdirectory of the adopted folder, not the adopted folder
+    itself - still the user's files, still without anyone having established
+    that the folder is ours. Because the rmtree precedes the fetch, a clone that
+    was never going to succeed deletes anyway. All of this is asserted in
+    `test_an_unverified_adoption_reaches_the_applier_with_no_ownership_check`,
+    which drives it with only `runner.run` doubled.
+
+    So the answer widened instead of hardening: the migration keeps working, and
+    the caller - and the user - are told which of the three they got.
     """
     compose = compose_file(server_dir)
     if compose is None:
-        return True
+        return Identification.UNVERIFIED
     try:
         text = compose.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return True
+        return Identification.UNVERIFIED
     spec = entry.container_spec()
-    return any(name and name in text for name in (spec.db, spec.auth, spec.world))
+    if any(name and name in text for name in (spec.db, spec.auth, spec.world)):
+        return Identification.MATCHES
+    return Identification.DIFFERENT
 
 
 class CatalogView(QWidget):
@@ -185,6 +289,8 @@ class CatalogView(QWidget):
         log_panel: LogPanel,
         *,
         pick_dir: DirPicker = _qt_dir_picker,
+        ask_suggestion: SuggestionAsker = _qt_suggestion_asker,
+        installed_games: Mapping[str, Path] | None = None,
         home: Path | None = None,
         platform_id: Callable[[], str] = platform.detect,
         pick_wsl_server: WslServerPicker = _qt_wsl_server_picker,
@@ -199,6 +305,7 @@ class CatalogView(QWidget):
         self._make_installer = installer_factory
         self._log = log_panel
         self._pick_dir = pick_dir
+        self._ask_suggestion = ask_suggestion
         self._pick_wsl_server = pick_wsl_server
         self._wsl_distros = wsl_distros
         self._adopt_buttons: dict[str, QPushButton] = {}
@@ -206,6 +313,7 @@ class CatalogView(QWidget):
         self._buttons: dict[str, QPushButton] = {}
         self._gated: set[str] = set()  # ids the platform gate disabled (roadmap 6.1)
         self._existing_buttons: dict[str, QPushButton] = {}
+        self._installed_dirs: dict[str, Path] = dict(installed_games or {})
         self._current: tuple[str, Path, Path | None] | None = None
         self._prompter: InputPrompter | None = None
 
@@ -274,6 +382,7 @@ class CatalogView(QWidget):
             button.setEnabled(False)
             button.setToolTip(unsupported_platform_message(entry, self._platform_id()))
             self._gated.add(entry.id)
+        self._show_installed(entry.id)
         existing = QPushButton("Use existing…", frame)
         existing.setObjectName(f"existing-{entry.id}")
         existing.setToolTip(
@@ -300,6 +409,40 @@ class CatalogView(QWidget):
             self._adopt_buttons[entry.id] = adopt
         return frame
 
+    def _show_installed(self, game_id: str) -> None:
+        """Say "Installed" and go grey on a tile whose server the app already knows.
+
+        Owner-asked, 2026-09-04. An Install button that still looks pressable on
+        a game that is already installed is an offer the app does not mean: the
+        second press asks for a folder, and then either `_guard()` refuses the
+        first install’s folder for being non-empty, or a SECOND server is built
+        for the same game — which cannot run beside the first, because container
+        names are global per game and `_refuse_foreign_containers` refuses
+        exactly that. Both outcomes are a minutes-long detour to reach a no.
+
+        The tooltip names the FOLDER rather than saying only "already
+        installed", because two boxes of the same game on one machine is a real
+        case here, and then the useful question is which one this tile is
+        remembering.
+
+        Called once per tile at build time and again at each of the three points
+        that produce an install, so one function decides how an installed tile
+        looks instead of four places that have to agree.
+        """
+        if game_id not in self._installed_dirs:
+            return
+        button = self._buttons[game_id]
+        button.setText("Installed")
+        button.setEnabled(False)
+        button.setToolTip(
+            f"Already installed in {self._installed_dirs[game_id]} — its own tab manages it."
+        )
+
+    def _remember_installed(self, game_id: str, server_dir: Path) -> None:
+        """Record an install this view just produced, and grey its button."""
+        self._installed_dirs[game_id] = server_dir
+        self._show_installed(game_id)
+
     def button_for(self, game_id: str) -> QPushButton:
         """The Install button of a tile (tests / accessibility)."""
         return self._buttons[game_id]
@@ -313,16 +456,23 @@ class CatalogView(QWidget):
     def attach_existing(self, entry: CatalogEntry) -> bool:
         """Register a server dir that already holds an install; False if not attached.
 
-        Installs made by the shell scripts or the CLI harness (or before the app
-        was reinstalled) never pass through `start_install()`, so this is how
-        they get a controller tab. Two checks: a compose file in the chosen
-        folder, under any of the names Compose itself accepts
-        (`installer.COMPOSE_FILENAMES`) - the TBC and Vanilla scripts write
-        `compose.yml`, not `docker-compose.yml` - and the same folder rule
-        `start_install()` applies, because a folder Docker cannot mount is no
-        more attachable than it is installable. That second one was missing
-        until a tester attached a server living inside WSL (2026-08-26): the
-        rule existed and simply was not wired to the button they pressed.
+        Installs made by the CLI harness (`python -m yulon.install_wiring`), by
+        an older build, or before the app was reinstalled never pass through
+        `start_install()`, so this is how they get a controller tab. Two checks:
+        a compose file in the chosen folder, under any of the names Compose
+        itself accepts (`installer.COMPOSE_FILENAMES`), because the TBC and
+        Vanilla scripts wrote `compose.yml` rather than `docker-compose.yml`
+        and those installs are still on disk - nothing Yu'lon writes has that
+        name since 7.2, when both families moved to `composegen`, whose
+        `BASE_FILE` is `docker-compose.yml` - and the same folder rule the
+        INSTALL path applies
+        (`platform.server_dir_problem`, which `StagedInstaller.preflight()`
+        asks before it provisions anything), because a folder Docker cannot
+        mount is no more attachable than it is installable. Attaching never
+        reaches an engine, which is why the rule is asked here by hand. That
+        second check was missing until a tester attached a server living inside
+        WSL (2026-08-26): the rule existed and simply was not wired to the
+        button they pressed.
         """
         server_dir = self._pick_dir(
             self,
@@ -366,6 +516,7 @@ class CatalogView(QWidget):
         # database volume beside the real one. Only `_on_run_finished()` may
         # pin: there the basename provably is what the containers were just
         # created under (review, 2026-08-22).
+        self._remember_installed(entry.id, server_dir)
         self.installed.emit(entry.id, server_dir, client_dir)
         return True
 
@@ -398,7 +549,8 @@ class CatalogView(QWidget):
         if chosen is None:
             return False
 
-        if not _looks_like(entry, chosen.server_dir):
+        identified = _identify(entry, chosen.server_dir)
+        if identified is Identification.DIFFERENT:
             QMessageBox.warning(
                 self,
                 "That is a different server",
@@ -410,6 +562,74 @@ class CatalogView(QWidget):
                 "different server.",
             )
             return False
+        if identified is Identification.UNVERIFIED:
+            # ASK, do not announce. This used to be a `QMessageBox.warning` - a
+            # notice with an OK button - and a notice cannot refuse. Three things
+            # made that the wrong instrument, and the owner chose the confirm:
+            #
+            #   1. The user has never seen this folder. `_qt_wsl_server_picker`
+            #      offers "{project}  -  {distro}  (running)"; `server_dir` appears
+            #      for the FIRST time in this dialog. Charging the user for a fact
+            #      they were never shown, with nowhere to say "that is not it".
+            #   2. The click carried no information. `adopt_from_wsl` returned True
+            #      whether the box was dismissed or not, so a user who clicked
+            #      through produced exactly what a clean verification produced -
+            #      the bool problem this function was fixed for, one layer up in
+            #      the UI.
+            #   3. The stated cost is FILE DELETION, and
+            #      `test_an_unverified_adoption_reaches_the_applier_with_no_ownership_check`
+            #      proves it reachable rather than asserting it.
+            #
+            # BEFORE the client-folder prompt, so a user who declines is not first
+            # made to go and find their WoW install. The record of an unverified
+            # adoption moves to just before the emit instead, where it describes
+            # something that actually happened - which is what the ordering fix
+            # this replaces was really about.
+            # The cost sentence is CONDITIONAL, because the flat version was not
+            # true. "Installing or removing a module writes into that folder and
+            # deletes files under it" describes `Applier`, which only exists for an
+            # entry with `has_manifests` - `wow-wotlk` alone of the four. For TBC,
+            # Vanilla and Tortoise `controller_view` passes `applier=None` and
+            # DISABLES both module buttons, so the user was being warned about an
+            # action they cannot perform. It errs safe, which is exactly why it
+            # survived review of the previous wording: a sentence spelled like a
+            # true one, aimed at the cost this time instead of the remedy.
+            cost = (
+                "Installing or removing a module from its tab writes into that "
+                "folder and deletes files under it."
+                if entry.has_manifests
+                else "Its tab will run docker commands against containers that "
+                "may not be the ones in that folder."
+            )
+            if (
+                QMessageBox.question(
+                    self,
+                    "Adopt without checking?",
+                    f"Yu'lon could not read a compose file in {chosen.server_dir}, so "
+                    f"nothing confirms that {chosen.project} in {chosen.distro} is a "
+                    f"{entry.name} install.\n\n"
+                    f"Adopt it anyway? {cost} So say yes only if you are sure this "
+                    "is the right folder.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                is not QMessageBox.StandardButton.Yes
+            ):
+                # Default No, and anything that is not an explicit Yes refuses.
+                #
+                # `is not ... Yes` and NOT `is ... No`, which is how most people
+                # would write it. `QMessageBox.question` returns `NoButton` (0) when
+                # the dialog is closed with the window chrome or Escape, and
+                # `NoButton is not No`, so the `is No` spelling ADOPTS in exactly the
+                # case this comment used to only declare. It survived the whole suite
+                # when a reviewer mutated it on 2026-09-02;
+                # `test_closing_the_unverified_confirm_without_answering_adopts_nothing`
+                # is what makes the distinction fail now.
+                logger.info(
+                    f"declined to adopt {entry.id} from {chosen.distro}: nothing "
+                    f"confirmed {chosen.server_dir} is a {entry.name} install"
+                )
+                return False
 
         client_dir: Path | None = None
         if entry.install.requires_client_dir:
@@ -423,10 +643,21 @@ class CatalogView(QWidget):
             if client_dir is None:
                 return False
 
+        if identified is Identification.UNVERIFIED:
+            # Deliberately here and not beside the question above: this line is a
+            # record, and a record written before the client-folder prompt
+            # described adoptions the user then cancelled. It now cannot be
+            # written unless the adoption is one line from being emitted.
+            logger.warning(
+                f"adopting {entry.id} from {chosen.distro} UNVERIFIED: no readable compose "
+                f"file in {chosen.server_dir}, so nothing confirms it is a {entry.name} "
+                "install - the user was asked and said yes"
+            )
         logger.info(
             f"adopting {entry.id} from WSL distro {chosen.distro}: "
             f"project {chosen.project} at {chosen.server_dir}"
         )
+        self._remember_installed(entry.id, chosen.server_dir)
         self.adopted.emit(entry.id, chosen.server_dir, client_dir, chosen.distro)
         return True
 
@@ -445,15 +676,21 @@ class CatalogView(QWidget):
             QMessageBox.information(self, "Not available on this platform", message)
             self.install_finished.emit(entry.id, False, message)
             return False
-        server_dir = self._pick_dir(
-            self,
-            # The suggested name moved into the title when the picker stopped
-            # opening on a path that does not exist - the dialog can no longer
-            # pre-fill it, so this is where the user is told what to make.
-            f"Where should {entry.name} be installed? "
-            f"(suggested: a new folder called {entry.install.default_server_dir})",
-            self._home / entry.install.default_server_dir,
-        )
+        # Offered BEFORE the picker, because the picker cannot offer it. The
+        # suggestion does not exist yet on a first install and
+        # `getExistingDirectory()` returns only folders that do, so the name
+        # used to live in the dialog's title - unclickable, and truncated by the
+        # window manager at 91 characters before it reached the name itself
+        # (owner, Fedora 44, 2026-09-03). Here it is body text and one button.
+        suggested = self._home / entry.install.default_server_dir
+        if self._ask_suggestion(self, entry.name, suggested):
+            server_dir: Path | None = suggested
+        else:
+            server_dir = self._pick_dir(
+                self,
+                f"Where should {entry.name} be installed?",
+                suggested,
+            )
         if server_dir is None:
             return False
         client_dir: Path | None = None
@@ -513,52 +750,119 @@ class CatalogView(QWidget):
             # turns into a permanent tab — an install the user had explicitly
             # cancelled, and on a run stopped earlier still, a directory that did
             # not exist at all (install gate, 2026-08-23).
-            note = cancelled_install_message(self._catalog.get(game_id).name, server_dir)
+            note = cancelled_install_message(self._catalog.get(game_id), server_dir)
             logger.info(f"install of {game_id} was cancelled; nothing remembered")
             QMessageBox.information(self, "Install cancelled", note)
             self.install_finished.emit(game_id, False, note)
             return
         if ok and compose_file(server_dir) is None:
-            # A clean exit is not proof of an install. The scripts exit 0 for
-            # "Keeping existing install — exiting." too, which is what a user
-            # gets by pressing Install a second time on a folder the previous
-            # attempt left behind: `PROMPT_RULES` answers "n" to "Remove it and
-            # start fresh?" because nothing in the GUI ever sets `reinstall`.
-            # That used to pin a compose project name into a half-cloned folder
-            # and grow a permanent tab for a server that was never built — and
-            # the pin is the part with teeth, since `docker.py` records that an
-            # install-time pin is inherited by any copy of the folder, so Stop
-            # in the copy can stop the original's server. The check is the one
-            # `attach_existing()` makes, deliberately: the compose file is the
-            # single thing every install of every game has (review, 2026-08-23).
+            # A clean exit is not proof of an install. Until 7.2 the bash
+            # installer exited 0 for "Keeping existing install — exiting.",
+            # which is what a user got by pressing Install a second time on a
+            # folder the previous attempt left behind; that pinned a compose
+            # project name into a half-cloned folder and grew a permanent tab
+            # for a server that was never built. The engine has no such path,
+            # but the check stays because it is the one `attach_existing()`
+            # makes, deliberately: the compose file is the single thing every
+            # install of every game has, and the pin below is the part with
+            # teeth — `docker.py` records that an install-time pin is inherited
+            # by any copy of the folder, so Stop in the copy can stop the
+            # original's server (review, 2026-08-23).
             ok = False
             message = (
                 f"The installer exited without error, but {server_dir} has no "
                 "compose file (compose.yml or docker-compose.yml) — so there is nothing "
                 "installed there to remember. "
-                "That is what the scripts do when they find an existing folder and are "
-                "told not to replace it: delete the folder and install again, or pick a "
-                "different one."
+                "Look in the folder, then install again or pick a different one."
             )
             logger.info(f"{game_id} exited 0 with no compose file in {server_dir}; not remembered")
-        if not ok:
+        if not ok and not self._offer_a_restart_instead(message):
             QMessageBox.warning(self, "Install failed", message)
         self.install_finished.emit(game_id, ok, message)
         if ok:
             _pin_compose_project(server_dir)
+            # AFTER `_set_buttons_enabled(True)` ran above: that pass re-enables
+            # every ungated tile, so greying this one has to come second or the
+            # unlock undoes it. Asserted, not just stated.
+            self._remember_installed(game_id, server_dir)
             self.installed.emit(game_id, server_dir, client_dir)
+
+    def _offer_a_restart_instead(self, message: str) -> bool:
+        """Offer to restart when a restart is now the whole of what is missing.
+
+        The install that just failed is the one that ASKED for the docker group
+        and got it: `usermod` ran, and the very process that ran it cannot see
+        the result, because supplementary groups are credentials fixed at login.
+        Before this, that user was told to log out and back in — measured on the
+        live Ubuntu gate as: consent, sudo, log out, log back in, find the
+        launcher, press Install again.
+
+        Asks the MACHINE whether a restart would help, rather than remembering
+        that a join happened. `docker_group_reexec()` returns an argv only when
+        the group is in the database and not in this process — which is the
+        condition, stated exactly, and it is right on the three paths a flag
+        gets wrong: the user declined, the join failed, or the group was
+        revoked. Each of those leaves the group out of the database, so the
+        predicate is false and no restart is offered.
+
+        It does NOT carry a fourth path. The caller runs this on EVERY failed
+        install and `docker_group_reexec()` asks nothing about what the failure
+        was, so a user who is in the database group but not in this process is
+        offered a restart for a download that 404'd or a disk that filled up
+        just as readily as for a docker-socket denial. A separate fix made the
+        predicate return None under root, which removed the instance that was
+        permanently true for every `sudo yulon` install; the general case is
+        still live, and the cost of it is one dialog offering a restart that
+        will not help. Whenever the predicate says None this returns False and
+        the plain warning is shown, unchanged.
+
+        Returns True when it has spoken to the user, so the caller does not also
+        show its own dialog: the question below already carries `message` in
+        full. `is ... Yes` and not `is not ... No`, because Escape and the
+        window's close button both return `NoButton`, and only an explicit Yes
+        may throw away a running application.
+        """
+        if platform.docker_group_reexec() is None:
+            return False
+        if (
+            QMessageBox.question(
+                self,
+                "Restart Yu'lon to finish setting up Docker",
+                f"{message}\n\n"
+                "Docker is set up and your account has been given access to it. "
+                "Yu'lon just needs to start again to pick that up — you do NOT "
+                "need to log out.\n\n"
+                "Restart Yu'lon now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            is QMessageBox.StandardButton.Yes
+        ):
+            # Only returns if the exec failed, and then the user is told what
+            # actually went wrong rather than being left looking at a dialog
+            # that closed and did nothing.
+            platform.restart_under_docker_group()
+            QMessageBox.warning(self, "Install failed", message)
+        return True
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
         """Lock the tiles while a job runs, and unlock them when it ends.
 
         Unlocking must never re-enable an Install button the platform gate
         disabled (roadmap 6.1) — the tile's own note says it cannot be installed
-        here. Latent while every catalog entry is Linux-only; armed the moment
-        6.2 widens WotLK and leaves the other three. "Use existing…" is
-        deliberately platform-independent: managing a server someone else
-        installed works everywhere.
+        here — nor one that already reads "Installed" (owner, 2026-09-04). Same
+        shape of bug in both: those are standing facts about the TILE, and this
+        function knows only whether a job is running. The gate half was latent
+        while every catalog entry was Linux-only and armed the moment 6.2
+        widened WotLK; the installed half is armed immediately, because
+        `_on_run_finished` calls this and then greys the tile that just
+        installed. "Use existing…" is deliberately outside both rules: managing
+        a server someone else installed works on every platform, and pointing
+        the app at a second copy of a known game is not an install.
         """
         for game_id, button in self._buttons.items():
-            button.setEnabled(enabled and game_id not in self._gated)
+            button.setEnabled(
+                enabled and game_id not in self._gated and game_id not in self._installed_dirs
+            )
         for button in self._existing_buttons.values():
             button.setEnabled(enabled)
