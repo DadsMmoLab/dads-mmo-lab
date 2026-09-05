@@ -1,0 +1,56 @@
+HEAD 4fb61ea9d936b051e35fbaf195f7f8d274d5065a
+on-disk == committed blob: True
+GUARD (the blob every mutation below was run on): 180895 bytes, LF, sha256 bfc196bf30bf39a2a1ccd50f3842970a17627c378732eeb3478fa763a3fb03d0, git hash-object b8268a01873209479cb5023452d171cbdd9c7215
+
+=== BASELINE ===
+........................................................................ [ 30%]
+........................................................................ [ 60%]
+........................................................................ [ 90%]
+......................                                                   [100%]
+238 passed in 1.03s
+
+=== M1 buy the separating read in where_the_reading_came_from() ===
+anchor occurrences in the committed bytes: 1
+mutated blob: 180962 bytes, LF, sha256 c7f866a53209b1c7b5cbd741b493b5023a3efdf154d6adfe21dd7380c6be9b91, git hash-object efddaeea4a3837ffb9c3e67a42d0408700c49bbf
+                "stat",
+                _namespaced(pid=_UNSHARE_PID_NS, mnt=_HOST_MNT_NS, pid1_mnt=_HOST_MNT_NS),
+            )
+            assert networking.in_initial_pid_namespace() is False
+>           assert networking.where_the_reading_came_from("ufw", run=never) == "other-pid-namespace"
+E           AssertionError: assert 'other-network-namespace' == 'other-pid-namespace'
+E             
+E             (pytest_assertion plugin: representation of details failed: /home/pk/yulon-runs/fix10-bug39/pylauncher/tests/test_networking.py:4443: AssertionError: asked about /usr/lib/python3.11/difflib.py.
+E              Probably an object has a faulty __repr__.)
+tests/test_networking.py:4719: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_networking.py::test_the_cause_is_the_namespace_that_actually_differs
+FAILED tests/test_networking.py::test_the_pid_question_refuses_both_shapes_without_reading_pid_1
+2 failed, 236 passed in 1.14s
+restored: 180895 bytes, LF, sha256 bfc196bf30bf39a2a1ccd50f3842970a17627c378732eeb3478fa763a3fb03d0, git hash-object b8268a01873209479cb5023452d171cbdd9c7215
+
+=== M2 in_initial_pid_namespace() asks /proc/1 instead of /proc/self ===
+anchor occurrences in the committed bytes: 1
+mutated blob: 180892 bytes, LF, sha256 768b65aeb9748764ff07027c4ec36ae6904bf8a1c580da2ff385d17e9612a48f, git hash-object abed15e033bee7d135afdde415302162ffb1051c
+            patched.setattr(
+                networking.os,
+                "stat",
+                _namespaced(pid=_UNSHARE_PID_NS, mnt=_HOST_MNT_NS, pid1_mnt=_HOST_MNT_NS),
+            )
+>           assert networking.in_initial_pid_namespace() is False
+E           assert True is False
+E            +  where True = <function in_initial_pid_namespace at 0x77914d5bd6c0>()
+E            +    where <function in_initial_pid_namespace at 0x77914d5bd6c0> = networking.in_initial_pid_namespace
+tests/test_networking.py:4718: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_networking.py::test_the_cause_is_the_namespace_that_actually_differs
+FAILED tests/test_networking.py::test_the_pid_question_refuses_both_shapes_without_reading_pid_1
+2 failed, 236 passed in 1.16s
+restored: 180895 bytes, LF, sha256 bfc196bf30bf39a2a1ccd50f3842970a17627c378732eeb3478fa763a3fb03d0, git hash-object b8268a01873209479cb5023452d171cbdd9c7215
+
+=== RESTORE CHECK ===
+........................................................................ [ 30%]
+........................................................................ [ 60%]
+........................................................................ [ 90%]
+......................                                                   [100%]
+238 passed in 1.03s
+final: 180895 bytes, LF, sha256 bfc196bf30bf39a2a1ccd50f3842970a17627c378732eeb3478fa763a3fb03d0, git hash-object b8268a01873209479cb5023452d171cbdd9c7215
