@@ -1,0 +1,59 @@
+# Where things stand, 2026-09-05 09:45 — written before a compact
+
+`yulon-phase7` is at **0cc637c7**, pushed, CI green (py3.11, py3.13, integration) on PR **#143 → Yulon**.
+The working tree is **clean**: every piece of in-flight work is on a `lane/*` branch, so nothing lives
+only in a conversation.
+
+## Phase 7: 7 of 12 ticked
+
+Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
+
+* **7.1** — the realm clause is MET (measured: row `172.30.55.119`, and `ready`'s own line at
+  `gate72-press3.log:3377`), and **clause 14 is MET as of 07:31:41 today**: a real 3.3.5a client
+  authenticated against the 7.2 install — `COP_AUTHENTICATE AUTH_OK`, `COP_GET_CHARACTERS code=44
+  result=TRUE`; server side `102 GATELOGIN last_login 2026-09-05 05:31:40 online 1 failed_logins 0`.
+  That account was made through `ControllerServices`, so it is clause 13 evidence too. Route: an
+  `ssh -L` tunnel with the realm temporarily at `127.0.0.1` — **Tailscale did not survive the
+  clean-ssh restore** — both since put back. Clause 15 (the LAN step) waits on §39.
+* **7.2** — gate evidence merged; the box is held open by ONE clause that went stale
+  (`the three CMaNGOS entries KEEP platforms: ["linux"]`, false since `2f39a6d9`). `lane/clause72`
+  is settling what the clause meant. The previous lane refused to reword a criterion so it passes,
+  which was right.
+* **7.7** — Tortoise has been installing on `yulon-win11-gate` since 23:19 and is at step 12 of 12,
+  world server loading, `restarts=0`, printing continuously. **It only survives because `timeout_s`
+  was widened to 10800 in that box's local catalog copy**; under the repo's 1800 it would already have
+  been failed, as TBC was. Still owed: Tortoise's `platforms` widening once it passes, and WotLK's
+  transcript.
+
+## The eight lane branches, and what each owes
+
+| branch | tip | state |
+|---|---|---|
+| `lane/ticks` | 2e8ae66c | MERGED at 0cc637c7 |
+| `lane/readybudget` | bbe6cdf4 | round 3 running — 2 blockers: a WSL cross-daemon read, and the `restarting` alive-status no test owns |
+| `lane/cancelcopy` | 2a4f0cab | round 3 running — the copy ignores the state file the app itself wrote |
+| `lane/headlesslog` | a20dae99 | round 3 running — the no-write rule is in-process only; the suite spawns children |
+| `lane/bug39-r6` | 9b0eb089 | needs another pass: a zone-breadth warning that fires on every ordinary Linux box (Docker makes a second firewalld zone) |
+| `lane/doodad` | 961230e1 | needs another pass: BLOCKER — the new refusal's remedy dead-ends and points the user at deleting their characters |
+| `lane/clause72` | d8e0895b | in flight |
+| `lane/dockerfile-value` | 75bce609 | in flight — §29's value half; `BUILD_ARG` carrying a secret was ACCEPTED |
+
+## Running in the background, and it survives a compact
+
+* Workflows `w96ix1cqw` (round 3) and `wf01as8gm` (§29 + 7.2).
+* The Tortoise watcher, and the VM resize queued behind its exit code — `yulon-win11-gate` is still at
+  its baseline 8 vCPU / 16 GB, correctly, because the owner's rule is that a working VM is never shut
+  down. `C:\Users\PK\vmsize.ps1` on the host does the resizing and restoring, with write-once baselines.
+
+## Owner decisions still open
+
+1. **7.8 macOS** — rent a Mac, or mark it deferred and ship at 11 of 12. `ci/macos-intel-dmg` is
+   unmerged and has no PR; it was deliberately kept in the branch cleanup.
+2. **The upstream CMaNGOS issue must NOT be posted yet** — the text on `lane/doodad` still carries a
+   patch that `git apply --check` refuses on the commit it names.
+
+## Bug checklist
+
+Closed: §21, §27, §30, §33, §40. Open: §29 (value half, in flight), §39 (round 5 committed, two
+measured lockout routes left — **the LAN button is not done**), §41 (loopback realm), §42 (a headless
+install writes no log).
