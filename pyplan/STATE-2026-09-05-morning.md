@@ -15,9 +15,9 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
   That account was made through `ControllerServices`, so it is clause 13 evidence too. Route: an
   `ssh -L` tunnel with the realm temporarily at `127.0.0.1` — **Tailscale did not survive the
   clean-ssh restore** — both since put back. Clause 15 (the LAN step) waits on §39.
-* **7.2** — gate evidence merged; the box is held open by ONE clause that went stale
-  (`the three CMaNGOS entries KEEP platforms: ["linux"]`, false since `2f39a6d9`). `lane/clause72`
-  is settling what the clause meant. The previous lane refused to reword a criterion so it passes,
+* **7.2** — TICKED at `bdee23f5` (13:30 CEST): `lane/clause72` reworded the stale clause on what it
+  meant, measured the deletion on both sides of `2fddaa0e`, and went through five review rounds
+  before its record stopped carrying numbers written from memory. The previous lane refused to reword a criterion so it passes,
   which was right.
 * **7.7** — Tortoise PASSED on `yulon-win11-gate` at 00:43:19 box-local (exit 0, banner `Loading time:
   59 minutes 18 seconds`, `RestartCount=0`). Widened to `["linux", "windows"]` and the ready budget
@@ -35,12 +35,16 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 | `lane/headlesslog` | a20dae99 | round 3 running — the no-write rule is in-process only; the suite spawns children |
 | `lane/bug39-r6` | 9b0eb089 | needs another pass: a zone-breadth warning that fires on every ordinary Linux box (Docker makes a second firewalld zone) |
 | `lane/doodad` | 961230e1 | needs another pass: BLOCKER — the new refusal's remedy dead-ends and points the user at deleting their characters |
-| `lane/clause72` | d8e0895b | in flight |
-| `lane/dockerfile-value` | 75bce609 | in flight — §29's value half; `BUILD_ARG` carrying a secret was ACCEPTED |
+| `lane/clause72` | ed3102b6 | MERGED into `yulon-phase7` at `bdee23f5`; worktree and branch deleted |
+| `lane/dockerfile-value` | c1baabea | MERGED at `bdee23f5` — §29's value half closed; `render()` refuses a public value that carries the secret |
 
 ## Running in the background, and it survives a compact
 
-* Workflows `w96ix1cqw` (round 3) and `wf01as8gm` (§29 + 7.2).
+* Workflow `wzizt9czj` (round 5 on readybudget / cancelcopy / headlesslog; round 4's verdicts and
+  the meta-reviews are in the session scratchpad as `r4-*.json`). A fresh WotLK install is running
+  on `yulon-win11-gate` into `D:\gate\wotlk-server77` from source `a0cc9dc0`, transcript
+  `C:\gate\evidence\wotlk77.log` (started 01:46 box-local after a preflight refusal on Docker's
+  disk; the VHDX was compacted 32.6 → 12.0 GB and the Tortoise stack stopped for the run).
 * The Tortoise watcher is done (see 7.7 above). Every VM is at its baseline as of 10:15 CEST
   (`vmsize.ps1 -Show`: only `yulon-fedora` had drifted, down to 4/4, restored to 10/11 while Off).
   `C:\Users\PK\vmsize.ps1` on the host does the resizing and restoring, with write-once baselines;
@@ -55,6 +59,6 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 
 ## Bug checklist
 
-Closed: §21, §27, §30, §33, §40. Open: §29 (value half, in flight), §39 (round 5 committed, two
+Closed: §21, §27, §29 (both halves, `bdee23f5`), §30, §33, §40. Open: §39 (round 5 committed, two
 measured lockout routes left — **the LAN button is not done**), §41 (loopback realm), §42 (a headless
 install writes no log).
