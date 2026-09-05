@@ -11,17 +11,448 @@ four and left three verbatim. One helper, one docstring, one report.
 from __future__ import annotations
 
 import ast
+import atexit
+import inspect
+import logging
 import os
+import shutil
+import subprocess
+import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
 
 from yulon import apply as apply_module
+from yulon import log as log_module
 from yulon import platform
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+THE_ANSWER_HANDED_TO_CHILDREN = "YULON_TEST_THE_USERS_OWN_CONFIG_DIR"
+"""Env var carrying the REAL `config_dir()` down to every child this suite starts.
+
+Without it the child redirect below defeats itself, silently. That redirect
+hands a child a scratch `XDG_DATA_HOME`/`APPDATA`/`HOME`, and a child that is
+ITSELF a pytest -- every `xdist` worker is one, spawned by a controller that
+has already imported this module -- would then import this module and resolve
+`THE_USERS_OWN_CONFIG_DIR` under the scratch it was handed. Every assertion in
+this file would go on passing, about a scratch directory, with nothing left
+between that worker and the user's own log. The answer travels down with the
+redirect rather than being recomputed under it.
+"""
+
+
+def _the_users_own_config_dir() -> Path:
+    """The real `config_dir()`, or the answer a parent process already resolved.
+
+    Reads `os.environ` and takes no environment argument. It carried an
+    `env: Mapping | None = None` parameter until 2026-09-05; nothing ever
+    passed it, and `test_log.py`'s nested-pytest test records the reason it
+    never would -- the claim is about what SURVIVES a process boundary, and
+    a dict crosses none. Measured on m910q 2026-09-05 (review, round 3):
+    hard-wiring the branch to `os.environ` left the suite at `2554 passed,
+    4 skipped`, which is what a parameter no caller can reach is worth.
+    """
+    handed_down = os.environ.get(THE_ANSWER_HANDED_TO_CHILDREN)
+    return Path(handed_down) if handed_down else platform.config_dir()
+
+
+THE_USERS_OWN_CONFIG_DIR = _the_users_own_config_dir()
+"""Where a REAL run of this app would put `yulon.log`, resolved once at import.
+
+Read before any fixture has redirected anything, because the whole point is to
+compare against the answer the user's own machine gives.
+"""
+
+THE_AMBIENT_CONFIG_DIR = platform.config_dir()
+"""What `config_dir()` answers from the environment this PROCESS was handed.
+
+The same directory as `THE_USERS_OWN_CONFIG_DIR` in a run started by a person,
+and a different one in a run started by this suite: an `xdist` worker inherits
+the scratch `XDG_DATA_HOME` the child guard gave it, so the ambient answer
+there is a directory shared by every worker on the box and every test in it.
+
+Both have to be redirected away from and for different reasons -- the first
+because it is the user's, the second because it is nobody's -- which is what
+`a_directory_no_test_chose` is. Measured on m910q 2026-09-05, `--checks` under
+`-n auto --dist loadfile` with only the first clause:
+`test_usage_and_a_bad_flag_leave_no_config_dir_behind` failed on
+`assert not PosixPath('/tmp/yulon-test-child-home-p1qhr7ic/yulon').exists()`
+-- a directory an earlier child had already made, in a test whose whole
+premise is that its config dir is untouched. Serial, that run was green.
+"""
+
+UNGUARDED_OPEN_LOG = log_module._open_log
+"""`log._open_log` as the app ships it, kept so the guard below can call through to it."""
+
+UNREDIRECTED_CONFIG_DIR = platform.config_dir
+"""`platform.config_dir` as the app ships it, kept because the fixture below replaces it.
+
+A test that needs to ask what a REAL run would answer -- rather than what a test
+is allowed to see -- has to call this one: the redirect is installed on the
+module attribute, so `platform.config_dir()` inside a test is the redirect.
+"""
+
+
+def _is_at_or_inside(directory: Path | str, other: Path) -> bool:
+    """Is `directory` `other` itself, or somewhere inside it?"""
+    try:
+        resolved = Path(directory).resolve()
+    except OSError:  # pragma: no cover - a path the OS refuses to resolve is not the real one
+        return False
+    outer = other.resolve()
+    return resolved == outer or outer in resolved.parents
+
+
+def is_the_users_own_config_dir(directory: Path | str) -> bool:
+    """Is `directory` the user's own app-state directory, or somewhere inside it?"""
+    return _is_at_or_inside(directory, THE_USERS_OWN_CONFIG_DIR)
+
+
+def a_directory_no_test_chose(directory: Path | str) -> bool:
+    """Is `directory` one this suite must answer a scratch path for instead?
+
+    Two of them, and the second exists only because this suite starts children:
+    the user's own, and whatever `config_dir()` answers from the ambient
+    environment -- which in an `xdist` worker is the scratch home the child
+    guard handed it, shared by every worker and every test. See
+    `THE_AMBIENT_CONFIG_DIR` for the failure that named the second.
+    """
+    return is_the_users_own_config_dir(directory) or _is_at_or_inside(
+        directory, THE_AMBIENT_CONFIG_DIR
+    )
+
+
+def _guarded_open_log(directory: Path, max_bytes: int, backup_count: int) -> RotatingFileHandler:
+    """`log._open_log`, refusing the user's own directory before it creates anything.
+
+    `AssertionError`, deliberately, and not `OSError`: `configure()` catches
+    `OSError` and falls back to the temp dir, so an `OSError` here would be
+    handled, logged as a "could not write its log" notice and swallowed. An
+    `AssertionError` comes out through `configure()` and fails whatever asked.
+    """
+    assert not is_the_users_own_config_dir(directory), (
+        f"a test asked to open the user's own log under {directory}. That file is what a "
+        "user sends to support; the suite may not append to it. Point this test's "
+        "`platform.config_dir()` at a tmp_path instead."
+    )
+    return UNGUARDED_OPEN_LOG(directory, max_bytes, backup_count)
+
+
+log_module._open_log = _guarded_open_log
+"""Installed HERE, at conftest import, and not inside the autouse fixture below.
+
+A fixture's `monkeypatch` covers a test and nothing else, and a log file can be
+opened outside every such window: module-scope code runs at COLLECTION, before
+any fixture exists, and a background thread outlives the `monkeypatch` undo of
+the test that started it.
+
+Measured on m910q 2026-09-05 against a one-line test module whose BODY called
+`configure(config_dir=platform.config_dir())`, same command both ways:
+
+    guard installed by the autouse fixture   1 passed                +98 bytes
+    guard installed here, at import          1 error during collection   +0
+
+and the 98 bytes were `INFO [tests.test_zzz_import_time] a module body wrote
+this at collection time`, in `/home/pk/.local/share/yulon/yulon.log`. The
+redirect below stays per-test, because it hands out a FRESH directory and a
+session-wide one would let each test read the last one's log.
+"""
+
+
+VARS_THAT_DECIDE_A_CHILDS_CONFIG_DIR = ("XDG_DATA_HOME", "APPDATA", "HOME", "USERPROFILE")
+"""Every environment variable `platform.config_dir()` can reach the user's log through.
+
+All four, on every OS, rather than this OS's two: the value is handed to a
+CHILD, and the cheap version of this ("set the one this platform reads") is a
+guard whose coverage depends on which box the suite is running on. `HOME` is in
+the list for macOS, where `config_dir()` has no override of its own and
+`Path.home()` is the only way in -- which is why
+`test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind` is
+skipped there and this is not.
+
+`test_log.py::test_the_variables_the_child_guard_rewrites_really_move_config_dir`
+drives the list against the real `config_dir()` on whatever box is running, so
+a rewrite of this list that no longer covers this platform fails here rather
+than in a support inbox.
+"""
+
+CHILD_SCRATCH_HOME = Path(tempfile.mkdtemp(prefix="yulon-test-child-home-"))
+"""The home/data directory every child process the suite starts is pointed at.
+
+Per PROCESS (each `xdist` worker makes its own), and removed at exit.
+"""
+
+atexit.register(lambda: shutil.rmtree(CHILD_SCRATCH_HOME, ignore_errors=True))
+
+UNGUARDED_POPEN_INIT = subprocess.Popen.__init__
+"""`subprocess.Popen.__init__` as CPython ships it, kept so the guard can call through."""
+
+ENV_IS_POSITIONAL_ARGUMENT = list(inspect.signature(UNGUARDED_POPEN_INIT).parameters).index("env")
+"""How many positional arguments a `Popen(...)` call needs before it is passing `env`.
+
+Asked of the signature this interpreter actually ships, counting `self`, so
+the guard below can refuse a positional `env` without restating CPython's
+parameter order. It was the literal `11` until 2026-09-05; a literal that
+drifts stops the guard SEEING the environment it exists to rewrite, and it
+would drift silently, because nothing downstream reads the number back
+(review, round 3: widening it so it could never fire left the whole suite
+at `2554 passed, 4 skipped` on m910q).
+"""
+
+
+def leads_to_the_users_own_log(value: str) -> bool:
+    """Would a child pointed at `value` end up writing the user's own `yulon.log`?
+
+    True for the directory itself and for every directory it hangs under, which
+    is what makes one check enough for all four variables: `HOME` and
+    `USERPROFILE` are ancestors of the user's config dir, `XDG_DATA_HOME` and
+    `APPDATA` are its parent.
+    """
+    try:
+        candidate = Path(value).resolve()
+    except OSError:  # pragma: no cover - a path the OS refuses to resolve is not the real one
+        return False
+    real = THE_USERS_OWN_CONFIG_DIR.resolve()
+    return candidate == real or candidate in real.parents
+
+
+def child_env_with_the_users_own_log_out_of_reach(
+    env: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """The environment a child process gets: the caller's, with no route to the user's log.
+
+    The child half of `_the_users_own_log_is_out_of_reach`, and the half that
+    fixture cannot do. Its redirect patches `platform.config_dir` IN THIS
+    PROCESS; a child has its own, resolves it from its own environment, and
+    inherits the real `HOME` from the suite. Measured on m910q 2026-09-05, the
+    whole suite run under a stand-in home (`HOME=/tmp/red-home`) with this
+    rewrite removed: `/tmp/red-home/.local/share/yulon/yulon.log` was created
+    and written -- the same appending-to-support's-evidence the in-process
+    guard was added to stop, through the one door it does not cover.
+
+    What wrote it was `test_log.py`'s own probe child, and that is worth being
+    exact about: of the three sites where this suite already spawns the app,
+    none writes the user's log TODAY, because each happens to point its child
+    at a directory of its own. The hole is that nothing said they had to. The
+    in-process rule had exactly the same shape until `test_spine.py` grew a
+    fourth `install_wiring.main()` call and wrote 54,500 bytes into the real
+    file.
+
+    Same conditional shape as the in-process redirect, for the same reason: a
+    variable the CALLER named is left exactly as the caller named it, so
+    `test_main.py`'s deliberately unwritable `APPDATA` and
+    `test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind`'s
+    per-entry-point `XDG_DATA_HOME` still reach the child. "Named by the
+    caller" is `var in given` AND a value that differs from what this process
+    would have handed down.
+
+    `var in given` is load-bearing, and was missing until 2026-09-05 (review,
+    round 3). Without it an OMITTED variable also "differs" -- `given.get(var)`
+    is `None` -- so a partial `env=` dict read as four deliberate unsets and
+    every one of the four was DROPPED from the child's environment instead of
+    being pointed at the scratch home. An unset route is not a closed one: on
+    POSIX `Path.home()` falls back to the passwd database, which is the user's
+    own, and on macOS that is `config_dir()`'s only input.
+
+    Measured on m910q 2026-09-05, a probe child spawned the way the suite
+    spawns one and handed `{"EXIT_CODE": "3", "PYTHONPATH": ...}`: under
+    `-n 2 --dist loadfile` it reached the OS with all four unset and
+    answered `/home/pk/.local/share/yulon`, the user's own; serially only
+    `HOME` was dropped (the box's own `XDG_DATA_HOME` was unset, so that
+    one compared equal to the omission and was rewritten) and the child
+    landed on the scratch. Green on the spelling CI runs, open on the
+    spelling the local gate runs.
+
+    That is not a shape only a probe can make. `runner.interact(...,
+    env={"EXIT_CODE": "3"})` in
+    `test_installer.py::test_interact_raises_on_nonzero_exit_after_yielding_output`
+    reaches `Popen(env=child_env(env))` with that one-key dict verbatim --
+    `yulon/runner.py:241` returns it unchanged off-frozen, `:623` spawns
+    with it (read, not run). The round-3 review's census of `-n auto --dist
+    loadfile` on m910q, same date, found 138 real children and exactly that
+    one holding all four routes as `None`; it runs `bash`, so nothing was
+    written that day, which is word for word this guard's own argument for
+    why the in-process rule's shape was a hole.
+
+    A caller that names one of them AS the user's own directory is refused
+    outright rather than rewritten, exactly as `_guarded_open_log` refuses it
+    in-process: rewriting would hide the mistake, and the caller stated an
+    intent that the suite may not carry out.
+    """
+    inherited = dict(os.environ)
+    given = dict(os.environ) if env is None else dict(env)
+    for var in VARS_THAT_DECIDE_A_CHILDS_CONFIG_DIR:
+        named_by_the_caller = var in given and given[var] != inherited.get(var)
+        if named_by_the_caller:
+            assert not leads_to_the_users_own_log(given[var]), (
+                f"a test asked to start a child process with {var}={given[var]}, which points "
+                "it at the user's own yulon.log. That file is what a user sends to support; "
+                "the suite may not append to it. Point this child at a tmp_path instead."
+            )
+            continue
+        given[var] = str(CHILD_SCRATCH_HOME)
+    given[THE_ANSWER_HANDED_TO_CHILDREN] = str(THE_USERS_OWN_CONFIG_DIR)
+    return given
+
+
+def _guarded_popen_init(self: subprocess.Popen, *args: object, **kwargs: object) -> None:
+    """Every child process in the suite, `subprocess.run` and `Popen` alike, through one seam.
+
+    `Popen.__init__` and not `subprocess.run`, because `run`, `call`,
+    `check_call` and `check_output` are four spellings of the same constructor
+    and a guard on any one of them is a guard on one call site.
+    """
+    assert len(args) < ENV_IS_POSITIONAL_ARGUMENT, (
+        "a test passed `env` to Popen positionally, so the guard on the user's own log "
+        "cannot see it. Pass it as a keyword."
+    )
+    kwargs["env"] = child_env_with_the_users_own_log_out_of_reach(
+        kwargs.get("env")  # type: ignore[arg-type]
+    )
+    UNGUARDED_POPEN_INIT(self, *args, **kwargs)  # type: ignore[arg-type]
+
+
+subprocess.Popen.__init__ = _guarded_popen_init  # type: ignore[method-assign,assignment]
+"""Installed at conftest import, for the reasons `_guarded_open_log` is, and one more.
+
+The in-process rule covers what this process opens. It cannot see a child at
+all: a child gets its own interpreter, its own `platform.config_dir` and the
+real `HOME` this process was started with, so a suite that had closed every
+in-process route was still one `subprocess.run` away from writing the file it
+had just been fixed to protect -- and the suite ALREADY spawns the app as a
+child, at three sites -- `test_main.py`'s launcher and `test_install_wiring.py`'s
+`--help` run and entry-point table -- two of which drive a `main()` whose first
+act is to open a log (review, 2026-09-05).
+"""
+
+
+def root_handler_levels() -> dict[logging.Handler, int]:
+    """The level of every handler currently on the root logger, keyed by the handler itself."""
+    return {handler: handler.level for handler in logging.getLogger().handlers}
+
+
+def restore_root_logging(levels: dict[logging.Handler, int]) -> None:
+    """Undo what a test's `configure()` did to the process-global root logger.
+
+    Two separate leaks, measured on m910q 2026-09-05 by a probe test run after
+    `tests/test_spine.py` in the same process:
+
+    * `stderr handler pinned at WARNING`. `configure(stderr_level=...)` applies
+      a level to the handler module-scope `get_logger()` built at import, which
+      is the point of it — and nothing ever takes that level off again, so one
+      `install_wiring.main()` in a test silences INFO on stderr for the rest of
+      the process. Every handler that was there before the test gets its level
+      back.
+    * `leaked file handlers:
+      ['/home/pk/.local/share/yulon/yulon.log']`. A `RotatingFileHandler` a
+      test opened stays on the root logger, writing every record the remaining
+      ~2,450 tests emit into a directory that is usually deleted underneath
+      it. Those are removed and closed, and `_file_configured` is recomputed
+      from the handlers that remain, so the module's idea of "done" matches the
+      handlers that actually exist.
+
+    A handler that is NEITHER in `levels` NOR a file handler is left exactly
+    alone: pytest puts its own `LogCaptureHandler` on the root logger per
+    phase, and a teardown that removed everything it did not recognise would
+    take `caplog`'s with it.
+
+    `_file_configured` is RECOMPUTED rather than restored, and that is the half
+    that decides whether the NEXT test gets a log at all: `configure()` opens
+    the file at most once per process, so a run that left the flag True hands
+    every test after it a `configure(config_dir=...)` that quietly does
+    nothing. Measured on m910q 2026-09-05 before this moved here, as
+    `test_install_wiring.py`'s own fixture: green serially (i sorts before s)
+    and two failures under `-n auto --dist loadfile`, on gw3. `_file_problem`
+    goes with it, so one test's unwritable directory is never another test's
+    diagnosis.
+
+    Recomputed from the handlers that REMAIN, and not simply set to False,
+    because the two answers differ for a file handler that was in `levels` --
+    one that existed before the test, was therefore not leaked by it, and is
+    left in place by the loop above. `False` there would tell the module that
+    file logging is off while the handler is still on the root logger, and the
+    next `configure(config_dir=...)` would open a second one. No test in the
+    suite produces that state on its own today, so the branch is driven
+    directly by
+    `test_log.py::test_a_file_handler_that_was_already_there_keeps_file_logging_marked_done`;
+    before it, `= False` passed everything (review, 2026-09-05).
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if handler in levels:
+            handler.setLevel(levels[handler])
+        elif isinstance(handler, RotatingFileHandler):
+            root.removeHandler(handler)
+            handler.close()
+    log_module._file_configured = any(
+        isinstance(handler, RotatingFileHandler) for handler in root.handlers
+    )
+    log_module._file_problem = None
+
+
+@pytest.fixture(autouse=True)
+def _the_users_own_log_is_out_of_reach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """No test may write `~/.local/share/yulon/yulon.log`, nor leave logging changed behind it.
+
+    Measured on m910q 2026-09-05, `pytest -q tests/test_spine.py`, same command
+    both ways: at `6546b190` the user's own log grew by 0 bytes; one commit
+    later, with the CLI harness configuring file logging the way every other
+    entry point does, it grew by **54,500 bytes** — 2,876,987 to 2,931,487 —
+    and its last two lines were a fabricated `install of wow-wotlk finished`
+    and the warning from a worker the fixture abandoned. That file is what a
+    user sends to support. A suite that appends invented installs to it has
+    destroyed the evidence it exists to preserve, and neither the fix nor the
+    tests were wrong about anything else: nothing in the suite had ever said
+    where a test's `config_dir()` may point.
+
+    Three things, in the order they matter:
+
+    * **The redirect.** `platform.config_dir()` answers a scratch directory
+      whenever the real function would have answered one no test chose --
+      the user's own, or the ambient one an `xdist` worker inherits. Only
+      then, so the five `test_platform.py` tests that drive `config_dir()`
+      against a made-up `$HOME`/`%APPDATA%` still see their own answer, and so
+      a test that sets up its own directory keeps it. This is what makes
+      `test_spine.py`'s four `install_wiring.main()` sites harmless without
+      any of them knowing about logging at all.
+    * **The guard**, `_guarded_open_log` above, which is not part of this
+      fixture at all: it is installed once at import, so that collection and a
+      background thread are covered too. The redirect is the fix; the guard is
+      what makes the fix provable, and it fails loudly in whatever asked.
+      `test_log.py` drives it directly.
+    * **The restore.** `install_wiring.main()` calls
+      `configure(stderr_level=WARNING)`, which pins a process-global handler
+      for good, and leaves a file handler on the root logger behind it. Both
+      are undone by `restore_root_logging()`, which carries the measurements
+      and the reasoning; `test_log.py` drives it directly, because a fixture
+      cannot assert on its own teardown.
+
+    All three are IN-PROCESS, and that was the whole of the rule until
+    2026-09-05 (review). A child process has its own `platform.config_dir`,
+    its own `log._open_log` and the real `HOME` this one was started with, so
+    none of the three can see it -- and this suite spawns the app as a child
+    at three sites. The child half is
+    `child_env_with_the_users_own_log_out_of_reach`, installed on
+    `subprocess.Popen.__init__` above.
+    """
+    scratch = tmp_path / "config-dir"
+    real_config_dir = platform.config_dir
+
+    def redirected() -> Path:
+        wanted = real_config_dir()
+        return scratch if a_directory_no_test_chose(wanted) else wanted
+
+    monkeypatch.setattr(platform, "config_dir", redirected)
+
+    levels = root_handler_levels()
+    yield
+    restore_root_logging(levels)
 
 
 @pytest.fixture(autouse=True)
