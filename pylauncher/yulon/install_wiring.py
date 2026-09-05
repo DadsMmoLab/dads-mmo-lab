@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import logging
 import sys
 import threading
 from collections.abc import Callable
@@ -37,7 +38,7 @@ from yulon.catalog.installer import (
     InstallOptions,
     installer_for,
 )
-from yulon.log import get_logger, use_utf8_streams
+from yulon.log import configure, get_logger, use_utf8_streams
 
 logger = get_logger(__name__)
 
@@ -205,6 +206,10 @@ def main(argv: list[str] | None = None) -> int:
     `--installers-root` is not in the contract's CLI spelling and is not a
     product surface: it lets a gate point the engine at a checkout's templates
     instead of a packaged bundle's.
+
+    Writes the same `yulon.log` as `main.py`, into the same `config_dir()`, and
+    the two are held to that by a test that fails on the disagreement rather
+    than on either missing call — see the `configure()` call below.
     """
     # Before ANY output. Windows hands a redirected stream cp1252, and this
     # harness prints whatever the engine yields -- which includes real arrows.
@@ -217,6 +222,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--client-dir", type=Path, default=None)
     parser.add_argument("--installers-root", type=Path, default=DEFAULT_INSTALLERS_ROOT)
     args = parser.parse_args(argv)
+    # The same `yulon.log` the GUI writes, for the entry point that needs it
+    # more. Measured on `yulon-ubuntu` 2026-09-05: after the entire 7.2 gate —
+    # every step of it driven through this harness — `~/.local/share/yulon/`
+    # did not exist, because `configure(config_dir=...)` appeared exactly once
+    # in the tree and that once was `main.py`. A headless install is what a
+    # gate box, a Steam Deck shortcut and every scripted install run, and when
+    # one fails the terminal is often already closed.
+    #
+    # `stderr_level=WARNING` is what makes logging the stage lines below
+    # affordable: they are on stdout already, a gate runs this as
+    # `> log 2>&1`, and an INFO record through the stderr handler would print
+    # every line of a 30-minute install twice. The file takes the run, the
+    # terminal takes what went wrong — including `configure()`'s own
+    # `file_log_problem()` warning, which is why this harness needs no
+    # equivalent of `main.py`'s `_warn_about_the_log_file()` dialog.
+    #
+    # AFTER `parse_args`, so `--help` and a bad flag stay pure: they exit
+    # without creating a config dir on a box that only asked for usage.
+    configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)
+    logger.info(
+        "install harness: game=%s server_dir=%s client_dir=%s",
+        args.game,
+        args.server_dir,
+        args.client_dir,
+    )
     try:
         entry = load_catalog().get(args.game)
     except KeyError:
@@ -238,7 +268,17 @@ def main(argv: list[str] | None = None) -> int:
         for line in engine.run(options, cancel=cancel, ask=_terminal_prompter):
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
+            # Streamed first, recorded second: stdout is what a gate is reading
+            # live, and the file is what is read afterwards. These lines are the
+            # whole reason the file is worth opening — an install that failed
+            # 20 minutes in is answerable only by which stages it got through.
+            logger.info("%s", line)
     except InstallerError as exc:
+        # Both, and not a duplicate to be tidied away: the record is what puts
+        # the sentence in `yulon.log` (and carries a timestamp), and the plain
+        # write is what reaches whatever `sys.stderr` is at this moment —
+        # a handler binds its stream when it is constructed, at import, which
+        # is before any redirection a caller or a test does.
         logger.error(f"install failed: {exc}")
         sys.stderr.write(f"install failed: {exc}\n")
         return 1

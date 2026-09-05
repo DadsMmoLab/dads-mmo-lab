@@ -7,7 +7,9 @@ suite (this file previously mutated global logging state with no teardown).
 
 from __future__ import annotations
 
+import io
 import logging
+import sys
 from collections.abc import Iterator
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -188,3 +190,51 @@ def test_a_config_dir_that_works_reports_no_problem(tmp_path: Path) -> None:
     configure(config_dir=tmp_path)
 
     assert file_log_problem() is None
+
+
+def test_a_stderr_level_keeps_info_off_the_terminal_and_still_in_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two readers, two levels: the file takes the run, the terminal takes what went wrong.
+
+    Asked for by `yulon.install_wiring`, whose stage lines are already on
+    stdout. A gate runs that harness as `> log 2>&1`, so logging those same
+    lines at INFO through a stderr handler printed every line of a 30-minute
+    install twice. Nothing is dropped -- the record they exist for is the file.
+
+    The `configure()` call that names the level is the SECOND one here, and
+    that is the case that matters: `install_wiring` does
+    `logger = get_logger(__name__)` at module scope, so the stderr handler is
+    already built by the time its `main()` runs, and a level that only reached
+    a freshly created handler would reach nothing at all.
+    """
+    terminal = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", terminal)
+    configure()  # what `get_logger()` at module scope does: stderr, no level
+    configure(config_dir=tmp_path, stderr_level=logging.WARNING)
+
+    logging.getLogger("yulon.tests").info("stage: preflight ok")
+    logging.getLogger("yulon.tests").warning("that did not work")
+
+    assert "stage: preflight ok" not in terminal.getvalue()
+    assert "that did not work" in terminal.getvalue()
+    written = (tmp_path / "yulon.log").read_text(encoding="utf-8")
+    assert "stage: preflight ok" in written and "that did not work" in written
+
+
+def test_without_a_stderr_level_info_still_reaches_the_terminal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The GUI entry point passes no level and must keep the stderr it always had.
+
+    The pair to the test above: `stderr_level` is opt-in, so adding it for the
+    CLI cannot quietly silence `main.py`, whose developer-facing INFO lines on
+    a console build are the only thing a `python main.py` shows.
+    """
+    terminal = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", terminal)
+    configure(config_dir=tmp_path)
+
+    logging.getLogger("yulon.tests").info("Yu'lon launcher starting")
+
+    assert "Yu'lon launcher starting" in terminal.getvalue()
