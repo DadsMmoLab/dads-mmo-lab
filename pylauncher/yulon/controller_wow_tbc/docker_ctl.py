@@ -98,7 +98,14 @@ stop_staged = docker.stop_staged
 status = docker.status
 health = docker.health
 wait_db_healthy = docker.wait_db_healthy
-wait_ready = docker.wait_ready
+# NOT `wait_ready = docker.wait_ready`. That alias stood here until 2026-09-05,
+# in all three CMaNGOS/AzerothCore packages, publishing the SINGLE-SHOT ready
+# primitive under this package's public name while `wait_server_ready()` below
+# spends the same catalogue number as a quiet budget. Nothing imported it (a
+# tree-wide grep, 2026-09-05, found no caller), and the audit that claims to
+# enumerate every ready wait in the app could not see it either: it matched
+# function DEFINITIONS, and a module-level binding is an `ast.Assign`. It now
+# reads bindings too, so re-adding this line is red rather than dormant.
 port_conflicts = docker.port_conflicts
 
 _TOKEN = re.compile(r"\{\{[A-Z_]+\}\}")

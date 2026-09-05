@@ -613,48 +613,113 @@ This is the INSTALL ceiling. A management wait gets its own — see
 `MANAGEMENT_CEILING_WINDOWS`.
 """
 
-MANAGEMENT_CEILING_WINDOWS = 4
-"""How many quiet budgets a MANAGEMENT wait may spend before it stops. The install gets six hours.
+SLOWEST_MEASURED_FIRST_BOOT_SECONDS = 3702
+"""The longest ready stage this project has measured, in seconds. A healthy one.
 
-The two waits are bounded by different things, and collapsing them was a
-regression. An INSTALL is a long operation the user started knowing it was long,
-it streams progress the whole way, and `READY_CEILING_SECONDS` is there only so
-a server printing rubbish for ever cannot hang it. A management wait is behind a
-Stop/Start button on the Server tab: the user pressed it and is looking at it.
+Three first boots have been timed on Docker Desktop's 9p share, and every one of
+them printed the whole way and ended `RestartCount=0` — they are slow servers,
+not broken ones:
+
+    Vanilla   1476 s  (24.6 min)  yulon-win11-gate 2026-09-04, `docker logs -t`,
+                                  06:12:43Z `mangosd` start -> 06:37:22Z `Avg Diff:`
+    TBC       2760 s  (46.0 min)  yulon-win11-gate 2026-09-04, `docker logs -t`,
+                                  18:59:55Z -> 19:45:58Z
+    Tortoise  3702 s  (61.7 min)  yulon-win11-gate 2026-09-05, ready-stage wall,
+                                  `pyplan/gates/7.7-win11-tortoise/README.md`,
+                                  23:41:37 `up` -> 00:43:19 `finished` box-local
+                                  (the banner's own "59 minutes 18 seconds" is
+                                  3558 s of that; the stage wall is what a wait
+                                  sits through, so the stage wall is the number)
+
+A management wait that stops before this has stopped on a server that was about
+to succeed, which is the 2026-09-04 verdict this whole lane exists to remove. So
+it is the FLOOR under `management_ceiling()` and not a comment beside it: until
+2026-09-05 the two callers that use `docker.azerothcore_ready()`'s 480 s default
+— `controller.Controller.wait_ready()` and
+`controller_wow_wotlk.docker_ctl.wait_server_ready()` — were bounded at four
+windows, 1920 s, which is shorter than all three of the boots above.
+
+The Tortoise number is a STAGE wall and the other two are container-to-banner,
+so they are not the same measurement. Taking the largest of the three anyway is
+the conservative direction and the only one available: a ready wait pays the
+stage's clock, and nobody has timed a CMaNGOS stage wall on 9p.
+"""
+
+MANAGEMENT_CEILING_WINDOWS = 2
+"""How many quiet budgets a MANAGEMENT wait may spend, when that is the larger bound.
+
+The install gets `READY_CEILING_SECONDS`. The two waits are bounded by different
+things and collapsing them was a regression: an INSTALL is a long operation the
+user started knowing it was long and which streams progress the whole way, and
+six hours is there only so a server printing rubbish for ever cannot hang it.
 Between 2026-09-04 and 2026-09-05 the management waits took the install's
-ceiling, so a button whose call used to be bounded at 480 s (the shared
-`ReadySpec.timeout` default), 1800 s or 3600 s could block for six hours, and
-nothing tested the change.
+ceiling, so a call that used to be bounded at 480 s, 1800 s or 10800 s could
+block for six hours whatever its caller asked for, and nothing tested the change.
 
-Bounding it as a MULTIPLE of the caller's `timeout` rather than as a second flat
-wall-clock constant, because the caller is the one who knows how long its user
-will sit there, and the callers do not agree: 480, 1800 and 3600 seconds are all
-in use today. One flat number would be 45x the smallest caller's expectation or
-below the largest's. `timeout=` therefore still bounds the call, which was half
-the complaint.
+TWO, because two is the whole claim this constant makes: a budget spent once is
+not a budget, and that single-shot reading is the bug this lane exists for. It
+is not the number that decides any shipped ceiling today, and that is asserted
+rather than hoped — `test_the_management_ceiling_is_the_floor_or_the_cap_for_every_budget_shipped`
+walks `catalog.json` and fails the day an entry lands in the band
+(1851 s < `timeout_s` < 10800 s) where `timeout * WINDOWS` is what answers. At
+that point somebody has to own the multiple with a measurement; today nothing
+can tell 2 from 5, and a docstring claiming otherwise would be the fourth
+confident reason with nothing behind it that this file has carried.
 
-Four, and not three or twelve. It must be more than one or the quiet budget is
-not a quiet budget at all — that is the bug this whole lane is about. Above
-that, the size is set by the largest measured miss: the wall-clock guess this
-lane replaced was out by a factor of 1.54 on the one occasion it was measured
-(TBC 46.0 min against `timeout_s: 1800`, yulon-win11-gate 2026-09-04), and
-Vanilla on the same box the same day came in UNDER it at 0.82. Four gives the
-worst of those 2.6x of headroom while keeping the smallest caller's bound at 32
-minutes rather than six hours. It is strictly longer than the single-shot total
-every one of these sites spent before this lane, so no wait that used to
-succeed can now be cut short.
+WHO ACTUALLY CALLS ONE. Not the Server tab's Stop/Start buttons: an earlier
+version of this docstring rested the size on them and they do not wait —
+`yulon/ui/controller_view.py:998` and `:1006` call `controller.start` and
+`.stop`, neither of which asks whether the server came up. Measured 2026-09-05
+by grepping the tree: outside `native.py` and `docker.py` every `wait_ready` /
+`wait_server_ready` is a definition or prose, and the only code that RUNS one is
+`pyplan/gates/gate-79-controller-surface.py`, three times per run (lines 219,
+414, 487). Its worst case — a server that keeps printing and never says ready —
+is therefore three ceilings:
+
+    game          budget    ceiling   3 x ceiling   was, single-shot
+    wow-wotlk       480 s    3702 s        3.1 h          24 min
+    wow-tbc        1800 s    3702 s        3.1 h           1.5 h
+    wow-vanilla    1800 s    3702 s        3.1 h           1.5 h
+    wow-tortoise  10800 s   21600 s         18 h             9 h
+
+Those are the numbers this change costs, written down because the round that
+introduced a management ceiling quoted only the flattering end of its own
+arithmetic. A quiet server still ends its wait after ONE window (`_read_world()`
+answers `quiet` the moment two readings match), so none of this is paid by a
+server that is merely down — only by one that talks for ever.
+
+Tortoise is the row worth reading twice. Its `timeout_s` was widened to 10800
+on 2026-09-05 (`eb5f3b3f`, the 7.7 gate), and at that size ANY multiple of two
+or more lands on `READY_CEILING_SECONDS`, so its management ceiling and the
+install's are the same six hours and cannot be separated without giving it a
+single window. That is a property of the catalogue number, not of this constant:
+10800 s was measured as a stage TOTAL and is read here as how long the server may
+say NOTHING, and nothing has ever measured three hours of Tortoise silence.
+Narrowing it belongs to whoever owns `catalog.json`'s `ready` block; recorded
+here so the next reader does not have to re-derive it.
 """
 
 
 def management_ceiling(timeout: float) -> float:
     """The wall clock a management wait may spend, given the quiet budget it was handed.
 
-    Capped by `READY_CEILING_SECONDS` as well: a catalogue entry asking for a
-    six-hour quiet budget does not get a twenty-four-hour poll behind a button.
-    Nothing in `catalog.json` is near that today (the largest is Tortoise's
-    3600, read 2026-09-05), which is exactly when a bound is cheap to add.
+    Three bounds, in this order, and each one is a different failure:
+
+    * `timeout * MANAGEMENT_CEILING_WINDOWS` — the budget must be spendable more
+      than once or it is the single-shot total this lane replaced.
+    * `SLOWEST_MEASURED_FIRST_BOOT_SECONDS` as a floor — a caller may not ask
+      for a bound shorter than the slowest healthy boot anyone here has
+      measured, because that bound refuses a server that was going to succeed.
+      This is why `timeout=` no longer bounds the call all the way down, and it
+      is deliberate: at 480 s the old four-window bound stopped 1782 s short of
+      the boot the same box measured on the same share.
+    * `READY_CEILING_SECONDS` as a cap — a catalogue entry asking for a six-hour
+      quiet budget does not get a twelve-hour poll behind a button.
     """
-    return min(timeout * MANAGEMENT_CEILING_WINDOWS, float(READY_CEILING_SECONDS))
+    return min(
+        max(timeout * MANAGEMENT_CEILING_WINDOWS, float(SLOWEST_MEASURED_FIRST_BOOT_SECONDS)),
+        float(READY_CEILING_SECONDS),
+    )
 
 
 def _line_around(text: str, found: re.Match[str]) -> str:
@@ -870,6 +935,28 @@ def _read_world(
     return "alive", None
 
 
+def _restart_baseline(first_restarts: int | None, now: WorldOutput) -> int | None:
+    """The crash-loop baseline: the first reading that HAS one, not the first reading.
+
+    `_world_output()` answers `restarts=None` for a docker that would not talk,
+    and a container is at its least inspectable in the seconds after `up`.
+    Taking `None` as the baseline would switch the crash-loop check off for the
+    REST of the wait because of one unlucky first look: `_read_world()` computes
+    `grew` as `None` whenever either side is `None`, so a looping container then
+    runs the whole ceiling out and is refused as quiet — a wrong sentence about a
+    container docker was telling us the truth about. Same shape as
+    `docker.wait_ready()`'s own `if first_restarts is None and world.status`.
+
+    ONE function because both loops need it and only one of the two copies had a
+    test: deleting the two lines from `wait_ready_quietly()` left the whole suite
+    green on m910q 2026-09-05, while the identical two lines in
+    `StagedInstaller.wait_for_ready()` were owned by
+    `test_a_first_reading_the_daemon_refused_does_not_switch_off_the_crash_check`.
+    A rule with two copies is a rule with one owner.
+    """
+    return now.restarts if first_restarts is None else first_restarts
+
+
 def wait_ready_quietly(
     spec: docker.ContainerSpec,
     ready: docker.ReadySpec,
@@ -898,9 +985,15 @@ def wait_ready_quietly(
     `catalog.json` — not this lane's to edit — and would have left six sites
     spending a budget under a name that said they should not.
 
-    **`timeout` still bounds the call**, at `MANAGEMENT_CEILING_WINDOWS` times
-    itself — see that constant for why a management wait gets its own ceiling
-    rather than the install's six hours.
+    **The call is bounded**, by `management_ceiling(ready.timeout)`: at least
+    `MANAGEMENT_CEILING_WINDOWS` of the caller's windows, never shorter than
+    `SLOWEST_MEASURED_FIRST_BOOT_SECONDS`, never longer than
+    `READY_CEILING_SECONDS`. So `timeout=` shortens the call only down to that
+    measured floor, and deliberately: the two callers on
+    `docker.azerothcore_ready()`'s 480 s default were bounded at 1920 s between
+    2026-09-04 and 2026-09-05, which is shorter than every 9p first boot this
+    project has measured, and refusing a server that was about to succeed is the
+    defect this file is here to remove rather than to relocate.
 
     `wait`, `output` and `monotonic` are resolved at CALL time, never bound as
     defaults: `docker.wait_ready_for` bound at import is a function a test's
@@ -940,8 +1033,7 @@ def wait_ready_quietly(
         if wait(spec, replace(ready, timeout=window), wsl_distro=wsl_distro):
             return True
         now = look(spec, wsl_distro=wsl_distro)
-        if first_restarts is None:
-            first_restarts = now.restarts
+        first_restarts = _restart_baseline(first_restarts, now)
         verdict, _ = _read_world(before, now, first_restarts, ready.restart_loop, ready.fatal)
         if verdict != "alive":
             return False
@@ -2357,16 +2449,7 @@ class StagedInstaller:
                 yield "The server is up."
                 return
             now = self._seams.world_output(spec)
-            if first_restarts is None:
-                # The baseline is the first reading that HAS one, not the first
-                # reading. `world_output` answers `restarts=None` for a docker
-                # that would not talk, and a container is at its least
-                # inspectable in the seconds after `up` — taking `None` as the
-                # baseline would have switched the crash-loop check off for the
-                # rest of the wait because of one unlucky first look. Same shape
-                # as `docker.wait_ready()`'s own `if first_restarts is None and
-                # world.status`.
-                first_restarts = now.restarts
+            first_restarts = _restart_baseline(first_restarts, now)
             verdict, detail = _read_world(
                 before, now, first_restarts, markers.restart_loop, ready.fatal
             )

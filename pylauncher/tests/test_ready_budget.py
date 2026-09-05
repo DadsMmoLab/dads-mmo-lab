@@ -28,6 +28,7 @@ six-hour ceiling both run in microseconds.
 from __future__ import annotations
 
 import ast
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -703,6 +704,23 @@ def _wait_functions() -> dict[str, tuple[Path, int]]:
                 if isinstance(node, ast.FunctionDef) and node.name in WAIT_FUNCTION_NAMES:
                     owner = parent.name + "." if isinstance(parent, ast.ClassDef) else ""
                     found[f"{module}::{owner}{node.name}"] = (path, node.lineno)
+                # A ready wait does not have to be a `def`. Three packages
+                # carried `wait_ready = docker.wait_ready` at module level until
+                # 2026-09-05 -- the single-shot primitive, re-exported under the
+                # package's public name, in a block whose comment says "callers
+                # import from here" -- and this walk could not see one of them,
+                # because a binding is an `ast.Assign` and it matched only
+                # definitions. MODULE level and not class level: `Seams` in
+                # `native.py` declares a `wait_ready` FIELD whose default is the
+                # primitive, which is correct there and is not a call site.
+                if isinstance(parent, ast.Module) and isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        if isinstance(target, ast.Name) and target.id in WAIT_FUNCTION_NAMES:
+                            found[f"{module}::{target.id} (module-level binding)"] = (
+                                path,
+                                node.lineno,
+                            )
     return found
 
 
@@ -789,6 +807,7 @@ def test_no_ready_wait_outside_the_primitive_spends_the_budget_as_one_total() ->
     """
     root = Path(__file__).resolve().parent.parent / "yulon"
     allowed = {READY_WAIT_PRIMITIVE, "yulon/catalog/native.py"}
+    single_shot = ("wait_ready_for", "wait_ready")
     offenders: list[str] = []
     naming_it: set[str] = set()
     for path in sorted(root.rglob("*.py")):
@@ -797,13 +816,21 @@ def test_no_ready_wait_outside_the_primitive_spends_the_budget_as_one_total() ->
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr == "wait_ready_for":
                 naming_it.add(module)
+            # `docker.wait_ready` as well as `docker.wait_ready_for`, and the
+            # ATTRIBUTE rather than only a call of it: the three aliases retired
+            # on 2026-09-05 never called anything, they bound the primitive to a
+            # public name and waited for a caller. `docker.` in front is
+            # required so that `self._seams.wait_ready(...)` -- the install
+            # spine's own seam, which is allowed to be the single window -- is
+            # not read as one of these.
             if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "wait_ready_for"
+                isinstance(node, ast.Attribute)
+                and node.attr in single_shot
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "docker"
                 and module not in allowed
             ):
-                offenders.append(f"{module}:{node.lineno}")
+                offenders.append(f"{module}:{node.lineno} (docker.{node.attr})")
 
     assert "yulon/catalog/native.py" in naming_it, "the quiet loop no longer names the primitive"
     assert offenders == [], (
@@ -859,27 +886,50 @@ def test_a_ready_wait_asks_one_daemon_for_the_wait_the_state_and_the_log(
     because the defect is a RELATIONSHIP between them and no read is wrong on
     its own. RED on m910q 2026-09-05, all eight sites at once:
     `{'state': None, 'logs': None, 'wait': 'dml-arch'}`.
+
+    TWO WINDOWS, and that is the whole shape of this test. `wait_ready_quietly()`
+    looks at the container twice — once before the loop and once after every
+    window that did not find the banner — and the SECOND look is the one whose
+    reading forms the verdict. The first version of this test drove a `wait`
+    double that answered True on its first window, so the second `look()` was
+    never reached: mutating it to `look(spec)` left this file at 57 passed and
+    the whole suite green apart from one unrelated test the docker guard caught
+    (review, m910q 2026-09-05). With the mutation and two windows all eight
+    sites go red on `{'state': ['dml-arch', None], ...}` — the behaviour being
+    restored is the blocker itself, a WSL install whose window 2 onward reads
+    the host daemon, comes back empty, and ends `unreadable` on a healthy
+    printing container.
     """
-    asked: dict[str, object] = {}
+    asked: dict[str, list[object]] = {"wait": [], "state": [], "logs": []}
+    printed = ["loading\n", "loading\nloaded the maps\n"]
 
     def wait(spec: docker.ContainerSpec, ready: docker.ReadySpec, **kwargs: object) -> bool:
-        asked["wait"] = kwargs.get("wsl_distro")
-        return True
+        asked["wait"].append(kwargs.get("wsl_distro"))
+        # False, then True: the second `look()` only happens after a window that
+        # did NOT find the banner, so a double that answers True at once records
+        # one read and leaves the other unwatched.
+        return len(asked["wait"]) > 1
 
     def state(container: str, **kwargs: object) -> docker.ContainerState:
-        asked["state"] = kwargs.get("wsl_distro")
+        asked["state"].append(kwargs.get("wsl_distro"))
         return docker.ContainerState("running", "2026-09-05T00:00:00Z", 0)
 
     def logs(container: str, **kwargs: object) -> str:
-        asked["logs"] = kwargs.get("wsl_distro")
-        return "loading\n"
+        # Fresh output each time, so the reading between the two windows is
+        # `alive` and the wait goes round again instead of ending as quiet.
+        asked["logs"].append(kwargs.get("wsl_distro"))
+        return printed[min(len(asked["logs"]) - 1, len(printed) - 1)]
 
     monkeypatch.setattr(docker, "wait_ready_for", wait)
     monkeypatch.setattr(docker, "container_state", state)
     monkeypatch.setattr(docker, "_logs", logs)
 
     assert _drive_every_wait(tmp_path, "dml-arch")[site]() is True
-    assert asked == {"wait": "dml-arch", "state": "dml-arch", "logs": "dml-arch"}
+    assert asked == {
+        "wait": ["dml-arch", "dml-arch"],
+        "state": ["dml-arch", "dml-arch"],
+        "logs": ["dml-arch", "dml-arch"],
+    }, "every read this wait makes goes to the daemon it was told to watch, EVERY time"
 
 
 # -- the status list, enumerated ---------------------------------------------
@@ -978,18 +1028,265 @@ def test_a_measured_duration_that_rounds_to_zero_is_not_reported_as_zero() -> No
 # -- two ceilings, because there are two kinds of wait -----------------------
 
 
-def test_a_management_wait_is_bounded_by_the_timeout_its_caller_handed_it() -> None:
+def _tortoise_stage_line() -> re.Match[str]:
+    """The 9p ready-stage wall, re-derived from the gate's own write-up rather than retyped.
+
+    `native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS` is a measurement, and a
+    measurement typed into a source file is a number somebody chose. This reads
+    `pyplan/gates/7.7-win11-tortoise/README.md` -- the evidence copied off
+    `yulon-win11-gate` on 2026-09-05 while the containers were still up -- and
+    checks the stated seconds against the two clock stamps beside them, so the
+    artefact has to be self-consistent before this file will believe it.
+
+    That makes the ceiling constant OWNED by a file on disk: editing the number
+    in `native.py` without the run that justifies it goes red here.
+    """
+    readme = (
+        Path(__file__).resolve().parents[2]
+        / "pyplan"
+        / "gates"
+        / "7.7-win11-tortoise"
+        / "README.md"
+    )
+    assert readme.is_file(), f"{readme} is the evidence the management floor is derived from"
+    found = re.search(
+        r"Ready stage wall: (\d\d):(\d\d):(\d\d)\D+(\d\d):(\d\d):(\d\d) = \*\*(\d+) s\*\*",
+        readme.read_text(encoding="utf-8"),
+    )
+    assert found is not None, (
+        f"{readme} no longer states its ready stage as `Ready stage wall: HH:MM:SS -> "
+        "HH:MM:SS = **N s**`, so this file cannot re-derive the number it bounds waits with"
+    )
+    return found
+
+
+def _tortoise_stage_wall_from_the_gate() -> int:
+    """The seconds that write-up states. Cross-checked against its own stamps by a test.
+
+    Split from the parse so that only ONE test dies if the artefact and its
+    arithmetic disagree. This runs at import time -- `parametrize` needs the
+    number at collection -- and an assertion here takes the whole file down with
+    a collection error, which is the right noise for a MISSING evidence file and
+    much too much for a mistyped one.
+    """
+    return int(_tortoise_stage_line()[7])
+
+
+MEASURED_9P_BOOTS: dict[str, int] = {
+    # yulon-win11-gate 2026-09-04, `docker logs -t`, mangosd start -> first `Avg
+    # Diff:`. The two stamps are in this file's own header; the seconds are the
+    # difference between them, not the rounded minutes the header prints.
+    "wow-vanilla, 06:12:43Z -> 06:37:22Z": 1479,
+    "wow-tbc, 18:59:55Z -> 19:45:58Z": 2763,
+    # yulon-win11-gate 2026-09-05, the ready STAGE's wall clock, which is what a
+    # wait actually sits through. Read off the gate's own write-up.
+    "wow-tortoise, ready-stage wall": _tortoise_stage_wall_from_the_gate(),
+}
+"""Every first boot this project has timed on Docker Desktop's 9p share. All healthy.
+
+Every one printed the whole way and ended `RestartCount=0`. They are the
+evidence under `native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS`, and the reason a
+management ceiling shorter than the largest of them is a bug rather than a
+policy: it refuses a server that was about to succeed, which is the 2026-09-04
+verdict this whole file exists to remove.
+"""
+
+
+def _budgets_in_use() -> dict[str, float]:
+    """Every quiet budget a management wait is handed today, asked of the real spec builders.
+
+    Not read off `catalog.json`: two of the eight sites do not use it.
+    `Controller.wait_ready()` and `controller_wow_wotlk.docker_ctl` build
+    `docker.azerothcore_ready()`, whose timeout is `ReadySpec`'s own 480 s
+    default -- the smallest budget in the app, and the one the four-window
+    ceiling of 2026-09-05 bounded at 1920 s, shorter than all three boots above.
+    """
+    from yulon.controller_wow_tbc import docker_ctl as tbc_ctl
+    from yulon.controller_wow_tortoise import docker_ctl as tortoise_ctl
+    from yulon.controller_wow_vanilla import docker_ctl as vanilla_ctl
+
+    return {
+        "Controller.wait_ready / wow-wotlk (azerothcore_ready default)": (
+            docker.azerothcore_ready("127.0.0.1", 3724).timeout
+        ),
+        "wow-tbc docker_ctl.ready_spec()": tbc_ctl.ready_spec().timeout,
+        "wow-vanilla docker_ctl.ready_spec()": vanilla_ctl.ready_spec().timeout,
+        "wow-tortoise docker_ctl.ready_spec()": tortoise_ctl.ready_spec("127.0.0.1", 3724).timeout,
+    }
+
+
+BUDGETS_IN_USE = _budgets_in_use()
+
+
+def test_the_gate_write_up_the_floor_is_read_from_agrees_with_its_own_clock() -> None:
+    """The artefact has to be self-consistent before this file believes a number in it.
+
+    `pyplan/gates/7.7-win11-tortoise/README.md` states the ready stage as
+    `23:41:37 -> 00:43:19 = **3702 s**`, and the arithmetic is what makes that a
+    measurement rather than a figure: the two stamps are copied out of the
+    installer's own transcript. Checked here so that editing the seconds without
+    the run behind them fails HERE, next to the evidence, as well as in
+    `native.py`'s constant.
+
+    An incomplete artefact reads as fact -- so this asks the file, and then asks
+    the file to agree with itself.
+    """
+    found = _tortoise_stage_line()
+    start = int(found[1]) * 3600 + int(found[2]) * 60 + int(found[3])
+    end = int(found[4]) * 3600 + int(found[5]) * 60 + int(found[6])
+    spanned = end - start + (24 * 3600 if end < start else 0)
+
+    assert spanned == int(found[7]), (
+        f"the 7.7 write-up states {found[7]}s of ready stage and its own stamps span "
+        f"{spanned}s; one of the two is wrong and the management floor is read off it"
+    )
+
+
+def test_the_management_floor_is_the_slowest_boot_this_project_has_measured() -> None:
+    """The constant IS the measurement, from both directions.
+
+    Round 3 argued the size of the management ceiling in a long docstring and
+    left the number owned by nothing: measured on m910q 2026-09-05, every value
+    of `MANAGEMENT_CEILING_WINDOWS` from 2 to 11 kept all 2593 tests green, and
+    at 11 a management wait on a `timeout_s: 1800` entry blocked for 5.5 hours
+    with no red anywhere. Re-derived here before this round changed it:
+    `MANAGEMENT_CEILING_WINDOWS = 5` -> `2594 passed, 4 skipped, 23 deselected`.
+
+    So the floor is not argued, it is read: the largest boot in
+    `MEASURED_9P_BOOTS`, whose Tortoise entry comes out of the gate's own
+    write-up. Raising the constant goes red here; lowering it goes red here AND
+    in the twelve waits below.
+    """
+    assert native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS == max(MEASURED_9P_BOOTS.values()), (
+        f"the management floor is {native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS}s and the "
+        f"slowest boot measured on this project is {max(MEASURED_9P_BOOTS.values())}s "
+        f"({MEASURED_9P_BOOTS})"
+    )
+    assert native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS < native.READY_CEILING_SECONDS, (
+        "a floor at or above the install ceiling would give every management wait the "
+        "install's six hours, which is the regression the two ceilings exist to undo"
+    )
+
+
+@pytest.mark.parametrize("budget", sorted(BUDGETS_IN_USE.items()))
+@pytest.mark.parametrize("boot", sorted(MEASURED_9P_BOOTS.items()))
+def test_no_boot_this_project_has_measured_is_refused_by_a_management_ceiling(
+    boot: tuple[str, int], budget: tuple[str, float]
+) -> None:
+    """Twelve waits: every measured boot against every budget a caller hands one.
+
+    This is the assertion the ceiling exists to survive, and it is driven
+    through the real `wait_ready_quietly()` rather than compared against
+    `management_ceiling()` -- the ceiling is spent by a LOOP, whose last window
+    is shortened to land on it, and a wait that stops one second early refuses a
+    healthy server exactly as a wall-clock timeout did.
+
+    It was RED before this round for two of the twelve: at four windows the
+    480 s callers stopped at 1920 s, and the TBC and Tortoise boots are 2763 s
+    and 3702 s. Those two sites are `Controller.wait_ready()` and
+    `controller_wow_wotlk.docker_ctl.wait_server_ready()`, which is to say the
+    2026-09-04 defect was still live at two of the app's eight ready waits after
+    the round that removed it from the other six.
+    """
+    world = FakeWorld(boot_s=float(boot[1]))
+
+    got = native.wait_ready_quietly(
+        TBC.container_spec(),
+        docker.ReadySpec(world="Avg Diff:", timeout=budget[1]),
+        wait=world.wait_ready,
+        output=world.output,
+        monotonic=world.clock,
+    )
+
+    assert got is True, (
+        f"a {boot[1]}s boot ({boot[0]}) was refused by the ceiling a {budget[1]:.0f}s budget "
+        f"buys ({budget[0]}, ceiling {native.management_ceiling(budget[1]):.0f}s) -- and that "
+        "boot happened, on a healthy server, with RestartCount=0"
+    )
+
+
+def test_the_management_ceiling_is_the_floor_or_the_cap_for_every_budget_shipped() -> None:
+    """`MANAGEMENT_CEILING_WINDOWS` decides no shipped ceiling today, and this says so.
+
+    The multiple only answers for a budget between 1851 s and 10800 s, and no
+    caller hands one: below that the measured floor wins, at Tortoise's 10800 s
+    the install cap does. So 2 and 5 are indistinguishable on this tree, which
+    is why the constant's docstring claims only "more than one" -- a docstring
+    arguing for a specific multiple would be a reason with nothing behind it.
+
+    The audit is written to FAIL on what it cannot see: the day an entry lands
+    in that band, this test goes red and the multiple has to be owned by
+    somebody with a measurement, instead of quietly starting to decide a
+    ceiling.
+    """
+    floor = float(native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS)
+    cap = float(native.READY_CEILING_SECONDS)
+    decided_by_the_multiple = {
+        who: budget
+        for who, budget in BUDGETS_IN_USE.items()
+        if native.management_ceiling(budget) not in (floor, cap)
+    }
+
+    assert decided_by_the_multiple == {}, (
+        f"{decided_by_the_multiple} now get a ceiling of "
+        f"timeout * {native.MANAGEMENT_CEILING_WINDOWS}, a number nothing on this project has "
+        "measured. Either derive the multiple or bound these callers another way"
+    )
+    assert sorted({native.management_ceiling(b) for b in BUDGETS_IN_USE.values()}) == [floor, cap]
+    assert native.management_ceiling(
+        BUDGETS_IN_USE["wow-tortoise docker_ctl.ready_spec()"]
+    ) == pytest.approx(cap), (
+        "Tortoise's timeout_s was widened to 10800 on 2026-09-05 (eb5f3b3f), and at that size "
+        "its management ceiling IS the install ceiling -- recorded here rather than left to be "
+        "rediscovered, because it is the one budget where the two waits cannot be separated"
+    )
+
+
+def test_a_management_wait_spends_more_than_one_window_of_every_budget_in_use() -> None:
+    """One window is the fixed total this lane replaced, whatever the budget is.
+
+    `MANAGEMENT_CEILING_WINDOWS = 1` is red here and only here: Tortoise's
+    10800 s budget is the one large enough that the multiple, not the floor,
+    decides how many windows it buys, so at 1 that site goes straight back to
+    spending `timeout_s` once -- which is the bug, for the entry that has the
+    most of it to spend.
+    """
+    for who, budget in BUDGETS_IN_USE.items():
+        world = FakeWorld(boot_s=float("inf"))
+
+        got = native.wait_ready_quietly(
+            TBC.container_spec(),
+            docker.ReadySpec(world="Avg Diff:", timeout=budget),
+            wait=world.wait_ready,
+            output=world.output,
+            monotonic=world.clock,
+        )
+
+        assert got is False
+        assert len(world.windows) >= 2, (
+            f"{who} spends its {budget:.0f}s budget {len(world.windows)} time(s), which is the "
+            "single-shot total the 2026-09-04 incident disproved"
+        )
+
+
+def test_a_management_wait_is_bounded_by_the_ceiling_and_shortens_its_last_window() -> None:
     """A Stop/Start button could block for six hours, and nothing tested the change.
 
     The four management waits used to spend `timeout` ONCE, as a total, so the
-    call was bounded at 480 s, 1800 s or 3600 s depending on which of them it
-    was. Reading the number as a quiet budget was right; taking the INSTALL
-    ceiling with it was not, and it went from 480-3600 s to 21600 s with no test
-    naming the change. `timeout=` bounds the call again, at
-    `MANAGEMENT_CEILING_WINDOWS` times itself -- still strictly longer than the
-    single-shot total it replaced, so no wait that used to succeed is cut short.
+    call was bounded at 480 s, 1800 s or 10800 s depending on which it was.
+    Reading the number as a quiet budget was right; taking the INSTALL ceiling
+    with it was not, and it went to 21600 s with no test naming the change.
+
+    The last window is the second half of this. `management_ceiling()` is no
+    longer a whole number of budgets -- 3702 is not a multiple of 1800 -- so the
+    `min(ready.timeout, ceiling - spent)` term is what makes the wait stop AT
+    the ceiling instead of overshooting it by most of a window. Until 2026-09-05
+    the shortening could not fire for any real caller and no test drove it;
+    replacing it with a plain `ready.timeout` leaves three whole windows and
+    5400 s elapsed, and both assertions below go red.
     """
     world = FakeWorld(boot_s=float("inf"))
+
     got = native.wait_ready_quietly(
         TBC.container_spec(),
         docker.ReadySpec(world="Avg Diff:", timeout=float(TBC_QUIET_S)),
@@ -997,11 +1294,17 @@ def test_a_management_wait_is_bounded_by_the_timeout_its_caller_handed_it() -> N
         output=world.output,
         monotonic=world.clock,
     )
+    ceiling = native.management_ceiling(float(TBC_QUIET_S))
 
     assert got is False
-    assert len(world.windows) == native.MANAGEMENT_CEILING_WINDOWS
-    assert world.elapsed == pytest.approx(TBC_QUIET_S * native.MANAGEMENT_CEILING_WINDOWS)
+    assert world.elapsed == pytest.approx(ceiling)
     assert world.elapsed > TBC_QUIET_S, "one window is the single-shot total this replaced"
+    assert world.elapsed < native.READY_CEILING_SECONDS, "the install ceiling is not this one"
+    assert world.windows[:-1] == [float(TBC_QUIET_S)] * (len(world.windows) - 1)
+    assert 0 < world.windows[-1] < TBC_QUIET_S, (
+        f"the last window is {world.windows[-1]}s; it must be cut short so the wait lands on "
+        f"the {ceiling}s ceiling rather than overshooting it"
+    )
 
 
 def test_the_install_wait_and_a_management_wait_stop_in_different_places() -> None:
@@ -1009,9 +1312,11 @@ def test_the_install_wait_and_a_management_wait_stop_in_different_places() -> No
 
     An install is a long operation the user started knowing it was long and
     which streams progress the whole way; six hours is there only so a server
-    printing rubbish for ever cannot hang it. A management wait is behind a
-    button the user just pressed and is looking at. Collapsing the two was the
-    regression; `MANAGEMENT_CEILING_WINDOWS` carries the argument for the size.
+    printing rubbish for ever cannot hang it. A management wait is one something
+    is waiting on -- today the only code that runs one is the 7.9 controller
+    gate, three times a run. Collapsing the two was the regression;
+    `MANAGEMENT_CEILING_WINDOWS` and `SLOWEST_MEASURED_FIRST_BOOT_SECONDS` carry
+    the argument for the size between them.
     """
     managed = FakeWorld(boot_s=float("inf"))
     assert (
@@ -1034,20 +1339,116 @@ def test_the_install_wait_and_a_management_wait_stop_in_different_places() -> No
         )
 
     assert installing.elapsed == pytest.approx(native.READY_CEILING_SECONDS)
-    assert managed.elapsed == pytest.approx(TBC_QUIET_S * native.MANAGEMENT_CEILING_WINDOWS)
+    assert managed.elapsed == pytest.approx(native.management_ceiling(float(TBC_QUIET_S)))
     assert managed.elapsed < installing.elapsed
 
 
 def test_a_quiet_budget_larger_than_the_install_ceiling_does_not_raise_it() -> None:
     """`management_ceiling()` is a multiple of a catalogue number, so it needs a cap.
 
-    Nothing in `catalog.json` is near this today -- the largest `timeout_s` is
-    Tortoise's 3600, read 2026-09-05, which buys four hours -- and that is
-    exactly when a bound costs nothing to add.
+    The largest `timeout_s` shipped is Tortoise's 10800, read 2026-09-05, which
+    already lands exactly on the cap; a hypothetical six-hour budget must not
+    buy a twelve-hour poll behind a button.
     """
-    assert native.management_ceiling(float(TBC_QUIET_S)) == pytest.approx(
-        TBC_QUIET_S * native.MANAGEMENT_CEILING_WINDOWS
-    )
     assert native.management_ceiling(float(native.READY_CEILING_SECONDS)) == pytest.approx(
         native.READY_CEILING_SECONDS
     )
+    assert native.management_ceiling(1.0) == pytest.approx(
+        native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS
+    ), "a caller may not ask to be bounded below the slowest boot anyone here has measured"
+
+
+# -- what a window that did not find the banner is allowed to mean -----------
+
+
+def test_a_first_look_the_daemon_refused_does_not_switch_the_crash_check_off_here_either() -> None:
+    """The management loop's copy of the baseline rule, which nothing owned.
+
+    `_restart_baseline()` keeps the first reading that HAS a restart count, not
+    the first reading. Both loops need it, and until 2026-09-05 only the install
+    spine's copy was tested: deleting the two lines from `wait_ready_quietly()`
+    left the whole suite green on m910q (2594 passed, 0 failures), while the
+    identical two lines in `wait_for_ready()` were owned by
+    `test_a_first_reading_the_daemon_refused_does_not_switch_off_the_crash_check`.
+    They are one function now, and this is the second driver of it.
+
+    The fixture violates exactly one rule -- the first look answers "could not
+    ask" -- and everything after it is readable. Without the late baseline
+    `grew` is `None` for the rest of the call, so the crash loop is invisible
+    and the container is refused as quiet three windows later instead of named
+    as a loop at the second.
+    """
+    readings = [
+        native.WorldOutput(text="", restarts=None, status=""),
+        native.WorldOutput(text="starting", restarts=0, status="restarting"),
+        native.WorldOutput(text="starting again", restarts=4, status="restarting"),
+    ]
+    windows: list[float] = []
+    now = {"t": 0.0}
+
+    def wait(spec: docker.ContainerSpec, ready: docker.ReadySpec, **_kwargs: object) -> bool:
+        windows.append(ready.timeout)
+        now["t"] += ready.timeout
+        return False
+
+    def look(spec: docker.ContainerSpec, **_kwargs: object) -> native.WorldOutput:
+        return readings[min(len(windows), len(readings) - 1)]
+
+    got = native.wait_ready_quietly(
+        TBC.container_spec(),
+        docker.ReadySpec(world="Avg Diff:", timeout=480.0, restart_loop=4),
+        wait=wait,
+        output=look,
+        monotonic=lambda: now["t"],
+    )
+
+    assert got is False
+    assert len(windows) == 2, (
+        "the crash loop is four restarts past a baseline of 0, taken from the second look; "
+        f"{len(windows)} windows means the baseline stayed None and the loop was never seen"
+    )
+
+
+def test_a_container_that_restarted_without_printing_anything_new_is_not_called_quiet() -> None:
+    """Any change at all counts as life, and the whole reading is what is compared.
+
+    `_read_world()` asks `now == before` on the whole `WorldOutput`, not on its
+    text. Weakening it to `now.text == before.text` left the entire suite green
+    on m910q 2026-09-05, and it is not a safe weakening: `docker._logs()` is
+    scoped to the CURRENT run, so a container that restarted below the crash
+    threshold reprints the same first lines and its text is genuinely
+    unchanged. Compared on text alone that server is "quiet" -- refused, with a
+    sentence saying it stopped printing -- while the restart count in the same
+    reading says it is very much alive.
+
+    One rule broken: the container restarted once. The threshold is four, so
+    this is not a loop; the status is `running`, so it is not gone; the only
+    question left is the quiet one, which is what makes this a test of that
+    question and not of the three ahead of it.
+    """
+    readings = [
+        native.WorldOutput(text="World initialised", restarts=0, status="running"),
+        native.WorldOutput(text="World initialised", restarts=1, status="running"),
+    ]
+    windows: list[float] = []
+
+    def wait(spec: docker.ContainerSpec, ready: docker.ReadySpec, **_kwargs: object) -> bool:
+        windows.append(ready.timeout)
+        return len(windows) > 1
+
+    def look(spec: docker.ContainerSpec, **_kwargs: object) -> native.WorldOutput:
+        return readings[min(len(windows), len(readings) - 1)]
+
+    got = native.wait_ready_quietly(
+        TBC.container_spec(),
+        docker.ReadySpec(world="Avg Diff:", timeout=float(TBC_QUIET_S), restart_loop=4),
+        wait=wait,
+        output=look,
+        monotonic=lambda: 0.0,
+    )
+
+    assert got is True, (
+        "the container restarted between the two readings and printed the same first lines "
+        "again; a wait that reads only the text calls that silence and gives up on it"
+    )
+    assert len(windows) == 2

@@ -15,7 +15,7 @@ import os
 import subprocess
 import time
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -330,11 +330,31 @@ The guard matches on the BASENAME, so the pinned Windows path is caught too.
 """
 
 
+def argv_reaches_the_docker_cli(command: object) -> bool:
+    """Does this argv start a docker CLI? The one rule the guard below is built on.
+
+    Public and named so a test can drive the RULE rather than the fixture: an
+    autouse fixture that refuses something is very hard to prove is doing
+    anything at all, and until 2026-09-05 nothing proved this one. See
+    `tests/test_docker_guard.py`.
+    """
+    if not isinstance(command, (list, tuple)) or not command:
+        return False
+    # `PureWindowsPath` on every host, not `Path`. `Path` is the RUNNING
+    # platform's flavour, and on Linux a Windows argv[0] has no separator it
+    # recognises: `Path(r"C:\Program Files\Docker\resources\bin\docker.exe").name`
+    # is that whole string there, so the pinned Windows spelling the guard's
+    # docstring claims to catch would sail through on the box this suite
+    # actually runs on. Windows flavour splits on both `/` and `\`, so it is
+    # right for either shape.
+    return PureWindowsPath(str(command[0])).name.lower() in DOCKER_ARGV0S
+
+
 @pytest.fixture(autouse=True)
 def _no_unit_test_talks_to_a_real_docker_daemon(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fail a non-integration test that reaches `docker` through `runner.run()`.
+    """Fail a non-integration test that reaches `docker` through `runner`.
 
     A unit test that shells out is not a unit test: it is slow, it answers
     differently on a box with Docker than on one without, and on the owner's
@@ -350,29 +370,53 @@ def _no_unit_test_talks_to_a_real_docker_daemon(
     read, and every test that patched only `docker.wait_ready_for` started
     inspecting a container on the box running the suite.
 
-    `runner.run` rather than `docker._docker`, because `_docker` is where the
-    argv is BUILT and the tests that assert argv shape patch below it. Only
-    docker argv is refused; every other subprocess (git, wsl-less shells) still
-    runs, so this cannot quietly disable a test that was never about docker.
+    `runner.run`/`runner.stream` rather than `docker._docker`, because `_docker`
+    is where the argv is BUILT and the tests that assert argv shape patch below
+    it. Only docker argv is refused; every other subprocess (git, wsl-less
+    shells) still runs, so this cannot quietly disable a test that was never
+    about docker.
+
+    TWO OF THE THREE ROUTES, and the third is named rather than implied. `docker.py`
+    reaches the CLI through `runner.run()`, through `runner.stream()`
+    (`run_attached()` at docker.py:2518, `follow_logs()` at :2351) and through a
+    bare `subprocess.Popen` in `exec_stdin()` (docker.py:3338). `stream` was
+    added here on 2026-09-05 after a review pointed out the guard covered one
+    route and the commit message claimed all of them; adding it changed no
+    result (m910q, whole suite, 0 failures either way), so what it buys is the
+    NEXT accidental reach, not a defect today. `exec_stdin()` is still open:
+    patching `subprocess.Popen` for the whole suite would catch every unrelated
+    child process this repo spawns, and that is a bigger decision than a guard.
     """
     if request.node.get_closest_marker("integration"):
         return
     from yulon import runner
 
-    real = runner.run
+    real_run, real_stream = runner.run, runner.stream
 
-    def guarded(
-        command: list[str], *args: object, **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        if command and Path(str(command[0])).name.lower() in DOCKER_ARGV0S:
+    def refuse(command: object) -> None:
+        if argv_reaches_the_docker_cli(command):
             pytest.fail(
                 f"a unit test shelled out to the real docker CLI: {command!r}. "
                 "Patch the seam the code under test reads (docker.container_state, "
                 "docker._logs, native._world_output, or the installer's seams) instead."
             )
-        return real(command, *args, **kwargs)  # type: ignore[arg-type]
+
+    def guarded(
+        command: list[str], *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        refuse(command)
+        return real_run(command, *args, **kwargs)  # type: ignore[arg-type]
+
+    def guarded_stream(command: list[str], *args: object, **kwargs: object) -> object:
+        # NOT a generator function. `runner.stream()` is one, and a `def` with a
+        # `yield` in it runs no code at all until the first `next()` — the
+        # refusal would then fire wherever the caller happened to iterate, or
+        # not at all for a caller that builds the generator and drops it.
+        refuse(command)
+        return real_stream(command, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(runner, "run", guarded)
+    monkeypatch.setattr(runner, "stream", guarded_stream)
 
 
 @pytest.fixture

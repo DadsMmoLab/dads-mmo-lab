@@ -142,9 +142,14 @@ def wait_server_ready(
     fixed total, while the install spine spent the same field as a window. This
     entry is also the one where the two readings differ most in wall clock: it
     is the only shipped entry that declares a `fatal` marker and the only one
-    whose `timeout_s` is not 1800 — it is 3600 (read off `catalog.json`
-    2026-09-05) — so the single-shot reading gave it an hour and the quiet one
-    gives it six.
+    whose `timeout_s` is not 1800 — it is 10800, widened from 3600 on
+    2026-09-05 by the 7.7 gate (`eb5f3b3f`), whose Tortoise ready stage was
+    measured at 3702 s over a 9p share. At that size the two readings meet
+    again: `native.management_ceiling(10800)` is `READY_CEILING_SECONDS`, six
+    hours, because any multiple of two or more lands on the cap. So this is the
+    one entry whose management wait and install wait stop in the same place, and
+    it is the catalogue number that makes that true — 10800 s was measured as a
+    stage TOTAL and is spent here as how long the server may say NOTHING.
     """
     return native.wait_ready_quietly(
         SPEC, ready_spec(realm_host, realm_port, **kwargs), wsl_distro=wsl_distro
