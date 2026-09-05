@@ -513,6 +513,14 @@
       they are continuations of one accumulating install, with free disk falling 75 → 67 → 53 GB
       across them. One useful consequence: a proper 7.2 re-run would naturally produce the second,
       independent compose capture that removes the circularity above. Sequence it that way.
+      **Read this bullet as the 7.2 GATE box, not the 7.2 line — note added 2026-09-05, the day the
+      line was ticked, so the two do not read as a contradiction.** What this bullet tests is the
+      re-run clause it quotes, and that clause is the text of the `- [ ] Gate:` sub-box under 7.2,
+      which is still open and still open for exactly this reason. The 7.2 LINE was ticked on
+      2026-09-05 on a different claim — its own eight criteria plus the size figure, audited against
+      the tree, none of which is a re-run — and that tick makes no statement about this evidence or
+      about the gate. Nothing above is withdrawn: this paragraph is still true of the box it is
+      about. The same distinction is stated from the other side in the tick record on the 7.2 line.
     - **RUN FROM A GENUINELY CLEAN CHECKPOINT, TWICE — 2026-09-04 (the 7.1 lane) and 2026-09-05
       (the 7.2 re-run, lane gate-71-72) — and clauses 1, 2, 8 and 9 are now on evidence.** Both
       runs restored `yulon-ubuntu` to `clean-ssh` (2026-08-28) and the driver's own before-probe
@@ -761,9 +769,20 @@
     2. *"The gate box below is open on 7.1's clauses 14 and 15."* **Not overturned, and not blurred
        into this tick.** The gate below is still `- [ ]` and stays so on its own terms. What is
        said here is only that the two boxes carry different claims — this line's claim is the nine rows
-       audited above, the gate's is a live re-run of 7.1's gate — and this file already treats
-       parent and sub-box independently in both directions (the 7.1 primitives gate above is
-       `- [x]` under an open 7.1). For the record on the gate's own terms: clause 14 is **now met**
+       audited above, the gate's is a live re-run of 7.1's gate. **No precedent is claimed for this
+       shape, because the file does not have one** (corrected 2026-09-05, after review: the first
+       version of this bullet said the file "already treats parent and sub-box independently in both
+       directions" and then gave the OTHER direction as its only example — the 7.1 primitives gate
+       `- [x]` under an open 7.1). Every `- [x]`/`- [ ]` pair in this file was enumerated in this
+       lane by indentation. **Ticked child under an open parent is ordinary:** 7.1 (its primitives
+       gate is `- [x]`), 6.3 (two ticked records under an open line), 6.5 (fifteen). **Ticked parent
+       over an open child happens exactly once besides this line:** 6.4, whose open child is a
+       *"First Darwin interpreter run — partial"* record bullet, not a `Gate:` box. So with this
+       commit 7.2 is the only line in the file reading `- [x]` above an open `Gate:` box, and 7.3 —
+       the sibling this tick explicitly models itself on — has its gate `- [x]`. The tick rests on
+       the nine audited rows and on nothing else; a reader who thinks a parent must not outrun its
+       gate is disagreeing with this line alone, which is the honest place to put the disagreement.
+       For the record on the gate's own terms: clause 14 is **now met**
        (a real client authenticated against the 09-05 install at 07:31:41 — see the 7.1 line),
        and clause 15 is not, so that box would still be open on the old reading too.
     - **What was deliberately NOT done, so nobody hunts for it.** The plan's Step 6
