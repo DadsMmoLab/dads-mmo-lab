@@ -8,7 +8,9 @@ suite (this file previously mutated global logging state with no teardown).
 from __future__ import annotations
 
 import ast
+import inspect
 import io
+import json
 import logging
 import os
 import subprocess
@@ -376,12 +378,27 @@ def test_a_pinned_stderr_level_and_a_leaked_file_handler_are_both_put_back(
 
 _WHAT_THE_CHILD_LOGS = "a child of this suite wrote this line"
 
-_A_CHILD_THAT_KEEPS_A_LOG = f"""\
+
+def _a_child_that_keeps_a_log(marker: str = _WHAT_THE_CHILD_LOGS) -> str:
+    """The child script, with the line it records spelled by its caller.
+
+    `marker` exists so two children that share one `CHILD_SCRATCH_HOME` can
+    be told apart in the single `yulon.log` they both open. With one fixed
+    marker, the second child's "a run was recorded there" assertion was
+    satisfied by the FIRST child's line: measured on m910q 2026-09-05, a
+    mutation letting only the first of the two record anything left
+    `test_a_child_process_cannot_write_the_users_own_log` at `1 passed`
+    (review, round 3).
+    """
+    return f"""\
 from yulon import log, platform
 log.configure(config_dir=platform.config_dir())
-log.get_logger("yulon.tests.child").info({_WHAT_THE_CHILD_LOGS!r})
+log.get_logger("yulon.tests.child").info({marker!r})
 print(platform.config_dir())
 """
+
+
+_A_CHILD_THAT_KEEPS_A_LOG = _a_child_that_keeps_a_log()
 """A child that does what every entry point does first, and says where it went.
 
 It writes a RECORD as well as opening the file, because "a file was created"
@@ -392,10 +409,12 @@ in it before this child logged a line, and 83 with it.
 """
 
 
-def _a_child_run_from_the_app_root(env: dict[str, str] | None) -> subprocess.CompletedProcess[str]:
-    """Run `_A_CHILD_THAT_KEEPS_A_LOG`, with `env` handed to `subprocess.run` verbatim."""
+def _a_child_run_from_the_app_root(
+    env: dict[str, str] | None, script: str = _A_CHILD_THAT_KEEPS_A_LOG
+) -> subprocess.CompletedProcess[str]:
+    """Run `script` from the app root, with `env` handed to `subprocess.run` verbatim."""
     return subprocess.run(
-        [sys.executable, "-c", _A_CHILD_THAT_KEEPS_A_LOG],
+        [sys.executable, "-c", script],
         cwd=Path(__file__).resolve().parents[1],
         env=env,
         capture_output=True,
@@ -428,7 +447,14 @@ def test_a_child_process_cannot_write_the_users_own_log() -> None:
 
     The second assertion is what stops the cheap pass: a child that died on
     import, or one that opened a file and recorded nothing, would satisfy "did
-    not write the user's log" perfectly.
+    not write the user's log" perfectly. Each spelling records a line of its
+    OWN, because both children are pointed at the same process-wide
+    `CHILD_SCRATCH_HOME` and so open the same `yulon.log`: with one shared
+    marker the second iteration was reading what the first had written, and
+    a mutation letting only the first record anything left this test at `1
+    passed` (review, round 3). With per-spelling markers, m910q 2026-09-05,
+    that mutation goes red on the second iteration -- and so does a child
+    script that records the fixed default instead of its caller's marker.
 
     What is NOT asserted here is the real log's size across the call, the way
     the in-process guard's test asserts it: on a shared box that file is not
@@ -444,7 +470,8 @@ def test_a_child_process_cannot_write_the_users_own_log() -> None:
         ("inheriting this process's environment", None),
         ("handed a copy of it", dict(os.environ)),
     ):
-        proc = _a_child_run_from_the_app_root(env)
+        marker = f"a child {how} wrote this line"
+        proc = _a_child_run_from_the_app_root(env, _a_child_that_keeps_a_log(marker))
         assert proc.returncode == 0, f"the child {how} died: {proc.stderr}"
         answered = proc.stdout.strip()
         assert not conftest.is_the_users_own_config_dir(answered), (
@@ -453,8 +480,8 @@ def test_a_child_process_cannot_write_the_users_own_log() -> None:
             "to support"
         )
         written = Path(answered) / "yulon.log"
-        assert written.is_file() and _WHAT_THE_CHILD_LOGS in written.read_text(encoding="utf-8"), (
-            f"the child {how} answered {answered} and no run of it was recorded there, so "
+        assert written.is_file() and marker in written.read_text(encoding="utf-8"), (
+            f"the child {how} answered {answered} and no run of IT was recorded there, so "
             "'it did not write the user's own' says nothing at all"
         )
 
@@ -530,6 +557,99 @@ def test_a_child_the_test_pointed_somewhere_of_its_own_is_left_alone(tmp_path: P
     assert (
         _WHAT_THE_CHILD_LOGS in written
     ), "the child answered its own directory and logged nothing"
+
+
+_ROUTES = conftest.VARS_THAT_DECIDE_A_CHILDS_CONFIG_DIR
+"""Spelled short here only so the child script below fits inside a line."""
+
+_A_CHILD_THAT_REPORTS_EVERY_ROUTE = f"""import json, os
+from yulon import platform
+print(json.dumps({{
+    "routes": {{var: os.environ.get(var) for var in {_ROUTES!r}}},
+    "config_dir": str(platform.config_dir()),
+}}))
+"""
+"""A child that reports which of the four routes it was handed, and where it landed.
+
+Both halves are needed. `config_dir()` alone answers only about the route THIS
+platform reads, and its answer depends on which spelling of the suite is
+running; the route census answers about all four on every box.
+"""
+
+
+def test_a_child_handed_a_partial_env_has_every_route_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that names none of the four must not thereby be handed all four OPEN.
+
+    `child_env_with_the_users_own_log_out_of_reach` decided "named by the
+    caller" as "differs from what this process would have handed down". An
+    OMITTED variable also differs -- `given.get(var)` is `None` -- so a partial
+    `env=` dict was read as four deliberate choices, each of them the choice to
+    unset, and the variable was DROPPED instead of being pointed at the scratch
+    home. On POSIX an absent `HOME` is not an absent route: `Path.home()` falls
+    back to the passwd database, which is the user's own.
+
+    This is not hypothetical traffic. `runner.interact(..., env={"EXIT_CODE":
+    "3"})` in `test_installer.py::test_interact_raises_on_nonzero_exit_after_
+    yielding_output` reaches `Popen(env=child_env(env))` with that one-key dict
+    verbatim (`yulon/runner.py:241` returns it unchanged off-frozen, `:623`
+    spawns with it). A census of `-n auto --dist loadfile` on m910q 2026-09-05,
+    with `conftest` instrumented to record what each child was handed, found
+    138 real children and exactly one holding all four routes as `None`: that
+    one.
+
+    RED, m910q 2026-09-05, this test's own child against the guard as it stood,
+    serially and under `-n 2 --dist loadfile` alike:
+
+        routes      {'XDG_DATA_HOME': None, 'APPDATA': None,
+                     'HOME': None, 'USERPROFILE': None}
+        config_dir  /home/pk/.local/share/yulon        <- the user's own
+
+    Both assertions are kept, because they answer different questions: the
+    route census says no door was closed, `config_dir()` says which room that
+    let the child into. The census is the one that travels -- it is about all
+    four variables, not about the one this OS happens to read.
+
+    Before the premise below was set explicitly, this was red only under
+    `xdist`: serially the box's own `XDG_DATA_HOME` was unset, so that single
+    variable compared equal to the caller's omission, was read as "not named",
+    was rewritten, and carried the child to the scratch anyway -- `config_dir
+    /tmp/yulon-test-child-home-7lxn4pqu/yulon`, with only `HOME` dropped
+    (m910q, same date). Green on the spelling CI runs is how the bug survived
+    the round that added the guard.
+
+    The premise is SET rather than assumed: all four are pointed at a directory
+    of this test's own first, so "the caller omitted a variable this process
+    names" holds on a box that spells `HOME` and on one that spells
+    `USERPROFILE`, serially and under `xdist` alike. That is what an `xdist`
+    worker gets for free -- the guard has already handed it the controller's
+    scratch in all four -- and a box-dependent version of the premise is what
+    let this read as green on the spelling CI actually uses.
+    """
+    ambient = tmp_path / "ambient"
+    for var in conftest.VARS_THAT_DECIDE_A_CHILDS_CONFIG_DIR:
+        monkeypatch.setenv(var, str(ambient))
+
+    proc = _a_child_run_from_the_app_root(
+        {"EXIT_CODE": "3", "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        _A_CHILD_THAT_REPORTS_EVERY_ROUTE,
+    )
+
+    assert proc.returncode == 0, f"the child died: {proc.stderr}"
+    report = json.loads(proc.stdout)
+    dropped = sorted(var for var, value in report["routes"].items() if value is None)
+    assert not dropped, (
+        f"a child handed a partial env reached the OS with {dropped} unset, so the guard "
+        "blocked no route through them at all. An unset HOME is not a closed one: on POSIX "
+        "Path.home() falls back to the passwd database, and on macOS that is config_dir()'s "
+        "only input."
+    )
+    assert not conftest.is_the_users_own_config_dir(report["config_dir"]), (
+        f"a child handed a partial env resolved config_dir() to {report['config_dir']}, "
+        "which is the user's own -- the dict a test passes to name ONE variable must not "
+        "open the other four"
+    )
 
 
 def test_a_worker_started_by_this_suite_gets_a_config_dir_of_its_own_too(
@@ -609,6 +729,44 @@ def test_a_child_pointed_at_the_users_own_directory_is_refused(
             capture_output=True,
             check=False,
         )
+
+
+def test_env_passed_to_popen_positionally_is_refused_rather_than_missed() -> None:
+    """The guard sees `env` only as a keyword, and says so instead of shrugging.
+
+    `Popen(args, bufsize, executable, stdin, stdout, stderr, preexec_fn,
+    close_fds, shell, cwd, env, ...)`: an eleventh positional argument IS
+    the environment, and `_guarded_popen_init` would then rewrite
+    `kwargs['env']` -- a key nobody passed -- and hand the child the
+    caller's positional dict untouched. No test in the suite passes `env`
+    positionally, which is exactly why the refusal needs one: until
+    2026-09-05 the count was the literal `11` and nothing read it back, so
+    widening it to a number that can never fire left the whole suite at
+    `2554 passed, 4 skipped` on m910q (review, round 3).
+
+    The call is built from `inspect.signature` HERE rather than from
+    `conftest.ENV_IS_POSITIONAL_ARGUMENT`, and that is the whole value of
+    the test: reading the guard's own number back would make any number it
+    held self-consistent. Measured on m910q 2026-09-05 -- with the constant
+    taken from the guard, setting it to 99 (so it can never fire) left this
+    test green; derived independently, the same mutation turns it red,
+    because an unfired guard hands `env` to the real constructor both
+    positionally and by keyword and dies of `TypeError`, not `AssertionError`.
+
+    What it does NOT own, stated so the cover is known: a threshold set too
+    LOW still refuses this call, so it stays green. That direction only
+    over-refuses -- it rejects calls that were not passing `env` at all --
+    and it cannot open a route to the user's log, which is what the guard
+    is for. A wrong parameter NAME cannot survive at all: `.index` raises
+    at `conftest` import and no test in the suite runs.
+    """
+    env_at = list(inspect.signature(conftest.UNGUARDED_POPEN_INIT).parameters).index("env")
+    positional: list[object] = [[sys.executable, "-c", "raise SystemExit('never')"]]
+    positional += [None] * (env_at - 2)
+    positional.append({"HOME": "/nowhere"})
+
+    with pytest.raises(AssertionError, match="positionally"):
+        subprocess.Popen(*positional)  # type: ignore[call-overload]
 
 
 def test_the_variables_the_child_guard_rewrites_really_move_config_dir(

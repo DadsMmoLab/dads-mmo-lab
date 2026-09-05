@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import atexit
+import inspect
 import logging
 import os
 import shutil
@@ -44,9 +45,18 @@ redirect rather than being recomputed under it.
 """
 
 
-def _the_users_own_config_dir(env: Mapping[str, str] | None = None) -> Path:
-    """The real `config_dir()`, or the answer a parent process already resolved."""
-    handed_down = (os.environ if env is None else env).get(THE_ANSWER_HANDED_TO_CHILDREN)
+def _the_users_own_config_dir() -> Path:
+    """The real `config_dir()`, or the answer a parent process already resolved.
+
+    Reads `os.environ` and takes no environment argument. It carried an
+    `env: Mapping | None = None` parameter until 2026-09-05; nothing ever
+    passed it, and `test_log.py`'s nested-pytest test records the reason it
+    never would -- the claim is about what SURVIVES a process boundary, and
+    a dict crosses none. Measured on m910q 2026-09-05 (review, round 3):
+    hard-wiring the branch to `os.environ` left the suite at `2554 passed,
+    4 skipped`, which is what a parameter no caller can reach is worth.
+    """
+    handed_down = os.environ.get(THE_ANSWER_HANDED_TO_CHILDREN)
     return Path(handed_down) if handed_down else platform.config_dir()
 
 
@@ -181,6 +191,18 @@ atexit.register(lambda: shutil.rmtree(CHILD_SCRATCH_HOME, ignore_errors=True))
 UNGUARDED_POPEN_INIT = subprocess.Popen.__init__
 """`subprocess.Popen.__init__` as CPython ships it, kept so the guard can call through."""
 
+ENV_IS_POSITIONAL_ARGUMENT = list(inspect.signature(UNGUARDED_POPEN_INIT).parameters).index("env")
+"""How many positional arguments a `Popen(...)` call needs before it is passing `env`.
+
+Asked of the signature this interpreter actually ships, counting `self`, so
+the guard below can refuse a positional `env` without restating CPython's
+parameter order. It was the literal `11` until 2026-09-05; a literal that
+drifts stops the guard SEEING the environment it exists to rewrite, and it
+would drift silently, because nothing downstream reads the number back
+(review, round 3: widening it so it could never fire left the whole suite
+at `2554 passed, 4 skipped` on m910q).
+"""
+
 
 def leads_to_the_users_own_log(value: str) -> bool:
     """Would a child pointed at `value` end up writing the user's own `yulon.log`?
@@ -225,8 +247,36 @@ def child_env_with_the_users_own_log_out_of_reach(
     `test_main.py`'s deliberately unwritable `APPDATA` and
     `test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind`'s
     per-entry-point `XDG_DATA_HOME` still reach the child. "Named by the
-    caller" is "differs from what this process would have handed down", which
-    is the only question that can be asked of an `env=` dict after the fact.
+    caller" is `var in given` AND a value that differs from what this process
+    would have handed down.
+
+    `var in given` is load-bearing, and was missing until 2026-09-05 (review,
+    round 3). Without it an OMITTED variable also "differs" -- `given.get(var)`
+    is `None` -- so a partial `env=` dict read as four deliberate unsets and
+    every one of the four was DROPPED from the child's environment instead of
+    being pointed at the scratch home. An unset route is not a closed one: on
+    POSIX `Path.home()` falls back to the passwd database, which is the user's
+    own, and on macOS that is `config_dir()`'s only input.
+
+    Measured on m910q 2026-09-05, a probe child spawned the way the suite
+    spawns one and handed `{"EXIT_CODE": "3", "PYTHONPATH": ...}`: under
+    `-n 2 --dist loadfile` it reached the OS with all four unset and
+    answered `/home/pk/.local/share/yulon`, the user's own; serially only
+    `HOME` was dropped (the box's own `XDG_DATA_HOME` was unset, so that
+    one compared equal to the omission and was rewritten) and the child
+    landed on the scratch. Green on the spelling CI runs, open on the
+    spelling the local gate runs.
+
+    That is not a shape only a probe can make. `runner.interact(...,
+    env={"EXIT_CODE": "3"})` in
+    `test_installer.py::test_interact_raises_on_nonzero_exit_after_yielding_output`
+    reaches `Popen(env=child_env(env))` with that one-key dict verbatim --
+    `yulon/runner.py:241` returns it unchanged off-frozen, `:623` spawns
+    with it (read, not run). The round-3 review's census of `-n auto --dist
+    loadfile` on m910q, same date, found 138 real children and exactly that
+    one holding all four routes as `None`; it runs `bash`, so nothing was
+    written that day, which is word for word this guard's own argument for
+    why the in-process rule's shape was a hole.
 
     A caller that names one of them AS the user's own directory is refused
     outright rather than rewritten, exactly as `_guarded_open_log` refuses it
@@ -236,13 +286,12 @@ def child_env_with_the_users_own_log_out_of_reach(
     inherited = dict(os.environ)
     given = dict(os.environ) if env is None else dict(env)
     for var in VARS_THAT_DECIDE_A_CHILDS_CONFIG_DIR:
-        named_by_the_caller = given.get(var) != inherited.get(var)
+        named_by_the_caller = var in given and given[var] != inherited.get(var)
         if named_by_the_caller:
-            value = given.get(var)
-            assert value is None or not leads_to_the_users_own_log(value), (
-                f"a test asked to start a child process with {var}={value}, which points it "
-                "at the user's own yulon.log. That file is what a user sends to support; the "
-                "suite may not append to it. Point this child at a tmp_path instead."
+            assert not leads_to_the_users_own_log(given[var]), (
+                f"a test asked to start a child process with {var}={given[var]}, which points "
+                "it at the user's own yulon.log. That file is what a user sends to support; "
+                "the suite may not append to it. Point this child at a tmp_path instead."
             )
             continue
         given[var] = str(CHILD_SCRATCH_HOME)
@@ -257,7 +306,7 @@ def _guarded_popen_init(self: subprocess.Popen, *args: object, **kwargs: object)
     `check_call` and `check_output` are four spellings of the same constructor
     and a guard on any one of them is a guard on one call site.
     """
-    assert len(args) < 11, (
+    assert len(args) < ENV_IS_POSITIONAL_ARGUMENT, (
         "a test passed `env` to Popen positionally, so the guard on the user's own log "
         "cannot see it. Pass it as a keyword."
     )
