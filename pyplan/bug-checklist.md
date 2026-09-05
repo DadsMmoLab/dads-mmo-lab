@@ -1897,8 +1897,11 @@ under another key, so the shape that has actually happened is caught at any leng
   which plants nothing in the mapping — it writes `mariadb:11` into `.db_password` and lets the
   shipped `DB_IMAGE` do the colliding.
 
-**Ten mutations, each killed, m910q 2026-09-05** (`__pycache__` purged on both sides of every one;
-the two files are 211 tests at baseline). The value refusal deleted → 11 failed. Containment
+**Ten mutations, each killed, m910q 2026-09-05, taken at `75bce609`** (`__pycache__` purged on both sides
+of every one; the two files were 211 tests at that commit). The three follow-up commits moved the
+numbers a reader would re-derive at `67128792`: 213 tests, the value refusal deleted → 13, the floor
+deleted → 3, the call site's `Secrets("")` → 3 — the two new tests join each kill. At `75bce609`: the
+value refusal deleted → 11 failed. Containment
 weakened to equality → 2. The empty-secret guard deleted → 1. The floor deleted → 2. `secrets` made
 optional with a `Secrets("")` default → 1. The two rules' order swapped → 1. The exemption widened
 to every token the instance declares → 1. The floor moved to 4 → 1; to 20 → 1. The call site's

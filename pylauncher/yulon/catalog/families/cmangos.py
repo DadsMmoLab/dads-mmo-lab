@@ -338,7 +338,10 @@ class CmangosInstaller(StagedInstaller):
         equality), among them `characters`, `mariadb:11`, `tw_logon` and `vanilla-`. A
         user holding one of those is refused for a key this app put in the mapping
         itself — `CHAR_DB`, `DB_IMAGE` — so "drop the key" is advice they cannot act on,
-        and the one thing that clears it, changing their own password, went unnamed.
+        and the remedy in their hands, changing their own password, went unnamed. (Three
+        rendered values carry a digest of the install folder — the image tag, the project
+        name, the container prefix — so for a collision with one of those a different
+        folder clears it too; measured 2026-09-05, review of `67128792`.)
 
         The volume is named because changing that password is not free once a database
         exists: the same fact `_db_password` refuses on, said before the user acts rather
@@ -354,9 +357,10 @@ class CmangosInstaller(StagedInstaller):
         volume = self._db_volume(ctx.server_dir)
         return (
             "This install's database password is yours: it is the contents of "
-            f"{ctx.server_dir / plan.file}. If you did not add the key named above, changing "
-            "that password is the only thing that clears this. It is not free — the database "
-            f"volume {volume}, if it already exists, was created with the current password, so "
+            f"{ctx.server_dir / plan.file}. If you did not add the key named above, the thing "
+            "to change is that password. It is not free — the database "
+            f"volume {volume}, if it already exists, was created with whatever password the "
+            "file held at the time, so "
             f"changing it means starting that database over (`docker volume rm {volume}` "
             "deletes it, and every character in it)."
         )

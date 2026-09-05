@@ -885,10 +885,20 @@ def test_a_user_written_password_below_the_floor_falls_to_equality_and_not_to_si
         "buried in a longer value it is NOT — the floor exists because containment on a "
         "three-character string would refuse every install, and this is what that costs"
     )
+    # The same limit through render() itself, not only through the predicate it calls.
+    # Review of `67128792` noted the predicate was pinned and the seam was not. What is
+    # pinned is that the seam ACCEPTS the buried value: with the floor deleted (containment
+    # at every length) this call raises DockerfileError, so a floor that quietly moved to
+    # the file would fail here. The fixture template does not spell BUILD_ARG, so the
+    # rendered text is not where the leak would show; acceptance is.
+    tpl = templates(tmp_path)  # mkdir inside; built once for both calls below
+    _accepted, _ = dockerfile.render(
+        tpl,
+        {**TOKENS, "BUILD_ARG": f"--db-pass={secret} --verbose"},
+        secrets=native.Secrets(secret),
+    )
     with pytest.raises(dockerfile.DockerfileError, match="BUILD_ARG"):
-        dockerfile.render(
-            templates(tmp_path), {**TOKENS, "BUILD_ARG": secret}, secrets=native.Secrets(secret)
-        )
+        dockerfile.render(tpl, {**TOKENS, "BUILD_ARG": secret}, secrets=native.Secrets(secret))
 
 
 def test_no_value_that_carries_a_secret_reaches_the_substitution(
