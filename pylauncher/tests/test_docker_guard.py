@@ -129,9 +129,12 @@ def test_every_argv0_the_local_route_can_produce_is_one_the_guard_knows(
     What this does NOT own is the SEPARATOR flavour: `Path` is the running
     platform's, so the candidates built here get `/` for their tail on Linux and
     an all-backslash argv[0] never appears. That spelling is owned by the wsl
-    case below and by the folded `["DOCKER.EXE", "ps"]` assertion, and the
-    `PureWindowsPath` the rule uses is what makes it work — both go red if it
-    becomes `Path`.
+    case below: `PureWindowsPath` in the rule replaced by `Path` gave `1 failed,
+    9 passed` in this file, the one failure being that case's `wsl.exe` spelling
+    (m910q, 2026-09-05, round-5 review). The folded `["DOCKER.EXE", "ps"]`
+    assertion stays green under the same mutation and must: a bare `DOCKER.EXE`
+    has no separator for the flavour to act on, so it owns the case fold and
+    nothing else. An earlier version of this paragraph said both go red.
     """
     _off_path_docker(host, monkeypatch)
 
