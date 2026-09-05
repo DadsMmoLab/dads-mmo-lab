@@ -7,6 +7,13 @@ is **closed**, and unblocks 7.2 as well.
 
 ## Clause 14 — the client login: **STILL NOT MET.** A client exists; it cannot be run.
 
+> **Superseded the same evening, and again the next morning.** The section below is the
+> 14:xx state of 2026-09-04 and is kept as written. The client logged in at 20:30 CEST that
+> day (`LOGIN-2026-09-04.md`, over Tailscale, account `YULON` id 101) and again at 07:31 CEST
+> on 2026-09-05 against the install 7.2's clean-box gate rebuilt (`LOGIN-2026-09-05.md`,
+> through an ssh tunnel with the realm at `127.0.0.1`, account `GATELOGIN` id 102). Each
+> record carries the client's `connection.log` and the server's `account` row for its run.
+
 **Verdict in one line:** a real 3.3.5a client (Wow.exe 3.3.5.12340) is on this laptop at
 `C:\wow335ahd`, but the laptop currently has **no display attached to the desktop**, so
 the client's D3D9 adapter enumeration returns nothing and it exits at startup with a
@@ -55,6 +62,8 @@ DXVK's `d3d9.dll` is in place. The 502 MB partial on `vmhost` was deleted — it
 | `client-and-display-facts.txt` | the whole finding: where the client is, why it will not start, what was measured, how to finish |
 | `server-side-after-attempt.txt` | the three server-side witnesses, all negative, taken after the attempt |
 | `wowdrive.ps1` | the driver written to launch and key the client (unused past launch) |
+| `LOGIN-2026-09-04.md`, `client-connection-20260904-2030.log`, `login-screen-realm-100.71.125.58.png`, `character-select-after-login.png` | the 20:30 login on 09-04: the account, the route, which file decides the realm, the client's log and the server's row |
+| `LOGIN-2026-09-05.md`, `client-connection-20260905-0731.log`, `server-side-20260905.txt` | the 07:31 login on 09-05 against the rebuilt install: ssh tunnel, loopback realm, `GATELOGIN` id 102; the server-side capture is `docker ps` + the `account` and `realmlist` rows as they stood at 10:17 |
 | `01-login-screen.png`, `01b-login-screen.png` | the two capture attempts — uniformly black |
 | `control-desktop-wow-minimized.png`, `control2-after-wake.png`, `control3-desktop-after-monitorpower.png`, `control4-unsandboxed.png` | the four controls that prove the DESKTOP is black, not the game window: with the game minimised, after injected keyboard/mouse activity, after `SC_MONITORPOWER` on, and outside the tool sandbox. All five PNGs are 10,143 bytes — the same solid-black frame every time |
 

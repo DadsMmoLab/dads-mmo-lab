@@ -411,6 +411,16 @@
         `Enter World` was never clicked, so nothing here speaks to the world server beyond a
         character-list reply — the plan's own bar at `:6584` is "logged in **and entered the
         world**" — and the client was on the laptop over Tailscale, not on this line's "the host".
+        **Met a second time on 2026-09-05 at 07:31 CEST, against the install 7.2's clean-box gate
+        rebuilt** — `pyplan/gates/7.1-client-login/LOGIN-2026-09-05.md`, with
+        `client-connection-20260905-0731.log` (`07:31:41.902 ClientConnection Completed:
+        COP_AUTHENTICATE code=AUTH_OK result=TRUE`, `07:31:42.568 … COP_GET_CHARACTERS code=44
+        result=TRUE`) and `server-side-20260905.txt` (`102 GATELOGIN last_login 2026-09-05 05:31:40
+        failed_logins 0`, created through `ControllerServices` at 05:28:33). The route was not
+        Tailscale: the `clean-ssh` checkpoint predates it and the restore took it away, so the client
+        went through `ssh -L 3724/8085` with the realm at `127.0.0.1` — the loopback realm the owner
+        asked to keep possible (§41), exercised for real. The same two limits apply: character list
+        only, laptop not host. Until this record existed the 09-05 login was cited from memory alone.
       * **"after the LAN step" — NOT MET, and deliberately.** The launcher's LAN step
         (`svc.network_apply`) was never invoked; the realm row was repointed at the Tailscale
         address by hand (`docker exec … UPDATE acore_auth.realmlist … WHERE id=1`, `rows_changed`
