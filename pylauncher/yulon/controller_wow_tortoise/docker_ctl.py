@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 
 from yulon import docker
-from yulon.catalog import composegen
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import ReadyMarkers
 from yulon.controller_wow_tortoise import game
 
@@ -134,8 +134,19 @@ def wait_db_healthy_ready(*, wsl_distro: str | None = None, **kwargs: float) -> 
 def wait_server_ready(
     realm_host: str, realm_port: int, *, wsl_distro: str | None = None, **kwargs: float
 ) -> bool:
-    """Poll until this install's world container reports ready, or clearly never will."""
-    return docker.wait_ready_for(
+    """Poll until this install's world container reports ready, or clearly never will.
+
+    `timeout` is the entry's `timeout_s` and it is a QUIET budget: how long the
+    world server may print nothing new, restarted every time it prints, bounded
+    by `native.READY_CEILING_SECONDS`. Until 2026-09-05 this spent it once, as a
+    fixed total, while the install spine spent the same field as a window. This
+    entry is also the one where the two readings differ most in wall clock: it
+    is the only shipped entry that declares a `fatal` marker and the only one
+    whose `timeout_s` is not 1800 — it is 3600 (read off `catalog.json`
+    2026-09-05) — so the single-shot reading gave it an hour and the quiet one
+    gives it six.
+    """
+    return native.wait_ready_quietly(
         SPEC, ready_spec(realm_host, realm_port, **kwargs), wsl_distro=wsl_distro
     )
 

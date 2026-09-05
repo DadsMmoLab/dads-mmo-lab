@@ -73,16 +73,35 @@ class FakeWorld:
     fatal_after_s: float | None = None
     status: str = "running"
 
+    gives_up_after_s: float | None = None
+    """How long a window that does NOT find the banner actually lasts. None: all of it.
+
+    The real `docker.wait_ready()` returns False EARLY on three of its four
+    paths -- a `fatal` line, its own crash-loop latch, and a missing docker CLI
+    after a 30-second grace -- so a window handed 1800 seconds can end in 30 and
+    hand back the same `False` a fully spent one does. Until this field existed
+    the fake always consumed the whole window, so no test in this file could
+    tell a duration the engine MEASURED from one it assumed off the window
+    count -- and the engine assumed (review, m910q 2026-09-05).
+    """
+
     elapsed: float = 0.0
     windows: list[float] = field(default_factory=list)
     """Every `ReadySpec.timeout` the engine handed a window, in order."""
 
-    def wait_ready(self, spec: docker.ContainerSpec, ready: docker.ReadySpec) -> bool:
+    def clock(self) -> float:
+        """The engine's `monotonic` seam: the time this fake has actually granted."""
+        return self.elapsed
+
+    def wait_ready(
+        self, spec: docker.ContainerSpec, ready: docker.ReadySpec, **_kwargs: object
+    ) -> bool:
         self.windows.append(ready.timeout)
         if self.boot_s <= self.elapsed + ready.timeout:
             self.elapsed = self.boot_s
             return True
-        self.elapsed += ready.timeout
+        spent = ready.timeout if self.gives_up_after_s is None else self.gives_up_after_s
+        self.elapsed += min(spent, ready.timeout)
         return False
 
     def output(self, spec: docker.ContainerSpec) -> native.WorldOutput:
@@ -102,7 +121,12 @@ def _installer(
 ) -> native.StagedInstaller:
     """The spine with its ready seams pointed at `world` and nothing else changed."""
     rec = Recorder()
-    seams = {"wait_ready": world.wait_ready, "world_output": world.output, **overrides}
+    seams = {
+        "wait_ready": world.wait_ready,
+        "world_output": world.output,
+        "monotonic": world.clock,
+        **overrides,
+    }
     return CmangosInstaller(
         entry,
         installers_root=resources.installers_dir(),
@@ -290,13 +314,21 @@ def test_the_catalogue_still_carries_the_number_this_file_drives() -> None:
     assert TBC.install.native.ready.restart_loop == 4
 
 
-def test_a_one_window_ceiling_is_still_one_window() -> None:
-    """A `timeout_s` larger than the ceiling must not floor the wait to zero windows."""
+def test_a_budget_larger_than_the_ceiling_buys_one_window_of_the_ceiling() -> None:
+    """One window, not zero -- and the ceiling's length, not the catalogue's.
+
+    Two rules meet here and both have to hold. A `timeout_s` above the ceiling
+    must not floor the wait to zero windows, or a catalogue number would switch
+    the wait off; and it must not raise the ceiling either, or `timeout_s` would
+    be an escape hatch from the one bound that exists because `wait_ready()`
+    takes no cancel. Until 2026-09-05 the second rule lost: this spent 12 hours
+    for a 12-hour budget.
+    """
     world = FakeWorld(boot_s=float("inf"))
     markers = ReadyMarkers(world="Avg Diff:", timeout_s=native.READY_CEILING_SECONDS * 2)
     with pytest.raises(InstallerError, match="never reported ready"):
         list(_installer(world).wait_for_ready(_ctx(), markers))
-    assert world.windows == [float(native.READY_CEILING_SECONDS * 2)]
+    assert world.windows == [float(native.READY_CEILING_SECONDS)]
 
 
 # -- the seam behind it -----------------------------------------------------
@@ -332,20 +364,36 @@ def test_the_default_output_seam_reads_this_run_of_the_world_container() -> None
     assert asked[1] == ("logs", (ENTRY.container_spec().world, True, "2026-09-04T18:59:55Z"))
 
 
-def test_a_daemon_that_will_not_answer_is_unknown_and_never_progress() -> None:
-    """`docker` failing must not read as "it printed something new"."""
+def test_a_log_that_will_not_read_under_a_state_that_will_is_still_a_reading() -> None:
+    """The half of "docker would not answer" that is NOT unknown, and must not claim to be.
 
-    def boom(name: str, **_kwargs: object) -> object:
-        raise docker.DockerCommandError("docker inspect exited 1")
+    `_logs()` returns `""` for a log it could not read AND for a container that
+    has printed nothing yet, and docker offers nothing that tells those apart.
+    So a readable state with an unreadable log is a real reading with an empty
+    log -- it goes on to look like a silent container, which
+    `wait_for_ready()` refuses after one quiet budget. Conservative in the only
+    direction that matters: it never calls a dead server ready.
 
-    original = docker.container_state
-    docker.container_state = boom  # type: ignore[assignment]
+    The companion to
+    `test_a_docker_that_would_not_answer_is_never_read_as_a_container_that_never_died`,
+    which drives the case where the STATE is what could not be read. That one
+    replaced a version of this test whose double raised `DockerCommandError`:
+    nothing in `docker.py` raises it from these two calls, so the test was
+    driving a branch production could not reach.
+    """
+
+    def unreadable_log(name: str, **_kwargs: object) -> str:
+        return ""
+
+    original_state, original_logs = docker.container_state, docker._logs
+    docker.container_state = lambda name, **kw: docker.ContainerState("running", "T0", 2)  # type: ignore[assignment]
+    docker._logs = unreadable_log  # type: ignore[assignment]
     try:
         out = native.Seams().world_output(ENTRY.container_spec())
     finally:
-        docker.container_state = original
+        docker.container_state, docker._logs = original_state, original_logs
 
-    assert out == native.WorldOutput(text="", restarts=None, status="")
+    assert out == native.WorldOutput(text="", restarts=2, status="running")
 
 
 def test_a_first_reading_the_daemon_refused_does_not_switch_off_the_crash_check() -> None:
@@ -380,3 +428,258 @@ def test_an_unreadable_restart_count_is_not_counted_towards_a_crash_loop() -> No
 
     assert "restarted" not in message
     assert "stopped printing" in message
+
+
+# -- what the reviewer measured on m910q, 2026-09-05 ------------------------
+
+
+def test_a_docker_that_would_not_answer_is_never_read_as_a_container_that_never_died() -> None:
+    """`WorldOutput`'s docstring, driven against what `container_state()` REALLY does.
+
+    That docstring promises "`restarts` is `None` for 'could not ask', never 0:
+    0 is a container that has never died, and reading a failed `docker inspect`
+    as that would let a crash loop run out the whole ceiling." The seam tried to
+    deliver it with `except docker.DockerCommandError`, and neither
+    `docker.container_state()` nor `docker._logs()` raises: the first returns a
+    default `ContainerState()` on a non-zero inspect ("could not read the state
+    of ..."), the second returns `""`. So the only branch that produced `None`
+    was one nothing could reach, and every real failed inspect came back as the
+    fabricated `restarts=0` the docstring forbids.
+    """
+
+    def refused(name: str, **_kwargs: object) -> docker.ContainerState:
+        # Verbatim what `container_state()` returns when `docker inspect` exits
+        # non-zero: no exception, a default-constructed state.
+        return docker.ContainerState()
+
+    original = docker.container_state
+    docker.container_state = refused  # type: ignore[assignment]
+    try:
+        out = native.Seams().world_output(ENTRY.container_spec())
+    finally:
+        docker.container_state = original
+
+    assert out.restarts is None, "a failed inspect is not a container that has never restarted"
+    assert out == native.WorldOutput(text="", restarts=None, status="")
+
+
+def test_a_crash_loop_is_named_a_loop_while_docker_is_restarting_the_container() -> None:
+    """The one confusion this wait exists to prevent, arriving through the STATUS list.
+
+    Every compose service here carries `restart: unless-stopped`, so a
+    crash-looping world server spends most of its life reporting `restarting`
+    rather than `running` (`docker.ContainerState.settled` says exactly this),
+    and `docker.wait_ready()` answers False right after a restart -- which is
+    when a window ends. With `restarting` outside the alive statuses it was read
+    as "it is not running any more", the sentence for a container that has
+    stopped for good, and the loop was never named. Measured by the reviewer on
+    m910q 2026-09-05 with this exact fake.
+    """
+    world = FakeWorld(boot_s=float("inf"), restart_every_s=60.0, status="restarting")
+    message = _refusal(world)
+
+    assert "crash loop" in message and "restarted" in message
+    assert "is not running any more" not in message
+
+
+def test_a_crash_loop_caught_between_restarts_is_still_a_loop_and_not_a_stop() -> None:
+    """And the ORDER of the two questions, which the status list alone does not settle.
+
+    `restart: unless-stopped` cycles a failing container running -> exited ->
+    restarting -> running, so an inspect can land on `exited` in the moment
+    between the process dying and the policy restarting it -- and a window ends
+    at exactly that moment, because that is when `wait_ready()` gave up. The
+    restart COUNT is the stronger evidence of the two: it is cumulative, where
+    the status is one sample. So the loop question is asked first, and a
+    container that has died four times is called a crash loop even when the
+    sample says `exited`.
+
+    The narrow reading of this test: swap the two checks in `_read_world()` and
+    it goes red while the whole rest of the suite stays green (m910q,
+    2026-09-05), which is what makes the order a decision rather than an
+    accident of how it was typed.
+    """
+    world = FakeWorld(boot_s=float("inf"), restart_every_s=60.0, status="exited")
+    message = _refusal(world)
+
+    assert "crash loop" in message
+    assert (
+        "is not running any more" not in message
+    ), "a container docker will restart has not stopped"
+
+
+def test_the_wait_reports_the_time_it_measured_and_not_the_windows_it_counted() -> None:
+    """Every duration this printed was assumed off the window count, and windows end early.
+
+    `docker.wait_ready()` returns False EARLY on three of its four paths, so a
+    window handed 30 minutes can end in two -- and the note the user read said
+    30 minutes anyway, because it was `(spent + 1) * timeout_s` rather than a
+    clock. The same arithmetic bounded the wait: twelve windows was read as six
+    hours, so a server whose windows ended early was given up on after 24
+    minutes by a refusal that said six.
+    """
+    world = FakeWorld(boot_s=float("inf"), gives_up_after_s=120.0)
+    lines: list[str] = []
+    with pytest.raises(InstallerError) as caught:
+        for line in _installer(world).stage_ready(_ctx()):
+            lines.append(line)
+    notes = [line for line in lines if "still printing" in line]
+
+    assert "2 minutes" in notes[0], f"the window lasted 120s, not 1800s: {notes[0]!r}"
+    assert world.elapsed == pytest.approx(
+        native.READY_CEILING_SECONDS
+    ), "the ceiling is six hours of wall clock, not twelve windows of any length"
+    assert "6 hours" in str(caught.value)
+
+
+def test_the_ready_stage_says_a_first_boot_can_take_many_minutes() -> None:
+    """The announcement the ready stage lost, and no test noticed it going.
+
+    `grep -rn "Waiting for the world server"` returned nothing after the quiet
+    budget landed (reviewer, m910q 2026-09-05): the user saw "Waiting for the
+    database." and then silence for up to a whole window. The database half
+    still announces itself; the half that can take forty-six minutes did not.
+    """
+    lines = _ready(FakeWorld(boot_s=0.0))
+
+    assert lines[0] == "Waiting for the database."
+    assert "world server" in lines[1]
+    assert "30 minutes" in lines[1], "the announcement names the budget it will apply"
+
+
+def test_the_ceiling_is_not_overshot_by_a_budget_that_does_not_divide_it() -> None:
+    """`READY_CEILING_SECONDS`' docstring says the wait never spends more. It did.
+
+    Windows were counted with a rounding-UP division, so a `timeout_s` that does
+    not divide six hours bought a whole extra window: 2500 -> 9 windows ->
+    22500 seconds, fifteen minutes past a ceiling documented as the point where
+    an install stops.
+    """
+    world = FakeWorld(boot_s=float("inf"))
+    markers = ReadyMarkers(world="Avg Diff:", timeout_s=2500)
+    with pytest.raises(InstallerError, match="never reported ready"):
+        list(_installer(world).wait_for_ready(_ctx(), markers))
+
+    assert world.elapsed <= native.READY_CEILING_SECONDS
+    assert sum(world.windows) <= native.READY_CEILING_SECONDS
+
+
+def test_the_restart_threshold_is_the_catalogue_number_and_not_one() -> None:
+    """`markers.restart_loop` was READ and its VALUE never asserted.
+
+    Mutating it to 1 left the whole suite green, because every crash-loop test
+    above drives a container that has restarted far past any threshold by the
+    end of its first window. This one restarts slowly enough that 4 and 1
+    disagree about which window refuses and about the count in the sentence.
+    """
+    world = FakeWorld(boot_s=float("inf"), restart_every_s=700.0)
+    markers = ReadyMarkers(world="Avg Diff:", timeout_s=TBC_QUIET_S, restart_loop=4)
+    with pytest.raises(InstallerError) as caught:
+        list(_installer(world).wait_for_ready(_ctx(), markers))
+
+    assert "restarted 5 times" in str(caught.value)
+    assert len(world.windows) == 2, "two restarts in the first window is not yet a loop of four"
+
+
+def test_a_wait_shorter_than_a_minute_is_reported_in_seconds() -> None:
+    """`_spell_seconds(30)` answered "0 minutes" -- true of nothing that happened.
+
+    Reachable as soon as durations are measured rather than assumed: a window
+    that ends on `docker.wait_ready()`'s missing-CLI grace lasts 30 seconds.
+    """
+    assert native._spell_seconds(30) == "30 seconds"
+    assert native._spell_seconds(1) == "1 second"
+    assert native._spell_seconds(90) == "2 minutes"
+    assert native._spell_seconds(3600) == "1 hour"
+
+
+# -- one number, one meaning ------------------------------------------------
+
+
+def test_the_management_wait_gives_a_printing_server_another_window_too() -> None:
+    """The spine's reading of `timeout_s`, in a form the four other waits can share.
+
+    `wait_for_ready()` is a generator that yields progress and raises four
+    different sentences; a controller polling an already-installed server wants
+    a bool. What both need is the same reading of the catalogue number, so the
+    decision lives in one function and the spine's loop is the one that dresses
+    it in sentences.
+    """
+    world = FakeWorld(boot_s=TBC_BOOT_S)
+    ready = docker.ReadySpec(world="Avg Diff:", timeout=float(TBC_QUIET_S))
+    got = native.wait_ready_quietly(
+        TBC.container_spec(),
+        ready,
+        wait=world.wait_ready,
+        output=world.output,
+        monotonic=world.clock,
+    )
+
+    assert got is True
+    assert len(world.windows) == 2, "a 46-minute boot does not fit one 30-minute window"
+
+
+def test_a_management_wait_that_cannot_see_the_container_spends_one_window() -> None:
+    """An unreachable daemon must not turn a bounded wait into a six-hour poll.
+
+    `world_output` answering `WorldOutput("", None, "")` is "docker would not
+    talk", and two of those in a row is the "quiet" verdict -- so this ends
+    after one window, which is exactly what the single-shot wait it replaces
+    did. No branch of its own delivers that, and one was written and deleted:
+    see `wait_ready_quietly`'s docstring for the mutation that showed the guard
+    was inert everywhere except the case where it was wrong.
+    """
+    world = FakeWorld(boot_s=float("inf"))
+    blind = native.WorldOutput(text="", restarts=None, status="")
+    got = native.wait_ready_quietly(
+        TBC.container_spec(),
+        docker.ReadySpec(world="Avg Diff:", timeout=float(TBC_QUIET_S)),
+        wait=world.wait_ready,
+        output=lambda spec: blind,
+        monotonic=world.clock,
+    )
+
+    assert got is False
+    assert len(world.windows) == 1
+
+
+@pytest.mark.parametrize("name", ["controller", "wow_tbc", "wow_vanilla", "wow_tortoise"])
+def test_every_ready_wait_in_the_app_spends_the_catalogue_number_the_same_way(
+    name: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Four sites built a `ReadySpec` from `timeout_s` and waited it out ONCE, as a total.
+
+    That is the same number the install spine spends as a quiet WINDOW. Two
+    readings of one catalogue field is how the incident this lane exists for
+    reached a user in the first place, so every site goes through the one
+    function that holds the reading -- asserted by taking the single-shot road
+    away, so a site that still walks it fails here rather than in a log.
+    """
+    from yulon import controller as base_controller
+    from yulon.controller_wow_tbc import docker_ctl as tbc_ctl
+    from yulon.controller_wow_tortoise import docker_ctl as tortoise_ctl
+    from yulon.controller_wow_vanilla import docker_ctl as vanilla_ctl
+
+    seen: list[docker.ReadySpec] = []
+
+    def quietly(spec: docker.ContainerSpec, ready: docker.ReadySpec, **_kwargs: object) -> bool:
+        seen.append(ready)
+        return True
+
+    def refuse(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("a ready wait must not spend the quiet budget as one total")
+
+    monkeypatch.setattr(native, "wait_ready_quietly", quietly)
+    monkeypatch.setattr(docker, "wait_ready_for", refuse)
+
+    calls = {
+        "controller": lambda: base_controller.Controller(tbc_ctl.SPEC, tmp_path).wait_ready(
+            "127.0.0.1", 8085
+        ),
+        "wow_tbc": lambda: tbc_ctl.wait_server_ready(),
+        "wow_vanilla": lambda: vanilla_ctl.wait_server_ready(),
+        "wow_tortoise": lambda: tortoise_ctl.wait_server_ready("127.0.0.1", 8085),
+    }
+
+    assert calls[name]() is True
+    assert len(seen) == 1
