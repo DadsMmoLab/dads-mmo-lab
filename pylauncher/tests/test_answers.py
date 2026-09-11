@@ -3,7 +3,7 @@
 PySide6 6.11.2's static `QMessageBox.question()` returns a plain `int` -- not a
 `QMessageBox.StandardButton` member -- so `answer is StandardButton.Yes` is
 always False, on every platform running that version
-(`scratchpad/T33/static_probe.py`). `said_yes()` is the one place that
+(`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`). `said_yes()` is the one place that
 comparison is spelled correctly; the second test here is the tripwire that
 keeps every other call site using it rather than reinventing the bug.
 """

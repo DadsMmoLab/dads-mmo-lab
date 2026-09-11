@@ -5161,7 +5161,7 @@ def test_a_real_static_ints_yes_still_starts_the_rebuild(
     The test above answers with the `QMessageBox.StandardButton` member, which
     is exactly the shape that hid the bug: PySide6 6.11.2's static
     `QMessageBox.question()` returns the plain `int` used here instead
-    (`scratchpad/T33/static_probe.py`).
+    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
     """
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
@@ -5742,7 +5742,7 @@ def test_a_real_static_ints_yes_still_starts_the_database_updates(
     Every other test of this confirm answers with the `QMessageBox.StandardButton`
     member, which is exactly the shape that hid the bug: PySide6 6.11.2's static
     `QMessageBox.question()` returns the plain `int` used here instead
-    (`scratchpad/T33/static_probe.py`).
+    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
     """
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
@@ -6083,7 +6083,7 @@ def test_a_real_static_ints_yes_still_starts_the_adopt_press(
     The test above answers with the `QMessageBox.StandardButton` member, which
     is exactly the shape that hid the bug: PySide6 6.11.2's static
     `QMessageBox.question()` returns the plain `int` used here instead
-    (`scratchpad/T33/static_probe.py`).
+    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
     """
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
