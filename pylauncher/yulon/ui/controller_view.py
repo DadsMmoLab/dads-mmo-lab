@@ -2799,6 +2799,20 @@ class ControllerView(QWidget):
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
 
+    def _forget_is_eligible(self) -> bool:
+        """The Forget control's whole rule, asked wherever it has to hold (T34).
+
+        One predicate rather than three separate checks copied around: the
+        button's visibility, the press that opens the confirmation, and the
+        press that actually forgets all have to agree, and a folder that comes
+        back between any two of those moments must be read the same way each
+        time it is asked (review, T34 round 2).
+        """
+        if self.services.uninstall is None:
+            return False
+        controller = self.services.controller
+        return controller.wsl_distro is None and platform.folder_is_gone(controller.server_dir)
+
     def _update_forget_visibility(self) -> None:
         """Show "Forget this install…" exactly while `server_dir` is gone (T34).
 
@@ -2809,10 +2823,7 @@ class ControllerView(QWidget):
         """
         if self.forget_install_button is None:
             return
-        controller = self.services.controller
-        self.forget_install_button.setVisible(
-            controller.wsl_distro is None and not controller.server_dir.is_dir()
-        )
+        self.forget_install_button.setVisible(self._forget_is_eligible())
 
     def _ask_about_the_import(self, status: InstallStatus) -> None:
         """Put the import question once per time the database comes up.
@@ -3443,10 +3454,19 @@ class ControllerView(QWidget):
         from, nothing here can tell this install's containers, volumes or
         images from a neighbour's, so they are left exactly where they are and
         the confirmation says so.
+
+        `_forget_is_eligible()` is asked again both before the confirmation
+        and right before the write, not trusted from the poll that showed the
+        button: the folder can come back in either gap — a restore, a mistaken
+        delete undone — and a press queued against a folder that is gone must
+        not forget a record for one that no longer is (review, T34 round 2).
         """
         if self.services.uninstall is None:
             return
         server_dir = self.services.controller.server_dir
+        if not self._forget_is_eligible():
+            self.uninstall_label.setText(f"{server_dir} is back; nothing was forgotten.")
+            return
         answer = QMessageBox.question(
             self,
             "Forget this install?",
@@ -3459,6 +3479,9 @@ class ControllerView(QWidget):
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not self._forget_is_eligible():
+            self.uninstall_label.setText(f"{server_dir} is back; nothing was forgotten.")
             return
         try:
             self.services.uninstall.forget()

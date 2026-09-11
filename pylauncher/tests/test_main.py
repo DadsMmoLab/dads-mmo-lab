@@ -868,3 +868,34 @@ def test_the_tabs_uninstaller_forgets_the_windows_own_live_state(
     saved = window.saved_states[-1]
     assert saved is remembered, "the uninstaller re-loaded state.json instead of using the live one"
     assert all(i.server_dir != server_dir for i in saved.installs)
+
+
+def test_a_failing_save_restores_the_forgotten_record_in_the_live_state(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ControllerView.forget_install()` catches `OSError` and keeps the tab open — a
+    promise about the record that the live `AppState` broke the moment
+    `state.forget()` ran, before the write that never landed (review, T34
+    round 2). Object identity, not a fresh load: the state this asserts on is
+    the same one every other tab still writes into.
+    """
+    server_dir = tmp_path / "forget-restore-me"
+    seen_states: list[Any] = []
+
+    def _refuse(app_state: Any, path: Any = None) -> None:
+        seen_states.append(app_state)
+        raise PermissionError(13, "Access is denied", "state.json")
+
+    monkeypatch.setattr(state, "save_state", _refuse)
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+
+    with pytest.raises(OSError):
+        view.services.uninstall.forget()
+
+    live = seen_states[-1]
+    assert live.find("wow-wotlk", server_dir) is not None, "the failed forget was not undone"
+    # Mutation: drop the `state.remember(install)` restore in
+    # `main._forget_live_record()`'s `except OSError` and this fails — the
+    # live state stays forgotten even though nothing was ever written.

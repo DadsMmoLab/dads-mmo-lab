@@ -177,13 +177,16 @@ below and reported as exactly that.
 
 
 def _cwd_is_missing(cwd: Path) -> bool:
-    """`not cwd.is_dir()`, named and patchable on its own so a test can fake a deleted folder.
+    """`platform.folder_is_gone()`, named and patchable on its own for a test.
 
-    Kept apart from `Path.is_dir` itself — patched wholesale, this would also
-    blind the bind-mount probe and the SELinux checks, which walk real
-    directories for reasons of their own.
+    Not `Path.is_dir()` — that also reads "gone" for a permission refusal or a
+    stalled network share, and this call must ask Docker anyway when it
+    genuinely cannot tell (T34 round 2). A seam of its own rather than calling
+    `platform.folder_is_gone()` directly everywhere in this module, so a test
+    can fake a deleted folder without also blinding the bind-mount probe and
+    the SELinux checks, which walk real directories for reasons of their own.
     """
-    return not cwd.is_dir()
+    return platform.folder_is_gone(cwd)
 
 
 def _missing_cwd_result(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:

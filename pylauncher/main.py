@@ -250,8 +250,21 @@ def build_window() -> object:
         from yulon.state import save_state
 
         def forget() -> None:
+            # Remembered before forgetting, and put back on a failed save
+            # (review, T34 round 2): `ControllerView.forget_install()` catches
+            # `OSError` and keeps the tab open, which promises the record is
+            # still there — a promise the live `AppState` broke the moment
+            # `state.forget()` ran, before this ever tried to write anything.
+            # Nothing else calls `remember()` between here and the raise, so a
+            # concurrent forget of a DIFFERENT install cannot be undone by this.
+            install = state.find(game, server_dir)
             state.forget(game, server_dir)
-            save_state(state)
+            try:
+                save_state(state)
+            except OSError:
+                if install is not None:
+                    state.remember(install)
+                raise
 
         return forget
 

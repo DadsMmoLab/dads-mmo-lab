@@ -5190,6 +5190,67 @@ def test_a_forget_that_raises_oserror_shows_the_error_and_keeps_the_tab(
     assert failures and "config dir is read-only" in failures[0]
 
 
+def test_the_folder_reappearing_before_the_press_forgets_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The visibility poll is not trusted at press time (review, T34 round 2).
+
+    A restore, or simply undoing an accidental delete, can put the folder back
+    in the gap between the five-second poll that showed the button and the
+    click that reached it.
+    """
+    asked: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(1),
+    )
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    assert not view.forget_install_button.isHidden()
+    tmp_path.mkdir()  # back before the press
+    seen: list[object] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+
+    view.forget_install()
+
+    assert fake.forgets == 0
+    assert seen == []
+    assert asked == [], "the confirmation must not open for a folder that is back"
+    assert view.uninstall_label.text() == f"{tmp_path} is back; nothing was forgotten."
+
+
+def test_the_folder_reappearing_during_the_confirmation_forgets_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second re-check (review, T34 round 2): the gap between Yes and the write is real too.
+
+    Mutation: drop the second `_forget_is_eligible()` call in
+    `forget_install()` — the first call still sees the folder gone, so only
+    the second one stands between this press and a forgotten record.
+    """
+
+    def question(*a: object, **k: object) -> object:
+        tmp_path.mkdir()
+        return int(controller_view_module.QMessageBox.StandardButton.Yes)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    seen: list[object] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+
+    view.forget_install()
+
+    assert fake.forgets == 0
+    assert seen == []
+    assert view.uninstall_label.text() == f"{tmp_path} is back; nothing was forgotten."
+
+
 # -- the rebuild control (the action `_format_report` has always named) --------
 
 

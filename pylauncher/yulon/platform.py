@@ -120,6 +120,25 @@ _PRIVATE = (
 )
 
 
+def folder_is_gone(path: Path) -> bool:
+    """True only on CONFIRMED absence — never "cannot tell" (T34 round 2).
+
+    `Path.is_dir()` conflates three different facts as one False: an existing
+    plain file, a broken symlink, and `os.stat()` raising anything at all — a
+    permission refusal, a stalled UNC path. Only `FileNotFoundError` is a
+    confirmed absence here; a broken symlink counts too, since it points
+    nowhere. Every other `OSError` answers False, so a caller that cannot tell
+    is left to behave as it did before this existed.
+    """
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def in_wsl() -> bool:
     """True when running inside WSL (Linux kernel built by Microsoft)."""
     try:

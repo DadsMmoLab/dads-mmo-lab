@@ -223,6 +223,22 @@ def test_an_unclaimed_folder_that_still_exists_gets_no_such_clause(tmp_path: Pat
     assert "Forget this install" not in message
 
 
+def test_a_wsl_installs_missing_host_path_gets_no_forget_clause_either(tmp_path: Path) -> None:
+    """The button the clause points at is itself hidden for a distro install (review, T34 round 2).
+
+    `server_dir` for a WSL install is a path on THIS process, not inside the
+    distro, so it reading as gone proves nothing about the distro's own
+    filesystem — the same reason the Forget button stays hidden there.
+    """
+    gone = tmp_path / "gone-for-good"
+    message = purge.refusal_for(Ownership.UNCLAIMED, gone, wsl_distro="dml-arch")
+    assert "Nothing here says Yu'lon installed it" in message
+    assert "Forget this install" not in message
+    # Mutation: ignore `wsl_distro` in `refusal_for()`'s clause condition and
+    # this fails — the clause would appear for a folder path this process
+    # cannot prove is gone from the distro's point of view.
+
+
 def test_the_two_refusals_do_not_share_their_wording(tmp_path: Path) -> None:
     """Three values, never two: the messages are how a user tells them apart."""
     unknown = purge.refusal_for(Ownership.UNKNOWN, tmp_path)

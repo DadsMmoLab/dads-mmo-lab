@@ -202,7 +202,9 @@ class PurgeReport:
     warnings: tuple[str, ...] = ()
 
 
-def refusal_for(ownership: Ownership, server_dir: Path, reason: str = "") -> str:
+def refusal_for(
+    ownership: Ownership, server_dir: Path, reason: str = "", *, wsl_distro: str | None = None
+) -> str:
     """The refusal an ownership answer earns, or `""` for the one that authorises.
 
     Three answers, three outcomes, and only `OWNED` is permission. The two
@@ -219,7 +221,12 @@ def refusal_for(ownership: Ownership, server_dir: Path, reason: str = "") -> str
     `UNCLAIMED` also covers a `server_dir` that does not exist at all — reading
     a record out of a folder that is not there answers exactly like reading one
     out of a folder that never had one (T34). That case alone earns a fourth
-    sentence pointing at the way out this refusal itself cannot offer.
+    sentence pointing at the way out this refusal itself cannot offer — unless
+    `wsl_distro` names one, because the Forget control this points at is itself
+    hidden for a distro install (`server_dir` there is a path on THIS process,
+    not inside the distro, so `folder_is_gone()` cannot answer for it either;
+    review, T34 round 2). Defaulted so every caller before this one is
+    unchanged.
     """
     if ownership is Ownership.OWNED:
         return ""
@@ -233,7 +240,7 @@ def refusal_for(ownership: Ownership, server_dir: Path, reason: str = "") -> str
         f"Nothing here says Yu'lon installed it: there is no install record in "
         f"{server_dir}, so this folder is not Yu'lon's to delete. Nothing was removed."
     )
-    if not server_dir.is_dir():
+    if wsl_distro is None and platform.folder_is_gone(server_dir):
         sentence += ' If the folder is gone for good, "Forget this install…" drops this tab.'
     return sentence
 
@@ -390,7 +397,12 @@ class Uninstaller:
         because a running server is a refusal and not a thing to enumerate.
         """
         ownership = self._claim(self.server_dir)
-        refusal = refusal_for(ownership, self.server_dir, self._reason_of(self.server_dir))
+        refusal = refusal_for(
+            ownership,
+            self.server_dir,
+            self._reason_of(self.server_dir),
+            wsl_distro=self.wsl_distro,
+        )
         if refusal:
             return None, refusal
         if self.wsl_distro:

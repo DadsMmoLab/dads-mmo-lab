@@ -13,6 +13,40 @@ import pytest
 
 from yulon import platform
 
+# -- folder_is_gone() (T34 round 2) --------------------------------------
+
+
+def test_an_existing_file_is_not_a_gone_folder(tmp_path: Path) -> None:
+    """`is_dir()` alone would answer False here too — a file is not a directory."""
+    plain_file = tmp_path / "state.json"
+    plain_file.write_text("{}")
+    assert platform.folder_is_gone(plain_file) is False
+
+
+def test_a_broken_symlink_counts_as_gone(tmp_path: Path) -> None:
+    """It points nowhere, which is what this predicate exists to name."""
+    target = tmp_path / "was-here"
+    link = tmp_path / "server"
+    link.symlink_to(target)
+    assert not target.exists()
+    assert platform.folder_is_gone(link) is True
+
+
+def test_a_probe_that_cannot_be_answered_is_not_read_as_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Permission denied and a stalled network share are "cannot tell", not "gone".
+
+    Only a confirmed `FileNotFoundError` may say so; every other `OSError`
+    leaves the caller behaving as it did before this predicate existed.
+    """
+
+    def refuses(path: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(platform.os, "stat", refuses)
+    assert platform.folder_is_gone(tmp_path / "locked") is False
+
 
 @pytest.mark.parametrize(
     ("sys_platform", "expected"),
