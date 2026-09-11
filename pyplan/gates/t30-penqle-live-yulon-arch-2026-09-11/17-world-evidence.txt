@@ -1,0 +1,47 @@
+2026-09-11T16:33:54+00:00
+# T30 Half 2 live -- capture 17: world log evidence (replaces broken 08/08b sections)
+
+## ready line
+31874:World server is up and running! Loading time: 1 minutes 14 seconds
+
+## native module loaded (AI enabled)
+31871:TortoiseBots: native module loaded (AI enabled)
+
+## pool line (target 500)
+31869:TortoiseBots: native random-bot pool loaded (500 candidates, target 500, startup 1, autoCreate 1)
+
+## Bot configuration
+31683:Bot configuration read from /opt/tortoise/etc/aiplayerbot.conf.
+
+## DB auto-updater module lines
+21156:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/character.
+21161:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/world.
+23262:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/character.
+23267:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/world.
+25368:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/character.
+25373:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/world.
+27474:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/character.
+27479:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/world.
+29580:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/character.
+29585:[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/world.
+
+## RNDBOT accounts in tw_logon.account
+count: 50
+sample:
+34	RNDBOT018601
+30	RNDBOT021483
+15	RNDBOT054791
+7	RNDBOT055725
+25	RNDBOT059486
+
+## bots online in tw_char.characters
+500
+
+## auto-create sample (from world log)
+
+## bots queued sample (from world log)
+TortoiseBots: native random bot Player Gughyrg (Guid: 95) queued on account 13
+TortoiseBots: native random bot Player Gughyrg (Guid: 95) queued on account 13
+TortoiseBots: native random bot Player Gughyrg (Guid: 95) queued on account 13
+TortoiseBots: native random bot Player Gughyrg (Guid: 95) queued on account 13
+TortoiseBots: native random bot Player Gughyrg (Guid: 95) queued on account 13

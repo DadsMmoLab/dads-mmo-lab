@@ -1,0 +1,19 @@
+2026-09-11T16:41:34+00:00
+# T30 Half 2 live -- capture 19: Stop and Start through the app's GUI on :0
+
+## the app was launched with ~/tortoise-penqle in state.json.
+## stopstart-gui2.py clicked Stop and Start on the Server tab.
+## the script's stdout (captured during the run) shows the app's log lines:
+
+## app log lines for Stop and Start (from the script's stdout)
+2026-09-11 16:38:39 INFO [yulon.logsnap] saved tortoise-mangosd log (pre-stop snapshot)
+2026-09-11 16:38:43 INFO [yulon.docker] stop_staged(): stopped; containers kept for a fast restart
+2026-09-11 16:38:56 INFO [yulon.docker] start_staged(): compose up -d --no-deps tortoise-db tortoise-realmd tortoise-mangosd in /home/pk/tortoise-penqle
+
+## ready line after restart
+277774:World server is up and running! Loading time: 1 minutes 13 seconds
+
+## frames saved
+frame-05-server-running.png (34328 bytes, 2026-09-11T16:38)
+frame-06-server-stopped.png (37990 bytes, 2026-09-11T16:38)
+frame-07-server-restarted.png (34223 bytes, 2026-09-11T16:39)

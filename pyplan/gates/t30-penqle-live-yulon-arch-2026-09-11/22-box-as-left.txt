@@ -1,5 +1,5 @@
-2026-09-11T16:17:22+00:00
-# T30 Half 2 live -- capture 16: box as left
+2026-09-11T16:57:40+00:00
+# T30 Half 2 live -- capture 22: box as left
 
 ## Step 1: stop the new install
  Container tortoise-mangosd Stopping 
@@ -17,9 +17,9 @@ tortoise-mangosd
 ## Step 3: rename parked containers back
 
 ## docker ps -a
-tortoise-mangosd	Exited (0) 17 hours ago
-tortoise-realmd	Exited (0) 17 hours ago
-tortoise-db	Exited (0) 17 hours ago
+tortoise-mangosd	Exited (0) 18 hours ago
+tortoise-realmd	Exited (0) 18 hours ago
+tortoise-db	Exited (0) 18 hours ago
 ac-worldserver	Exited (0) 3 days ago
 ac-authserver	Exited (0) 3 days ago
 ac-db-import	Exited (0) 10 days ago
@@ -47,14 +47,14 @@ alpine/git:<none>	138MB
 
 ## free -m
                total        used        free      shared  buff/cache   available
-Mem:           19990        1387        3037          76       16040       18602
+Mem:           19990        3183        6561         447       11092       16807
 Swap:            511           0         511
 
 ## df -h ~
 Filesystem      Size  Used Avail Use% Mounted on
-/dev/sda3       100G   44G   55G  45% /
+/dev/sda3       100G   44G   56G  45% /
 
-## state.json
+## state.json (full)
 {
   "schema_version": 1,
   "installs": [
@@ -67,7 +67,7 @@ Filesystem      Size  Used Avail Use% Mounted on
   ]
 }
 
-## AddOns (the two addons STAY)
+## AddOns folder (the two app-written addons stay)
 Blizzard_AuctionUI
 Blizzard_BattlefieldMinimap
 Blizzard_BindingUI
@@ -84,13 +84,16 @@ TortoiseBotsManager
 TortoiseGMManager
 
 ## Steam process
+102406 bash /home/pk/.local/share/Steam/steam.sh -srt-logger-opened -bigpicture
+102426 /home/pk/.local/share/Steam/ubuntu12_32/steam-runtime/usr/libexec/steam-runtime-tools-0/srt-logger --sh-syntax --rotate=8388608 --log-directory /home/pk/.local/share/Steam/logs --filename console-linux.txt --log-fd=7 --journal-fd=5 --parse-level-prefix
 
 ## no python/yulon/WoW process
 (none)
 
 ## kill memwatch
-## reverse recipe (to put the new install's containers back in front):
+
+## reverse recipe (how to put the new install's containers back):
   docker rename tortoise-db t30-parked-tortoise-db
   docker rename tortoise-realmd t30-parked-tortoise-realmd
   docker rename tortoise-mangosd t30-parked-tortoise-mangosd
-  cd ~/tortoise-penqle && docker compose start
+  cd ~/tortoise-penqle && docker compose up -d

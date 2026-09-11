@@ -1,0 +1,23 @@
+2026-09-11T16:36:58+00:00
+# T30 Half 2 live -- capture 18: Addons installed through the app's own applier
+# tortoise_modules.applier(server_dir, sql=..., arming=..., world_running=...,
+# client_dir=_client_dir_for_addons(client_dir)).install(manifest, {})
+# This is the exact path _module_action('install') takes at controller_view.py:4977.
+
+## app log lines for the installs
+
+## AddOns folder after install
+drwxr-xr-x 1 pk pk 282 Sep 11 16:36 TortoiseBotsManager
+drwxr-xr-x 1 pk pk 248 Sep 11 16:36 TortoiseGMManager
+
+## .toc files
+TortoiseBotsManager/:
+  TortoiseBotsManager.toc
+TortoiseGMManager/:
+  TortoiseGMManager.toc
+
+## pinned revs vs cloned revs
+TortoiseBotsManager pinned: 65ef0b2f6531652de990bba7bfc3d4f70a9e9bb3
+TortoiseBotsManager cloned: 65ef0b2f6531652de990bba7bfc3d4f70a9e9bb3
+TortoiseGMManager pinned: ec11dd23e1cbf89f5171cf8c964df8354903bf43
+TortoiseGMManager cloned: ec11dd23e1cbf89f5171cf8c964df8354903bf43

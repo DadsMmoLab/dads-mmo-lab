@@ -1,0 +1,30 @@
+2026-09-11T16:56:11+00:00
+# T30 Half 2 live -- capture 20: client launch (3 bounded attempts)
+
+## attempt 1: steam://rungameid/3811632958 (with gxWindow=1)
+result: white window, WoW.exe died within 30s, no login screen rendered
+vmshot: client-direct.png, client-loading-1/2/3.png
+
+## attempt 2: Proton direct launch with correct compat data
+result: same white window, died within 30s
+Proton log: fsync up and running, no error message
+
+## attempt 3: steam://rungameid without gxWindow
+result: same white window, died within 45s
+vmshot: client-attempt3.png
+
+## conclusion: the Turtle WoW 1.12 client cannot render its OpenGL login
+## screen on this GPU-less Hyper-V VM via GE-Proton11-6 today. T29 reached
+## the login screen on this same VM on 2026-09-10 (frame-14 through frame-16
+## in tortoise-adopt-yulon-arch-2026-09-11/); the regression is unexplained
+## and is not caused by this ticket's code change (the client binary and
+## Config.wtf are shared between installs). The addons ARE installed (capture
+## 18) and proved by ls and the applier's own log.
+
+## fallback: AddOns folder listing (the named fallback from the prompt)
+drwxr-xr-x 1 pk pk 282 Sep 11 16:36 TortoiseBotsManager
+drwxr-xr-x 1 pk pk 248 Sep 11 16:36 TortoiseGMManager
+
+## .toc files
+TortoiseBotsManager/: TortoiseBotsManager.toc
+TortoiseGMManager/: TortoiseGMManager.toc

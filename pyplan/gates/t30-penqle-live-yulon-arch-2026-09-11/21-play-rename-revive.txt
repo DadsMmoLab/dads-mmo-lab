@@ -1,0 +1,17 @@
+2026-09-11 16:56:57 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['rename', 'Vafartharo']
+2026-09-11 16:57:01 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['revive', 'Vafartharo']
+2026-09-11T16:56:57.386910+00:00
+# T30 Half 2 live -- capture 21: Play rename/revive through attach channel
+
+## character: Vafartharo
+
+## command: rename Vafartharo
+  prompted: True
+  lines: ('Forced rename for player Vafartharo will be requested at next login.',)
+
+## command: revive Vafartharo
+  prompted: True
+  lines: ('TortoiseBots AI: Engine executing Action=emote Trigger=receive emote bot=Nyrmoru', 'TortoiseBots AI: Engine executing Action=add gathering loot Trigger=timer bot=Nyrmoru', 'TortoiseBots AI: Engine executing Action=emote Trigger=receive emote bot=Lyrvash', 'TortoiseBots AI: Engine executing Action=add gathering loot Trigger=timer bot=Lyrvash', 'TortoiseBots AI: Engine executing Action=check values Trigger=very often bot=Lyrvash')
+
+## both commands transported through the attach channel (tortoise_console.send).
+## the console has no player session; Half 1 capture 08d documents the refusal.
