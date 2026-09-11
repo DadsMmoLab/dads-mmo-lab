@@ -203,6 +203,26 @@ def test_a_folder_nothing_claims_is_refused_too_and_says_something_different(
     assert rec.order == ["claim"], rec.order
 
 
+def test_a_refusal_over_a_folder_that_is_entirely_gone_points_at_forget(tmp_path: Path) -> None:
+    """T34: a deleted folder's UNCLAIMED refusal names the one way out it cannot offer itself.
+
+    `server_dir` never being written also answers UNCLAIMED - reading a claim
+    file out of a folder that is not there is the same `not is_file()` as
+    reading one out of a folder that never had one - so this clause is the only
+    thing telling the two apart in the sentence a user reads.
+    """
+    gone = tmp_path / "gone-for-good"
+    message = purge.refusal_for(Ownership.UNCLAIMED, gone)
+    assert "Nothing here says Yu'lon installed it" in message
+    assert 'If the folder is gone for good, "Forget this install…" drops this tab.' in message
+
+
+def test_an_unclaimed_folder_that_still_exists_gets_no_such_clause(tmp_path: Path) -> None:
+    """The offer to forget is wrong advice for a folder that is still there to look at."""
+    message = purge.refusal_for(Ownership.UNCLAIMED, tmp_path)
+    assert "Forget this install" not in message
+
+
 def test_the_two_refusals_do_not_share_their_wording(tmp_path: Path) -> None:
     """Three values, never two: the messages are how a user tells them apart."""
     unknown = purge.refusal_for(Ownership.UNKNOWN, tmp_path)

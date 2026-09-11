@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -4785,6 +4786,7 @@ class _FakeUninstall:
         failure: str = "",
         report: object | None = None,
         while_running: object | None = None,
+        forget_error: OSError | None = None,
     ) -> None:
         self.server_dir = server_dir
         self.refusal = refusal
@@ -4792,8 +4794,16 @@ class _FakeUninstall:
         self.plans = 0
         self.runs: list[bool] = []
         self.busy_seen: list[object] = []
+        self.forgets = 0
         self._report = report
         self._while_running = while_running
+        self._forget_error = forget_error
+
+    def forget(self) -> None:
+        """`Uninstall.forget` (T34): the same attribute `main.py` replaces in the app."""
+        self.forgets += 1
+        if self._forget_error is not None:
+            raise self._forget_error
 
     def plan(self) -> purge.PurgePlan:
         self.plans += 1
@@ -5052,6 +5062,132 @@ def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(
     """8.9a is WotLK; 8.9b is Vanilla. A tree without the seam offers no button."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     assert view.uninstall_button is None
+
+
+# -- "Forget this install…", for a folder that is gone (T34) -------------------
+
+
+def test_the_forget_button_is_hidden_while_the_folder_exists_and_appears_once_gone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Re-checked on the same poll as the status line, not only at tab-build time.
+
+    The owner's box had two stale tabs open with their folders already gone —
+    the folder can disappear under a tab that has been open for a while, and
+    the button has to notice without a restart.
+    """
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    assert view.forget_install_button is not None
+    view.refresh_status()
+    assert view.forget_install_button.isHidden()
+
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    assert not view.forget_install_button.isHidden()
+    # Mutation: negate `_update_forget_visibility()`'s `is_dir()` check (or
+    # drop it) and this assertion is what catches it — the button would then
+    # be shown for the folder that exists and hidden for the one that is gone.
+
+
+def test_the_forget_button_stays_hidden_for_a_wsl_install_with_no_folder_here(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`server_dir.is_dir()` asks THIS process, which is right for a native
+    install and wrong for one inside a WSL distro — the folder lives in the
+    distro's own filesystem, not this one's. Out of scope for T34, and the
+    button must not offer a wrong answer instead of no answer.
+    """
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.services.controller.wsl_distro = "dml-arch"
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    assert view.forget_install_button is not None
+    assert view.forget_install_button.isHidden()
+    # Mutation: drop the `wsl_distro is None` clause from
+    # `_update_forget_visibility()` and this fails — the button would show for
+    # a distro path this process cannot evaluate.
+
+
+def test_answering_yes_forgets_the_record_and_emits_uninstalled(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The confirm must compare with `==`, not `is` (T33's bug): this PySide6's
+    static `QMessageBox.question()` returns a plain `int`, and the fake below
+    returns exactly that — not the enum member — to prove the comparison
+    survives it.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    seen: list[tuple[str, object]] = []
+    view.uninstalled.connect(lambda game, folder: seen.append((game, folder)))
+
+    view.forget_install()
+
+    assert fake.forgets == 1
+    assert seen == [("wow-wotlk", tmp_path)]
+    # Mutation: change `forget_install()`'s `answer == QMessageBox.StandardButton.Yes`
+    # to `answer is QMessageBox.StandardButton.Yes` and this fails — the bare
+    # `int` the fake returns is never `is` the enum member, so a real Yes reads
+    # as a No and nothing is forgotten.
+
+
+def test_answering_no_forgets_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_no_modal_dialogs` already answers No; this asserts what that means here."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.No),
+    )
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    seen: list[object] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+
+    view.forget_install()
+
+    assert fake.forgets == 0
+    assert seen == []
+
+
+def test_a_forget_that_raises_oserror_shows_the_error_and_keeps_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`forget_record()`'s own docstring: `OSError` is not caught there because
+    `purge.run()` catches it for the uninstall path — this is the OTHER caller
+    of the same live-`AppState` seam, and it has to catch its own.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    fake = _FakeUninstall(tmp_path, forget_error=OSError("config dir is read-only"))
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    seen: list[object] = []
+    failures: list[str] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+    view.action_failed.connect(failures.append)
+
+    view.forget_install()
+
+    assert seen == [], "the tab was dropped over a forget that never happened"
+    assert "config dir is read-only" in view.uninstall_label.text()
+    assert failures and "config dir is read-only" in failures[0]
 
 
 # -- the rebuild control (the action `_format_report` has always named) --------

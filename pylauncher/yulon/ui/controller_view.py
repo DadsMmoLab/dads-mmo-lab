@@ -2447,6 +2447,14 @@ class ControllerView(QWidget):
         # asked for, and a second button that only appears once a plan is on
         # screen.
         self.uninstall_button: QPushButton | None = None
+        # T34: the dead end Uninstall's own refusal names. Hidden until a poll
+        # finds `server_dir` gone, because that is the one fact that makes
+        # Uninstall's ownership check permanently unanswerable and this
+        # button's the only remaining way off the tab. `wsl_distro` keeps it
+        # hidden for a distro install even then - `server_dir` there is a path
+        # on THIS process, not inside the distro, so its `is_dir()` answers a
+        # question about the wrong filesystem.
+        self.forget_install_button: QPushButton | None = None
         self.keep_characters_check = QCheckBox(
             "Keep my characters (the database volume is left alone)", tab
         )
@@ -2478,6 +2486,9 @@ class ControllerView(QWidget):
             self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
             self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
             self.keep_characters_check.setVisible(True)
+            self.forget_install_button = QPushButton("Forget this install\u2026", tab)
+            self.forget_install_button.setVisible(False)
+            self.forget_install_button.clicked.connect(self.forget_install)
             self.uninstall_label.setVisible(True)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
@@ -2514,6 +2525,8 @@ class ControllerView(QWidget):
             box.addWidget(self.keep_characters_check)
             box.addWidget(self.uninstall_label)
             box.addWidget(self.uninstall_confirm_button)
+        if self.forget_install_button is not None:
+            box.addWidget(self.forget_install_button)
         box.addStretch(1)
         self._tabs.addTab(tab, "Server")
 
@@ -2782,8 +2795,24 @@ class ControllerView(QWidget):
             self.status_label.setText("status: " + ", ".join(parts))
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
+        self._update_forget_visibility()
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
+
+    def _update_forget_visibility(self) -> None:
+        """Show "Forget this install…" exactly while `server_dir` is gone (T34).
+
+        Read fresh on every poll rather than once at tab-build time: the folder
+        can be deleted out from under an open tab, and a button that only
+        appeared on the next launch would leave the owner stuck exactly as long
+        as the bug this ticket fixes did.
+        """
+        if self.forget_install_button is None:
+            return
+        controller = self.services.controller
+        self.forget_install_button.setVisible(
+            controller.wsl_distro is None and not controller.server_dir.is_dir()
+        )
 
     def _ask_about_the_import(self, status: InstallStatus) -> None:
         """Put the import question once per time the database comes up.
@@ -2966,6 +2995,8 @@ class ControllerView(QWidget):
             self.repair_button.setEnabled(False)
             if self.uninstall_button is not None:
                 self.uninstall_button.setEnabled(False)
+            if self.forget_install_button is not None:
+                self.forget_install_button.setEnabled(False)
             self.uninstall_confirm_button.setEnabled(False)
             self.keep_characters_check.setEnabled(False)
             self.rebuild_button.setEnabled(False)
@@ -3018,6 +3049,8 @@ class ControllerView(QWidget):
             self.repair_button.setEnabled(True)
             if self.uninstall_button is not None:
                 self.uninstall_button.setEnabled(True)
+            if self.forget_install_button is not None:
+                self.forget_install_button.setEnabled(True)
             self.uninstall_confirm_button.setEnabled(True)
             self.keep_characters_check.setEnabled(True)
             self.rebuild_button.setEnabled(self.services.rebuild is not None)
@@ -3392,6 +3425,51 @@ class ControllerView(QWidget):
         message = str(exc)
         self.uninstall_label.setText(message)
         self.action_failed.emit(message)
+
+    @Slot()
+    def forget_install(self) -> None:
+        """Drop this tab's record without touching Docker (T34).
+
+        `services.uninstall.forget` and not `purge.forget_record()`: inside a
+        running window that attribute is `main.py`'s closure over the ONE live
+        `AppState` every tab writes into, and `forget_record()`'s own default
+        would load `state.json`, forget this install, and save — silently
+        undoing whatever else the session had remembered since. Off the GUI
+        thread is not needed here the way it is for `run_uninstall()` — this
+        writes one small file and asks Docker nothing — so a raised `OSError`
+        is caught in place rather than through `_run()`'s worker.
+
+        No project-name guess reaches Docker: without a folder to read a claim
+        from, nothing here can tell this install's containers, volumes or
+        images from a neighbour's, so they are left exactly where they are and
+        the confirmation says so.
+        """
+        if self.services.uninstall is None:
+            return
+        server_dir = self.services.controller.server_dir
+        answer = QMessageBox.question(
+            self,
+            "Forget this install?",
+            f"{server_dir} no longer exists. Forget this install? Yu'lon removes only its "
+            "own record of it — the tab closes and the Catalog offers the game again. Any "
+            "Docker containers, volumes or images named for it are NOT touched, because "
+            "without the folder Yu'lon cannot prove which ones were its own; remove those "
+            "from Docker Desktop yourself if they remain.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.services.uninstall.forget()
+        except OSError as exc:
+            message = f"Could not forget {server_dir}: {exc}"
+            self.uninstall_label.setText(message)
+            self.action_failed.emit(message)
+            return
+        # Last: the window drops this tab on this signal, which destroys the
+        # view. Nothing may touch `self` after it (mirrors `_uninstall_done()`).
+        self.uninstalled.emit(self.entry.id, server_dir)
 
     @Slot()
     def add_to_steam(self) -> None:

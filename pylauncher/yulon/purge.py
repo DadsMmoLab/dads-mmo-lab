@@ -215,6 +215,11 @@ def refusal_for(ownership: Ownership, server_dir: Path, reason: str = "") -> str
     `reason` carries the one `UNKNOWN` that is not damage — a record written by
     a NEWER build (`catalog.native.read_claim()`). The generic advice would tell
     that user to delete a working install's record.
+
+    `UNCLAIMED` also covers a `server_dir` that does not exist at all — reading
+    a record out of a folder that is not there answers exactly like reading one
+    out of a folder that never had one (T34). That case alone earns a fourth
+    sentence pointing at the way out this refusal itself cannot offer.
     """
     if ownership is Ownership.OWNED:
         return ""
@@ -224,10 +229,13 @@ def refusal_for(ownership: Ownership, server_dir: Path, reason: str = "") -> str
             f"There is an install record in {server_dir} that Yu'lon cannot read, so it "
             f"cannot prove this install is its own.{detail} Nothing was removed."
         )
-    return (
+    sentence = (
         f"Nothing here says Yu'lon installed it: there is no install record in "
         f"{server_dir}, so this folder is not Yu'lon's to delete. Nothing was removed."
     )
+    if not server_dir.is_dir():
+        sentence += ' If the folder is gone for good, "Forget this install…" drops this tab.'
+    return sentence
 
 
 class Uninstaller:
