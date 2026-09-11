@@ -13,6 +13,7 @@ import pytest
 from PySide6.QtWidgets import (
     QGridLayout,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -38,6 +39,17 @@ def _completed() -> subprocess.CompletedProcess[str]:
 
 
 CATALOG = load_catalog()
+
+_REAL_QMESSAGEBOX_QUESTION = QMessageBox.question
+"""The real static `QMessageBox.question`, captured before any fixture can replace it.
+
+`_no_modal_dialogs` (autouse, `conftest.py`) fakes this for every other test in
+the suite so a modal can never block a run. T33's real-dialog test needs the
+REAL one instead: it is what PySide6 actually returns (a plain `int`, not a
+`QMessageBox.StandardButton` member -- `scratchpad/T33/static_probe.py`) that
+the bug was measured against. Module import runs before any fixture, so this
+reference is unaffected by fixture ordering.
+"""
 
 
 class _FakeInstaller:
@@ -1613,12 +1625,12 @@ def test_closing_the_unverified_confirm_without_answering_adopts_nothing(
     """Escape, or the window's X, is not consent.
 
     `QMessageBox.question` returns `NoButton` (0) when the dialog is dismissed
-    without pressing either button. The gate is spelled
-    `is not StandardButton.Yes` rather than the more natural
-    `is StandardButton.No` precisely because of this, and the difference is
-    invisible to every other test: a reviewer mutated the gate to `is No` on
-    2026-09-02 and the ENTIRE SUITE passed, while the mutant adopted the folder
-    for a user who answered nothing and logged "the user was asked and said yes".
+    without pressing either button. The gate is spelled `not said_yes(...)`
+    rather than the more natural "is the answer No" precisely because of this,
+    and the difference is invisible to every other test: a reviewer mutated the
+    gate to check for No on 2026-09-02 and the ENTIRE SUITE passed, while the
+    mutant adopted the folder for a user who answered nothing and logged "the
+    user was asked and said yes".
 
     A comment declared that case. A declaration is not a guard - this is.
     """
@@ -1645,6 +1657,42 @@ def test_closing_the_unverified_confirm_without_answering_adopts_nothing(
 
     assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is False
     assert emitted == [], "dismissing the dialog adopted the folder"
+
+
+def test_a_real_static_ints_yes_still_adopts_an_unverified_folder(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33's other shape at this site: PySide6's real static `question()` return, not the enum.
+
+    Every other test of this confirm answers with the `QMessageBox.StandardButton`
+    member (`_user_confirms_unverified`, `_adopt_with_identification`), which is
+    exactly the shape that hid the bug: PySide6 6.11.2's static
+    `QMessageBox.question()` returns the plain `int` used here instead
+    (`scratchpad/T33/static_probe.py`).
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: int(QMessageBox.StandardButton.Yes)
+    )
+    folder = _folder(tmp_path, "int-yes", _compose_naming("whatever"))
+    server = _server_in(folder)
+    monkeypatch.setattr(wsl, "find_servers", lambda include=(): (server,))
+    monkeypatch.setattr(
+        catalog_view, "_identify", lambda entry, server_dir: Identification.UNVERIFIED
+    )
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        home=tmp_path,
+        pick_wsl_server=lambda _f: server,
+    )
+    emitted: list[tuple[object, ...]] = []
+    view.adopted.connect(lambda *a: emitted.append(a))
+
+    assert view.adopt_from_wsl(CATALOG.get("wow-wotlk")) is True
+    assert emitted, "an int Yes from the static question() did not adopt"
 
 
 def test_an_unverified_adoption_names_the_folder_in_the_dialog_it_shows(
@@ -2027,6 +2075,140 @@ def test_the_suggestion_is_never_created_by_asking_about_it(qapp: object, tmp_pa
     # `_FakeInstaller` runs no stages, so nothing downstream can have made it
     # either: whatever exists here was made by the question.
     assert not suggested.exists(), "asking about the folder created it"
+
+
+def test_a_real_static_ints_yes_still_offers_and_takes_the_restart(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33 at `_offer_a_restart_instead`: PySide6's real static `question()` return, not the enum.
+
+    No other test exercises `_offer_a_restart_instead` yet, so this is also its
+    first: it drives the exact shape the bug needs, the static call's plain
+    `int` (`scratchpad/T33/static_probe.py`), rather than the
+    `QMessageBox.StandardButton` member every other confirm test in this file
+    answers with.
+    """
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: int(QMessageBox.StandardButton.Yes)
+    )
+    monkeypatch.setattr(catalog_view.platform, "docker_group_reexec", lambda: ["yulon"])
+    restarted: list[bool] = []
+    monkeypatch.setattr(
+        catalog_view.platform, "restart_under_docker_group", lambda: restarted.append(True)
+    )
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), LogPanel())
+
+    assert view._offer_a_restart_instead("boom") is True
+    assert restarted, "an int Yes from the static question() did not offer the restart"
+
+
+# -- T33: a real `QMessageBox.question()`, not a fake one, reading Yes as Yes
+
+_DIALOG_POLL_MS = 20
+"""How often the click loop below re-checks for the active modal `QMessageBox`.
+
+Mirrors `scratchpad/T33/static_probe.py`'s `QTimer.singleShot(20, ...)`. Not a
+deadline -- see `_REAL_DIALOG_BOUND_MS`.
+"""
+
+_REAL_DIALOG_BOUND_MS = 5000
+"""Gives up on the real dialog ever appearing, so a broken run fails this test rather than hangs.
+
+`_qt_suggestion_asker` blocks this thread inside `QMessageBox.question()`'s own
+nested Qt event loop, so nothing outside it runs until a button is clicked (or
+the dialog is otherwise closed) -- `pump_until` cannot reach in from outside,
+because nothing OUTSIDE that call is waiting. A `QTimer` queued on the same
+event loop can: it fires from inside the nested loop like the click-poller
+does, and forcibly closes whatever modal is active if the poller never found
+one to click within this bound.
+"""
+
+
+def _click_active_message_box(
+    which: QMessageBox.StandardButton, clicked: list[bool], deadline: object
+) -> None:
+    """Click `which` on the active modal `QMessageBox`, re-arming until it appears or times out.
+
+    The dialog `QMessageBox.question()` opens is not handed back to the caller,
+    so the only way to reach it from this same thread is to poll
+    `QApplication.activeModalWidget()` from a queued timer while `question()`
+    blocks in its own nested event loop -- the technique
+    `scratchpad/T33/static_probe.py` proved the bug with.
+    """
+    from PySide6.QtCore import QDeadlineTimer, QTimer
+    from PySide6.QtWidgets import QApplication
+
+    assert isinstance(deadline, QDeadlineTimer)
+    app = QApplication.instance()
+    widget = app.activeModalWidget() if app is not None else None
+    if isinstance(widget, QMessageBox):
+        widget.button(which).click()
+        clicked.append(True)
+        return
+    if deadline.hasExpired():
+        return
+    QTimer.singleShot(_DIALOG_POLL_MS, lambda: _click_active_message_box(which, clicked, deadline))
+
+
+def _ask_with_real_dialog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, which: QMessageBox.StandardButton
+) -> bool:
+    """Drive `_qt_suggestion_asker` against the REAL `QMessageBox.question()`, clicking `which`.
+
+    Bounded by `_REAL_DIALOG_BOUND_MS`: a `QTimer` that force-closes the active
+    modal if the click-poller never found one to click, so a run where the
+    dialog never opens fails this test's `assert clicked` rather than hanging
+    the suite.
+    """
+    from PySide6.QtCore import QDeadlineTimer, QTimer
+    from PySide6.QtWidgets import QApplication
+
+    monkeypatch.setattr(QMessageBox, "question", _REAL_QMESSAGEBOX_QUESTION)
+    clicked: list[bool] = []
+    _click_active_message_box(which, clicked, QDeadlineTimer(_REAL_DIALOG_BOUND_MS))
+
+    giveup = QTimer()
+    giveup.setSingleShot(True)
+
+    def _give_up() -> None:
+        app = QApplication.instance()
+        widget = app.activeModalWidget() if app is not None else None
+        if isinstance(widget, QMessageBox):
+            widget.close()
+
+    giveup.timeout.connect(_give_up)
+    giveup.start(_REAL_DIALOG_BOUND_MS)
+    try:
+        result = catalog_view._qt_suggestion_asker(None, "Test Game", tmp_path / "suggested")
+    finally:
+        giveup.stop()
+    assert (
+        clicked
+    ), f"no QMessageBox became the active modal widget within {_REAL_DIALOG_BOUND_MS}ms"
+    return result
+
+
+def test_a_real_yes_on_the_suggestion_dialog_reads_as_yes(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33: the owner's report, reproduced without a fake `QMessageBox.question`.
+
+    Every other test of `_qt_suggestion_asker` drives it through the
+    `ask_suggestion` seam with a plain Python fake (`_view()`, above), which is
+    exactly why the regression went unnoticed -- the fakes return the enum
+    member, and PySide6's real static `question()` does not
+    (`scratchpad/T33/static_probe.py`). This clicks the REAL dialog's REAL Yes
+    button, the one path a fake cannot stand in for.
+    """
+    assert _ask_with_real_dialog(monkeypatch, tmp_path, QMessageBox.StandardButton.Yes) is True
+
+
+def test_a_real_no_on_the_suggestion_dialog_reads_as_no(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The companion press: a real No must still read as No."""
+    assert _ask_with_real_dialog(monkeypatch, tmp_path, QMessageBox.StandardButton.No) is False
 
 
 # -- "Installed" on a tile whose server the app already knows (owner, 2026-09-04)

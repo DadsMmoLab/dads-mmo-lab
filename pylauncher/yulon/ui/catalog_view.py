@@ -40,6 +40,7 @@ from yulon.catalog.installer import (
     unsupported_platform_message,
 )
 from yulon.log import get_logger
+from yulon.ui.answers import said_yes
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter
 
@@ -133,7 +134,7 @@ def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         QMessageBox.StandardButton.Yes,
     )
-    return answer is QMessageBox.StandardButton.Yes
+    return said_yes(answer)
 
 
 def _pin_compose_project(server_dir: Path) -> None:
@@ -662,7 +663,7 @@ class CatalogView(QWidget):
                 else "Its tab will run docker commands against containers that "
                 "may not be the ones in that folder."
             )
-            if (
+            if not said_yes(
                 QMessageBox.question(
                     self,
                     "Adopt without checking?",
@@ -674,18 +675,19 @@ class CatalogView(QWidget):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
-                is not QMessageBox.StandardButton.Yes
             ):
                 # Default No, and anything that is not an explicit Yes refuses.
                 #
-                # `is not ... Yes` and NOT `is ... No`, which is how most people
-                # would write it. `QMessageBox.question` returns `NoButton` (0) when
-                # the dialog is closed with the window chrome or Escape, and
-                # `NoButton is not No`, so the `is No` spelling ADOPTS in exactly the
-                # case this comment used to only declare. It survived the whole suite
-                # when a reviewer mutated it on 2026-09-02;
+                # `not said_yes(...)` and NOT `== No`, which is how most people would
+                # write it. `QMessageBox.question` returns `NoButton` (0) when the
+                # dialog is closed with the window chrome or Escape, and `NoButton !=
+                # Yes` but also `NoButton != No`, so the `== No` spelling ADOPTS in
+                # exactly the case this comment used to only declare. It survived the
+                # whole suite when a reviewer mutated it on 2026-09-02;
                 # `test_closing_the_unverified_confirm_without_answering_adopts_nothing`
-                # is what makes the distinction fail now.
+                # is what makes the distinction fail now. `said_yes()` compares by
+                # `==`, not `is` (T33: PySide6 6.11.2's static `question()` returns a
+                # plain `int`, for which `is Yes` is always False).
                 logger.info(
                     f"declined to adopt {entry.id} from {chosen.distro}: nothing "
                     f"confirmed {chosen.server_dir} is a {entry.name} install"
@@ -879,13 +881,13 @@ class CatalogView(QWidget):
 
         Returns True when it has spoken to the user, so the caller does not also
         show its own dialog: the question below already carries `message` in
-        full. `is ... Yes` and not `is not ... No`, because Escape and the
-        window's close button both return `NoButton`, and only an explicit Yes
-        may throw away a running application.
+        full. `said_yes(...)` and not `not said_yes(...)` inverted, because
+        Escape and the window's close button both return `NoButton`, and only
+        an explicit Yes may throw away a running application.
         """
         if platform.docker_group_reexec() is None:
             return False
-        if (
+        if said_yes(
             QMessageBox.question(
                 self,
                 "Restart Yu'lon to finish setting up Docker",
@@ -897,7 +899,6 @@ class CatalogView(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
             )
-            is QMessageBox.StandardButton.Yes
         ):
             # Only returns if the exec failed, and then the user is told what
             # actually went wrong rather than being left looking at a dialog

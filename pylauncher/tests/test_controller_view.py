@@ -5153,6 +5153,33 @@ def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
     assert "--- build" in text and "compiling" in text, text
 
 
+def test_a_real_static_ints_yes_still_starts_the_rebuild(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33's other shape at this site: PySide6's real static `question()` return, not the enum.
+
+    The test above answers with the `QMessageBox.StandardButton` member, which
+    is exactly the shape that hid the bug: PySide6 6.11.2's static
+    `QMessageBox.question()` returns the plain `int` used here instead
+    (`scratchpad/T33/static_probe.py`).
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    services, started = _rebuild_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is True
+    # `started` crosses from the panel's worker thread, so the handler returning
+    # is not the press having actually run yet — `pump_until` is what makes the
+    # difference (`test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel`
+    # says so in the same words).
+    pump_until(lambda: "done" in view.rebuild_log.text(), "the rebuild's output reached the panel")
+    assert len(started) == 1, "an int Yes from the static question() did not start the rebuild"
+
+
 def test_the_rebuild_confirmation_offers_yes_and_no_and_defaults_to_refusing(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5646,11 +5673,11 @@ def test_declining_the_updates_confirmation_starts_nothing(
 ) -> None:
     """The gate is real: the question is asked, and No means nothing ran.
 
-    `is ... Yes` and not `is not ... No`, because Escape and the window's close
-    button both answer `NoButton` — and this press writes DDL into a database
-    with somebody's characters in it.
+    `said_yes(...)` rather than a check for No, because Escape and the window's
+    close button both answer `NoButton` — and this press writes DDL into a
+    database with somebody's characters in it.
 
-    Catches the confirmation skipped, and the verdict read as `is not No`.
+    Catches the confirmation skipped, and the verdict read as `== No`.
     """
     seen: list[str] = []
 
@@ -5705,6 +5732,34 @@ def test_a_confirmation_that_refuses_puts_the_sentence_where_the_user_is_and_sta
     assert started == [], "refused, and the press ran anyway"
     assert asked == [], "the user was asked to confirm a press that could not be described"
     assert failures and "found no file matching" in failures[0], failures
+
+
+def test_a_real_static_ints_yes_still_starts_the_database_updates(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33's other shape at this site: PySide6's real static `question()` return, not the enum.
+
+    Every other test of this confirm answers with the `QMessageBox.StandardButton`
+    member, which is exactly the shape that hid the bug: PySide6 6.11.2's static
+    `QMessageBox.question()` returns the plain `int` used here instead
+    (`scratchpad/T33/static_probe.py`).
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    services, started, asked = _updates_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.apply_database_updates() is True
+    assert asked == ["confirmation"], "the engine's own confirmation text was not used"
+    # `started` crosses from the panel's worker thread; see the rebuild version
+    # of this test for why the wait is needed before it can be read.
+    pump_until(
+        lambda: "applied" in view.rebuild_log.text(), "the update's output reached the panel"
+    )
+    assert len(started) == 1, "an int Yes from the static question() did not start the press"
 
 
 def test_the_tortoise_updates_button_refuses_while_the_world_runs(
@@ -5963,11 +6018,11 @@ def test_declining_the_adopt_confirmation_writes_nothing(
 ) -> None:
     """The gate is real, and this is the press where it matters most.
 
-    `is ... Yes` and not `is not ... No`, because Escape and the window's close
-    button both answer `NoButton` — and Yes here is a person saying something
-    about their databases that nothing takes back.
+    `said_yes(...)` rather than a check for No, because Escape and the window's
+    close button both answer `NoButton` — and Yes here is a person saying
+    something about their databases that nothing takes back.
 
-    Catches the confirmation skipped, and the verdict read as `is not No`.
+    Catches the confirmation skipped, and the verdict read as `== No`.
     """
     seen: list[str] = []
 
@@ -6018,6 +6073,36 @@ def test_the_adopt_press_runs_the_routes_own_generator_into_the_panel(
     assert len(started) == 1, started
     assert started[0] is not None, "the panel's Stop button has nothing to set"
     assert "--- adopt" in view.rebuild_log.text()
+
+
+def test_a_real_static_ints_yes_still_starts_the_adopt_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33's other shape at this site: PySide6's real static `question()` return, not the enum.
+
+    The test above answers with the `QMessageBox.StandardButton` member, which
+    is exactly the shape that hid the bug: PySide6 6.11.2's static
+    `QMessageBox.question()` returns the plain `int` used here instead
+    (`scratchpad/T33/static_probe.py`).
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    services, started, _, _ = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+
+    assert view.adopt_as_imported() is True
+    # `started` crosses from the panel's worker thread; see the rebuild version
+    # of this test for why the wait is needed before it can be read.
+    pump_until(
+        lambda: "the row is written" in view.rebuild_log.text(),
+        "the adopt press's output reached the panel",
+    )
+    assert len(started) == 1, "an int Yes from the static question() did not start the press"
 
 
 def test_the_adopt_button_greys_itself_once_its_own_press_has_finished(

@@ -99,6 +99,7 @@ from yulon.log import get_logger
 from yulon.manifest import Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
+from yulon.ui.answers import said_yes
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
@@ -5260,7 +5261,7 @@ class ControllerView(QWidget):
 
         **The confirmation is a real gate, and everything about it is chosen so
         that it cannot be clicked through.** Yes/No with No as the default, so
-        Enter declines; `is ... Yes` rather than `is not ... No`, because
+        Enter declines; `said_yes(...)` rather than a check for No, because
         Escape and the window's close button both answer `NoButton` and only an
         explicit Yes may take somebody's server down for an hour; and the text
         is `rebuild_confirmation()`'s, which names the folder and quotes this
@@ -5300,7 +5301,7 @@ class ControllerView(QWidget):
                 "Server tab, then press Rebuild again. Nothing was started.",
             )
             return False
-        if (
+        if not said_yes(
             QMessageBox.question(
                 self,
                 f"Rebuild {self.entry.name}?",
@@ -5308,7 +5309,6 @@ class ControllerView(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
-            is not QMessageBox.StandardButton.Yes
         ):
             logger.info(f"rebuild of {self.entry.id} declined at the confirmation")
             return False
@@ -5344,10 +5344,10 @@ class ControllerView(QWidget):
         for a press that applies nothing.
 
         Everything else follows `rebuild_server()` exactly, and deliberately:
-        Yes/No with No as the default so Enter declines, `is ... Yes` so Escape
-        and the close button decline too, and the same panel — one long job on
-        this tab at a time, because a rebuild and an update want the same
-        containers.
+        Yes/No with No as the default so Enter declines, `said_yes(...)` so
+        Escape and the close button decline too, and the same panel — one long
+        job on this tab at a time, because a rebuild and an update want the
+        same containers.
         """
         route = self.services.updates
         if route is None:
@@ -5374,7 +5374,7 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             QMessageBox.warning(self, f"{self.entry.name}", str(exc))
             return False
-        if (
+        if not said_yes(
             QMessageBox.question(
                 self,
                 f"Apply database updates to {self.entry.name}?",
@@ -5382,7 +5382,6 @@ class ControllerView(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
-            is not QMessageBox.StandardButton.Yes
         ):
             logger.info(f"database updates for {self.entry.id} declined at the confirmation")
             return False
@@ -5413,8 +5412,8 @@ class ControllerView(QWidget):
 
         Everything else follows `apply_database_updates()` exactly: the
         confirmation composed before it is shown, Yes/No with No as the default
-        so Enter declines, `is ... Yes` so Escape and the close button decline
-        too, and the same panel — one long job on this tab at a time.
+        so Enter declines, `said_yes(...)` so Escape and the close button
+        decline too, and the same panel — one long job on this tab at a time.
         """
         route = self.services.adopt
         if route is None:
@@ -5441,7 +5440,7 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             QMessageBox.warning(self, f"{self.entry.name}", str(exc))
             return False
-        if (
+        if not said_yes(
             QMessageBox.question(
                 self,
                 f"Adopt {self.entry.name}'s databases as a finished import?",
@@ -5449,7 +5448,6 @@ class ControllerView(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
-            is not QMessageBox.StandardButton.Yes
         ):
             logger.info(f"adopting {self.entry.id} declined at the confirmation")
             return False
