@@ -1132,7 +1132,7 @@ def test_the_guard_rule_that_needs_a_daemon_still_runs_after_provisioning(
         docker_ready=lambda: False,
         ensure_docker=ensure_docker,
     )
-    with pytest.raises(InstallerError, match="belongs to another install"):
+    with pytest.raises(InstallerError, match="belongs to another Docker Compose project"):
         list(installer.run(InstallOptions(server_dir=tmp_path / "wow")))
     assert provisioned == ["ensure_docker"], "this rule needs the daemon it was provisioned for"
 

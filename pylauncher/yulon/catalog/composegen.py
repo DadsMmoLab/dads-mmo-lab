@@ -163,6 +163,16 @@ def _identity_key(server_dir: Path, platform_id: Callable[[], str]) -> str:
     return text.lower() if platform_id() == "windows" else text
 
 
+PROJECT_PREFIX = "yulon-"
+"""Every compose project this app makes starts with this, and nothing else's does.
+
+The one place the literal is spelled. `native._refuse_foreign_containers()`
+reads it too, to tell a container that belongs to another install THIS app
+made from one that belongs to a stranger's Docker Compose project — a
+distinction a hand-typed second copy of `"yulon-"` could quietly drift from.
+"""
+
+
 def project_name(
     game_id: str, server_dir: Path, *, platform_id: Callable[[], str] = platform.detect
 ) -> str:
@@ -177,7 +187,7 @@ def project_name(
     project too: two installs of one game under one project name would share a
     database volume, and the second `up` would mount the first's characters.
     """
-    return f"yulon-{_slug(game_id)}-{install_id(server_dir, platform_id=platform_id)}"
+    return f"{PROJECT_PREFIX}{_slug(game_id)}-{install_id(server_dir, platform_id=platform_id)}"
 
 
 def built_image_refs(

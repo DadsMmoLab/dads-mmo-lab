@@ -138,6 +138,19 @@ class Recorder:
     fresh install.
     """
 
+    working_dirs: dict[str, str | None] = field(default_factory=dict)
+    """The compose working-dir label for a container in `containers` (T32).
+
+    Keyed separately rather than folded into `containers`, because the two
+    labels answer different questions and a test driving the folder-naming
+    refusal wants to set one without having to restate the other. A name
+    absent here answers `None` — the label read empty, same as a container
+    started by a compose version that never wrote it — not `UNREADABLE`:
+    that sentinel belongs to `container_project()`, whose caller only ever
+    asks this seam once `container_project()` has already answered with a
+    real owner.
+    """
+
     daemon_lists_containers: bool = True
     """False when `docker ps -a` fails, which the real `container_exists()` RAISES on."""
 
@@ -331,6 +344,9 @@ class Recorder:
 
     def container_project(self, name: str) -> str | None:
         return self.containers[name] if name in self.containers else docker.UNREADABLE
+
+    def container_working_dir(self, name: str) -> str | None:
+        return self.working_dirs.get(name)
 
     def file_unmodified(self, dest: Path, relative_path: str) -> bool | None:
         """`git status --porcelain -- <path>`: empty only for tracked and unchanged.
@@ -531,6 +547,7 @@ class Recorder:
             verify_import=verify,
             container_exists=self.container_exists,
             container_project=self.container_project,
+            container_working_dir=self.container_working_dir,
             start_db=self.start_db,
             start=self.start,
             recreate=self.recreate,

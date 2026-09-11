@@ -1869,6 +1869,14 @@ class Seams:
     verify_import: Callable[..., docker.ImportState] = docker.verify_import
     container_exists: Callable[[str], bool] = docker.container_exists
     container_project: Callable[[str], str | None] = docker.container_project
+    container_working_dir: Callable[[str], str | None] = docker.container_working_dir
+    """Which folder the compose project owning a container was brought up from.
+
+    Threaded beside `container_project` for the same reason: a refusal that
+    names a project id and not a folder tells a reporter nothing they can act
+    on (T32). Read only after `container_project` has already answered with a
+    real, non-`UNREADABLE` owner — see `_refuse_foreign_containers()`.
+    """
     # `object` rather than `None`: `start_database()` has said since T7 whether
     # it HAD to start the container, for `apply.Applier`'s report line. This
     # stage ignores that -- it wants the database up, and it is up either way --
@@ -4066,6 +4074,18 @@ class StagedInstaller:
         `docker._running()` guards the same way, `if name not in running:
         continue`; this is that check, spelled for containers that exist but are
         stopped as well as running ones.
+
+        **The sentence names the folder, not only the project id.** T32: a
+        reporter told a container belonged to `yulon-wow-wotlk-db937032` has no
+        way to act on that — the id names nothing they can see in their own
+        file manager. `container_working_dir()` reads the working-dir sibling
+        of the same compose label, so the refusal can say WHERE to go instead
+        of a hash; `None` or `UNREADABLE` from that seam means the label could
+        not be read, and the sentence says so rather than printing either
+        value. A project this app made (`composegen.PROJECT_PREFIX`) gets the
+        friendlier wording, because "another install this app made" is true of
+        it and is not true of a stranger's Docker Compose project, whose only
+        honest remedy is to go and stop it from its own tooling.
         """
         ours = composegen.project_name(
             self.entry.id, server_dir, platform_id=self._seams.platform_id
@@ -4094,10 +4114,34 @@ class StagedInstaller:
                     "to, so this install cannot prove it is safe to create one. Nothing was "
                     "written."
                 )
+            working_dir = self._seams.container_working_dir(name)
+            readable = working_dir not in (None, docker.UNREADABLE)
+            if owner.startswith(composegen.PROJECT_PREFIX):
+                if readable:
+                    raise InstallerError(
+                        f"A container called {name} already exists and belongs to another "
+                        f"install this app made, at {working_dir}. Two servers cannot share "
+                        "that name. Open that install's tab and stop and remove its "
+                        f"containers, or install into {working_dir} instead."
+                    )
+                raise InstallerError(
+                    f"A container called {name} already exists and belongs to another "
+                    f"install this app made ({owner}), but this app could not read which "
+                    "folder that install used. Two servers cannot share that name. Open "
+                    "that install's tab and stop and remove its containers, then try again."
+                )
+            if readable:
+                raise InstallerError(
+                    f"A container called {name} already exists and belongs to another "
+                    f"Docker Compose project ({owner}), brought up from {working_dir}. Two "
+                    "servers cannot share that name. Remove the other install's containers "
+                    "from its own tab first, then try again."
+                )
             raise InstallerError(
-                f"A container called {name} already exists and belongs to another install "
-                f"({owner}). Two servers cannot share that name. Remove the other install's "
-                "containers from its own tab first, then try again."
+                f"A container called {name} already exists and belongs to another Docker "
+                f"Compose project ({owner}), but this app could not read which folder it "
+                "was brought up from. Two servers cannot share that name. Remove the other "
+                "install's containers from its own tab first, then try again."
             )
 
     # -- stage bodies a family binds into `Stage.run` --------------------
