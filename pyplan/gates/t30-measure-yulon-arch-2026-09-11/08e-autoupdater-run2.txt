@@ -1,0 +1,14 @@
+### every DB Auto-Updater line of run 2
+[DB Auto-Updater] Path doesn't contain auth updates, creating..
+[DB Auto-Updater] No DB migrations found, table migrations is empty.
+[DB Auto-Updater] Found 1 possible migration for character.
+[DB Auto-Updater] Found 144 possible migrations for world.
+[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/character.
+[DB Auto-Updater] Found 5 possible migrations for character.
+[DB Auto-Updater] Attempting to execute update 20260824090001_char for module TortoiseBots, hash F535167DB42E1FA48AFAC78C5DF6FD489F76AA0B.
+[DB Auto-Updater] Attempting to execute update 20260824090002_char for module TortoiseBots, hash 10E7965275B3B63514D2E48C39296F462C6F451A.
+[DB Auto-Updater] Attempting to execute update 20260824090003_char for module TortoiseBots, hash D2A123FCCCF3F35A4AE552B7E2E4212B3208602C.
+[DB Auto-Updater] Attempting to execute update 20260902090000_char for module TortoiseBots, hash F2380E45BADC9344DED7FFAAF2F09DBF329ECFEC.
+[DB Auto-Updater] Attempting to execute update 20260906090000_char for module TortoiseBots, hash 042FC7EB5E7DFF21406B7D774434E8CEB1D74DA8.
+[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/world.
+[DB Auto-Updater] Found 3 possible migrations for world.

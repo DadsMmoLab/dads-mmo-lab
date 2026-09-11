@@ -1,0 +1,69 @@
+2026-09-11T09:50:05+00:00
+# probe: the flag line from pylauncher/catalog/installers/wow-tortoise/native/Dockerfile.tmpl, run against the new core
+-- The C compiler identification is GNU 13.3.0
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Detected 64-bit platform.
+-- Found Git: /usr/bin/git  
+-- 
+This script builds the MaNGOS server.
+  Options that can be used in order to configure the process:
+    PREFIX: Path where the server should be installed to
+    USE_PCH: Use precompiled headers
+  To set an option simply type -D<OPTION>=<VALUE> after 'cmake <srcs>'.
+  For example: cmake .. -DPREFIX=/opt/mangos
+
+-- Found ACE library: /usr/lib/x86_64-linux-gnu/libACE.so
+-- Found ACE headers: /usr/include
+-- Using mysql-config: /usr/bin/mysql_config
+-- Found MySQL library: /usr/lib/x86_64-linux-gnu/libmysqlclient.so
+-- Found MySQL headers: /usr/include/mysql
+-- Found OpenSSL library: /usr/lib/x86_64-linux-gnu/libssl.so
+-- Found OpenSSL headers: /usr/include/openssl
+-- Found ZLIB: /usr/lib/x86_64-linux-gnu/libz.so (found version "1.3")  
+-- 
+    Could not find a proper repository signature (hash) - you may need to pull tags with git fetch -t
+    Continuing anyway - note that the versionstring will be set to "unknown 1970-01-01 00:00:00 (Archived)"
+-- 
+-- Core revision: unknown 1970-01-01 00:00:00 +0000 
+-- Install server to: /opt/tortoise
+-- 
+-- Use PCH               : Yes
+-- PGO profile           : Disabled
+-- Memory allocation     : std::malloc 
+-- Detected compiler     : GNU
+-- Build type            : Release
+-- Use anticheat         : No  (default)
+-- Build scripts         : Yes (default)
+-- Build modules         : disabled
+--   TortoiseBots: disabled (MODULE_TORTOISEBOTS=default)
+-- Module dynamic linking: Not required
+-- Build Discord Bot     : No (default)
+-- Allow Turtle Addons   : Yes
+-- Debug symbols         : Disabled
+-- Build flags (RELEASE) : -O3 -DNDEBUG  --no-warnings -fexceptions -fnon-call-exceptions -march=native -O3 -pipe 
+-- Build flags (DEBUG)   : -g  --no-warnings -fexceptions -fnon-call-exceptions -march=native -O3 -pipe 
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE  
+-- Configuring done (0.7s)
+-- Generating done (0.2s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    BUILD_PLAYERBOTS
+    MODULE_MOD_DUNGEON_CLEAR
+    MODULE_MOD_PLAYERBOTS
+
+
+-- Build files have been written to: /build
+EXIT=0

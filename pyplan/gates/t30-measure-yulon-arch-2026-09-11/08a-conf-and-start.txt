@@ -1,0 +1,82 @@
+--- the conf files the build installed
+etc/aiplayerbot.conf
+etc/mangosd.conf.dist
+etc/modules/tortoise_bots.conf
+etc/modules/tortoise_bots.conf.dist
+etc/realmd.conf.dist
+--- copying every *.dist to its live name
+etc:
+aiplayerbot.conf
+mangosd.conf
+mangosd.conf.dist
+modules
+realmd.conf
+realmd.conf.dist
+
+etc/modules:
+tortoise_bots.conf
+tortoise_bots.conf.dist
+--- mangosd.conf: the keys catalog.json:1114-1128 writes, plus what this tree needs
+--- mangosd.conf, with the password masked:
+12:DataDir = "/opt/tortoise/data"
+40:LoginDatabase.Info = "t30-db;3306;mangos;<GENERATED-PASSWORD>;tw_logon"
+41:WorldDatabase.Info = "t30-db;3306;mangos;<GENERATED-PASSWORD>;tw_world"
+42:CharacterDatabase.Info = "t30-db;3306;mangos;<GENERATED-PASSWORD>;tw_char"
+43:LogsDatabase.Info = "t30-db;3306;mangos;<GENERATED-PASSWORD>;tw_logs"
+47:Database.AutoUpdate.Enabled = 1
+48:Database.AutoUpdate.Path = "/opt/tortoise/sql/database_updates/"
+49:Database.AutoUpdate.AuthUpdateName = "auth"
+50:Database.AutoUpdate.CharUpdateName = "character"
+51:Database.AutoUpdate.WorldUpdateName = "world"
+56:Database.AutoUpdate.AllowedModules = "all"
+62:Database.AutoUpdate.SortByName = 1
+88:WorldServerPort = 8090
+148:AutoRestart.MaxServerUptime = 0
+604:GameType = 0
+707:AutoHonorRestart = 0
+888:GM.JoinOppositeFactionChannels = 0
+1577:GM.LoginState = 0
+1581:GM.Visible = 0
+1585:GM.AcceptTickets = 1
+1589:GM.Chat = 1
+1593:GM.WhisperingTo = 1
+1597:GM.InGMList.Level = 3
+1601:GM.InWhoList.Level = 3
+1605:GM.LogTrade = 1
+1609:GM.StartLevel = 1
+1613:GM.LowerSecurity = 1
+1617:GM.CreditOnDie = 1
+1621:GM.AllowTrades = 1
+1625:GM.AllowPublicChannels = 1
+1629:GM.StartOnGMIsland = 1
+1999:Console.Enable = 1
+--- aiplayerbot.conf: the three keys catalog.json:1107-1110 writes, as far as this tree still has them
+12:AiPlayerbot.Enabled = 1
+22:AiPlayerbot.RandomBotAutologin = 1
+25:AiPlayerbot.RandomBotLoginAtStartup = 1
+46:AiPlayerbot.MinRandomBots = 5
+47:AiPlayerbot.MaxRandomBots = 5
+48:AiPlayerbot.RandomBotMaxLevel = 60
+53:AiPlayerbot.RandomBotAccountPrefix = RNDBOT
+89:AiPlayerbot.RandomBotAutoCreate = 1
+280:AiPlayerbot.RandomBotShowHelmet = 1
+281:AiPlayerbot.RandomBotShowCloak = 1
+326:AiPlayerbot.RandomBotQuestIds = 7848,3802,5505,6502,7761,9378
+471:AiPlayerbot.RandomBotSayWithoutMaster = 1
+1211:AiPlayerbot.RandomBotCombatStrategies = +dps,+dps assist,-threat
+1212:AiPlayerbot.RandomBotNonCombatStrategies = +grind,+loot,+custom::say,+tfish,+wander,+rpg craft
+1243:AiPlayerbot.RandomBotUpdateInterval = 500
+1244:AiPlayerbot.RandomBotsMaxLoginsPerInterval = 30
+--- module conf
+total 8
+-rw-r--r-- 1 pk pk 2075 Sep 11 10:26 tortoise_bots.conf
+-rw-r--r-- 1 pk pk 2075 Sep 11 09:36 tortoise_bots.conf.dist
+--- client data offered read-only from the old fork's extraction
+3.6G	/home/pk/tortoise-vm/data
+Buildings
+dbc
+maps
+mmaps
+vmaps
+--- starting the world (one run)
+world started at 2026-09-11T10:26:01+00:00

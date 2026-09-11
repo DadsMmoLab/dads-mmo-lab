@@ -1,0 +1,17 @@
+2026-09-11T09:56:13+00:00
+# T30 Half 1 capture 07 — database bring-up for the world run
+--- starting t30-db (mariadb:10.6)
+VERSION()
+10.6.28-MariaDB-ubu2204
+--- importing sql/create_databases.sql
+--- importing sql/base/*.sql into tw_world (190 files)
+--- app user and grants (password read from the environment inside the container)
+--- realm row
+--- table counts after base import
+table_schema	tables
+tw_char	93
+tw_logon	41
+tw_logs	1
+tw_world	283
+EXIT=0
+2026-09-11T09:58:21+00:00

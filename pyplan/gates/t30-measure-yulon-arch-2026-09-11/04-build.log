@@ -1,0 +1,799 @@
+# T30 Half 1 capture 04 - the build log of t30/tortoise-core.
+# 1228 `Building CXX object ...` progress lines are removed; everything else
+# the build printed is here, in order, including the full cmake configure output,
+# every link line, `make install`, the runtime stage and the exit line.
+2026-09-11T09:50:41+00:00
+# host: ; build of t30/tortoise-core from docker/Dockerfile.build, make -j4
+# free -m BEFORE:
+               total        used        free      shared  buff/cache   available
+Mem:           19990        1043       15698          20        3656       18946
+Swap:            511           0         511
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.build
+#1 DONE 0.0s
+
+#1 [internal] load build definition from Dockerfile.build
+#1 transferring dockerfile: 1.72kB done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for docker.io/t30/base:latest
+#2 DONE 0.1s
+
+#3 [internal] load metadata for docker.io/library/ubuntu:24.04
+#3 DONE 1.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.1s
+
+#5 [internal] load build context
+#5 DONE 0.0s
+
+#6 [stage-1 1/5] FROM docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+#6 resolve docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 0.1s done
+#6 DONE 0.1s
+
+#7 [builder 1/6] FROM docker.io/t30/base:latest@sha256:137fb3345366b2081dea5664d749f5306024f4fe4dd6b5fd262a7f6cfce08b1d
+#7 resolve docker.io/t30/base:latest@sha256:137fb3345366b2081dea5664d749f5306024f4fe4dd6b5fd262a7f6cfce08b1d
+#7 ...
+
+#6 [stage-1 1/5] FROM docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+#6 CACHED
+
+#7 [builder 1/6] FROM docker.io/t30/base:latest@sha256:137fb3345366b2081dea5664d749f5306024f4fe4dd6b5fd262a7f6cfce08b1d
+#7 resolve docker.io/t30/base:latest@sha256:137fb3345366b2081dea5664d749f5306024f4fe4dd6b5fd262a7f6cfce08b1d 0.1s done
+#7 DONE 0.3s
+
+#5 [internal] load build context
+#5 transferring context: 494.91MB 4.0s done
+#5 DONE 4.2s
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 ...
+
+#9 [builder 2/6] COPY src/tortoise-wow /src
+#9 DONE 2.3s
+
+#10 [builder 3/6] WORKDIR /src/_build
+#10 DONE 0.4s
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 ...
+
+#11 [builder 4/6] RUN cmake ..         -DCMAKE_INSTALL_PREFIX=/opt/tortoise         -DMODULES=static -DMODULE_TORTOISEBOTS=static         -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON         -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON
+#11 0.594 -- The C compiler identification is GNU 13.3.0
+#11 0.674 -- The CXX compiler identification is GNU 13.3.0
+#11 0.695 -- Detecting C compiler ABI info
+#11 0.814 -- Detecting C compiler ABI info - done
+#11 0.831 -- Check for working C compiler: /usr/bin/cc - skipped
+#11 0.832 -- Detecting C compile features
+#11 0.833 -- Detecting C compile features - done
+#11 0.845 -- Detecting CXX compiler ABI info
+#11 0.982 -- Detecting CXX compiler ABI info - done
+#11 0.999 -- Check for working CXX compiler: /usr/bin/c++ - skipped
+#11 0.999 -- Detecting CXX compile features
+#11 1.000 -- Detecting CXX compile features - done
+#11 1.012 -- Detected 64-bit platform.
+#11 1.014 -- Found Git: /usr/bin/git  
+#11 1.014 -- 
+#11 1.014 This script builds the MaNGOS server.
+#11 1.014   Options that can be used in order to configure the process:
+#11 1.014     PREFIX: Path where the server should be installed to
+#11 1.014     USE_PCH: Use precompiled headers
+#11 1.014   To set an option simply type -D<OPTION>=<VALUE> after 'cmake <srcs>'.
+#11 1.014   For example: cmake .. -DPREFIX=/opt/mangos
+#11 1.014 
+#11 1.018 -- Found ACE library: /usr/lib/x86_64-linux-gnu/libACE.so
+#11 1.018 -- Found ACE headers: /usr/include
+#11 1.018 -- Using mysql-config: /usr/bin/mysql_config
+#11 1.037 -- Found MySQL library: /usr/lib/x86_64-linux-gnu/libmysqlclient.so
+#11 1.037 -- Found MySQL headers: /usr/include/mysql
+#11 1.039 -- Found OpenSSL library: /usr/lib/x86_64-linux-gnu/libssl.so
+#11 1.039 -- Found OpenSSL headers: /usr/include/openssl
+#11 1.048 -- Found ZLIB: /usr/lib/x86_64-linux-gnu/libz.so (found version "1.3")  
+#11 1.059 -- 
+#11 1.059 -- Core revision: 9980181ce9aa5940b612 2026-09-10 15:03:52 -0700 
+#11 1.059 -- Install server to: /opt/tortoise
+#11 1.059 -- 
+#11 1.059 -- Use PCH               : Yes
+#11 1.059 -- PGO profile           : Disabled
+#11 1.059 -- Memory allocation     : std::malloc 
+#11 1.059 -- Detected compiler     : GNU
+#11 1.059 -- Build type            : Release
+#11 1.059 -- Use anticheat         : No  (default)
+#11 1.059 -- Build scripts         : Yes (default)
+#11 1.059 -- Build modules         : static
+#11 1.060 --   TortoiseBots: static (MODULE_TORTOISEBOTS=static)
+#11 1.060 -- Module dynamic linking: Not required
+#11 1.060 -- Build Discord Bot     : No (default)
+#11 1.060 -- Allow Turtle Addons   : Yes
+#11 1.060 -- Debug symbols         : Disabled
+#11 1.060 -- Build flags (RELEASE) : -O3 -DNDEBUG  --no-warnings -fexceptions -fnon-call-exceptions -march=native -O3 -pipe 
+#11 1.060 -- Build flags (DEBUG)   : -g  --no-warnings -fexceptions -fnon-call-exceptions -march=native -O3 -pipe 
+#11 1.064 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+#11 1.183 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+#11 1.184 -- Found Threads: TRUE  
+#11 1.357 -- TortoiseBots source: /src/modules/TortoiseBots commit fd7ec9ec7659035cfc3ea75d542c8683005525de (clean)
+#11 1.426 -- Configuring done (0.9s)
+#11 1.797 -- Generating done (0.3s)
+#11 1.806 -- Build files have been written to: /src/_build
+#11 DONE 2.0s
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 4.851 [  1%] Linking CXX static library libframework.a
+#12 4.898 [  1%] Built target framework
+#12 5.385 [  1%] Linking CXX static library libDetour.a
+#12 5.435 [  1%] Built target Detour
+#12 20.12 [  5%] Linking CXX static library libre2.a
+#12 20.19 [  5%] Built target re2
+#12 23.23 [  5%] Linking C static library liblibmpq.a
+#12 23.28 [  5%] Built target libmpq
+#12 24.23 [  6%] Linking CXX static library liblibdeflate.a
+#12 24.28 [  6%] Built target libdeflate
+#12 29.26 [  8%] Linking C static library libbz2.a
+#12 29.31 [  8%] Built target bz2
+#12 29.60 [  8%] Linking CXX static library libRecast.a
+#12 29.65 [  8%] Built target Recast
+#12 36.23 [  8%] Linking CXX static library libg3dlite.a
+#12 36.32 [  8%] Built target g3dlite
+#12 39.56 [  9%] Linking CXX executable mapextractor
+#12 39.66 [  9%] Built target mapextractor
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 49.94 Get:1 http://archive.ubuntu.com/ubuntu noble InRelease [256 kB]
+#8 50.25 Get:2 http://archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+#8 50.32 Get:3 http://archive.ubuntu.com/ubuntu noble-backports InRelease [126 kB]
+#8 50.39 Get:4 http://archive.ubuntu.com/ubuntu noble/main amd64 Packages [1808 kB]
+#8 50.61 Get:5 http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages [19.3 MB]
+#8 51.56 Get:6 http://archive.ubuntu.com/ubuntu noble/multiverse amd64 Packages [331 kB]
+#8 51.62 Get:7 http://archive.ubuntu.com/ubuntu noble/restricted amd64 Packages [117 kB]
+#8 51.68 Get:8 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages [1564 kB]
+#8 51.80 Get:9 http://archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Packages [55.8 kB]
+#8 51.85 Get:10 http://archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Packages [1908 kB]
+#8 51.99 Get:11 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages [2151 kB]
+#8 52.14 Get:12 http://archive.ubuntu.com/ubuntu noble-backports/main amd64 Packages [48.9 kB]
+#8 52.20 Get:13 http://archive.ubuntu.com/ubuntu noble-backports/universe amd64 Packages [35.9 kB]
+#8 52.25 Get:14 http://archive.ubuntu.com/ubuntu noble-backports/multiverse amd64 Packages [671 B]
+#8 52.77 Get:15 http://security.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+#8 56.86 Get:16 http://security.ubuntu.com/ubuntu noble-security/restricted amd64 Packages [1796 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 49.05 [ 11%] Linking CXX static library libvmap.a
+#12 49.10 [ 11%] Built target vmap
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 61.30 Get:17 http://security.ubuntu.com/ubuntu noble-security/multiverse amd64 Packages [50.0 kB]
+#8 62.32 Get:18 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages [1242 kB]
+#8 65.08 Get:19 http://security.ubuntu.com/ubuntu noble-security/universe amd64 Packages [1530 kB]
+#8 68.18 Fetched 32.6 MB in 1min 8s (481 kB/s)
+#8 68.18 Reading package lists...
+#8 69.51 Reading package lists...
+#8 70.82 Building dependency tree...
+#8 71.07 Reading state information...
+#8 71.33 The following additional packages will be installed:
+#8 71.33   gcc-13-base libace-7.1.2t64 libasan8 libatomic1 libboost-atomic1.83-dev
+#8 71.33   libboost-atomic1.83.0 libboost-chrono1.83-dev libboost-chrono1.83.0t64
+#8 71.33   libboost-date-time1.83-dev libboost-date-time1.83.0
+#8 71.33   libboost-filesystem1.83-dev libboost-filesystem1.83.0
+#8 71.33   libboost-serialization1.83-dev libboost-serialization1.83.0
+#8 71.33   libboost-system1.83-dev libboost-system1.83.0 libboost-thread1.83-dev
+#8 71.33   libboost-thread1.83.0 libboost1.83-dev libbsd0 libc-bin libc-dev-bin libc6
+#8 71.33   libc6-dev libconfig-inifiles-perl libcrypt-dev libedit2 libgcc-13-dev
+#8 71.33   libgdbm-compat4t64 libgdbm6t64 libgomp1 libhwasan0 libitm1 liblsan0
+#8 71.33   libmariadb3 libmysqlclient21 libncurses6 libperl5.38t64 libquadmath0
+#8 71.33   libstdc++-13-dev libtsan2 libubsan1 libzstd-dev linux-libc-dev
+#8 71.33   mariadb-client-core mariadb-common mysql-common openssl perl
+#8 71.33   perl-modules-5.38 rpcsvc-proto
+#8 71.33 Suggested packages:
+#8 71.33   libace-doc pkg-config libboost1.83-doc libboost-container1.83-dev
+#8 71.33   libboost-context1.83-dev libboost-contract1.83-dev
+#8 71.33   libboost-coroutine1.83-dev libboost-exception1.83-dev libboost-fiber1.83-dev
+#8 71.33   libboost-graph-parallel1.83-dev libboost-graph1.83-dev
+#8 71.33   libboost-iostreams1.83-dev libboost-json1.83-dev libboost-locale1.83-dev
+#8 71.33   libboost-log1.83-dev libboost-math1.83-dev libboost-mpi-python1.83-dev
+#8 71.33   libboost-mpi1.83-dev libboost-nowide1.83-dev libboost-numpy1.83-dev
+#8 71.33   libboost-program-options1.83-dev libboost-python1.83-dev
+#8 71.33   libboost-random1.83-dev libboost-regex1.83-dev libboost-stacktrace1.83-dev
+#8 71.33   libboost-test1.83-dev libboost-timer1.83-dev libboost-type-erasure1.83-dev
+#8 71.33   libboost-url1.83-dev libboost-wave1.83-dev libboost1.83-tools-dev
+#8 71.33   libmpfrc++-dev libntl-dev manpages glibc-doc locales libnss-nis
+#8 71.33   libnss-nisplus manpages-dev gdbm-l10n libssl-doc libstdc++-13-doc perl-doc
+#8 71.33   libterm-readline-gnu-perl | libterm-readline-perl-perl make
+#8 71.33   libtap-harness-archive-perl
+#8 71.33 Recommended packages:
+#8 71.33   bzip2-doc manpages manpages-dev libc-devtools libgpm2 libdbd-mariadb-perl
+#8 71.33   | libdbd-mysql-perl libdbi-perl libterm-readkey-perl netbase
+#8 71.49 The following NEW packages will be installed:
+#8 71.49   ca-certificates default-libmysqlclient-dev gcc-13-base gosu libace-7.1.2t64
+#8 71.49   libace-dev libasan8 libatomic1 libboost-atomic1.83-dev libboost-atomic1.83.0
+#8 71.49   libboost-chrono1.83-dev libboost-chrono1.83.0t64 libboost-date-time1.83-dev
+#8 71.49   libboost-date-time1.83.0 libboost-filesystem-dev libboost-filesystem1.83-dev
+#8 71.49   libboost-filesystem1.83.0 libboost-serialization1.83-dev
+#8 71.49   libboost-serialization1.83.0 libboost-system-dev libboost-system1.83-dev
+#8 71.49   libboost-system1.83.0 libboost-thread-dev libboost-thread1.83-dev
+#8 71.49   libboost-thread1.83.0 libboost1.83-dev libbsd0 libbz2-dev libc-dev-bin
+#8 71.49   libc6-dev libconfig-inifiles-perl libcrypt-dev libedit2 libgcc-13-dev
+#8 71.49   libgdbm-compat4t64 libgdbm6t64 libgomp1 libhwasan0 libitm1 liblsan0
+#8 71.49   libmariadb3 libmysqlclient-dev libmysqlclient21 libncurses6 libperl5.38t64
+#8 71.49   libquadmath0 libssl-dev libstdc++-13-dev libtsan2 libubsan1 libzstd-dev
+#8 71.49   linux-libc-dev mariadb-client mariadb-client-core mariadb-common
+#8 71.49   mysql-common openssl perl perl-modules-5.38 rpcsvc-proto zlib1g-dev
+#8 71.49 The following packages will be upgraded:
+#8 71.49   libc-bin libc6
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 54.85 [ 12%] Linking CXX executable vmapextractor
+#12 54.96 [ 12%] Built target vmapextractor
+#12 71.73 [ 12%] Linking CXX static library libshared.a
+#12 71.83 [ 12%] Built target shared
+#12 73.16 [ 12%] Linking CXX executable vmap_assembler
+#12 73.33 [ 12%] Built target vmap_assembler
+#12 81.50 [ 13%] Linking CXX executable MoveMapGen
+#12 81.68 [ 13%] Built target MoveMapGen
+#12 83.56 [ 13%] Linking CXX executable realmd
+#12 83.75 [ 13%] Built target realmd
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 94.95 2 upgraded, 61 newly installed, 0 to remove and 1 not upgraded.
+#8 94.95 Need to get 60.2 MB of archives.
+#8 94.95 After this operation, 468 MB of additional disk space will be used.
+#8 94.95 Get:1 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc6 amd64 2.39-0ubuntu8.9 [3264 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 104.3 Get:2 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc-bin amd64 2.39-0ubuntu8.9 [682 kB]
+#8 104.8 Get:3 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 perl-modules-5.38 all 5.38.2-3.2ubuntu0.4 [3110 kB]
+#8 108.2 Get:4 http://archive.ubuntu.com/ubuntu noble/main amd64 libgdbm6t64 amd64 1.23-5.1build1 [34.4 kB]
+#8 108.2 Get:5 http://archive.ubuntu.com/ubuntu noble/main amd64 libgdbm-compat4t64 amd64 1.23-5.1build1 [6710 B]
+#8 108.2 Get:6 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libperl5.38t64 amd64 5.38.2-3.2ubuntu0.4 [4870 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 114.6 Get:7 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 perl amd64 5.38.2-3.2ubuntu0.4 [231 kB]
+#8 115.0 Get:8 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 openssl amd64 3.0.13-0ubuntu3.15 [1003 kB]
+#8 116.3 Get:9 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 ca-certificates all 20260601~24.04.1 [139 kB]
+#8 116.4 Get:10 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libbsd0 amd64 0.12.1-1build1.1 [41.2 kB]
+#8 116.4 Get:11 http://archive.ubuntu.com/ubuntu noble/main amd64 libedit2 amd64 3.1-20230828-1build1 [97.6 kB]
+#8 116.5 Get:12 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libncurses6 amd64 6.4+20240113-1ubuntu2.2 [112 kB]
+#8 116.6 Get:13 http://archive.ubuntu.com/ubuntu noble/main amd64 mysql-common all 5.8+1.1.0build1 [6746 B]
+#8 116.6 Get:14 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libmysqlclient21 amd64 8.0.46-0ubuntu0.24.04.4 [1255 kB]
+#8 118.8 Get:15 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libssl-dev amd64 3.0.13-0ubuntu3.15 [2408 kB]
+#8 122.4 Get:16 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libzstd-dev amd64 1.5.5+dfsg2-2build1.1 [364 kB]
+#8 123.1 Get:17 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc-dev-bin amd64 2.39-0ubuntu8.9 [20.4 kB]
+#8 123.2 Get:18 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 linux-libc-dev amd64 6.8.0-139.139 [1527 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 126.1 Get:19 http://archive.ubuntu.com/ubuntu noble/main amd64 libcrypt-dev amd64 1:4.4.36-4build1 [112 kB]
+#8 126.4 Get:20 http://archive.ubuntu.com/ubuntu noble/main amd64 rpcsvc-proto amd64 1.4.2-0ubuntu7 [67.4 kB]
+#8 126.5 Get:21 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libc6-dev amd64 2.39-0ubuntu8.9 [2126 kB]
+#8 131.9 Get:22 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 zlib1g-dev amd64 1:1.3.dfsg-3.1ubuntu2.2 [894 kB]
+#8 134.4 Get:23 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libmysqlclient-dev amd64 8.0.46-0ubuntu0.24.04.4 [1591 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 140.7 Get:24 http://archive.ubuntu.com/ubuntu noble/main amd64 default-libmysqlclient-dev amd64 1.1.0build1 [3132 B]
+#8 140.8 Get:25 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 gcc-13-base amd64 13.3.0-6ubuntu2~24.04.1 [51.6 kB]
+#8 141.0 Get:26 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libace-7.1.2t64 amd64 7.1.2+dfsg-2.1ubuntu0.1 [652 kB]
+#8 143.7 Get:27 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libace-dev amd64 7.1.2+dfsg-2.1ubuntu0.1 [848 kB]
+#8 148.4 Get:28 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libasan8 amd64 14.2.0-4ubuntu2~24.04.1 [3027 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 174.2 Get:29 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libatomic1 amd64 14.2.0-4ubuntu2~24.04.1 [10.5 kB]
+#8 174.3 Get:30 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libgomp1 amd64 14.2.0-4ubuntu2~24.04.1 [148 kB]
+#8 176.3 Get:31 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libitm1 amd64 14.2.0-4ubuntu2~24.04.1 [29.7 kB]
+#8 176.7 Get:32 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 liblsan0 amd64 14.2.0-4ubuntu2~24.04.1 [1322 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 202.6 Get:33 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libtsan2 amd64 14.2.0-4ubuntu2~24.04.1 [2772 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 324.6 Get:34 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libubsan1 amd64 14.2.0-4ubuntu2~24.04.1 [1184 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 395.3 Get:35 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libhwasan0 amd64 14.2.0-4ubuntu2~24.04.1 [1641 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 388.4 [ 30%] Linking CXX static library libgame.a
+#12 388.9 [ 30%] Built target game
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 494.8 Get:36 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libquadmath0 amd64 14.2.0-4ubuntu2~24.04.1 [153 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 504.1 Get:37 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libgcc-13-dev amd64 13.3.0-6ubuntu2~24.04.1 [2681 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 664.0 Get:38 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libstdc++-13-dev amd64 13.3.0-6ubuntu2~24.04.1 [2420 kB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 ...
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 811.7 Get:39 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost1.83-dev amd64 1.83.0-2.1ubuntu3.2 [10.7 MB]
+#8 ...
+
+#12 [builder 5/6] RUN make -j4 && make install
+#12 981.3 [ 75%] Linking CXX static library libscripts.a
+#12 981.9 [ 75%] Built target scripts
+#12 1419.1 [ 99%] Linking CXX static library libmodules.a
+#12 1420.5 [ 99%] Built target modules
+#12 1444.3 [100%] Linking CXX executable mangosd
+#12 1447.7 [100%] Built target mangosd
+#12 1447.9 [  2%] Built target re2
+#12 1448.0 [  4%] Built target shared
+#12 1448.1 [  5%] Built target framework
+#12 1448.1 [  5%] Built target realmd
+#12 1448.1 [  5%] Built target Detour
+#12 1448.3 [ 22%] Built target game
+#12 1449.1 [ 63%] Built target modules
+#12 1449.2 [ 91%] Built target scripts
+#12 1449.3 [ 94%] Built target g3dlite
+#12 1449.4 [ 95%] Built target libdeflate
+#12 1449.4 [ 96%] Built target mangosd
+#12 1449.5 [ 97%] Built target Recast
+#12 1449.5 [ 97%] Built target libmpq
+#12 1449.5 [ 97%] Built target bz2
+#12 1449.6 [ 97%] Built target mapextractor
+#12 1449.6 [ 98%] Built target vmap
+#12 1449.7 [ 98%] Built target vmap_assembler
+#12 1449.7 [ 99%] Built target vmapextractor
+#12 1449.8 [100%] Built target MoveMapGen
+#12 1449.8 Install the project...
+#12 1449.8 -- Install configuration: "Release"
+#12 1449.8 -- Installing: /opt/tortoise/bin/realmd
+#12 1449.8 -- Installing: /opt/tortoise/etc/realmd.conf.dist
+#12 1449.8 -- Installing: /opt/tortoise/bin/mangosd
+#12 1449.9 -- Installing: /opt/tortoise/bin/run-mangosd
+#12 1449.9 -- Installing: /opt/tortoise/etc/mangosd.conf.dist
+#12 1450.0 -- Installing: /opt/tortoise/etc/aiplayerbot.conf
+#12 1450.0 -- Installing: /opt/tortoise/etc/modules/tortoise_bots.conf
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/world
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/world/20260824090000_world.sql
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/world/20260824090002_world.sql
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/world/20260824090003_world.sql
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/character
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/character/20260824090001_char.sql
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/character/20260824090002_char.sql
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/character/20260824090003_char.sql
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/character/20260902090000_char.sql
+#12 1450.0 -- Installing: /opt/tortoise/modules/TortoiseBots/data/sql/character/20260906090000_char.sql
+#12 1450.0 -- Installing: /opt/tortoise/etc/modules/tortoise_bots.conf.dist
+#12 1450.0 -- Installing: /opt/tortoise/bin/mapextractor
+#12 1450.0 -- Installing: /opt/tortoise/bin/vmap_assembler
+#12 1450.0 -- Installing: /opt/tortoise/bin/vmapextractor
+#12 1450.0 -- Installing: /opt/tortoise/bin/MoveMapGen
+#12 DONE 1450.2s
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 ...
+
+#13 [builder 6/6] RUN mkdir -p /opt/tortoise/sql && cp -r /src/sql/. /opt/tortoise/sql/
+#13 DONE 0.5s
+
+#8 [stage-1 2/5] RUN apt-get update && apt-get install -y --no-install-recommends     libace-dev default-libmysqlclient-dev libmysqlclient-dev     libssl-dev zlib1g-dev libbz2-dev     libboost-thread-dev libboost-filesystem-dev libboost-system-dev     mariadb-client gosu ca-certificates     && rm -rf /var/lib/apt/lists/*
+#8 1475.2 Get:40 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-atomic1.83.0 amd64 1.83.0-2.1ubuntu3.2 [240 kB]
+#8 1488.9 Get:41 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-atomic1.83-dev amd64 1.83.0-2.1ubuntu3.2 [235 kB]
+#8 1501.8 Get:42 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-chrono1.83.0t64 amd64 1.83.0-2.1ubuntu3.2 [245 kB]
+#8 1515.4 Get:43 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-chrono1.83-dev amd64 1.83.0-2.1ubuntu3.2 [246 kB]
+#8 1529.1 Get:44 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-date-time1.83.0 amd64 1.83.0-2.1ubuntu3.2 [236 kB]
+#8 1541.5 Get:45 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-serialization1.83.0 amd64 1.83.0-2.1ubuntu3.2 [341 kB]
+#8 1560.6 Get:46 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-serialization1.83-dev amd64 1.83.0-2.1ubuntu3.2 [387 kB]
+#8 1584.8 Get:47 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-date-time1.83-dev amd64 1.83.0-2.1ubuntu3.2 [239 kB]
+#8 1599.5 Get:48 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-filesystem1.83.0 amd64 1.83.0-2.1ubuntu3.2 [284 kB]
+#8 1617.3 Get:49 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-system1.83.0 amd64 1.83.0-2.1ubuntu3.2 [236 kB]
+#8 1632.1 Get:50 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-system1.83-dev amd64 1.83.0-2.1ubuntu3.2 [231 kB]
+#8 1647.3 Get:51 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libboost-filesystem1.83-dev amd64 1.83.0-2.1ubuntu3.2 [301 kB]
+#8 1665.4 Get:52 http://archive.ubuntu.com/ubuntu noble/universe amd64 libboost-filesystem-dev amd64 1.83.0.1ubuntu2 [4096 B]
+#8 1665.6 Get:53 http://archive.ubuntu.com/ubuntu noble/universe amd64 libboost-system-dev amd64 1.83.0.1ubuntu2 [4206 B]
+#8 1665.9 Get:54 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-thread1.83.0 amd64 1.83.0-2.1ubuntu3.2 [276 kB]
+#8 1682.6 Get:55 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libboost-thread1.83-dev amd64 1.83.0-2.1ubuntu3.2 [282 kB]
+#8 1699.4 Get:56 http://archive.ubuntu.com/ubuntu noble/main amd64 libboost-thread-dev amd64 1.83.0.1ubuntu2 [4088 B]
+#8 1699.7 Get:57 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libbz2-dev amd64 1.0.8-5.1ubuntu0.1 [33.6 kB]
+#8 1701.8 Get:58 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 mariadb-common all 1:10.11.14-0ubuntu0.24.04.1 [28.6 kB]
+#8 1703.8 Get:59 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 libmariadb3 amd64 1:10.11.14-0ubuntu0.24.04.1 [196 kB]
+#8 1716.8 Get:60 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libconfig-inifiles-perl all 3.000003-2ubuntu0.1 [38.5 kB]
+#8 1719.1 Get:61 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 mariadb-client-core amd64 1:10.11.14-0ubuntu0.24.04.1 [1039 kB]
+#8 1778.6 Get:62 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 mariadb-client amd64 1:10.11.14-0ubuntu0.24.04.1 [2502 kB]
+#8 1926.6 Get:63 http://archive.ubuntu.com/ubuntu noble-updates/universe amd64 gosu amd64 1.17-1ubuntu0.24.04.3 [921 kB]
+#8 1982.9 debconf: delaying package configuration, since apt-utils is not installed
+#8 1982.9 Fetched 60.2 MB in 31min 51s (31.5 kB/s)
+#8 1983.0 (Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 4381 files and directories currently installed.)
+#8 1983.0 Preparing to unpack .../libc6_2.39-0ubuntu8.9_amd64.deb ...
+#8 1983.1 Unpacking libc6:amd64 (2.39-0ubuntu8.9) over (2.39-0ubuntu8.8) ...
+#8 1983.6 Setting up libc6:amd64 (2.39-0ubuntu8.9) ...
+#8 1984.8 (Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 4381 files and directories currently installed.)
+#8 1984.8 Preparing to unpack .../libc-bin_2.39-0ubuntu8.9_amd64.deb ...
+#8 1984.8 Unpacking libc-bin (2.39-0ubuntu8.9) over (2.39-0ubuntu8.8) ...
+#8 1984.9 Setting up libc-bin (2.39-0ubuntu8.9) ...
+#8 1985.1 Selecting previously unselected package perl-modules-5.38.
+#8 1985.1 (Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 4381 files and directories currently installed.)
+#8 1985.1 Preparing to unpack .../00-perl-modules-5.38_5.38.2-3.2ubuntu0.4_all.deb ...
+#8 1985.1 Unpacking perl-modules-5.38 (5.38.2-3.2ubuntu0.4) ...
+#8 1985.6 Selecting previously unselected package libgdbm6t64:amd64.
+#8 1985.6 Preparing to unpack .../01-libgdbm6t64_1.23-5.1build1_amd64.deb ...
+#8 1985.6 Unpacking libgdbm6t64:amd64 (1.23-5.1build1) ...
+#8 1985.7 Selecting previously unselected package libgdbm-compat4t64:amd64.
+#8 1985.7 Preparing to unpack .../02-libgdbm-compat4t64_1.23-5.1build1_amd64.deb ...
+#8 1985.7 Unpacking libgdbm-compat4t64:amd64 (1.23-5.1build1) ...
+#8 1985.8 Selecting previously unselected package libperl5.38t64:amd64.
+#8 1985.8 Preparing to unpack .../03-libperl5.38t64_5.38.2-3.2ubuntu0.4_amd64.deb ...
+#8 1985.8 Unpacking libperl5.38t64:amd64 (5.38.2-3.2ubuntu0.4) ...
+#8 1986.1 Selecting previously unselected package perl.
+#8 1986.1 Preparing to unpack .../04-perl_5.38.2-3.2ubuntu0.4_amd64.deb ...
+#8 1986.1 Unpacking perl (5.38.2-3.2ubuntu0.4) ...
+#8 1986.2 Selecting previously unselected package openssl.
+#8 1986.2 Preparing to unpack .../05-openssl_3.0.13-0ubuntu3.15_amd64.deb ...
+#8 1986.2 Unpacking openssl (3.0.13-0ubuntu3.15) ...
+#8 1986.5 Selecting previously unselected package ca-certificates.
+#8 1986.5 Preparing to unpack .../06-ca-certificates_20260601~24.04.1_all.deb ...
+#8 1986.5 Unpacking ca-certificates (20260601~24.04.1) ...
+#8 1986.7 Selecting previously unselected package libbsd0:amd64.
+#8 1986.7 Preparing to unpack .../07-libbsd0_0.12.1-1build1.1_amd64.deb ...
+#8 1986.7 Unpacking libbsd0:amd64 (0.12.1-1build1.1) ...
+#8 1986.8 Selecting previously unselected package libedit2:amd64.
+#8 1986.8 Preparing to unpack .../08-libedit2_3.1-20230828-1build1_amd64.deb ...
+#8 1986.9 Unpacking libedit2:amd64 (3.1-20230828-1build1) ...
+#8 1987.0 Selecting previously unselected package libncurses6:amd64.
+#8 1987.0 Preparing to unpack .../09-libncurses6_6.4+20240113-1ubuntu2.2_amd64.deb ...
+#8 1987.0 Unpacking libncurses6:amd64 (6.4+20240113-1ubuntu2.2) ...
+#8 1987.1 Selecting previously unselected package mysql-common.
+#8 1987.2 Preparing to unpack .../10-mysql-common_5.8+1.1.0build1_all.deb ...
+#8 1987.2 Unpacking mysql-common (5.8+1.1.0build1) ...
+#8 1987.3 Selecting previously unselected package libmysqlclient21:amd64.
+#8 1987.3 Preparing to unpack .../11-libmysqlclient21_8.0.46-0ubuntu0.24.04.4_amd64.deb ...
+#8 1987.3 Unpacking libmysqlclient21:amd64 (8.0.46-0ubuntu0.24.04.4) ...
+#8 1987.5 Selecting previously unselected package libssl-dev:amd64.
+#8 1987.5 Preparing to unpack .../12-libssl-dev_3.0.13-0ubuntu3.15_amd64.deb ...
+#8 1987.5 Unpacking libssl-dev:amd64 (3.0.13-0ubuntu3.15) ...
+#8 1987.7 Selecting previously unselected package libzstd-dev:amd64.
+#8 1987.7 Preparing to unpack .../13-libzstd-dev_1.5.5+dfsg2-2build1.1_amd64.deb ...
+#8 1987.7 Unpacking libzstd-dev:amd64 (1.5.5+dfsg2-2build1.1) ...
+#8 1987.8 Selecting previously unselected package libc-dev-bin.
+#8 1987.8 Preparing to unpack .../14-libc-dev-bin_2.39-0ubuntu8.9_amd64.deb ...
+#8 1987.8 Unpacking libc-dev-bin (2.39-0ubuntu8.9) ...
+#8 1987.8 Selecting previously unselected package linux-libc-dev:amd64.
+#8 1987.8 Preparing to unpack .../15-linux-libc-dev_6.8.0-139.139_amd64.deb ...
+#8 1987.9 Unpacking linux-libc-dev:amd64 (6.8.0-139.139) ...
+#8 1988.2 Selecting previously unselected package libcrypt-dev:amd64.
+#8 1988.2 Preparing to unpack .../16-libcrypt-dev_1%3a4.4.36-4build1_amd64.deb ...
+#8 1988.3 Unpacking libcrypt-dev:amd64 (1:4.4.36-4build1) ...
+#8 1988.3 Selecting previously unselected package rpcsvc-proto.
+#8 1988.3 Preparing to unpack .../17-rpcsvc-proto_1.4.2-0ubuntu7_amd64.deb ...
+#8 1988.3 Unpacking rpcsvc-proto (1.4.2-0ubuntu7) ...
+#8 1988.4 Selecting previously unselected package libc6-dev:amd64.
+#8 1988.4 Preparing to unpack .../18-libc6-dev_2.39-0ubuntu8.9_amd64.deb ...
+#8 1988.4 Unpacking libc6-dev:amd64 (2.39-0ubuntu8.9) ...
+#8 1988.7 Selecting previously unselected package zlib1g-dev:amd64.
+#8 1988.7 Preparing to unpack .../19-zlib1g-dev_1%3a1.3.dfsg-3.1ubuntu2.2_amd64.deb ...
+#8 1988.7 Unpacking zlib1g-dev:amd64 (1:1.3.dfsg-3.1ubuntu2.2) ...
+#8 1988.7 Selecting previously unselected package libmysqlclient-dev.
+#8 1988.7 Preparing to unpack .../20-libmysqlclient-dev_8.0.46-0ubuntu0.24.04.4_amd64.deb ...
+#8 1988.7 Unpacking libmysqlclient-dev (8.0.46-0ubuntu0.24.04.4) ...
+#8 1988.9 Selecting previously unselected package default-libmysqlclient-dev:amd64.
+#8 1988.9 Preparing to unpack .../21-default-libmysqlclient-dev_1.1.0build1_amd64.deb ...
+#8 1988.9 Unpacking default-libmysqlclient-dev:amd64 (1.1.0build1) ...
+#8 1988.9 Selecting previously unselected package gcc-13-base:amd64.
+#8 1988.9 Preparing to unpack .../22-gcc-13-base_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#8 1988.9 Unpacking gcc-13-base:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#8 1989.0 Selecting previously unselected package libace-7.1.2t64.
+#8 1989.0 Preparing to unpack .../23-libace-7.1.2t64_7.1.2+dfsg-2.1ubuntu0.1_amd64.deb ...
+#8 1989.0 Unpacking libace-7.1.2t64 (7.1.2+dfsg-2.1ubuntu0.1) ...
+#8 1989.1 Selecting previously unselected package libace-dev.
+#8 1989.1 Preparing to unpack .../24-libace-dev_7.1.2+dfsg-2.1ubuntu0.1_amd64.deb ...
+#8 1989.1 Unpacking libace-dev (7.1.2+dfsg-2.1ubuntu0.1) ...
+#8 1989.5 Selecting previously unselected package libasan8:amd64.
+#8 1989.5 Preparing to unpack .../25-libasan8_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#8 1989.5 Unpacking libasan8:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1989.7 Selecting previously unselected package libatomic1:amd64.
+#8 1989.7 Preparing to unpack .../26-libatomic1_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#8 1989.7 Unpacking libatomic1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1989.7 Selecting previously unselected package libgomp1:amd64.
+#8 1989.7 Preparing to unpack .../27-libgomp1_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#8 1989.8 Unpacking libgomp1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1989.8 Selecting previously unselected package libitm1:amd64.
+#8 1989.8 Preparing to unpack .../28-libitm1_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#8 1989.8 Unpacking libitm1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1989.9 Selecting previously unselected package liblsan0:amd64.
+#8 1989.9 Preparing to unpack .../29-liblsan0_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#8 1989.9 Unpacking liblsan0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1990.0 Selecting previously unselected package libtsan2:amd64.
+#8 1990.0 Preparing to unpack .../30-libtsan2_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#8 1990.0 Unpacking libtsan2:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1990.2 Selecting previously unselected package libubsan1:amd64.
+#8 1990.2 Preparing to unpack .../31-libubsan1_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#8 1990.2 Unpacking libubsan1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1990.3 Selecting previously unselected package libhwasan0:amd64.
+#8 1990.3 Preparing to unpack .../32-libhwasan0_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#8 1990.3 Unpacking libhwasan0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1990.4 Selecting previously unselected package libquadmath0:amd64.
+#8 1990.4 Preparing to unpack .../33-libquadmath0_14.2.0-4ubuntu2~24.04.1_amd64.deb ...
+#8 1990.4 Unpacking libquadmath0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1990.5 Selecting previously unselected package libgcc-13-dev:amd64.
+#8 1990.5 Preparing to unpack .../34-libgcc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#8 1990.5 Unpacking libgcc-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#8 1990.8 Selecting previously unselected package libstdc++-13-dev:amd64.
+#8 1990.8 Preparing to unpack .../35-libstdc++-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb ...
+#8 1990.8 Unpacking libstdc++-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#8 1991.2 Selecting previously unselected package libboost1.83-dev:amd64.
+#8 1991.2 Preparing to unpack .../36-libboost1.83-dev_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1991.2 Unpacking libboost1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.0 Selecting previously unselected package libboost-atomic1.83.0:amd64.
+#8 1996.0 Preparing to unpack .../37-libboost-atomic1.83.0_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.1 Unpacking libboost-atomic1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.1 Selecting previously unselected package libboost-atomic1.83-dev:amd64.
+#8 1996.1 Preparing to unpack .../38-libboost-atomic1.83-dev_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.1 Unpacking libboost-atomic1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.2 Selecting previously unselected package libboost-chrono1.83.0t64:amd64.
+#8 1996.2 Preparing to unpack .../39-libboost-chrono1.83.0t64_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.2 Unpacking libboost-chrono1.83.0t64:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.3 Selecting previously unselected package libboost-chrono1.83-dev:amd64.
+#8 1996.3 Preparing to unpack .../40-libboost-chrono1.83-dev_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.3 Unpacking libboost-chrono1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.4 Selecting previously unselected package libboost-date-time1.83.0:amd64.
+#8 1996.4 Preparing to unpack .../41-libboost-date-time1.83.0_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.4 Unpacking libboost-date-time1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.5 Selecting previously unselected package libboost-serialization1.83.0:amd64.
+#8 1996.5 Preparing to unpack .../42-libboost-serialization1.83.0_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.5 Unpacking libboost-serialization1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.5 Selecting previously unselected package libboost-serialization1.83-dev:amd64.
+#8 1996.6 Preparing to unpack .../43-libboost-serialization1.83-dev_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.6 Unpacking libboost-serialization1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.6 Selecting previously unselected package libboost-date-time1.83-dev:amd64.
+#8 1996.6 Preparing to unpack .../44-libboost-date-time1.83-dev_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.7 Unpacking libboost-date-time1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.7 Selecting previously unselected package libboost-filesystem1.83.0:amd64.
+#8 1996.7 Preparing to unpack .../45-libboost-filesystem1.83.0_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.7 Unpacking libboost-filesystem1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.8 Selecting previously unselected package libboost-system1.83.0:amd64.
+#8 1996.8 Preparing to unpack .../46-libboost-system1.83.0_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.8 Unpacking libboost-system1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1996.9 Selecting previously unselected package libboost-system1.83-dev:amd64.
+#8 1996.9 Preparing to unpack .../47-libboost-system1.83-dev_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1996.9 Unpacking libboost-system1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1997.0 Selecting previously unselected package libboost-filesystem1.83-dev:amd64.
+#8 1997.0 Preparing to unpack .../48-libboost-filesystem1.83-dev_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1997.0 Unpacking libboost-filesystem1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1997.1 Selecting previously unselected package libboost-filesystem-dev:amd64.
+#8 1997.1 Preparing to unpack .../49-libboost-filesystem-dev_1.83.0.1ubuntu2_amd64.deb ...
+#8 1997.1 Unpacking libboost-filesystem-dev:amd64 (1.83.0.1ubuntu2) ...
+#8 1997.1 Selecting previously unselected package libboost-system-dev:amd64.
+#8 1997.1 Preparing to unpack .../50-libboost-system-dev_1.83.0.1ubuntu2_amd64.deb ...
+#8 1997.1 Unpacking libboost-system-dev:amd64 (1.83.0.1ubuntu2) ...
+#8 1997.2 Selecting previously unselected package libboost-thread1.83.0:amd64.
+#8 1997.2 Preparing to unpack .../51-libboost-thread1.83.0_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1997.2 Unpacking libboost-thread1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1997.3 Selecting previously unselected package libboost-thread1.83-dev:amd64.
+#8 1997.3 Preparing to unpack .../52-libboost-thread1.83-dev_1.83.0-2.1ubuntu3.2_amd64.deb ...
+#8 1997.3 Unpacking libboost-thread1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1997.4 Selecting previously unselected package libboost-thread-dev:amd64.
+#8 1997.4 Preparing to unpack .../53-libboost-thread-dev_1.83.0.1ubuntu2_amd64.deb ...
+#8 1997.4 Unpacking libboost-thread-dev:amd64 (1.83.0.1ubuntu2) ...
+#8 1997.5 Selecting previously unselected package libbz2-dev:amd64.
+#8 1997.5 Preparing to unpack .../54-libbz2-dev_1.0.8-5.1ubuntu0.1_amd64.deb ...
+#8 1997.5 Unpacking libbz2-dev:amd64 (1.0.8-5.1ubuntu0.1) ...
+#8 1997.6 Selecting previously unselected package mariadb-common.
+#8 1997.6 Preparing to unpack .../55-mariadb-common_1%3a10.11.14-0ubuntu0.24.04.1_all.deb ...
+#8 1997.6 Unpacking mariadb-common (1:10.11.14-0ubuntu0.24.04.1) ...
+#8 1997.8 Selecting previously unselected package libmariadb3:amd64.
+#8 1997.8 Preparing to unpack .../56-libmariadb3_1%3a10.11.14-0ubuntu0.24.04.1_amd64.deb ...
+#8 1997.8 Unpacking libmariadb3:amd64 (1:10.11.14-0ubuntu0.24.04.1) ...
+#8 1998.0 Selecting previously unselected package libconfig-inifiles-perl.
+#8 1998.0 Preparing to unpack .../57-libconfig-inifiles-perl_3.000003-2ubuntu0.1_all.deb ...
+#8 1998.0 Unpacking libconfig-inifiles-perl (3.000003-2ubuntu0.1) ...
+#8 1998.2 Selecting previously unselected package mariadb-client-core.
+#8 1998.2 Preparing to unpack .../58-mariadb-client-core_1%3a10.11.14-0ubuntu0.24.04.1_amd64.deb ...
+#8 1998.3 Unpacking mariadb-client-core (1:10.11.14-0ubuntu0.24.04.1) ...
+#8 1998.5 Selecting previously unselected package mariadb-client.
+#8 1998.5 Preparing to unpack .../59-mariadb-client_1%3a10.11.14-0ubuntu0.24.04.1_amd64.deb ...
+#8 1998.5 Unpacking mariadb-client (1:10.11.14-0ubuntu0.24.04.1) ...
+#8 1999.0 Selecting previously unselected package gosu.
+#8 1999.0 Preparing to unpack .../60-gosu_1.17-1ubuntu0.24.04.3_amd64.deb ...
+#8 1999.0 Unpacking gosu (1.17-1ubuntu0.24.04.3) ...
+#8 1999.1 Setting up libconfig-inifiles-perl (3.000003-2ubuntu0.1) ...
+#8 1999.1 Setting up mysql-common (5.8+1.1.0build1) ...
+#8 1999.2 update-alternatives: using /etc/mysql/my.cnf.fallback to provide /etc/mysql/my.cnf (my.cnf) in auto mode
+#8 1999.2 Setting up libmysqlclient21:amd64 (8.0.46-0ubuntu0.24.04.4) ...
+#8 1999.2 Setting up libzstd-dev:amd64 (1.5.5+dfsg2-2build1.1) ...
+#8 1999.2 Setting up libgdbm6t64:amd64 (1.23-5.1build1) ...
+#8 1999.3 Setting up libboost-date-time1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1999.3 Setting up libgdbm-compat4t64:amd64 (1.23-5.1build1) ...
+#8 1999.3 Setting up libboost-system1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1999.4 Setting up linux-libc-dev:amd64 (6.8.0-139.139) ...
+#8 1999.4 Setting up libboost-thread1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1999.4 Setting up libboost-filesystem1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1999.4 Setting up libgomp1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 1999.5 Setting up libboost-atomic1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1999.5 Setting up mariadb-common (1:10.11.14-0ubuntu0.24.04.1) ...
+#8 1999.5 update-alternatives: using /etc/mysql/mariadb.cnf to provide /etc/mysql/my.cnf (my.cnf) in auto mode
+#8 1999.6 Setting up libboost-serialization1.83.0:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1999.6 Setting up rpcsvc-proto (1.4.2-0ubuntu7) ...
+#8 1999.7 Setting up gcc-13-base:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#8 1999.8 Setting up libboost-chrono1.83.0t64:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 1999.8 Setting up gosu (1.17-1ubuntu0.24.04.3) ...
+#8 1999.9 Setting up libncurses6:amd64 (6.4+20240113-1ubuntu2.2) ...
+#8 1999.9 Setting up perl-modules-5.38 (5.38.2-3.2ubuntu0.4) ...
+#8 2000.0 Setting up libquadmath0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 2000.1 Setting up libssl-dev:amd64 (3.0.13-0ubuntu3.15) ...
+#8 2000.1 Setting up libatomic1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 2000.2 Setting up libmariadb3:amd64 (1:10.11.14-0ubuntu0.24.04.1) ...
+#8 2000.2 Setting up libubsan1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 2000.2 Setting up libhwasan0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 2000.3 Setting up libcrypt-dev:amd64 (1:4.4.36-4build1) ...
+#8 2000.3 Setting up libasan8:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 2000.4 Setting up libperl5.38t64:amd64 (5.38.2-3.2ubuntu0.4) ...
+#8 2000.4 Setting up libtsan2:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 2000.5 Setting up libc-dev-bin (2.39-0ubuntu8.9) ...
+#8 2000.6 Setting up openssl (3.0.13-0ubuntu3.15) ...
+#8 2000.6 Setting up libbsd0:amd64 (0.12.1-1build1.1) ...
+#8 2000.6 Setting up liblsan0:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 2000.7 Setting up libitm1:amd64 (14.2.0-4ubuntu2~24.04.1) ...
+#8 2000.7 Setting up libace-7.1.2t64 (7.1.2+dfsg-2.1ubuntu0.1) ...
+#8 2000.7 Setting up libace-dev (7.1.2+dfsg-2.1ubuntu0.1) ...
+#8 2000.7 Setting up libedit2:amd64 (3.1-20230828-1build1) ...
+#8 2000.8 Setting up mariadb-client-core (1:10.11.14-0ubuntu0.24.04.1) ...
+#8 2000.8 Setting up ca-certificates (20260601~24.04.1) ...
+#8 2001.4 Updating certificates in /etc/ssl/certs...
+#8 2002.1 121 added, 0 removed; done.
+#8 2002.2 Setting up perl (5.38.2-3.2ubuntu0.4) ...
+#8 2002.2 Setting up libgcc-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#8 2002.2 Setting up libc6-dev:amd64 (2.39-0ubuntu8.9) ...
+#8 2002.3 Setting up libstdc++-13-dev:amd64 (13.3.0-6ubuntu2~24.04.1) ...
+#8 2002.3 Setting up libbz2-dev:amd64 (1.0.8-5.1ubuntu0.1) ...
+#8 2002.3 Setting up libboost1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 2002.3 Setting up libboost-chrono1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 2002.4 Setting up mariadb-client (1:10.11.14-0ubuntu0.24.04.1) ...
+#8 2002.4 Setting up libboost-serialization1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 2002.5 Setting up libboost-date-time1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 2002.5 Setting up libboost-atomic1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 2002.5 Setting up zlib1g-dev:amd64 (1:1.3.dfsg-3.1ubuntu2.2) ...
+#8 2002.5 Setting up libboost-system1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 2002.6 Setting up libmysqlclient-dev (8.0.46-0ubuntu0.24.04.4) ...
+#8 2002.6 Setting up default-libmysqlclient-dev:amd64 (1.1.0build1) ...
+#8 2002.7 Setting up libboost-thread1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 2002.7 Setting up libboost-system-dev:amd64 (1.83.0.1ubuntu2) ...
+#8 2002.8 Setting up libboost-filesystem1.83-dev:amd64 (1.83.0-2.1ubuntu3.2) ...
+#8 2002.8 Setting up libboost-filesystem-dev:amd64 (1.83.0.1ubuntu2) ...
+#8 2002.9 Setting up libboost-thread-dev:amd64 (1.83.0.1ubuntu2) ...
+#8 2002.9 Processing triggers for libc-bin (2.39-0ubuntu8.9) ...
+#8 2003.0 Processing triggers for ca-certificates (20260601~24.04.1) ...
+#8 2003.0 Updating certificates in /etc/ssl/certs...
+#8 2003.6 0 added, 0 removed; done.
+#8 2003.6 Running hooks in /etc/ca-certificates/update.d...
+#8 2003.6 done.
+#8 DONE 2004.2s
+
+#14 [stage-1 3/5] COPY --from=builder /opt/tortoise /opt/tortoise
+#14 DONE 0.9s
+
+#15 [stage-1 4/5] COPY --from=builder /src/modules /src/modules
+#15 DONE 0.5s
+
+#16 [stage-1 5/5] WORKDIR /opt/tortoise/bin
+#16 DONE 0.4s
+
+#17 exporting to image
+#17 exporting layers
+#17 exporting layers 22.6s done
+#17 exporting manifest sha256:005d316c76f431870ab5477bc15b57882b889403bfe1b660673e63dd93013c58 0.0s done
+#17 exporting config sha256:f8c8ef350ce359e306ffb73b48380787b80322321225518bdbf7f96978a52203 0.1s done
+#17 exporting attestation manifest sha256:f6f17ed296033f0c4756431928af60e0a7690559b3a139ae9e9d90c93cb09f91 0.0s done
+#17 exporting manifest list sha256:ad71a23fc5ed6275ec7a455ac8f403449751914f7738c9d9cdfcfcfaea3ac26a 0.0s done
+#17 naming to docker.io/t30/tortoise-core:latest
+#17 naming to docker.io/t30/tortoise-core:latest done
+#17 unpacking to docker.io/t30/tortoise-core:latest
+#17 unpacking to docker.io/t30/tortoise-core:latest 12.6s done
+#17 DONE 35.6s
+EXIT=0 ELAPSED_S=2044
+2026-09-11T10:24:45+00:00

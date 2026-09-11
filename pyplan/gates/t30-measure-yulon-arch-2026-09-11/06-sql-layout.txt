@@ -1,0 +1,172 @@
+2026-09-11T09:54:41+00:00
+# T30 Half 1 capture 06 — the SQL layout of the new tree against the plan in catalog.json:1128-1231
+
+## core sql/ top level
+base
+create_databases.sql
+database_updates
+make_migration.bat
+setup_databases.bat
+setup_databases.sh
+tools
+touch_migration.sh
+wip_updates
+
+## databases created by sql/create_databases.sql
+23:CREATE DATABASE /*!32312 IF NOT EXISTS*/ `tw_char` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci */;
+2063:CREATE DATABASE /*!32312 IF NOT EXISTS*/ `tw_logon` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci */;
+3476:CREATE DATABASE /*!32312 IF NOT EXISTS*/ `tw_logs` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci */;
+3513:CREATE DATABASE /*!32312 IF NOT EXISTS*/ `tw_world` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci */;
+
+## sql/base — per-table dumps, all tw_world
+file count: 190
+    190 tw_world
+
+## sql/database_updates/ (what Database.AutoUpdate.Path points at)
+character
+world
+world migrations: 144
+character migrations: 1
+20260817151028_character.sql
+
+## sql/character_updates — the fork directory catalog.json:1160 imports (phase character updates, on_error fail)
+ls: cannot access 'src/tortoise-wow/sql/character_updates': No such file or directory
+
+## the self-colliding migration T-Tortoise made idempotent (Dockerfile.tmpl sed, catalog notes)
+-rw-r--r-- 1 pk pk 7513 Sep 11 09:35 src/tortoise-wow/sql/database_updates/world/20260903063722_world.sql
+  plain INSERT INTO statements: 14
+  INSERT IGNORE statements:     0
+  the 44070 spell_proc_event row that collided on m910q 2026-09-08:
+92:WHERE `entry` = 44070;
+109:(44070, 0, 0, 0, 0, 0, 664232, 0, 0, 0, 180);
+
+## the old fork paths the plan reads that do not exist on this tree
+  sql/character_updates                          ABSENT
+  modules/mod-playerbots/sql/characters          ABSENT
+  modules/mod-playerbots/sql/world               ABSENT
+  src/tools                                      ABSENT
+
+## module migrations
+src/tortoise-wow/modules/TortoiseBots/data/sql/char/20260824090001_char.sql
+src/tortoise-wow/modules/TortoiseBots/data/sql/char/20260824090002_char.sql
+src/tortoise-wow/modules/TortoiseBots/data/sql/char/20260824090003_char.sql
+src/tortoise-wow/modules/TortoiseBots/data/sql/char/20260902090000_char.sql
+src/tortoise-wow/modules/TortoiseBots/data/sql/char/20260906090000_char.sql
+src/tortoise-wow/modules/TortoiseBots/data/sql/world/20260824090000_world.sql
+src/tortoise-wow/modules/TortoiseBots/data/sql/world/20260824090002_world.sql
+src/tortoise-wow/modules/TortoiseBots/data/sql/world/20260824090003_world.sql
+
+## ai_playerbot* tables the module world SQL creates (catalog.json:1240-1244 verify expects >= 10 in tw_world)
+12
+CREATE TABLE IF NOT EXISTS `ai_playerbot_equip_cache` (
+CREATE TABLE IF NOT EXISTS `ai_playerbot_rarity_cache` (
+CREATE TABLE IF NOT EXISTS `ai_playerbot_rnditem_cache` (
+CREATE TABLE IF NOT EXISTS `ai_playerbot_tele_cache` (
+CREATE TABLE IF NOT EXISTS `ai_playerbot_item_info_cache` (
+CREATE TABLE IF NOT EXISTS `ai_playerbot_db_store` (
+CREATE TABLE IF NOT EXISTS `ai_playerbot_custom_strategy` (
+CREATE TABLE IF NOT EXISTS `ai_playerbot_random_bots` (
+CREATE TABLE IF NOT EXISTS `tortoise_bots_owned_character` (
+CREATE TABLE IF NOT EXISTS `ahbot_items` (
+
+## how the core finds module SQL
+    bool AutoUpdater::ProcessModuleUpdates(const fs::path& modulesPath, const std::string& targetFolder, DatabaseType* targetDatabase, bool sortByName) const
+    {
+        directory_entry modulesRoot{ modulesPath };
+        if (!modulesRoot.exists())
+        {
+            sLog.outInfo("[DB Auto-Updater] Module update path %s does not exist, skipped.", modulesPath.string().c_str());
+            return true;
+        }
+
+        std::vector<std::string> allowedModules = SplitCommaSeparated(sConfig.GetStringDefault("Database.AutoUpdate.AllowedModules", "all"));
+        if (allowedModules.empty())
+            return true;
+
+        std::vector<std::string> moduleNames;
+        if (IsAllModulesAllowed(allowedModules))
+        {
+            moduleNames = SplitCommaSeparated(TW_ENABLED_MODULES);
+            std::sort(moduleNames.begin(), moduleNames.end());
+        }
+        else
+        {
+            moduleNames = std::move(allowedModules);
+        }
+
+        for (std::string const& moduleName : moduleNames)
+        {
+            path moduleUpdatePath = modulesPath / moduleName / "data" / "sql" / targetFolder;
+            if (!exists(moduleUpdatePath) || !is_directory(moduleUpdatePath))
+                continue;
+
+            sLog.outInfo("[DB Auto-Updater] Processing module %s updates from %s.", moduleName.c_str(), moduleUpdatePath.string().c_str());
+            if (!ProcessTargetUpdates(directory_entry{ moduleUpdatePath }, targetDatabase, false, sortByName, moduleName))
+                return false;
+        }
+
+        return true;
+    }
+
+    bool AutoUpdater::ExecuteUpdate(const FileMigration& migration, DatabaseType* targetDatabase) const
+    {
+        sLog.outInfo("[DB Auto-Updater] Attempting to execute update %s%s, hash %s.", migration.Name.c_str(),
+---- and the paths it builds them from (AutoUpdater.cpp:497-531)
+        auto pathString = sConfig.GetStringDefault("Database.AutoUpdate.Path", "");
+        auto authUpdateFolder = sConfig.GetStringDefault("Database.AutoUpdate.AuthUpdateName", "Logon");
+        auto charUpdateFolder = sConfig.GetStringDefault("Database.AutoUpdate.CharUpdateName", "Char");
+        auto worldUpdateFolder = sConfig.GetStringDefault("Database.AutoUpdate.WorldUpdateName", "World");
+        bool sortByName = sConfig.GetBoolDefault("Database.AutoUpdate.SortByName", false);
+        path folderPath{ pathString };
+#ifdef TW_SOURCE_MODULES_DIR
+        path modulesPath{ TW_SOURCE_MODULES_DIR };
+#else
+        path modulesPath{ "modules" };
+#endif
+
+
+        directory_entry logonUpdatePath{ folderPath / authUpdateFolder };
+        directory_entry charUpdatePath{ folderPath / charUpdateFolder };
+        directory_entry worldUpdatePath{ folderPath / worldUpdateFolder };
+
+        if (!ProcessTargetUpdates(logonUpdatePath, &LoginDatabase, false, sortByName))
+            return false;
+
+        if (!ProcessTargetUpdates(charUpdatePath, &CharacterDatabase, false, sortByName))
+            return false;
+
+        if (!ProcessTargetUpdates(worldUpdatePath, &WorldDatabase, false, sortByName))
+            return false;
+
+        if (!ProcessModuleUpdates(modulesPath, authUpdateFolder, &LoginDatabase, sortByName))
+            return false;
+
+        if (!ProcessModuleUpdates(modulesPath, charUpdateFolder, &CharacterDatabase, sortByName))
+            return false;
+
+        if (!ProcessModuleUpdates(modulesPath, worldUpdateFolder, &WorldDatabase, sortByName))
+            return false;
+
+---- TW_SOURCE_MODULES_DIR is baked at compile time:
+src/tortoise-wow/CMakeLists.txt:548:  TW_SOURCE_MODULES_DIR="${CMAKE_SOURCE_DIR}/modules"
+src/tortoise-wow/src/shared/Database/AutoUpdater.cpp:503:#ifdef TW_SOURCE_MODULES_DIR
+src/tortoise-wow/src/shared/Database/AutoUpdater.cpp:504:        path modulesPath{ TW_SOURCE_MODULES_DIR };
+
+---- but make install renames data/sql/char to .../character under the INSTALL prefix
+  # Optional module migrations are installed only with the module. The core
+  # AutoUpdater applies them on startup without making bots a core dependency.
+  # AutoUpdater's module contract is case-sensitive on Linux. Penqle's
+  # effective mangosd.conf.dist names these configured folders `world` and
+  # `character`; the uppercase names in AutoUpdater.cpp are only fallback
+  # defaults when those settings are absent. Keep the module aligned with the
+  # shipped core configuration so a fresh install cannot silently skip SQL.
+  if(EXISTS "${TORTOISEBOTS_ROOT}/data/sql/world")
+    install(DIRECTORY "${TORTOISEBOTS_ROOT}/data/sql/world/"
+      DESTINATION "${CMAKE_INSTALL_PREFIX}/modules/TortoiseBots/data/sql/world")
+  endif()
+  if(EXISTS "${TORTOISEBOTS_ROOT}/data/sql/char")
+    install(DIRECTORY "${TORTOISEBOTS_ROOT}/data/sql/char/"
+      DESTINATION "${CMAKE_INSTALL_PREFIX}/modules/TortoiseBots/data/sql/character")
+  endif()
+
+  set(TORTOISEBOTS_HOST_SRC

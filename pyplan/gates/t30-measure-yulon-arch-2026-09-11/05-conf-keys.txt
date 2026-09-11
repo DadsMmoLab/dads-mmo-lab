@@ -1,0 +1,68 @@
+2026-09-11T09:53:48+00:00
+# T30 Half 1 capture 05 — every conf key catalog.json writes for wow-tortoise, against the new tree
+# catalog.json:1104-1150 (conf.files), :1266-1272 (operations.enable_conf), :1288-1289 (observability.bots)
+
+## mangosd.conf  <- src/tortoise-wow/src/mangosd/mangosd.conf.dist.in
+  PRESENT  LoginDatabase.Info                     40:LoginDatabase.Info = "127.0.0.1;3306;mangos;mangos;tw_logon"
+  PRESENT  WorldDatabase.Info                     41:WorldDatabase.Info = "127.0.0.1;3306;mangos;mangos;tw_world"
+  PRESENT  CharacterDatabase.Info                 42:CharacterDatabase.Info = "127.0.0.1;3306;mangos;mangos;tw_char"
+  PRESENT  LogsDatabase.Info                      43:LogsDatabase.Info = "127.0.0.1;3306;mangos;mangos;tw_logs"
+  PRESENT  Database.AutoUpdate.Path               48:Database.AutoUpdate.Path = "../../sql/database_updates/"
+  PRESENT  DataDir                                12:DataDir = "../data"
+  PRESENT  WorldServerPort                        88:WorldServerPort = 8090
+  PRESENT  GameType                               604:GameType = 6
+  PRESENT  GM.LoginState                          1577:GM.LoginState = 1
+  PRESENT  GM.StartLevel                          1609:GM.StartLevel = 60
+  PRESENT  AutoHonorRestart                       707:AutoHonorRestart = 1
+  PRESENT  AutoRestart.MaxServerUptime            148:AutoRestart.MaxServerUptime = 259200
+  ABSENT   SOAP.Enabled                           (no match anywhere in mangosd.conf.dist.in: 0)
+  ABSENT   SOAP.IP                                (no match anywhere in mangosd.conf.dist.in: 0)
+  ABSENT   SOAP.Port                              (no match anywhere in mangosd.conf.dist.in: 0)
+
+## new mangosd.conf keys this stack needs that the old entry never wrote
+  PRESENT  Database.AutoUpdate.Enabled            47:Database.AutoUpdate.Enabled = 1
+  PRESENT  Database.AutoUpdate.AuthUpdateName     49:Database.AutoUpdate.AuthUpdateName = "auth"
+  PRESENT  Database.AutoUpdate.CharUpdateName     50:Database.AutoUpdate.CharUpdateName = "character"
+  PRESENT  Database.AutoUpdate.WorldUpdateName    51:Database.AutoUpdate.WorldUpdateName = "world"
+  PRESENT  Database.AutoUpdate.AllowedModules     56:Database.AutoUpdate.AllowedModules = "all"
+  PRESENT  Database.AutoUpdate.SortByName         62:Database.AutoUpdate.SortByName = 1
+  PRESENT  Console.Enable                         1999:Console.Enable = 1
+  PRESENT  HttpApi.Enable                         96:HttpApi.Enable = 0
+
+## realmd.conf  <- src/tortoise-wow/src/realmd/realmd.conf.dist.in
+  PRESENT  LoginDatabaseInfo                      10:LoginDatabaseInfo = "127.0.0.1;3306;mangos;mangos;tw_logon"
+  PRESENT  ForcePinAccountRank                    143:ForcePinAccountRank = 1
+
+## aiplayerbot.conf  <- src/tortoise-wow/modules/TortoiseBots/ai/playerbot/aiplayerbot.conf.dist.in
+  PRESENT  AiPlayerbot.MinRandomBots              46:AiPlayerbot.MinRandomBots = 0
+  PRESENT  AiPlayerbot.MaxRandomBots              47:AiPlayerbot.MaxRandomBots = 0
+  ABSENT   AiPlayerbot.RandomBotAccountCount      (no match anywhere in aiplayerbot.conf.dist.in: 0)
+  PRESENT  AiPlayerbot.RandomBotAccountPrefix     53:AiPlayerbot.RandomBotAccountPrefix = RNDBOT
+  PRESENT  AiPlayerbot.Enabled                    12:AiPlayerbot.Enabled = 0
+  PRESENT  AiPlayerbot.RandomBotAutologin         22:AiPlayerbot.RandomBotAutologin = 0
+  PRESENT  AiPlayerbot.RandomBotLoginAtStartup    25:AiPlayerbot.RandomBotLoginAtStartup = 0
+  PRESENT  AiPlayerbot.RandomBotAutoCreate        89:AiPlayerbot.RandomBotAutoCreate = 0
+
+## RandomBotAccountCount anywhere in the module tree:
+  (no output above = the key does not exist in the module)
+
+## tortoise_bots.conf  <- src/tortoise-wow/modules/TortoiseBots/conf/tortoise_bots.conf.dist (new file, no catalog block writes it today)
+5:[TortoiseBotsConf]
+10:TortoiseBots.AutoTest = 0
+11:TortoiseBots.AutoTest.AccountId = 0
+12:TortoiseBots.AutoTest.CharacterGuid = 0
+20:TortoiseBots.PacketBridgeTest = 0
+21:TortoiseBots.PacketBridgeTest.AccountId = 0
+22:TortoiseBots.PacketBridgeTest.MasterGuid = 0
+23:TortoiseBots.PacketBridgeTest.BotGuid = 0
+27:TortoiseBots.PendingAddRemoveTest = 0
+28:TortoiseBots.PendingAddRemoveTest.AccountId = 0
+29:TortoiseBots.PendingAddRemoveTest.CharacterGuid = 0
+32:TortoiseBots.LogLevel = 1
+44:AiPlayerbot.Observability = 0
+45:AiPlayerbot.ObservabilityPort = 9195
+46:AiPlayerbot.ObservabilityHost = 127.0.0.1
+
+## SOAP anywhere in the new core:
+src/tortoise-wow/src/game/World.h
+  (no output above = the new core has no SOAP at all)

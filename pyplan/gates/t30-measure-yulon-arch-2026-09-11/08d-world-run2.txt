@@ -1,0 +1,121 @@
+2026-09-11T10:39:59+00:00
+# T30 Half 1 capture 08d — world run 2, filtered. Same image and confs as run 1, with one
+# change: the module source tree was bind-mounted at /src/modules with data/sql/char copied
+# to data/sql/character, the name the core asks for (see the README, finding 4).
+
+## the ready line, and the module lines around it
+2195:Bot configuration read from /opt/tortoise/etc/aiplayerbot.conf.
+2280:TortoiseBots: native random-bot pool loaded (0 candidates, target 5, startup 1, autoCreate 1)
+2282:TortoiseBots: native module loaded (AI enabled)
+2285:World server is up and running! Loading time: 1 minutes 13 seconds
+
+## the auto-updater, module half
+[DB Auto-Updater] Found 1 possible migration for character.
+[DB Auto-Updater] Found 144 possible migrations for world.
+[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/character.
+[DB Auto-Updater] Found 5 possible migrations for character.
+[DB Auto-Updater] Attempting to execute update 20260824090001_char for module TortoiseBots, hash F535167DB42E1FA48AFAC78C5DF6FD489F76AA0B.
+[DB Auto-Updater] Attempting to execute update 20260824090002_char for module TortoiseBots, hash 10E7965275B3B63514D2E48C39296F462C6F451A.
+[DB Auto-Updater] Attempting to execute update 20260824090003_char for module TortoiseBots, hash D2A123FCCCF3F35A4AE552B7E2E4212B3208602C.
+[DB Auto-Updater] Attempting to execute update 20260902090000_char for module TortoiseBots, hash F2380E45BADC9344DED7FFAAF2F09DBF329ECFEC.
+[DB Auto-Updater] Attempting to execute update 20260906090000_char for module TortoiseBots, hash 042FC7EB5E7DFF21406B7D774434E8CEB1D74DA8.
+[DB Auto-Updater] Processing module TortoiseBots updates from /src/modules/TortoiseBots/data/sql/world.
+[DB Auto-Updater] Found 3 possible migrations for world.
+
+## the RNDBOT population the module built by itself
+TortoiseBots: native random-bot pool loaded (0 candidates, target 5, startup 1, autoCreate 1)
+TortoiseBots: auto-create created character Kraerer (Player Kraerer (Guid: 1)) race 5 class 8 on account 4
+TortoiseBots: auto-create created character Vaemarnish (Player Vaemarnish (Guid: 2)) race 3 class 2 on account 4
+TortoiseBots: auto-create created character Trerarg (Player Trerarg (Guid: 3)) race 5 class 4 on account 4
+TortoiseBots: auto-create created character Guzaryrzaek (Player Guzaryrzaek (Guid: 4)) race 2 class 1 on account 4
+TortoiseBots: auto-create created character Jurstaemoro (Player Jurstaemoro (Guid: 5)) race 2 class 4 on account 4
+TortoiseBots: native random bot Player Kraerer (Guid: 1) queued on account 4
+TortoiseBots: native random bot Player Vaemarnish (Guid: 2) queued on account 4
+TortoiseBots: native random bot Player Trerarg (Guid: 3) queued on account 4
+TortoiseBots: native random bot Player Guzaryrzaek (Guid: 4) queued on account 4
+TortoiseBots: native random bot Player Jurstaemoro (Guid: 5) queued on account 4
+
+## the console probe, verbatim, with the per-tick AI chatter dropped
+=== T30 CONSOLE PROBE ===
+Core revision: 9980181ce9aa5940b612 / 2026-09-10 15:03:52 -0700 / Linux_x64 (little-endian)
+Players online: 0. Max online: 0.
+Server uptime: 1 Minute 29 Seconds.
+Server Time: Fri, 11.09.2026 10:38:41
+
+--- console: bot
+Usage: .bot add/remove/logout/roster/action/follow/invite/uninvite/stay/guard/free/ready/attack/interrupt/formation/list/stats/status/lease/pullback/summon/command/ah
+
+--- console: bot help
+TortoiseBots: Enabled
+
+--- console: bot list
+You must be in-game.
+
+--- console: bot roster
+TBM:ROSTER_ERROR|not-in-game|You must be in-game.
+You must be in-game to request a bot roster.
+
+--- console: bot stats
+You must be in-game.
+
+--- console: bot status
+Usage: .bot status <online bot name> (same account only)
+
+--- console: bot add Nobody
+You must be in-game to add a bot.
+
+--- console: bot summon Nobody
+You must be in-game.
+
+--- console: bot ah help
+AHBot commands:
+  .bot ah status - Display synthetic AH engine status and telemetry
+  .bot ah reload - Reload price overrides and bans from ahbot_items
+  .bot ah rebuild [all] - Restart market pass (all = expire active unbid synthetic items)
+  .bot ah item <id> - View override for item
+  .bot ah item <id> reset - Remove override for item
+  .bot ah item <id> <value> [chance] [min] [max] - Set override (0 0 = blacklist)
+
+--- console: bot nosuchthing
+Unknown bot command 'nosuchthing'. Try .bot help
+Shutting down world...
+TortoiseBots: StopHeadlessSession guid Player Kraerer (Guid: 1) save 1
+TortoiseBots: RemoveBot Player Kraerer (Guid: 1) immediate NotFound — erased
+TortoiseBots: StopHeadlessSession guid Player Vaemarnish (Guid: 2) save 1
+TortoiseBots: RemoveBot Player Vaemarnish (Guid: 2) immediate NotFound — erased
+TortoiseBots: StopHeadlessSession guid Player Trerarg (Guid: 3) save 1
+TortoiseBots: RemoveBot Player Trerarg (Guid: 3) immediate NotFound — erased
+TortoiseBots: StopHeadlessSession guid Player Guzaryrzaek (Guid: 4) save 1
+TortoiseBots: RemoveBot Player Guzaryrzaek (Guid: 4) immediate NotFound — erased
+TortoiseBots: StopHeadlessSession guid Player Jurstaemoro (Guid: 5) save 1
+TortoiseBots: RemoveBot Player Jurstaemoro (Guid: 5) immediate NotFound — erased
+TortoiseBots: native module shutting down after 1583 world ticks
+Stopping network threads...
+Unloading all maps...
+Unloading all transports...
+Cleaning character database...
+Sending queued mail...
+Closing database connections...
+Halting process...
+[NETWORK] Stopping movement broadcaster...
+
+## shutdown
+[0 ms] SQL: UPDATE characters SET online = 0 WHERE online<>0
+[1 ms] SQL: UPDATE character_battleground_data SET instance_id = 0
+[1 ms] SQL: UPDATE account SET current_realm = 0 WHERE current_realm = '1'
+Halting process...
+[NETWORK] Stopping movement broadcaster...
+
+## the old fork's extracted client data at ~/tortoise-vm/data, mounted read-only, was accepted
+## by the new core (same 1.18.1 / build 7272 client):
+VMap data directory: /opt/tortoise/data/vmaps.
+VMap support included. LineOfSight: 1 | getHeight: 1 | indoorCheck: 1.
+MMap pathfinding enabled.
+Loading DBC data...
+Using enUS DBC locale as default.
+
+## what the world had online at shutdown, and the clean stop
+[1 ms] SQL: UPDATE character_battleground_data SET instance_id = 0
+[1 ms] SQL: UPDATE account SET current_realm = 0 WHERE current_realm = '1'
+Halting process...
+[NETWORK] Stopping movement broadcaster...

@@ -1,0 +1,76 @@
+2026-09-11T10:25:38+00:00
+# T30 Half 1 capture 12 — what the build installed, and what the conf stage would find
+
+## image sizes
+t30/tortoise-core:latest	1.12GB
+t30/base:latest	1.12GB
+
+## /opt/tortoise/bin — the four binaries catalog.json:1000-1071 runs, by name
+total 53716
+drwxr-xr-x 1 root root      146 Sep 11 10:15 .
+drwxr-xr-x 1 root root       32 Sep 11 10:15 ..
+-rwxr-xr-x 1 root root  1745864 Sep 11 09:52 MoveMapGen
+-rwxr-xr-x 1 root root 50461856 Sep 11 10:15 mangosd
+-rwxr-xr-x 1 root root   187224 Sep 11 09:51 mapextractor
+-rwxr-xr-x 1 root root  1056872 Sep 11 09:52 realmd
+-rw-r--r-- 1 root root      345 Sep 11 09:35 run-mangosd
+-rwxr-xr-x 1 root root  1314856 Sep 11 09:52 vmap_assembler
+-rwxr-xr-x 1 root root   220056 Sep 11 09:51 vmapextractor
+
+## /opt/tortoise/etc — what conf.materialise() (families/conf.py:208-240) would copy out
+/opt/tortoise/etc/aiplayerbot.conf
+/opt/tortoise/etc/mangosd.conf.dist
+/opt/tortoise/etc/modules/tortoise_bots.conf
+/opt/tortoise/etc/modules/tortoise_bots.conf.dist
+/opt/tortoise/etc/realmd.conf.dist
+
+## the same directory on the OLD fork image still on this box
+ahbot.conf.dist
+aiplayerbot.conf.dist
+mangosd.conf.dist
+realmd.conf.dist
+
+## the module SQL make install laid down (renamed char -> character, TortoiseBots.cmake:61-69)
+/opt/tortoise/modules/TortoiseBots/data/sql/character/20260824090001_char.sql
+/opt/tortoise/modules/TortoiseBots/data/sql/character/20260824090002_char.sql
+/opt/tortoise/modules/TortoiseBots/data/sql/character/20260824090003_char.sql
+/opt/tortoise/modules/TortoiseBots/data/sql/character/20260902090000_char.sql
+/opt/tortoise/modules/TortoiseBots/data/sql/character/20260906090000_char.sql
+/opt/tortoise/modules/TortoiseBots/data/sql/world/20260824090000_world.sql
+/opt/tortoise/modules/TortoiseBots/data/sql/world/20260824090002_world.sql
+/opt/tortoise/modules/TortoiseBots/data/sql/world/20260824090003_world.sql
+
+## but the path the binary compiled in for module SQL is the SOURCE tree:
+bash: line 1: strings: command not found
+
+## sql/ and the mmap inputs in the image
+base
+create_databases.sql
+database_updates
+make_migration.bat
+setup_databases.bat
+setup_databases.sh
+tools
+touch_migration.sh
+wip_updates
+char_fix_guild_bank_tabs.sql
+realm_specific_cn_pvp.sql
+realm_specific_telabim.sql
+## the mmap inputs catalog.json:1058-1062 names at /opt/tortoise/src/tools/mmap/:
+ls: cannot access '/opt/tortoise/src/tools/mmap': No such file or directory
+## where they actually are in this tree:
+CMakeLists.txt
+mmapSettings.txt
+mmap_extract.py
+offmesh.txt
+readme
+src
+
+## addendum: strings(1) is not in the runtime image; the compiled-in module SQL path read with grep -a instead
+/src/modules/TortoiseBots/ai/playerbot/PlayerbotAI
+/src/modules/TortoiseBots/ai/playerbot/TravelMgr
+/src/modules/TortoiseBots/ai/playerbot/TravelNode
+/src/modules/TortoiseBots/ai/playerbot/WorldPosition
+/src/modules/TortoiseBots/ai/playerbot/WorldSquare
+## CMakeLists.txt:548 is where that string comes from:
+548:  TW_SOURCE_MODULES_DIR="${CMAKE_SOURCE_DIR}/modules"

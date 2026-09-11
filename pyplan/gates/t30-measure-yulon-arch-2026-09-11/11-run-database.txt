@@ -1,0 +1,30 @@
+2026-09-11T10:39:39+00:00
+# T30 Half 1 capture 11 — the RNDBOT population the run produced, read from the database
+## accounts whose username starts RNDBOT (dbreads.py:226-227 builds exactly this clause)
+rndbot_accounts
+1
+id	username
+4	RNDBOT111875
+## characters, and how many the world had online at shutdown
+characters
+5
+online
+5
+guid	name	level	online	account
+1	Kraerer	1	1	4
+2	Vaemarnish	1	1	4
+3	Trerarg	1	1	4
+4	Guzaryrzaek	1	1	4
+5	Jurstaemoro	1	1	4
+## the module's own tables, world side (catalog.json:1240-1244 wants >= 10 ai_playerbot% in tw_world)
+ai_playerbot_tables_world
+11
+ai_playerbot_tables_char
+5
+## the auto-updater's own record of what it applied
+world_migrations
+147
+Tables_in_tw_world (%migration%)
+migrations
+Tables_in_tw_char (%migration%)
+migrations

@@ -1,0 +1,100 @@
+2026-09-11T09:53:30+00:00
+# T30 Half 1 capture 02 — tree layout of the new core and the module
+
+## core top level
+AUTHORS.md
+CMakeLists.txt
+CONTRIBUTING.md
+LICENSE
+PULL_REQUEST_TEMPLATE.md
+README.md
+cmake
+dep
+modules
+sql
+src
+tools
+
+## core tools/ (the old fork kept these under src/tools/)
+BuildEverything.bat
+CMakeLists.txt
+CinematicTool
+DiscordOverlay
+RealmMerge
+TGAtoPNG
+TurtlePatcher
+checkegglogs
+dbc_verification
+extractor
+libDiscord
+mmap
+model_reader
+vmap_assembler
+vmap_extractor
+vmap_reader
+
+## extractor targets and their install names
+src/tortoise-wow/tools/extractor/CMakeLists.txt:26:add_executable(mapextractor
+src/tortoise-wow/tools/extractor/CMakeLists.txt:47:install(TARGETS mapextractor DESTINATION ${BIN_DIR})
+src/tortoise-wow/tools/vmap_extractor/vmapextract/CMakeLists.txt:20:add_executable(vmapextractor adtfile.cpp  dbcfile.cpp gameobject_extract.cpp model.cpp  mpq_libmpq.cpp  vmapexport.cpp  wdtfile.cpp  wmo.cpp)
+src/tortoise-wow/tools/vmap_extractor/vmapextract/CMakeLists.txt:43:install(TARGETS vmapextractor DESTINATION ${BIN_DIR})
+src/tortoise-wow/tools/vmap_assembler/CMakeLists.txt:86:add_executable(vmap_assembler vmap_assembler.cpp)
+src/tortoise-wow/tools/vmap_assembler/CMakeLists.txt:106:install(TARGETS vmap_assembler DESTINATION ${BIN_DIR})
+src/tortoise-wow/tools/mmap/CMakeLists.txt:60:add_executable(MoveMapGen ${SOURCES})
+src/tortoise-wow/tools/mmap/CMakeLists.txt:81:install(TARGETS MoveMapGen DESTINATION ${BIN_DIR})
+
+## tools/CMakeLists.txt gate
+if (USE_EXTRACTORS)
+add_subdirectory(extractor)
+add_subdirectory(vmap_assembler)
+add_subdirectory(vmap_extractor)
+add_subdirectory(mmap)
+endif()
+
+if (USE_REALMMERGE)
+add_subdirectory(RealmMerge)
+endif()
+
+## MoveMapGen inputs (catalog.json:1058-1062 points at /opt/tortoise/src/tools/mmap/)
+CMakeLists.txt
+mmapSettings.txt
+mmap_extract.py
+offmesh.txt
+readme
+src
+
+## every *.conf.dist in the tree
+./modules/TortoiseBots/ai/playerbot/aiplayerbot.conf.dist.in
+./modules/TortoiseBots/conf/tortoise_bots.conf.dist
+./modules/templates/basic/conf/module.conf.dist.in
+./src/mangosd/mangosd.conf.dist.in
+./src/mangosd/mods.conf.dist.in
+./src/mangosd/rate.conf.dist.in
+./src/realmd/realmd.conf.dist.in
+
+## modules/
+CMakeLists.txt
+ModulesLoader.cpp.in.cmake
+ModulesScriptLoader.h
+README.md
+TortoiseBots
+create_module.sh
+templates
+
+## modules/TortoiseBots/
+AGENTS.md
+CONTRIBUTING.md
+LICENCE.md
+README.md
+TortoiseBots.cmake
+ai
+behavior
+commands
+conf
+data
+docs
+host
+runtime
+scripts
+src
+tools

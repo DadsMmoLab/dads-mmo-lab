@@ -1,0 +1,19 @@
+2026-09-11T09:53:21+00:00
+# T30 Half 1 capture 01 — what was cloned, and at which revision
+
+## core: https://github.com/tortoise-wow/tortoise-wow branch bot-helpers
+9980181ce9aa5940b6125a5991cc754148ed9b82
+date: 2026-09-10 15:03:52 -0700
+subject: Merge pull request #475 from Sagiroth/fix/headless-session-queue
+bot-helpers
+
+## module: https://github.com/Sagiroth/TortoiseBots (main) -> modules/TortoiseBots
+fd7ec9ec7659035cfc3ea75d542c8683005525de
+date: 2026-09-11 09:36:58 +0100
+subject: Merge pull request #128 from Sagiroth/revert/bot-packet-pump
+
+## client addons, read only
+TortoiseBotsManager 65ef0b2f6531652de990bba7bfc3d4f70a9e9bb3
+  2026-09-09 09:58:15 +0100 Merge pull request #15 from Sagiroth/chore/tortoise-naming
+TortoiseGMManager ec11dd23e1cbf89f5171cf8c964df8354903bf43
+  2026-09-09 09:49:51 +0100 Standardize on Tortoise WoW naming (#3)

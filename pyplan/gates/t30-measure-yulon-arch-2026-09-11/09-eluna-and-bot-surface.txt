@@ -1,0 +1,113 @@
+2026-09-11T09:59:23+00:00
+# T30 Half 1 capture 09 — Eluna / the Lua bridge on the new core
+
+## src/ of the new core — there is no src/modules at all
+CMakeLists.txt
+framework
+game
+mangosd
+realmd
+scripts
+shared
+
+## anything named Eluna in the tree (excluding .git):
+  (no output above = nothing)
+
+## Eluna named in any CMakeLists.txt or *.cmake:
+  (no output above = nothing)
+
+## the old fork refused to configure without it; this tree has no such guard.
+## evidence: capture 03 configured to completion with no Eluna checkout present.
+58:-- Configuring done (0.7s)
+59:-- Generating done (0.2s)
+68:-- Build files have been written to: /build
+
+## no Lua engine among the vendored deps:
+CMakeLists.txt
+dpp
+fmt
+include
+include-windows
+lib
+libdeflate
+libmpq
+loadlib
+re2
+recastnavigation
+src
+windows
+
+## the module command surface that replaces it (module README + commands/BotCommands.cpp)
+bool HandleChatCommand(ChatHandler* handler, char const* args)
+{
+    if (!handler || !args)
+        return false;
+
+    // Trim leading spaces
+    while (*args == ' ' || *args == '\t') ++args;
+    if (!*args)
+    {
+        handler->PSendSysMessage("Usage: .bot add/remove/logout/roster/action/follow/invite/uninvite/stay/guard/free/ready/attack/interrupt/formation/list/stats/status/lease/pullback/summon/command/ah");
+        return true;
+    }
+
+    // Extract subcommand
+    std::string cmd;
+
+## and how .bot reaches every ChatHandler, console included (core Chat.cpp)
+void ChatHandler::ExecuteCommand(const char* text)
+{
+    std::string fullcmd = text;                             // original `text` can't be used. It content destroyed in command code processing.
+
+    char const* commandArgs = text;
+    std::string commandName;
+    while (*commandArgs && *commandArgs != ' ')
+        commandName += *commandArgs++;
+
+    while (*commandArgs == ' ')
+        ++commandArgs;
+
+    bool handledByScript = ScriptRegistry<AllCommandScript>::ForEachWithReturn([&](AllCommandScript* script)
+    {
+        return !script->CanExecuteCommand(this, commandName.c_str(), commandArgs);
+    });
+
+    if (handledByScript)
+        return;
+
+    ChatCommand* command = nullptr;
+
+## the module side of that hook
+BotChatAdapter::BotChatAdapter()
+    : AllCommandScript("tortoisebots_commands")
+{
+}
+
+bool BotChatAdapter::CanExecuteCommand(ChatHandler* handler, char const* command, char const* args)
+{
+    if (!command)
+        return true;
+
+    std::string commandName(command);
+    for (char& character : commandName)
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+
+    if (commandName != "bot")
+        return true;
+
+    // Returning false tells the generic AllCommandScript registry that this
+    // command has been consumed; normal core command lookup must not see it.
+    BotCommands::HandleChatCommand(handler, args ? args : "");
+    return false;
+}
+
+
+## a console-refusing handler, for contrast (.bot add)
+    ::Player* requester = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+    if (!requester)
+    {
+        handler->PSendSysMessage("You must be in-game to add a bot.");
+        return true;
+    }
+
+    PlayerCacheData* data = sObjectMgr.GetPlayerDataByName(name);

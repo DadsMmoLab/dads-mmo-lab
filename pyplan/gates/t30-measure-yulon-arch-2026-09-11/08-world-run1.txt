@@ -1,0 +1,212 @@
+2026-09-11T10:36:46+00:00
+# T30 Half 1 capture 08 — world run 1, filtered (the raw log was 59 MB, almost all of it the
+# auto-updater echoing every statement of 144 world migrations; the SQL: lines are dropped here
+# and the file that produced them is named on every line that remains).
+
+## the run
+2026-09-11T10:26:00+00:00
+# T30 Half 1 capture 08 — the one world run (confs written by hand, world up, console probed, down)
+
+## everything that is not a bare SQL echo, from the start of the run
+2026-09-11T10:26:00+00:00
+# T30 Half 1 capture 08 — the one world run (confs written by hand, world up, console probed, down)
+Release: 2026-09-10 15:03:52 -0700
+Daemon PID: 1
+
+Welcome to Turtle WoW! Realm ID: 1
+HTTP API server disabled by config.
+Loading config...
+Visibility.Distance.BG can't be greater 532.333313
+VMap data directory: /opt/tortoise/data/vmaps.
+VMap support included. LineOfSight: 1 | getHeight: 1 | indoorCheck: 1.
+MMap pathfinding enabled.
+Anticrash: 0x18 rearm after 60 seconds.
+Pathfinding: [Enabled]
+Loading MaNGOS strings...
+Initiating auto-updater...
+[DB Auto-Updater] Path doesn't contain auth updates, creating..
+[DB Auto-Updater] No DB migrations found, table migrations is empty.
+[DB Auto-Updater] Found 1 possible migration for character.
+[DB Auto-Updater] No DB migrations found, table migrations is empty.
+[DB Auto-Updater] Attempting to execute update 20260817151028_character, hash 684F9CCFC3338937D80C77E471D71A3DD45A98FD.
+[DB Auto-Updater] Found 144 possible migrations for world.
+[DB Auto-Updater] No DB migrations found, table migrations is empty.
+[DB Auto-Updater] Attempting to execute update 20260504194945_world, hash 3A7721175EEACB165E2C7BFA7C633B88F4D7C732.
+[DB Auto-Updater] Attempting to execute update 20260504203644_world, hash C74A412BABA6A3436F71AA6D59BBEE209601888A.
+[DB Auto-Updater] Attempting to execute update 20260504214035_world, hash 1569ACD2754F46C4676C6337444D8DC9D5969271.
+[DB Auto-Updater] Attempting to execute update 20260505222630_world, hash 67B0100A999D8BE5A4D99DA4DC07ABEF8B38ADC7.
+[DB Auto-Updater] Attempting to execute update 20260506204945_world, hash 04007403CADB29927F0BD1FE1F38606873BDCD96.
+[DB Auto-Updater] Attempting to execute update 20260507165648_world, hash C818696DC745948706DE58E116A8486EA72A69D5.
+[DB Auto-Updater] Attempting to execute update 20260507184157_world, hash EFA9A1ECC92C2249A60EE892AC953FD4B0CD7C3F.
+[DB Auto-Updater] Attempting to execute update 20260507191316_world, hash 70BE21F7D9B4AB14C591D0F1BA229A3F9EDD7124.
+[DB Auto-Updater] Attempting to execute update 20260508064255_world, hash 6CC2C0D303A25EEAF115DFFA39167EA80CFAE0C4.
+[DB Auto-Updater] Attempting to execute update 20260508192404_world, hash F0B6D70A0323662F06251B361C292861B470A98F.
+[DB Auto-Updater] Attempting to execute update 20260509055406_world, hash 8F68BBDFEA6DC02ED5E942E5DC4A12D8758BBB98.
+[DB Auto-Updater] Attempting to execute update 20260510092659_world, hash B0FF0FF0372B8A71A1CD44B5F09C8028C74025A1.
+[DB Auto-Updater] Attempting to execute update 20260511053220_world, hash 741C36C71BFE82857C246D4C9C52C463C26276EA.
+[DB Auto-Updater] Attempting to execute update 20260511154529_world, hash 468B56625407184FC65949860B632406DC2FDD82.
+[DB Auto-Updater] Attempting to execute update 20260511164918_world, hash 373E9E345DA970C37A486114EB8E98615243B8D8.
+[DB Auto-Updater] Attempting to execute update 20260511211643_world, hash FF9402BAF43F9E322611A514619D6E3A97912DF1.
+[DB Auto-Updater] Attempting to execute update 20260512033310_world, hash 881E0DEAF3190E32D14B2686279C0865F88507D0.
+[DB Auto-Updater] Attempting to execute update 20260512130432_world, hash 5D14F21596D214B72772B512BAC75A8FFA921E34.
+[DB Auto-Updater] Attempting to execute update 20260512224739_world, hash F7EE237C4B59D15745B880E42CE938D767F7865A.
+[DB Auto-Updater] Attempting to execute update 20260513084003_world, hash 9FF0F3F44DB9D1483397D537CC6A997C37DB1CE8.
+[DB Auto-Updater] Attempting to execute update 20260513094906_world, hash D8150400484D58B8224B8B59837C998437DD8312.
+[DB Auto-Updater] Attempting to execute update 20260513233443_world, hash 7B68DC550961DFBDB3D2027894078C237E514B40.
+[DB Auto-Updater] Attempting to execute update 20260514011114_world, hash 5B5C410F7CCE60FF017AA47FFE38C437565ECB8A.
+[DB Auto-Updater] Attempting to execute update 20260514035236_world, hash 02520FA1C5CE3D441D3B6E7AFB71B44C9F4CA0DC.
+[DB Auto-Updater] Attempting to execute update 20260516050606_world, hash 224B173C8766714666659F9B246379F922CA7C68.
+[DB Auto-Updater] Attempting to execute update 20260516210743_world, hash 1B9F4DF4AFC1D2AAEA30D18ACBDC1C7155C419D3.
+[DB Auto-Updater] Attempting to execute update 20260517045535_world, hash F7999363B429BCCA3E91EBE511857A181D6F92D8.
+[DB Auto-Updater] Attempting to execute update 20260517062330_world, hash 65D6B0CC5B61494A8E1C934C21931D8B0F0DF7FF.
+[DB Auto-Updater] Attempting to execute update 20260517101017_world, hash BB29C77A64C917B9E21974814E073B233894438B.
+[DB Auto-Updater] Attempting to execute update 20260517121832_world, hash AFD34542A36ECAE29D1DB6417DDC0C7A2A3E492F.
+[DB Auto-Updater] Attempting to execute update 20260518050203_world, hash A01DFD68DC2D6829AE2ACC1E3E66829580B848BC.
+[DB Auto-Updater] Attempting to execute update 20260522141111_world, hash D26C1A0B340BD0BD25FF78082DEE93404063E5FA.
+[DB Auto-Updater] Attempting to execute update 20260523041131_world, hash E8B2FB27A7ED9ABD53B4A1CBA89F233A4E65CDB7.
+[DB Auto-Updater] Attempting to execute update 20260526123433_world, hash 48CAD01F1D6DBB088F3351DCA71EB6A1415ABC94.
+[DB Auto-Updater] Attempting to execute update 20260526134500_world, hash 2A6E7F4220604F050737E9929190AA2163681F42.
+[DB Auto-Updater] Attempting to execute update 20260527120000_world, hash 40A5660CC5689AD933BC66D04C629491580C0692.
+[DB Auto-Updater] Attempting to execute update 20260528150633_world, hash 4FB9DFD7B244A3AA3982B7C01FD6B2E2BC3516E3.
+[DB Auto-Updater] Attempting to execute update 20260529182210_world, hash F792E8A69507999E96B64E7A10319B0BB01858DB.
+[DB Auto-Updater] Attempting to execute update 20260530203924_world, hash E26855EBF4AE39D2F24F079BD1812E3185CC0D41.
+[DB Auto-Updater] Attempting to execute update 20260602180159_world, hash 84119DB44EE93221A4D39A118903B9F41475EAC7.
+[DB Auto-Updater] Attempting to execute update 20260603094447_world, hash 4EAB62674581B3C22C3CE5ECCC79971A2F77C071.
+[DB Auto-Updater] Attempting to execute update 20260604214927_world, hash CB988796B8F4893B111B77A266F7BC7FA8BD4CB2.
+[DB Auto-Updater] Attempting to execute update 20260604222044_world, hash 1E165FDF08D7306DCD52BEA13D1AAD46115F311E.
+[DB Auto-Updater] Attempting to execute update 20260605181338_world, hash AA31C21AA4F326B1C8E46CE4E590DE33B02B1581.
+[DB Auto-Updater] Attempting to execute update 20260606142438_world, hash 048D7E6887538E1A2ADC06EE95EB49AAEE489C20.
+[DB Auto-Updater] Attempting to execute update 20260608174707_world, hash 1B352221C5710B28F075FDFB846FB488F30CAAF7.
+[DB Auto-Updater] Attempting to execute update 20260610134807_world, hash 12ED493A2A43A6D2955750DB5C29023F7669D091.
+[DB Auto-Updater] Attempting to execute update 20260614120836_world, hash D3F2E34AA1212F6933D5FE3C7F70A1933BF69A4E.
+[DB Auto-Updater] Attempting to execute update 20260614124739_world, hash 7C2BC9D744E2B32CDDC45E5B42F56461643B2134.
+[DB Auto-Updater] Attempting to execute update 20260618114919_world, hash 9D89C8C21C527CBD20F6D89492BD9B5F3DEE2953.
+[DB Auto-Updater] Attempting to execute update 20260619123444_world, hash D73E27A494E708ED954CB00A19D2963A41BC5EF5.
+[DB Auto-Updater] Attempting to execute update 20260619155101_world, hash 05AAA607E9AEEC53129D6510BA23C92A59978AEB.
+[DB Auto-Updater] Attempting to execute update 20260620003740_world, hash 9DB6969432874539148777CA79AEE16D3D8E4847.
+[DB Auto-Updater] Attempting to execute update 20260620113716_world, hash 0F819B6F94D7472509278373A25BB95673CB5B6D.
+[DB Auto-Updater] Attempting to execute update 20260620152800_world, hash B7E1AB27B0E73E4A844AA08998B3DC3E485C98B2.
+[DB Auto-Updater] Attempting to execute update 20260620224628_world, hash 4A9B5ED75446256EDEA919C97816B62E0DBCF713.
+[DB Auto-Updater] Attempting to execute update 20260622203054_world, hash A6AA50F579F629415834A1C2AE53B35823B7B731.
+[DB Auto-Updater] Attempting to execute update 20260624094237_world, hash DDAB7E182071DF7E2F9E3E26ABB93A9015030335.
+[DB Auto-Updater] Attempting to execute update 20260625083947_world, hash B45A0F10371056FAD6251C856B1B0640D0FC18FE.
+[DB Auto-Updater] Attempting to execute update 20260626153218_world, hash B6B517FF09CB71EF2539A6574F3CD38A6F8F3C86.
+[DB Auto-Updater] Attempting to execute update 20260628192033_world, hash AB95761BB94B2D60FC39947DE6E07C7165E9E20C.
+[DB Auto-Updater] Attempting to execute update 20260629195406_world, hash 3334200B0A07B6B0AFB1064CAAA0E70B538E1EA9.
+[DB Auto-Updater] Attempting to execute update 20260630194548_world, hash B48D36F5FFD8D5909657A64ACEC6F50C7DBAD9A8.
+[DB Auto-Updater] Attempting to execute update 20260701010422_world, hash C7CB277F16E06269A98C1530291EDB59C97722CF.
+[DB Auto-Updater] Attempting to execute update 20260702115558_world, hash FAB7F3769E096DC13CECA4A5AB1591DE70257814.
+[DB Auto-Updater] Attempting to execute update 20260702232910_world, hash 5C03239744B9220ADBA3F7848E45C8340B2DF74C.
+[DB Auto-Updater] Attempting to execute update 20260706100617_world, hash 76E1610C18750EBBDEA1E66CAE32C737A6176394.
+[DB Auto-Updater] Attempting to execute update 20260707174014_world, hash EA45DD5440E88EDABB30FBB472F7CA997006164C.
+[DB Auto-Updater] Attempting to execute update 20260709071006_world, hash 3A60FF40C1A50CDAEFA0E6F793D2ABE743B8A3BA.
+[DB Auto-Updater] Attempting to execute update 20260710045142_world, hash 1939303884C3D5D0A21926B000FA4970C71A5F98.
+[DB Auto-Updater] Attempting to execute update 20260711131631_world, hash 9EF58482BA803E8C3F64D72828D39257567C5660.
+[DB Auto-Updater] Attempting to execute update 20260711150912_world, hash 0D9BD93FC526C8D1E16E1956F5C4EB4226B5A005.
+[DB Auto-Updater] Attempting to execute update 20260711170358_world, hash 6DF84F9F5C6F9CBD4EF0B8343E4A784371282398.
+[DB Auto-Updater] Attempting to execute update 20260711191209_world, hash DCA67EC44447AF1D7F354274AE3E093BB87A57B8.
+[DB Auto-Updater] Attempting to execute update 20260712222616_world, hash C81CCE40B848CE6114C5B8617CD47408472E45ED.
+[DB Auto-Updater] Attempting to execute update 20260714180156_world, hash DAED4F50B30E301D0E51792BDF8BCD7462571DA6.
+[DB Auto-Updater] Attempting to execute update 20260714235525_world, hash 42BAB64EF898E88895B454C6AEB8A637EEECC932.
+[DB Auto-Updater] Attempting to execute update 20260715003750_world, hash 636793E5031688A8D7884B7D267E12A60D1A4734.
+[DB Auto-Updater] Attempting to execute update 20260715124044_world, hash C492F6397E33C94E55F9811607DBF80C327ACA80.
+[DB Auto-Updater] Attempting to execute update 20260715141903_world, hash AEE58D657E61C3AEAB49F5927B7A7BDDBEF24ACF.
+[DB Auto-Updater] Attempting to execute update 20260715153051_world, hash E7EC242C0E9B55C6714E8B76DB9B85574D438067.
+[DB Auto-Updater] Attempting to execute update 20260715174518_world, hash AD5805978C2B961D9FE40C9CEEEECB6E952C1CB5.
+[DB Auto-Updater] Attempting to execute update 20260718120125_world, hash BDAE2914700D804098398070C3BE06934E0F33F9.
+[DB Auto-Updater] Attempting to execute update 20260718150344_world, hash 61019B866DC8FA0244727D7BF5A4B0DE25AECB7B.
+[DB Auto-Updater] Attempting to execute update 20260718184759_world, hash 688A8B3A32B2D3944A3BB29FD0ED5B970D1F9E71.
+[DB Auto-Updater] Attempting to execute update 20260721013813_world, hash 7C4098E09589C03542C6BF2E62602C8C74710874.
+[DB Auto-Updater] Attempting to execute update 20260721095654_world, hash 5B10F8F1FEA97C1A3266384872CD4309CD6828CB.
+[DB Auto-Updater] Attempting to execute update 20260721231140_world, hash 8C28541E779DA0D7B28E25AA39CE9084908F76CF.
+[DB Auto-Updater] Attempting to execute update 20260724201050_world, hash C55C6A85F979F72D5ABA849C62D330CE09FA0711.
+[DB Auto-Updater] Attempting to execute update 20260726112016_world, hash 905548F38B1838FEAA371AE5BB9DDEE8F2FDC7ED.
+[DB Auto-Updater] Attempting to execute update 20260727120119_world, hash 4156490A6149A2F239508EB576358E5095BC0AB5.
+[DB Auto-Updater] Attempting to execute update 20260730132859_world, hash A8EC4D91DC9BEDB1E60E72694F4E8A3B121D816A.
+[DB Auto-Updater] Attempting to execute update 20260730145429_world, hash E57422F5E47C72B8448A17A6E60F9BB3D8EB799A.
+[DB Auto-Updater] Attempting to execute update 20260730201802_world, hash 3C437F71E7BD35C10A8384C41A0138F252A1E462.
+[DB Auto-Updater] Attempting to execute update 20260730212326_world, hash 6A5BB7FC8532FD2735B1E6FB993EC75B6CC291D0.
+[DB Auto-Updater] Attempting to execute update 20260731011334_world, hash BD95FF3AD3EA5DE8F3EC5C644999E32EDD730D33.
+[DB Auto-Updater] Attempting to execute update 20260731121709_world, hash 8B3C591626F97B911579BC950D711AF1881DD548.
+
+## ...through to the end
+Script not found: npc_lady_ripper.
+Script not found: npc_nasuna.
+Script not found: npc_surgeon_go.
+Script not found: npc_teslinah.
+Script not found: spell_druid_wrath.
+Loading daily quests handler...
+Loading companion manager...
+Loading mount manager...
+Loading toy manager...
+Loading shop...
+Initialize Performance monitor...
+Loading dynamic visibility templates...
+Loading cached Account data...
+Loading gameobject model list...
+Initiating map manager...
+Deleting expired bans...
+Table `battleground_template` for id 1 associated with nonexistent refloot id 0. Setting to 0.
+Table 'reference_loot_template' entry 30559 (reference id) not exist but used as loot id in DB.
+Table 'reference_loot_template' entry 30559 (reference id) not exist but used as loot id in DB.
+Table 'reference_loot_template' entry 30559 (reference id) not exist but used as loot id in DB.
+Table 'reference_loot_template' entry 30559 (reference id) not exist but used as loot id in DB.
+Table 'reference_loot_template' entry 150112 (reference id) not exist but used as loot id in DB.
+Table 'reference_loot_template' entry 30171 (reference id) not exist but used as loot id in DB.
+Initiating zone scripts...
+Loading transport on continents...
+WaypointMovementGenerator::LoadPath: GUID 60006 Entry 15184 doesn't have waypoint path
+Deleting expired bans...
+Initiating honor maintenance...
+GameEventMgr: [Dragons of Nightmare] variable does not exist! Setting default.
+Game Event system initialized.
+Loading disable spells...
+Loading anticheat...
+Loading autobroadcat...
+Loading player phasing...
+Caching player pets...
+Loading faction change reputations...
+Loading faction change spells...
+Loading faction change items...
+Loading faction change quests...
+Loading faction change mounts...
+Loading loot-disable map list...
+Loading cinematic waypoints...
+Loading transmogrification templates...
+Loading transmogrification templates...
+Loading spell groups...
+Loading spell group stack rules...
+Beginning inactive character deletion...
+Loading active players per faction...
+Loading RBAC for chat commands...
+Restoring deleted items...
+Loading shell coins...
+Loading possible transmogs: 0 minutes 0 seconds
+Fixing Hardcore Guild bank items..
+Initializing AI Playerbot by ike3, based on the original Playerbot by blueboy
+Bot configuration read from /opt/tortoise/etc/aiplayerbot.conf.
+Loading Race/Class probabilities
+Loading free bots.
+Loading area levels.
+>> No cached area levels found; using in-memory calculation.
+Loading spellIds.
+Loading weightscales info
+TortoiseBots: optional item weight scales are empty; random gear scoring is unavailable
+[1146] Table 'tw_char.ai_playerbot_equip_cache' doesn't exist
+Your database structure is not up to date. Please make sure you have executed all the queries in the sql/updates folders.
+/src/src/shared/Database/DatabaseMysql.cpp:190: Error: Assertion in HandleMySQLError failed: false
+./mangosd(_ZN15MySQLConnection5QueryEPKc+0x56) [0x563b055d5816]
+./mangosd(_ZN8Database6PQueryEPKcz+0x170) [0x563b055ceef0]
+./mangosd(_ZN13RandomItemMgr15BuildEquipCacheEv+0x7e) [0x563b057b9ece]
+./mangosd(_ZN13RandomItemMgr4InitEv+0x15) [0x563b057c5b05]
+./mangosd(_ZN17PlayerbotAIConfig10InitializeEv+0x4cc8) [0x563b05747268]
+./mangosd(_ZN12TortoiseBots14BotHostAdapter9OnStartupEv+0x23) [0x563b05698ee3]
+./mangosd(_ZN5World23SetInitialWorldSettingsEv+0x257f) [0x563b04d5804f]
+./mangosd(_ZN6Master3RunEv+0x99) [0x563b04c3ac39]
+./mangosd(main+0x326) [0x563b04b42496]
+/lib/x86_64-linux-gnu/libc.so.6(+0x2a1ca) [0x7f248684b1ca]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x8b) [0x7f248684b28b]
+./mangosd(_start+0x25) [0x563b04c316f5]
+
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  false

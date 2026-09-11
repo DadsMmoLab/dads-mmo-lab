@@ -1,0 +1,8 @@
+# T30 measure — toolchain base.
+# Base image and apt list copied from
+# pylauncher/catalog/installers/wow-tortoise/native/Dockerfile.tmpl (builder stage).
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake git pkg-config ca-certificates libace-dev default-libmysqlclient-dev libmysqlclient-dev libssl-dev zlib1g-dev libbz2-dev libboost-thread-dev libboost-filesystem-dev libboost-system-dev mariadb-client gosu && rm -rf /var/lib/apt/lists/*
+RUN git config --system http.version HTTP/1.1

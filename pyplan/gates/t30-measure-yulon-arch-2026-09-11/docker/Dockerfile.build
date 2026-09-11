@@ -1,0 +1,39 @@
+# T30 measure — the new Penqle core + TortoiseBots module.
+# Base image and apt lists are copied verbatim from
+# pylauncher/catalog/installers/wow-tortoise/native/Dockerfile.tmpl.
+FROM t30/base AS builder
+
+COPY src/tortoise-wow /src
+
+WORKDIR /src/_build
+# The module README gives -DMODULES=static -DMODULE_TORTOISEBOTS=static;
+# the rest is our Dockerfile.tmpl flag line minus the three variables the new
+# core does not know (BUILD_PLAYERBOTS, MODULE_MOD_PLAYERBOTS,
+# MODULE_MOD_DUNGEON_CLEAR — evidence 03).
+RUN cmake .. \
+        -DCMAKE_INSTALL_PREFIX=/opt/tortoise \
+        -DMODULES=static -DMODULE_TORTOISEBOTS=static \
+        -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
+        -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON
+
+RUN make -j4 && make install
+
+RUN mkdir -p /opt/tortoise/sql && cp -r /src/sql/. /opt/tortoise/sql/
+
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libace-dev default-libmysqlclient-dev libmysqlclient-dev \
+    libssl-dev zlib1g-dev libbz2-dev \
+    libboost-thread-dev libboost-filesystem-dev libboost-system-dev \
+    mariadb-client gosu ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /opt/tortoise /opt/tortoise
+# TW_SOURCE_MODULES_DIR is baked at compile time as <source>/modules
+# (CMakeLists.txt:548) and AutoUpdater reads module SQL from it at run time
+# (src/shared/Database/AutoUpdater.cpp:503-529), so the source modules tree has
+# to survive at the same absolute path in the runtime image.
+COPY --from=builder /src/modules /src/modules
+WORKDIR /opt/tortoise/bin
+CMD ["./mangosd"]

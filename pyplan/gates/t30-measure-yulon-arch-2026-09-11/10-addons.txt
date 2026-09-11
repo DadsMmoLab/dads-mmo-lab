@@ -1,0 +1,71 @@
+2026-09-11T09:59:31+00:00
+# T30 Half 1 capture 10 — the two client addons, read only
+
+## TortoiseBotsManager  65ef0b2f6531652de990bba7bfc3d4f70a9e9bb3
+### .toc
+## Interface: 11200
+## Title: |cffd8a657TortoiseBots|r |cffffffffManager|r
+## Notes: Manager for your server-owned TortoiseBots — actions, lifecycle, and roster state.
+## Author: TortoiseBots
+## Version: 1.2.0
+## SavedVariables: TortoiseBotsDB
+
+Constants.lua
+Utils.lua
+Core.lua
+Roster.lua
+Comms.lua
+UI.lua
+Minimap.lua
+### files
+Comms.lua
+Constants.lua
+Core.lua
+LICENSE
+Minimap.lua
+README.md
+Roster.lua
+TortoiseBotsManager.toc
+UI.lua
+Utils.lua
+tests
+
+## TortoiseGMManager  ec11dd23e1cbf89f5171cf8c964df8354903bf43
+### .toc
+## Interface: 11200
+## Title: TortoiseGMManager
+## Notes: Compact GM command manager with searchable server-backed lookups for Tortoise WoW 1.18.1.
+## Author: Sagiroth
+## Version: 0.7.8
+## SavedVariables: TortoiseGMManagerDB
+
+Data.lua
+Core.lua
+Lookup.lua
+UI.lua
+ResultsUI.lua
+### files
+Core.lua
+Data.lua
+LICENSE
+Lookup.lua
+README.md
+ResultsUI.lua
+TortoiseGMManager.toc
+UI.lua
+assets
+tests
+
+## what TortoiseBotsManager needs (README)
+9:> **Requires the server-side module:** [Sagiroth/TortoiseBots](https://github.com/Sagiroth/TortoiseBots) (`modules/TortoiseBots`). The addon sends `.bot` transport commands, consumes structured `TBM:` responses, and keeps legacy command compatibility.
+39:TortoiseBots Manager (in-game, /tbm, optimistic UI)
+42:No module → addon loads but every action replies “TortoiseBots module not loaded” from the server.
+46:* `/tbm` (primary) — toggle panel. Aliases `/tb` / `/tbot` / `/tortoise` still work.
+47:* `/tbm list` — force a server roster refresh. `/tbm help` and `/tbm resetpos` remain available.
+
+## what TortoiseGMManager needs (README)
+3:A compact, Vanilla-native GM command manager for **Tortoise WoW 1.18.1 / client build 7272**.
+7:The addon is **client-side only**. It does not connect directly to MariaDB and does not bypass server permissions. Commands are sent through the normal GM chat-command path; the world server remains authoritative for access level, syntax, and database state.
+33:- `/tgmm` opens the manager.
+128:/tgmm
+217:The addon is statically and behavior tested in development, but still needs its first full visual/integration pass inside the actual Tortoise WoW 1.18.1 client.
