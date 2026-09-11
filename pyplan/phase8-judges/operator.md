@@ -4,7 +4,7 @@
 > `designs/seam.md` (**A**), `designs/surface.md` (**B**), `designs/risk.md` (**C**).
 > Governing pages read: `pyplan/phase8-kickoff.md` §§3–7, `phase8-parity-decisions.md`,
 > `phase8-delta.md` ("Facts that govern every row", "Could not ask"),
-> `STATE-2026-09-06-morning.md`, `resume-2026-09-05.md`, `phase7-decisions.md`
+> `notes/STATE-2026-09-06-morning.md`, `notes/resume-2026-09-05.md`, `phase7-decisions.md`
 > "Delivery order and gates" + Appendix B, `checklist.md:2120` (7.9) and `:2331` (7.10),
 > `gates/gate-79-controller-surface.py`, `gates/press-driver.py`,
 > `gates/bug39-lan-press-2026-09-05/`, `gates/7.10-ubuntu-2026-09-05-rerun/`,
@@ -51,7 +51,7 @@ Score notes worth keeping:
   starting* (`surface.md:106`), and stores a GM-3 credential inside the server folder
   (`surface.md:161`). Both are §2 flaws.
 - **C, criterion 6 = 5.** `risk.md:24` — "every gate captures the live rows it is about to
-  change into a file before the change and the same rows after" — is `resume-2026-09-05.md:76-79`
+  change into a file before the change and the same rows after" — is `notes/resume-2026-09-05.md:76-79`
   written into the design, and there is an "Evidence before" row in every §4 subsection. Two DoDs
   carry negative fixtures that violate exactly one rule each (`risk.md:305` wrong-credential-file
   → 401 → Repair; `risk.md:309` prefix blanked in a copy of the conf must show the refusal, not 0).
@@ -120,9 +120,9 @@ Two more, either of which stops B's 8.1a gate passing as written:
 ### C — the box plan needs two CMaNGOS servers on a box that has never held one
 
 `risk.md:281` assigns TBC and Vanilla to **yulon-fedora** ("Py 3.13, SELinux Enforcing, Off at
-baseline"). No WoW server has ever been installed there. `STATE-2026-09-06-morning.md:41-42` has
+baseline"). No WoW server has ever been installed there. `notes/STATE-2026-09-06-morning.md:41-42` has
 it "Off at baseline after the final gate", and that gate was the `--checks` matrix
-(`STATE-2026-09-06-morning.md:23-25`), not an install; memory `test-boxes-include-the-vms`
+(`notes/STATE-2026-09-06-morning.md:23-25`), not an install; memory `test-boxes-include-the-vms`
 records it as "Py 3.13, SELinux Enforcing, clone + venv" since 2026-09-05.
 
 So C's 8.1/8.2/8.3/8.4/8.7 CMaNGOS gates each require **two fresh CMaNGOS installs**, each a
@@ -165,7 +165,7 @@ marker is seen this run.
 
 ### The cost all three ignore: there is no Vanilla install anywhere
 
-`STATE-2026-09-06-morning.md:34-36`: *"the CMaNGOS engine's `patch-sources` stage now refuses a
+`notes/STATE-2026-09-06-morning.md:34-36`: *"the CMaNGOS engine's `patch-sources` stage now refuses a
 second press on any folder built before the doodad patch (m910q Vanilla, win11 TBC), so those
 installs cannot reach `ready` again without a recompile."*
 
@@ -185,7 +185,7 @@ The seven checks the reviewers are briefed to make, run here over the three desi
 
 | Check | Verdict | Line and why |
 |---|---|---|
-| (i) DoD unsatisfiable by a skip / absent capture / stale marker / exit code | **FAIL ×2** | `:616` — 8.6's DoD is *"the ping answered **(or the load line seen — recorded which)**"*. An either/or DoD is satisfied by its weaker half, and the weaker half is a log line. `:530` concedes the ping's own mechanism is unread. — And `:611`, `:612`, `:613`, `:614`, `:615`, `:617`: every DoD is after-state only. `resume-2026-09-05.md:76-79` requires the before-half in the same breath. |
+| (i) DoD unsatisfiable by a skip / absent capture / stale marker / exit code | **FAIL ×2** | `:616` — 8.6's DoD is *"the ping answered **(or the load line seen — recorded which)**"*. An either/or DoD is satisfied by its weaker half, and the weaker half is a log line. `:530` concedes the ping's own mechanism is unread. — And `:611`, `:612`, `:613`, `:614`, `:615`, `:617`: every DoD is after-state only. `notes/resume-2026-09-05.md:76-79` requires the before-half in the same breath. |
 | (ii) "already has X" resolves; "needs Y" names a mechanism and where verified | **PASS** | Spot-checked live: `docker.published_bindings` (`docker.py:2302`), `container_state` (`:1883`), `project_containers` (`:804`), `run_one_shot` (`:1357`), `conf.apply_table` (`conf.py:243`), `composegen.install_id` (`:135`), `write_plan` (`:692`), `accounts.MAX_USERNAME/MAX_PASSWORD` (`accounts.py:93-94`) all exist. |
 | (iii) no WotLK mechanism assumed for a CMaNGOS tree | **PASS, with a caveat** | `:333` declares the Vanilla block *is* the TBC block "because the same `cmangos/playerbots` SHA is built in", then rescues itself: "the gate that proves it for TBC proves it for Vanilla separately (rule 9)". Keep the rescue sentence in the plan, not only in the design. |
 | (iv) no DoD met from a CLI or a script | **PASS** | Every gate row is a press on a tab. |
@@ -340,7 +340,7 @@ What each step costs on the boxes it names, after the grafts. **Machine** is una
 on the box; **human** is time at a keyboard or a client. Grounding, stated once:
 
 - `yulon-ubuntu` holds the finished 7.2 WotLK install, Off at baseline
-  (`STATE-2026-09-06-morning.md:40-41`); a Start's ready budget is 480 s (`docker.py:39`) and a
+  (`notes/STATE-2026-09-06-morning.md:40-41`); a Start's ready budget is 480 s (`docker.py:39`) and a
   Stop's measured drains were 90.7 / 73.4 / 58.3 s at ~1980 characters (`docker.py:938-980`).
 - A CMaNGOS install from source is a compile. The only measured figure in the record is
   **10800 s** (Windows Tortoise, memory `windows-gate-box-recipes`); Linux is faster and has never
@@ -359,7 +359,7 @@ on the box; **human** is time at a keyboard or a client. Grounding, stated once:
 |---|---|---|---|---|
 | **8.1a** WotLK | `yulon-ubuntu` + `vmhost` client | ~30 min: baseline capture, Set up, recreate (stop 60–90 s + ready ≤ 480 s), probe, wrong-credential → Repair → verified | LAN step (announced, from checkpoint) + 1 client login to prove the channel did not break auth | 0 |
 | **8.1b** TBC | `m910q`, Tortoise stopped and restored | ~45 min **if** the exited `tbc-*` install still reaches `ready`; unknown if it hit the `patch-sources` refusal | none (the probe reply is the proof); the `//gsoap` namespace line and the `server info` reply are recorded and the catalog pinned to them | 0 — **or 1 (hours) if TBC is in the same state as Vanilla** |
-| **8.1c** Vanilla | `m910q` | **BLOCKED** — `STATE-2026-09-06-morning.md:34-36`: the install cannot reach `ready` again | — | **1 CMaNGOS recompile, owner's, hours** |
+| **8.1c** Vanilla | `m910q` | **BLOCKED** — `notes/STATE-2026-09-06-morning.md:34-36`: the install cannot reach `ready` again | — | **1 CMaNGOS recompile, owner's, hours** |
 | **8.1d** Tortoise | `m910q` (running since 2026-08-26) | ~20 min: attach probe + the "no remote channel" sentence | none | 0 |
 | **8.1e** WotLK, native Windows | `yulon-win11-gate` | ~40 min + Docker Desktop's interactive-session dance (memory `windows-gate-box-recipes`) | none | 0 |
 | **8.2** dashboard + snapshot | all four | ~20 min per game: hand counts, two forced `docker kill`s, Stop → snapshot file | 1 client login per game to move the player count | 0 |

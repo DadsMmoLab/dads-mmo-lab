@@ -2983,7 +2983,7 @@ and the daemon's view of the mount. The remaining difference is the process
 that spawns it — a frozen PyInstaller `.app`, a launchd child, running the
 subprocess off the GUI thread with `capture_output=True` and an inherited
 stdin. None of that can be bisected without a Mac, and this project has none.
-The handoff brief is `pyplan/macos-clone-handoff.md`; the first thing it asks
+The handoff brief is `pyplan/notes/macos-clone-handoff.md`; the first thing it asks
 for is the run-sheet's Step 1, because **nothing in this project has ever run
 on a Darwin interpreter**, and a machine that can run the app from source ends
 the four-release-round-trip loop this investigation has been stuck in.

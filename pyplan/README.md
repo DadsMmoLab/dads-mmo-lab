@@ -7,7 +7,7 @@
 
 ## Document map (where each planning doc lives)
 
-There are **three `README.md`s**, each with a distinct audience, plus three `pyplan/` companions with a deliberate division of labour:
+There are **three `README.md`s**, each with a distinct audience, plus the `pyplan/` companions with a deliberate division of labour:
 
 | File | Role |
 |---|---|
@@ -16,11 +16,18 @@ There are **three `README.md`s**, each with a distinct audience, plus three `pyp
 | `pylauncher/README.md` | **User-facing**: what the shipped app does under the hood. |
 | `pyplan/style-guide.md` | **The code rules**: *how* to write it. Precedence on style. |
 | `pyplan/roadmap.md` | **The execution plan**: *what order* to do it in. Clean plan only — no decisions or notes. |
+| `pyplan/checklist.md` | **The checkable progress tracker**: completed `[x]` / pending `[ ]` items per phase, each tick citing its gate folder. |
+| `pyplan/bug-checklist.md` | **The defect register**: numbered findings from reviews and hunts, each closed against a commit or carried as known. |
+| `pyplan/write-ledger.md` | **Every write the app makes outside its own folder**, by function, with what it touches and under which running-world state it refuses. |
+| `pyplan/tickets/` | **The per-ticket record** (T1…): spec, hand reports, reviews, close — one file per ticket, the current process's unit of work. |
+| `pyplan/gates/` | **Evidence**: one folder per live gate on a real box, cited by the checklist, the CHANGELOG and the tickets. |
 | `pyplan/phase6-decisions.md` | **The Phase 6 decisions log ("why")**: reasoning, rejections, incident history. |
 | `pyplan/phase7-decisions.md` | **The Phase 7 decisions log**: one install engine for all four servers; what it overturns in the pages above, by name. |
-| `pyplan/phase7-plans/` | **The Phase 7 implementation plans**, one per gated step (7.1, 7.2, 7.3 so far): bite-sized TDD tasks with the code, against the interface contract each plan embeds. Executed task by task; ticked in the checklist. |
-| `pyplan/phase8-decisions.md` | **The Phase 8 decisions log**: so far one feature only — uninstalling an install, and what it deliberately does not touch. Written before Phase 8 is scoped; blocked on Phase 7. |
-| `pyplan/checklist.md` | **The checkable progress tracker**: completed `[x]` / pending `[ ]` items per phase. |
+| `pyplan/phase7-plans/` | **The Phase 7 implementation plans**, one per gated step: bite-sized TDD tasks with the code, against the interface contract each plan embeds. Executed task by task; ticked in the checklist. |
+| `pyplan/phase8-kickoff.md`, `phase8-decisions.md`, `phase8-parity-decisions.md`, `phase8-delta.md` | **Phase 8's scope and decisions**: the kickoff (29 boxes), the decisions log, the parity decisions across the four trees, and the delta against the Rust launcher. |
+| `pyplan/phase8-designs/`, `phase8-reads/`, `phase8-reviews/`, `phase8-judges/` | **Phase 8's working papers**: the designs per feature, the reads of the prior art, the review rounds and the judges' verdicts. |
+| `pyplan/phase8-owner-answers-2026-09-08.md`, `phase8-exit-review-2026-09-09.md` | **Owner answers and the exit review** — decision sources cited from code and tests, kept beside the phase. |
+| `pyplan/notes/` | **Session handoffs** (`STATE-*`, `resume-*`, the morning questions): how to resume; the newest supersedes the rest. Not decisions. |
 
 **Precedence (restated once, here and in the other two):** `README.md` wins on *what/why*;
 `style-guide.md` wins on *how*; `roadmap.md` wins on *order*. If they conflict, flag it — don't

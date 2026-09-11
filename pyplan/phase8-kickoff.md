@@ -31,10 +31,10 @@ is 531 commits behind it; do not work there. Phase 7 stands at 11 of 12 boxes; o
 decision 2026-09-06) and the Phase 7 exit-criteria box (Baerthe's to tick). Read, in this order,
 before anything else:
 
-1. `pyplan/STATE-2026-09-06-morning.md` — where Phase 7 stands, the five merges of the night,
+1. `pyplan/notes/STATE-2026-09-06-morning.md` — where Phase 7 stands, the five merges of the night,
    and the owner decisions still open.
-2. `pyplan/STATE-2026-09-05-morning.md`, `pyplan/STATE-2026-09-04-evening.md`,
-   `pyplan/resume-2026-09-05.md` and `pyplan/resume-2026-09-04.md` — older, still binding where
+2. `pyplan/notes/STATE-2026-09-05-morning.md`, `pyplan/notes/STATE-2026-09-04-evening.md`,
+   `pyplan/notes/resume-2026-09-05.md` and `pyplan/notes/resume-2026-09-04.md` — older, still binding where
    the newest STATE file is silent.
 3. `pyplan/README.md`, `pyplan/style-guide.md`, `pyplan/roadmap.md` §8, §9 and "Cross-cutting
    obligations", `pyplan/checklist.md` "Phase 8", `pyplan/rust-prior-art.md` §7,

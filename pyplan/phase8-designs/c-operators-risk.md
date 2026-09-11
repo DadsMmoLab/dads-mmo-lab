@@ -276,7 +276,7 @@ WotLK first on every step (Q3), one box per family, every gate from a checkpoint
 `claude-say`, captured **before** it changes anything. Boxes and why they are safe: **yulon-ubuntu**
 (Hyper-V, checkpoint `pre-7.2-gate-2026-09-02` under `clean-ssh`; the 7.2 WotLK install intact,
 Off at baseline; the 3.3.5a client on vmhost at `C:\clients\WoW-WotLK-3.3.5a-min` logs in after the
-LAN step — `STATE-2026-09-06-morning.md`) for WotLK; **m910q** (Tortoise running since 2026-08-26;
+LAN step — `notes/STATE-2026-09-06-morning.md`) for WotLK; **m910q** (Tortoise running since 2026-08-26;
 all four clients under `~/clients`; stale `r5`/`r6`/`fw5` containers and `http.server` processes
 to be removed first) for Tortoise; **yulon-fedora** (Py 3.13, SELinux Enforcing, Off at baseline)
 for TBC and Vanilla — never two servers on one box at once (README §12), never a compile beside a
