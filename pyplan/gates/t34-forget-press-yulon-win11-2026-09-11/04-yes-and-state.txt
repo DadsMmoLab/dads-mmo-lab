@@ -1,0 +1,17 @@
+2026-09-11T23:56:20.2417969+02:00
+buttons seen: yulon.exe - 1 running window | Volume No audio device is installed | Yes | No | Uninstall. | Forget this install. | Up to "YULON (D:)" (Alt + Up Arrow) | Version 4.90.0 is ready to install
+found [Yes] at 1074,588 81x26; invoking
+invoked at 2026-09-11T23:56:12.5390506+02:00
+--- state.json ---
+{
+  "schema_version": 1,
+  "installs": [
+    {
+      "game": "wow-wotlk",
+      "server_dir": "C:\\Users\\pk\\wow-server-playerbots",
+      "client_dir": null,
+      "wsl_distro": null
+    }
+  ]
+}
+--- log tail ---

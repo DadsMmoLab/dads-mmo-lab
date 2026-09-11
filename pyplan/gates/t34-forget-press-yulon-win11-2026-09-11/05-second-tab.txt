@@ -1,0 +1,12 @@
+2026-09-11T23:57:07.2550163+02:00
+buttons seen: yulon.exe - 1 running window | Volume No audio device is installed | Uninstall. | Forget this install. | Up to "YULON (D:)" (Alt + Up Arrow) | Version 4.90.0 is ready to install
+found [Forget this install*] at 441,478 1140x26; invoking
+invoked at 2026-09-11T23:56:46.6983957+02:00
+buttons seen: yulon.exe - 1 running window | Volume No audio device is installed | Yes | No | Uninstall. | Forget this install. | Up to "YULON (D:)" (Alt + Up Arrow) | Version 4.90.0 is ready to install
+found [Yes] at 1074,588 81x26; invoking
+invoked at 2026-09-11T23:56:59.6355261+02:00
+--- state.json ---
+{
+  "schema_version": 1,
+  "installs": []
+}

@@ -1,0 +1,5 @@
+Warning: Permanently added 'yulon-arch' (ED25519) to the list of known hosts.
+2026-09-11T20:25:33+00:00
+# yulon-arch, real display :0 (xcb), the app tree at ~/y8, the app's own _qt_suggestion_asker, a QTimer pressing the button
+yulon-arch py3.13.15 PySide6 6.11.2 tree 124c9a7 platform=xcb: pressed Yes -> asker returned False
+yulon-arch py3.13.15 PySide6 6.11.2 tree 124c9a7 platform=xcb: pressed No -> asker returned False

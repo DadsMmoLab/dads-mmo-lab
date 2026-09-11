@@ -1,0 +1,3 @@
+buttons seen: yulon.exe - 1 running window | Volume No audio device is installed | Uninstall. | Forget this install. | Up to "YULON (D:)" (Alt + Up Arrow) | Version 4.90.0 is ready to install
+found [Forget this install*] at 441,478 1140x26; invoking
+invoked at 2026-09-11T23:55:29.2809392+02:00

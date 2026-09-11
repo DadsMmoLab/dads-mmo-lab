@@ -1,0 +1,4 @@
+2026-09-11T22:25:35+02:00
+# m910q, offscreen platform, the gate venv (py3.11), the synced tree at ~/dads-mmo-lab
+PK-M910q py3.11.15 PySide6 6.11.2 tree a13a5def platform=offscreen: pressed Yes -> asker returned False
+PK-M910q py3.11.15 PySide6 6.11.2 tree a13a5def platform=offscreen: pressed No -> asker returned False
