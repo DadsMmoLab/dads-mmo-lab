@@ -9,6 +9,27 @@ single list; this one is only the running order.
 
 ---
 
+## All four rounds are run — the matrix closed 2026-08-29
+
+**Every game installs on every operating system.** Four games, four platforms, each one driven
+for real rather than reasoned about. The evidence per box is in
+[`bug-checklist.md`](bug-checklist.md) §§8–15; this table is the running order's scoreboard.
+
+| | Ubuntu 24.04 | Fedora 44 | Arch | Windows 11 |
+| --- | --- | --- | --- | --- |
+| **WotLK** | done | done, fresh dnf compile | done | done, native engine |
+| **Vanilla** | done | done | done | done, through WSL2 |
+| **TBC** | done | done, SELinux enforcing | done | done, 2h19m |
+| **Tortoise** | done | done, SELinux enforcing | done, no passwordless sudo | done, its own WSL2 branch |
+
+Tortoise also runs on the physical **m910q** box, up since 2026-08-26.
+
+Open defects from all of it live in [`bug-checklist.md`](bug-checklist.md), not here. The class
+worth naming: **four separate sightings of a readiness check grepping for strings the core cannot
+print** (WotLK on Fedora §9.1, TBC everywhere §11.2, Tortoise §14) — they are one fix, not four.
+
+---
+
 ## Round 1 — WotLK, all four OSes
 
 The AzerothCore WotLK installer, which is the one the launcher leads with.
@@ -16,18 +37,23 @@ The AzerothCore WotLK installer, which is the one the launcher leads with.
 | OS | Installer | State |
 | --- | --- | --- |
 | **Ubuntu 24.04** | `install-wow-wotlk-ubuntu.sh` (apt) | **done** — 21 defects, fixed, [PR #126](https://github.com/DadsMmoLab/dads-mmo-lab/pull/126) green |
-| **Arch** | `install-wow-wotlk.sh` (base script, pacman fallback) | round-4 hunt running |
-| **Windows 11** | native engine (no bash script) | round-4 hunt running |
-| **Fedora 44** | `install-wow-wotlk-fedora.sh` (dnf) | **open** — see below |
+| **Arch** | `install-wow-wotlk.sh` (base script, pacman fallback) | **done** — round-4 hunt, `bug-checklist.md` §8, §10 |
+| **Windows 11** | native engine (no bash script) | **done** — the clean-box gate of 2026-08-26 closed the 6.3 `ac-db-import` blocker |
+| **Fedora 44** | `install-wow-wotlk-fedora.sh` (dnf) | **done** — `bug-checklist.md` §9 |
 
-**Fedora is the hole in this round.** The dnf variant has never completed a fresh compile: it
-reached 83% at 8 GB of RAM and swap-thrashed the box unreachable. Everything Fedora has
-contributed so far — the SELinux `:z`/`:Z` findings — came from an *adopted* install, not one
-the script built. Owed: a fresh compile at 23 GB on yulon-fedora.
+~~**Fedora is the hole in this round.** The dnf variant has never completed a fresh compile: it
+reached 83% at 8 GB of RAM and swap-thrashed the box unreachable.~~ **Closed 2026-08-29** — the
+fresh dnf compile finished on yulon-fedora at 23 GB (`bug-checklist.md` §9), so Fedora's findings
+are no longer all from an *adopted* install. That section also carries what the fresh compile
+found, including the readiness check that can never report ready on Fedora.
 
 ## Round 2 — Tortoise
 
-`install-tortoise-wow-wsl.sh`. **Never run once.**
+`install-tortoise-wow-wsl.sh`. ~~**Never run once.**~~ **Run everywhere, 2026-08-29** — Fedora
+(SELinux enforcing), Arch (no passwordless sudo), Windows/WSL2 and the physical m910q box, all
+with the real Turtle 1.18.1 build 7272 client; on Windows it is the first Tortoise anywhere to
+reach a full install with real client data (`bug-checklist.md` §12, §14). It also now ships the
+playerbots it is named for, and the `RandomBotPrefix` that lets them load (PR #135).
 
 **It is a LINUX installer, despite the filename.** `catalog.json` declares
 `"platforms": ["linux"]` for `wow-tortoise` — Linux and nothing else. The `-wsl` in the name is
@@ -49,7 +75,12 @@ two. Nothing else stands in this round's way.
 
 ## Round 3 — Vanilla
 
-`install-wow-vanilla.sh`. **Correction: it HAS been run, on Fedora, and it failed.**
+`install-wow-vanilla.sh`. **Done on all four, 2026-08-29** — Arch and Ubuntu (`bug-checklist.md`
+§10, §11), Fedora, and Windows through WSL2, where it completed end to end through its own
+"VANILLA WOW INSTALLED!" banner: client fetched, ~26 minute compile, extraction, and mmaps for
+every Vanilla map (`bug-checklist.md` §13). The historical starting point is below.
+
+~~**Correction: it HAS been run, on Fedora, and it failed.**~~ *(the failure this round started from)*
 `/home/pk/wow-vanilla-server` exists on yulon-fedora and `vanilla-install.log` ends with
 
     Bind for 0.0.0.0:8085 failed: port is already allocated
@@ -62,7 +93,10 @@ root**, so a prune is required between installs on the same box.
 
 ## Round 4 — TBC
 
-`install-wow-tbc.sh`. **Never run once.** Needs the 2.4.3 client, staged on the host share.
+`install-wow-tbc.sh`. ~~**Never run once.**~~ **Done on all four, 2026-08-29** — first ever run on
+Ubuntu (`bug-checklist.md` §11), Arch (§10), Fedora under SELinux enforcing, and Windows in
+2h19m across all 83 maps including Outland (§14). It needed the 2.4.3 client from the host share,
+which is where the table below still matters.
 
 ---
 
