@@ -1,0 +1,38 @@
+2026-09-11T15:53:15+00:00
+# T30 Half 2 live -- capture 11: AutoHonorRestart = 0 live proof
+
+## mangosd.conf read-back (the two keys)
+146:# AutoRestart.MaxServerUptime. Schedule a restart if server has been up for this many seconds.
+148:AutoRestart.MaxServerUptime = 0
+705:# AutoHonorRestart. Server will schedule a restart on its own when it's time to perform PvP rank calculations.
+707:AutoHonorRestart = 0
+
+## Step 1: stop the world
+tortoise-mangosd
+stopped at 2026-09-11T15:53:20+00:00
+
+## Step 2: set nextHonorMaintenanceDay to 0 (a past day)
+before:
+0	0	20705	20712	0
+after:
+0	0	20705	0	0
+
+## Step 3: start the world
+tortoise-mangosd
+started at 2026-09-11T15:53:21+00:00
+
+## Step 4: wait for the world to load and the honor tick to fire
+check 1 (2026-09-11T15:53:51+00:00):
+check 2 (2026-09-11T15:54:21+00:00):
+check 3 (2026-09-11T15:54:51+00:00):
+check 4 (2026-09-11T15:55:21+00:00):
+check 5 (2026-09-11T15:55:51+00:00):
+check 6 (2026-09-11T15:56:21+00:00):
+
+## the HonorMaintenancer line:
+HonorMaintenancer: Server needs to be restarted to perform honor rank calculations.
+
+## any shutdown/restart announcement (should be NONE with AutoHonorRestart=0):
+
+## world still running:
+tortoise-mangosd Up 3 minutes

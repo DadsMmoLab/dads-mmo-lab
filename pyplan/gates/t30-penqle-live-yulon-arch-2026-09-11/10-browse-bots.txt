@@ -1,0 +1,27 @@
+2026-09-11T15:47:08+00:00
+# T30 Half 2 live -- capture 10: Browse bots who-list
+
+## RNDBOT accounts in tw_logon.account
+count:
+50
+sample (5):
+34	RNDBOT018601
+30	RNDBOT021483
+15	RNDBOT054791
+7	RNDBOT055725
+25	RNDBOT059486
+
+## bots online in tw_char.characters
+500
+
+## character sample (online bots)
+1	Vafartharo	10	3	1
+2	Calmoruborr	4	1	1
+3	Tharizarals	6	3	1
+4	Kururdrur	1	4	1
+5	Ralleg	3	3	1
+6	Murgrosh	9	4	1
+8	Camaltrall	5	1	1
+7	Tharobraesh	1	4	1
+9	Rarghugryrl	7	9	1
+10	Vorshen	7	9	1

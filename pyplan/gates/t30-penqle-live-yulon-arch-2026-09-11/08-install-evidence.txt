@@ -1,0 +1,45 @@
+2026-09-11T15:44:26+00:00
+# T30 Half 2 live -- capture 08: the install evidence
+
+## install phases and wall-clock (from install.log timestamps)
+install started: [13:03:56Z]
+compile [100%]: [13:54:49Z]
+image done: [13:55:33Z]
+extraction start: [13:55:49Z]
+mmaps complete (last Building tile): [15:35:06Z]
+install finished: [15:43:25Z]
+
+## ready line
+
+## module lines
+
+## RNDBOT accounts
+
+## bots queued
+
+## DB auto-updater module lines
+
+## mangosd.conf: AutoHonorRestart and AutoRestart keys
+146:# AutoRestart.MaxServerUptime. Schedule a restart if server has been up for this many seconds.
+148:AutoRestart.MaxServerUptime = 0
+705:# AutoHonorRestart. Server will schedule a restart on its own when it's time to perform PvP rank calculations.
+707:AutoHonorRestart = 0
+
+## RNDBOT account count and sample
+--------------
+SELECT COUNT(*) FROM account WHERE username LIKE RNDBOT%
+--------------
+
+ERROR 1064 (42000) at line 1: You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '' at line 1
+sample:
+--------------
+SELECT id, username FROM account WHERE username LIKE RNDBOT% LIMIT 5
+--------------
+
+ERROR 1064 (42000) at line 1: You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'LIMIT 5' at line 1
+
+## bots online count
+ERROR 1049 (42000): Unknown database 'tw_characters'
+
+## peak memory from memwatch
+2026-09-11T15:43:59+00:00 used=5635 free=187 avail=14354

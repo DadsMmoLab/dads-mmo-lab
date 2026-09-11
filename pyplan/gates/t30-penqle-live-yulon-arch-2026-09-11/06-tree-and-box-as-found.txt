@@ -1,0 +1,76 @@
+2026-09-11T12:51:24+00:00
+# T30 Half 2 live — capture 06: the tree and box as found
+
+## y8-t30 sha
+bed545b T30 Half 2 evidence: the gate transcript, and the live run the box would not allow
+dfbb4b1 T30 Half 2 code: the wow-tortoise entry moves to the Penqle core and TortoiseBots
+bd51ea8 T30 Half 1: the Penqle core and TortoiseBots measured on yulon-arch
+
+## docker ps -a
+NAMES                         STATUS                    IMAGE
+t30-parked-tortoise-mangosd   Exited (0) 14 hours ago   yulon.local/cmangos-tortoise-server:native-54fa64f0
+t30-parked-tortoise-realmd    Exited (0) 14 hours ago   yulon.local/cmangos-tortoise-server:native-54fa64f0
+t30-parked-tortoise-db        Exited (0) 14 hours ago   mariadb:10.6
+ac-worldserver                Exited (0) 2 days ago     yulon.local/ac-wotlk-worldserver:native-056ed20d
+ac-authserver                 Exited (0) 2 days ago     yulon.local/ac-wotlk-authserver:native-056ed20d
+ac-db-import                  Exited (0) 10 days ago    yulon.local/ac-wotlk-db-import:native-056ed20d
+ac-database                   Exited (0) 2 days ago     mysql:8.4
+ac-client-data-init           Exited (0) 10 days ago    yulon.local/ac-wotlk-client-data:native-056ed20d
+
+## docker volume ls
+DRIVER    VOLUME NAME
+local     94c41bcf6b609c34aa57c4a66d121e5a18de4fde201a3af60928809629420a28
+local     yulon-wow-tortoise-54fa64f0_db-data
+local     yulon-wow-wotlk-056ed20d_client-data
+local     yulon-wow-wotlk-056ed20d_db-data
+
+## docker images
+t30/tortoise-core:latest	1.12GB
+t30/base:latest	1.12GB
+yulon.local/cmangos-tortoise-server:native-54fa64f0	1.06GB
+yulon.local/ac-wotlk-db-import:native-056ed20d	1.56GB
+yulon.local/ac-wotlk-authserver:native-056ed20d	333MB
+yulon.local/ac-wotlk-worldserver:native-056ed20d	1.02GB
+yulon.local/ac-wotlk-client-data:native-056ed20d	145MB
+mariadb:10.6	438MB
+mysql:8.4	1.12GB
+alpine/git:<none>	138MB
+
+## free -m
+               total        used        free      shared  buff/cache   available
+Mem:           19990        1162        5698          76       13608       18827
+Swap:            511           0         511
+
+## df -h ~
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda3       100G   41G   58G  42% /
+
+## AddOns folder
+total 0
+drwxr-xr-x 1 pk pk 444 Jul 14 14:47 .
+drwxr-xr-x 1 pk pk  12 Jul 14 14:47 ..
+drwxr-xr-x 1 pk pk  44 Sep  8 16:34 Blizzard_AuctionUI
+drwxr-xr-x 1 pk pk  62 Sep  8 16:34 Blizzard_BattlefieldMinimap
+drwxr-xr-x 1 pk pk  44 Sep  8 16:34 Blizzard_BindingUI
+drwxr-xr-x 1 pk pk  46 Sep  8 16:34 Blizzard_CombatText
+drwxr-xr-x 1 pk pk  40 Sep  8 16:34 Blizzard_CraftUI
+drwxr-xr-x 1 pk pk  46 Sep  8 16:34 Blizzard_GMSurveyUI
+drwxr-xr-x 1 pk pk  44 Sep  8 16:34 Blizzard_InspectUI
+drwxr-xr-x 1 pk pk  40 Sep  8 16:34 Blizzard_MacroUI
+drwxr-xr-x 1 pk pk  38 Sep  8 16:34 Blizzard_RaidUI
+drwxr-xr-x 1 pk pk  42 Sep  8 16:34 Blizzard_TalentUI
+drwxr-xr-x 1 pk pk  50 Sep  8 16:34 Blizzard_TradeSkillUI
+drwxr-xr-x 1 pk pk  44 Jul 14 14:47 Blizzard_TrainerUI
+
+## state.json
+{
+  "schema_version": 1,
+  "installs": [
+    {
+      "game": "wow-tortoise",
+      "server_dir": "/home/pk/tortoise-vm",
+      "client_dir": "/home/pk/clients/TurtleWoW",
+      "wsl_distro": null
+    }
+  ]
+}

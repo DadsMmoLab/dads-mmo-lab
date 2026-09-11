@@ -1,0 +1,96 @@
+2026-09-11T16:17:22+00:00
+# T30 Half 2 live -- capture 16: box as left
+
+## Step 1: stop the new install
+ Container tortoise-mangosd Stopping 
+ Container tortoise-realmd Stopping 
+ Container tortoise-realmd Stopped 
+ Container tortoise-mangosd Stopped 
+ Container tortoise-db Stopping 
+ Container tortoise-db Stopped 
+
+## Step 2: remove the new install's containers
+tortoise-db
+tortoise-realmd
+tortoise-mangosd
+
+## Step 3: rename parked containers back
+
+## docker ps -a
+tortoise-mangosd	Exited (0) 17 hours ago
+tortoise-realmd	Exited (0) 17 hours ago
+tortoise-db	Exited (0) 17 hours ago
+ac-worldserver	Exited (0) 3 days ago
+ac-authserver	Exited (0) 3 days ago
+ac-db-import	Exited (0) 10 days ago
+ac-database	Exited (0) 3 days ago
+ac-client-data-init	Exited (0) 10 days ago
+
+## docker volume ls
+DRIVER    VOLUME NAME
+local     94c41bcf6b609c34aa57c4a66d121e5a18de4fde201a3af60928809629420a28
+local     yulon-wow-tortoise-54fa64f0_db-data
+local     yulon-wow-tortoise-08258e92_db-data
+local     yulon-wow-wotlk-056ed20d_client-data
+local     yulon-wow-wotlk-056ed20d_db-data
+
+## docker images
+yulon.local/cmangos-tortoise-server:native-08258e92	1.05GB
+yulon.local/cmangos-tortoise-server:native-54fa64f0	1.06GB
+yulon.local/ac-wotlk-db-import:native-056ed20d	1.56GB
+yulon.local/ac-wotlk-authserver:native-056ed20d	333MB
+yulon.local/ac-wotlk-worldserver:native-056ed20d	1.02GB
+yulon.local/ac-wotlk-client-data:native-056ed20d	145MB
+mariadb:10.6	438MB
+mysql:8.4	1.12GB
+alpine/git:<none>	138MB
+
+## free -m
+               total        used        free      shared  buff/cache   available
+Mem:           19990        1387        3037          76       16040       18602
+Swap:            511           0         511
+
+## df -h ~
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda3       100G   44G   55G  45% /
+
+## state.json
+{
+  "schema_version": 1,
+  "installs": [
+    {
+      "game": "wow-tortoise",
+      "server_dir": "/home/pk/tortoise-vm",
+      "client_dir": "/home/pk/clients/TurtleWoW",
+      "wsl_distro": null
+    }
+  ]
+}
+
+## AddOns (the two addons STAY)
+Blizzard_AuctionUI
+Blizzard_BattlefieldMinimap
+Blizzard_BindingUI
+Blizzard_CombatText
+Blizzard_CraftUI
+Blizzard_GMSurveyUI
+Blizzard_InspectUI
+Blizzard_MacroUI
+Blizzard_RaidUI
+Blizzard_TalentUI
+Blizzard_TradeSkillUI
+Blizzard_TrainerUI
+TortoiseBotsManager
+TortoiseGMManager
+
+## Steam process
+
+## no python/yulon/WoW process
+(none)
+
+## kill memwatch
+## reverse recipe (to put the new install's containers back in front):
+  docker rename tortoise-db t30-parked-tortoise-db
+  docker rename tortoise-realmd t30-parked-tortoise-realmd
+  docker rename tortoise-mangosd t30-parked-tortoise-mangosd
+  cd ~/tortoise-penqle && docker compose start

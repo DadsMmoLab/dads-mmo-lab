@@ -1,0 +1,23 @@
+2026-09-11T15:45:05+00:00
+# capture 08b - world lines and DB queries
+
+## ready line from docker logs
+
+## RNDBOT accounts
+--------------
+SELECT COUNT(*) FROM account WHERE username LIKE RNDBOT%
+--------------
+
+ERROR 1064 (42000) at line 1: You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '' at line 1
+sample:
+--------------
+SELECT id, username FROM account WHERE username LIKE RNDBOT% LIMIT 5
+--------------
+
+ERROR 1064 (42000) at line 1: You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'LIMIT 5' at line 1
+
+## characters database name
+tw_char
+
+## bots online
+280

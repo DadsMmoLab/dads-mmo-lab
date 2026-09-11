@@ -1,0 +1,12 @@
+2026-09-11T15:57:22+00:00
+# T30 Half 2 live -- capture 12: Modules conf activation surface
+
+Traceback (most recent call last):
+  File "<string>", line 12, in <module>
+    manifests = store.list()
+                ^^^^^^^^^^
+AttributeError: 'ManifestStore' object has no attribute 'list'
+
+## verify: Perf keys in mangosd.conf
+2110:Perf.Enable = 1
+2113:Perf.ReportInterval = 600

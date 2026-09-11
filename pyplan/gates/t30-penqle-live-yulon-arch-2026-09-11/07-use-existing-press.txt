@@ -1,0 +1,48 @@
+2026-09-11T13:03:26+00:00
+# T30 Half 2 live -- capture 07: the Use existing press for ~/tortoise-vm
+
+## deviation: the GUI dialog was bypassed
+The Use existing button in the GUI opens a QFileDialog the user clicks through.
+Here, the app own state.forget() + state.remember() + compose_file() validation
+was called directly (useexisting.py), and the app was launched to show the tabs
+(tabframes.py). The validation and state write are the app own code; the deviation
+is the dialog bypass.
+
+## the press transcript (from useexisting.py)
+(output was on stdout, captured below)
+
+## the app log during the tab capture
+2026-09-10 22:49:38 INFO [yulon.catalog.families.sqlplan] tw_world.yulon_install records a finished import by an older plan (a1dfc9fefe235d37, this app's is 8b60e764371f2293); it is kept as it is
+2026-09-10 22:49:39 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False
+2026-09-10 22:52:30 INFO [yulon.logsnap] saved tortoise-mangosd's log to /home/pk/.local/share/yulon/logs/wow-tortoise-54fa64f0-20260910T225230Z.log
+2026-09-10 22:52:36 INFO [yulon.docker] stop_staged(): stopped; containers kept for a fast restart
+2026-09-10 23:03:40 INFO [yulon.platform] no `sg` on PATH; the docker group cannot be picked up without a logout
+2026-09-10 23:03:40 INFO [__main__] Yu'lon launcher starting
+2026-09-10 23:03:41 INFO [yulon.channel_setup] no usable credential at /home/pk/.local/share/yulon/credentials/wow-tortoise-54fa64f0.json: FileNotFoundError
+2026-09-10 23:03:41 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False
+2026-09-10 23:34:08 INFO [yulon.platform] no `sg` on PATH; the docker group cannot be picked up without a logout
+2026-09-10 23:34:08 INFO [__main__] Yu'lon launcher starting
+2026-09-10 23:34:09 INFO [yulon.channel_setup] no usable credential at /home/pk/.local/share/yulon/credentials/wow-tortoise-54fa64f0.json: FileNotFoundError
+2026-09-10 23:34:10 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False
+2026-09-11 12:55:58 INFO [yulon.platform] no `sg` on PATH; the docker group cannot be picked up without a logout
+2026-09-11 12:55:58 INFO [__main__] Yu'lon launcher starting
+2026-09-11 12:56:00 INFO [yulon.update] update check: current=0.6.59 latest=v0.6.59Public newer=False
+
+## state.json after the press
+{
+  "schema_version": 1,
+  "installs": [
+    {
+      "game": "wow-tortoise",
+      "server_dir": "/home/pk/tortoise-vm",
+      "client_dir": "/home/pk/clients/TurtleWoW",
+      "wsl_distro": null
+    }
+  ]
+}
+
+## what the tabs showed (frames)
+frame-01-server-tab.png: Server tab stopped, db/auth/world down, channel=attach
+frame-02-modules-tab.png: Modules tab with 6 entries including TortoiseBotsManager and TortoiseGMManager
+frame-03-accounts-tab.png: Accounts tab
+frame-04-networking-tab.png: Networking tab
