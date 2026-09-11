@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 
-from PySide6.QtCore import QCoreApplication, QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from yulon import runner
@@ -216,6 +216,15 @@ class LogPanel(QWidget):
         # the only way out was to resize or restart. Found by the owner during
         # the 7.2 gate, on the first refusal a real user would ever see.
         self._status.setWordWrap(True)
+        # SELECTABLE, so a refusal can be copied instead of screenshotted (T32:
+        # a macOS report arrived as a photograph of this label because a QLabel
+        # selects nothing by default). Keyboard selection is asked for beside
+        # mouse selection, not in place of it: `TextSelectableByKeyboard` is
+        # what gives the label a text cursor for Ctrl+A/Ctrl+C at all.
+        self._status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         # Elapsed lives HERE, beside Stop, not on every line (owner,
         # 2026-09-03). One field that ticks answers "how long has this been
         # going" better than the same number repeated down the panel, and it

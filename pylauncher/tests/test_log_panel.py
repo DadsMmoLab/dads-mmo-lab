@@ -9,6 +9,7 @@ import time
 from collections.abc import Iterator
 
 import pytest
+from PySide6.QtCore import Qt
 
 from tests.conftest import (
     HANG_BOUND,
@@ -629,6 +630,20 @@ def test_the_status_label_still_says_what_failed(qapp: object) -> None:
     )
     panel._status.setText("FAILED: " + message)
     assert panel.status_text() == "FAILED: " + message
+
+
+def test_the_status_label_text_can_be_selected_and_copied(qapp: object) -> None:
+    """A screenshot is what a reporter sends when the text under it cannot be selected.
+
+    T32: a macOS user relayed a refusal as a photograph of the screen because
+    `QLabel` selects nothing by default. Mouse and keyboard selection are both
+    asked for, because a keyboard-only user copying with Ctrl+A/Ctrl+C is no
+    less entitled to the sentence than one dragging a mouse over it.
+    """
+    panel = LogPanel()
+    flags = panel._status.textInteractionFlags()
+    assert flags & Qt.TextInteractionFlag.TextSelectableByMouse
+    assert flags & Qt.TextInteractionFlag.TextSelectableByKeyboard
 
 
 # ---------------------------------------------------------------------------
