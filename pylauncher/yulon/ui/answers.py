@@ -1,7 +1,8 @@
 """Reading a `QMessageBox.question()` answer without the identity trap (T33).
 
 Measured on PySide6 6.11.2, Python 3.11 and 3.13 (both CI legs, `2026-09-11`,
-`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`): the **static** `QMessageBox.question(...)`
+`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`): the **static**
+`QMessageBox.question(...)`
 returns a plain `int` -- `16384` for Yes, `65536` for No -- not a
 `QMessageBox.StandardButton` member. An instance's `standardButton(clickedButton())`
 still returns the member, so the two call shapes hand back different types for

@@ -46,7 +46,8 @@ _REAL_QMESSAGEBOX_QUESTION = QMessageBox.question
 `_no_modal_dialogs` (autouse, `conftest.py`) fakes this for every other test in
 the suite so a modal can never block a run. T33's real-dialog test needs the
 REAL one instead: it is what PySide6 actually returns (a plain `int`, not a
-`QMessageBox.StandardButton` member -- `pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`) that
+`QMessageBox.StandardButton` member --
+`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`) that
 the bug was measured against. Module import runs before any fixture, so this
 reference is unaffected by fixture ordering.
 """
@@ -2108,7 +2109,8 @@ def test_a_real_static_ints_yes_still_offers_and_takes_the_restart(
 _DIALOG_POLL_MS = 20
 """How often the click loop below re-checks for the active modal `QMessageBox`.
 
-Mirrors `pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`'s `QTimer.singleShot(20, ...)`. Not a
+Mirrors `pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`'s
+`QTimer.singleShot(20, ...)`. Not a
 deadline -- see `_REAL_DIALOG_BOUND_MS`.
 """
 
@@ -2198,7 +2200,8 @@ def test_a_real_yes_on_the_suggestion_dialog_reads_as_yes(
     `ask_suggestion` seam with a plain Python fake (`_view()`, above), which is
     exactly why the regression went unnoticed -- the fakes return the enum
     member, and PySide6's real static `question()` does not
-    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`). This clicks the REAL dialog's REAL Yes
+    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`). This clicks the REAL
+    dialog's REAL Yes
     button, the one path a fake cannot stand in for.
     """
     assert _ask_with_real_dialog(monkeypatch, tmp_path, QMessageBox.StandardButton.Yes) is True
