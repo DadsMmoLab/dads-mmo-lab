@@ -646,6 +646,53 @@ def test_the_status_label_text_can_be_selected_and_copied(qapp: object) -> None:
     assert flags & Qt.TextInteractionFlag.TextSelectableByKeyboard
 
 
+def test_the_selectable_flags_do_not_reopen_the_wrap_bug(qapp: object) -> None:
+    """T32: the flags this half adds must not be the thing that undoes the last one.
+
+    Measures `panel.minimumSizeHint()` -- the same quantity
+    `test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window`
+    measures, with the same short-status-vs-the-196-character-refusal
+    comparison and the same 2x bound -- rather than assuming the flags added
+    for T32 left it alone.
+
+    **Not `panel._status.sizeHint()`.** That was tried first, and it is not
+    a usable metric here at all: `QLabel.sizeHint()` is Qt's documented
+    unwrapped preferred size, so it grows past the 196-character refusal
+    regardless of word wrap -- measured at 22px -> 476px with the
+    `TextInteractionFlag`s this half adds REMOVED, and 22px -> 195px with
+    them present. Both already blow a 2x bound; the flags did not cause
+    that, and pinning it to one would only be pinning a pre-existing,
+    unrelated property of `QLabel.sizeHint()` under word wrap.
+    `minimumSizeHint()` is the quantity that actually determines what a
+    `QSplitter` demands (see the comment on `setWordWrap(True)` above), which
+    is why the original fix measured it and why this does too. Mutation:
+    comment out `self._status.setWordWrap(True)` and this test fails the
+    same way the original one does, which is the proof this measures the
+    right thing.
+    """
+    panel = LogPanel()
+    panel.resize(400, 300)
+
+    panel._status.setText("idle")
+    panel.layout().activate()
+    short = panel.minimumSizeHint().width()
+
+    panel._status.setText(
+        "FAILED: InstallerError: /home/pk is your home folder itself. A server "
+        "install owns the folder it is given - a reinstall removes it - so pick a "
+        "dedicated subfolder inside your home folder instead. Pick a different "
+        "folder and try again. Nothing was written."
+    )
+    panel.layout().activate()
+    long = panel.minimumSizeHint().width()
+
+    assert long <= short * 2, (
+        "the panel's minimum width grew from "
+        f"{short}px to {long}px with the long refusal, under the selectable flags "
+        "T32 adds -- the earlier wrap fix no longer holds"
+    )
+
+
 # ---------------------------------------------------------------------------
 # The stamp and the stickiness (2026-09-03). Both asked for by the owner while
 # watching a real install: an hour of build output with no clock on it answers

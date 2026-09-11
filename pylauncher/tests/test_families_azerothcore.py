@@ -780,9 +780,10 @@ def test_a_container_owned_by_another_yulon_install_names_its_folder(tmp_path: P
         install(rec, tmp_path / "wow")
     assert str(excinfo.value) == (
         "A container called ac-database already exists and belongs to another "
-        f"install this app made, at {other}. Two servers cannot share that name. "
-        "Open that install's tab and stop and remove its containers, or install "
-        f"into {other} instead."
+        f"install this app made, brought up from {other} when it was created (if "
+        "that folder has moved since, its own tab still knows it). Two servers "
+        "cannot share that name. Open that install's tab and stop and remove its "
+        "containers, then try again."
     )
 
 
@@ -815,8 +816,9 @@ def test_a_foreign_compose_project_names_its_working_dir(tmp_path: Path) -> None
         install(rec, tmp_path / "wow")
     assert str(excinfo.value) == (
         "A container called ac-worldserver already exists and belongs to another "
-        f"Docker Compose project (somebody-elses-project), brought up from {other}. "
-        "Two servers cannot share that name. Remove the other install's "
+        f"Docker Compose project (somebody-elses-project), brought up from {other} "
+        "when it was created (if that folder has moved since, its own tab still "
+        "knows it). Two servers cannot share that name. Remove the other install's "
         "containers from its own tab first, then try again."
     )
 
@@ -826,13 +828,18 @@ def test_the_yulon_prefix_the_refusal_uses_is_project_names_own(
 ) -> None:
     """One constant, not two hand-typed copies of `"yulon-"` (T32).
 
-    Changing `composegen.PROJECT_PREFIX` and watching the refusal's wording
-    follow it is what proves `_refuse_foreign_containers()` reads the same
-    name `project_name()` writes, rather than a literal that could drift from
-    it.
+    Patching `composegen.PROJECT_PREFIX` and checking only the refusal's
+    branch would prove nothing about `project_name()` itself: a
+    `project_name()` that still built `f"yulon-{...}"` by hand, ignoring the
+    constant entirely, would pass that check every time, since the test then
+    supplies the owner string itself. So this asserts BOTH halves of the
+    binding follow the patch -- `project_name()`'s own output, and the
+    refusal's branch for an owner shaped like what `project_name()` would
+    now produce (review, Codex, 2026-09-11).
     """
     assert composegen.PROJECT_PREFIX == "yulon-"
     monkeypatch.setattr(composegen, "PROJECT_PREFIX", "custom-")
+    assert composegen.project_name(ENTRY.id, tmp_path / "wow").startswith("custom-")
     owner = "custom-wow-wotlk-deadbeef"
     rec = Recorder(containers={"ac-database": owner}, working_dirs={"ac-database": None})
     with pytest.raises(InstallerError, match="this app made"):

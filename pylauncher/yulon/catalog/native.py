@@ -4086,6 +4086,15 @@ class StagedInstaller:
         friendlier wording, because "another install this app made" is true of
         it and is not true of a stranger's Docker Compose project, whose only
         honest remedy is to go and stop it from its own tooling.
+
+        **The folder is where compose brought the project up FROM, not
+        necessarily where it lives now.** `container_working_dir()`'s own
+        docstring says the label is baked in at container creation, so a
+        moved install reports its old path. The sentence says "brought up
+        from … when it was created" rather than "is at", and does not offer
+        "install into that folder instead" — the folder named may no longer
+        be the right one to open, though the install's own tab still knows
+        wherever it is now (review, Codex, 2026-09-11).
         """
         ours = composegen.project_name(
             self.entry.id, server_dir, platform_id=self._seams.platform_id
@@ -4120,9 +4129,10 @@ class StagedInstaller:
                 if readable:
                     raise InstallerError(
                         f"A container called {name} already exists and belongs to another "
-                        f"install this app made, at {working_dir}. Two servers cannot share "
-                        "that name. Open that install's tab and stop and remove its "
-                        f"containers, or install into {working_dir} instead."
+                        f"install this app made, brought up from {working_dir} when it was "
+                        "created (if that folder has moved since, its own tab still knows "
+                        "it). Two servers cannot share that name. Open that install's tab "
+                        "and stop and remove its containers, then try again."
                     )
                 raise InstallerError(
                     f"A container called {name} already exists and belongs to another "
@@ -4133,9 +4143,10 @@ class StagedInstaller:
             if readable:
                 raise InstallerError(
                     f"A container called {name} already exists and belongs to another "
-                    f"Docker Compose project ({owner}), brought up from {working_dir}. Two "
-                    "servers cannot share that name. Remove the other install's containers "
-                    "from its own tab first, then try again."
+                    f"Docker Compose project ({owner}), brought up from {working_dir} when "
+                    "it was created (if that folder has moved since, its own tab still "
+                    "knows it). Two servers cannot share that name. Remove the other "
+                    "install's containers from its own tab first, then try again."
                 )
             raise InstallerError(
                 f"A container called {name} already exists and belongs to another Docker "
