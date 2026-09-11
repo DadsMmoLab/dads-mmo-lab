@@ -733,6 +733,32 @@ def test_every_installer_writes_the_bot_population_that_was_decided() -> None:
         # The account count is the third number the plan got wrong (400 and 200
         # against the 100 both scripts write), and it is a separate key: an edit
         # that broke only this one would pass every assertion above it.
+        #
+        # `wow-tortoise` no longer has that key and it is not an omission. The
+        # TortoiseBots module discovers its pool by account PREFIX rather than
+        # being told a count, and `AiPlayerbot.RandomBotAccountCount` does not
+        # occur anywhere in the module's tree (grepped on `yulon-arch`
+        # 2026-09-11, T30 Half 1 `05-conf-keys.txt`). What it has instead are
+        # three switches that all ship OFF, so a conf block writing only the two
+        # populations above produces a module that loads and does nothing --
+        # which is why they are asserted here rather than left to the entry.
+        if game_id == "wow-tortoise":
+            assert "AiPlayerbot.RandomBotAccountCount" not in bots.keys, (
+                "the key does not exist in TortoiseBots; writing it appends a line the "
+                "module never reads and states a pool size it does not take"
+            )
+            for switch in (
+                "AiPlayerbot.Enabled",
+                "AiPlayerbot.RandomBotAutoCreate",
+                "AiPlayerbot.RandomBotAutologin",
+                "AiPlayerbot.RandomBotLoginAtStartup",
+            ):
+                assert bots.keys.get(switch) == "1", (
+                    f"{switch} ships at 0 on this module ({bots.keys.get(switch)!r} here); "
+                    "with any of the four off the bots are compiled in, configured, and "
+                    "absent from the world"
+                )
+            continue
         assert bots.keys["AiPlayerbot.RandomBotAccountCount"] == BOT_ACCOUNTS, game_id
 
 
@@ -1814,20 +1840,29 @@ def test_every_cmangos_dockerignore_admits_only_the_core_tree_it_copies(
         assert nested or source.dest not in ignore, f"{source.dest} is host-only, not context"
 
 
-def test_the_tortoise_dockerfile_keeps_every_flag_and_library_its_script_proved() -> None:
-    """The Tortoise image is transcribed from `install-tortoise-wow-wsl.sh`, which ran.
+def test_the_tortoise_dockerfile_names_the_module_and_not_the_retired_forks_flags() -> None:
+    """The flag line, measured against the Penqle core on `yulon-arch` 2026-09-11.
 
-    Three things in that script are load-bearing and were missing from the
-    plan's transcription of it:
+    Four things are load-bearing here and the first two changed with the core
+    (T30 Half 1, `03-cmake-probe-old-flags.txt`, `04-build.log`):
 
-    * `-DBUILD_PLAYERBOTS=ON`. The entry clones `Shyalya/tortoise-wow` on branch
-      `playerbots-integration-gh` and its description sells the bots; without
-      the flag the fork compiles into a bot-less server that boots and looks
-      fine. It is also what emits `aiplayerbot.conf.dist` into `etc/`, which the
-      conf stage copies out of the image.
-    * `libboost-{thread,filesystem,system}-dev`. The script installed them in
-      the ONE image that both compiled and ran, so here they belong to both
-      stages — a runtime stage without them is a `mangosd` that cannot link.
+    * **`-DMODULES=static -DMODULE_TORTOISEBOTS=static`.** `MODULES` still
+      defaults to `disabled`, so the module has to be named. With both, CMake
+      prints `TortoiseBots: static (MODULE_TORTOISEBOTS=static)`; with the old
+      line it prints `TortoiseBots: disabled (MODULE_TORTOISEBOTS=default)` and
+      builds a bot-less server that boots and looks entirely healthy.
+    * **`BUILD_PLAYERBOTS`, `MODULE_MOD_PLAYERBOTS` and
+      `MODULE_MOD_DUNGEON_CLEAR` are gone.** They belonged to the retired fork's
+      vendored `modules/mod-playerbots`. Run against this core they are not an
+      error -- CMake configures to completion and merely warns
+      `Manually-specified variables were not used by the project` -- so the old
+      line still produces an image, and that image is the bot-less one. This
+      asserts their ABSENCE for that reason: nothing else in the build would
+      say a word.
+    * `libboost-{thread,filesystem,system}-dev`. The script this template
+      replaced installed them in the ONE image that both compiled and ran, so
+      here they belong to both stages -- a runtime stage without them is a
+      `mangosd` that cannot link.
     * the `sql/` and `tools/mmap/` trees under `CORE_DIR`, named by this entry's
       own `Database.AutoUpdate.Path` conf value and by `mmaps.argv`. If the
       image does not carry them, those two settings point at nothing.
@@ -1843,9 +1878,22 @@ def test_the_tortoise_dockerfile_keeps_every_flag_and_library_its_script_proved(
         "-DDEBUG_SYMBOLS=OFF",
         "-DUSE_ANTICHEAT=OFF",
         "-DALLOW_TURTLE_ADDONS=ON",
-        "-DBUILD_PLAYERBOTS=ON",
+        "-DMODULES=static",
+        "-DMODULE_TORTOISEBOTS=static",
     ):
         assert flag in dockerfile, flag
+    cmake = next(line for line in dockerfile.splitlines() if line.lstrip().startswith("RUN cmake"))
+    step = dockerfile[dockerfile.index(cmake) :]
+    step = step[: step.index("\nRUN make")]
+    for dead in ("BUILD_PLAYERBOTS", "MODULE_MOD_PLAYERBOTS", "MODULE_MOD_DUNGEON_CLEAR"):
+        assert f"-D{dead}" not in step, (
+            f"{dead} is the retired fork's flag and this core does not know it. CMake WARNS "
+            "and carries on, so the build succeeds and ships a server with no bots in it"
+        )
+    assert "-DMODULES=disabled" not in step, (
+        "`disabled` was the fork's line, where the module was named per-module instead; on "
+        "this core it is what leaves TortoiseBots out"
+    )
     for package in ("libboost-thread-dev", "libboost-filesystem-dev", "libboost-system-dev"):
         assert dockerfile.count(package) == 2, f"{package} is a build AND a runtime dependency"
     core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
@@ -1854,6 +1902,46 @@ def test_the_tortoise_dockerfile_keeps_every_flag_and_library_its_script_proved(
     for argument in native.cmangos.mmaps.argv:
         if argument.startswith(f"{core_dir}/src/"):
             assert str(PurePosixPath(argument).parent) in dockerfile, argument
+
+
+def test_the_tortoise_image_lets_the_binary_find_the_modules_sql_it_compiled_a_path_to() -> None:
+    """Finding 3 of T30 Half 1: the one line between a fresh install and a crash loop.
+
+    The core applies a module's migrations from
+    `<modulesPath>/<module>/data/sql/<folder>` and `modulesPath` is
+    `TW_SOURCE_MODULES_DIR`, compiled in as `${CMAKE_SOURCE_DIR}/modules`
+    (`CMakeLists.txt:548`, `AutoUpdater.cpp:503-506`) -- the BUILDER's source
+    tree, which the runtime stage does not have. A module folder that is not
+    there is skipped in silence (`:268-270`), so run 1 on `yulon-arch`
+    2026-09-11 applied every core migration, skipped all five of the module's
+    character migrations without a word, and died before its ready line on
+    `[1146] Table 'tw_char.ai_playerbot_equip_cache' doesn't exist`
+    (`08-world-run1.txt`).
+
+    The runtime image therefore has to make `/src/modules` resolve. It does it
+    by pointing at the INSTALLED tree, where `TortoiseBots.cmake:61-69` has
+    already renamed `data/sql/char` to `data/sql/character` -- the module's own
+    CMake owns that spelling and moves with the module, which is why this beats
+    renaming the directory ourselves before the build.
+
+    Asserted as a relationship rather than as a literal line: the source path
+    must be the one the binary carries, and the target must be under the prefix
+    the build installs into.
+    """
+    entry = load_catalog().get("wow-tortoise")
+    dockerfile = dockerfile_text(entry)
+    core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
+    runtime = dockerfile[dockerfile.rindex("\nFROM ") :]
+    link = [line for line in runtime.splitlines() if "/src/modules" in line and "ln -s" in line]
+    assert link, (
+        "the runtime stage does not make /src/modules resolve; TW_SOURCE_MODULES_DIR is "
+        "compiled in as ${CMAKE_SOURCE_DIR}/modules and the world skips every module "
+        "migration it cannot find, then dies on the table they create"
+    )
+    assert f"{core_dir}/modules" in link[0], (
+        f"the link must point into the installed prefix ({core_dir}/modules), which is where "
+        f"`make install` puts the module's SQL under its own folder names: {link[0]!r}"
+    )
 
 
 def test_the_tortoise_image_makes_their_self_colliding_migration_idempotent() -> None:

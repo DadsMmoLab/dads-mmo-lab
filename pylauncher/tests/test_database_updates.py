@@ -695,6 +695,21 @@ def test_the_entries_that_offer_this_press_are_exactly_the_ones_with_a_flagged_p
     such phase, or withheld from one that does, is red here rather than
     discovered on a server.
 
+    NO SHIPPED ENTRY DECLARES ONE since T30, and the empty answer here is a
+    real assertion rather than a vacuous one. `wow-tortoise` was the only entry
+    that ever did: its `character updates` phase applied the retired fork's
+    `sql/character_updates/`, which nothing on that tree read, and the Penqle
+    core has no such directory -- what that phase's files fixed, this core's own
+    updater applies at every world start. The flag is an exception to the marker
+    rule (a phase run against a server somebody is playing on), so the catalog
+    having none is the safe state and the one worth pinning: a flag that
+    reappears, anywhere, is red here and has to be argued for.
+
+    The other direction -- that the reader finds a flag when there IS one -- is
+    `test_a_flag_added_to_another_entry_is_offered_without_the_reader_being_touched`
+    below, over a synthesised plan, which is what keeps this pair from together
+    passing on a reader that answers `()` to everything.
+
     Catches the reader hard-coding `wow-tortoise`, and a phase's flag moved to
     another phase or another entry.
     """
@@ -703,7 +718,11 @@ def test_the_entries_that_offer_this_press_are_exactly_the_ones_with_a_flagged_p
         for entry in load_catalog().games
         if native.update_phases(entry)
     }
-    assert offered == {"wow-tortoise": ("character updates",)}, offered
+    assert offered == {}, (
+        "a shipped plan declares a re-runnable phase again. That flag applies SQL to an "
+        "install the marker rule says is finished -- somebody's server, mid-play -- so it "
+        f"is argued for per phase, in the phase's own notes, before it lands here: {offered}"
+    )
     assert native.update_phases(WOTLK) == (), "AzerothCore imports through a compose one-shot"
 
 

@@ -421,6 +421,35 @@ class ConfPatch(_Strict):
             "on this; everywhere else a commented key is left alone and the value is appended."
         ),
     )
+    template: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The path under `source_dir`, inside the image, that this file is first copied "
+            "from. `None` means the default `materialise()` has always used, `<name>.dist`, "
+            "and every entry but Tortoise's two leaves it there. Per FILE rather than a new "
+            "default, because the shape is per file: measured on `yulon-arch` 2026-09-11 "
+            "(T30 Half 1, `12-image-contents.txt`), the Penqle core's image ships "
+            "`etc/aiplayerbot.conf` with no `.dist` at all -- `TortoiseBots.cmake:40-46` "
+            "`configure_file`s it straight to its live name -- and ships the module's own "
+            "template one level down at `etc/modules/tortoise_bots.conf.dist`, beside a live "
+            "`tortoise_bots.conf`. Both were an InstallerError before this field, and a "
+            "changed DEFAULT would have made the other three games' images answer a question "
+            "nobody had asked them."
+        ),
+    )
+
+    @field_validator("template")
+    @classmethod
+    def _template_stays_inside_the_staged_copy(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        path = PurePosixPath(value)
+        if "\\" in value or path.is_absolute() or ".." in path.parts:
+            raise ValueError(
+                f"template must be a relative POSIX path under source_dir, got {value!r}"
+            )
+        return value
 
 
 class ConfPatchTable(_Strict):
@@ -1371,6 +1400,18 @@ class Operations(_Strict):
             "install's own compose already does it -- WotLK's base file has carried "
             "`${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878` since before there was a "
             "channel -- and true where it does not, which is every CMaNGOS tree."
+        ),
+    )
+    notes: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Per-tree facts about THIS channel, for a human. Nothing reads them. The shape "
+            "`SqlPhase.notes` and `Client.notes` already have, and here for the same reason: "
+            "which channel a tree can speak is a property of somebody else's build, it "
+            "changes when that build changes, and the reasoning behind a `channel` is "
+            "invisible from the value. `wow-tortoise` carries the recipe for putting SOAP "
+            "back when the Penqle core re-links it, because that entry has been through the "
+            "swap in both directions already."
         ),
     )
     must_not_listen: tuple[int, ...] = Field(

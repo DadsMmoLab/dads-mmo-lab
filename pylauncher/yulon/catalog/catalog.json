@@ -948,20 +948,21 @@
       "id": "wow-tortoise",
       "name": "WoW Tortoise",
       "status": "beta",
-      "description": "Tortoise (the Turtle-WoW solo fork on MaNGOS Zero) with the cmangos playerbots AI, source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. Installer is work-in-progress; it has been driven with a real 1.18.1 client on the test box (8.3d, 8.5d), and the running build still lacks the command channel and the account-password fix that upstream has since shipped.",
+      "description": "Tortoise on the Penqle core: tortoise-wow/tortoise-wow branch bot-helpers, a MaNGOS Zero lineage, with the TortoiseBots module compiled in statically and the whole thing source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. bot-helpers is the branch the bots module requires -- it carries the headless bot sessions (PR #438) -- and the bots themselves are Sagiroth/TortoiseBots, cloned into modules/TortoiseBots. It replaces the retired Shyalya fork that vendored the cmangos playerbots; a server already installed from that fork goes on opening, starting and being played, and is not migrated. Commands reach this world down the worldserver console the Console tab types at: the core links neither SOAP nor a telnet console (T30 Half 1, yulon-arch 2026-09-11). Driven with a real 1.18.1 client on the test box.",
       "emulator": {
-        "name": "Shyalya/tortoise-wow (Turtle-WoW V2 + cmangos playerbots)",
+        "name": "tortoise-wow/tortoise-wow @ bot-helpers (the Penqle core) + Sagiroth/TortoiseBots",
         "sources": [
           {
-            "repo": "Shyalya/tortoise-wow",
-            "branch": "playerbots-integration-gh",
+            "repo": "tortoise-wow/tortoise-wow",
+            "branch": "bot-helpers",
             "dest": "src/tortoise-wow",
-            "rev": "3a8472e68e4aca5d2675feb9241e924f1c31899c"
+            "rev": "9980181ce9aa5940b6125a5991cc754148ed9b82"
           },
           {
-            "repo": "ElunaLuaEngine/Eluna",
-            "dest": "src/tortoise-wow/src/modules/Eluna",
-            "rev": "1b06f28ff3a00054d915d824c725fb4283fee74d"
+            "repo": "Sagiroth/TortoiseBots",
+            "branch": "main",
+            "dest": "src/tortoise-wow/modules/TortoiseBots",
+            "rev": "fd7ec9ec7659035cfc3ea75d542c8683005525de"
           }
         ]
       },
@@ -1000,7 +1001,7 @@
           "ready": {
             "world": "World server is up and running|World initialized|MaNGOS.*started up successfully|Ready to login",
             "auth": null,
-            "fatal": "Correct \\*.map files not found|Could not open (?!.*Logging to it is off for this run)|Database .* not found",
+            "fatal": "Correct \\*.map files not found|Could not open (?!.*Logging to it is off for this run)|Database .* not found|\\[1146\\] Table .* doesn't exist|Your database structure is not up to date",
             "regex": true,
             "timeout_s": 10800,
             "restart_loop": 4
@@ -1078,10 +1079,24 @@
               "source_dir": "/opt/tortoise/etc",
               "files": {
                 "aiplayerbot.conf": {
+                  "template": "aiplayerbot.conf",
                   "keys": {
+                    "AiPlayerbot.Enabled": "1",
+                    "AiPlayerbot.RandomBotAutoCreate": "1",
+                    "AiPlayerbot.RandomBotAutologin": "1",
+                    "AiPlayerbot.RandomBotLoginAtStartup": "1",
                     "AiPlayerbot.MinRandomBots": "500",
-                    "AiPlayerbot.MaxRandomBots": "500",
-                    "AiPlayerbot.RandomBotAccountCount": "100"
+                    "AiPlayerbot.MaxRandomBots": "500"
+                  }
+                },
+                "modules/tortoise_bots.conf": {
+                  "template": "modules/tortoise_bots.conf.dist",
+                  "keys": {
+                    "TortoiseBots.AutoTest": "0",
+                    "TortoiseBots.PacketBridgeTest": "0",
+                    "TortoiseBots.PendingAddRemoveTest": "0",
+                    "TortoiseBots.LogLevel": "1",
+                    "AiPlayerbot.Observability": "0"
                   }
                 },
                 "mangosd.conf": {
@@ -1090,14 +1105,21 @@
                     "WorldDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{WORLD_DB}}\"",
                     "CharacterDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{CHAR_DB}}\"",
                     "LogsDatabase.Info": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{LOGS_DB}}\"",
+                    "Database.AutoUpdate.Enabled": "1",
                     "Database.AutoUpdate.Path": "\"/opt/tortoise/sql/database_updates/\"",
+                    "Database.AutoUpdate.AuthUpdateName": "\"auth\"",
+                    "Database.AutoUpdate.CharUpdateName": "\"character\"",
+                    "Database.AutoUpdate.WorldUpdateName": "\"world\"",
+                    "Database.AutoUpdate.AllowedModules": "\"all\"",
+                    "Database.AutoUpdate.SortByName": "1",
                     "DataDir": "\"/opt/tortoise/data\"",
                     "WorldServerPort": "{{WORLD_PORT}}",
                     "GameType": "0",
                     "GM.LoginState": "0",
                     "GM.StartLevel": "1",
                     "AutoHonorRestart": "0",
-                    "AutoRestart.MaxServerUptime": "0"
+                    "AutoRestart.MaxServerUptime": "0",
+                    "Console.Enable": "1"
                   }
                 },
                 "realmd.conf": {
@@ -1137,40 +1159,12 @@
                     "src/tortoise-wow/sql/base/*.sql"
                   ],
                   "sort": "name",
-                  "on_error": "fail"
-                },
-                {
-                  "name": "playerbots characters",
-                  "into": "tw_char",
-                  "files": [
-                    "src/tortoise-wow/modules/mod-playerbots/sql/characters/*.sql"
-                  ],
-                  "on_error": "warn"
-                },
-                {
-                  "name": "playerbots world",
-                  "into": "tw_world",
-                  "files": [
-                    "src/tortoise-wow/modules/mod-playerbots/sql/world/*.sql",
-                    "src/tortoise-wow/modules/mod-playerbots/sql/world/classic/*.sql"
-                  ],
-                  "on_error": "warn"
-                },
-                {
-                  "name": "character updates",
-                  "into": "tw_char",
-                  "files": [
-                    "src/tortoise-wow/sql/character_updates/*.sql"
-                  ],
-                  "sort": "name",
                   "on_error": "fail",
-                  "rerun_on_marked": true,
                   "notes": [
-                    "sql/character_updates/ is the fork's own directory and NOTHING on this tree applies it. Database.AutoUpdate.Path points the core's updater at sql/database_updates/, whose only children are character/ and world/; the fork's sql/setup_databases.sh imports create_databases.sql and then database_updates/*.sql, and that top level holds no .sql at all. Both read on m910q, 2026-09-09.",
-                    "Measured twice. yulon-arch 2026-09-08: a FRESH install crash-looped on character migration 20260903211500 until these were applied into tw_char by hand (pyplan/gates/tortoise-soap-yulon-arch-2026-09-09/README.md). m910q 2026-09-09 01:09Z: an ESTABLISHED install of 903 characters entered a restart loop on TRUNCATE character_inventory_copy the first morning honor maintenance fell due, saved_variables.nextHonorMaintenanceDay 20705 being that day (pyplan/gates/7.9-rerun-m910q-2026-09-09/README.md, finding 1). So every install that has never had these is one honor-maintenance day from being unstartable, and the day is weekly.",
-                    "After `playerbots characters` and not merely after `schemas`: 20260708055500 indexes ai_playerbot_random_bots, which create_databases.sql does not create and the playerbots module's characters SQL does. The other two need guild_bank_money and character_inventory, both CREATE TABLEs inside create_databases.sql.",
-                    "Re-runnable on an install that already has them, read from the three files on 2026-09-09: ADD INDEX IF NOT EXISTS, MODIFY money INT(10) UNSIGNED (an absolute column type, so a second run is a no-op), CREATE TABLE IF NOT EXISTS ... LIKE. on_error is `fail` because a missing directory here is a fork sync that moved it, and a silent skip is the defect this phase exists to end. rerun_on_marked is set on the strength of that reading and of nothing else (T11): it makes this the one phase the import applies to an install already marked imported, which is the only route the m910q's 903-character install has to the file it died without.",
-                    "The load-bearing order is this phase before the first world start: the core updater's own sql/database_updates/character/20260903211500 DROPs idx_owner_bot_event, the index that only 20260708055500 here adds, which is why a fresh install crash-looped on it (reviewer, 2026-09-09)."
+                    "190 per-table tw_world dumps on the pinned core, counted on yulon-arch 2026-09-11 (T30 Half 1, 06-sql-layout.txt). Unchanged from the retired fork.",
+                    "THREE PHASES WERE REMOVED HERE, each naming a directory this tree does not have, all three read on the same day: `playerbots characters` and `playerbots world` globbed `modules/mod-playerbots/sql/...`, which went with the vendored cmangos playerbots, and `character updates` globbed `sql/character_updates/`, which the Penqle core has never had. The last of those was `on_error: fail`, so it would have stopped every fresh install on a directory that is simply absent.",
+                    "NOTHING IN THIS PLAN IMPORTS THE BOTS' OWN SQL, and that is not an omission. The core's own updater applies module migrations at world start from `<TW_SOURCE_MODULES_DIR>/TortoiseBots/data/sql/<CharUpdateName|WorldUpdateName>` (`AutoUpdater.cpp:245-283`, `:497-531`) -- the same `character` and `world` folder names this entry's conf block writes. Measured on yulon-arch 2026-09-11: 5 character and 3 world module migrations applied at first start, and the ai_playerbot_* tables exist afterwards (Half 1 run 2, 08d/08e). The Dockerfile is what makes that compiled-in path resolve inside the runtime image; its comment says how and why.",
+                    "The removed `character updates` was also the catalog's only `rerun_on_marked` phase (T11), so this plan has none. An install made from the retired fork keeps every row it already has -- that flag only ever ADDED a re-run -- and every glob this plan still carries resolves on that older tree too, so pressing Install on one refuses or proceeds by its marker exactly as before."
                   ]
                 },
                 {
@@ -1192,11 +1186,6 @@
                   "db": "tw_logon",
                   "query": "SELECT COUNT(*) FROM realmlist",
                   "min": 1
-                },
-                {
-                  "db": "tw_world",
-                  "query": "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='tw_world' AND table_name LIKE 'ai_playerbot%'",
-                  "min": 10
                 }
               ],
               "player_data": [
@@ -1262,20 +1251,13 @@
         "prompt_precedes_answer": false
       },
       "operations": {
-        "channel": "soap",
-        "namespace": "urn:MaNGOS",
-        "port": 7878,
-        "gm_level": 4,
-        "enable_conf": {
-          "file": "etc/mangosd.conf",
-          "keys": {
-            "SOAP.Enabled": "1",
-            "SOAP.IP": "0.0.0.0",
-            "SOAP.Port": "7878"
-          }
-        },
-        "publish": true,
-        "must_not_listen": []
+        "channel": "attach",
+        "notes": [
+          "THE PENQLE CORE HAS NO SOAP. Not the keys, not the conf block, not the subsystem: the only occurrence of the string anywhere under src/ at the pinned rev is a comment at src/game/World.h:799, no SOAP.* key is in mangosd.conf.dist.in, and no gsoap is vendored (T30 Half 1, yulon-arch 2026-09-11, 05-conf-keys.txt). What it offers instead is Console.Enable, which is the console the Console tab already types at, and an HttpApi.Enable that is not a channel kind this app knows. So this entry is back on `attach`, which is what it said until 2026-09-08 and what AttachChannel (channel.py:88-105) was written for.",
+          "THE WAY BACK IS ONE EDIT OF THIS BLOCK, and the owner has asked the core's maintainer for the subsystem back. When a rev lands that carries it, restore exactly: \"channel\": \"soap\", \"namespace\": \"urn:MaNGOS\", \"port\": 7878, \"gm_level\": 4, \"publish\": true, and \"enable_conf\": {\"file\": \"etc/mangosd.conf\", \"keys\": {\"SOAP.Enabled\": \"1\", \"SOAP.IP\": \"0.0.0.0\", \"SOAP.Port\": \"7878\"}}. Those four keys plus the three SOAP.* conf keys are the whole of it on this side. Two other edits go with it and nothing else does: `_for_tortoise` in ui/controller_view.py builds a channel_setup.InstallChannel over channel.SoapChannel again instead of channel.AttachChannel, and tests/test_catalog_operations.py's Tortoise expectation flips back. No SOAP code was removed anywhere for this change -- SoapChannel, InstallChannel, the enable_conf writer in channel_setup.py and tortoise accounts' reset_own_password are all still here and still tested.",
+          "The three SOAP.* keys are NOT in this entry's conf table while the channel is `attach`, because a conf key the emulator does not read is a claim that somebody measured something. They come back with the block above, as `enable_conf`, which is the only place they have ever been written from.",
+          "Nothing in ready.world or ready.fatal depends on the channel: both are lines the worldserver prints on its own stdout, read by the install spine before any channel exists."
+        ]
       },
       "observability": {
         "characters": {

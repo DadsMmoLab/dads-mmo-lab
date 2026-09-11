@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "tortoise-gm-manager",
+  "name": "Tortoise GM Manager (client addon)",
+  "type": "mod",
+  "game": "wow-tortoise",
+  "description": "A GM command panel for your own server: /tgmm opens a searchable palette over the ordinary GM chat commands. Client-side only - it is copied into your WoW client's Interface/AddOns, nothing is written to the server, and the world still decides what your account is allowed to do.",
+  "source": {
+    "repo": "Sagiroth/TortoiseGMManager",
+    "rev": "ec11dd23e1cbf89f5171cf8c964df8354903bf43"
+  },
+  "build": {
+    "rebuild": false,
+    "restart": false
+  },
+  "client": [
+    {
+      "src": ".",
+      "dest": "addons",
+      "name": "TortoiseGMManager"
+    }
+  ],
+  "notes": [
+    "NEEDS NOTHING SERVER-SIDE, which is the difference between this and its sibling. Its own",
+    "README: \"The addon is client-side only. It does not connect directly to MariaDB and does",
+    "not bypass server permissions. Commands are sent through the normal GM chat-command path;",
+    "the world server remains authoritative for access level, syntax, and database state.\" So",
+    "it works on an install with no bots, and it is worth nothing to an account with no GM rank",
+    "-- this entry's `accounts.level` scale runs to 4 and the Accounts tab is where a rank is",
+    "set.",
+    "Interface 11200 (Vanilla 1.12) against the 1.18.1 / build 7272 Turtle client.",
+    "The whole pinned checkout is copied, `assets/` included -- the UI reads it. That is also",
+    "why the step copies the repository root rather than a list of files: this addon has a",
+    "subdirectory, and a file list would be a thing to keep in step with somebody else's repo.",
+    "WRITTEN AT INSTALL, not at Play, for the reason spelled in the sibling manifest."
+  ]
+}

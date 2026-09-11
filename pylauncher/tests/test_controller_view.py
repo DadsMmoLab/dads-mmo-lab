@@ -24,6 +24,7 @@ from yulon import (
     party,
     purge,
     runner,
+    state,
     steam,
     useraccounts,
 )
@@ -5553,6 +5554,34 @@ def _updates_services(
     return services, started, asked
 
 
+def _entry_declaring_a_rerunnable_phase(game: str = "wow-tortoise") -> CatalogEntry:
+    """The shipped entry with one file phase flagged `rerun_on_marked`, and nothing else changed.
+
+    Until T30 the shipped `wow-tortoise` plan carried such a phase --
+    `character updates`, the retired fork's own `sql/character_updates/`, which
+    nothing on that tree applied -- and the presses below read it straight off
+    the catalog. The Penqle core has no such directory, so the plan has no such
+    phase and NO SHIPPED ENTRY DECLARES ONE. That is the rule these presses
+    follow, not an exception to it: `services.updates` and `services.adopt` are
+    `None` for every game today, which is what
+    `test_the_updates_button_is_offered_only_where_the_plan_declares_a_rerunnable_phase`
+    now asserts.
+
+    The presses themselves still have to work the day a flagged phase comes
+    back, and they are the route that writes DDL into somebody's live
+    characters database, so they go on being exercised -- against an entry that
+    declares one. Built from the shipped entry by round-tripping it through the
+    model so it is the real wiring, the real plan and the real guards, differing
+    in exactly the one flag.
+    """
+    entry = load_catalog().get(game)
+    data = entry.model_dump(mode="json")
+    phases = data["install"]["native"]["cmangos"]["sql"]["phases"]
+    flagged = next(phase for phase in phases if phase["name"] == "world base")
+    flagged["rerun_on_marked"] = True
+    return CatalogEntry.model_validate(data)
+
+
 def test_the_updates_button_is_offered_only_where_the_plan_declares_a_rerunnable_phase(
     tmp_path: Path,
 ) -> None:
@@ -5560,20 +5589,25 @@ def test_the_updates_button_is_offered_only_where_the_plan_declares_a_rerunnable
 
     Read off the catalog by `native.update_phases()`, so this is the same
     question `test_database_updates.py` asks of the data, asked here of what
-    `for_entry()` actually hands a tab. Tortoise is the one entry whose plan
-    carries such a phase today; the other three get `None` and a dead control,
-    which is the rule the rebuild seam already follows — a control that is
-    visibly unavailable beats one that is pressed and then explains itself.
+    `for_entry()` actually hands a tab. No shipped entry declares such a phase
+    since T30 -- Tortoise was the one that did, and the directory it applied is
+    not on the Penqle core -- so all four get `None` and a dead control, which
+    is the rule the rebuild seam already follows: a control that is visibly
+    unavailable beats one that is pressed and then explains itself.
 
-    Catches the route wired for every entry (three games would then offer a
-    press that applies nothing and reports success), and the reader hard-coded
-    to an id.
+    Both directions, because an "everything is None" assertion alone would be
+    satisfied by a route that is simply broken. The entry that DOES declare one
+    is built beside it from the shipped data.
+
+    Catches the route wired for every entry (four games would then offer a
+    press that applies nothing and reports success), the reader hard-coded to
+    an id, and the route removed with the phase.
     """
-    tortoise = load_catalog().get("wow-tortoise")
-    assert ControllerServices.for_entry(tortoise, tmp_path / "tw").updates is not None
-    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla"):
+    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"):
         entry = load_catalog().get(game)
         assert ControllerServices.for_entry(entry, tmp_path / game).updates is None, game
+    flagged = _entry_declaring_a_rerunnable_phase()
+    assert ControllerServices.for_entry(flagged, tmp_path / "flagged").updates is not None
 
 
 def test_a_server_adopted_from_a_wsl_distro_is_not_offered_the_updates_button(
@@ -5589,7 +5623,7 @@ def test_a_server_adopted_from_a_wsl_distro_is_not_offered_the_updates_button(
 
     Catches the `wsl_distro` test dropped from the wiring.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _entry_declaring_a_rerunnable_phase()
     inside = ControllerServices.for_entry(tortoise, tmp_path / "tw", wsl_distro="Ubuntu")
     assert inside.updates is None
 
@@ -5689,7 +5723,7 @@ def test_the_tortoise_updates_button_refuses_while_the_world_runs(
     (which answers `False` here and would let the press through), and a wiring
     that hands the engine a `world_running` bound at import.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _entry_declaring_a_rerunnable_phase()
     server_dir = tmp_path / "tw"
     server_dir.mkdir()
     asked: list[str] = []
@@ -5722,7 +5756,7 @@ def test_the_tortoise_updates_button_refuses_when_it_cannot_tell_whether_the_wor
 
     Catches the `None` branch folded into the `False` one.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _entry_declaring_a_rerunnable_phase()
     server_dir = tmp_path / "tw"
     server_dir.mkdir()
     monkeypatch.setattr(docker, "world_running", lambda container, wsl_distro=None: None)
@@ -5901,11 +5935,11 @@ def test_the_adopt_button_is_offered_only_where_the_plan_declares_a_rerunnable_p
 
     Catches the route wired for every entry, and the reader hard-coded to an id.
     """
-    tortoise = load_catalog().get("wow-tortoise")
-    assert ControllerServices.for_entry(tortoise, tmp_path / "tw").adopt is not None
-    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla"):
+    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"):
         entry = load_catalog().get(game)
         assert ControllerServices.for_entry(entry, tmp_path / game).adopt is None, game
+    flagged = _entry_declaring_a_rerunnable_phase()
+    assert ControllerServices.for_entry(flagged, tmp_path / "flagged").adopt is not None
 
 
 def test_a_server_adopted_from_a_wsl_distro_is_not_offered_the_adopt_button(
@@ -5919,7 +5953,7 @@ def test_a_server_adopted_from_a_wsl_distro_is_not_offered_the_adopt_button(
 
     Catches the `wsl_distro` test dropped from the wiring.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _entry_declaring_a_rerunnable_phase()
     inside = ControllerServices.for_entry(tortoise, tmp_path / "tw", wsl_distro="Ubuntu")
     assert inside.adopt is None
 
@@ -6028,7 +6062,7 @@ def test_the_tortoise_adopt_press_refuses_while_the_world_runs(
     (which answers `False` here and would let the press through), and the
     guard's button label left hard-coded to the updates one.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _entry_declaring_a_rerunnable_phase()
     server_dir = tmp_path / "tw"
     server_dir.mkdir()
     asked: list[str] = []
@@ -6061,7 +6095,7 @@ def test_the_tortoise_adopt_press_refuses_when_it_cannot_tell_whether_the_world_
 
     Catches the `None` branch folded into the `False` one.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _entry_declaring_a_rerunnable_phase()
     server_dir = tmp_path / "tw"
     server_dir.mkdir()
     monkeypatch.setattr(docker, "world_running", lambda container, wsl_distro=None: None)
@@ -6087,7 +6121,7 @@ def test_the_tortoise_adopt_confirmation_names_the_row_through_the_shipped_wirin
     Catches the confirmation reaching for a database, and a row named from
     anything but the plan the writer reads.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _entry_declaring_a_rerunnable_phase()
     server_dir = tmp_path / "tw"
     server_dir.mkdir()
     services = ControllerServices.for_entry(tortoise, server_dir)
@@ -6096,6 +6130,194 @@ def test_the_tortoise_adopt_confirmation_names_the_row_through_the_shipped_wirin
     assert native.ADOPT_CONSEQUENCE in said
     assert sqlplan.MARKER_TABLE in said
     assert str(server_dir) in said
+
+
+# --------------------------------------------------------------------------
+# T30 -- a server installed from the retired fork, opened by the new entry
+# --------------------------------------------------------------------------
+
+
+OLD_FORK_SERVER = {
+    "src/tortoise-wow/sql/character_updates/20260708055500_ai_playerbot_random_bots_index.sql": (
+        "-- the fork's own directory, which the Penqle core does not have\n"
+    ),
+    "src/tortoise-wow/modules/mod-playerbots/sql/characters/ai_playerbot_random_bots.sql": (
+        "-- the vendored cmangos playerbots, which the Penqle core does not have\n"
+    ),
+    "src/tortoise-wow/src/modules/Eluna/LuaEngine.h": "// the fork's one submodule\n",
+    "etc/mangosd.conf": "[MangosdConf]\nAutoHonorRestart = 0\nSOAP.Enabled = 1\n",
+    "etc/aiplayerbot.conf": "AiPlayerbot.MinRandomBots = 500\n",
+    ".db_password": "tortoise-0123456789abcdef\n",
+}
+"""A server directory in the shape the retired fork left behind.
+
+Every path is one the OLD `wow-tortoise` entry wrote or cloned and the new one
+does not: the two SQL directories its plan globbed, the Eluna checkout its
+second source cloned, and a `mangosd.conf` carrying a `SOAP.Enabled` this core
+has no key for. `~/tortoise-vm` on `yulon-arch` and the owner's own install on
+m910q are both this shape.
+"""
+
+
+def _old_fork_install(tmp_path: Path) -> tuple[Path, Path]:
+    server_dir = tmp_path / "tortoise-wow-server"
+    for relative, text in OLD_FORK_SERVER.items():
+        target = server_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    client_dir = tmp_path / "TurtleWoW"
+    (client_dir / "Interface" / "AddOns").mkdir(parents=True)
+    return server_dir, client_dir
+
+
+def test_a_server_installed_from_the_retired_fork_still_opens_its_tabs(tmp_path: Path) -> None:
+    """The owner's condition on replacing the entry: existing installs keep opening.
+
+    T30 replaced `wow-tortoise` rather than adding a second game -- the owner's
+    answer, 2026-09-11 -- so the ONE entry now describes the Penqle core while
+    two servers on this desk (`~/tortoise-vm` on `yulon-arch`, and m910q's) were
+    built from the fork it replaced. Their `state.json` record is a game id and
+    two folders, so they open through exactly this route.
+
+    What has to survive is every seam the tab draws itself from: the controller,
+    the SQL runner over `.db_password`, accounts, play, the bot browser, the
+    console probe and the manifest store. None of them reads a source rev -- they
+    read this entry's containers, schemas and columns, which did not move
+    between the two trees (`tw_char`/`tw_logon`, `mangos_sha`, `RNDBOT`).
+
+    Catches a factory that starts reading something only the new stack has, and
+    a tab that refuses to open on a folder whose `src/` is the old shape.
+    """
+    server_dir, client_dir = _old_fork_install(tmp_path)
+    known = state.KnownInstall(game="wow-tortoise", server_dir=server_dir, client_dir=client_dir)
+    app_state = state.AppState()
+    app_state.remember(known)
+    reloaded = state.AppState.model_validate_json(app_state.model_dump_json()).find(
+        "wow-tortoise", server_dir
+    )
+    assert reloaded is not None, "the record does not survive a round trip through state.json"
+
+    services = ControllerServices.for_entry(
+        load_catalog().get(reloaded.game),
+        reloaded.server_dir,
+        client_dir=reloaded.client_dir,
+        wsl_distro=reloaded.wsl_distro,
+    )
+    assert services.controller is not None
+    assert services.send_console is not None
+    assert services.accounts is not None
+    assert services.play is not None
+    assert services.bots is not None
+    assert services.store is not None and services.applier is not None
+    assert services.console_probe is not None, (
+        "this entry's channel is the console again; a fork install reaches its world the "
+        "same way a new one does"
+    )
+    assert services.rebuild is not None, (
+        "the rebuild press is what puts such an install onto the new stack when its owner "
+        "chooses to; withholding it would strand the folder"
+    )
+
+
+def test_the_marker_rule_presses_are_withheld_from_a_fork_install_as_from_any_other(
+    tmp_path: Path,
+) -> None:
+    """Adopt and Updates are gone for every Tortoise install, fork-built or not.
+
+    They were offered because the plan declared one `rerun_on_marked` phase --
+    `character updates`, over `sql/character_updates/`, which is on the fork's
+    tree and not on the Penqle core. With the phase gone the plan declares none,
+    so `native.update_phases()` answers `()` and both controls are withheld
+    rather than pressed and then explaining themselves. That is the SAME rule as
+    before applied to a different plan, not a new exception for old folders, and
+    it is asserted on a folder that really has the directory those presses
+    applied -- which is the one place a reader might expect the app to notice.
+
+    Nothing about the install's own databases is read to decide this, and that
+    matters: the press being absent means the marker row is never consulted, so
+    a fork install cannot have DDL run against its live `tw_char` by an app
+    upgrade. T29's "older plan hash" arm is reachable only through these two
+    presses; with none offered, that arm is not reached at all on this game.
+    """
+    server_dir, client_dir = _old_fork_install(tmp_path)
+    assert (server_dir / "src/tortoise-wow/sql/character_updates").is_dir()
+    services = ControllerServices.for_entry(
+        load_catalog().get("wow-tortoise"), server_dir, client_dir=client_dir
+    )
+    assert services.updates is None
+    assert services.adopt is None
+    assert native.update_phases(load_catalog().get("wow-tortoise")) == ()
+
+
+# --------------------------------------------------------------------------
+# T30 -- the Tortoise tab's client folder, for the two Turtle addons
+# --------------------------------------------------------------------------
+
+
+def _tortoise_services(tmp_path: Path, client_dir: Path | None):
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir(parents=True, exist_ok=True)
+    return ControllerServices.for_entry(
+        load_catalog().get("wow-tortoise"), server_dir, client_dir=client_dir
+    )
+
+
+def test_the_tortoise_applier_is_handed_the_client_folder_its_addons_are_written_into(
+    tmp_path: Path,
+) -> None:
+    """The one keyword this factory swallowed, and what it cost.
+
+    `tortoise_modules.applier()` has taken `client_dir` since 8.7d and
+    `_for_tortoise` was the only game factory that did not pass it (tbc at
+    `:1441`, vanilla at `:1603`), so a manifest `client` step on this game
+    reported "no client dir configured" and copied nothing. Nothing in
+    `manifests/wow-tortoise/` declared one until T30 added the two Turtle
+    addons, which is how the gap sat there unseen.
+
+    Asserted on the applier the tab is really handed, because the keyword is
+    accepted either way: an applier built without it is not an error, it is an
+    applier that silently skips every client step it is ever given.
+    """
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface" / "AddOns").mkdir(parents=True)
+    services = _tortoise_services(tmp_path, client)
+    assert services.applier is not None
+    assert services.applier.client_dir == client, (
+        "the Tortoise tab's applier has no client folder, so every addon it installs is "
+        "copied nowhere and reported as skipped"
+    )
+
+
+def test_a_client_folder_with_no_interface_directory_is_not_written_into(
+    tmp_path: Path,
+) -> None:
+    """The refusal, named: `Interface/` is the folder the GAME ships.
+
+    `_ApplyEngine._client()` joins `Interface/AddOns/<name>` onto whatever it is
+    handed and creates every missing parent, so without this guard a folder that
+    is not a WoW client would quietly gain an `Interface/AddOns/TortoiseBotsManager`
+    and the install would report success -- while the client the user actually
+    plays never got the addon.
+
+    Three folders, one rule, and the first two must not read the same to the
+    applier as the third: a record with no client dir at all, a folder with no
+    `Interface/`, and a real client. The refusal costs a user one launch of the
+    game; guessing costs them files in a folder the app was told to treat as
+    their own.
+    """
+    assert _tortoise_services(tmp_path / "none", None).applier.client_dir is None
+    bare = tmp_path / "not-a-client"
+    (bare / "Data").mkdir(parents=True)
+    assert _tortoise_services(tmp_path / "bare", bare).applier.client_dir is None, (
+        "a folder with no Interface/ was accepted; the addons would be written into a "
+        "directory tree this app created inside it"
+    )
+    real = tmp_path / "TurtleWoW"
+    (real / "Interface").mkdir(parents=True)
+    assert _tortoise_services(tmp_path / "real", real).applier.client_dir == real, (
+        "Interface/ without AddOns/ is a client no addon has been installed into yet, which "
+        "is the case this guard must NOT refuse -- AddOns/ is the folder an addon creates"
+    )
 
 
 # --------------------------------------------------------------------------

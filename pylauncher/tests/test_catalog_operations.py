@@ -105,13 +105,31 @@ def test_every_tree_now_states_its_channel_and_they_are_not_the_same() -> None:
     assert channels["wow-wotlk"].enable_env and not channels["wow-wotlk"].enable_conf
     for game in ("wow-tbc", "wow-vanilla"):
         assert channels[game].enable_conf and not channels[game].enable_env
-    # Tortoise joined the SOAP trees on 2026-09-08: the fork re-added the
-    # interface (3f9a062) and the pin moved onto it (3a8472e); measured on the
-    # fresh install on yulon-arch (pyplan/gates/tortoise-fresh-yulon-arch-2026-09-08/).
-    assert channels["wow-tortoise"].channel == "soap"
-    assert channels["wow-tortoise"].port == 7878
-    assert channels["wow-tortoise"].namespace == "urn:MaNGOS"
-    assert channels["wow-tortoise"].enable_conf and not channels["wow-tortoise"].enable_env
+    # Tortoise has been round this loop twice. It said `attach` until 2026-09-08,
+    # joined the SOAP trees when the fork re-added the interface (3f9a062) and
+    # the pin moved onto it (3a8472e), and went back to `attach` on 2026-09-11
+    # when T30 moved the whole entry off that fork onto the Penqle core -- which
+    # has no SOAP at all: one comment at `src/game/World.h:799` is the only
+    # occurrence of the string under its `src/`, its `mangosd.conf.dist.in`
+    # ships no `SOAP.*` key and no gsoap is vendored (T30 Half 1, yulon-arch,
+    # `05-conf-keys.txt`).
+    assert channels["wow-tortoise"].channel == "attach"
+    assert not channels["wow-tortoise"].enable_conf and not channels["wow-tortoise"].enable_env
+    # THE WAY BACK IS ONE EDIT, and it is written down in the entry rather than
+    # here, because that is where a hand doing the flip will be looking. The
+    # owner has asked the core's maintainer for the subsystem back; this asserts
+    # the recipe is still beside the block and still names every key, so it
+    # cannot rot into "it used to say something about SOAP".
+    notes = " ".join(channels["wow-tortoise"].notes)
+    assert notes, "the Tortoise channel carries no note saying why it is `attach`"
+    for key in ("channel", "namespace", "port", "gm_level", "enable_conf", "publish"):
+        assert key in notes, f"the restore recipe does not name {key!r}: {notes!r}"
+    for key in ("SOAP.Enabled", "SOAP.IP", "SOAP.Port"):
+        assert key in notes, f"the restore recipe does not name the conf key {key!r}"
+    assert "urn:MaNGOS" in notes and "7878" in notes, (
+        "the restore recipe gives the namespace and the port by value; a recipe that says "
+        "`put the keys back` sends the next hand to measure them again"
+    )
 
 
 def test_an_attach_channel_declares_nothing_it_does_not_have() -> None:
@@ -327,20 +345,34 @@ def test_every_tree_says_how_high_its_levels_go() -> None:
         assert level.max_level == ceiling, game
 
 
-def test_tortoise_asks_the_channel_for_the_rank_this_fork_calls_administrator() -> None:
-    """Measured on the fresh install on yulon-arch, 2026-09-08 19:52Z.
+def test_tortoise_declares_no_channel_rank_because_its_console_has_no_account() -> None:
+    """The rank that WAS measured, and why the block no longer states it.
 
-    The SOAP block was first written with `gm_level: 3` copied from Vanilla, and
-    the fork answered the first `server info` with *the account exists but its GM
+    Measured on the fresh install on yulon-arch, 2026-09-08 19:52Z: the fork's
+    SOAP block was first written with `gm_level: 3` copied from Vanilla, and the
+    server answered the first `server info` with *the account exists but its GM
     level is below administrator, which SOAP requires* -- a 401 with the account
-    known. This tree's `accounts.level` scale runs to 4 (`rank`, measured in 8.3d),
-    and its administrator is the top of that scale, not MaNGOS's 3. A per-tree
-    fact, taken from the tree.
+    known. This tree's `accounts.level` scale runs to 4 (`rank`, 8.3d) and its
+    administrator is the top of it, not MaNGOS's 3.
+
+    That measurement is still true of the scale and is still asserted, below, on
+    `accounts.level`. What changed on 2026-09-11 is that the channel is the
+    worldserver console again: console commands run at `SEC_CONSOLE` with
+    account id 0 and there is no account to hold a rank, so an `attach` block
+    that named one would be describing something that does not exist -- which
+    the model refuses outright (`Operations._a_soap_channel_says_how_it_is_switched_on`).
+    The rank comes back with the SOAP block, and the entry's notes carry it by
+    value so it does not have to be measured a third time.
     """
     entry = load_catalog().get("wow-tortoise")
     assert entry.operations is not None and entry.accounts.level is not None
-    assert entry.operations.gm_level == 4
-    assert entry.operations.gm_level == entry.accounts.level.max_level
+    assert entry.operations.channel == "attach"
+    assert entry.operations.gm_level is None
+    assert entry.accounts.level.max_level == 4, (
+        "this fork's rank scale runs to 4 and its administrator is the top of it; the "
+        "channel's rank comes back from here when SOAP does"
+    )
+    assert "gm_level" in " ".join(entry.operations.notes)
 
 
 def test_a_channel_rank_above_the_trees_own_level_scale_is_refused() -> None:

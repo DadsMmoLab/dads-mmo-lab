@@ -6,6 +6,8 @@
     "perf-report",
     "motd",
     "xp-rates",
-    "all-stackables"
+    "all-stackables",
+    "tortoise-bots-manager",
+    "tortoise-gm-manager"
   ]
 }

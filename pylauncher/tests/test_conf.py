@@ -34,6 +34,7 @@ import stat
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from yulon import resources
 from yulon.catalog import composegen
@@ -613,6 +614,131 @@ def test_materialise_does_not_accept_a_directory_as_a_dist_file(tmp_path: Path) 
     with pytest.raises(InstallerError, match=r"realmd\.conf\.dist"):
         conf.materialise(TABLE, image_ref="img", etc_dir=etc, copy_from_image=copy)
     assert list(etc.iterdir()) == []
+
+
+# --- materialise: the template a file is copied FROM ----------------------------------
+
+
+# The two shapes the Penqle core forced the field into existence for, read off the
+# built image on `yulon-arch` 2026-09-11
+# (`pyplan/gates/t30-measure-yulon-arch-2026-09-11/12-image-contents.txt`):
+#
+#   /opt/tortoise/etc/aiplayerbot.conf              <- no `.dist` at all
+#   /opt/tortoise/etc/modules/tortoise_bots.conf.dist  <- a `.dist`, one level down
+#
+# `TortoiseBots.cmake:40-46` `configure_file`s the first straight to its live name,
+# and installs the second under `etc/modules/`. Both were an `InstallerError` from
+# `materialise()` before the table could name a template per file.
+TEMPLATED = ConfPatchTable(
+    source_dir="/opt/tortoise/etc",
+    files={
+        "mangosd.conf": ConfPatch(keys={"DataDir": '"/opt/tortoise/data"'}),
+        "aiplayerbot.conf": ConfPatch(
+            keys={"AiPlayerbot.Enabled": "1"}, template="aiplayerbot.conf"
+        ),
+        "modules/tortoise_bots.conf": ConfPatch(
+            keys={"TortoiseBots.LogLevel": "1"},
+            template="modules/tortoise_bots.conf.dist",
+        ),
+    },
+)
+
+
+class _NestedImage:
+    """`copy_from_image` for a source dir that has a subdirectory in it."""
+
+    def __init__(self, files: dict[str, bytes]) -> None:
+        self.files = files
+        self.calls = 0
+
+    def __call__(self, image: str, src: str, dest: Path) -> None:
+        self.calls += 1
+        dest.mkdir(parents=True)
+        for name, data in self.files.items():
+            target = dest / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+
+
+TEMPLATED_IMAGE = {
+    "mangosd.conf.dist": MANGOSD.encode("utf-8"),
+    "aiplayerbot.conf": b"AiPlayerbot.Enabled = 0\n",
+    "modules/tortoise_bots.conf.dist": b"[TortoiseBotsConf]\nTortoiseBots.LogLevel = 0\n",
+    # The live name the module also installs beside its own template. Nothing may
+    # copy THIS: it is the file the image happens to ship, not the template the
+    # table named, and treating it as one would make a resume's `etc/` depend on
+    # which of the two the image shipped last.
+    "modules/tortoise_bots.conf": b"[TortoiseBotsConf]\nTortoiseBots.LogLevel = 9\n",
+}
+
+
+def test_a_file_may_name_the_template_it_is_copied_from(tmp_path: Path) -> None:
+    """Per file, and the default — `<name>.dist` — is unchanged for everyone else.
+
+    Three files in one table: one taking the default, one whose template has no
+    `.dist` suffix, one whose template is a path into a subdirectory of the same
+    `source_dir`. One `docker cp` still, because the override changes which entry
+    of the staged tree is moved and nothing about how it is fetched.
+
+    The nested file lands at `etc/modules/tortoise_bots.conf`, parent directory
+    created: the table's key is the path under `etc/`, so the image's layout and
+    the install's agree without a second `source_dir`.
+    """
+    etc = tmp_path / "etc"
+    image = _NestedImage(TEMPLATED_IMAGE)
+    created = conf.materialise(TEMPLATED, image_ref="img", etc_dir=etc, copy_from_image=image)
+    assert created == (
+        etc / "mangosd.conf",
+        etc / "aiplayerbot.conf",
+        etc / "modules" / "tortoise_bots.conf",
+    )
+    assert image.calls == 1
+    assert (etc / "mangosd.conf").read_bytes() == MANGOSD.encode("utf-8")
+    assert (etc / "aiplayerbot.conf").read_bytes() == b"AiPlayerbot.Enabled = 0\n"
+    assert (etc / "modules" / "tortoise_bots.conf").read_bytes() == (
+        b"[TortoiseBotsConf]\nTortoiseBots.LogLevel = 0\n"
+    ), "the template the table named, not the live file the image ships beside it"
+    assert stat.S_IMODE((etc / "modules" / "tortoise_bots.conf").stat().st_mode) == 0o600
+    assert sorted(p.name for p in etc.iterdir()) == [
+        "aiplayerbot.conf",
+        "mangosd.conf",
+        "modules",
+    ], "no staging dir left behind"
+
+
+def test_a_named_template_the_image_does_not_ship_is_the_same_refusal(tmp_path: Path) -> None:
+    """The override moves which path is checked; it does not weaken the check.
+
+    A table that names `aiplayerbot.conf` against an image that ships only
+    `aiplayerbot.conf.dist` is the same catalog/image disagreement as a missing
+    `.dist`, and it must name the path it actually looked for — otherwise the
+    message sends a reader to the file that IS there.
+    """
+    etc = tmp_path / "etc"
+    image = _NestedImage(
+        {
+            "mangosd.conf.dist": MANGOSD.encode("utf-8"),
+            "aiplayerbot.conf.dist": b"AiPlayerbot.Enabled = 0\n",
+            "modules/tortoise_bots.conf.dist": b"[TortoiseBotsConf]\n",
+        }
+    )
+    with pytest.raises(InstallerError, match=r"/opt/tortoise/etc/aiplayerbot\.conf,"):
+        conf.materialise(TEMPLATED, image_ref="img", etc_dir=etc, copy_from_image=image)
+    assert list(etc.iterdir()) == [], "all or nothing, exactly as for a missing .dist"
+
+
+@pytest.mark.parametrize(
+    "template", ["", "/opt/tortoise/etc/x.conf", "../x.conf", "modules/../../x.conf"]
+)
+def test_a_template_that_could_leave_the_staged_copy_is_refused(template: str) -> None:
+    """The template is joined onto the staging dir, so nothing may point it outside.
+
+    Same rule and same reason as `EmulatorSource.dest`: this is catalog data, it
+    becomes a path, and a path that escapes its root is how a copy reaches a file
+    nobody named.
+    """
+    with pytest.raises(ValidationError):
+        ConfPatch.model_validate({"keys": {"A": "1"}, "template": template})
 
 
 # --- materialise: the staging directory ----------------------------------------------

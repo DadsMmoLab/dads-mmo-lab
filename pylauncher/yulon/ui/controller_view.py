@@ -1619,6 +1619,51 @@ def _for_vanilla(
     )
 
 
+ADDONS_PARENT = "Interface"
+"""The folder a client addon is written under, and the one a client must already have.
+
+`Interface/AddOns/<Name>` is where WoW looks, and `_ApplyEngine._client()`
+(`apply.py:2173-2192`) joins that onto whatever client folder it is handed --
+with `copytree`/`mkdir` creating every missing parent. So a folder that is not a
+WoW client does not refuse a `client` step: it GAINS an
+`Interface/AddOns/TortoiseBotsManager`, and the install reports success.
+"""
+
+
+def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
+    """This install's client folder if a manifest may write an addon into it, else None.
+
+    Two answers, and the second is the one that had to be written down (T30).
+    A tab whose install record carries NO client dir has never had one --
+    nothing to write into. A tab that carries one which holds no `Interface/`
+    is the case that looks the same from the applier's side and is not: the step
+    would create the whole tree and succeed, in a folder nobody has shown to be
+    a game client, and the user would go looking for `/tbm` in the client they
+    actually play.
+
+    The check is `Interface/` rather than `Interface/AddOns/`, because the
+    second is the folder an addon is entitled to create and the first is the one
+    the game ships. Measured on `yulon-arch` 2026-09-11, the Turtle client used
+    for T30's live half has `Interface/AddOns/` with twelve Blizzard_* folders
+    in it before anything of ours is written.
+
+    A client that genuinely has no `Interface/` -- one unpacked and never
+    started -- is refused rather than filled in, and that is the deliberate half:
+    the cost of refusing is one launch of the game, and the cost of guessing
+    wrong is files written into a folder the app was told to treat as the user's
+    own.
+    """
+    if client_dir is None:
+        return None
+    if not (client_dir / ADDONS_PARENT).is_dir():
+        logger.info(
+            f"{client_dir} has no {ADDONS_PARENT}/ folder, so no client addon is written "
+            "into it; start the game once, or point this install at the client you play"
+        )
+        return None
+    return client_dir
+
+
 def _for_tortoise(
     entry: CatalogEntry,
     server_dir: Path,
@@ -1652,39 +1697,51 @@ def _for_tortoise(
         wsl_distro=wsl_distro,
     )
     watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
-    # Until 2026-09-08 this tab reached its world through `AttachChannel` over
-    # the console (8.2e): the fork's mangosd linked no SOAP. The fork re-added
-    # the interface (3f9a062) and the pin moved onto it (3a8472e), so the
-    # entry now says `soap` and this is Vanilla's wiring over this tree's own
-    # account seam -- one column, `mangos_sha`, not Vanilla's `v`/`s`. The
-    # console itself is still what the Console tab types at (`send_console`).
-    channel = channel_setup.InstallChannel(
-        entry,
-        server_dir,
-        templates_root=resources.installers_dir(),
-        install_id=composegen.install_id(server_dir),
-        db_password=password,
-        create=lambda name, pw, level: tortoise_accounts.create_account(
-            sql, name, pw, gm_level=level
-        ),
-        reset=lambda name, pw: tortoise_accounts.reset_own_password(sql, name, pw),
-        channel_for=lambda endpoint: channel_module.SoapChannel(
-            endpoint=endpoint,
-            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
-        ),
+    # THE CONSOLE IS THE CHANNEL ON THIS TREE, and it is the second time that has
+    # been true. 8.2e wired `AttachChannel` here because the fork's mangosd
+    # linked neither gsoap nor `RASocket`; the fork re-added SOAP (3f9a062), the
+    # pin moved onto it (3a8472e) and this became Vanilla's `InstallChannel` over
+    # this tree's own account seam. T30 moved the whole entry off that fork and
+    # onto the Penqle core, which has no SOAP at all: the string does not occur
+    # anywhere under its `src/` but in one comment, `mangosd.conf.dist.in` ships
+    # no `SOAP.*` key, and no gsoap is vendored (measured on `yulon-arch`
+    # 2026-09-11, `pyplan/gates/t30-measure-yulon-arch-2026-09-11/05-conf-keys.txt`).
+    # So `operations.channel` says `attach` again and this is the transport that
+    # goes with it.
+    #
+    # NOTHING SOAP-SIDE WAS DELETED for that move, deliberately: the owner has
+    # asked the core's maintainer for the subsystem back and expects it. When a
+    # rev lands with it, this block goes back to the `channel_setup.InstallChannel`
+    # over `channel_module.SoapChannel` that stood here between 2026-09-08 and
+    # 2026-09-11, and the entry's `operations` block regains the four keys its
+    # own `notes` list. `SoapChannel`, `InstallChannel`, the `enable_conf` writer
+    # and `tortoise_accounts.reset_own_password` are all still here and still
+    # under test.
+    #
+    # ONE channel object, used three times: the Server tab's probe presses it,
+    # the Accounts tab sends this tree's two commands down it, and the Play tab's
+    # rename/revive go the same way. They are the same console and the same lock
+    # -- two channels over one `docker attach` would interleave two replies in
+    # one window (8.3d).
+    console = channel_module.AttachChannel(
+        send=lambda cmd, **kw: tortoise_console.send(cmd, wsl_distro=wsl_distro, **kw)
     )
+    # There is no credential and nothing to set up on this core, so the channel
+    # is simply always the console: `channel_for_saved` answers it rather than
+    # looking one up, and the `AttachChannel` says "could not ask" by itself when
+    # the world is not there to answer.
     accounts_admin = useraccounts.InstallAccounts(
         entry,
         server_dir,
         sql=sql,
-        channel_for_saved=channel.live_channel,
+        channel_for_saved=lambda: console,
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     characters_admin = play_module.InstallPlay(
         entry,
         server_dir,
         sql=sql,
-        channel_for_saved=channel.live_channel,
+        channel_for_saved=lambda: console,
     )
     return _assemble(
         entry,
@@ -1693,9 +1750,13 @@ def _for_tortoise(
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
-        channel_setup=channel,
         accounts=accounts_admin,
         play=characters_admin,
+        # The Server tab's probe, and it is the CHANNEL's `send` rather than the
+        # Console tab's own seam below: what that tab shows has to come through
+        # the object every other feature on this tree uses, or it proves the
+        # console works and not the channel (8.2e).
+        console_probe=console.send,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=tortoise_controller.controller_for(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -1746,6 +1807,22 @@ def _for_tortoise(
                 start_database=lambda: docker.start_database(
                     spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
                 ),
+                # T30. `applier()` has taken this keyword since 8.7d and this
+                # factory was the one caller that swallowed it, so a manifest
+                # `client` step on this game reported "no client dir configured"
+                # and copied nothing (`apply.py:2175-2177`). Nothing in
+                # `manifests/wow-tortoise/` had one until the two Turtle addons
+                # arrived, which is why the gap could sit here unseen -- tbc
+                # (`:1441`) and vanilla (`:1603`) have always passed it.
+                #
+                # It is the folder the user chose as their WoW client, the same
+                # value `requires_client_dir` makes the installer ask for --
+                # through `_client_dir_for_addons()`, which is where the second
+                # refusal lives: a record with no client dir, and a client dir
+                # with no `Interface/`, both arrive here as `None` and the step
+                # is skipped with a sentence rather than creating a directory
+                # tree in a folder nobody has shown to be a game client.
+                client_dir=_client_dir_for_addons(client_dir),
             )
             if entry.has_manifests
             else None

@@ -14,7 +14,6 @@ The gate that found them (7.6, `yulon-ubuntu`) is written up in
 from __future__ import annotations
 
 import re
-from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -138,98 +137,20 @@ def test_every_cmangos_game_asks_for_the_bot_population_the_owner_set(game: str)
     assert conf.keys.get("AiPlayerbot.MaxRandomBots") == "500"
 
 
-def test_tortoise_imports_the_playerbot_sql_its_own_bots_query() -> None:
-    """Compiled in, configured, and then dead on a missing table.
-
-    Enabling `aiplayerbot.conf` moved the crash rather than removing it: the
-    bots initialise, load their area levels, and then die on
-
-        select id, name, class from ai_playerbot_weightscales
-        [1146] Table 'tw_world.ai_playerbot_weightscales' doesn't exist
-
-    Nothing had ever imported the module's SQL. Vanilla's plan has carried a
-    `playerbots characters` and a `playerbots world` phase all along -- the
-    second listing both `sql/world/*.sql` and `sql/world/classic/*.sql`,
-    because the classic subfolder is where the tables the bots read actually
-    live -- and Tortoise's plan had neither.
-
-    This is the third time on this entry that a thing was shipped and then not
-    switched on: the bots were compiled into the image, then the conf that
-    loads them was not written, then the SQL they read was not imported. Each
-    step revealed the next only by running the server.
-    """
-    from yulon.catalog.catalog import load_catalog
-
-    sql = _native().cmangos.sql  # type: ignore[union-attr]
-    phases = {phase.name: phase for phase in sql.phases}
-    assert "playerbots world" in phases, "the module's world SQL is never imported"
-    assert "playerbots characters" in phases, "the module's character SQL is never imported"
-
-    # WHICH DATABASE each phase loads into, which the phase names do not say.
-    # A review moved `playerbots world` to `tw_char` and every assertion above
-    # still held: the module's tables land in the characters schema, the
-    # server's boot query still finds no `tw_world.ai_playerbot_weightscales`,
-    # and the crash quoted in this docstring comes back unchanged.
-    assert phases["playerbots world"].into == "tw_world", (
-        "the bots' boot query names `tw_world.ai_playerbot_weightscales`; a phase that loads "
-        f"into {phases['playerbots world'].into!r} imports the files and still leaves that "
-        "table missing"
-    )
-    assert (
-        phases["playerbots characters"].into == "tw_char"
-    ), "the character-side module tables belong in the characters schema"
-
-    # The exact glob. `"classic" in pattern` was also true of
-    # `.../world/classical/*.sql` -- a directory that does not exist, matching
-    # no file, importing nothing, and passing.
-    patterns = phases["playerbots world"].files or ()
-    assert any(pattern.endswith("/sql/world/classic/*.sql") for pattern in patterns), (
-        "the `classic` subfolder holds `ai_playerbot_weightscales` and the rest of the "
-        f"tables the bots query on boot; the phase lists only {list(patterns)}"
-    )
-    assert any(pattern.endswith("/sql/world/*.sql") for pattern in patterns), (
-        "the module's top-level world SQL is imported alongside the classic subfolder, as "
-        f"wow-vanilla does; the phase lists only {list(patterns)}"
-    )
-
-    vanilla = load_catalog().get("wow-vanilla").install.native
-    assert vanilla is not None and vanilla.cmangos is not None
-    sibling = {phase.name for phase in vanilla.cmangos.sql.phases}
-    assert {
-        "playerbots world",
-        "playerbots characters",
-    } <= sibling, "wow-vanilla no longer carries the phases this test compares against"
-
-
-def test_the_import_is_verified_by_the_tables_the_bots_need() -> None:
-    """A table COUNT is not a schema check, and that is how this got through.
-
-    The only world-side verification was `COUNT(*) FROM information_schema.tables
-    >= 150`. The database that crashed the server on boot had 285 tables, so it
-    passed comfortably while missing every table the bots read and 125
-    migrations besides. A count answers "did something get imported", never
-    "did the right things".
-
-    The `ai_playerbot%` count is the same check `wow-vanilla` has carried since
-    its own import was fixed, and it fails on exactly the database this gate
-    produced.
-    """
-    checks = _native().cmangos.sql.verify  # type: ignore[union-attr]
-    bots = [c for c in checks if "ai_playerbot" in c.query]
-    assert bots, "nothing verifies that the playerbot tables arrived"
-    rule = bots[0]
-    assert rule.min >= 10, f"a threshold of {rule.min} would pass on an empty import"
-
-    # WHICH database it counts in. A review pointed the rule at `tw_char`: the
-    # query still mentions `ai_playerbot`, the threshold is still 10, and the
-    # check now passes against the characters schema while the world import it
-    # exists to verify goes unexamined -- the exact failure this docstring is
-    # about, restored by a one-word edit the assertion above cannot see.
-    assert rule.db == "tw_world", f"the rule runs against {rule.db!r}, not the world database"
-    assert "table_schema='tw_world'" in rule.query, (
-        f"the rule counts tables in whichever schema {rule.query!r} names; the bots read "
-        "theirs out of tw_world"
-    )
+# `test_tortoise_imports_the_playerbot_sql_its_own_bots_query` and
+# `test_the_import_is_verified_by_the_tables_the_bots_need` stood here. Both were
+# about the fork's vendored `modules/mod-playerbots`: the first that the plan
+# imported its `sql/characters` and `sql/world` (including the `world/classic`
+# subfolder, where `ai_playerbot_weightscales` actually lived), the second that
+# the import verified the result with a `LIKE 'ai_playerbot%'` count rather than
+# a table total.
+#
+# Both directories went with the fork. On the Penqle core the bots' SQL belongs
+# to the module and is applied by the core's own updater at world start, which
+# is after the import's verify has run -- so the phases are gone, the rule is
+# gone, and the two facts that replace them are
+# `test_the_bots_own_sql_is_applied_by_the_core_and_the_plan_says_which_folders`
+# and `test_the_import_verifies_only_what_its_own_files_create`, further down.
 
 
 def test_the_ready_budget_covers_a_measured_first_boot_not_a_round_number() -> None:
@@ -406,9 +327,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     catalog would still claim the old answers.
 
     `Source.rev`'s own description already says this ("a pinned server must
-    rebuild the same bytes"); the entry simply had not used it. Pinned to
-    7c0fb278, the commit that was built, extracted, migrated, booted and logged
-    into on `yulon-ubuntu`.
+    rebuild the same bytes"); the entry simply had not used it.
 
     Asserted over ALL sources rather than the one that was wrong, so a third
     source added later cannot arrive unpinned.
@@ -429,16 +348,21 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     # rest are held to the SHAPE of a full commit id, because an abbreviation
     # is a prefix and a prefix can stop being unique.
     core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
-    assert core.rev == "3a8472e68e4aca5d2675feb9241e924f1c31899c", (
-        f"the core is pinned to {core.rev!r}. Until 2026-09-08 it was 7c0fb278, where every "
-        "measurement in this file was taken; the pin moved to 3a8472e -- the SOAP interface "
-        "(3f9a062) and the account-lockout fix (3a8472e), which the fork's own README now says "
-        "are the last of its own work before it archives -- and the measurements were taken "
-        "again: the ready banner, the migrations path, the SQL globs and the harmless bot-log "
-        "line on a copy of m910q's install (pyplan/gates/tortoise-reimport-rehearsal-m910q-"
-        "2026-09-08/), the exit status and the bot conf on the fresh install on yulon-arch "
-        "(pyplan/gates/tortoise-fresh-yulon-arch-2026-09-08/). Moving it again means taking "
-        "them again"
+    assert core.rev == "9980181ce9aa5940b6125a5991cc754148ed9b82", (
+        f"the core is pinned to {core.rev!r}. It was 7c0fb278, then 3a8472e on the retired "
+        "Shyalya fork, and since T30 it is 9980181c on `tortoise-wow/tortoise-wow` branch "
+        "`bot-helpers` -- a different TREE, not a later commit of the same one, so every "
+        "measurement in this file was taken again against it on `yulon-arch` 2026-09-11: the "
+        "ready banner, the migrations path, the conf keys, the SQL layout, the cmake flags, "
+        "the harmless bot-log line and the module's own startup lines "
+        "(pyplan/gates/t30-measure-yulon-arch-2026-09-11/). Moving it again means taking them "
+        "again"
+    )
+    module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
+    assert module.rev == "fd7ec9ec7659035cfc3ea75d542c8683005525de", (
+        f"the bots module is pinned to {module.rev!r}. Its own pin is as load-bearing as the "
+        "core's: the module is what decides the folder names its SQL is installed under, "
+        "which conf keys exist, and what the world prints when it loads"
     )
     for source in sources:
         assert re.fullmatch(
@@ -492,23 +416,20 @@ def test_both_boot_patterns_are_read_as_regular_expressions_not_literal_text() -
     )
 
 
-# --- the fork's own `sql/character_updates/`, which nothing on this tree applies ------
-
-
-CHARACTER_UPDATES = "src/tortoise-wow/sql/character_updates/*.sql"
-"""The directory, spelled as the phase globs it.
-
-Listed read-only on `m910q` 2026-09-09 at
-`~/tortoise-server/src/tortoise-wow/sql/character_updates/`; it ships three files.
-"""
-
-THE_THREE_FILES = (
-    "20260708055500_ai_playerbot_random_bots_index.sql",
-    "20260731160000_guild_bank_money_unsigned.sql",
-    "20260812142512_character_inventory_copy.sql",
-)
-"""Every file in that directory on 2026-09-09, in the order the fork's own timestamps put
-them in. Named rather than globbed because the ORDER is what is being asserted."""
+# --- the SQL the plan applies, and the SQL it deliberately leaves alone --------------
+#
+# The retired fork's `sql/character_updates/` lived here, with four tests and two
+# constants: `CHARACTER_UPDATES`, `THE_THREE_FILES`, and the measurements from
+# `yulon-arch` 2026-09-08 and `m910q` 2026-09-09 that put the phase in the plan.
+# Nothing on that fork applied that directory, and a world died without it --
+# immediately on a fresh install, and on its first honor-maintenance day on an
+# established one.
+#
+# The Penqle core has no such directory (`06-sql-layout.txt`, T30 Half 1), and
+# neither of the two `modules/mod-playerbots/sql/...` directories the plan also
+# globbed. All three phases are gone. What replaces them is below: the plan must
+# not name a directory this tree does not have, and the bots' own SQL is applied
+# by the core rather than by us.
 
 
 def _sql_plan():
@@ -521,191 +442,126 @@ def _phase_names() -> list[str]:
     return [phase.name for phase in _sql_plan().phases]
 
 
-def test_the_forks_own_character_updates_are_applied_into_the_characters_database() -> None:
-    """Nothing on this tree applies `sql/character_updates/`, and a world dies without it.
+GONE = (
+    "sql/character_updates",
+    "modules/mod-playerbots/sql/characters",
+    "modules/mod-playerbots/sql/world",
+)
+"""The three directories the plan globbed that the Penqle core does not have.
 
-    Two measurements, a week apart, of one missing phase:
+Listed on `yulon-arch` 2026-09-11 against a real clone at the pinned rev
+(`pyplan/gates/t30-measure-yulon-arch-2026-09-11/06-sql-layout.txt`, "the old
+fork paths the plan reads that do not exist on this tree"). The first was an
+`on_error: fail` phase, so it is the one that would have stopped every fresh
+install; the other two were `warn`, which is worse in the other direction --
+they would have gone on reporting a successful import of nothing.
+"""
 
-    * **A fresh install crash-loops immediately.** `yulon-arch`, 2026-09-08: the
-      world crash-looped on character migration `20260903211500` until these
-      files were applied into `tw_char` by hand
-      (`pyplan/gates/tortoise-soap-yulon-arch-2026-09-09/README.md`).
-    * **An established install crash-loops on a date.** `m910q`, 2026-09-09
-      01:09Z: 903 characters, serving gates for weeks, dead on
-      `TRUNCATE character_inventory_copy` the first morning honor maintenance
-      fell due -- `saved_variables.nextHonorMaintenanceDay` 20705 was that day
-      (`pyplan/gates/7.9-rerun-m910q-2026-09-09/README.md`, finding 1). That
-      table is created by `20260812142512_character_inventory_copy.sql` and by
-      nothing else under `sql/`. The fresh-install reading alone understates
-      this: every install that has never had these applied is one
-      honor-maintenance day from being unstartable, and the day is weekly.
 
-    **Two separate things on this tree apply SQL and neither reads this
-    directory.** `Database.AutoUpdate.Path` points the core's own updater at
-    `sql/database_updates/`, whose only children are `character` and `world`
-    (read on `m910q`, 2026-09-09) -- a different directory. The fork's own
-    `sql/setup_databases.sh` imports `create_databases.sql` and then
-    `database_updates/*.sql`, and that top level holds no `.sql` at all. So the
-    pinned-path test above is not a substitute for this one: both paths can be
-    right at the same time and this directory still be applied by nobody.
+def test_the_plan_names_no_directory_the_penqle_core_does_not_have() -> None:
+    """Every glob in the plan, against the three directories that went with the fork.
 
-    `into` is asserted because the phase name does not say it, and all three
-    files edit `tw_char` tables. The world half of the same family of problems
-    is the image template's `INSERT IGNORE` rewrite (`3a1ed6ee`), not this.
+    A `warn` phase over a missing directory is the defect this is really about:
+    it imports nothing, says so in one line nobody reads, and leaves an install
+    that passes every count-based check while missing the tables a later boot
+    queries. That is exactly how the fork's own playerbots SQL went unimported
+    for a week in 8.7 -- the same shape, one core earlier.
+
+    Asserted over the whole plan rather than by phase name, because the way this
+    comes back is a glob edited into a phase that kept its name.
     """
-    phases = {phase.name: phase for phase in _sql_plan().phases}
-    assert "character updates" in phases, (
-        "wow-tortoise has no phase for `sql/character_updates/`; a fresh install of this "
-        "fork does not come up, and an established one dies on its first honor-maintenance "
-        f"day. The plan's phases are {_phase_names()}"
+    globs = [pattern for phase in _sql_plan().phases for pattern in (phase.files or ())]
+    assert globs, "the plan globs no files at all; this test is looking at nothing"
+    for directory in GONE:
+        offenders = [pattern for pattern in globs if directory in pattern]
+        assert not offenders, (
+            f"the plan still globs {directory!r}, which does not exist on the pinned core: "
+            f"{offenders}"
+        )
+    assert any("/sql/base/" in pattern for pattern in globs), (
+        "the 190 per-table world dumps are still the import; a plan that lost them would "
+        "also satisfy every assertion above"
     )
-    phase = phases["character updates"]
-    assert phase.into == "tw_char", (
-        "all three files edit characters-database tables (`ai_playerbot_random_bots`, "
-        "`guild_bank_money`, `character_inventory`); a phase loading into "
-        f"{phase.into!r} applies them and leaves `tw_char` exactly as broken"
-    )
-    assert CHARACTER_UPDATES in (phase.files or ()), (
-        "the fork's directory is `sql/character_updates/`; `sql/database_updates/character/` "
-        "is the OTHER one, the one its own updater already reads. The phase globs "
-        f"{list(phase.files or ())}"
-    )
+
+
+def test_the_bots_own_sql_is_applied_by_the_core_and_the_plan_says_which_folders() -> None:
+    """Nothing here imports the module's migrations, and that is a measured decision.
+
+    The core applies a module's SQL at world start from
+    `<TW_SOURCE_MODULES_DIR>/<module>/data/sql/<folder>`, where `<folder>` is
+    the SAME `Database.AutoUpdate.CharUpdateName` / `WorldUpdateName` it uses
+    for its own migrations (`AutoUpdater.cpp:245-283`, `:497-531`). So the conf
+    block is what decides whether the module's SQL is found at all, and the two
+    values are `character` and `world` -- the names `TortoiseBots.cmake:61-69`
+    installs the module's `char` folder under, deliberately, with a comment
+    saying "so a fresh install cannot silently skip SQL".
+
+    Measured both ways on `yulon-arch` 2026-09-11: with the folder spelled
+    `char` the world found nothing, said nothing about it, and died before its
+    ready line on `[1146] Table 'tw_char.ai_playerbot_equip_cache' doesn't
+    exist` (`08-world-run1.txt`); with it spelled `character` the same image
+    applied 5 character and 3 world module migrations and came up (`08d`, `08e`).
+
+    Catches the two folder names edited to the module's on-disk spelling, which
+    would ALSO point the core's own `sql/database_updates/character` at a
+    directory that is not there.
+    """
     keys = _native().cmangos.conf.files["mangosd.conf"].keys  # type: ignore[union-attr]
-    updater = keys["Database.AutoUpdate.Path"].strip('"').rstrip("/")
-    assert not updater.endswith("character_updates"), (
-        "were the updater pointed here it would apply these itself; it is pointed at "
-        f"{updater!r}, which is the whole reason this phase exists"
+    assert keys["Database.AutoUpdate.CharUpdateName"].strip('"') == "character"
+    assert keys["Database.AutoUpdate.WorldUpdateName"].strip('"') == "world"
+    assert keys["Database.AutoUpdate.AllowedModules"].strip('"') == "all", (
+        "the updater reads this before it looks at any module; a list that does not name "
+        "TortoiseBots skips the module's SQL exactly as a missing folder does"
+    )
+    globs = [pattern for phase in _sql_plan().phases for pattern in (phase.files or ())]
+    assert not [pattern for pattern in globs if "TortoiseBots" in pattern], (
+        "a phase imports the module's SQL. The core's updater applies those files itself and "
+        "ledgers each by hash; importing them first means the same tables created twice, by "
+        "two things that do not know about each other"
+    )
+    notes = " ".join(note for phase in _sql_plan().phases for note in phase.notes)
+    assert "TW_SOURCE_MODULES_DIR" in notes, (
+        "nothing in the plan records WHY it imports no bot SQL. A reader who sees the bots' "
+        "tables missing at import time and adds a phase for them gets the double-apply above"
     )
 
 
-def test_the_character_updates_phase_runs_after_the_phases_that_make_its_tables() -> None:
-    """Order, read off the files' contents and not off their timestamps.
+def test_the_import_verifies_only_what_its_own_files_create() -> None:
+    """The `ai_playerbot%` rule went with the phases that made those tables, and had to.
 
-    Each of the three ALTERs or copies a table something EARLIER creates, and
-    the two creators are two different phases (both read on `m910q`, 2026-09-09):
+    It read `COUNT(*) ... table_name LIKE 'ai_playerbot%' >= 10` in `tw_world`,
+    and it was true on the fork because the plan's own `playerbots world` phase
+    imported those files. On this stack nothing creates them until the world
+    starts for the first time -- the core's updater does it -- and the import's
+    verify runs before that, so the rule would have failed every fresh install
+    at the last step of a forty-minute import.
 
-    * `20260708055500_ai_playerbot_random_bots_index.sql` indexes
-      `ai_playerbot_random_bots`. `create_databases.sql` does not contain that
-      table; `modules/mod-playerbots/sql/characters/ai_playerbot_random_bots.sql`
-      does -- the `playerbots characters` phase.
-    * `20260731160000_guild_bank_money_unsigned.sql` and
-      `20260812142512_character_inventory_copy.sql` need `guild_bank_money` and
-      `character_inventory`, both `CREATE TABLE`s inside `create_databases.sql`
-      (its lines 1455 and 573) -- the `schemas` phase.
+    Keeping it would have been worse than dropping it, and not only because of
+    the failure: since T19 the completeness probe reads its evidence off the
+    plan's OWN files (`created_tables()` over each streamed file), so a verify
+    rule about tables no file in the plan creates is the one kind of rule that
+    cannot be checked against anything.
 
-    So it belongs after BOTH, and after the one whose file is named in the
-    evidence is not enough: placed after `schemas` alone, the index file fails
-    on a table that does not exist yet and `on_error: fail` stops the install.
+    What proves the bots' tables arrived is the world itself: it refuses to
+    finish starting without them, loudly, on the line in the fatal pattern
+    (`test_the_fatal_pattern_catches_the_shape_this_core_dies_in`).
     """
-    order = _phase_names()
-    assert "character updates" in order, f"there is no such phase to order; the plan is {order}"
-    for earlier in ("schemas", "playerbots characters"):
-        assert earlier in order, f"the phase this order is measured against is gone: {earlier}"
-        assert order.index("character updates") > order.index(earlier), (
-            f"`character updates` runs before `{earlier}`, which creates a table it edits; "
-            f"the order is {order}"
-        )
-
-
-def test_the_three_files_are_applied_in_name_order_after_the_bots_own_table(
-    tmp_path: Path,
-) -> None:
-    """The order the import will really use, not the order the catalog was written in.
-
-    `sqlplan.expand()` is the seam that turns this plan into an ordered list of
-    runs, so the plan is expanded over a tree carrying the three real filenames
-    (dropped in reverse, so a listing that did not sort would be caught) and the
-    runs are read back. Two things are asserted about them and neither is
-    visible in the JSON: that the three arrive in their timestamp order, and
-    that the whole group arrives after the module file that creates
-    `ai_playerbot_random_bots`.
-
-    Every other directory the plan globs is created from the plan's own patterns
-    rather than from a list written here, so a phase added later cannot make
-    this test lie by failing its `fail` glob. The one file in this directory
-    that is not `.sql` is there because a phase that streamed a README at the
-    database would also pass an assertion about the three.
-    """
-    from yulon.catalog.families import sqlplan
-
-    entry = load_catalog().get(TORTOISE)
-    plan = _sql_plan()
-    schemas = {
-        name: name
-        for name in (
-            entry.databases.auth,
-            entry.databases.characters,
-            entry.databases.world,
-            *entry.databases.extra,
-        )
-    }
-    tokens = {
-        "DB_USER": "mangos",
-        "DB_PASSWORD": "not-a-real-password",
-        "WORLD_DB": entry.databases.world,
-        "CHAR_DB": entry.databases.characters,
-        "AUTH_DB": entry.databases.auth,
-        "LOGS_DB": entry.databases.extra[0],
-        "REALM_HOST": "127.0.0.1",
-        "WORLD_PORT": "8085",
-        "CLIENT_BUILD": str(entry.client.build),
-    }
-    for phase in plan.phases:
-        for pattern in phase.files or ():
-            if pattern == CHARACTER_UPDATES:
-                continue
-            directory = tmp_path / PurePosixPath(pattern).parent
-            directory.mkdir(parents=True, exist_ok=True)
-            (directory / PurePosixPath(pattern).name.replace("*", "aaa")).write_text("--\n")
-    bots = tmp_path / "src/tortoise-wow/modules/mod-playerbots/sql/characters"
-    bots.mkdir(parents=True, exist_ok=True)
-    (bots / "ai_playerbot_random_bots.sql").write_text("--\n")
-    updates = tmp_path / PurePosixPath(CHARACTER_UPDATES).parent
-    updates.mkdir(parents=True, exist_ok=True)
-    for name in reversed(THE_THREE_FILES):
-        (updates / name).write_text("--\n")
-    (updates / "README.md").write_text("not SQL\n")
-
-    runs = sqlplan.expand(plan, tmp_path, schemas, tokens)
-    applied = [run.rel for run in runs]
-    mine = [
-        run for run in runs if run.path is not None and run.path.parent.name == "character_updates"
-    ]
-    assert [run.path.name for run in mine] == list(THE_THREE_FILES), (  # type: ignore[union-attr]
-        "the fork names these by timestamp, so name order IS the order it wrote them in; "
-        f"the import would apply {[run.rel for run in mine]}"
+    checks = _native().cmangos.sql.verify  # type: ignore[union-attr]
+    assert checks, "the import verifies nothing at all"
+    assert not [c for c in checks if "ai_playerbot" in c.query], (
+        "the import claims to verify the bots' tables. Nothing in this plan creates them -- "
+        "the core's updater does, at first world start, after this check has run"
     )
-    assert {run.schema for run in mine} == {
-        entry.databases.characters
-    }, f"the files are streamed into {[run.schema for run in mine]}, not the characters db"
-    creator = "modules/mod-playerbots/sql/characters/ai_playerbot_random_bots.sql"
-    made = [index for index, rel in enumerate(applied) if rel.endswith(creator)]
-    assert made, f"the module file that creates the bots' table was not applied at all: {applied}"
-    assert applied.index(mine[0].rel) > made[0], (
-        "the first character update indexes `ai_playerbot_random_bots`, and the import "
-        f"reaches it before the file that creates that table; the order is {applied}"
+    world = [c for c in checks if c.db == "tw_world" and "information_schema" in c.query]
+    assert world and world[0].min >= 150, (
+        "the world import is still verified by the table count its own 190 base dumps "
+        f"produce: {[(c.db, c.min) for c in checks]}"
     )
+    assert [c for c in checks if c.db == "tw_logon"], "nothing checks the realm row landed"
 
 
-def test_the_phase_records_why_this_directory_is_the_apps_job() -> None:
-    """The per-tree fact travels with the phase, because the next reader will ask.
-
-    A phase that applies a directory the tree's own updater ignores looks
-    redundant next to `Database.AutoUpdate.Path`, and a reader who deletes it
-    gets a world that boots for a week. Both dates are here because they are two
-    different claims -- a fresh install and an established one -- and the
-    weekly one is the one that is easy to lose.
-    """
-    phases = {phase.name: phase for phase in _sql_plan().phases}
-    assert "character updates" in phases, f"there is no such phase; the plan is {_phase_names()}"
-    notes = " ".join(phases["character updates"].notes)
-    assert notes, "the phase carries no note saying why the app applies what the updater will not"
-    for fact in ("character_updates", "2026-09-08", "2026-09-09"):
-        assert fact in notes, f"the phase's notes do not mention {fact!r}: {notes!r}"
-
-
-def test_this_is_the_only_phase_in_the_catalog_that_runs_on_an_install_already_imported() -> None:
-    """`rerun_on_marked` is an exception to the marker rule, and exceptions are enumerated.
+def test_no_phase_in_this_catalog_runs_on_an_install_already_imported() -> None:
+    """`rerun_on_marked` is an exception to the marker rule, and there is no longer one.
 
     The rule it excepts is the probe's (`pyplan/phase7-decisions.md`, "Probe"):
     a finished import is never re-run, because an app upgrade must not `DROP
@@ -715,17 +571,17 @@ def test_this_is_the_only_phase_in_the_catalog_that_runs_on_an_install_already_i
     somebody else's SQL, read by hand, and not something any test here can
     check.
 
-    Enumerated over the WHOLE catalog rather than asserted of this phase,
-    because the failure this guards against is the flag appearing somewhere
-    else: a phase whose files drop or truncate would run again on a live world,
-    and a test that only asked "is Tortoise's phase flagged" would say nothing
-    about it. Adding a second one is deliberate work -- it means editing this
-    list and writing down why those files can be applied twice.
+    Exactly one phase ever carried it: `wow-tortoise`'s `character updates`,
+    over the retired fork's `sql/character_updates/`, whose three files were
+    read for idempotence by hand on 2026-09-09. That directory does not exist on
+    the Penqle core and the phase is gone, so the catalog is back to the plain
+    rule.
 
-    The three files behind the one entry below were read on 2026-09-09:
-    `ADD INDEX IF NOT EXISTS`, `MODIFY money INT(10) UNSIGNED` (an absolute
-    column type, so a second run is a no-op) and `CREATE TABLE IF NOT EXISTS
-    ... LIKE`.
+    Enumerated over the WHOLE catalog, because the failure this guards against
+    is the flag appearing ANYWHERE: a phase whose files drop or truncate would
+    run again on a live world. Adding one is deliberate work -- it means turning
+    this assertion red on purpose and writing down, in the phase's own notes,
+    why those files can be applied twice.
     """
     flagged = {
         (entry.id, phase.name)
@@ -734,8 +590,184 @@ def test_this_is_the_only_phase_in_the_catalog_that_runs_on_an_install_already_i
         for phase in entry.install.native.cmangos.sql.phases
         if phase.rerun_on_marked
     }
-    assert flagged == {(TORTOISE, "character updates")}, (
+    assert flagged == set(), (
         "`rerun_on_marked` applies a phase to an install the marker rule says is finished -- "
-        "somebody's server, mid-play. It is set on exactly one phase, whose three files were "
-        f"read for idempotence by hand; this catalog flags {sorted(flagged)}"
+        f"somebody's server, mid-play. This catalog flags {sorted(flagged)}"
+    )
+
+
+# --- T30: the Penqle core's conf surface, and the line the world dies on -------------
+
+
+def test_the_conf_block_writes_the_keys_this_core_needs_and_none_it_removed() -> None:
+    """Six keys arrived with this core and three left with the fork, all in one file.
+
+    Every line here is `05-conf-keys.txt` from T30 Half 1, which probed the
+    shipped `mangosd.conf.dist.in` at the pinned rev key by key.
+
+    **The six that arrived** are the auto-updater's folder names and switches
+    plus the console. They are not decoration: `Database.AutoUpdate.AllowedModules`
+    and the two `*UpdateName`s are what the core uses to find the BOTS' SQL as
+    well as its own (`AutoUpdater.cpp:497-531`), `SortByName` decides the order
+    migrations are applied in on a tree whose filenames are timestamps, and
+    `Console.Enable` is the whole of this entry's command channel now that its
+    `operations` block says `attach`.
+
+    **The three that left** are `SOAP.Enabled`, `SOAP.IP` and `SOAP.Port`. The
+    subsystem is gone from the core -- not the keys, the code: the only match
+    for the string under `src/` is a comment at `src/game/World.h:799`, and no
+    gsoap is vendored. They were never written from the conf table anyway; they
+    came from `operations.enable_conf`, and they go back the same way.
+
+    `GameType` is checked because its DEFAULT moved (the dist ships `6` on this
+    core where the fork shipped `0`), which is the quiet kind of change: an
+    entry that stopped writing the key would get a different world without
+    anything in this repo being edited.
+    """
+    keys = _native().cmangos.conf.files["mangosd.conf"].keys  # type: ignore[union-attr]
+    for arrived in (
+        "Database.AutoUpdate.AllowedModules",
+        "Database.AutoUpdate.AuthUpdateName",
+        "Database.AutoUpdate.CharUpdateName",
+        "Database.AutoUpdate.WorldUpdateName",
+        "Database.AutoUpdate.SortByName",
+        "Console.Enable",
+    ):
+        assert arrived in keys, f"{arrived} is new on this core and nothing writes it"
+    assert keys["Console.Enable"] == "1", (
+        "this entry's command channel is the console (`operations.channel: attach`); with "
+        "the console off it has no channel at all"
+    )
+    assert keys["Database.AutoUpdate.SortByName"] == "1"
+    for left in ("SOAP.Enabled", "SOAP.IP", "SOAP.Port"):
+        assert left not in keys, (
+            f"{left} is written into a conf this core never reads. It belongs to "
+            "`operations.enable_conf`, and that block comes back with the subsystem"
+        )
+    assert keys["GameType"] == "0", (
+        "the shipped default moved to 6 on this core; an entry that leaves the key alone "
+        "gets a different world than the one that was measured"
+    )
+
+
+def test_both_restart_keys_the_owner_named_are_written_off() -> None:
+    """ "When the server is made, AutoHonorRestart must be set from 1 to 0." — the owner.
+
+    Two keys, and each is a way for a solo server to go down on its own while
+    somebody is playing on it:
+
+    * `AutoHonorRestart` ships at `1` in this core's `mangosd.conf.dist.in`
+      (`:707`) and is read at `src/game/World.cpp:1139`.
+    * `AutoRestart.MaxServerUptime` ships at `259200` (`:148`) -- three days.
+
+    Both read on the pinned core, `yulon-arch` 2026-09-11 (`05-conf-keys.txt`).
+    The values are strings because that is what a conf table holds, and `"0"`
+    rather than `0` is the whole assertion: a JSON `0` would be written as the
+    text `0` too, but a JSON `false` would be written as `False`, which this
+    core reads as a default.
+    """
+    keys = _native().cmangos.conf.files["mangosd.conf"].keys  # type: ignore[union-attr]
+    assert keys["AutoHonorRestart"] == "0", (
+        "the key ships at 1 and the owner asked for 0 when the server is made; this is the "
+        "only place the app says so"
+    )
+    assert keys["AutoRestart.MaxServerUptime"] == "0", "the dist ships three days"
+
+
+def test_the_two_confs_this_image_does_not_ship_as_plain_dists_name_their_templates() -> None:
+    """`materialise()`'s default is `<name>.dist` beside the file, and twice it is wrong here.
+
+    Read off the built image on `yulon-arch` 2026-09-11
+    (`12-image-contents.txt`), `/opt/tortoise/etc` holds:
+
+        aiplayerbot.conf                 <- no `.dist` at all
+        mangosd.conf.dist
+        modules/tortoise_bots.conf       <- the live name, which is NOT a template
+        modules/tortoise_bots.conf.dist
+        realmd.conf.dist
+
+    `TortoiseBots.cmake:40-46` `configure_file`s the first straight to its live
+    name, and installs its own conf one directory down. Without a template per
+    file both would be an `InstallerError` from the conf stage -- "the built
+    image does not contain /opt/tortoise/etc/aiplayerbot.conf.dist" -- on an
+    install that had just spent half an hour compiling.
+
+    The module conf's table key is a PATH, `modules/tortoise_bots.conf`, so the
+    install's `etc/` reproduces the image's layout: the module reads it from
+    `etc/modules/`, and a file put beside `mangosd.conf` instead would be a file
+    the world never opens.
+
+    The other three entries in this table take the default and must go on doing
+    so, which is the half that says this is a per-file override and not a new
+    rule.
+    """
+    files = _native().cmangos.conf.files  # type: ignore[union-attr]
+    assert files["aiplayerbot.conf"].template == "aiplayerbot.conf", (
+        "the image ships this one already stripped; the default would look for "
+        "aiplayerbot.conf.dist and refuse the image"
+    )
+    assert "modules/tortoise_bots.conf" in files, "the module's own conf is never materialised"
+    module_conf = files["modules/tortoise_bots.conf"]
+    assert module_conf.template == "modules/tortoise_bots.conf.dist"
+    assert module_conf.keys, "a conf file in the table with no keys patches nothing"
+    for untouched in ("mangosd.conf", "realmd.conf"):
+        assert files[untouched].template is None, (
+            f"{untouched} is an ordinary `.dist` in this image; naming a template for it "
+            "turns a per-file exception into a habit"
+        )
+    for game in ("wow-tbc", "wow-vanilla"):
+        other = _native(game).cmangos.conf.files  # type: ignore[union-attr]
+        assert all(
+            patch.template is None for patch in other.values()
+        ), f"{game}'s images ship plain `.dist` files; the default must not have moved"
+
+
+def test_the_fatal_pattern_catches_the_shape_this_core_dies_in() -> None:
+    """Run 1 of T30 Half 1, which is what a fresh install gets wrong about its bots.
+
+    The world applied every core migration, silently skipped all five of the
+    module's character migrations because the folder it looked for was spelled
+    differently, and then died -- not at once, and not on a line the old fatal
+    pattern matched (`08-world-run1.txt`):
+
+        SQL: select clazz, spec, lvl, slot, quality, item from ai_playerbot_equip_cache
+        [1146] Table 'tw_char.ai_playerbot_equip_cache' doesn't exist
+        Your database structure is not up to date. ...
+
+    then an assertion inside `HandleMySQLError` and a `std::runtime_error`. What
+    the install spine saw was a container that had gone away with no fatal line
+    matched, so it restarted it, up to `restart_loop` times, each time spending
+    minutes getting back to the same row. Both shapes are in the pattern now.
+
+    The `Could not open` alternative keeps its negative lookahead and that is
+    asserted here as well as above, because these two changes touch the same
+    string: the module prints `Could not open bot log file .../bot_events.csv
+    (No such file or directory). Logging to it is off for this run.` on nearly
+    every tick of a perfectly healthy world.
+    """
+    ready = _native().ready
+    assert ready.fatal is not None and ready.regex is True
+    for dying in (
+        "[1146] Table 'tw_char.ai_playerbot_equip_cache' doesn't exist",
+        "Your database structure is not up to date. Please make sure you have executed all "
+        "the queries in the sql/updates folders.",
+    ):
+        assert re.search(ready.fatal, dying), (
+            f"the fatal pattern walks past {dying!r}; the install restarts the container "
+            "instead of saying what happened"
+        )
+    for healthy in (
+        "Could not open bot log file ../logs/bot_events.csv (No such file or directory). "
+        "Logging to it is off for this run.",
+        "World server is up and running! Loading time: 1 minutes 13 seconds",
+        "[DB Auto-Updater] Found 5 possible migrations for character.",
+        "TortoiseBots: native module loaded (AI enabled)",
+    ):
+        assert not re.search(
+            ready.fatal, healthy
+        ), f"the fatal pattern fires on a line a healthy world prints: {healthy!r}"
+    assert re.search(_native().ready.world or "", "World server is up and running!"), (
+        "the ready marker is unchanged on this core -- the first of its four alternatives is "
+        "what it prints (`08d-world-run2.txt`), and it is asserted beside the fatal pattern "
+        "because a change to one is usually a change to both"
     )

@@ -7,8 +7,11 @@
 *
 !src/tortoise-wow
 src/tortoise-wow/.git
-# Eluna is cloned as a SECOND source into the core tree (it is the fork's one git
-# submodule, and cmake refuses to build without its LuaEngine.h). The re-include above
-# is the whole core tree, so its .git would ride along into the context unless named.
-src/tortoise-wow/src/modules/Eluna/.git
+# TortoiseBots is cloned as a SECOND source INTO the core tree, at the path the
+# core's CMake globs for modules (`modules/TortoiseBots`). The re-include above
+# is the whole core tree, so the module's own .git would ride along into the
+# context unless named. It replaced `src/tortoise-wow/src/modules/Eluna/.git`,
+# which was the retired fork's one submodule; this core has no Eluna and nothing
+# that could load one (T30 Half 1, `09-eluna-and-bot-surface.txt`).
+src/tortoise-wow/modules/TortoiseBots/.git
 src/tortoise-wow/_build

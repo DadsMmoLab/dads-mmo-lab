@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "tortoise-bots-manager",
+  "name": "TortoiseBots Manager (client addon)",
+  "type": "mod",
+  "game": "wow-tortoise",
+  "description": "The in-game panel for the bots this server compiles in: /tbm opens it, and it drives the same .bot commands from a window instead of the chat box. Client-side only - it is copied into your WoW client's Interface/AddOns, nothing is written to the server.",
+  "source": {
+    "repo": "Sagiroth/TortoiseBotsManager",
+    "rev": "65ef0b2f6531652de990bba7bfc3d4f70a9e9bb3"
+  },
+  "build": {
+    "rebuild": false,
+    "restart": false
+  },
+  "client": [
+    {
+      "src": ".",
+      "dest": "addons",
+      "name": "TortoiseBotsManager"
+    }
+  ],
+  "notes": [
+    "REQUIRES THE SERVER-SIDE MODULE, and this entry's server already has it: TortoiseBots is",
+    "compiled into the image (`-DMODULE_TORTOISEBOTS=static`), so there is nothing to install",
+    "for it and nothing to put in `requires`, which names installable items. The addon's own",
+    "README states the dependency the other way round: \"No module -> addon loads but every",
+    "action replies 'TortoiseBots module not loaded' from the server.\"",
+    "The addon speaks the module's `TBM:` protocol over `.bot` transport commands. That is not",
+    "a client-only protocol: `bot roster` typed at the worldserver CONSOLE answers",
+    "`TBM:ROSTER_ERROR|not-in-game|You must be in-game.` (measured, T30 Half 1, 08d), which is",
+    "also the shape of every bot command's refusal without a player session -- the addon is the",
+    "surface that HAS one.",
+    "Interface 11200 (Vanilla 1.12) against the 1.18.1 / build 7272 Turtle client, which is",
+    "what this entry's `client` block declares and what the client reports.",
+    "The whole pinned checkout is copied, `.git` and README and `tests/` included: `client`",
+    "steps take a path in the clone and this addon IS the repository root. WoW reads the",
+    "`.toc` and the files it lists and ignores the rest.",
+    "WRITTEN AT INSTALL, not at Play. `_ApplyEngine._client()` (apply.py:2173-2192) is the one",
+    "writer into a client folder in this app, and it runs from the Modules tab's Install press;",
+    "Play launches the client it finds. The tab has to have been given a client dir for the",
+    "step to run at all -- on a record with none it is skipped with a sentence."
+  ]
+}

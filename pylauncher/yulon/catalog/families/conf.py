@@ -113,6 +113,24 @@ _TEMP_SUFFIX = ".yulon-new"
 """Suffix of the file `_write` renames over a conf, so a conf is never half-written."""
 
 
+def template_of(name: str, patch: ConfPatch) -> str:
+    """Which path under `source_dir` this file is copied from, `<name>.dist` by default.
+
+    One function rather than an expression inside `materialise()` because two
+    places ask the question and they must not be able to answer it differently:
+    the all-or-nothing check that every template is present, and the move that
+    follows it.
+
+    The override exists for a per-file fact, not a per-tree one. On the Penqle
+    core's image, measured 2026-09-11 (T30 Half 1, `12-image-contents.txt`),
+    `etc/aiplayerbot.conf` has no `.dist` — the module's own CMake writes it
+    straight to its live name — and `tortoise_bots.conf.dist` sits one level
+    down in `etc/modules/`. `mangosd.conf` and `realmd.conf` in the same image,
+    and every file of the other three games' tables, take the default.
+    """
+    return patch.template or f"{name}{DIST_SUFFIX}"
+
+
 class CopyFromImage(Protocol):
     """`docker.copy_from_image`'s shape: `docker create` + `cp` + `rm`, no shell.
 
@@ -205,7 +223,11 @@ def materialise(
     Raises:
         InstallerError: the image does not ship a `.dist` the table names.
     """
-    missing = [name for name in table.files if not (etc_dir / name).exists()]
+    missing = [
+        (name, template_of(name, patch))
+        for name, patch in table.files.items()
+        if not (etc_dir / name).exists()
+    ]
     if not missing:
         return ()
     etc_dir.mkdir(parents=True, exist_ok=True)
@@ -220,17 +242,20 @@ def materialise(
     created: list[Path] = []
     try:
         copy_from_image(image_ref, source_dir, staging)
-        dists = [(name, staging / f"{name}{DIST_SUFFIX}") for name in missing]
-        for name, dist in dists:
+        dists = [(name, template, staging / template) for name, template in missing]
+        for name, template, dist in dists:
             if not dist.is_file():
                 raise InstallerError(
                     f"the built image {image_ref} does not contain "
-                    f"{source_dir}/{name}{DIST_SUFFIX}, so {name} could not be created. "
+                    f"{source_dir}/{template}, so {name} could not be created. "
                     "The catalog's conf table and the image disagree; that is a bug in "
                     "the app."
                 )
-        for name, dist in dists:
+        for name, _template, dist in dists:
             target = etc_dir / name
+            # A table key may be a path (`modules/tortoise_bots.conf`), because the
+            # image's own layout is what the install has to reproduce.
+            target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(dist), str(target))
             os.chmod(target, CONF_MODE)
             created.append(target)

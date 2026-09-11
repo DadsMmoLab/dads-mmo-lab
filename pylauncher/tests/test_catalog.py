@@ -471,7 +471,7 @@ def test_every_source_says_where_it_lands() -> None:
         ),
         "wow-tortoise": (
             "src/tortoise-wow",
-            "src/tortoise-wow/src/modules/Eluna",
+            "src/tortoise-wow/modules/TortoiseBots",
         ),
     }
     for game_id, dests in expected.items():
@@ -920,84 +920,112 @@ def test_vanilla_and_tortoise_carry_their_deltas() -> None:
     assert load_catalog().get("wow-tortoise").install.password.prefix == "tortoise-"
 
 
-def test_tortoise_still_clones_the_fork_that_carries_the_playerbots() -> None:
-    """The plan for G.4 respelled this source as `Penqle/tortoise-wow` on `main`.
+def test_tortoise_clones_the_core_branch_the_bots_module_requires_and_the_module_beside_it() -> (
+    None
+):
+    """Two sources, and each of the four values is a way to build a bot-less server.
 
-    Tortoise V2 is `Shyalya/tortoise-wow` on branch `playerbots-integration-gh`
-    — the fork with the CMaNGOS playerbots integrated, which is the whole reason
-    this game is in the catalog. Penqle's main is the upstream it was forked
-    from, and swapping the pin would build a bot-less server that still passes
-    every other assertion in this file.
-    """
-    source = load_catalog().get("wow-tortoise").emulator.sources[0]
-    assert source.repo == "Shyalya/tortoise-wow"
-    assert source.branch == "playerbots-integration-gh"
+    Until T30 this was `Shyalya/tortoise-wow` on `playerbots-integration-gh`,
+    the fork that vendored the cmangos playerbots at `modules/mod-playerbots`.
+    That fork is retired; the stack is now the core `tortoise-wow/tortoise-wow`
+    with `Sagiroth/TortoiseBots` cloned into `modules/TortoiseBots`, and every
+    one of the four assertions below was wrong at least once on the way here:
 
-
-# Every gitlink `Shyalya/tortoise-wow` declares on `playerbots-integration-gh`,
-# read off GitHub on 2026-09-02. `.gitmodules` named one submodule
-# (`src/modules/Eluna` -> https://github.com/ElunaLuaEngine/Eluna.git) and the
-# recursive tree API answered with exactly one entry of type `commit` and
-# `truncated: false`, so this was the whole list and not the first of several.
-# The sha is the gitlink that branch pins. `Eluna` at that commit shipped no
-# `.gitmodules` of its own (raw.githubusercontent answered 404), so the
-# `--recursive` in CMake's advice had nothing further to fetch.
-#
-# This table is a transcript, not a live query: a submodule ADDED upstream after
-# that date will not turn this red. What it does hold is the other direction —
-# an edit that drops one of these sources takes the build down at `cmake`, and
-# takes this test down first.
-TORTOISE_SUBMODULES = {
-    "src/modules/Eluna": ("ElunaLuaEngine/Eluna", "1b06f28ff3a00054d915d824c725fb4283fee74d"),
-}
-
-
-def test_tortoise_clones_the_submodules_its_cmake_refuses_to_build_without() -> None:
-    """The clone stage does not run `git submodule update`, so each gitlink is a source.
-
-    Measured on m910q 2026-09-02: the Tortoise build died at configure with
-    `CMakeLists.txt:50 (message): Eluna submodule is missing.  Run: git
-    submodule update --init --recursive src/modules/Eluna`. `clone-sources` had
-    cloned the fork and nothing had fetched its submodules, so the gitlink left
-    an empty `src/modules/Eluna` behind.
-
-    Nothing here needs a submodule to BE a submodule. That CMake guard is
-    `if(NOT EXISTS "${CMAKE_SOURCE_DIR}/src/modules/Eluna/LuaEngine.h")` and
-    reads no git metadata at all, so an ordinary clone parked at the pinned
-    commit satisfies it — which is why the fix is a row of data beside the core
-    rather than engine support for `.gitmodules`.
-
-    Three properties, and each one is a way the fix silently stops working:
-
-    * The **rev** is the sha the superproject pins. Without it the clone takes
-      whatever `ElunaLuaEngine/Eluna` publishes next against a fork that has not
-      moved, which is a compile error nobody edited anything to cause.
-    * The **order** — every submodule after the core that contains it.
-      `stage_clone_sources()` walks the list in order and refuses a dest that
-      holds files but no `.git`, so a submodule cloned FIRST turns the core's
-      own clone into "move that folder aside and try again".
-    * The **depth**, left at 1. Measured here on 2026-09-02, running the argv
-      `git.py` runs: a `--depth 1` clone of Eluna's default branch (`master`),
-      then `fetch --depth=1 origin <sha>` and `checkout --detach <sha>`,
-      succeeded and left `LuaEngine.h` on disk in 5.6 MB. That is why no
-      `branch` is spelled: the pinned commit was the head of a side branch
-      (`cmangos-spell-update`), `_pin()` fetches it by hash regardless, and
-      naming a branch that upstream may delete would break the clone outright
-      where the default branch will not.
+    * **The core repo.** `Penqle/tortoise-wow` shows the identical branch set
+      and push time, so the two are one tree; the entry names the one the
+      module's own README clones from.
+    * **The branch, `bot-helpers`.** Not `main`. It is the branch TortoiseBots
+      requires -- the headless bot sessions, PR #438 -- and a build of `main`
+      with the module named would be a build of a core without the entry points
+      the module hooks.
+    * **The module repo.** Its README clones from `tortoise-wow-stack/TortoiseBots`,
+      which does not exist on GitHub. `Sagiroth/TortoiseBots` is the tree, and
+      it is not a fork of anything (read 2026-09-11).
+    * **Where the module lands.** `modules/TortoiseBots` INSIDE the core
+      checkout, because that is the directory the core's CMake globs for
+      modules and the directory `-DMODULE_TORTOISEBOTS=static` names. Anywhere
+      else and CMake finds no module, warns about an unused variable and
+      compiles a server with no bots in it -- which boots and looks entirely
+      healthy (T30 Half 1, `03-cmake-probe-old-flags.txt`).
     """
     sources = load_catalog().get("wow-tortoise").emulator.sources
-    core = sources[0]
-    assert core.dest == "src/tortoise-wow", "the submodule dests below are built onto this"
-    by_dest = {source.dest: source for source in sources}
-    for path, (repo, rev) in TORTOISE_SUBMODULES.items():
-        dest = f"{core.dest}/{path}"
-        assert dest in by_dest, f"{path} is declared as a submodule and nothing clones it"
-        source = by_dest[dest]
-        assert source.repo == repo
-        assert source.url == f"https://github.com/{repo}.git", "the .gitmodules url, respelled"
-        assert source.rev == rev, "the gitlink the fork pins, not the tip of some branch"
-        assert source.branch is None
-        assert source.depth == 1
+    assert len(sources) == 2, f"the stack is the core plus the module: {[s.repo for s in sources]}"
+    core, module = sources
+    assert core.repo == "tortoise-wow/tortoise-wow"
+    assert core.branch == "bot-helpers", (
+        "`main` is a core without the headless bot sessions the module hooks; `bot-helpers` "
+        "is the branch TortoiseBots' own README §2 requires"
+    )
+    assert core.dest == "src/tortoise-wow"
+    assert module.repo == "Sagiroth/TortoiseBots"
+    assert module.dest == "src/tortoise-wow/modules/TortoiseBots", (
+        "the module is cloned INTO the core tree, at the path its CMake globs; anywhere else "
+        "builds a bot-less server that starts and says nothing"
+    )
+
+
+def test_no_source_of_this_entry_still_points_at_the_retired_fork_or_at_eluna() -> None:
+    """The two names that have to leave together, asserted where they were declared.
+
+    `Shyalya/tortoise-wow` is the retired fork. `ElunaLuaEngine/Eluna` was its
+    one git submodule, cloned to `src/tortoise-wow/src/modules/Eluna` because
+    that fork's CMake refused to configure without `LuaEngine.h`. The Penqle
+    core has no Eluna and nothing that could load one: no `src/modules`
+    directory at all, nothing in the tree named Eluna, no Lua engine among the
+    vendored deps, and a configure that ran to completion with none present
+    (T30 Half 1, `09-eluna-and-bot-surface.txt`, `03-cmake-probe-old-flags.txt`).
+
+    A source left behind here is not inert. `stage_clone_sources()` clones every
+    one of them, so it would be a 5.6 MB clone on every install into a directory
+    with no parent and no consumer, and the entry would go on claiming a Lua
+    bridge this tree has never had -- Tortoise never used one either way:
+    `party.InstallParty.for_entry_is_possible()` ends
+    `entry.id == "wow-wotlk"` (`party.py:3066`).
+    """
+    sources = load_catalog().get("wow-tortoise").emulator.sources
+    repos = [source.repo for source in sources]
+    assert "Shyalya/tortoise-wow" not in repos, "the retired fork is still cloned"
+    assert not [repo for repo in repos if "Eluna" in repo], f"Eluna is still a source: {repos}"
+    assert not [
+        source for source in sources if "Eluna" in source.dest
+    ], f"something still clones into an Eluna path: {[s.dest for s in sources]}"
+
+
+# The retired fork's one git submodule lived here as `TORTOISE_SUBMODULES` and
+# `test_tortoise_clones_the_submodules_its_cmake_refuses_to_build_without`: a
+# transcript of every gitlink `Shyalya/tortoise-wow` declared on
+# `playerbots-integration-gh` (exactly one, `src/modules/Eluna`), because the
+# clone stage does not run `git submodule update` and that fork's CMake stopped
+# at `Eluna submodule is missing`.
+#
+# Both are gone with the fork. The Penqle core declares no submodule at all --
+# `03-cmake-probe-old-flags.txt` configured it to completion with nothing
+# fetched, where the fork refused -- and its one companion tree, TortoiseBots,
+# is an ordinary second source cloned into `modules/TortoiseBots`, which
+# `test_tortoise_clones_the_core_branch_the_bots_module_requires_and_the_module_beside_it`
+# above asserts by repo, branch and dest. What replaces the "nothing clones it"
+# half of that test is
+# `test_no_source_of_this_entry_still_points_at_the_retired_fork_or_at_eluna`.
+#
+# The ORDER half of that test outlived it, and is the one thing about this entry
+# that a second source can still get wrong: `stage_clone_sources()` walks the
+# list in order and refuses a dest that holds files but no `.git`, so a source
+# that lands INSIDE another and is cloned first turns the outer clone into "move
+# that folder aside and try again". TortoiseBots lands inside the core, so this
+# is now its assertion rather than Eluna's, and it is asked of every entry.
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_a_source_that_lands_inside_another_is_cloned_after_it(game: str) -> None:
+    """A nested checkout after the tree it nests in, for every entry that has one.
+
+    Three entries have such a pair today: TBC's and Vanilla's playerbots under
+    `src/mangos-*/src/modules/Bots`, and Tortoise's `modules/TortoiseBots` under
+    `src/tortoise-wow`. Measured consequence, not a style rule -- the clone of
+    the OUTER tree is the one that fails, and it fails with a message about the
+    user's folder.
+    """
+    sources = load_catalog().get(game).emulator.sources
     cloned_before_the_tree_it_lands_in = [
         (inner.dest, outer.dest)
         for i, inner in enumerate(sources)

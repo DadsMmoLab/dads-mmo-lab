@@ -211,13 +211,44 @@ def test_no_manifest_names_a_database_this_fork_does_not_have() -> None:
     assert "playerbots" not in ENTRY.schema_map()
 
 
-def test_no_tortoise_manifest_asks_for_a_rebuild_and_all_of_them_ask_for_a_restart() -> None:
-    """`build.rebuild` DEFAULTS to True, so an omitted block asks for an hour of compiling."""
+def test_no_tortoise_manifest_asks_for_a_rebuild_and_a_restart_is_asked_by_whoever_needs_one() -> (
+    None
+):
+    """`build.rebuild` DEFAULTS to True, so an omitted block asks for an hour of compiling.
+
+    `restart` is the other direction and is not universal. It was, while every
+    item here wrote a conf key or a `tw_world` row -- mangosd reads `etc/*.conf`
+    and loads the world database once, at startup, so an item like that which
+    does not ask for a restart lies about when its change takes effect.
+
+    T30 added two items that touch NEITHER: the client addons, whose whole
+    content is a `client` step into the user's own `Interface/AddOns`. Restarting
+    the worldserver for those would be a lie in the other direction -- it would
+    put a running server down for a change no server-side process can see.
+
+    So the rule is derived from what each manifest actually writes rather than
+    asserted flat, which is also what stops the next conf item arriving without
+    one.
+    """
     for manifest in _mods():
         assert manifest.build.rebuild is False, f"{manifest.id}: this fork compiles no modules"
-        assert (
-            manifest.build.restart is True
-        ), f"{manifest.id}: mangosd reads etc/*.conf and loads tw_world once, at startup"
+        touches_the_server = bool(
+            manifest.conf or manifest.sql or manifest.deploy or manifest.npcs or manifest.patches
+        )
+        if touches_the_server:
+            assert (
+                manifest.build.restart is True
+            ), f"{manifest.id}: mangosd reads etc/*.conf and loads tw_world once, at startup"
+            continue
+        assert manifest.client, (
+            f"{manifest.id} writes nothing at all -- no conf, no SQL, no deploy, no client "
+            "files. An item that changes nothing is a row in a list that does nothing"
+        )
+        assert manifest.build.restart is False, (
+            f"{manifest.id} only copies files into the user's own WoW client; asking for a "
+            "worldserver restart would put a running server down for a change no server-side "
+            "process can see"
+        )
 
 
 # ------------------------------------------------------------ the real ones
@@ -707,3 +738,159 @@ def test_a_world_that_cannot_be_read_refuses_here_and_still_permits_the_updater_
     assert "could not tell whether the world server is running" in message
     assert "auto-update" not in message.lower(), "2504 reads an unreadable world as down"
     assert sql.statements == [] and sql.files == []
+
+
+# ------------------------------------------------- T30: the two client addons
+
+
+class _AddonGit:
+    """A `Git` that writes an addon checkout into the clone dir instead of cloning.
+
+    Shaped like the real repositories, whose ROOT is the addon: a `.toc`, the
+    Lua files it lists, and the things a git checkout carries that WoW does not
+    read -- which is the half worth having in a fake, because the `client` step
+    copies the whole checkout.
+    """
+
+    def __init__(self, toc: str, files: tuple[str, ...]) -> None:
+        self.toc = toc
+        self.files = files
+        self.specs: list[object] = []
+
+    def clone(self, spec: object) -> None:
+        self.specs.append(spec)
+        dest = Path(spec.dest)  # type: ignore[attr-defined]
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / self.toc).write_text("## Interface: 11200\n", encoding="utf-8")
+        for name in self.files:
+            target = dest / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("-- lua\n", encoding="utf-8")
+        (dest / ".git").mkdir(exist_ok=True)
+        (dest / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        return None
+
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        return None
+
+
+ADDONS = {
+    "tortoise-bots-manager": (
+        "TortoiseBotsManager",
+        "TortoiseBotsManager.toc",
+        ("Core.lua", "Comms.lua", "Roster.lua", "UI.lua"),
+    ),
+    "tortoise-gm-manager": (
+        "TortoiseGMManager",
+        "TortoiseGMManager.toc",
+        ("Core.lua", "Lookup.lua", "ResultsUI.lua", "assets/icon.tga"),
+    ),
+}
+"""Each addon's folder name, its `.toc`, and a few of the files the `.toc` lists.
+
+Read off the two repositories at the revisions this catalog pins, on
+`yulon-arch` 2026-09-11 (T30 Half 1, `10-addons.txt`). `assets/icon.tga` stands
+for the one SUBDIRECTORY either addon has, which is why the manifests copy the
+checkout rather than a list of files.
+"""
+
+
+@pytest.mark.parametrize("item", sorted(ADDONS))
+def test_each_addon_lands_in_the_clients_own_addons_folder_under_its_toc_name(
+    item: str, tmp_path: Path
+) -> None:
+    """The whole of the addons' delivery, through the shipped manifest and nothing else.
+
+    The folder name matters and is not the repository name by accident: WoW
+    loads `Interface/AddOns/<Name>/<Name>.toc` and ignores a directory whose
+    `.toc` does not match it. The manifest states it (`client[].name`), which is
+    why a `src: "."` copy -- whose source directory is called `modules/mod/<id>`
+    -- arrives under the right one.
+
+    The subdirectory is asserted because it is the reason these manifests copy
+    the checkout instead of listing files: a `client` step whose `src` is a
+    directory `copytree`s it, and `assets/` has to arrive as `assets/`.
+
+    Catches the manifests losing `name`, the step pointed at a subdirectory of
+    the checkout, and a `dest` other than `addons` (which would put the files in
+    `Interface/` or `Data/`, where nothing loads them).
+    """
+    folder, toc, files = ADDONS[item]
+    manifest = tortoise_modules.store().load("mod", item)
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface" / "AddOns").mkdir(parents=True)
+    report = Applier(
+        tmp_path / "server",
+        git=_AddonGit(toc, files),
+        sql=_RecordingSql(),
+        client_dir=client,
+    ).install(manifest)
+
+    addon = client / "Interface" / "AddOns" / folder
+    assert (addon / toc).is_file(), f"{folder} has no .toc; WoW will not load it"
+    for name in files:
+        assert (addon / name).is_file(), f"{name} did not arrive under {folder}"
+    assert report.skipped == (), report.skipped
+    assert report.rebuild_required is False
+    assert report.restart_recommended is False, (
+        "nothing server-side changed; asking for a restart would take a running world down "
+        "for files in somebody's game folder"
+    )
+
+
+@pytest.mark.parametrize("item", sorted(ADDONS))
+def test_an_addon_install_on_a_tab_with_no_client_dir_is_refused_by_name(
+    item: str, tmp_path: Path
+) -> None:
+    """A record with no client folder skips the step and SAYS which step it skipped.
+
+    `_ApplyEngine._client()` reports "no client dir configured" rather than
+    raising, which is right -- the rest of an item still installs -- and is
+    exactly why the sentence has to name the source: an addon whose entire
+    content is one `client` step would otherwise report a successful install of
+    nothing, and the user would go looking for `/tbm` in a client that has never
+    had it.
+
+    This is the state a Tortoise tab was in for EVERY manifest until T30: the
+    controller built the applier without `client_dir`, so the step could not
+    have run on any item. The test that the wiring passes it now lives in
+    `test_controller_view.py`.
+    """
+    _folder, toc, files = ADDONS[item]
+    manifest = tortoise_modules.store().load("mod", item)
+    report = Applier(tmp_path / "server", git=_AddonGit(toc, files), sql=_RecordingSql()).install(
+        manifest
+    )
+    assert any("no client dir configured" in line for line in report.skipped), report.skipped
+    assert any("client" in line for line in report.skipped), report.skipped
+
+
+@pytest.mark.parametrize("item", sorted(ADDONS))
+def test_each_addon_is_pinned_and_carries_no_server_side_step(item: str) -> None:
+    """What these two manifests may and may not contain, asserted from the data.
+
+    * **Pinned.** The `.toc`, the file list and the protocol the bots addon
+      speaks were all read at one commit; a manifest on a branch tip installs
+      whatever those repositories publish next into somebody's game client.
+    * **Nothing server-side.** No `sql`, no `conf`, no `deploy`, no `npcs`.
+      These are files for the user's own client, and an addon manifest that
+      quietly grew a `sql` step would be running SQL against `tw_world` under a
+      name that says "client addon".
+    * **README §3a**, the piracy fence: the content comes from the item's own
+      open-source repository, so `source` is required and is a repo rather than
+      anything this app ships.
+    """
+    manifest = tortoise_modules.store().load("mod", item)
+    assert manifest.source is not None, "README §3a: client files come from their own repo"
+    assert manifest.source.rev is not None and len(manifest.source.rev) == 40, (
+        f"{item} is cloned from {manifest.source.rev!r}; a moving ref puts whatever those "
+        "repositories publish next into a user's game client"
+    )
+    assert manifest.client, f"{item} declares no client files at all"
+    assert not manifest.sql and not manifest.conf and not manifest.deploy and not manifest.npcs, (
+        f"{item} is a client addon and touches the server: "
+        f"sql={manifest.sql} conf={manifest.conf} deploy={manifest.deploy} npcs={manifest.npcs}"
+    )
+    assert all(step.dest == "addons" for step in manifest.client)
