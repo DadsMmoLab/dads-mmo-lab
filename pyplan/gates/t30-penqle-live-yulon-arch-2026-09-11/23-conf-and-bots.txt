@@ -1,0 +1,45 @@
+2026-09-11 17:29:34 WARNING [yulon.botlist] could not browse wow-tortoise's bots: expected str, bytes or os.PathLike object, not DbFacts
+2026-09-11 17:29:39 INFO [yulon.apply] install perf-report: 1 step(s), 0 skipped, 0 left unapplied, rebuild=False
+2026-09-11T17:29:33.946348+00:00
+# T30 Half 2 live -- capture 23: conf activation and Browse bots (fixes)
+
+## Browse bots through _BotBrowser.page()
+## _BotBrowser is the exact wrapper the Bots tab uses (controller_view.py:1856)
+total: None
+problem: "could not read this server's bots: expected str, bytes or os.PathLike object, not DbFacts"
+bots (0):
+
+SQL corroboration: RNDBOT accounts=50, bots online=491
+
+## Modules conf activation through applier.install()
+## stopping world (the guard requires it for restart-bearing manifests)
+world stopped at 2026-09-11T17:29:39.391150+00:00
+manifest: perf-report (Performance Stats)
+report: action=install item_id=perf-report
+  done: ('set 2 key(s) in etc/mangosd.conf — the world reads etc/mangosd.conf at its next start', 'auto-update guard: not applied, the world is not running (could not be read (/opt/tortoise/sql/database_updates/auth: could not be listed in tortoise-mangosd; tw_logon.migrations: could not be read; /opt/tortoise/sql/database_updates/character: could not be listed in tortoise-mangosd; tw_char.migrations: could not be read; /opt/tortoise/sql/database_updates/world: could not be listed in tortoise-mangosd; tw_world.migrations: could not be read))')
+  skipped: ()
+  rebuild_required: False
+  restart_recommended: True
+
+mangosd.conf:
+2110:Perf.Enable = 1
+2113:Perf.ReportInterval = 120
+
+world restarted at 2026-09-11T17:29:39.918825+00:00
+
+2026-09-11T17:30:26.767201+00:00
+## Browse bots FIX: _BotBrowser with correct DockerSql construction
+total: 500
+problem: ''
+bots (50):
+  Bot(name='Baeburtush', level=1, online=False, source='prefix')
+  Bot(name='Baezarn', level=2, online=False, source='prefix')
+  Bot(name='Balher', level=2, online=False, source='prefix')
+  Bot(name='Barcalpaesh', level=3, online=False, source='prefix')
+  Bot(name='Bartrunyr', level=2, online=False, source='prefix')
+  Bot(name='Bashorr', level=4, online=False, source='prefix')
+  Bot(name='Belalrn', level=3, online=False, source='prefix')
+  Bot(name='Bewarg', level=1, online=False, source='prefix')
+  Bot(name='Bikorr', level=3, online=False, source='prefix')
+  Bot(name='Bordaejeth', level=2, online=False, source='prefix')
+  ... and 450 more

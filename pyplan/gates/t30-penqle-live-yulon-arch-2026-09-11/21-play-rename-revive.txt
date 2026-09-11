@@ -1,7 +1,9 @@
-2026-09-11 16:56:57 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['rename', 'Vafartharo']
-2026-09-11 16:57:01 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['revive', 'Vafartharo']
 2026-09-11T16:56:57.386910+00:00
 # T30 Half 2 live -- capture 21: Play rename/revive through attach channel
+
+## app log lines (tortoise_console.send)
+2026-09-11 16:56:57 INFO [yulon.controller_wow_wotlk.console] console -> tortoise-mangosd: ['rename', 'Vafartharo']
+2026-09-11 16:57:01 INFO [yulon.controller_wow_wotlk.console] console -> tortoise-mangosd: ['revive', 'Vafartharo']
 
 ## character: Vafartharo
 

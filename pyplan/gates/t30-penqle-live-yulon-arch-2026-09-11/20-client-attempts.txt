@@ -13,6 +13,14 @@ Proton log: fsync up and running, no error message
 result: same white window, died within 45s
 vmshot: client-attempt3.png
 
+## attempt 4 (round 3, orphan processes killed first):
+## Steam Big Picture focused on the Turtle WoW game page, Enter pressed.
+## The app (yu'lon) opened instead of the client; killed the app, refocused
+## Steam, pressed Enter again. WoW.exe never appeared (pgrep checked 9 times
+## over 90 seconds). realmd log showed no connection attempt. Play time stayed
+## at 30 minutes. Steam may have suppressed the launch after the earlier crashes.
+## vmshot: after-play-clean.png (Steam game page with Play button, no client)
+
 ## conclusion: the Turtle WoW 1.12 client cannot render its OpenGL login
 ## screen on this GPU-less Hyper-V VM via GE-Proton11-6 today. T29 reached
 ## the login screen on this same VM on 2026-09-10 (frame-14 through frame-16
