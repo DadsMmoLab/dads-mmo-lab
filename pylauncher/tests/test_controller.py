@@ -25,6 +25,12 @@ SPEC = docker.ContainerSpec(db="t-db", auth="t-auth", world="t-world", ports=(11
 SERVER_DIR = Path("/tmp/t-server")
 
 
+@pytest.fixture(autouse=True)
+def _server_dirs_are_treated_as_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`SERVER_DIR` is symbolic, never created; see `test_docker.py`'s twin fixture."""
+    monkeypatch.setattr(docker, "_cwd_is_missing", lambda cwd: False)
+
+
 def _completed(
     returncode: int = 0, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:

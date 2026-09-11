@@ -164,6 +164,36 @@ log: no docker command can exit 127 itself, and every caller here already
 branches on `returncode != 0`.
 """
 
+_MISSING_CWD_RETURNCODE = 66
+"""What `_docker()` and `run_attached()` report when `cwd` does not exist.
+
+Borrowed from BSD sysexits' `EX_NOINPUT` ("cannot open input"), which is what
+happened: the input this call needed — the server folder — could not be
+opened. Distinct from `_CLI_MISSING_RETURNCODE` on purpose, so `_cli_missing()`
+never mistakes a deleted server folder for a missing docker CLI; a WinError
+267 from a `cwd` that does not exist used to be caught by the `except OSError`
+below and reported as exactly that.
+"""
+
+
+def _cwd_is_missing(cwd: Path) -> bool:
+    """`not cwd.is_dir()`, named and patchable on its own so a test can fake a deleted folder.
+
+    Kept apart from `Path.is_dir` itself — patched wholesale, this would also
+    blind the bind-mount probe and the SELinux checks, which walk real
+    directories for reasons of their own.
+    """
+    return not cwd.is_dir()
+
+
+def _missing_cwd_result(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        command,
+        _MISSING_CWD_RETURNCODE,
+        "",
+        f"The server folder {cwd} no longer exists, so Docker was not asked.",
+    )
+
 
 def _docker(
     argv: list[str],
@@ -196,6 +226,14 @@ def _docker(
     path aimed at a file that is gone. The user hears "Docker could not be
     found", which is true.
 
+    Before the `cwd.is_dir()` guard above, a deleted server folder fell into
+    this same `except OSError` and was misreported the same way: on
+    `yulon-win11`, `subprocess` raised `[WinError 267] The directory name is
+    invalid` for a `cwd` that no longer existed, and the owner was told to
+    install a Docker Desktop that was already running (T34). The guard answers
+    that case before `subprocess` is asked at all, so `OSError` here is once
+    again only ever "the CLI itself is gone".
+
     The two branches log at different levels on purpose. "No CLI at all" is
     already in the `stderr` this returns, and every caller here logs that — a
     warning would print the same sentence twice for every command, and
@@ -213,6 +251,9 @@ def _docker(
     if prefix is not None:
         command = [*prefix, *argv]
         run_cwd: Path | None = None if wsl_distro is not None else cwd
+        if run_cwd is not None and _cwd_is_missing(run_cwd):
+            logger.warning(f"server folder gone: {run_cwd}")
+            return _missing_cwd_result(command, run_cwd)
         try:
             return runner.run(command, cwd=run_cwd, timeout=timeout)
         except OSError as exc:
@@ -3179,13 +3220,17 @@ def run_attached(
     if prefix is None:
         logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
         return AttachedRun(_CLI_MISSING_RETURNCODE, (platform.DOCKER_CLI_MISSING_HELP,))
+    stream_cwd = None if wsl_distro is not None else cwd
+    if stream_cwd is not None and _cwd_is_missing(stream_cwd):
+        logger.warning(f"server folder gone: {stream_cwd}")
+        missing = _missing_cwd_result([*prefix, *argv], stream_cwd)
+        return AttachedRun(missing.returncode, (missing.stderr,))
     live = sink
     try:
         # `closing`, not a bare `for`: leaving the loop early has to CLOSE the
         # generator for `stream()`'s finally to terminate the child, and
         # relying on the loop variable falling out of scope makes that depend
         # on refcounting rather than on the code saying so.
-        stream_cwd = None if wsl_distro is not None else cwd
         with closing(
             runner.stream([*prefix, *argv], cwd=stream_cwd, merge_stderr=merge_stderr)
         ) as lines:

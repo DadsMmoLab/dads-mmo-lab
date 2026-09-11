@@ -30,6 +30,19 @@ _GRACE = str(docker.STOP_GRACE_SECONDS)
 """The stop grace as it appears in argv, so an expected command reads like the real one."""
 
 
+@pytest.fixture(autouse=True)
+def _server_dirs_are_treated_as_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This suite's `server_dir` values are symbolic (`Path("/tmp/wow")`, never created).
+
+    `_docker()` gained a missing-folder check (T34) that reads `cwd.is_dir()`
+    through `_cwd_is_missing()`, which is what this patches — not `Path.is_dir`
+    itself, so probes that walk real directories (bind mounts, SELinux, the
+    module lister) are untouched. Tests for the folder-gone behavior undo this
+    one patch first, so they see the real, missing directory.
+    """
+    monkeypatch.setattr(docker, "_cwd_is_missing", lambda cwd: False)
+
+
 def _completed(
     returncode: int = 0, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
@@ -3615,6 +3628,81 @@ def test_no_wsl_on_this_host_is_the_existing_missing_cli_answer(
     monkeypatch.setattr(docker.platform, "_which", lambda name, path=None: None)
     proc = docker._docker(["ps"], wsl_distro="dml-arch")
     assert docker._cli_missing(proc)
+
+
+def test_a_missing_server_folder_is_named_not_misreported_as_no_docker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`yulon-win11`: a deleted server folder read as "Docker could not be found".
+
+    `subprocess` raised `[WinError 267] The directory name is invalid` for the
+    missing `cwd`, which fell into the `except OSError` built for an
+    uninstalled CLI. `_docker()` must tell the two apart before ever asking
+    `subprocess` to try.
+    """
+    monkeypatch.undo()  # this suite's autouse fixture hides real folder absence
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+
+    def must_not_run(cmd, cwd=None, timeout=None):  # type: ignore[no-untyped-def]
+        raise AssertionError("docker must not be asked about a folder that is gone")
+
+    monkeypatch.setattr(docker.runner, "run", must_not_run)
+    gone = tmp_path / "wow-server-playerbots"
+    proc = docker._docker(["compose", "ps", "-a", "-q", "ac-worldserver"], cwd=gone)
+    assert proc.returncode != 0
+    assert proc.stderr == f"The server folder {gone} no longer exists, so Docker was not asked."
+    assert not docker._cli_missing(proc)
+    assert docker.platform.DOCKER_CLI_MISSING_HELP not in proc.stderr
+
+
+def test_a_missing_cwd_is_still_reported_when_the_cli_would_have_been_fine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutation guard: drop the `is_dir()` check and the CLI-missing text comes back.
+
+    A resolvable CLI with a gone `cwd` used to reach `subprocess`, which raised
+    `OSError` and was caught by the branch meant for an uninstalled Docker -
+    the exact WinError 267 misreport this ticket exists to fix.
+    """
+    monkeypatch.undo()
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        lambda cmd, cwd=None, timeout=None: (_ for _ in ()).throw(
+            FileNotFoundError(267, "The directory name is invalid")
+        ),
+    )
+    gone = tmp_path / "wow-server-playerbots"
+    proc = docker._docker(["ps"], cwd=gone)
+    assert proc.stderr == f"The server folder {gone} no longer exists, so Docker was not asked."
+    # Mutation: comment out `_docker()`'s `_cwd_is_missing()` guard and this
+    # assertion is what fails - `proc.stderr` becomes `DOCKER_CLI_MISSING_HELP`.
+    assert proc.stderr != docker.platform.DOCKER_CLI_MISSING_HELP
+
+
+def test_run_attached_also_names_a_missing_server_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The streamed sibling of `_docker()` must not misreport the same way.
+
+    `run_attached()` reaches `runner.stream()` directly rather than through
+    `_docker()` - `build_staged()` and the no-deps compose start use it with
+    `server_dir` as `cwd` - so it needs its own guard, not a shared code path.
+    """
+    monkeypatch.undo()
+    monkeypatch.setattr(docker.platform, "docker_program", lambda: "docker")
+
+    def must_not_stream(cmd, cwd=None, merge_stderr=False):  # type: ignore[no-untyped-def]
+        raise AssertionError("docker must not be asked about a folder that is gone")
+        yield  # pragma: no cover - never reached
+
+    monkeypatch.setattr(docker.runner, "stream", must_not_stream)
+    gone = tmp_path / "wow-server-playerbots"
+    run = docker.run_attached(["compose", "build"], gone)
+    assert run.returncode != 0
+    assert run.tail == (f"The server folder {gone} no longer exists, so Docker was not asked.",)
+    assert not docker.cli_missing_run(run)
 
 
 # Functions that reach the docker seam without needing to name a daemon, each
