@@ -1,0 +1,22 @@
+2026-09-11T11:59:25+00:00
+# T30 Half 2 capture 01 - the branch under test, and the entry it ships
+
+## the tree the app was run from
+dfbb4b1 T30 Half 2 code: the wow-tortoise entry moves to the Penqle core and TortoiseBots
+bd51ea8 T30 Half 1: the Penqle core and TortoiseBots measured on yulon-arch
+5248521 T30 filed: Tortoise moves to the Penqle core with the TortoiseBots module; measuring half first
+
+## the wow-tortoise entry, read back through the app on this box
+source  tortoise-wow/tortoise-wow  branch=bot-helpers  rev=9980181ce9aa5940b6125a5991cc754148ed9b82  -> src/tortoise-wow
+source  Sagiroth/TortoiseBots  branch=main  rev=fd7ec9ec7659035cfc3ea75d542c8683005525de  -> src/tortoise-wow/modules/TortoiseBots
+channel: attach
+conf files: ['aiplayerbot.conf', 'modules/tortoise_bots.conf', 'mangosd.conf', 'realmd.conf']
+  aiplayerbot.conf: template='aiplayerbot.conf' keys=6
+  modules/tortoise_bots.conf: template='modules/tortoise_bots.conf.dist' keys=5
+  mangosd.conf: template=None keys=19
+  realmd.conf: template=None keys=2
+sql phases: ['schemas', 'app user and grants', 'world base', 'realm row']
+verify: [('tw_world', 150), ('tw_logon', 1)]
+make_jobs: 2
+ready.world: World server is up and running|World initialized|MaNGOS.*started up successfully|Ready to login
+ready.fatal: Correct \*.map files not found|Could not open (?!.*Logging to it is off for this run)|Database .* not found|\[1146\] Table .* doesn't exist|Your database structure is not up to date

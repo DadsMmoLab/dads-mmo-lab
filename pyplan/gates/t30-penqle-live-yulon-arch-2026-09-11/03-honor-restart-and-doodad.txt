@@ -1,0 +1,65 @@
+2026-09-11T12:00:25+00:00
+# T30 Half 2 capture 03 - AutoHonorRestart on the Penqle core, read from its own source
+# clone at ~/t30/src/tortoise-wow, rev 9980181ce9aa5940b6125a5991cc754148ed9b82
+
+## where the key is read (default TRUE, which is why the entry writes it)
+src/tortoise-wow/src/game/World.cpp:1139:    setConfig(CONFIG_BOOL_AUTO_HONOR_RESTART, "AutoHonorRestart", true);
+src/tortoise-wow/src/game/World.h:624:    CONFIG_BOOL_AUTO_HONOR_RESTART,
+
+## the ONE place it is consumed, and what each value does
+393:        if (sWorld.getConfig(CONFIG_BOOL_AUTO_HONOR_RESTART))
+
+void HonorMaintenancer::CheckMaintenanceDay()
+{
+    if (sWorld.GetGameDay() >= m_nextMaintenanceDay && !m_markerToStart)
+    {
+        // Restart 15 minutes after honor weekend by server time
+        if (sWorld.getConfig(CONFIG_BOOL_AUTO_HONOR_RESTART))
+            sWorld.ShutdownServ(900, SHUTDOWN_MASK_RESTART, SHUTDOWN_EXIT_CODE);
+        else
+            sLog.outString("HonorMaintenancer: Server needs to be restarted to perform honor rank calculations.");
+
+        ToggleMaintenanceMarker();
+    }
+}
+
+void HonorMaintenancer::ToggleMaintenanceMarker()
+
+## so with the key at 0 the world SCHEDULES NOTHING and prints this instead:
+   HonorMaintenancer: Server needs to be restarted to perform honor rank calculations.
+## and with the key at 1 it calls ShutdownServ(900, SHUTDOWN_MASK_RESTART, ...),
+## which announces a restart 15 minutes out through ShutdownMsg (World.cpp:3307, :3338).
+
+## when the check runs at all: once a minute, and only on the maintenance day
+    /// Maintenance checker
+    if (m_MaintenanceTimeChecker < diff)
+    {
+        sHonorMaintenancer.CheckMaintenanceDay();
+        m_MaintenanceTimeChecker = 60000;
+    }
+    else
+        m_MaintenanceTimeChecker -= diff;
+
+
+## the SECOND restart the entry switches off, AutoRestart.MaxServerUptime = 0:
+## a zero makes this whole block unreachable (getConfig(...) is the first test)
+    if (!m_ShutdownTimer && !m_stopEvent &&
+        getConfig(CONFIG_UINT32_AUTO_RESTART_MAX_SERVER_UPTIME) &&
+        getConfig(CONFIG_UINT32_AUTO_RESTART_MAX_SERVER_UPTIME) < GetUptime() &&
+        GetGameDay() != sHonorMaintenancer.GetNextMaintenanceDay())
+    {
+        struct tm* tm_struct = localtime(&m_gameTime);
+        if (tm_struct->tm_hour >= getConfig(CONFIG_UINT32_AUTO_RESTART_HOUR_MIN) && tm_struct->tm_hour <= getConfig(CONFIG_UINT32_AUTO_RESTART_HOUR_MAX))
+        {
+            sLog.outInfo("Restarting server due to exceeding maximum uptime.");
+            sWorld.ShutdownServ(900, SHUTDOWN_MASK_RESTART, SHUTDOWN_EXIT_CODE);
+        }
+
+# T30 Half 2 capture 03b - the doodad question, re-asked on the new core
+# (families/extract.py:1342 recorded the reading at the retired fork's 7c0fb278;
+#  the tools tree moved to top-level tools/ on this core, so it was read again)
+31:#include "adtfile.h" // for fixnamen
+98:                fixnamen(ddnames, size);
+## same call, same line number, in-place over the whole MODN block before
+## either the writer or the reader looks at a name: this entry still carries
+## no doodad patch, and still should not.

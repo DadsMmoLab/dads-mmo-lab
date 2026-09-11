@@ -1,0 +1,70 @@
+2026-09-11T12:01:10+00:00
+# T30 Half 2 capture 04 - the box as this run found it, and as it left it
+
+## the client folder the live half would have written into
+total 0
+drwxr-xr-x 1 pk pk 444 Jul 14 14:47 .
+drwxr-xr-x 1 pk pk  12 Jul 14 14:47 ..
+drwxr-xr-x 1 pk pk  44 Sep  8 16:34 Blizzard_AuctionUI
+drwxr-xr-x 1 pk pk  62 Sep  8 16:34 Blizzard_BattlefieldMinimap
+drwxr-xr-x 1 pk pk  44 Sep  8 16:34 Blizzard_BindingUI
+drwxr-xr-x 1 pk pk  46 Sep  8 16:34 Blizzard_CombatText
+drwxr-xr-x 1 pk pk  40 Sep  8 16:34 Blizzard_CraftUI
+drwxr-xr-x 1 pk pk  46 Sep  8 16:34 Blizzard_GMSurveyUI
+drwxr-xr-x 1 pk pk  44 Sep  8 16:34 Blizzard_InspectUI
+drwxr-xr-x 1 pk pk  40 Sep  8 16:34 Blizzard_MacroUI
+drwxr-xr-x 1 pk pk  38 Sep  8 16:34 Blizzard_RaidUI
+drwxr-xr-x 1 pk pk  42 Sep  8 16:34 Blizzard_TalentUI
+drwxr-xr-x 1 pk pk  50 Sep  8 16:34 Blizzard_TradeSkillUI
+drwxr-xr-x 1 pk pk  44 Jul 14 14:47 Blizzard_TrainerUI
+
+## its realmlist, before and (unchanged) after
+set realmlist 127.0.0.1
+
+## NO TortoiseBotsManager / TortoiseGMManager: the addons were never written,
+## because the install that would have written them never ran (capture 02).
+(none, as expected)
+
+## ~/tortoise-vm, the retired fork's install: untouched, not started, not adopted
+4.1G	/home/pk/tortoise-vm
+Dockerfile
+data
+docker-compose.build.yml
+docker-compose.override.yml
+docker-compose.override.yml.before-channel
+docker-compose.yml
+etc
+src
+2026-09-10 22:14:18.756133853 +0000 /home/pk/tortoise-vm
+
+## containers and volumes: exactly what was here before this run
+tortoise-mangosd	Exited (0) 13 hours ago
+tortoise-realmd	Exited (0) 13 hours ago
+tortoise-db	Exited (0) 13 hours ago
+ac-worldserver	Exited (0) 2 days ago
+ac-authserver	Exited (0) 2 days ago
+ac-db-import	Exited (0) 10 days ago
+ac-database	Exited (0) 2 days ago
+ac-client-data-init	Exited (0) 10 days ago
+DRIVER    VOLUME NAME
+local     94c41bcf6b609c34aa57c4a66d121e5a18de4fde201a3af60928809629420a28
+local     yulon-wow-tortoise-54fa64f0_db-data
+local     yulon-wow-wotlk-056ed20d_client-data
+local     yulon-wow-wotlk-056ed20d_db-data
+
+## images: the two t30/ images Half 1 left, and nothing new
+t30/tortoise-core:latest 1.12GB
+t30/base:latest 1.12GB
+yulon.local/cmangos-tortoise-server:native-54fa64f0 1.06GB
+yulon.local/ac-wotlk-db-import:native-056ed20d 1.56GB
+yulon.local/ac-wotlk-authserver:native-056ed20d 333MB
+yulon.local/ac-wotlk-worldserver:native-056ed20d 1.02GB
+yulon.local/ac-wotlk-client-data:native-056ed20d 145MB
+mariadb:10.6 438MB
+mysql:8.4 1.12GB
+alpine/git:<none> 138MB
+
+## disk and memory
+/dev/sda3       100G   41G   58G  42% /
+               total        used        free      shared  buff/cache   available
+Mem:           19990        1167        5732          76       13569       18822
