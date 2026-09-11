@@ -1,6 +1,6 @@
+2026-09-11T17:29:33.946348+00:00
 2026-09-11 17:29:34 WARNING [yulon.botlist] could not browse wow-tortoise's bots: expected str, bytes or os.PathLike object, not DbFacts
 2026-09-11 17:29:39 INFO [yulon.apply] install perf-report: 1 step(s), 0 skipped, 0 left unapplied, rebuild=False
-2026-09-11T17:29:33.946348+00:00
 # T30 Half 2 live -- capture 23: conf activation and Browse bots (fixes)
 
 ## Browse bots through _BotBrowser.page()
