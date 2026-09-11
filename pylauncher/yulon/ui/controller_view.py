@@ -3478,7 +3478,7 @@ class ControllerView(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if not said_yes(answer):
             return
         if not self._forget_is_eligible():
             self.uninstall_label.setText(f"{server_dir} is back; nothing was forgotten.")
