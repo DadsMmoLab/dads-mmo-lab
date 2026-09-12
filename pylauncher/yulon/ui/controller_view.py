@@ -2313,23 +2313,14 @@ class ControllerView(QWidget):
         # had no selection to lose.
         self._custom_install_pending = False
         self._console_pending = False
-        # The panel name shown in the header above the tab strip, for the panel
-        # currently open. The tabs themselves are icon-only; their text is the
-        # tooltip, and the header carries the full readable name instead of a
-        # clipped strip.
-        self._panel_title = QLabel("", self)
-        self._panel_title.setObjectName("panel-title")
-        self._tab_titles: dict[int, str] = {}
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
         self._tabs.setUsesScrollButtons(True)
         self._tabs.setElideMode(Qt.TextElideMode.ElideRight)
-        self._tabs.setDocumentMode(False)
+        self._tabs.setDocumentMode(True)
         self._tabs.tabBar().setExpanding(True)
-        self._tabs.currentChanged.connect(self._sync_panel_title)
         layout = QVBoxLayout(self)
-        layout.setSpacing(4)
-        layout.addWidget(self._panel_title)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._tabs)
 
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
@@ -2376,9 +2367,6 @@ class ControllerView(QWidget):
         self._build_maintenance_tab()
         self._build_modules_tab()
         self._build_networking_tab()
-        # The first panel's name is shown without a tab-change signal, because
-        # the default current index (0) never emits `currentChanged`.
-        self._sync_panel_title(self._tabs.currentIndex())
 
         # What the channel says needs no daemon, no database and no network:
         # it is read from the credential file, so it is shown whether or not
@@ -2406,20 +2394,9 @@ class ControllerView(QWidget):
     # ------------------------------------------------------------- sub-tabs
 
     def _add_panel_tab(self, tab: QWidget, icon_name: str, title: str) -> None:
-        """Add an icon-only sub-tab whose full name lives in the tooltip and header.
-
-        The strip is icon-only: a text label here clips (8 tabs into a narrow
-        bar), so the full name goes into the tooltip and the header label shows
-        the open panel's name via `_sync_panel_title`.
-        """
-        index = self._tabs.addTab(tab, get_tab_icon(icon_name), "")
+        """Add a sub-tab carrying both its icon and readable title label."""
+        index = self._tabs.addTab(tab, get_tab_icon(icon_name), title)
         self._tabs.setTabToolTip(index, title)
-        self._tab_titles[index] = title
-
-    @Slot(int)
-    def _sync_panel_title(self, index: int) -> None:
-        """Show the open panel's full name in the header above the tab strip."""
-        self._panel_title.setText(self._tab_titles.get(index, ""))
 
     # ------------------------------------------------------------ server tab
 

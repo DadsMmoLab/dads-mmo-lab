@@ -241,25 +241,6 @@ QTabBar::tab:left:selected {{
     border-right: none;
     padding-left: 7px;
 }}
-    border-left: 2px solid #FFF8D0;
-    border-bottom: 2px solid {COLOR_GOLD_BRASS};
-    border-right: none;
-}}
-
-QTabBar::tab:west:selected, QTabBar::tab:left:selected {{
-    background: qlineargradient(
-        x1:0, y1:0, x2:1, y2:0,
-        stop:0 #42321D, stop:0.4 #2A1F13, stop:1 #17100A
-    );
-    color: {COLOR_GOLD_BRIGHT};
-    border: 2px solid {COLOR_GOLD_BRASS};
-    border-top: 2px solid {COLOR_GOLD_BRIGHT};
-    border-left: 3px solid {COLOR_GOLD_BRIGHT};
-    border-bottom: 2px solid {COLOR_GOLD_BRASS};
-    border-right: none;
-    padding-left: 7px;
-    margin-right: -2px;
-}}
 
 QTabBar::tab:disabled {{
     background-color: #12100E;
@@ -448,10 +429,28 @@ QGroupBox::title {{
 QFrame[frameShape="5"], QFrame[frameShape="StyledPanel"] {{
     background-color: {COLOR_BG_PARCHMENT};
     border: 1.5px solid {COLOR_BRASS_DARK};
-    border-radius: 5px;
+    border-top: 1.5px solid {COLOR_GOLD_BORDER};
+    border-left: 1.5px solid {COLOR_GOLD_BORDER};
+    border-radius: 6px;
 }}
 
-/* --- Catalog Tile Text Hierarchy --- */
+QFrame[frameShape="5"]:hover, QFrame[frameShape="StyledPanel"]:hover {{
+    border: 1.5px solid {COLOR_GOLD_BRASS};
+    border-top: 1.5px solid #FFF8D0;
+    border-left: 1.5px solid #FFF8D0;
+}}
+
+/* --- Catalog Tile Text Hierarchy & Scrollable Box Cover Inset --- */
+QScrollArea#tile-desc-box {{
+    background-color: {COLOR_BG_INPUT};
+    border: 1px solid {COLOR_BRASS_DEEP};
+    border-radius: 4px;
+}}
+
+QScrollArea#tile-desc-box QWidget {{
+    background-color: transparent;
+}}
+
 QLabel#tile-title {{
     font-family: {FONT_TITLE_SINGLE};
     font-size: {_px(15, scale)};
@@ -818,6 +817,16 @@ def apply_warcraft_theme(target: QApplication | QWidget, *, width: int | None = 
     (or pass None) for the reference scale 1.0.
     """
     from PySide6.QtWidgets import QApplication
+
+    # On macOS, Qt defaults to the native "macos" (Aqua) QStyle engine,
+    # which overrides and distorts custom QSS rules (turning tab bars into
+    # segmented controls, breaking West sidebar tab alignment, adding native
+    # Cocoa button bevels, and nesting groupbox borders). Setting "Fusion"
+    # base style guarantees clean, authentic, pixel-accurate rendering across
+    # macOS, Windows and Linux.
+    app = QApplication.instance()
+    if isinstance(app, QApplication) and app.style().objectName() != "fusion":
+        app.setStyle("Fusion")
 
     qss = _build_qss(scale_for_width(width) if width is not None else 1.0)
     if isinstance(target, QApplication):

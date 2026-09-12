@@ -106,19 +106,38 @@ def build_catalog_tab(
     column.addWidget(tabs, 1)
     window.setCentralWidget(central)
 
-    splitter = QSplitter()
+    splitter = QSplitter(Qt.Orientation.Vertical)
+    splitter.setObjectName("catalog-splitter")
     splitter.addWidget(catalog_view)
-    splitter.addWidget(log_panel)
-    # The catalog is the thing the window is for; it may shrink, never vanish.
-    # A bare QSplitter honours whatever minimum its children ask for, so one
-    # widget with a wide size hint can squeeze the other to nothing -- which is
-    # exactly what an unwrapped status label did on 2026-09-02, leaving the
-    # tiles clipped mid-word and their buttons unreachable. That label now
-    # wraps, which is the fix; this is the floor, so the next widget with a wide
-    # hint cannot do it again. Stretch goes to the log because it is the pane
-    # whose content grows.
+
+    console_tabs = QTabWidget()
+    console_tabs.setObjectName("catalog-console-tabs")
+    console_tabs.setIconSize(QSize(16, 16))
+    console_tabs.addTab(log_panel, get_tab_icon("console"), "Console & Install Logs")
+
+    def _set_console_visible(visible: bool) -> None:
+        console_tabs.setVisible(visible)
+        btn = getattr(catalog_view, "toggle_console_button", None)
+        if btn is not None:
+            btn.setText("▼ Hide Console" if visible else "▲ Show Console")
+        if visible:
+            splitter.setSizes([max(200, splitter.height() - 170), 170])
+
+    def _toggle_console() -> None:
+        _set_console_visible(not console_tabs.isVisible())
+
+    toggle_btn = getattr(catalog_view, "toggle_console_button", None)
+    if toggle_btn is not None:
+        toggle_btn.clicked.connect(_toggle_console)
+
+    log_panel.run_started.connect(lambda: _set_console_visible(True))
+
+    splitter.addWidget(console_tabs)
+    # The catalog shelf sits on top; the console window at the bottom can be
+    # toggled or resized via the vertical splitter.
     splitter.setCollapsible(0, False)
-    splitter.setStretchFactor(0, 0)
+    splitter.setCollapsible(1, True)
+    splitter.setStretchFactor(0, 3)
     splitter.setStretchFactor(1, 1)
     catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
     tabs.addTab(splitter, "Catalog")

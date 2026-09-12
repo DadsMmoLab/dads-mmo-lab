@@ -232,24 +232,18 @@ def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
     return fake
 
 
-def test_the_sub_tabs_are_icon_only_and_name_the_open_panel_in_a_header(
+def test_the_sub_tabs_carry_icon_and_title_in_the_tab_itself(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The internal tab strip is icon-only: eight labels crowded into a narrow
-    bar clip and overlap. Each tab's full name goes into its tooltip, and a
-    header above the strip carries the name of the panel currently open.
-    """
+    """The sub-tabs carry both their icon and their readable title label directly."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
 
-    # Icon-only: every tab's text is empty, its tooltip holds the name.
     for i in range(view._tabs.count()):
-        assert view._tabs.tabText(i) == "", f"tab {i} still carries a clipped label"
-        assert view._tabs.tabToolTip(i) != "", f"tab {i} lost its full name"
+        assert view._tabs.tabText(i) != "", f"tab {i} missing its title"
+        assert view._tabs.tabToolTip(i) == view._tabs.tabText(i)
 
-    # The header shows the open panel's name, and follows the selection.
-    assert view._panel_title.text() == "Server"
-    view._tabs.setCurrentIndex(2)
-    assert view._panel_title.text() == "Accounts"
+    assert view._tabs.tabText(0) == "Server"
+    assert view._tabs.tabText(2) == "Accounts"
 
 
 def test_server_tab_status_start_and_port_conflict_message(

@@ -250,45 +250,27 @@ def test_the_columns_stay_equal_with_one_long_and_one_short_description(qapp: ob
 def test_the_columns_stay_equal_across_the_splitters_supported_width_range(
     qapp: object,
 ) -> None:
-    """T28 round 2: the catalog pane is not a fixed width -- it is one side of a
-    `QSplitter` the user drags, and the two tests above only ever measured it
-    at the width a fresh window happens to open at.
-
-    Three points across the range `build_window()` actually allows:
-
-    * the width a fresh window's first layout gives it, with no `setSizes()`
-      call at all -- the same point the two tests above check;
-    * `main._CATALOG_MIN_WIDTH`, the floor `build_catalog_tab()` sets on the
-      catalog view (`catalog_view.setMinimumWidth`) and the narrowest the
-      splitter will honour;
-    * a wide point with room to spare, so the stretch factors are exercised
-      giving the columns MORE than their preferred width too, not only less.
-
-    All three must land at genuinely different viewport widths -- a matrix
-    that silently measured the same width three times would prove nothing
-    beyond the first test.
+    """The catalog shelf adapts responsively across the window's supported width range:
+    from minimum 960px to default 1280px to wide 1600px.
     """
     panel = LogPanel()
     view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
-    _window, scroll, splitter = _catalog_in_the_default_window(view, panel)
-    total = sum(splitter.sizes())
+    window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
 
     measured: dict[str, int] = {}
 
-    # 1. The default allocation: the state `_catalog_in_the_default_window()`
-    # already laid out, untouched.
+    # 1. The default allocation (1280px).
     measured["default"] = scroll.viewport().width()
     _assert_the_two_columns_are_equal(scroll)
 
-    # 2. The floor.
-    splitter.setSizes([main._CATALOG_MIN_WIDTH, total - main._CATALOG_MIN_WIDTH])
+    # 2. Narrowest supported window width (960px).
+    window.resize(960, 600)
     process_events()
     measured["min"] = scroll.viewport().width()
     _assert_the_two_columns_are_equal(scroll)
 
-    # 3. Wide -- comfortably above both other points, still inside the window.
-    wide = 900
-    splitter.setSizes([wide, total - wide])
+    # 3. Wide window width (1600px).
+    window.resize(1600, 900)
     process_events()
     measured["wide"] = scroll.viewport().width()
     _assert_the_two_columns_are_equal(scroll)

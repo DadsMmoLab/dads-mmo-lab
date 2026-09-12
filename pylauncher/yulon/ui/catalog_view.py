@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QMenu,
@@ -322,39 +323,34 @@ class CatalogView(QWidget):
         self._current: tuple[str, Path, Path | None] | None = None
         self._prompter: InputPrompter | None = None
 
+        header_row = QHBoxLayout()
+        header_label = QLabel("Select a Campaign", self)
+        header_label.setObjectName("section-title")
+        header_row.addWidget(header_label)
+        header_row.addStretch(1)
+
+        self.toggle_console_button = QPushButton("▼ Hide Console", self)
+        self.toggle_console_button.setObjectName("toggle-console-btn")
+        self.toggle_console_button.setIcon(warcraft_icon("console", COLOR_TEXT_GOLD, 14))
+        header_row.addWidget(self.toggle_console_button)
+
         grid = QGridLayout()
         grid.setSpacing(14)
         grid.setContentsMargins(6, 6, 6, 6)
         for index, entry in enumerate(catalog.games):
-            grid.addWidget(self._tile(entry), index // 2, index % 2)
-        # Equal columns (T28). `index % 2` never addresses a third column, so
-        # 0 and 1 are the whole grid. Left at the default 0/0 stretch, a
-        # `QGridLayout` hands each column its own preferred width and then
-        # splits any leftover space in proportion to those same preferred
-        # widths — so the column whose word-wrapped labels ask for more stays
-        # wider, and by MORE than its content actually needs. Measured through
-        # the owner's frame (`catalog-two-columns-unequal.png`, `yulon-arch`,
-        # 2026-09-10): WotLK/Vanilla drawn at 224px next to TBC/Tortoise at
-        # 451px, in the same row of the same grid. Equal stretch factors make
-        # the two columns share space equally instead.
-        #
-        # No size policy on `_tile()`'s frame was needed on top of this: a
-        # `QFrame`'s default policy is already `Preferred`/`Preferred`, which
-        # lets `QGridLayout` grow it past its size hint, and the word-wrapped
-        # labels' `minimumSizeHint` (the longest WORD, not the longest line —
-        # `_tile_text`'s v0.6.51 fix) is well under 338px either way, so it
-        # never became the binding constraint once the columns were stretched
-        # evenly. Measured at `DEFAULT_WINDOW_SIZE` through the same splitter
-        # `main.py` builds: both columns land at 338/337px, a 1px rounding
-        # remainder `QGridLayout` has to put somewhere.
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
+            grid.addWidget(self._tile(entry), 0, index)
+            grid.setColumnStretch(index, 1)
+        grid.setRowStretch(0, 1)
+
         inner = QWidget()
         inner.setLayout(grid)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setWidget(inner)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addLayout(header_row)
         layout.addWidget(scroll, 1)
         self._log.run_finished.connect(self._on_run_finished)
 
@@ -391,14 +387,17 @@ class CatalogView(QWidget):
 
     def _tile(self, entry: CatalogEntry) -> QFrame:
         frame = QFrame(self)
+        frame.setObjectName("catalog-tile")
         frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setFixedHeight(360)
+        frame.setMinimumWidth(230)
         frame.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         frame.customContextMenuRequested.connect(
             lambda pos, e=entry, f=frame: self._show_tile_context_menu(pos, e, f)
         )
         box = QVBoxLayout(frame)
         box.setSpacing(8)
-        box.setContentsMargins(14, 14, 14, 14)
+        box.setContentsMargins(12, 12, 12, 12)
         box.addWidget(
             self._tile_text(
                 f"{entry.name} <span style='color:{COLOR_TEXT_MUTED}; font-style:italic;'>"
@@ -407,7 +406,13 @@ class CatalogView(QWidget):
                 role="tile-title",
             )
         )
-        box.addWidget(self._tile_text(entry.description, frame, role="tile-desc"))
+        desc_scroll = QScrollArea(frame)
+        desc_scroll.setObjectName("tile-desc-box")
+        desc_scroll.setWidgetResizable(True)
+        desc_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        desc_label = self._tile_text(entry.description, desc_scroll, role="tile-desc")
+        desc_scroll.setWidget(desc_label)
+        box.addWidget(desc_scroll, 1)
         box.addWidget(
             self._tile_text(
                 f"Client: {entry.client.version} (build {entry.client.build})",

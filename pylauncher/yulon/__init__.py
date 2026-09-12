@@ -3,4 +3,4 @@
 Top-level package. See pyplan/README.md for the full design document.
 """
 
-__version__ = "0.8.1-Public"
+__version__ = "0.8.3-Public"
