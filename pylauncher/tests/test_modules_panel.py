@@ -387,3 +387,262 @@ def test_an_uncatalogued_row_still_takes_the_owed_chips() -> None:
     rows = _rows([], {"module": frozenset({"mod-homemade"})}, session)
 
     assert mp.CHIP_REBUILD_PENDING in _labels(_row(rows, "mod-homemade"))
+
+
+# --------------------------------------------------------------------- the panel
+
+
+def _panel(rows: tuple[mp.ModuleRow, ...]) -> mp.ModulesPanel:
+    panel = mp.ModulesPanel()
+    panel.set_rows(rows)
+    return panel
+
+
+def _catalog_rows(
+    installed: dict[str, frozenset[str]] | None = None,
+    catalog: list[Manifest] | None = None,
+    session: mp.SessionState | None = None,
+) -> tuple[mp.ModuleRow, ...]:
+    return _rows(
+        catalog or [_m("mod-a"), _m("mod-b"), _m("a1", "ale"), _m("a2", "ale")],
+        installed,
+        session,
+    )
+
+
+def test_a_family_with_something_installed_starts_collapsed(qapp: object) -> None:
+    """The card you open the tab on shows what you HAVE; the rest is one press away.
+
+    Mutation: open every family and the WotLK card's 20-odd uninstalled rows
+    push the installed ones off the screen again.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+
+    assert panel.available_open("module") is False
+    assert panel.available_open("ale") is True, "a family with nothing installed opens"
+
+
+def test_a_toggle_press_flips_the_family_and_set_rows_keeps_it(qapp: object) -> None:
+    """Both halves of the rule, because the second is the one a reload destroys.
+
+    Mutation: recompute the open/closed state inside `set_rows()` and the
+    section a user opened snaps shut the next time anything reloads the tab.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+    panel.available_toggle("module").click()
+    assert panel.available_open("module") is True
+
+    panel.set_rows(_catalog_rows({"module": frozenset({"mod-a"})}))
+    assert panel.available_open("module") is True
+
+    panel.available_toggle("module").click()
+    assert panel.available_open("module") is False
+
+
+def test_a_rows_install_button_emits_that_rows_id(qapp: object) -> None:
+    """One handler, one id — the tab no longer has a "selected" button to get wrong.
+
+    Mutation: emit the panel's `selected_id()` instead of the row's own id and a
+    press installs whatever was highlighted rather than what was pressed.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+    seen: list[str] = []
+    panel.install_pressed.connect(seen.append)
+    removed: list[str] = []
+    panel.remove_pressed.connect(removed.append)
+
+    panel.select("mod-a")
+    panel.row("mod-b").install_button.click()
+    panel.row("mod-a").remove_button.click()
+
+    assert seen == ["mod-b"]
+    assert removed == ["mod-a"]
+
+
+def test_an_installed_row_has_no_install_button_and_the_reverse(qapp: object) -> None:
+    """One button per row, and it is the one that would do something.
+
+    Mutation: build both buttons on every row and an installed module offers an
+    Install press that re-clones over itself.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+
+    assert panel.row("mod-a").install_button is None
+    assert panel.row("mod-a").remove_button is not None
+    assert panel.row("mod-b").install_button is not None
+    assert panel.row("mod-b").remove_button is None
+
+
+def test_an_uncatalogued_row_has_no_buttons_at_all(qapp: object) -> None:
+    """T41's rows carry no manifest, so there are no steps to press.
+
+    Mutation: build a Remove button for `catalogued=False` and the press reaches
+    an applier with nothing to hand it.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-homemade"})}))
+
+    row = panel.row("mod-homemade")
+    assert row.install_button is None and row.remove_button is None
+    assert row.data.catalogued is False
+
+
+def test_a_row_another_installed_module_needs_cannot_be_removed(qapp: object) -> None:
+    """`removable=False` is drawn, not just recorded.
+
+    Mutation: ignore `ModuleRow.removable` and the Remove button is live on a
+    module something else is compiled against.
+    """
+    base, user = _m("mod-base", name="Base"), _m("mod-user", name="User", requires=("mod-base",))
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-base", "mod-user"})}, [base, user]))
+
+    button = panel.row("mod-base").remove_button
+    assert button is not None and button.isEnabled() is False
+    assert "User" in button.toolTip()
+    assert panel.row("mod-user").remove_button.isEnabled() is True
+
+
+def test_set_enabled_actions_false_disables_every_row_button(qapp: object) -> None:
+    """The busy lock, and the `store is None or applier is None` gate, in one call.
+
+    Mutation: only disable the first card's buttons (or only the installed
+    half) and a press during a rebuild reaches the applier.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"}), "ale": frozenset({"a1"})}))
+    buttons = [
+        b
+        for row_id in ("mod-a", "mod-b", "a1", "a2")
+        for b in (panel.row(row_id).install_button, panel.row(row_id).remove_button)
+        if b is not None
+    ]
+    assert len(buttons) == 4
+
+    panel.set_enabled_actions(False)
+    assert [b.isEnabled() for b in buttons] == [False] * 4
+
+    panel.set_enabled_actions(True)
+    # Back on -- except the one the row itself forbids, which is not the busy
+    # lock's to hand back.
+    assert [b.isEnabled() for b in buttons] == [True] * 4
+
+
+def test_set_enabled_actions_true_does_not_unlock_an_unremovable_row(qapp: object) -> None:
+    """A job finishing must not hand back a control the ROW never armed.
+
+    Mutation: `setEnabled(enabled)` for every button and a rebuild finishing
+    makes a depended-on module removable.
+    """
+    base, user = _m("mod-base", name="Base"), _m("mod-user", name="User", requires=("mod-base",))
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-base", "mod-user"})}, [base, user]))
+
+    panel.set_enabled_actions(False)
+    panel.set_enabled_actions(True)
+
+    assert panel.row("mod-base").remove_button.isEnabled() is False
+
+
+def test_the_selection_survives_a_rebuild_and_a_gone_id_does_not(qapp: object) -> None:
+    """`set_rows()` is called after every install; losing the selection loses the place.
+
+    Mutation: clear `_selected` in `set_rows()` unconditionally and the row a
+    user was reading is deselected by a reload they did not ask for.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+    panel.select("mod-b")
+    assert panel.selected_id() == "mod-b"
+
+    panel.set_rows(_catalog_rows({"module": frozenset({"mod-a", "mod-b"})}))
+    assert panel.selected_id() == "mod-b"
+
+    panel.set_rows(_catalog_rows(catalog=[_m("mod-a")]))
+    assert panel.selected_id() is None
+
+
+def test_a_click_anywhere_on_a_row_selects_it(qapp: object) -> None:
+    """Not only on the button: the whole row is the target (the mockup's own rule).
+
+    Mutation: connect the selection to the buttons alone and a click on the
+    description selects nothing, which is what the context menu then acts on.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+    panel.resize(600, 800)
+    panel.show()
+    chosen: list[str] = []
+    panel.row_selected.connect(chosen.append)
+
+    QTest.mouseClick(panel.row("mod-b").description_label, Qt.MouseButton.LeftButton)
+
+    assert panel.selected_id() == "mod-b"
+    assert chosen == ["mod-b"]
+    panel.hide()
+
+
+def test_an_owed_chip_press_names_its_row_and_its_label(qapp: object) -> None:
+    """An owed chip is a press; the view turns the pair into the chip's own detail.
+
+    Mutation: emit only the id and the view cannot tell which of a row's three
+    owed chips was pressed.
+    """
+    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+    pressed: list[tuple[str, str]] = []
+    panel.chip_pressed.connect(lambda mid, label: pressed.append((mid, label)))
+
+    chips = panel.row("mod-a").chip_buttons
+    assert len(chips) == 1
+    chips[0].click()
+
+    assert pressed == [("mod-a", mp.CHIP_REBUILD_PENDING)]
+
+
+def test_a_fact_chip_is_not_a_press_and_carries_its_detail_as_a_tooltip(qapp: object) -> None:
+    """Nothing can be done about a fact, so nothing happens when it is pressed.
+
+    Mutation: connect every chip to `chip_pressed` and pressing "asks a
+    question" writes a sentence into the report that answers nothing.
+    """
+    asks = _m(
+        "mod-ah-bot",
+        prompts=(Prompt(key="bot_guid", question="Which GUID?"),),
+        patches=(Patch(file="x.conf", find="a", replace="{bot_guid}"),),
+    )
+    panel = _panel(_catalog_rows(catalog=[asks]))
+    pressed: list[tuple[str, str]] = []
+    panel.chip_pressed.connect(lambda mid, label: pressed.append((mid, label)))
+
+    chips = panel.row("mod-ah-bot").chip_buttons
+    assert [c.text() for c in chips] == [mp.CHIP_ASKS_A_QUESTION]
+    assert "Which GUID?" in chips[0].toolTip()
+    chips[0].click()
+
+    assert pressed == []
+
+
+def test_a_panel_with_no_rows_says_so_instead_of_showing_nothing(qapp: object) -> None:
+    """The three CMaNGOS games have no manifest store at all.
+
+    Mutation: return early on an empty sequence and the tab is a blank box.
+    """
+    panel = _panel(())
+
+    assert panel.empty_label.isVisibleTo(panel)
+    assert panel.empty_label.text() == mp.NO_MODULES_NOTE
+
+    panel.set_rows(_catalog_rows())
+    assert not panel.empty_label.isVisibleTo(panel)
+
+
+def test_the_installed_header_counts_that_family_only(qapp: object) -> None:
+    """The count is the reading; a count off by a family is worse than no count.
+
+    Mutation: count every installed row rather than the family's own and the
+    ALE card claims the modules too.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"}), "ale": frozenset({"a1", "a2"})}))
+
+    assert "(1)" in panel.installed_header("module").text()
+    assert "(2)" in panel.installed_header("ale").text()
+    assert "1" in panel.available_toggle("module").text()
+    assert panel.available_toggle("ale") is None, "no uninstalled ale rows, so no toggle"
