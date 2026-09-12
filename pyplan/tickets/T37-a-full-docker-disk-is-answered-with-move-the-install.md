@@ -1,6 +1,6 @@
 # T37 — a full Docker disk is answered with "install to a drive that has room", which the user already did
 
-**Status:** OPEN — fix written and green on the lead's checkout; owes a review and a gate
+**Status:** OPEN — reviewed (Codex: REJECT, both findings fixed in one round) and green on the lead's checkout; owes a gate
 **Filed:** 2026-09-12 by the lead, from Doc's report in `#-yulon` (Discord, 2026-09-12 06:04 and 08:05 CEST) with his install log DM'd the same morning.
 **Hand:** the lead. Unit only; no box — the refusal is a pure function of `Facts` and every threshold in it is already testable without a daemon or a disk.
 
@@ -51,8 +51,8 @@ This is one more of [[defects-live-between-the-parts]] — neither check is wron
 | row | remedy |
 |---|---|
 | `the server folder` | `FOLDER_SPACE_REMEDY` — free space, or install to a drive that has room. Unchanged. |
-| `Docker's disk` | `_docker_disk_remedy(facts)` — names Docker Desktop → Settings → Resources → Advanced → **Disk image location** on Windows and macOS, `data-root` in `/etc/docker/daemon.json` on Linux, and says outright that moving the install will not help. |
-| `ONE_VOLUME_SPACE` | one drive holds both, so all three actions are offered. |
+| `Docker's disk` | `_docker_disk_remedy(facts)` — names Docker Desktop → Settings → Resources → Advanced → **Disk image location** on Windows and macOS; on Linux names *both* `data-root` in `/etc/docker/daemon.json` and Docker Desktop's setting, because `detect()` reports `"linux"` inside WSL too (see the review below). Says outright that moving the install will not help. |
+| `ONE_VOLUME_SPACE` | one drive holds both, so all three actions are offered. Matched explicitly; an unknown row gets a logged, claim-free default. |
 
 `_space_check_macos_bounded()`'s refusal calls `_docker_disk_remedy()` too.
 
@@ -71,9 +71,74 @@ E       assert 'install to ...hat has room' not in 'Free some s...n try again.'
 
 Green after: `tests/test_preflight.py` 56 passed; full suite 4340 passed, 31 skipped.
 
+## Codex adversarial review (2026-09-12): REJECT, then fixed
+
+Two findings taken, both real; the round closed in one pass.
+
+**1. The Linux remedy was wrong for a reachable configuration.** `detect()` returns
+`"linux"` inside WSL — its own docstring says so — so a launcher running in a WSL
+distro whose `docker` is Docker Desktop's through WSL integration reached the Linux
+branch and was told to edit `/etc/docker/daemon.json`, which that daemon never
+reads. The same dead end the ticket exists to remove, one platform over. The branch
+now names both routes, because this module cannot tell the two daemons apart:
+`platform.docker_desktop_data_root()` answers `/var/lib/docker` for either
+(`platform.py:3531`), which means under WSL integration the *measurement* is of the
+wrong filesystem too. **That is a separate defect and is not fixed here** — it moves
+a number, not a sentence, and wants a box that can prove which filesystem Docker
+Desktop actually grew. Filed below.
+
+Codex also named Docker rootless (`~/.config/docker/daemon.json`) and the containerd
+image store as cases `data-root` does not cover. Not verified against a live daemon
+by this project, so the sentence does not claim to be exhaustive — it names where to
+look rather than asserting a single file is the only answer.
+
+**2. `_space_remedy()`'s final `return` was unguarded**, so any row name added later
+would have been handed the one-volume sentence — an assertion that two paths share a
+drive, false under every row but `ONE_VOLUME_SPACE`. Now matched explicitly, with a
+logged, claim-free default for a row with no remedy written for it.
+
+Not taken: finding 3 (the `warn`/`unchecked` branches) was NOT FOUND by the reviewer
+and confirmed sound. Finding 5 confirmed the Windows/macOS Docker Desktop path is
+right.
+
+**Tests added for the three rows the first pass left untested** —
+`test_every_free_space_row_gets_the_remedy_that_can_actually_move_its_bytes` (Linux,
+macOS, one-volume) and `test_an_unnamed_free_space_row_does_not_claim_two_paths_share_a_drive`.
+Three mutations, `__pycache__` purged on both sides of each, all three caught by the
+right test with the right message: the Linux branch losing the Docker Desktop route,
+the fallthrough going back to claiming one drive, and the macOS refusal keeping the
+old shared sentence.
+
+`tests/test_preflight.py` 58 passed; suite 4342 passed, 31 skipped; ruff, black, mypy clean.
+
+## Follow-ups this review opened (not T37's scope)
+
+- **The WSL measurement.** `docker_desktop_data_root()` returns `/var/lib/docker` for
+  any `platform_id == "linux"`, including a WSL distro on Docker Desktop's WSL
+  integration, where Docker's bytes are in the `docker-desktop-data` VHDX on the
+  Windows drive. The refusal there is computed from the wrong filesystem. Wants a box.
+- **The same defect class, three more rows, all pre-existing** (Codex finding 6): a
+  stopped native Linux Docker Engine is told to open Docker Desktop and wait for the
+  whale icon (`preflight.py:457`); a native Linux box short on memory is told to raise
+  Docker Desktop's Resources limit, which native Engine has no pane for
+  (`preflight.py:482`); and the client-folder bind check always prescribes Docker
+  Desktop's file-sharing settings (`preflight.py:843`) where the server folder's twin
+  already handles it through `_bind_remedy()`. Each names an action the user cannot
+  take on that platform. One ticket, not four.
+
 ## Still owed
 
-- A review (Codex adversarial, per the budget rule).
 - The gate on a box, and `--checks`.
-- CHANGELOG line under Fixed.
-- A reply to Doc once it ships, with the Disk image location steps — he is waiting on an answer.
+- A reply to Doc and to Boatmurdered — see below.
+
+## The two reports this closes out
+
+- **Doc** (the C: drive): fixed here. He is waiting on an answer and should get the
+  Disk image location steps directly, since his refusal is real until he moves
+  Docker's disk or frees space on `C:`.
+- **Boatmurdered** (the rebuild doing nothing): **not a new bug.** That is T33, the
+  static `QMessageBox.question()` returning an `int` so `is not Yes` was always true
+  and every rebuild read as declined. Fixed in `82a1f01b` and shipped in
+  `v0.8.4-Public`, tagged 2026-09-12 00:54 PDT — about three hours after his 08:08
+  CEST report, which is why he and Baerthe both saw it live that morning. He needs
+  the update, not a fix.

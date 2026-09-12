@@ -270,6 +270,62 @@ def test_a_full_docker_disk_is_not_answered_with_move_the_install() -> None:
     assert "install to a drive that has room" in folder_row[0].remedy, folder_row[0].remedy
 
 
+def test_every_free_space_row_gets_the_remedy_that_can_actually_move_its_bytes() -> None:
+    """The other three rows T37's first pass left untested (review, 2026-09-12).
+
+    One test per row because each names a different action, and the one that was
+    wrong was wrong precisely by being shared.
+    """
+    # Linux: two daemons answer to `platform_id == "linux"`. `detect()` reports
+    # it inside WSL too, where `docker` is often Docker Desktop's through WSL
+    # integration and never reads the distro's /etc/docker/daemon.json. Naming
+    # only `data-root` there is the same dead end in a new place, so both routes
+    # must be on the line.
+    linux = preflight.evaluate(
+        ENTRY,
+        SERVER_DIR,
+        facts(platform_id="linux", data_root_free=16 * GIB, server_dir_free=1336 * GIB),
+    ).refusals()
+    assert [check.name for check in linux] == ["free space on Docker's disk"], linux
+    assert "data-root" in linux[0].remedy, linux[0].remedy
+    assert "Disk image location" in linux[0].remedy, linux[0].remedy
+
+    # macOS reaches `_space_check_macos_bounded()`, a separate function that
+    # carried its own copy of the same wrong sentence.
+    mac = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="macos", data_root_free=10 * GIB)
+    ).refusals()
+    assert [check.name for check in mac] == ["free space on Docker's disk"], mac
+    assert "install to a drive that has room" not in mac[0].remedy, mac[0].remedy
+    assert "Disk image location" in mac[0].remedy, mac[0].remedy
+
+    # One drive holding both: every action is open, so all three are offered.
+    one = preflight.evaluate(
+        ENTRY,
+        SERVER_DIR,
+        facts(data_root_free=4 * GIB, server_dir_free=4 * GIB, same_volume=True),
+    ).refusals()
+    assert [check.name for check in one] == [f"free space on {preflight.ONE_VOLUME_SPACE}"], one
+    for offer in ("Free space on it", "install to a drive that has room", "move Docker's disk"):
+        assert offer in one[0].remedy, (offer, one[0].remedy)
+
+
+def test_an_unnamed_free_space_row_does_not_claim_two_paths_share_a_drive() -> None:
+    """The fallthrough the first pass left open (review, 2026-09-12).
+
+    `_space_remedy()` ended in an unguarded `return` of the one-volume sentence,
+    so a row added later — "the client cache", say — would have told the user
+    that the install folder and Docker's disk are on the same drive. That is an
+    assertion about their machine, and under any row but `ONE_VOLUME_SPACE` it
+    is simply untrue. A row with no remedy written for it must say less, not
+    guess.
+    """
+    said = preflight._space_remedy("the client cache", facts())
+    assert "same drive" not in said, said
+    assert "install to a drive that has room" not in said, said
+    assert said, "a row with no remedy of its own still needs one sentence"
+
+
 def _space_rows(report: preflight.Report) -> list[preflight.Check]:
     return [check for check in report.checks if check.name.startswith("free space on ")]
 

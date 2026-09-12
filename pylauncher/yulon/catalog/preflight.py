@@ -702,10 +702,23 @@ def _docker_disk_remedy(facts: Facts) -> str:
     "Disk image location" on Windows and macOS, `data-root` on a Linux daemon.
     """
     if facts.platform_id == "linux":
+        # Two daemons answer to `platform_id == "linux"` and they are moved by
+        # different settings. `detect()` reports "linux" inside WSL as well as
+        # on a real Linux box (its own docstring says so), so this branch is
+        # reached by a launcher running in a WSL distro whose `docker` is Docker
+        # Desktop's through WSL integration — and that daemon never reads the
+        # distro's /etc/docker/daemon.json. Naming only `data-root` here sent
+        # that user to edit a file with no effect (review, 2026-09-12). Both
+        # routes are named rather than guessed between, because this module
+        # cannot tell the two daemons apart today: `docker_desktop_data_root()`
+        # answers `/var/lib/docker` for either, which is its own defect and is
+        # recorded on T37 rather than fixed behind this sentence.
         return (
             "This is Docker's own disk, not the install folder — moving the install will not "
-            "help. Free space on the drive holding Docker's data root, or point the daemon "
-            'somewhere roomier with "data-root" in /etc/docker/daemon.json, then try again.'
+            "help. Free space on the drive Docker stores on; for a Docker Engine installed on "
+            'this machine that drive is set by "data-root" in /etc/docker/daemon.json, and if '
+            "Docker Desktop provides the daemon (WSL integration) it is Docker Desktop → "
+            "Settings → Resources → Advanced → Disk image location. Then try again."
         )
     return (
         "This is Docker's own disk, not the install folder — moving the install will not "
@@ -720,13 +733,21 @@ def _space_remedy(what: str, facts: Facts) -> str:
         return FOLDER_SPACE_REMEDY
     if what == "Docker's disk":
         return _docker_disk_remedy(facts)
-    # `ONE_VOLUME_SPACE`: one drive holds both, so either action frees the same
-    # pool and the user should be told they have the choice.
-    return (
-        "The install folder and Docker's disk are on the same drive, so both needs come out "
-        "of it. Free space on it, install to a drive that has room, or move Docker's disk "
-        "off it, then try again."
-    )
+    if what == ONE_VOLUME_SPACE:
+        # One drive holds both, so either action frees the same pool and the
+        # user should be told they have the choice.
+        return (
+            "The install folder and Docker's disk are on the same drive, so both needs come "
+            "out of it. Free space on it, install to a drive that has room, or move Docker's "
+            "disk off it, then try again."
+        )
+    # A row this function has not been taught. Matched explicitly above rather
+    # than falling through, because the one-volume sentence asserts that two
+    # paths share a drive — a claim about the machine, and a false one under any
+    # row that is not `ONE_VOLUME_SPACE` (review, 2026-09-12). A remedy that
+    # says less is the only safe default; `Check.line()` already rstrips it.
+    logger.info(f"no remedy is written for the free-space row {what!r}")
+    return "Free some space on the drive this is measuring, then try again."
 
 
 def _space_check_macos_bounded(
