@@ -1,6 +1,6 @@
 # T43 — a Tuning tab: every module setting, with the file behind it editable
 
-**Status:** FILED — spec ready; the hand starts next
+**Status:** CLOSED 2026-09-13 by the lead — two rounds, gate verified by the lead on the branch, merged to `hand-t42`'s line. Owes the box gate and the live press, which are the lead's.
 **Filed:** 2026-09-12 by the lead, from the owner: "I also want a tuning tab for the modules like in my dml launcher" and "should be able to open .conf file for the modules inside yulon to edit there also."
 **Mockup (owner-approved):** https://claude.ai/code/artifact/21ebf51e-a3f5-4f6b-90c9-dbac665c9bdf
 **Hand:** Opus 5. Worktree `.claude/worktrees/t43`, branch `hand-t43` **from `hand-t42`**, not from `yulon-phase8b`: T42 rewrote the Modules tab and moved T41's row building into `ui/widgets/modules_panel.py`, and a Tuning tab built off the old shape would conflict with every line of it. Reviewer: Codex adversarial, two-round cap, then the lead closes by hand. Unit only; the live press on `yulon-win11` is the lead's.
@@ -653,3 +653,51 @@ records the microsecond stamp and the conf row the strict decode.
 
 `black --check yulon/ tests/` — 212 files unchanged. `ruff check` — all checks
 passed. `mypy yulon/` — no issues in 102 source files. Nothing pushed.
+
+
+## Closed (lead, 2026-09-13)
+
+Two rounds, the cap, no third asked for.
+
+**The lead's own gate on `hand-t43`, run on the branch rather than read off the report:**
+`4537 passed, 31 skipped`; black 212 files unchanged, ruff clean, mypy clean on 102 files.
+The hand's numbers were honest in both rounds — round 1's `4518 passed` was re-run and
+matched too.
+
+**The review's headline finding was wrong, and the hand was right to decline it.** Codex
+read `tuning.write()` rebuilding the line as destroying trailing comments. The hand went to
+AzerothCore's own parser instead of agreeing, and the lead confirmed it against
+`src/common/Configuration/Config.cpp` in the live install on `yulon-win11`:
+
+```
+307:  line = Acore::String::Trim(line, in.getloc());     // trimmed BEFORE anything is decided
+313:  if (line[0] == '#' || line[0] == '[')              // '#' is a comment only at position 0
+325:  value = Trim(line.substr(equal_pos + 1, npos));    // the REST of the line IS the value
+330:  if (IsDuplicateOption(entry)) continue;            // the FIRST copy wins
+```
+
+So `K = old # keep this` has the value `old # keep this` to the running server, and
+"preserving the comment" would have written `new # keep this` into a live conf — the review's
+fix would have introduced the bug it thought it was preventing. This is
+[[a-guarantee-is-an-invitation]] pointed at a reviewer rather than at the code: a finding is
+a claim, and the parser is the machine to ask.
+
+**Chasing the wrong finding found two real defects, both worse than it.** Line 307 means an
+INDENTED assignment is live, and the reader's column-0 rule — borrowed from
+`party.read_conf()`, which reads Lua — answered `None` for one. Line 330 means the FIRST
+duplicate wins, and the tab was showing a value the server does not use while the writer
+rewrote a line it ignores: Save would have looked broken and left no trace. Both fixed,
+both tested. `apply._set_conf_key()`'s `count=1` had the rule right all along, which is
+[[defects-live-between-the-parts]] again — two readers of one file format, disagreeing.
+
+**`worst()` is gone.** The lead asked for a mixed card to "name both"; the hand replaced the
+function with `owed()`, which returns every job most expensive first. Better than what was
+asked for.
+
+## Still owed (the lead's)
+
+- The `--checks` gate on a box.
+- The live press on `yulon-win11`: one screenshot of the tab against the real WotLK install,
+  and the before/after of one key with its backup beside it.
+- A CHANGELOG line.
+- T42 is still unreviewed, and this branch is stacked on it.
