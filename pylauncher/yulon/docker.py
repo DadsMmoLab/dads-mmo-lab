@@ -3127,12 +3127,35 @@ _BUILDKIT_FENCE = "------"
 """The rule BuildKit draws around the failing step's own output.
 
 Exactly six hyphens, and distinct from the twenty it draws around the
-Dockerfile context below it — which is what makes the block findable.
+Dockerfile context below it — which is part of what makes the block findable.
+"""
+
+_BUILDKIT_STEP_HEADER = re.compile(r"^> \[[^\]]+\]")
+"""BuildKit's ` > [3/3] RUN …:` header, stripped of its leading space.
+
+The bracketed step number is required, not just a leading `>`: `last_words()`
+is shared with imports, clones and extractors, and any of them may print a
+line starting with `>`. Two rules and a `>` alone was enough to make an
+unrelated tool's output be read as a build (review, 2026-09-12).
+"""
+
+_ERROR_KEEP = 70
+"""How much of each end of BuildKit's `ERROR:` line survives the elision.
+
+The middle of that line is the whole `RUN` command; the ends are "ERROR: failed
+to solve: process" and the exit code, which is the half that says something.
 """
 
 
-def _buildkit_step_output(said: list[str]) -> list[str]:
-    """The failing step's own lines out of a `docker build` epilogue, or empty.
+def _elided(line: str) -> str:
+    """A long `ERROR:` line with its embedded command removed, both ends kept."""
+    if len(line) <= 2 * _ERROR_KEEP:
+        return line
+    return f"{line[:_ERROR_KEEP]}…{line[-_ERROR_KEEP:]}"
+
+
+def _buildkit_failure(said: list[str]) -> tuple[list[str], str]:
+    """A failed `docker build` split into (the step's own output, its `ERROR:` line).
 
     A failed build ends in a fixed shape (captured on m910q, Docker 29.7.2,
     `pyplan/gates/t38-build-failure-reports-the-command-2026-09-12/`)::
@@ -3148,30 +3171,60 @@ def _buildkit_step_output(said: list[str]) -> list[str]:
         --------------------
         ERROR: failed to build: failed to solve: process "/bin/sh -c …" did not complete…
 
-    The last five lines of that are the context and the `ERROR:` line, and that
-    final line embeds the entire `RUN` command — so it alone overruns the
-    character cap and arrives truncated from the left. A user adding a module
-    was shown the middle of a cmake invocation and nothing else (T38, Lac,
-    2026-09-12). The compiler's words are between the fences, and were never
-    missing from the buffer: `KEEP_OUTPUT_LINES` keeps 200.
+    The last five lines of that are the Dockerfile context and the `ERROR:`
+    line, and that line embeds the entire `RUN` command — so it alone overruns
+    the character cap and arrives truncated from the left. A user adding a
+    module was shown the middle of a cmake invocation and nothing else (T38,
+    Lac, 2026-09-12). The compiler's words are between the fences, and were
+    never missing from the buffer: `KEEP_OUTPUT_LINES` keeps 200.
 
-    The LAST pair of fences is the one taken, because a build that fails twice
-    prints the block twice and the later one is the failure being reported. An
-    empty result means this output is not a failed build — an import, a clone
-    and a map extractor all come through `last_words()` too — and the caller
-    falls back to the plain tail rather than inventing a block.
+    **Both halves are returned, because either alone can be the whole story.**
+    The step block carries a compiler diagnostic; the `ERROR:` line carries the
+    exit code, and for a build the kernel killed — `exited with code: 137`, an
+    out-of-memory linker on a machine whose Docker VM is too small, which this
+    project warns about before it ever starts — the step block's last line is a
+    cheerful `[95%] Linking CXX executable worldserver` and the 137 is the only
+    sign anything went wrong. Returning the block alone hid it (review,
+    2026-09-12).
+
+    Fences are paired structurally rather than by taking the last two: the
+    opening one is the last that carries a `_BUILDKIT_STEP_HEADER`, and the
+    closing one is the first fence after it. An odd count, a stray rule in some
+    tool's output, or a `------` inside the step's own lines then costs at most
+    a short block instead of silently choosing two unrelated rules.
+
+    An empty block with a non-empty `ERROR:` line, or both empty, tells the
+    caller to fall back — a silent failing step must not come out worse than
+    it did before.
     """
-    fences = [index for index, line in enumerate(said) if line == _BUILDKIT_FENCE]
-    if len(fences) < 2:
-        return []
-    opened, closed = fences[-2], fences[-1]
-    # The line under the opening fence is BuildKit's ` > [3/3] RUN …:` header.
-    # Requiring it is what keeps a stray rule in some tool's own output from
-    # being read as a step block, and dropping it is deliberate: naming the
-    # command is what this whole ticket is about not doing.
-    if opened + 1 >= closed or not said[opened + 1].startswith(">"):
-        return []
-    return said[opened + 2 : closed]
+    error_at: int | None = None
+    for index in range(len(said) - 1, -1, -1):
+        if said[index].startswith("ERROR:"):
+            error_at = index
+            break
+    if error_at is None:
+        # No BuildKit failure marker: not a failed build. An import, a clone or
+        # a map extractor reaches here too, and none of them is parsed.
+        return [], ""
+    error_line = said[error_at]
+
+    opened: int | None = None
+    for index in range(error_at - 1, 0, -1):
+        if said[index - 1] == _BUILDKIT_FENCE and _BUILDKIT_STEP_HEADER.match(said[index]):
+            opened = index - 1
+            break
+    if opened is None:
+        return [], error_line
+    closed: int | None = None
+    for index in range(opened + 2, error_at):
+        if said[index] == _BUILDKIT_FENCE:
+            closed = index
+            break
+    if closed is None:
+        return [], error_line
+    # `opened + 2` drops the header: naming the command is what this ticket
+    # exists to stop doing.
+    return said[opened + 2 : closed], error_line
 
 
 def last_words(tail: tuple[str, ...]) -> str:
@@ -3182,12 +3235,22 @@ def last_words(tail: tuple[str, ...]) -> str:
 
     For a failed `docker build` the last lines are Docker's own epilogue rather
     than anything that went wrong, so the failing step's output is preferred
-    when it can be found — see `_buildkit_step_output()`.
+    and the `ERROR:` line is kept beside it with its command elided — see
+    `_buildkit_failure()`.
     """
     said = [line.strip() for line in tail if line.strip()]
     if not said:
         return "it printed nothing at all"
-    said = _buildkit_step_output(said) or said
+    block, error_line = _buildkit_failure(said)
+    if block:
+        text = " / ".join(block[-_LAST_WORDS_LINES:])
+        if len(text) > _LAST_WORDS_CHARS:
+            # From the HEAD here, the opposite of the fallback below: a compiler
+            # puts `file:line:column: error:` at the front of its diagnostic,
+            # and keeping the tail of a long one throws away the only part that
+            # says where to look (review, 2026-09-12).
+            text = text[:_LAST_WORDS_CHARS] + "…"
+        return f"{text} / {_elided(error_line)}" if error_line else text
     text = " / ".join(said[-_LAST_WORDS_LINES:])
     return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
 
