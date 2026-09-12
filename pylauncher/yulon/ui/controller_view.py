@@ -580,8 +580,8 @@ class ControllerServices:
     It costs one `git fetch` per installed checkout, which is why it is a button
     and not part of the status poll.
     """
-    installed_modules: Callable[[], frozenset[str]] | None = None
-    """Which module folders exist in this install, or None for a game with no modules.
+    installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None
+    """What is installed here per manifest family, or None for a game with no modules.
 
     T41: the list was built from the manifest STORE alone, so it showed what
     this game could install and never what it had. A player who pointed Yu'lon
@@ -595,8 +595,11 @@ class ControllerServices:
     run on every `reload_modules()`. Folding the cheap fact into the expensive
     call is what kept it off the list in the first place.
 
-    Returns ids, not paths: the view compares them with `manifest.id` and must
-    not learn where an install keeps its modules.
+    Returns ids per family, not paths: the view compares them with
+    `manifest.id` for that manifest's own `type` and must not learn where an
+    install keeps each family. One folder per family is the point — reading
+    `modules/` for all four marked an ale installed because a module of the
+    same id was, and never marked a real ale at all (review, 2026-09-12).
     """
     module_from_link: Callable[[str], Manifest] | None = None
     """Derive a manifest from a link the user pasted, or raise with the refusal.
@@ -932,7 +935,7 @@ def _assemble(
     uninstall: Uninstall | None = None,
     module_sql: ModuleSqlRoute | None = None,
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
-    installed_modules: Callable[[], frozenset[str]] | None = None,
+    installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
     module_install_custom: CustomModuleInstall | None = None,
@@ -1341,7 +1344,7 @@ def _for_wotlk(
         # the same `has_manifests` flag, so the three CMaNGOS games — which have
         # no modules folder — keep a list of the catalog and nothing else.
         installed_modules=(
-            (lambda: docker.installed_module_names(server_dir)) if entry.has_manifests else None
+            (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
         ),
         # A module from a link or a folder (design page, lane C's four seams),
         # wired once lanes A and B were on the branch (2026-09-08). Lane C
@@ -2213,6 +2216,34 @@ It is installed whatever the catalog thinks, and `apply_module.module_updates()`
 already takes that position for its own rows. A list that silently omitted a
 hand-cloned module would be the same "None of modules detected" in a smaller
 place.
+"""
+
+
+def _clone_dir_of(kind: str) -> str:
+    """Which directory this manifest family's clones land in, by its plain name.
+
+    `apply.CLONE_DIRS` is keyed by the `ManifestType` literal; the view carries
+    families around as plain strings (they arrive from `FAMILY_FILES` and from
+    `manifest.type`). Looked up defensively rather than cast: a family with no
+    clone directory gets its own bucket under its own name, which keeps its
+    rows separate instead of merging them into somebody else's folder.
+    """
+    for family, folder in apply_module.CLONE_DIRS.items():
+        if family == kind:
+            return folder
+    return kind
+
+
+UNCATALOGUED_PRESS = (
+    "This module is installed in this server's folder, but this game's catalog has no "
+    "manifest for it, so Yu'lon has no steps to install or remove. Nothing was changed. "
+    "It is still compiled into the server and its SQL is still applied by the importer."
+)
+"""What a press on one of T41's uncatalogued rows says.
+
+The rows exist so somebody can SEE what is installed; the buttons above them
+cannot act on a module with no manifest. Saying so is the difference between a
+control that is inert and one that looks broken.
 """
 
 MODULE_SQL_RUNNING = "Running the importer over the modules installed here. What it prints:"
@@ -5547,14 +5578,14 @@ class ControllerView(QWidget):
         # What is actually in this install's modules folder. Cheap enough for
         # every reload (directory names, no git), which is why it is its own
         # seam and not part of `module_updates` — see `ControllerServices`.
-        installed: frozenset[str] = frozenset()
+        installed: Mapping[str, frozenset[str]] = {}
         reader = self.services.installed_modules
         if reader is not None:
             try:
                 installed = reader()
             except Exception as exc:  # boundary: an unreadable folder must not kill the UI
                 logger.warning(f"could not read which modules are installed: {exc}")
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         for kind in FAMILY_FILES:
             try:
                 items = list(store.load_all(kind))
@@ -5562,7 +5593,7 @@ class ControllerView(QWidget):
                 self.module_list.addItem(f"!! could not load {kind}s: {exc}")
                 continue
             for manifest in items:
-                here = manifest.id in installed
+                here = manifest.id in installed.get(manifest.type, frozenset())
                 mark = f"{INSTALLED_MARK} " if here else ""
                 item = QListWidgetItem(
                     f"{mark}[{manifest.type}] {manifest.name} — {manifest.description}"
@@ -5570,15 +5601,36 @@ class ControllerView(QWidget):
                 item.setData(256, manifest.id)  # Qt.UserRole
                 self.module_list.addItem(item)
                 self._manifests[manifest.id] = manifest
-                seen.add(manifest.id)
+                seen.add((manifest.type, manifest.id))
         # A module on disk the catalog has never heard of is still installed.
         # No manifest is invented for it: it gets a row and no entry in
         # `_manifests`, so the install/remove buttons stay inert on it rather
         # than acting on a manifest this app made up.
-        for name in sorted(installed - seen):
-            self.module_list.addItem(
-                QListWidgetItem(f"{INSTALLED_MARK} [module] {name} — {NOT_IN_CATALOG}")
-            )
+        # Accounted for per FOLDER, because that is the unit clones share:
+        # `apply.CLONE_DIRS` puts ale and keg in one directory, so a keg's clone
+        # is read into both families' sets and the keg manifest that matched it
+        # left the ale copy looking unknown — `bmah` matched the shipped keg and
+        # then appeared a second time as an uncatalogued ale, measured on the
+        # live install (2026-09-12). Accounting by bare name instead would have
+        # fixed that and swallowed the opposite case: a clone in `ale_scripts/`
+        # whose name happens to match a MODULE manifest that is not installed.
+        accounted: dict[str, set[str]] = {}
+        for kind_seen, id_seen in seen:
+            accounted.setdefault(_clone_dir_of(kind_seen), set()).add(id_seen)
+        for kind in FAMILY_FILES:
+            known = accounted.setdefault(_clone_dir_of(kind), set())
+            for name in sorted(installed.get(kind, frozenset())):
+                if name in known:
+                    continue
+                known.add(name)
+                self.module_list.addItem(
+                    QListWidgetItem(f"{INSTALLED_MARK} [{kind}] {name} — {NOT_IN_CATALOG}")
+                )
+
+    def _selected_row_is_uncatalogued(self) -> bool:
+        """Is the selected row one of T41's "installed here, not in the catalog" rows?"""
+        item = self.module_list.currentItem()
+        return item is not None and NOT_IN_CATALOG in item.text()
 
     def selected_manifest(self) -> Manifest | None:
         item = self.module_list.currentItem()
@@ -5589,6 +5641,14 @@ class ControllerView(QWidget):
     def _module_action(self, action: str) -> None:
         manifest = self.selected_manifest()
         applier = self.services.applier
+        if manifest is None and self._selected_row_is_uncatalogued():
+            # T41's own rows: installed here, no manifest in this game's
+            # catalog, so there is nothing for the applier to run. Said rather
+            # than returned in silence — a press that does nothing and explains
+            # nothing is the defect this ticket exists to remove, one control
+            # further along (review, 2026-09-12).
+            self.module_report.setPlainText(UNCATALOGUED_PRESS)
+            return
         if manifest is None or applier is None:
             return
         go_ahead, values = self._module_values(manifest, action)

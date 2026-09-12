@@ -56,7 +56,12 @@ from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
-from yulon.ui.controller_view import INSTALLED_MARK, ControllerServices, ControllerView
+from yulon.ui.controller_view import (
+    INSTALLED_MARK,
+    NOT_IN_CATALOG,
+    ControllerServices,
+    ControllerView,
+)
 from yulon.ui.widgets.job import run_inline
 
 WOTLK = load_catalog().get("wow-wotlk")
@@ -7149,11 +7154,26 @@ def test_neither_one_line_sink_can_show_a_control_character(
     assert view.module_report.toPlainText().splitlines()[-1] == ">> Applying mod-playerbots.sql"
 
 
-def _installed_view(ps: _Ps, tmp_path: Path, installed: frozenset[str]) -> ControllerView:
-    """A WotLK view whose install has `installed` in its modules folder."""
+def _installed_view(ps: _Ps, tmp_path: Path, **families: frozenset[str]) -> ControllerView:
+    """A WotLK view whose install has these clones, per manifest family.
+
+    Per family and not one set, because `apply.CLONE_DIRS` gives each family its
+    own folder: a module lands in `modules/`, an ale and a keg in
+    `ale_scripts/`, a mod in `sql_scripts/clones/`.
+    """
     services = _services(ps, tmp_path, [])
-    object.__setattr__(services, "installed_modules", lambda: installed)
+    object.__setattr__(services, "installed_modules", lambda: dict(families))
     return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def _marked(view: ControllerView) -> list[str]:
+    """Rows the list marks as installed — by LEADING mark, not a substring.
+
+    `INSTALLED_MARK in row` would also match a description that happens to
+    contain the glyph (review, 2026-09-12).
+    """
+    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
+    return [r for r in rows if r.startswith(INSTALLED_MARK)]
 
 
 def test_the_modules_list_says_which_modules_are_installed(
@@ -7166,18 +7186,17 @@ def test_the_modules_list_says_which_modules_are_installed(
     had. Measured on the live install on `yulon-win11`: `mod-playerbots` sits in
     `modules/` and all 41 catalog rows looked identical to a server with none.
     """
-    view = _installed_view(ps, tmp_path, frozenset({"mod-transmog"}))
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    marked = _marked(view)
+
+    # Exactly one row, and it is the catalog's own transmog row -- not an
+    # erroneous extra "not in catalog" row beside an unmarked one, which an
+    # `any(...)` assertion would have accepted.
+    assert len(marked) == 1, marked
+    assert "Transmogrification" in marked[0], marked
+    assert NOT_IN_CATALOG not in marked[0], marked
     rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
-
-    transmog = [r for r in rows if "mod-transmog" in r or "Transmogrification" in r]
-    assert transmog, rows[:5]
-    assert any(INSTALLED_MARK in r for r in transmog), transmog
-
-    # And a module the catalog offers but this install does not have is not
-    # marked -- otherwise the mark says nothing.
-    others = [r for r in rows if r not in transmog]
-    assert others, rows[:5]
-    assert not any(INSTALLED_MARK in r for r in others), [r for r in others if INSTALLED_MARK in r]
+    assert len(rows) > 5, rows
 
 
 def test_a_module_on_disk_the_catalog_never_heard_of_still_gets_a_row(
@@ -7190,12 +7209,15 @@ def test_a_module_on_disk_the_catalog_never_heard_of_still_gets_a_row(
     row" — and a list that silently omits somebody's hand-cloned module is the
     same "None of modules detected" in a smaller place.
     """
-    view = _installed_view(ps, tmp_path, frozenset({"mod-something-homemade"}))
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-something-homemade"}))
     rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
 
     mine = [r for r in rows if "mod-something-homemade" in r]
     assert len(mine) == 1, rows[-5:]
-    assert INSTALLED_MARK in mine[0], mine
+    assert mine[0].startswith(INSTALLED_MARK), mine
+    assert NOT_IN_CATALOG in mine[0], mine
+    # No manifest is invented for it, so the buttons have nothing to act on.
+    assert "mod-something-homemade" not in view._manifests
 
 
 def test_a_game_with_no_installed_modules_seam_lists_the_catalog_unchanged(
@@ -7208,3 +7230,63 @@ def test_a_game_with_no_installed_modules_seam_lists_the_catalog_unchanged(
     rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
     assert rows, "the catalog still lists"
     assert not any(INSTALLED_MARK in r for r in rows), [r for r in rows if INSTALLED_MARK in r]
+
+
+def test_pressing_install_on_an_uncatalogued_row_says_why_nothing_happened(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Review, 2026-09-12: those rows were inert and silent.
+
+    T41 added rows for modules on disk the catalog has never heard of. They
+    carry no manifest, so `_module_action` returned at its first line and the
+    press did nothing and said nothing — a control that looks broken, which is
+    the same complaint this ticket started from, one step further along.
+    """
+    from yulon.ui.controller_view import UNCATALOGUED_PRESS
+
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-something-homemade"}))
+    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
+    index = next(i for i, r in enumerate(rows) if "mod-something-homemade" in r)
+    view.module_list.setCurrentRow(index)
+
+    assert view.selected_manifest() is None, "the row must carry no manifest"
+    view._module_action("install")
+    assert view.module_report.toPlainText() == UNCATALOGUED_PRESS, view.module_report.toPlainText()
+
+
+def test_a_family_is_marked_from_its_own_clone_folder_not_from_modules(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Review, 2026-09-12: `apply.CLONE_DIRS` gives each family a different folder.
+
+    A module lands in `modules/`, an ale and a keg in `ale_scripts/`, a mod in
+    `sql_scripts/clones/`. Reading `modules/` for all four marked an ale
+    installed because a MODULE of the same id was, and never marked a real ale
+    at all. The seam hands a set per family, and a row is marked only from its
+    own family's set.
+    """
+    # `mod-ale` is a shipped module id. Claim it is present in the ALE family's
+    # folder and absent from the module family's: the module row must stay
+    # unmarked, and a row must appear for the ale clone instead.
+    view = _installed_view(ps, tmp_path, module=frozenset(), ale=frozenset({"mod-ale"}))
+    marked = _marked(view)
+    assert marked, "the ale clone is installed and must be marked somewhere"
+    assert all("[module]" not in r for r in marked), marked
+
+
+def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Measured live, 2026-09-12: `bmah` appeared twice.
+
+    `apply.CLONE_DIRS` puts ale and keg in one folder, so a keg's clone is read
+    into BOTH families' sets. The keg manifest matched it and marked its row;
+    the ale copy then looked like a module nobody had a manifest for and got an
+    "installed here — not in this game's catalog" row of its own, for a thing
+    the list had already named one line up.
+    """
+    view = _installed_view(ps, tmp_path, ale=frozenset({"bmah"}), keg=frozenset({"bmah"}))
+    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
+    bmah = [r for r in rows if r.startswith(INSTALLED_MARK) and "bmah" in r.lower()]
+    assert len(bmah) == 1, bmah
+    assert NOT_IN_CATALOG not in bmah[0], bmah

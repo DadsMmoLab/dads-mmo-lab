@@ -1875,18 +1875,34 @@ def _module_dir_names(server_dir: Path) -> list[str] | None:
         return None
 
 
-def installed_module_names(server_dir: Path) -> frozenset[str]:
-    """Which modules are installed here, as a set of folder names (T41).
+def clone_names(folder: Path) -> frozenset[str]:
+    """The directory names directly inside `folder`, as a set. Unreadable is empty (T41).
 
-    What the Modules tab marks its rows with. Cheap on purpose — directory
-    names, no git, no daemon — because it runs on every `reload_modules()`,
-    where `module_updates()` costs a `git fetch` per checkout and is a button.
+    What the Modules tab marks its rows with, one family's clone directory at a
+    time. Cheap on purpose — directory names, no git, no daemon — because it
+    runs on every `reload_modules()`, where `module_updates()` costs a `git
+    fetch` per checkout and is a button.
 
     An unreadable or missing folder answers the empty set: the list then marks
     nothing, which is what it did before this existed, rather than claiming
-    every module is missing.
+    every module is missing. That is the opposite of `allowed_modules()`, which
+    must answer `all` for the same folder — see `_module_dir_names()`.
+
+    Takes the folder rather than the server directory because the four manifest
+    families do NOT share one: `apply.CLONE_DIRS` puts a module in `modules/`,
+    an ale and a keg in `ale_scripts/` and a mod in `sql_scripts/clones/`.
+    Reading `modules/` for all four marked an ale installed because a module of
+    the same id was, and never marked a real ale at all (review, 2026-09-12).
     """
-    return frozenset(_module_dir_names(server_dir) or ())
+    try:
+        return frozenset(
+            entry.name
+            for entry in folder.iterdir()
+            if entry.is_dir() and not entry.name.startswith(".")
+        )
+    except OSError as exc:
+        logger.info(f"could not list {folder}, so nothing there is marked installed: {exc}")
+        return frozenset()
 
 
 def run_one_shot(

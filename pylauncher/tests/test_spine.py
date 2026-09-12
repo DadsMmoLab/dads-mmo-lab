@@ -2453,6 +2453,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         'its `all`/`""` rule: this function answers `None` for unreadable and `[]` for empty, '
         "and each caller decides what those two mean to it. Neither caller writes anything"
     ),
+    ("docker.py", "clone_names"): (
+        "lists one manifest family's clone directory so the Modules tab can mark which of its "
+        "rows are installed (T41); decides no write and never touches the folder. Its "
+        "`except OSError` logs and answers the EMPTY set, which is the opposite of "
+        "`allowed_modules()` on the same folder -- there an unreadable answer must be `all` "
+        "so the importer keeps upstream's default, here it must mark nothing rather than "
+        "claim every module is missing. Takes the folder and not the server directory because "
+        "`apply.CLONE_DIRS` gives each family its own"
+    ),
     ("docker.py", "_first_populated_ancestor"): (
         "walks up a path looking for a directory that HAS something in it, to tell a real "
         "mount from an empty mount point; its own `except OSError` logs and answers None, "

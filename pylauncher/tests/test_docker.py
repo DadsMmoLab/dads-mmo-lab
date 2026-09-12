@@ -6302,7 +6302,7 @@ def test_buildkit_shaped_output_with_no_failure_marker_falls_back() -> None:
     assert "[3/3]" in said, said
 
 
-def test_installed_module_names_reads_folders_only(tmp_path: Path) -> None:
+def test_clone_names_reads_folders_only(tmp_path: Path) -> None:
     """T41: what the Modules tab marks its rows with.
 
     The live `modules/` folder holds six loose files beside the checkouts —
@@ -6319,7 +6319,7 @@ def test_installed_module_names_reads_folders_only(tmp_path: Path) -> None:
     (modules / "CMakeLists.txt").write_text("x", encoding="utf-8")
     (modules / "how_to_make_a_module.md").write_text("x", encoding="utf-8")
 
-    assert docker.installed_module_names(tmp_path) == frozenset({"mod-playerbots", "mod-transmog"})
+    assert docker.clone_names(modules) == frozenset({"mod-playerbots", "mod-transmog"})
 
 
 def test_a_missing_modules_folder_marks_nothing_rather_than_claiming_anything(
@@ -6333,5 +6333,5 @@ def test_a_missing_modules_folder_marks_nothing_rather_than_claiming_anything(
     and not that rule, which is why `_module_dir_names()` returns `None` and
     lets each decide.
     """
-    assert docker.installed_module_names(tmp_path) == frozenset()
+    assert docker.clone_names(tmp_path / "modules") == frozenset()
     assert docker.allowed_modules(tmp_path) == docker.ALL_MODULES

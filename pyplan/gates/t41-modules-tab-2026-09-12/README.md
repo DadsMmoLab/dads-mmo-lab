@@ -35,5 +35,25 @@ rows marked       : 2
 ```
 
 41 rows became 42: `mod-playerbots` is installed and the catalog has never
-heard of it, so it gets a row of its own rather than being left out. The other
-39 are unmarked, which is the half that makes the mark mean something.
+heard of it, so it gets a row of its own rather than being left out. The rest
+are unmarked, which is the half that makes the mark mean something.
+
+After the review round made the read per-family, the same install answers:
+
+```
+per-family on disk:
+   ale      ['bmah']
+   keg      ['bmah']
+   mod      []
+   module   ['mod-playerbots', 'mod-transmog']
+rows 42, marked 3
+    ✓ [module] Transmogrification
+    ✓ [keg] Black Market Auction House
+    ✓ [module] mod-playerbots — installed here — not in this game's catalog
+```
+
+`bmah` is the find: a keg installed in `ale_scripts/`, which the first pass —
+reading `modules/` for every family — could never have marked at all. It is
+also why accounting is per FOLDER: ale and keg share `ale_scripts/`, so the
+first per-family pass listed `bmah` twice, once matched as a keg and once as an
+uncatalogued ale.
