@@ -513,3 +513,42 @@ def test_a_card_is_priced_at_its_most_expensive_row() -> None:
     assert tuning.worst(["restart", "recreate"]) == "recreate"
     assert tuning.worst(["read-only", "restart"]) == "restart"
     assert tuning.worst([]) == "read-only"
+
+
+# -- a catalog shorthand is not a key ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "AutoBalance.Enable.*",
+        "MountScaling.Ground.Journeyman.*",
+        "AuctionHouseBot.ListProportion.*",
+        "common/rare/ultraRare_*_price",
+        "FillRateCommon / FillRateRare / FillRateUltra",
+        "PotentialDurations ",
+    ],
+)
+def test_a_key_that_names_a_family_of_keys_is_listed_read_only(key: str, tmp_path: Path) -> None:
+    """Six of the 107 shipped "keys" are shorthand for a GROUP of settings.
+
+    `AutoBalance.Enable.*` is eleven real keys (`.Global`, `.5M`, `.10M`, …) and
+    `FillRateCommon / FillRateRare / FillRateUltra` is three. Writing any of
+    them would append a line the module never reads, under a comment saying
+    Yu'lon put it there.
+    """
+    _write(tmp_path, CONF, "[worldserver]\n")
+    manifest = _manifest(conf=[_conf(CONF, [{"key": key}])])
+    (row,) = tuning.rows_for([manifest], {"module": frozenset({"mod-beast"})}, tmp_path)
+    assert not row.editable
+    assert row.read_only_reason == tuning.NOT_ONE_KEY.format(key=key)
+    assert tuning.apply_rule(row) == "read-only"
+
+
+def test_an_ordinary_key_is_still_writable(tmp_path: Path) -> None:
+    """The guard above must not swallow the keys this whole tab exists for."""
+    _write(tmp_path, CONF, "[worldserver]\n")
+    for key in ("BeastMaster.Enable", "SoloCraft.Debuff.Enable", "mod-quest-loot.Enable"):
+        manifest = _manifest(conf=[_conf(CONF, [{"key": key}])])
+        (row,) = tuning.rows_for([manifest], {"module": frozenset({"mod-beast"})}, tmp_path)
+        assert row.editable, key

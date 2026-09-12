@@ -30,13 +30,13 @@
       "file": "env/dist/etc/modules/mod_dungeon_master.conf",
       "keys": [
         {
-          "key": "Scaling.LevelBand"
+          "key": "DungeonMaster.Scaling.LevelBand"
         },
         {
-          "key": "Rewards.BaseGold"
+          "key": "DungeonMaster.Rewards.BaseGold"
         },
         {
-          "key": "Roguelike.Enable"
+          "key": "DungeonMaster.Roguelike.Enable"
         }
       ],
       "template": "conf/mod_dungeon_master.conf.dist"

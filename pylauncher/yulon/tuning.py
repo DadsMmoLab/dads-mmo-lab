@@ -67,8 +67,32 @@ MORE_THAN_ONE_FILE = (
     "no single file to show or to write, so this one is read-only."
 )
 
+NOT_ONE_KEY = (
+    "The catalog names `{key}`, which is shorthand for a GROUP of settings rather than one "
+    "key — Yu'lon would not know which line to write. Edit them in the file itself, on the "
+    "right."
+)
+"""A `ConfKey.key` that is not one key at all.
+
+Six of the 107 shipped keys are like this, and every one of them was written as
+a note to a reader rather than as something to write: `AutoBalance.Enable.*` is
+eleven real keys, `FillRateCommon / FillRateRare / FillRateUltra` is three, and
+`common/rare/ultraRare_*_price` is a naming pattern. Found while enriching the
+manifests for T43 point 7, and it matters because before T43 nothing WROTE a
+key with no default — these six were only ever printed in a skip line.
+"""
+
 CONF_SUFFIX = ".conf"
 LUA_SUFFIX = ".lua"
+
+_PLAIN_KEY = re.compile(r"^[A-Za-z0-9_.\-]+$")
+"""What a real conf key looks like: the character set every one in this catalog uses.
+
+An allow-list and not a deny-list of `*` and `/`, because the question is "is
+this one key?" and the honest answer for anything outside this set is "we cannot
+tell" -- which has to degrade to read-only, the same way an unknown `type`
+degrades to a text box.
+"""
 
 
 def _is_glob(path: str) -> bool:
@@ -92,14 +116,17 @@ def backend_of(file: str) -> Backend:
     return "other"
 
 
-def _read_only_reason(file: str, backend: Backend) -> str | None:
+def _read_only_reason(file: str, backend: Backend, key: str = "x") -> str | None:
     """Why this row cannot be written, or `None` when it can.
 
-    Ordered by what blocks hardest. A glob has no single file at all, so it
+    Ordered by what blocks hardest: a `key` that is not one key is asked about
+    first, because it is true whatever file it points at. A glob has no single file at all, so it
     could not be written even if its backend were writable; the Lua sentence
     comes next because it is the one a user is most likely to go looking for
     (`accountwide/*.lua` is both, and either answer would be true).
     """
+    if not _PLAIN_KEY.match(key):
+        return NOT_ONE_KEY.format(key=key)
     if _is_glob(file):
         return MORE_THAN_ONE_FILE.format(file=file)
     if backend == "lua":
@@ -199,7 +226,6 @@ def rows_for(
                 continue
             for conf in manifest.conf:
                 backend = backend_of(conf.file)
-                reason = _read_only_reason(conf.file, backend)
                 # Read once per FILE, not once per key: a conf with a dozen keys
                 # is one open, and the whole tab is one pass over the install.
                 text = (
@@ -208,6 +234,7 @@ def rows_for(
                     else _read(server_dir / conf.file)
                 )
                 for key in conf.keys:
+                    reason = _read_only_reason(conf.file, backend, key.key)
                     rows.append(
                         TuningRow(
                             module_id=manifest.id,
