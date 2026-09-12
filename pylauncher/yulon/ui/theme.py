@@ -436,7 +436,125 @@ QFrame[frameShape="5"]:hover, QFrame[frameShape="StyledPanel"]:hover {{
     border-left: 1.5px solid #FFF8D0;
 }}
 
+/* --- Themed Campaign Box Covers --- */
+/* WotLK - Icy Frostmourne Theme */
+QFrame#catalog-tile-wow-wotlk {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #121A26, stop:0.5 #101620, stop:1 #0A0F16
+    );
+    border: 2px solid #2B5278;
+    border-top: 2px solid #80D0FF;
+    border-left: 2px solid #50A0E0;
+    border-radius: 7px;
+}}
+
+QFrame#catalog-tile-wow-wotlk:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #182638, stop:0.5 #131E2C, stop:1 #0D141E
+    );
+    border: 2px solid #50A8FF;
+    border-top: 2px solid #E0F4FF;
+    border-left: 2px solid #A0DAFF;
+}}
+
+QFrame#catalog-tile-wow-wotlk QScrollArea#tile-desc-box {{
+    background-color: #080D14;
+    border: 1px solid #1C3248;
+}}
+
+/* TBC - Fel Fire & Brimstone Theme */
+QFrame#catalog-tile-wow-tbc {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #182214, stop:0.5 #121A0F, stop:1 #0B1209
+    );
+    border: 2px solid #285A20;
+    border-top: 2px solid #60FF30;
+    border-left: 2px solid #30D018;
+    border-radius: 7px;
+}}
+
+QFrame#catalog-tile-wow-tbc:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #20301B, stop:0.5 #172414, stop:1 #0F180D
+    );
+    border: 2px solid #40FF20;
+    border-top: 2px solid #D8FFB8;
+    border-left: 2px solid #70FF40;
+}}
+
+QFrame#catalog-tile-wow-tbc QScrollArea#tile-desc-box {{
+    background-color: #091207;
+    border: 1px solid #1E3E16;
+}}
+
+/* Vanilla - Classic Polished Steel & Dark Iron Theme */
+QFrame#catalog-tile-wow-vanilla {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #202228, stop:0.5 #16181D, stop:1 #0E0F13
+    );
+    border: 2px solid #4A5666;
+    border-top: 2px solid #D8E4F0;
+    border-left: 2px solid #9AB0C4;
+    border-radius: 7px;
+}}
+
+QFrame#catalog-tile-wow-vanilla:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #2A2E38, stop:0.5 #1E2128, stop:1 #14161C
+    );
+    border: 2px solid #80A0C0;
+    border-top: 2px solid #FFFFFF;
+    border-left: 2px solid #D0E0F0;
+}}
+
+QFrame#catalog-tile-wow-vanilla QScrollArea#tile-desc-box {{
+    background-color: #0A0B0E;
+    border: 1px solid #2A323E;
+}}
+
+/* Tortoise - Mystic Emerald Jade Theme */
+QFrame#catalog-tile-wow-tortoise {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #1A221C, stop:0.5 #131A15, stop:1 #0C110E
+    );
+    border: 2px solid #2E6044;
+    border-top: 2px solid #50E898;
+    border-left: 2px solid #38B870;
+    border-radius: 7px;
+}}
+
+QFrame#catalog-tile-wow-tortoise:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #223026, stop:0.5 #18221B, stop:1 #101612
+    );
+    border: 2px solid #40E088;
+    border-top: 2px solid #C0FFDC;
+    border-left: 2px solid #70F0B0;
+}}
+
+QFrame#catalog-tile-wow-tortoise QScrollArea#tile-desc-box {{
+    background-color: #08100C;
+    border: 1px solid #1B402E;
+}}
+
 /* --- Catalog Tile Text Hierarchy & Scrollable Box Cover Inset --- */
+QScrollArea#catalog-shelf-scroll {{
+    background-color: transparent;
+    border: none;
+}}
+
+QScrollArea#catalog-shelf-scroll > QWidget > QWidget {{
+    background-color: transparent;
+}}
+
 QScrollArea#tile-desc-box {{
     background-color: {COLOR_BG_INPUT};
     border: 1px solid {COLOR_BRASS_DEEP};
@@ -460,8 +578,12 @@ QLabel#tile-desc {{
 }}
 
 QLabel#tile-meta {{
-    font-size: {_px(12, scale)};
-    color: {COLOR_TEXT_MUTED};
+    font-size: {_px(11, scale)};
+    color: {COLOR_TEXT_PRIMARY};
+    background-color: rgba(10, 13, 18, 0.6);
+    border: 1px solid {COLOR_BRASS_DARK};
+    border-radius: 3px;
+    padding: 2px 6px;
 }}
 
 QLabel#tile-warning {{

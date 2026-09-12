@@ -75,7 +75,6 @@ from typing import Protocol, cast
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox,
-    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -398,6 +397,7 @@ class PartyPanel(QWidget):
         self.candidates_button = QPushButton(SHOW_CANDIDATES, self)
         self.candidates_button.clicked.connect(self.show_candidates)
         self.candidate_list = QListWidget(self)
+        self.candidate_list.setMinimumHeight(60)
         self.candidate_list.currentRowChanged.connect(self._candidate_chosen)
         self.candidate_note = QLabel("", self)
         self.candidate_note.setWordWrap(True)
@@ -414,7 +414,7 @@ class PartyPanel(QWidget):
         self.link_button.clicked.connect(self.link_account)
 
         self.member_list = QListWidget(self)
-        self.member_list.setMinimumHeight(110)
+        self.member_list.setMinimumHeight(70)
         self.member_list.currentRowChanged.connect(self._member_chosen)
         self.dismiss_button = QPushButton(DISMISS_NOTHING, self)
         self.dismiss_button.clicked.connect(self.dismiss_bot)
@@ -422,7 +422,7 @@ class PartyPanel(QWidget):
         self.dismiss_all_button.clicked.connect(self.dismiss_all)
 
         self.check_list = QListWidget(self)
-        self.check_list.setMinimumHeight(90)
+        self.check_list.setMinimumHeight(60)
         self.summary = QLabel("", self)
         self.summary.setWordWrap(True)
         self.summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -431,38 +431,44 @@ class PartyPanel(QWidget):
         self.report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         who = QHBoxLayout()
-        who.setSpacing(8)
+        who.setSpacing(6)
         who.addWidget(QLabel("Character", self))
         who.addWidget(self.character, 1)
         who.addWidget(self.refresh_button)
 
-        # A form for the add-a-bot controls: each labelled field on its own
-        # row, aligned, so class/spec/level have room and the labels line up.
-        add_form = QFormLayout()
-        add_form.setSpacing(8)
-        add_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        add_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        add_form.addRow("Class", self.klass)
-        add_form.addRow("Spec", self.spec)
-        add_form.addRow("Level", self.level)
-        add_form.addRow(self.add_button)
+        # Compact 2-row layout for Class, Spec, Level and Add bot:
+        # Row 1: Class + Spec pickers side-by-side
+        row_class_spec = QHBoxLayout()
+        row_class_spec.setSpacing(6)
+        row_class_spec.addWidget(QLabel("Class", self))
+        row_class_spec.addWidget(self.klass, 1)
+        row_class_spec.addWidget(QLabel("Spec", self))
+        row_class_spec.addWidget(self.spec, 1)
+
+        # Row 2: Level spinner + Add a bot button
+        row_lvl_add = QHBoxLayout()
+        row_lvl_add.setSpacing(6)
+        row_lvl_add.addWidget(QLabel("Level", self))
+        row_lvl_add.addWidget(self.level, 1)
+        row_lvl_add.addWidget(self.add_button, 1)
 
         named = QHBoxLayout()
-        named.setSpacing(8)
+        named.setSpacing(6)
         named.addWidget(self.candidates_button, 1)
         named.addWidget(self.add_named_button, 1)
 
         link = QHBoxLayout()
-        link.setSpacing(8)
+        link.setSpacing(6)
         link.addWidget(QLabel("Link account", self))
         link.addWidget(self.link_name, 1)
         link.addWidget(self.link_button)
 
         box = QVBoxLayout(self)
-        box.setSpacing(10)
-        box.setContentsMargins(6, 6, 6, 6)
+        box.setSpacing(6)
+        box.setContentsMargins(4, 4, 4, 4)
         box.addLayout(who)
-        box.addLayout(add_form)
+        box.addLayout(row_class_spec)
+        box.addLayout(row_lvl_add)
         box.addWidget(self.level_absent)
         box.addLayout(named)
         box.addWidget(self.candidate_list, 1)
@@ -475,14 +481,18 @@ class PartyPanel(QWidget):
         in_party.setObjectName("section-title")
         box.addWidget(in_party)
         box.addWidget(self.summary)
-        box.addWidget(self.member_list, 2)
-        box.addWidget(self.dismiss_button)
-        box.addWidget(self.dismiss_all_button)
+        box.addWidget(self.member_list, 1)
+
+        dismiss_row = QHBoxLayout()
+        dismiss_row.setSpacing(6)
+        dismiss_row.addWidget(self.dismiss_button, 1)
+        dismiss_row.addWidget(self.dismiss_all_button, 1)
+        box.addLayout(dismiss_row)
 
         needs = QLabel("What My Party needs", self)
         needs.setObjectName("section-title")
         box.addWidget(needs)
-        box.addWidget(self.check_list, 2)
+        box.addWidget(self.check_list, 1)
         box.addWidget(self.report)
         self._member_chosen(-1)
         self._candidate_chosen(-1)

@@ -250,7 +250,7 @@ def build_window() -> object:
     catalog = load_catalog()
     state = load_state()
     window = _Window()
-    window.setWindowTitle(f"Dad's MMO Lab launcher — Yu'lon {__version__}")
+    window.setWindowTitle(f"Dad's MMO Lab — Yu'lon {__version__}")
     apply_warcraft_theme(window)
     window._theme_scale = 1.0  # matches the unscaled theme just applied
 
@@ -282,7 +282,7 @@ def build_window() -> object:
             return
         menu = QMenu(tab_bar)
         if index == 0:
-            act = menu.addAction("Catalog (Store)")
+            act = menu.addAction("Catalog of Server Emulators")
             act.setEnabled(False)
         else:
             widget = tabs.widget(index)

@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -47,6 +48,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -4945,7 +4947,12 @@ class ControllerView(QWidget):
         # The design's own cross-link (`b-users-surface.md:111`): a bot that just
         # joined a party is a row the Browse list above has not got yet.
         self.party_panel.party_changed.connect(self.refresh_bots)
-        inside.addWidget(self.party_panel)
+
+        scroll = QScrollArea(group)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(self.party_panel)
+        inside.addWidget(scroll, 1)
         return group
 
     def _show_page_buttons(self) -> None:

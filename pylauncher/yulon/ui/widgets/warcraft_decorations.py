@@ -159,7 +159,7 @@ class WarcraftHeader(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setFixedHeight(56)
-        self.setStyleSheet("WarcraftHeader { background: transparent; border: none; }")
+        self.setStyleSheet("background: transparent; border: none;")
         self._time = 0.0
 
         # Pool of floating firepit embers

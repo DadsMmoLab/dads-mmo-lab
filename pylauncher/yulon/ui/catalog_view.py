@@ -45,7 +45,7 @@ from yulon.catalog.installer import (
 from yulon.log import get_logger
 from yulon.ui.answers import said_yes
 from yulon.ui.icons import warcraft_icon
-from yulon.ui.theme import COLOR_TEXT_GOLD, COLOR_TEXT_MUTED
+from yulon.ui.theme import COLOR_TEXT_GOLD
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter
 
@@ -274,6 +274,21 @@ def _identify(entry: CatalogEntry, server_dir: Path) -> Identification:
     return Identification.DIFFERENT
 
 
+_CAMPAIGN_GLYPHS = {
+    "wow-wotlk": "❄️",
+    "wow-tbc": "🔥",
+    "wow-vanilla": "⚔️",
+    "wow-tortoise": "🐢",
+}
+
+_CAMPAIGN_SUBTITLES = {
+    "wow-wotlk": "Wrath of the Lich King (3.3.5a)",
+    "wow-tbc": "The Burning Crusade (2.4.3)",
+    "wow-vanilla": "Classic Vanilla (1.12.1)",
+    "wow-tortoise": "Turtle WoW Solo (1.17.2)",
+}
+
+
 class CatalogView(QWidget):
     """One tile per catalog entry; Install streams the Phase 3a installer into `log_panel`."""
 
@@ -324,7 +339,7 @@ class CatalogView(QWidget):
         self._prompter: InputPrompter | None = None
 
         header_row = QHBoxLayout()
-        header_label = QLabel("Select a Campaign", self)
+        header_label = QLabel("SELECT A SERVER CAMPAIGN", self)
         header_label.setObjectName("section-title")
         header_row.addWidget(header_label)
         header_row.addStretch(1)
@@ -336,7 +351,7 @@ class CatalogView(QWidget):
 
         grid = QGridLayout()
         grid.setSpacing(14)
-        grid.setContentsMargins(6, 6, 6, 6)
+        grid.setContentsMargins(0, 4, 0, 4)
         for index, entry in enumerate(catalog.games):
             grid.addWidget(self._tile(entry), 0, index)
             grid.setColumnStretch(index, 1)
@@ -345,7 +360,9 @@ class CatalogView(QWidget):
         inner = QWidget()
         inner.setLayout(grid)
         scroll = QScrollArea(self)
+        scroll.setObjectName("catalog-shelf-scroll")
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(inner)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -387,25 +404,42 @@ class CatalogView(QWidget):
 
     def _tile(self, entry: CatalogEntry) -> QFrame:
         frame = QFrame(self)
-        frame.setObjectName("catalog-tile")
+        frame.setObjectName(f"catalog-tile-{entry.id}")
         frame.setFrameShape(QFrame.Shape.StyledPanel)
-        frame.setFixedHeight(360)
-        frame.setMinimumWidth(230)
+        frame.setFixedHeight(370)
+        frame.setMinimumWidth(235)
         frame.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         frame.customContextMenuRequested.connect(
             lambda pos, e=entry, f=frame: self._show_tile_context_menu(pos, e, f)
         )
         box = QVBoxLayout(frame)
-        box.setSpacing(8)
-        box.setContentsMargins(12, 12, 12, 12)
-        box.addWidget(
+        box.setSpacing(6)
+        box.setContentsMargins(14, 14, 14, 14)
+
+        header_box = QHBoxLayout()
+        glyph = QLabel(_CAMPAIGN_GLYPHS.get(entry.id, "⚔️"), frame)
+        glyph.setStyleSheet("font-size: 20px; background: transparent;")
+        header_box.addWidget(glyph)
+
+        title_col = QVBoxLayout()
+        title_col.setSpacing(1)
+        title_col.addWidget(
             self._tile_text(
-                f"{entry.name} <span style='color:{COLOR_TEXT_MUTED}; font-style:italic;'>"
-                f"({entry.status})</span>",
+                f"<b>{entry.name}</b>",
                 frame,
                 role="tile-title",
             )
         )
+        sub_title = QLabel(_CAMPAIGN_SUBTITLES.get(entry.id, entry.emulator.name), frame)
+        sub_title.setObjectName("tile-subtitle")
+        sub_title.setStyleSheet(
+            f"font-size: 11px; color: {COLOR_TEXT_GOLD}; font-weight: bold; "
+            "background: transparent;"
+        )
+        title_col.addWidget(sub_title)
+        header_box.addLayout(title_col, 1)
+        box.addLayout(header_box)
+
         desc_scroll = QScrollArea(frame)
         desc_scroll.setObjectName("tile-desc-box")
         desc_scroll.setWidgetResizable(True)
@@ -413,14 +447,22 @@ class CatalogView(QWidget):
         desc_label = self._tile_text(entry.description, desc_scroll, role="tile-desc")
         desc_scroll.setWidget(desc_label)
         box.addWidget(desc_scroll, 1)
-        box.addWidget(
+
+        meta_box = QHBoxLayout()
+        meta_box.setSpacing(6)
+        meta_box.addWidget(
             self._tile_text(
-                f"Client: {entry.client.version} (build {entry.client.build})",
+                f"Client {entry.client.version} (b{entry.client.build})",
                 frame,
                 role="tile-meta",
             )
         )
-        box.addWidget(self._tile_text(f"Emulator: {entry.emulator.name}", frame, role="tile-meta"))
+        meta_box.addWidget(
+            self._tile_text(f"{entry.emulator.name}", frame, role="tile-meta")
+        )
+        meta_box.addStretch(1)
+        box.addLayout(meta_box)
+
         button = QPushButton("Install", frame)
         button.setIcon(warcraft_icon("download", "#FFF1A8", 14))
         button.setObjectName(f"install-{entry.id}")
