@@ -27,7 +27,7 @@ if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay
 
 logger = get_logger(__name__)
 
-DEFAULT_WINDOW_SIZE = (1280, 720)
+DEFAULT_WINDOW_SIZE = (1280, 800)
 """The size the window opens at, and the width every tab has to fit into.
 
 The reference resolution the whole theme scales from (owner answer): font sizes
