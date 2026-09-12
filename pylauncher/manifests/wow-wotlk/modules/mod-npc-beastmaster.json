@@ -29,17 +29,31 @@
       "file": "env/dist/etc/modules/mod_npc_beastmaster.conf",
       "keys": [
         {
-          "key": "BeastMaster.Enable"
+          "key": "BeastMaster.Enable",
+          "label": "Enable the Beastmaster NPC",
+          "explain": "Master switch for the Beastmaster NPC that lets classes tame, stable and use hunter pets.",
+          "type": "bool"
         },
         {
           "key": "BeastMaster.HunterOnly",
-          "note": "set to 0 to allow non-hunters"
+          "note": "set to 0 to allow non-hunters",
+          "label": "Hunters only",
+          "explain": "When on, only Hunters may use the Beastmaster. Turn it off to let every class tame pets.",
+          "type": "bool"
         },
         {
-          "key": "BeastMaster.AllowedClasses"
+          "key": "BeastMaster.AllowedClasses",
+          "label": "Allowed classes",
+          "explain": "Comma-separated class ids allowed to adopt pets (0 = all classes). Only used when Hunters-only is off.",
+          "type": "list"
         },
         {
-          "key": "BeastMaster.MinLevel"
+          "key": "BeastMaster.MinLevel",
+          "label": "Minimum level",
+          "explain": "Level a character must reach before adopting a pet (0 = no requirement).",
+          "type": "int",
+          "min": 0,
+          "max": 80
         }
       ],
       "template": "conf/mod_npc_beastmaster.conf.dist"
@@ -49,7 +63,10 @@
       "keys": [
         {
           "key": "Creatures.CustomIDs",
-          "note": "add 601026 to silence a harmless gossip warning"
+          "note": "add 601026 to silence a harmless gossip warning",
+          "label": "Custom creature ids",
+          "explain": "The list of custom creatures with gossip dialogues hardcoded in core, divided by \",\" without spaces. It is implied that you do not use for these NPC dialogs data from \"gossip_menu\" table. Server will skip these IDs during the definitions validation process.",
+          "type": "list"
         }
       ]
     }

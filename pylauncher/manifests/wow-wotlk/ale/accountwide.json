@@ -31,67 +31,105 @@
         {
           "key": "ENABLE_ACCOUNTWIDE_COMPLETED_ACHIEVEMENTS",
           "default": "{achievements}",
-          "note": "in AccountAchievements.lua"
+          "note": "in AccountAchievements.lua",
+          "label": "Share completed achievements",
+          "explain": "This script will allow completed achievements to be synced across all characters on the account. Once you complete an achievement, the next time you log into a different character, they will be awarded with the achievement as well.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_CRITERIA_PROGRESS",
           "default": "{criteria}",
-          "note": "in AccountAchievements.lua"
+          "note": "in AccountAchievements.lua",
+          "label": "Share achievement progress",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_CURRENCY",
           "default": "{currency}",
-          "note": "in AccountCurrency.lua"
+          "note": "in AccountCurrency.lua",
+          "label": "Share currencies",
+          "explain": "This script will allow currencies to be synced across all characters on your account. For example, if you have 100 Badge of Justice, all of your characters will have 100. If you spend 30, then all of your characters will now have 70.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_MONEY",
           "default": "{money}",
-          "note": "in AccountMoney.lua"
+          "note": "in AccountMoney.lua",
+          "label": "Share gold",
+          "explain": "This script essentially allows all of your characters to share a single gold fund. If you gain 100 gold on one character, then all of your characters will get that gold upon the next login. If you spend any gold, then all of your characters will subtract their gold balance.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_REALTIME_TICK",
           "default": "{money_realtime}",
-          "note": "in AccountMoney.lua"
+          "note": "in AccountMoney.lua",
+          "label": "Sync gold in real time",
+          "explain": "Realtime tick (periodic sync).",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ALTBOT_REALTIME_TICK",
           "default": "{money_altbot}",
-          "note": "in AccountMoney.lua"
+          "note": "in AccountMoney.lua",
+          "label": "Sync Altbot gold in real time",
+          "explain": "Only applies when ENABLE_REALTIME_TICK = true. Enable this if you want Altbots to also tick realtime; otherwise Altbots only write on save/logout.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_MOUNTS",
           "default": "{mounts}",
-          "note": "in AccountMounts.lua"
+          "note": "in AccountMounts.lua",
+          "label": "Share mounts",
+          "explain": "By default, this script allows learned mounts to be shared across all characters on the account, provided they are at least level 11.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_PETS",
           "default": "{pets}",
-          "note": "in AccountPets.lua"
+          "note": "in AccountPets.lua",
+          "label": "Share pet companions",
+          "explain": "This script allows learned pet companions to be shared across all characters on the account.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_PLAYTIME",
           "default": "{playtime}",
-          "note": "in AccountPlaytime.lua"
+          "note": "in AccountPlaytime.lua",
+          "label": "Account playtime summary",
+          "explain": "This script provides a playtime summary across all characters on your account. This is similar to the `/played` command, but shows accountwide totals and a per-character breakdown in a cleaner format.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_PVP_RANK",
           "default": "{pvp_rank}",
-          "note": "in AccountPvPRank.lua"
+          "note": "in AccountPvPRank.lua",
+          "label": "Share PvP rank and stats",
+          "explain": "This script will sync your PvP Rank/Stats across all of your characters: Honorable Kills, Honor Points, Arena Points.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_REPUTATION",
           "default": "{reputation}",
-          "note": "in AccountReputation.lua"
+          "note": "in AccountReputation.lua",
+          "label": "Share reputation",
+          "explain": "This script allows all of the reputation progress to be shared across all of your characters. Horde factions will only be shared to horde characters. Alliance factions will only be shared to alliance characters. Neutral factions will be shared to both.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_TAXI_PATHS",
           "default": "{taxi}",
-          "note": "in AccountTaxiPaths.lua"
+          "note": "in AccountTaxiPaths.lua",
+          "label": "Share flight paths",
+          "explain": "This script synchronizes learned flight paths across all characters on your account that belong to the same faction. Due to Horde/Alliance restrictions, Horde flight paths will only be shared with other Horde characters, and Alliance flight paths will only be shared with other Alliance characters.",
+          "type": "bool"
         },
         {
           "key": "ENABLE_ACCOUNTWIDE_TITLES",
           "default": "{titles}",
-          "note": "in AccountTitles.lua"
+          "note": "in AccountTitles.lua",
+          "label": "Share titles",
+          "explain": "This script will synchronize earned character titles to the other characters on your account.",
+          "type": "bool"
         }
       ]
     }

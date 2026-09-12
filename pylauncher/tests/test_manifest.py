@@ -400,3 +400,81 @@ def test_an_int_key_whose_min_is_above_its_max_is_a_parse_error() -> None:
     """A range no value can satisfy, caught where a reader would trust it."""
     with pytest.raises(ValidationError, match="min"):
         _with_keys([{"key": "A.B", "type": "int", "min": 10, "max": 9}])
+
+
+# -- T43 point 7: what the enriched catalog must keep true ------------------
+
+WOTLK_KEYS = [
+    (path, conf.file, key)
+    for path in sorted((MANIFESTS_DIR / "wow-wotlk").glob("*/*.json"))
+    for conf in manifest.parse_manifest(json.loads(path.read_text(encoding="utf-8"))).conf
+    for key in conf.keys
+]
+
+
+def test_a_bool_key_the_catalog_also_writes_agrees_with_its_own_default() -> None:
+    """A `type` that disagrees with the `default` beside it would write a wrong value.
+
+    The relationship has no owner otherwise: `ConfKey` can check a bound against
+    a bound, but only a pass over the shipped catalog can check that the TYPE a
+    key was given matches the VALUE the same key tells the installer to write.
+    """
+    for path, file, key in WOTLK_KEYS:
+        if key.type != "bool" or key.default is None or "{" in key.default:
+            continue
+        assert key.default.strip().lower() in (
+            "0",
+            "1",
+            "true",
+            "false",
+        ), f"{path.name}:{file}:{key.key} is typed `bool` but its default is {key.default!r}"
+
+
+def test_an_int_key_the_catalog_also_writes_parses_and_sits_in_its_own_bounds() -> None:
+    for path, file, key in WOTLK_KEYS:
+        if key.type != "int" or key.default is None or "{" in key.default:
+            continue
+        where = f"{path.name}:{file}:{key.key}"
+        number = int(key.default.strip())  # raises here rather than at save time
+        assert key.min is None or number >= key.min, f"{where}: default below its own min"
+        assert key.max is None or number <= key.max, f"{where}: default above its own max"
+
+
+def test_every_key_the_tuning_tab_can_write_says_what_kind_of_setting_it_is() -> None:
+    """T43 point 7, pinned by NAME rather than by a count.
+
+    A count would pass on the wrong twelve. These are the twelve keys deliberately
+    left with no `type`, and every one of them is a key the tab refuses to write
+    anyway: seven are catalog shorthand for a GROUP of keys (`tuning.NOT_ONE_KEY`)
+    and five are `paragon`'s, whose values live in a database table and whose
+    source states nothing about them — the author's silence, kept.
+    """
+    bare = {
+        f"{path.parent.name}/{path.name}:{key.key}"
+        for path, _file, key in WOTLK_KEYS
+        if key.type is None
+    }
+    assert bare == {
+        "ale/paragon.json:LEVEL_LINKED_TO_ACCOUNT",
+        "ale/paragon.json:PARAGON_LEVEL_CAP",
+        "ale/paragon.json:BASE_MAX_EXPERIENCE",
+        "ale/paragon.json:POINTS_PER_LEVEL",
+        "ale/paragon.json:UNIVERSAL_CREATURE_EXPERIENCE",
+        "kegs/bmah.json:common/rare/ultraRare_*_price",
+        "kegs/bmah.json:FillRateCommon / FillRateRare / FillRateUltra",
+        "modules/mod-ah-bot-plus.json:AuctionHouseBot.ListProportion.*",
+        "modules/mod-autobalance.json:AutoBalance.Enable.*",
+        "modules/mod-mount-scaling.json:MountScaling.Ground.Journeyman.*",
+        "modules/mod-mount-scaling.json:MountScaling.Flying.Expert.*",
+        "modules/mod-mount-scaling.json:MountScaling.Flying.Artisan.*",
+    }
+
+
+def test_a_label_is_a_name_and_not_the_authors_whole_sentence() -> None:
+    """The label goes beside a control; the sentence goes under it."""
+    for path, file, key in WOTLK_KEYS:
+        if key.label is None:
+            continue
+        where = f"{path.name}:{file}:{key.key}"
+        assert len(key.label) <= 40, f"{where}: label is a sentence, not a name"
+        assert not key.label.endswith("."), f"{where}: label ends in a full stop"

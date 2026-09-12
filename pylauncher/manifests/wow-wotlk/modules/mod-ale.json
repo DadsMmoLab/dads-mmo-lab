@@ -20,12 +20,18 @@
         {
           "key": "ALE.ScriptPath",
           "default": "\"/azerothcore/env/dist/etc/modules/lua_scripts\"",
-          "note": "container-visible path; quoted; always re-applied on configure"
+          "note": "container-visible path; quoted; always re-applied on configure",
+          "label": "Script folder",
+          "explain": "Sets the location of the script folder to load scripts from. The path can be relative or absolute.",
+          "type": "text"
         },
         {
           "key": "ALE.Enabled",
           "default": "1",
-          "note": "the module's own key, read 2026-09-08 from conf/mod_ale.conf.dist:63 and src/LuaEngine/ALEConfig.cpp:20. This manifest said ALE.EnableLuaEngine, which is in neither; the engine therefore took its COMPILED default, and that default is false while the shipped conf's comment beside it says true. Written rather than surfaced for that reason."
+          "note": "the module's own key, read 2026-09-08 from conf/mod_ale.conf.dist:63 and src/LuaEngine/ALEConfig.cpp:20. This manifest said ALE.EnableLuaEngine, which is in neither; the engine therefore took its COMPILED default, and that default is false while the shipped conf's comment beside it says true. Written rather than surfaced for that reason.",
+          "label": "Enable the Lua engine",
+          "explain": "Enable or disable ALE LuaEngine.",
+          "type": "bool"
         }
       ],
       "template": "conf/mod_ale.conf.dist"
