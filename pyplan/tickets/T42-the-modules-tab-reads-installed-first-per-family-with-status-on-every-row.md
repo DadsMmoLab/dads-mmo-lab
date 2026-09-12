@@ -37,3 +37,236 @@ git worktree add .claude/worktrees/t42 -b hand-t42 yulon-phase8b
 ```
 
 Then a general-purpose agent on Opus 5 with: "You are the hand for T42. Read `pyplan/tickets/T42-*.md` in full and `pyplan/tickets/T41-*.md` for what you build on. Work only in `.claude/worktrees/t42` on `hand-t42`. Implement the definition of done in order, TDD: write each test, watch it fail, make it pass, name the mutation. Run `yt` from the worktree (never bare pytest, never docker). Do not touch the files the ticket forbids. Commit with the trailer the ticket names and nothing else. Append your report to the ticket under `## Report (hand, Opus 5, <date from the clock>)`. Do not push." The lead then runs the reviewer, the m910q gate, the merge and the live half.
+
+## Report (hand, Opus 5, 2026-09-12)
+
+**Status:** IMPLEMENTED — unit-gated in the worktree, not pushed. Reviewer, the m910q
+`--checks` gate, the CHANGELOG line, the merge and the live half on `yulon-win11` are the
+lead's.
+
+### Commits (`hand-t42`, from `eb30e6c3`)
+
+| sha | what |
+| --- | --- |
+| `e11fcc9b` | point 2 — the pure builder |
+| `c1bc34d1` | point 1 — the panel of family cards |
+| `2a77ae6c` | points 3 and 4 — the view reads the panel and remembers what is owed |
+
+### Files and classes
+
+**New: `pylauncher/yulon/ui/widgets/modules_panel.py`.** No Qt in its first half, no import
+of `controller_view`, none of the decorations modules; colours are `theme.py`'s `COLOR_*`
+constants.
+
+* `Chip(kind, label, detail)`, `ModuleRow(...)` and `SessionState(rebuild_owed, sql_owed,
+  behind)` — frozen dataclasses.
+* `build_module_rows(manifests, installed, session, client_dir) -> tuple[ModuleRow, ...]`.
+  `manifests` is a flat sequence in the store's own order (the view concatenates
+  `store.load_all(kind)` per family), which keeps the "a family would not load" branch in
+  the view where the report box is.
+* `FAMILY_TITLES` (module → `C++ modules`, ale → `ALE Lua scripts`, keg → `Kegs`, mod →
+  `SQL & config mods`), `NOT_IN_CATALOG`, `BADGE_INSTALLED`/`BADGE_NOT_INSTALLED`, the four
+  fixed chip labels, `chip_update_label(n)`, `chip_required_by_label(names)`,
+  `NO_MODULES_NOTE`, `BUTTON_COLUMN_WIDTH`.
+* `_clone_dir_of()` **moved here** from `controller_view.py` with T41's per-folder
+  accounting; the view no longer has a copy.
+* `RowWidget(QFrame)` — `.data`, `.name_label`, `.link_label`, `.description_label`,
+  `.paths_label`, `.badge_label`, `.chip_buttons`, `.install_button`, `.remove_button`
+  (`None` where that press does not exist), `.set_enabled_actions()`, `.set_selected()`.
+* `_FamilyCard(QGroupBox)` — `installed_header`, `installed_box`, `toggle`,
+  `available_box`.
+* `ModulesPanel(QWidget)` — a `QScrollArea` of cards. `set_rows`, `select`, `selected_id`,
+  `row`, `rows`, `set_enabled_actions`, `available_open`, `available_toggle`,
+  `installed_header`, `empty_label`. Signals `install_pressed`, `remove_pressed`,
+  `chip_pressed(id, label)`, `row_selected`, **and** `context_menu_requested(id, QPoint)`
+  (see Deviations).
+
+**Changed: `pylauncher/yulon/ui/controller_view.py`.** `INSTALLED_MARK`, `NOT_IN_CATALOG`
+and `_clone_dir_of` removed (the last two moved); `REBUILD_BANNER`, `MODULE_LOAD_FAILED`
+and `_pending_sql_names()` added. New/changed members: `modules_panel`,
+`refresh_modules_button`, `rebuild_banner`/`rebuild_banner_label`/`rebuild_banner_button`,
+`_rebuild_owed`/`_sql_owed`/`_behind`/`_rebuild_is_compile`, `_session_state()`,
+`_module_actions_allowed()`, `_refresh_rebuild_banner()`, `_row_install`, `_row_remove`,
+`_chip_pressed`, `_note_session_facts`. Gone: `module_list`, `install_module_button`,
+`remove_module_button`, `_custom_install_pending`.
+
+**Changed: `pylauncher/yulon/module_source.py`** — `_refuse_shipped` said "select it in the
+list and press Install selected", naming a control this ticket removes. It now says "find
+it on the Modules tab and press Install on its row".
+
+### The six chip rules as implemented
+
+All in `modules_panel._chips_for()`, owed first then facts, and nothing beyond these six.
+
+| # | kind | label | when | detail |
+| --- | --- | --- | --- | --- |
+| 1 | owed | `Rebuild pending` | `id in session.rebuild_owed` | names the id and says to press Rebuild server… |
+| 2 | owed | `SQL pending` | `session.sql_owed[id]` is non-empty | names every file (`_pending_sql_names` resolves `PendingSql.files`, falling back to the glob when `files` is `()` or `None`) and says to press Apply module SQL |
+| 3 | owed | `Update available — N commit(s) behind` | `session.behind[id] > 0` | says Yu'lon has no per-module pull, so git in the clone folder |
+| 4 | fact | `asks a question` | **not installed**, catalogued, and `required_prompts(manifest, "install")` has a prompt with `default is None` | lists the questions |
+| 5 | fact | `needs the client folder` | **not installed**, catalogued, `manifest.client` non-empty, `client_dir is None` | says to set one on the Server tab |
+| 6 | fact | `required by <names>` | **installed** and another **INSTALLED** manifest names it in `requires` | names them and says to remove them first — and the row is `removable=False` with `remove_reason` naming them |
+
+Uncatalogued rows (`catalogued=False`) take chips 1–3 and 6 — the session and the
+dependency graph know about an id whether or not a manifest does — and never 4 or 5, which
+are facts about installing something that is already installed. They carry no buttons at
+all.
+
+### How the T41 tests were re-seeded
+
+Not deleted. Four kept their names and were re-pointed at the panel; two were renamed
+because the surface they name changed. Every assertion T41 made is still made — the mark is
+now the `Installed` badge read off `RowWidget.badge_label`, which is a stronger reading than
+the old leading-glyph substring.
+
+| old (`tests/test_controller_view.py`) | new |
+| --- | --- |
+| `test_the_modules_list_says_which_modules_are_installed` | `test_the_modules_tab_says_which_modules_are_installed` |
+| `test_pressing_install_on_an_uncatalogued_row_says_why_nothing_happened` | `test_the_context_menu_on_an_uncatalogued_row_says_why_nothing_happened` |
+| `test_a_module_on_disk_the_catalog_never_heard_of_still_gets_a_row` | same name, asserts `catalogued is False`, the badge, and that the row has no buttons |
+| `test_a_game_with_no_installed_modules_seam_lists_the_catalog_unchanged` | same name, asserts every badge reads `Not installed` (the old test only asserted the absence of a glyph) |
+| `test_a_family_is_marked_from_its_own_clone_folder_not_from_modules` | same name, against the panel |
+| `test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another` | same name, against the panel |
+| helper `_marked(view)` | reads `badge_label.text() == BADGE_INSTALLED` |
+| helper `_select_module` / `_row_for` / `_rows_for` / `_listed` | read `modules_panel` instead of `module_list` |
+
+The same four facts are also asserted at builder level in the new file, with synthetic
+manifests, so a change to the shipped WotLK catalog cannot quietly stop exercising them:
+`test_the_rows_say_which_modules_are_installed`,
+`test_a_module_on_disk_the_catalog_never_heard_of_still_gets_a_row`,
+`test_a_family_is_marked_from_its_own_clone_folder_not_from_modules`,
+`test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another`.
+
+One more rename, outside T41: `tests/test_module_source.py`'s
+`test_a_link_to_a_shipped_module_says_to_use_the_list_instead` →
+`..._says_to_use_the_tab_instead`.
+
+### Tests and their mutations
+
+Every mutation below was applied to a clean tree with `__pycache__` purged on both sides,
+run, and seen to FAIL; the tree was restored afterwards. 35 mutations in all.
+
+**Builder — `tests/test_modules_panel.py` (19)**
+
+| test | mutation that fails it |
+| --- | --- |
+| `test_installed_rows_come_first_inside_each_family` | one `rows += [_row(m) for m in family]` instead of the two halves |
+| `test_catalog_order_is_kept_inside_each_half` | sort each half by id |
+| `test_the_four_families_come_in_family_files_order` | `for kind in sorted(FAMILY_FILES)` |
+| `test_every_family_has_a_title` | drop the `keg` key from `FAMILY_TITLES` |
+| `test_the_rows_say_which_modules_are_installed` | `here = True` for every row |
+| `test_a_module_on_disk_the_catalog_never_heard_of_still_gets_a_row` | `continue` before the uncatalogued row is appended |
+| `test_a_game_with_no_installed_reading_marks_nothing` | default a missing family to `frozenset({manifest.id})` |
+| `test_a_family_is_marked_from_its_own_clone_folder_not_from_modules` | `installed.get("module", …)` for every family |
+| `test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another` | account per family instead of per clone folder |
+| `test_one_uncatalogued_clone_in_a_shared_folder_gets_one_row_not_two` | same mutation (both fail together) |
+| `test_the_rebuild_pending_chip_is_on_exactly_the_owed_module` | `if False:` on `session.rebuild_owed` |
+| `test_the_sql_pending_chip_names_the_files_it_is_waiting_on` | `detail = CHIP_SQL_PENDING` |
+| `test_the_update_chip_counts_and_is_absent_at_zero` | `if behind >= 0:` |
+| `test_the_asks_a_question_chip_is_only_on_an_uninstalled_manifest_with_no_default` | drop the `default is None` clause |
+| `test_the_client_folder_chip_appears_only_while_no_folder_is_set` | drop `and client_dir is None` |
+| `test_required_by_names_only_installed_dependants_and_locks_remove` | count dependants from `catalog` instead of `installed_ids` |
+| `test_an_installed_module_nothing_needs_is_removable_and_carries_no_chips` | `removable=False` always |
+| `test_a_row_carries_its_github_link_and_its_conf_paths` | `url=manifest.source.repo` instead of `.url` |
+| `test_an_uncatalogued_row_still_takes_the_owed_chips` | `chips=()` on uncatalogued rows |
+
+**Panel — `tests/test_modules_panel.py` (15)**
+
+| test | mutation |
+| --- | --- |
+| `test_a_family_with_something_installed_starts_collapsed` | `self._open[kind] = True` |
+| `test_a_toggle_press_flips_the_family_and_set_rows_keeps_it` | recompute the open state on every `set_rows()` |
+| `test_a_rows_install_button_emits_that_rows_id` | emit `""` instead of `self.data.id` |
+| `test_an_installed_row_has_no_install_button_and_the_reverse` | build both buttons on every catalogued row |
+| `test_an_uncatalogued_row_has_no_buttons_at_all` | `else:` instead of `elif data.catalogued:` (an uncatalogued row gets a Remove) |
+| `test_a_row_another_installed_module_needs_cannot_be_removed` | `setEnabled(enabled)` without `and self.data.removable` |
+| `test_set_enabled_actions_false_disables_every_row_button` | drop the install half of `RowWidget.set_enabled_actions` |
+| `test_set_enabled_actions_true_does_not_unlock_an_unremovable_row` | the same `setEnabled(enabled)` mutation |
+| `test_the_selection_survives_a_rebuild_and_a_gone_id_does_not` | `self._selected = None` in `set_rows()` |
+| `test_a_click_anywhere_on_a_row_selects_it` | drop `self.clicked.emit()` from `mousePressEvent` |
+| `test_an_owed_chip_press_names_its_row_and_its_label` | emit the id with an empty label |
+| `test_a_fact_chip_is_not_a_press_and_carries_its_detail_as_a_tooltip` | `if True:` instead of `if chip.kind == "owed":` |
+| `test_a_panel_with_no_rows_says_so_instead_of_showing_nothing` | `empty_label.setVisible(False)` unconditionally |
+| `test_the_installed_header_counts_that_family_only` | `Installed ({len(installed) + 1})` |
+| `test_the_panel_reports_rows_in_the_order_it_was_handed_them` | fill the card by building the installed half first |
+
+**View — `tests/test_controller_view.py` (11 new + the re-seeded T41 six)**
+
+| test | mutation |
+| --- | --- |
+| `test_the_installed_row_is_drawn_above_the_ones_that_are_not` | drop the builder's installed-first split |
+| `test_an_install_that_needs_a_rebuild_raises_the_banner_and_the_chip` | drop `_note_session_facts()` from `_module_done` |
+| `test_only_a_compile_that_succeeds_clears_the_banner_and_the_chip` | `if ok:` (drops the compile flag) — and `if True:` |
+| `test_a_database_update_through_the_same_panel_clears_no_rebuild` | the same two; this is the only test that sees the first |
+| `test_a_report_with_pending_sql_puts_the_files_on_the_chip` | drop `_note_session_facts()` |
+| `test_the_importer_finishing_clears_every_sql_chip` | drop `self._sql_owed.clear()` from `_module_sql_done` |
+| `test_an_update_check_puts_the_count_on_the_row_it_counted` | treat `behind=None` as `1`; and drop the `reload_modules()` after the check |
+| `test_busy_greys_every_row_button_and_gives_them_back` | drop `set_enabled_actions(False)` from `_set_busy` |
+| `test_a_game_with_no_applier_has_no_live_row_button` | `set_enabled_actions(True)` at build time |
+| `test_a_rows_install_button_installs_that_row` | make `_row_install` a no-op |
+| `test_the_context_menu_on_an_uncatalogued_row_says_why_nothing_happened` | `_selected_row_is_uncatalogued` returns `False` |
+| the five other re-seeded T41 tests | `installed = {}` in `reload_modules()` fails four of them; `badge = BADGE_INSTALLED` always fails two |
+
+### Two defects found while wiring it, each now held by a test
+
+1. **`_rebuild_finished` is not the rebuild's slot alone.** Three actions run through
+   `rebuild_log` — `rebuild_server()`, `apply_database_updates()` and `adopt_as_imported()`
+   — and all three reach `_rebuild_finished`. The ticket says "`_rebuild_owed` cleared when
+   `_rebuild_finished` reports success", which taken literally makes a successful SQL run
+   clear the banner and tell the user their module is live. `_rebuild_is_compile` is set at
+   the press that starts a compile and cleared at each of the other two;
+   `test_a_database_update_through_the_same_panel_clears_no_rebuild` is the only test that
+   sees it, because the compile path is green either way.
+2. **A test that agreed by accident.** `ModulesPanel.rows()` first reported the dict
+   insertion order, which was the FILL order (installed half built first) rather than the
+   drawn order — so `test_the_installed_row_is_drawn_above_the_ones_that_are_not` stayed
+   green with the builder's sort deleted. The cards are now built in the order handed over
+   and only then split into halves, and `test_the_panel_reports_rows_in_the_order_it_was
+   _handed_them` hands the panel an order the builder would never produce.
+
+### Deviations
+
+* **A fifth signal on `ModulesPanel`.** The ticket names four; point 1 also says
+  "right-click keeps `_show_module_context_menu` (moved to take the row's id)", and the menu
+  it builds is about the applier and the clipboard, which the widget must not know. So
+  `context_menu_requested(str, QPoint)` carries the row's id and a global position.
+* **`FAMILY_TITLES` lives in `modules_panel.py`, not in `manifest_store.py`.** "Beside
+  `FAMILY_FILES`" is honoured by importing it next to the mapping and by
+  `test_every_family_has_a_title`, which fails the moment the two disagree. A card's label
+  in the store would give the store, the fetcher and the catalog tests a dependency on how
+  a tab titles a card.
+* **Three reading methods the ticket does not name** — `available_open(family)`,
+  `available_toggle(family)`, `installed_header(family)` — plus `rows()` and
+  `empty_label`. Without them the collapse rule and the per-family count are not assertable
+  except through pixel geometry.
+* **`_module_done` now reloads after EVERY report**, where it used to reload only for a
+  custom install or a dropped record. The chips and the banner come from the report just
+  filed, and the reason the old rule was narrow (a reload lost the list's selection) is
+  gone: `set_rows()` keeps the selection. Its only reader gone, `_custom_install_pending`
+  is retired.
+* **A remove drops the id from all three sets, per the ticket, including
+  `_rebuild_owed`.** So removing a C++ module raises no banner even though the removal's own
+  report says `rebuild_required`. Written down rather than quietly changed: the module is
+  off the list, but the running server still has it compiled in. Worth a follow-up ticket.
+* **A family whose manifests will not parse** used to be a row in the list
+  (`!! could not load <kind>s: …`). There is no list; it is now `appendPlainText`ed into
+  `module_report` (`MODULE_LOAD_FAILED`) — appended, not set, so it cannot take the report
+  of the action the user just pressed with it.
+* **`module_source.py` touched**, which the ticket does not list. Its refusal named
+  "Install selected", a control this ticket removes — FACT 4's exact fault. One sentence and
+  its test.
+* **Not done, and in the ticket's "Not in scope":** no Update button (no per-module pull
+  exists below this tab — still worth filing), no persisted rebuild marker, no version
+  lines, no explanation panel under a row (the report line carries the chip's detail).
+
+### Gate
+
+`yt` in the worktree, last line:
+
+```
+4405 passed, 8 skipped, 23 deselected, 2 warnings in 136.69s (0:02:16)
+```
+
+`black --check yulon/ tests/` — 208 files unchanged. `ruff check yulon/ tests/` — all checks
+passed. `mypy yulon/` — no issues in 100 source files. Nothing pushed; `--checks` on m910q
+and the `yulon-win11` frames are the lead's.
