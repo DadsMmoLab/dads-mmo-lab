@@ -7,6 +7,7 @@ a `QApplication`. The widgets are `tests/test_tuning_panel.py`'s.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -218,3 +219,141 @@ def test_a_family_is_read_from_its_own_clone_folder(tmp_path: Path) -> None:
     )
     rows = tuning.rows_for([ale], {"module": frozenset({"mod-beast"})}, tmp_path)
     assert rows == ()
+
+
+# -- point 3: the writer ----------------------------------------------------
+
+
+def _key(**over: Any) -> Any:
+    return _manifest(conf=[_conf(CONF, [{"key": "K", **over}])]).conf[0].keys[0]
+
+
+CLEAN = (
+    "[worldserver]\n"
+    "#\n"
+    "# BeastMaster.Enable = 9\n"
+    "BeastMaster.Enable = 1\n"
+    "\n"
+    "BeastMaster.MinLevel = 10\n"
+    "BeastMaster.HunterOnly = 1\n"
+)
+
+
+def test_only_the_named_keys_move_and_every_other_line_is_untouched(tmp_path: Path) -> None:
+    path = _write(tmp_path, CONF, CLEAN)
+    tuning.write(path, {"BeastMaster.MinLevel": "40"})
+    assert path.read_text(encoding="utf-8") == CLEAN.replace(
+        "BeastMaster.MinLevel = 10", "BeastMaster.MinLevel = 40"
+    )
+
+
+def test_the_last_active_assignment_is_rewritten_and_a_commented_copy_is_left(
+    tmp_path: Path,
+) -> None:
+    """The one the server reads, and only it: the comment above is the user's note."""
+    path = _write(tmp_path, CONF, "K = 1\n# K = 9\nK = 2\n  K = 3\n")
+    tuning.write(path, {"K": "7"})
+    assert path.read_text(encoding="utf-8") == "K = 1\n# K = 9\nK = 7\n  K = 3\n"
+
+
+def test_a_key_the_file_does_not_carry_is_appended_under_a_dated_comment(
+    tmp_path: Path,
+) -> None:
+    """The 73 defaultless keys are exactly the ones a shipped .conf.dist may omit."""
+    path = _write(tmp_path, CONF, "[worldserver]\nA = 1\n")
+    tuning.write(path, {"B": "2"}, now=datetime(2026, 9, 12, 14, 30, 0))
+    assert path.read_text(encoding="utf-8") == (
+        "[worldserver]\nA = 1\n"
+        "# Added by Yu'lon on 2026-09-12 — this key was not in the file.\n"
+        "B = 2\n"
+    )
+
+
+def test_a_crlf_file_comes_back_crlf_and_an_lf_file_stays_lf(tmp_path: Path) -> None:
+    """A conf a Windows editor wrote must come back out the way it went in."""
+    crlf = tmp_path / "crlf.conf"
+    crlf.write_bytes(b"[worldserver]\r\nK = 1\r\nOther = 2\r\n")
+    tuning.write(crlf, {"K": "5"})
+    assert crlf.read_bytes() == b"[worldserver]\r\nK = 5\r\nOther = 2\r\n"
+    lf = tmp_path / "lf.conf"
+    lf.write_bytes(b"K = 1\n")
+    tuning.write(lf, {"K": "5"})
+    assert lf.read_bytes() == b"K = 5\n"
+
+
+def test_a_key_appended_to_a_crlf_file_is_appended_with_crlf(tmp_path: Path) -> None:
+    crlf = tmp_path / "crlf.conf"
+    crlf.write_bytes(b"A = 1\r\n")
+    tuning.write(crlf, {"B": "2"}, now=datetime(2026, 9, 12))
+    assert crlf.read_bytes().endswith(b"\r\nB = 2\r\n")
+    assert b"\n\r" not in crlf.read_bytes()
+
+
+def test_a_backup_is_taken_before_the_write_and_its_path_is_returned(tmp_path: Path) -> None:
+    path = _write(tmp_path, CONF, CLEAN)
+    made = tuning.write(path, {"BeastMaster.MinLevel": "40"})
+    assert made.parent == path.parent
+    assert made.read_text(encoding="utf-8") == CLEAN
+    assert tuning.backups_of(path) == (made,)
+
+
+def test_a_value_that_fails_its_own_type_is_refused_before_a_byte_is_written(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, CONF, CLEAN)
+    spec = {"BeastMaster.MinLevel": _key(type="int", min=0, max=80)}
+    for bad in ("many", "", "81", "-1"):
+        with pytest.raises(tuning.TuningError, match="K"):
+            tuning.write(path, {"BeastMaster.MinLevel": bad}, spec=spec)
+    assert path.read_text(encoding="utf-8") == CLEAN
+    assert tuning.backups_of(path) == ()
+
+
+def test_one_bad_value_in_a_batch_writes_none_of_the_batch(tmp_path: Path) -> None:
+    """Save is per module card, so a card of six settings is one refusal or one write."""
+    path = _write(tmp_path, CONF, CLEAN)
+    spec = {"BeastMaster.MinLevel": _key(type="int")}
+    with pytest.raises(tuning.TuningError):
+        tuning.write(
+            path,
+            {"BeastMaster.Enable": "0", "BeastMaster.MinLevel": "forty"},
+            spec=spec,
+        )
+    assert path.read_text(encoding="utf-8") == CLEAN
+
+
+def test_no_bound_is_invented_where_the_catalog_states_none() -> None:
+    tuning.check(_key(type="int"), "999999999")
+    tuning.check(_key(type="int", min=0), "999999999")
+    tuning.check(_key(type="int", max=80), "-999")
+    with pytest.raises(tuning.TuningError):
+        tuning.check(_key(type="int", min=0), "-1")
+
+
+def test_a_key_with_no_type_accepts_anything_because_it_is_a_text_box() -> None:
+    """T43's safety rule: a refusal the catalog never declared is a refusal we invented."""
+    for value in ("anything at all", "", "3.5", "0,1,2"):
+        tuning.check(_key(), value)
+        tuning.check(None, value)
+
+
+def test_a_bool_key_takes_both_spellings_its_files_use_and_nothing_wider() -> None:
+    for value in ("0", "1", "true", "FALSE", " 1 "):
+        tuning.check(_key(type="bool"), value)
+    with pytest.raises(tuning.TuningError, match="on/off"):
+        tuning.check(_key(type="bool"), "yes")
+
+
+def test_a_quoted_value_keeps_its_quotes(tmp_path: Path) -> None:
+    """`LoginDatabaseInfo = "..."` is quoted in every real conf; unquoting it breaks it."""
+    path = _write(tmp_path, CONF, 'Motd = "hello"\n')
+    tuning.write(path, {"Motd": "goodbye"})
+    assert path.read_text(encoding="utf-8") == 'Motd = "goodbye"\n'
+
+
+def test_a_backup_can_be_put_back(tmp_path: Path) -> None:
+    path = _write(tmp_path, CONF, CLEAN)
+    made = tuning.write(path, {"BeastMaster.MinLevel": "40"})
+    tuning.restore(made, path)
+    assert path.read_text(encoding="utf-8") == CLEAN
+    assert made.is_file(), "a Revert must not consume the only record of the old file"
