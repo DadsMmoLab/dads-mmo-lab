@@ -668,7 +668,7 @@ def _space_check(
             f"free space on {what}",
             "refuse",
             f"{gigabytes:.0f} GB free, and the install needs {refuse_gb:.0f} GB{note}",
-            "Free some space, or install to a drive that has room, then try again.",
+            _space_remedy(what, facts),
         )
     if gigabytes < warn_gb:
         return Check(
@@ -677,6 +677,56 @@ def _space_check(
             f"{gigabytes:.0f} GB free; {warn_gb:.0f} GB is the comfortable figure{note}",
         )
     return Check(f"free space on {what}", "pass", f"{gigabytes:.0f} GB free")
+
+
+FOLDER_SPACE_REMEDY = "Free some space, or install to a drive that has room, then try again."
+"""What to do about a server folder with no room. Moving the install fixes it.
+
+Kept apart from `_docker_disk_remedy()` because the two rows that used to share
+this sentence are fixed by opposite actions, and saying this one under the
+Docker row is what sent a user in a circle (2026-09-12, see
+`test_a_full_docker_disk_is_not_answered_with_move_the_install`).
+"""
+
+
+def _docker_disk_remedy(facts: Facts) -> str:
+    """What to do about a full Docker disk: move DOCKER, not the install.
+
+    The images, layers and build cache live wherever the daemon keeps them, and
+    the folder the user picks for the server has no bearing on that at all --- a
+    user with 1336 GB free on `E:` was refused over 16 GB free on `C:` and told
+    to install to a drive with room, which is what he had already done.
+
+    Where the bytes actually move is per-platform, so the sentence names the
+    real setting rather than "free some space somewhere": Docker Desktop's
+    "Disk image location" on Windows and macOS, `data-root` on a Linux daemon.
+    """
+    if facts.platform_id == "linux":
+        return (
+            "This is Docker's own disk, not the install folder — moving the install will not "
+            "help. Free space on the drive holding Docker's data root, or point the daemon "
+            'somewhere roomier with "data-root" in /etc/docker/daemon.json, then try again.'
+        )
+    return (
+        "This is Docker's own disk, not the install folder — moving the install will not "
+        "help. Free space on that drive, or move Docker's disk itself in Docker Desktop → "
+        "Settings → Resources → Advanced → Disk image location, then try again."
+    )
+
+
+def _space_remedy(what: str, facts: Facts) -> str:
+    """The remedy for one free-space row. Which drive is short decides which advice is true."""
+    if what == "the server folder":
+        return FOLDER_SPACE_REMEDY
+    if what == "Docker's disk":
+        return _docker_disk_remedy(facts)
+    # `ONE_VOLUME_SPACE`: one drive holds both, so either action frees the same
+    # pool and the user should be told they have the choice.
+    return (
+        "The install folder and Docker's disk are on the same drive, so both needs come out "
+        "of it. Free space on it, install to a drive that has room, or move Docker's disk "
+        "off it, then try again."
+    )
 
 
 def _space_check_macos_bounded(
@@ -712,7 +762,7 @@ def _space_check_macos_bounded(
             "free space on Docker's disk",
             "refuse",
             f"{gigabytes:.0f} GB free on the drive, and the install needs {refuse_gb:.0f} GB",
-            "Free some space, or install to a drive that has room, then try again.",
+            _docker_disk_remedy(facts),
         )
     if gigabytes < warn_gb:
         return Check(

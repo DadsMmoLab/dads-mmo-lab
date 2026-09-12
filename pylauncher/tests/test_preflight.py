@@ -214,6 +214,62 @@ def test_the_floors_add_when_both_needs_are_on_one_volume() -> None:
     assert "share one drive" in report.message()
 
 
+def test_a_full_docker_disk_is_not_answered_with_move_the_install() -> None:
+    """Doc's 2026-09-12 refusal: the remedy named the one thing he had already done.
+
+    Reported in #-yulon with the log: installing into `E:\\wow wotlk`, which the
+    run's own rows agree about --- "free space on the server folder: 1336 GB
+    free" and "the server folder: E:\\wow wotlk looks usable" both pass --- while
+    "free space on Docker's disk: 16 GB free, and the install needs 40 GB"
+    refuses and stops the install. The refusal was true: Docker Desktop keeps
+    its images and build cache in its own disk image on C:, and nothing about
+    the folder the user picks moves them.
+
+    What was wrong was the sentence under it. Both free-space rows shared one
+    remedy, "Free some space, or install to a drive that has room" --- correct
+    for the server-folder row, and a circle for this one, because the drive
+    with room is where the install already points. Doc read it and asked
+    whether the app could be pointed anywhere but C: at all.
+
+    So the Docker row must name the thing that actually moves those bytes, and
+    must not repeat the advice that sent him round.
+    """
+    doc = facts(
+        platform_id="windows",
+        data_root_free=16 * GIB,
+        server_dir_free=1336 * GIB,
+        same_volume=False,
+    )
+    report = preflight.evaluate(ENTRY, SERVER_DIR, doc)
+    assert not report.ok()
+    refused = report.refusals()
+    assert [check.name for check in refused] == ["free space on Docker's disk"], [
+        check.line() for check in refused
+    ]
+
+    remedy = refused[0].remedy
+    assert "install to a drive that has room" not in remedy, remedy
+    assert "Disk image location" in remedy, remedy
+
+    # The server-folder row keeps the advice that is right for it, and is not
+    # dragged along by this change.
+    # Under `min_server_dir_gb`, which is 8 and not the data root's 40 — the
+    # floors differ per row, so the mirror case needs the folder's own number.
+    roomless_folder = facts(
+        platform_id="windows",
+        data_root_free=1336 * GIB,
+        server_dir_free=4 * GIB,
+        same_volume=False,
+    )
+    folder_row = [
+        check
+        for check in preflight.evaluate(ENTRY, SERVER_DIR, roomless_folder).refusals()
+        if check.name == "free space on the server folder"
+    ]
+    assert len(folder_row) == 1, folder_row
+    assert "install to a drive that has room" in folder_row[0].remedy, folder_row[0].remedy
+
+
 def _space_rows(report: preflight.Report) -> list[preflight.Check]:
     return [check for check in report.checks if check.name.startswith("free space on ")]
 
