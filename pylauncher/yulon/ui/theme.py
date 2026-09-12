@@ -76,9 +76,14 @@ COLOR_TEXT_WARNING = "#E0A030"  # amber warning (unsupported platform, refusals)
 # ('Cinzel'/'Friz Quadrata'/'Georgia') names no face that ships on SteamOS, so
 # it resolved non-deterministically through fontconfig. Every family below is
 # either ubiquitous or has a generic fallback that exists everywhere.
-FONT_FAMILY_TITLE = "'Segoe UI', 'Noto Sans', 'DejaVu Sans', 'Liberation Sans', 'Helvetica Neue', 'Arial', sans-serif"
+FONT_FAMILY_TITLE = (
+    "'Segoe UI', 'Noto Sans', 'DejaVu Sans', 'Liberation Sans', "
+    "'Helvetica Neue', 'Arial', sans-serif"
+)
 FONT_FAMILY_BODY = FONT_FAMILY_TITLE
-FONT_FAMILY_MONO = "'JetBrains Mono', 'Fira Code', 'DejaVu Sans Mono', 'Liberation Mono', 'Consolas', monospace"
+FONT_FAMILY_MONO = (
+    "'JetBrains Mono', 'Fira Code', 'DejaVu Sans Mono', 'Liberation Mono', 'Consolas', monospace"
+)
 
 # Qt's QSS cannot scale font sizes relatively (`em`, `%` and the CSS keywords
 # all resolve to a fixed value — measured on PySide6 6.11.2). So the theme is
@@ -397,7 +402,9 @@ QPushButton[danger="true"]:hover, QPushButton#stop-server:hover, QPushButton#pur
     border: 1px solid {COLOR_DANGER};
 }}
 
-QPushButton[danger="true"]:pressed, QPushButton#stop-server:pressed, QPushButton#purge-btn:pressed {{
+QPushButton[danger="true"]:pressed,
+QPushButton#stop-server:pressed,
+QPushButton#purge-btn:pressed {{
     background-color: #1A1012;
     color: #E8A0A4;
     border: 1px solid #6A3034;
@@ -407,7 +414,9 @@ QPushButton[danger="true"]:focus, QPushButton#stop-server:focus, QPushButton#pur
     border: 1px solid #E06064;
 }}
 
-QPushButton[danger="true"]:disabled, QPushButton#stop-server:disabled, QPushButton#purge-btn:disabled {{
+QPushButton[danger="true"]:disabled,
+QPushButton#stop-server:disabled,
+QPushButton#purge-btn:disabled {{
     background-color: #1E1618;
     color: #6A5A5C;
     border: 1px solid {COLOR_BRASS_DEEP};
@@ -566,7 +575,11 @@ QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdi
     background-color: #181818;
 }}
 
-QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {{
+QLineEdit:disabled,
+QSpinBox:disabled,
+QComboBox:disabled,
+QTextEdit:disabled,
+QPlainTextEdit:disabled {{
     background-color: #161616;
     color: #6A6A6A;
     border: 1px solid {COLOR_BRASS_DEEP};

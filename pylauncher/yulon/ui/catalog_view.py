@@ -465,9 +465,7 @@ class CatalogView(QWidget):
                 role="tile-meta",
             )
         )
-        meta_box.addWidget(
-            self._tile_text(f"{entry.emulator.name}", frame, role="tile-meta")
-        )
+        meta_box.addWidget(self._tile_text(f"{entry.emulator.name}", frame, role="tile-meta"))
         meta_box.addStretch(1)
         box.addLayout(meta_box)
 

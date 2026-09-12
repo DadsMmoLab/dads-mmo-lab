@@ -21,13 +21,13 @@ from yulon.ui.theme import (
     apply_dadcraft_theme,
     build_dadcraft_palette,
 )
-from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.dadcraft_decorations import (
     DadcraftCampaignCard,
     DadcraftHeader,
     DadcraftRealmBadge,
     format_dadcraft_tooltip,
 )
+from yulon.ui.widgets.log_panel import LogPanel
 
 
 def test_dadcraft_palette_construction() -> None:
@@ -126,9 +126,7 @@ def test_the_button_base_state_draws_a_visible_hairline() -> None:
 def test_the_tab_base_state_draws_a_visible_hairline() -> None:
     from yulon.ui.theme import COLOR_BRASS_DARK
 
-    tab_rule = DADCRAFT_THEME_QSS.split(
-        "QTabBar::tab, QTabBar::tab:top {"
-    )[1].split("}")[0]
+    tab_rule = DADCRAFT_THEME_QSS.split("QTabBar::tab, QTabBar::tab:top {")[1].split("}")[0]
     assert f"border: 1px solid {COLOR_BRASS_DARK};" in tab_rule
 
 

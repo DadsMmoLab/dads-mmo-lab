@@ -818,9 +818,7 @@ def main() -> int:
         try:
             import ctypes
 
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "org.dadsmmolab.yulon"
-            )
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("org.dadsmmolab.yulon")
         except Exception:
             pass
 

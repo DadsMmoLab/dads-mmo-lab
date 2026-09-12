@@ -93,12 +93,7 @@ def _iter_focusable(root: QWidget) -> Iterable[QWidget]:
 
     def walk(w: QWidget) -> Iterable[QWidget]:
         policy = w.focusPolicy()
-        if (
-            w is not root
-            and (policy & Qt.FocusPolicy.TabFocus)
-            and w.isEnabled()
-            and w.isVisible()
-        ):
+        if w is not root and (policy & Qt.FocusPolicy.TabFocus) and w.isEnabled() and w.isVisible():
             # read-only multi-line text is a D-pad trap; skip it.
             if isinstance(w, (QPlainTextEdit, QTextEdit)) and w.isReadOnly():
                 pass
