@@ -281,7 +281,7 @@ def build_window() -> object:
     # tab tree changes, and the remembered loop runs *during* this function.
     from yulon.ui.gamepad import install_gamepad_navigation
 
-    navigator, _source = install_gamepad_navigation(window)
+    navigator, _keyboard, _gamepad = install_gamepad_navigation(window)
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]

@@ -2,18 +2,31 @@
 
 "Dadcraft" gamepad autonomy: the engine turns a D-pad + face buttons + shoulder
 bumpers into full navigation of every panel, button, tab and input, with no
-mouse. It is input-source-agnostic by design:
+mouse. It is input-source-agnostic by design: every source decodes the physical
+device into *logical* `Direction`/`Action` events and hands them to the one
+`Navigator`, which is the only thing that moves focus.
 
-- It reads *logical* actions ("up", "confirm", "cycle-next", ...) from an
-  `InputSource`, never raw OS events.
-- The shipped `KeyboardSource` is a zero-dependency event filter: on Steam Deck
-  (Steam Input maps the pad to arrow/Return/Escape/uinput keys) and on Windows
-  (Steam's XInput overlay does the same) the physical gamepad already arrives as
-  key events, so the default source needs nothing OS-specific.
+Two sources ship, for the two ways a pad reaches Qt:
 
-PySide6/Qt6 has no native gamepad API; a real evdev/SDL backend plugs in behind
-the `InputSource` protocol (the `inputs` or `pygame` package) without touching
-any navigation code below.
+- `GamepadSource` reads the physical controller directly through SDL (`pygame`).
+  On the Steam Deck, adding the AppImage to Steam presents the built-in pad as
+  a **virtual Xbox 360 pad** to any non-Steam game — so "basic XInput" is what
+  every user gets by default, delivered as SDL joystick events. SDL normalizes
+  evdev (SteamOS), XInput (Windows) and IOHID (macOS) to one model, so the same
+  poll loop works on all three with no OS-specific code. This is the
+  lowest-common-denominator source: we cannot ask the user to change Steam
+  Input's template, so we read what Steam Input always produces.
+- `KeyboardSource` stays as a zero-dependency fallback for desktop arrow-key
+  use and for the keyboard-emulation path, so a checkout without `pygame`
+  still navigates.
+
+`GamepadSource` imports `pygame` lazily and degrades to a no-op when it is not
+installed (CI, an un-reinstalled checkout), so a missing dependency never stops
+the app from launching.
+
+PySide6/Qt6 has no native gamepad API; `pygame` (SDL2) is the one backend that
+covers all three target OSes — `inputs` drops macOS and `evdev` is Linux-only.
+SDL2 already ships on SteamOS, so the AppImage does not bloat on the Deck.
 
 Architecture (style-guide §3/§5): this module owns *navigation mechanics only*.
 It knows how focus moves and how a logical action becomes a focus shift or a
@@ -23,10 +36,12 @@ window composes it and connects its signals.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable
 from enum import Enum
+from typing import Protocol
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -36,6 +51,52 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QWidget,
 )
+
+
+class Joystick(Protocol):
+    """The slice of `pygame.joystick.Joystick` the poller reads.
+
+    A Protocol rather than an import of `pygame` because that package is optional
+    and absent from CI/desktop checkouts — mypy would otherwise fail on a missing
+    stub. The real object satisfies this surface; nothing else in the module
+    touches `pygame` except `_GamepadWorker.run()`.
+    """
+
+    def get_numbuttons(self) -> int: ...
+    def get_button(self, index: int) -> bool: ...
+    def get_numaxes(self) -> int: ...
+    def get_axis(self, index: int) -> float: ...
+    def get_numhats(self) -> int: ...
+    def get_hat(self, index: int) -> tuple[float, float]: ...
+
+
+# --- Xbox/XInput layout + polling timing (module-level: shared by the worker) ---
+# The Steam Deck's base template presents the built-in pad as a virtual Xbox 360
+# pad to any non-Steam game, so these SDL joystick indices are what every user
+# gets without being asked to remap anything.
+BTN_A = 0
+BTN_B = 1
+BTN_X = 2
+BTN_Y = 3
+BTN_LB = 4
+BTN_RB = 5
+BTN_BACK = 6
+BTN_START = 7
+
+# SDL joystick axes (XInput order). LX/LY drive movement; LT/RT are unmapped on
+# purpose (analog triggers rest under the fingers and would fire actions).
+AXIS_LX = 0
+AXIS_LY = 1
+
+# Deadzone for the stick, in SDL's [-1, 1] axis units.
+DEADZONE = 0.5
+
+# Hold-repeat timing: a held direction repeats after this delay, then at this
+# interval, so a user can hold the D-pad to scroll a list fast.
+FIRST_REPEAT_S = 0.45
+REPEAT_S = 0.12
+
+POLL_S = 1 / 120
 
 
 class Direction(Enum):
@@ -360,15 +421,237 @@ class KeyboardSource(QObject):
         return super().eventFilter(watched, event)
 
 
-def install_gamepad_navigation(window: QWidget) -> tuple[Navigator, KeyboardSource]:
-    """Create and start a Navigator + KeyboardSource pair bound to `window`.
+def install_gamepad_navigation(window: QWidget) -> tuple[Navigator, KeyboardSource, GamepadSource]:
+    """Create and start every input source bound to `window`.
 
-    The one line the app calls: builds the engine, starts the source, and
-    returns both so a caller can keep references (they are also parented to
-    `window` so Qt owns their lifetime). Idempotent per window via the source's
-    `start()` guard.
+    Builds the one `Navigator`, then starts the keyboard filter (always) and the
+    SDL gamepad reader (no-op when `pygame` is absent). Returns the navigator
+    and both sources so a caller can keep references; they are also parented to
+    `window` so Qt owns their lifetime.
     """
     navigator = Navigator(window)
-    source = KeyboardSource(navigator, window)
-    source.start()
-    return navigator, source
+    keyboard = KeyboardSource(navigator, window)
+    gamepad = GamepadSource(navigator, window)
+    keyboard.start()
+    # The gamepad source emits logical events as queued signals; route them into
+    # the same navigator the keyboard filter drives.
+    gamepad.direction.connect(navigator.navigate)
+    gamepad.action.connect(navigator.perform)
+    gamepad.start()
+    return navigator, keyboard, gamepad
+
+
+class GamepadSource(QObject):
+    """Reads the physical controller through SDL and feeds the navigator.
+
+    A `QThread` + worker poll the pad at ~120 Hz; every decoded logical event is
+    emitted as a queued Qt signal onto the GUI thread. Face/shoulder buttons are
+    edge-triggered (one action per press), the D-pad and left stick are
+    level-triggered with a deadzone and a hold-repeat for fast list scrolling.
+    The Xbox/XInput layout is the target because the Steam Deck's own base
+    template presents exactly that (a virtual Xbox 360 pad) to any non-Steam
+    game — the lowest common denominator the app must read, from a user who was
+    never asked to remap anything.
+    """
+
+    #: Emits `Direction` on the GUI thread.
+    direction = Signal(object)
+    #: Emits `Action` on the GUI thread.
+    action = Signal(object)
+
+    def __init__(self, navigator: Navigator, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._thread: QThread | None = None
+        self._worker: _GamepadWorker | None = None
+        self._running = False
+
+    def start(self) -> None:
+        """Begin polling SDL for a connected pad. No-op if unavailable.
+
+        The `pygame` import lives in the worker's `run()`, but availability is
+        checked HERE on the GUI thread first — if the package is absent, no
+        worker is ever created and the `try/except ImportError` cannot leak a
+        doomed `QThread` into teardown. A missing joystick is also decided here,
+        so a headless box never spawns a poller at all.
+        """
+        if self._running:
+            return
+        try:
+            import pygame  # noqa: F401  # availability probe only
+        except ImportError:
+            return
+        try:
+            pygame.joystick.init()
+            has_stick = pygame.joystick.get_count() > 0
+        finally:
+            pygame.joystick.quit()
+        if not has_stick:
+            return
+        self._start_thread()
+        self._running = True
+
+    def _start_thread(self) -> None:
+        worker = _GamepadWorker()
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.direction.connect(self.direction)
+        worker.action.connect(self.action)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_thread_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _on_thread_finished(self) -> None:
+        self._running = False
+        self._thread = None
+        self._worker = None
+
+    def stop(self) -> None:
+        """Stop polling cleanly (the worker breaks its loop on the next tick)."""
+        if self._worker is not None:
+            self._worker.stop()
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait(500)
+            self._thread = None
+        self._running = False
+
+
+class _GamepadWorker(QObject):
+    """The SDL poller, living on its own thread. Emits logical events via signals.
+
+    Kept separate from `GamepadSource` so the GUI-thread object never touches
+    SDL directly: SDL's joystick state must be read from one thread (the poller),
+    and the signals carry the decoded result back across the thread boundary.
+    """
+
+    direction = Signal(object)
+    action = Signal(object)
+    finished = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._stop = False
+        self._held: Direction | None = None
+        self._held_since = 0.0
+        self._pressed: set[int] = set()
+
+    @Slot()
+    def run(self) -> None:
+        """Poll SDL until told to stop; the only method that imports/uses `pygame`.
+
+        The whole body is one `try/finally`: whatever happens — `pygame` missing,
+        no joystick present, a poll raising — `finished` is emitted exactly once so
+        the owning `QThread` quits and the pair is torn down, never left running
+        into Qt's interpreter teardown (which aborts with 0xC0000409).
+        """
+        import pygame  # optional dep; availability is probed on the GUI thread first
+        try:
+            pygame.joystick.init()
+            count = pygame.joystick.get_count()
+        except pygame.error:
+            # No joystick subsystem (headless CI, a container): nothing to read.
+            self.finished.emit()
+            return
+        if count == 0:
+            self.finished.emit()
+            return
+        stick = pygame.joystick.Joystick(0)
+        stick.init()
+        pygame.event.pump()
+        try:
+            while not self._stop:
+                pygame.event.pump()
+                self._poll(stick)
+                time.sleep(POLL_S)
+        finally:
+            pygame.joystick.quit()
+            self.finished.emit()
+
+    def stop(self) -> None:
+        """Signal the poll loop to break (thread-safe enough for a bool flag)."""
+        self._stop = True
+
+    def _poll(self, stick: Joystick) -> None:
+        """Decode one snapshot of button and axis state into logical events."""
+        # Buttons: edge-triggered. A press emits once; a held button emits
+        # nothing more (except a held direction, handled below).
+        current_pressed: set[int] = set()
+        for idx in range(stick.get_numbuttons()):
+            if stick.get_button(idx):
+                current_pressed.add(idx)
+
+        for idx in current_pressed - self._pressed:
+            self._handle_button_down(idx)
+        self._pressed = current_pressed
+
+        # D-pad (hat) and left stick: level-triggered with a deadzone, plus a
+        # hold-repeat so a held direction keeps stepping.
+        dx, dy = self._read_stick(stick)
+        hat = self._read_hat(stick)
+        if hat is not None:
+            dx, dy = hat
+        direction = _axis_to_direction(dx, dy, DEADZONE)
+        self._update_direction(direction)
+
+    def _handle_button_down(self, idx: int) -> None:
+        mapping = {
+            BTN_A: Action.CONFIRM,
+            BTN_B: Action.BACK,
+            BTN_LB: Action.CYCLE_PREV,
+            BTN_RB: Action.CYCLE_NEXT,
+        }
+        action = mapping.get(idx)
+        if action is not None:
+            self.action.emit(action)
+
+    def _read_stick(self, stick: Joystick) -> tuple[float, float]:
+        if stick.get_numaxes() > max(AXIS_LX, AXIS_LY):
+            return stick.get_axis(AXIS_LX), stick.get_axis(AXIS_LY)
+        return 0.0, 0.0
+
+    def _read_hat(self, stick: Joystick) -> tuple[float, float] | None:
+        if stick.get_numhats() == 0:
+            return None
+        hx, hy = stick.get_hat(0)  # (-1..1, -1..1): right = +x, up = +y
+        if hx == 0 and hy == 0:
+            return None
+        return float(hx), float(hy)
+
+    def _update_direction(self, direction: Direction | None) -> None:
+        now = time.monotonic()
+        if direction is None:
+            self._held = None
+            self._held_since = 0.0
+            return
+        if direction is not self._held:
+            # A fresh press (or a change of direction): emit immediately, then
+            # begin the hold-repeat clock.
+            self._held = direction
+            self._held_since = now
+            self.direction.emit(direction)
+            return
+        # Same direction still held: after the initial delay, re-emit once per
+        # interval so a held D-pad scrolls a list instead of stepping once.
+        elapsed = now - self._held_since
+        if elapsed >= FIRST_REPEAT_S:
+            steps = int((elapsed - FIRST_REPEAT_S) / REPEAT_S)
+            previous = int((elapsed - POLL_S - FIRST_REPEAT_S) / REPEAT_S)
+            if steps > previous:
+                self.direction.emit(direction)
+
+
+def _axis_to_direction(dx: float, dy: float, deadzone: float) -> Direction | None:
+    """Map a 2D axis/hat vector to a cardinal direction, with a deadzone.
+
+    The dominant axis wins; both are suppressed inside the deadzone so a resting
+    stick (which never reads exactly 0.0) does not drift.
+    """
+    if abs(dx) < deadzone and abs(dy) < deadzone:
+        return None
+    if abs(dx) >= abs(dy):
+        return Direction.RIGHT if dx > 0 else Direction.LEFT
+    return Direction.DOWN if dy > 0 else Direction.UP

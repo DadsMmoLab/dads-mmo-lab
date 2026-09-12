@@ -1,5 +1,11 @@
 PySide6>=6.6
 pydantic>=2.7
+# SDL2 bindings for gamepad/navigation. On the Steam Deck the built-in pad is
+# presented as a virtual Xbox 360 pad to any non-Steam game, so reading it
+# through SDL is the lowest common denominator — the user is never asked to
+# remap Steam Input. Degrades to keyboard navigation (`yulon/ui/gamepad.py`)
+# when this is absent (e.g. a CI checkout), so it is soft, not hard, dependency.
+pygame>=2.5
 # Mozilla's root CA bundle. A fresh Windows install ships ~18 roots and fetches
 # the rest on demand through a mechanism OpenSSL never triggers, so Python could
 # not verify desktop.docker.com there (measured 2026-08-22) — see

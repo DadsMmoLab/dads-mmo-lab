@@ -46,7 +46,16 @@ datas = [
 # the verified-download fallback working in a frozen build. Without it the frozen
 # app falls back to the OS root store alone — still verifying, but missing the
 # roots a fresh Windows install has not materialized yet.
-hiddenimports = collect_submodules("yulon") + ["pydantic", "pydantic_core", "certifi"]
+# pygame is imported lazily inside `yulon.ui.gamepad._GamepadWorker.run()`, so
+# static analysis recovers no reference to it; naming it lets PyInstaller's
+# pygame hook collect the SDL2 shared libraries the joystick reader links at
+# runtime (Windows ships `SDL2.dll`, macOS bundles the SDL2 framework).
+hiddenimports = collect_submodules("yulon") + [
+    "pydantic",
+    "pydantic_core",
+    "certifi",
+    "pygame",
+]
 
 a = Analysis(
     [os.path.join(ROOT, "main.py")],
