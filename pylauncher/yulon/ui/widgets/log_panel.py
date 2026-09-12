@@ -391,6 +391,11 @@ class LogPanel(QWidget):
         super().__init__(parent)
         self._text = QPlainTextEdit(self)
         self._text.setReadOnly(True)
+        # Non-focusable on purpose: a read-only log is a D-pad dead-end (arrow
+        # keys would move its text cursor instead of navigating). Focus belongs
+        # on the Stop button beside it, and copy-by-selection still works via
+        # the mouse.
+        self._text.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._text.setMaximumBlockCount(_MAX_BLOCKS)
         self._status = QLabel("idle", self)
         # WRAPPED, and the app is unusable without it. This label is handed the

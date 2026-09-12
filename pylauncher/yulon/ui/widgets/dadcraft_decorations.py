@@ -331,6 +331,11 @@ class DadcraftCampaignCard(QFrame):
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setFixedHeight(370)
         self.setMinimumWidth(235)
+        # Focusable so the gamepad navigator can land on the tile as a single
+        # node (and its Install / Use-existing buttons are reached one step in),
+        # rather than the card being an invisible gap in the D-pad chain. The
+        # card itself has no action; Confirm falls through to its children.
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.setStyleSheet("background: transparent; border: none;")
         self._time = 0.0
         self._hovered = False

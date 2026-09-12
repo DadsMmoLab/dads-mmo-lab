@@ -275,6 +275,14 @@ def build_window() -> object:
     apply_dadcraft_theme(window)
     window._theme_width = DEFAULT_WINDOW_SIZE[0]  # matches the unscaled theme just applied
 
+    # Gamepad / D-pad navigation (handheld), created HERE — before `tabs`, the
+    # `add_controller`/`drop_controller` closures, and the remembered-installs
+    # loop below — because those closures call `navigator.invalidate()` when the
+    # tab tree changes, and the remembered loop runs *during* this function.
+    from yulon.ui.gamepad import install_gamepad_navigation
+
+    navigator, _source = install_gamepad_navigation(window)
+
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
 
@@ -362,6 +370,8 @@ def build_window() -> object:
         index = tabs.indexOf(view)
         if index != -1:
             tabs.removeTab(index)
+        # The tab tree changed; the navigator's cached focus chain is stale.
+        navigator.invalidate()
         # `removeTab()` only unparents the page, it does not delete it. Without
         # this the discarded view stays alive for the life of the process, and
         # it is a whole ControllerView (six sub-tabs, a LogPanel, a QTimer).
@@ -563,6 +573,8 @@ def build_window() -> object:
         panels.extend(view.log_panels())
         tabs.addTab(view, entry.name)
         tabs.setTabIcon(tabs.indexOf(view), get_tab_icon("server"))
+        # A new page entered the tree; the navigator's focus chain is stale.
+        navigator.invalidate()
         # The leaf folder alone was the title, and it is the one part of the
         # path that repeats: the installer suggests the same name every time,
         # so two installs under different parents both read "WoW WotLK —
