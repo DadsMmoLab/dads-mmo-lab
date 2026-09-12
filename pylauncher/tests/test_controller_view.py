@@ -28,6 +28,7 @@ from yulon import (
     runner,
     state,
     steam,
+    tuning,
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql
@@ -52,7 +53,7 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
-from yulon.manifest import Build, Manifest, ManifestType, Source, parse_manifest
+from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
@@ -7920,3 +7921,254 @@ def test_the_selected_manifest_of_a_shared_id_is_the_one_whose_row_is_selected(
     picked = view.selected_manifest()
     assert picked is not None and picked.type == "mod", picked
     view.modules_panel.hide()
+
+# -- T43: the Tuning tab ----------------------------------------------------
+
+
+def _deploy(server_dir: Path, rel: str, text: str) -> Path:
+    path = server_dir / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+TRANSMOG_CONF = "env/dist/etc/modules/transmog.conf"
+
+
+def _tuned_view(ps: _Ps, tmp_path: Path) -> ControllerView:
+    """A WotLK view with `mod-transmog` installed and its conf deployed.
+
+    The same module the live install on `yulon-win11` reported five unwritten
+    keys for on 2026-09-12, which is the report this whole ticket came from.
+    """
+    _deploy(
+        tmp_path,
+        TRANSMOG_CONF,
+        "[worldserver]\n"
+        "#\n"
+        "Transmogrification.Enable = 1\n"
+        "Transmogrification.ShowSetDisclaimer = 1\n",
+    )
+    return _installed_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+
+
+def test_the_tuning_tab_lists_the_settings_of_installed_modules_only(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    cards = [card.card.module_id for card in view.tuning_panel.cards()]
+    assert cards == ["mod-transmog"], cards
+    keys = list(view.tuning_panel.card("mod-transmog").editors)
+    assert "Transmogrification.Enable" in keys and len(keys) == 5
+
+
+def test_a_setting_shows_what_the_deployed_conf_says_and_never_invents_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The five keys carry no `default`, so four of them have no value at all."""
+    view = _tuned_view(ps, tmp_path)
+    editors = view.tuning_panel.card("mod-transmog").editors
+    assert editors["Transmogrification.Enable"].value() == "1"
+    assert editors["Transmogrification.Enable"].note_label is None
+    missing = editors["Transmogrification.UseCollectionSystem"]
+    assert missing.value() == ""
+    assert missing.note_label is not None
+
+
+def test_a_game_with_nothing_installed_says_so_instead_of_an_empty_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.tuning_panel.cards() == ()
+    assert not view.tuning_panel.empty_label.isHidden()
+
+
+def test_saving_a_card_writes_what_changed_and_names_the_backup(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setText("0")
+    assert card.save_button is not None
+    card.save_button.click()
+
+    after = path.read_text(encoding="utf-8")
+    assert "Transmogrification.Enable = 0" in after
+    assert "Transmogrification.ShowSetDisclaimer = 1" in after, "an untouched key moved"
+    (backup,) = tuning.backups_of(path)
+    assert backup.read_text(encoding="utf-8") == before
+    said = view.tuning_report.toPlainText()
+    assert "Transmogrification.Enable" in said and backup.name in said
+    # And the cards were re-read off the file afterwards: the row that was just
+    # written is no longer marked as changed, because the file now says so.
+    redrawn = view.tuning_panel.card("mod-transmog").editors["Transmogrification.Enable"]
+    assert redrawn.value() == "0" and not redrawn.changed
+
+
+def test_a_save_that_changed_nothing_writes_nothing_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    assert card.save_button is not None
+    card.save_button.click()
+    assert path.read_text(encoding="utf-8") == before
+    assert tuning.backups_of(path) == ()
+    assert "nothing" in view.tuning_report.toPlainText()
+
+
+def test_a_key_the_conf_never_carried_is_written_for_the_first_time(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The whole point of the ticket: 73 of the 107 keys are unreachable today."""
+    view = _tuned_view(ps, tmp_path)
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.UseCollectionSystem"].control.setText("0")
+    assert card.save_button is not None
+    card.save_button.click()
+    assert "Transmogrification.UseCollectionSystem = 0" in (tmp_path / TRANSMOG_CONF).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_a_value_that_fails_its_type_is_refused_and_the_file_is_untouched(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    key = "Transmogrification.Enable"
+    # The shipped manifest declares no `type` for this key yet (that is T43
+    # point 7's job), so the refusal is asked for here by declaring one.
+    monkeypatch.setattr(
+        view,
+        "_tuning_spec",
+        lambda family, module_id, file: {key: ConfKey(key=key, type="int", min=0, max=1)},
+    )
+    card.editors[key].control.setText("nine")
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    assert card.save_button is not None
+    card.save_button.click()
+    assert path.read_text(encoding="utf-8") == before
+    assert tuning.backups_of(path) == ()
+    assert key in view.tuning_report.toPlainText()
+    assert failures and key in failures[0]
+
+
+def test_revert_puts_the_conf_back_from_the_backup(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setText("0")
+    assert card.save_button is not None and card.revert_button is not None
+    card.save_button.click()
+    assert path.read_text(encoding="utf-8") != before
+    view.tuning_panel.card("mod-transmog").revert_button.click()
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_revert_with_no_backup_says_so_rather_than_doing_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    card = view.tuning_panel.card("mod-transmog")
+    assert card.revert_button is not None
+    card.revert_button.click()
+    assert "no backup" in view.tuning_report.toPlainText()
+
+
+def test_the_file_picker_lists_the_deployed_confs_and_opens_the_first(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    listed = [view.tuning_panel.files.itemText(i) for i in range(view.tuning_panel.files.count())]
+    assert listed == [TRANSMOG_CONF], listed
+    assert "Transmogrification.Enable = 1" in view.tuning_panel.editor.toPlainText()
+    assert not view.tuning_panel.editor.isReadOnly()
+
+
+def test_the_servers_own_conf_is_listed_read_only_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T43's own follow-up: who owns core configuration is a bigger question."""
+    _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    view = _tuned_view(ps, tmp_path)
+    view.tuning_panel.files.setCurrentText("env/dist/etc/worldserver.conf")
+    assert view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.file_note.text() == controller_view_module.TUNING_CORE_FILE
+    assert not view.tuning_panel.file_save_button.isEnabled()
+
+
+def test_a_raw_save_that_still_looks_like_a_conf_asks_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: asked.append("asked")
+        or int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    view = _tuned_view(ps, tmp_path)
+    view.tuning_panel.editor.setPlainText("[worldserver]\nTransmogrification.Enable = 0\n")
+    view.tuning_panel.file_save_button.click()
+    assert asked == []
+    assert (tmp_path / TRANSMOG_CONF).read_text(encoding="utf-8") == (
+        "[worldserver]\nTransmogrification.Enable = 0\n"
+    )
+
+
+def test_a_raw_save_that_stopped_looking_like_a_conf_asks_once_and_a_no_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard warns and gates; it never blocks (T43 point 4)."""
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    said: list[str] = []
+
+    def refuse(parent: object, title: str, text: str, *rest: object) -> int:
+        said.append(text)
+        return int(controller_view_module.QMessageBox.StandardButton.No)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", refuse)
+    view.tuning_panel.editor.setPlainText("this is not a setting\n")
+    view.tuning_panel.file_save_button.click()
+    assert said and "Line 1" in said[0]
+    assert path.read_text(encoding="utf-8") == before
+    assert tuning.backups_of(path) == ()
+
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    view.tuning_panel.file_save_button.click()
+    assert path.read_text(encoding="utf-8") == "this is not a setting\n"
+
+
+def test_busy_greys_the_tuning_saves_and_gives_them_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    card = view.tuning_panel.card("mod-transmog")
+    assert card.save_button is not None
+    view._set_busy(True)
+    assert not card.save_button.isEnabled()
+    view._set_busy(False)
+    assert card.save_button.isEnabled()
+
+
+def test_a_card_says_what_applying_its_change_costs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Computed, not typed into the view: the same sentence the raw editor shows."""
+    view = _tuned_view(ps, tmp_path)
+    card = view.tuning_panel.card("mod-transmog")
+    assert card.rule_label.text() == tuning.apply_sentence("restart")
+    assert view.tuning_panel.file_note.text() == tuning.apply_sentence("restart")

@@ -69,6 +69,7 @@ from yulon import (
     platform,
     purge,
     resources,
+    tuning,
     useraccounts,
 )
 from yulon import channel as channel_module
@@ -102,7 +103,7 @@ from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.log import get_logger
-from yulon.manifest import Manifest, Prompt, When
+from yulon.manifest import ConfKey, Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui import lines
@@ -121,6 +122,7 @@ from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
 from yulon.ui.widgets.modules_panel import ModulesPanel, SessionState, build_module_rows
 from yulon.ui.widgets.party_panel import PartyPanel
+from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
 logger = get_logger(__name__)
 
@@ -2292,6 +2294,57 @@ here would be the same defect 8.7a's other half was opened for — a module
 reported as done while nothing ran.
 """
 
+TUNING_SAVED = (
+    "{module}: wrote {keys} in {file}. A backup of the file as it was is beside it at "
+    "{backup}.\n{rule}"
+)
+"""What a guided save reports: what moved, where, and what it costs to apply.
+
+The backup's path is named rather than implied, because Revert is one press and
+the file is one a person may also want to look at by hand.
+"""
+
+TUNING_NOTHING_CHANGED = "{module}: nothing on this card was changed, so nothing was written."
+
+TUNING_REFUSED = "{module}: nothing was written — {why}"
+"""A refusal that names the key, in the box every other answer on this tab is read in.
+
+`tuning.write()` checks every value before it touches the file, so this really
+does mean nothing was written, and saying so is the difference between a user
+who fixes one field and a user who wonders what state their conf is in.
+"""
+
+TUNING_REVERTED = "{module}: put {file} back from {backup}.\n{rule}"
+
+TUNING_NO_BACKUP = (
+    "{module}: there is no backup of {file} to revert to. Yu'lon takes one every time it "
+    "saves, so the first save is what creates it."
+)
+
+TUNING_FILE_SAVED = "Wrote {file}. A backup of it as it was is beside it at {backup}.\n{rule}"
+
+TUNING_FILE_FAILED = "{file} was NOT written: {exc}"
+
+TUNING_LINT_CONFIRM_TITLE = "Save this file anyway?"
+
+TUNING_CORE_FILE = (
+    "This is the server's own configuration, not a module's. Yu'lon shows it read-only in "
+    "this version: who owns core configuration is a bigger question than one module's conf."
+)
+"""Why `worldserver.conf` is listed but not editable here (T43's own follow-up)."""
+
+TUNING_CORE_FILES: tuple[str, ...] = (
+    "env/dist/etc/worldserver.conf",
+    "env/dist/etc/authserver.conf",
+    "env/dist/etc/modules/playerbots.conf",
+)
+"""The install's own conf files, listed read-only beside the module ones.
+
+Named here and not discovered by a glob of `env/dist/etc`: a glob would also
+list every module conf a second time, and the point of the list is that these
+three are the ones this tab deliberately will not write.
+"""
+
 MODULE_SQL_BUTTON_LABEL = "Apply module SQL"
 """The Modules tab's import button, named once.
 
@@ -2575,6 +2628,7 @@ class ControllerView(QWidget):
         self._build_bots_tab()
         self._build_maintenance_tab()
         self._build_modules_tab()
+        self._build_tuning_tab()
         self._build_networking_tab()
 
         # What the channel says needs no daemon, no database and no network:
@@ -3370,6 +3424,9 @@ class ControllerView(QWidget):
             # landing half-way through a build puts a module into the image no
             # report claims is in it.
             self.modules_panel.set_enabled_actions(False)
+            # And the Tuning tab's saves: they write conf files an install,
+            # a rebuild or an importer run is reading at the same moment.
+            self.tuning_panel.set_enabled_actions(False)
         else:
             self.refresh_button.setEnabled(True)
             self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -3387,6 +3444,7 @@ class ControllerView(QWidget):
             # a job of its own finishing, and neither must a row the ROW itself
             # forbids -- `RowWidget.set_enabled_actions` keeps `removable`.
             self.modules_panel.set_enabled_actions(self._module_actions_allowed())
+            self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
@@ -5677,32 +5735,45 @@ class ControllerView(QWidget):
             self.services.store is not None and self.services.applier is not None and not self._busy
         )
 
-    def reload_modules(self) -> None:
-        """Re-read the catalog and the clone folders, and redraw the cards.
+    def _installed_clones(self) -> Mapping[str, frozenset[str]] | None:
+        """What is in this install's clone folders per family, or `None` for no reader.
 
-        Cheap on purpose and called after everything that changes what is
-        installed: `store.load_all()` reads files this app shipped, and
-        `installed_modules` reads directory names. No git, no network -- that is
-        `check_module_updates()`, which is a button for exactly that reason.
+        Cheap enough for every reload (directory names, no git), which is why it
+        is its own seam and not part of `module_updates` — see
+        `ControllerServices`. Shared by the Modules tab and the Tuning tab
+        rather than read twice: two readings a moment apart could disagree, and
+        a module listed as installed on one tab and not on the other is the
+        confusion T41 was reported for.
+
+        `None` and `{}` are DIFFERENT answers, and T42 round 2 turns on the
+        difference: `{}` is a seam that answered "nothing installed", which is
+        evidence a clone has gone and the facts owed about it may be forgotten;
+        `None` is a game with no reader at all, and treating that as evidence
+        would throw away everything this session has learned on the first reload
+        after an install. A reader that RAISED answers `{}`, exactly as it did
+        before this loop was factored out of `reload_modules()`.
+        """
+        reader = self.services.installed_modules
+        if reader is None:
+            return None
+        try:
+            return reader()
+        except Exception as exc:  # boundary: an unreadable folder must not kill the UI
+            logger.warning(f"could not read which modules are installed: {exc}")
+            return {}
+
+    def _load_manifests(self) -> tuple[list[Manifest], list[str]]:
+        """This game's catalog in the store's own order, and what would not parse.
+
+        Fills `self._manifests` on the way through, which is the lookup both
+        tabs use to get from an id back to its steps and its conf keys.
         """
         self._manifests.clear()
         store = self.services.store
-        if store is None:
-            self.modules_panel.set_rows(())
-            self._refresh_rebuild_banner()
-            return
-        # What is actually in this install's clone folders. Cheap enough for
-        # every reload (directory names, no git), which is why it is its own
-        # seam and not part of `module_updates` — see `ControllerServices`.
-        installed: Mapping[str, frozenset[str]] = {}
-        reader = self.services.installed_modules
-        if reader is not None:
-            try:
-                installed = reader()
-            except Exception as exc:  # boundary: an unreadable folder must not kill the UI
-                logger.warning(f"could not read which modules are installed: {exc}")
         manifests: list[Manifest] = []
         broken: list[str] = []
+        if store is None:
+            return manifests, broken
         for kind in FAMILY_FILES:
             try:
                 items = list(store.load_all(kind))
@@ -5711,8 +5782,29 @@ class ControllerView(QWidget):
                 continue
             manifests += items
             for manifest in items:
+                # T42 round 2's key shape, threaded through T43's extraction of
+                # this loop: an id two families share is two manifests, and the
+                # object this dict hands out goes straight to the applier.
                 self._manifests[(manifest.type, manifest.id)] = manifest
-        if reader is not None:
+        return manifests, broken
+
+    def reload_modules(self) -> None:
+        """Re-read the catalog and the clone folders, and redraw the cards.
+
+        Cheap on purpose and called after everything that changes what is
+        installed: `store.load_all()` reads files this app shipped, and
+        `installed_modules` reads directory names. No git, no network -- that is
+        `check_module_updates()`, which is a button for exactly that reason.
+        """
+        if self.services.store is None:
+            self._manifests.clear()
+            self.modules_panel.set_rows(())
+            self._refresh_rebuild_banner()
+            return
+        answered = self._installed_clones()
+        installed = answered if answered is not None else {}
+        manifests, broken = self._load_manifests()
+        if answered is not None:
             self._forget_what_is_no_longer_installed(installed)
         self.modules_panel.set_rows(
             build_module_rows(manifests, installed, self._session_state(), self.services.client_dir)
@@ -5984,6 +6076,10 @@ class ControllerView(QWidget):
         # `reload_modules()` no longer takes the selection with it, because
         # `ModulesPanel.set_rows()` keeps it wherever the id still exists.
         self.reload_modules()
+        # And the Tuning tab, for the same reason one size along: an install
+        # deploys a conf and a remove takes one away, so the settings this
+        # install HAS changed with this report (T43).
+        self.reload_tuning()
 
     def _note_session_facts(self, result: ApplyReport) -> None:
         """Record what this report says is still owed, for the chips and the banner.
@@ -6431,6 +6527,258 @@ class ControllerView(QWidget):
         return (self.console_log, self.rebuild_log)
 
     # -------------------------------------------------------- networking tab
+
+    # ------------------------------------------------------------ tuning tab
+
+    def _build_tuning_tab(self) -> None:
+        """Every setting the modules on this install declare, and the file behind it.
+
+        Its own tab beside Modules (T43 decision 1) rather than a section inside
+        it: the Modules tab is about what this install HAS, and this one is
+        about what those things are set to. They share two readings and nothing
+        else -- `_load_manifests()` and `_installed_clones()`, so the two tabs
+        cannot disagree about which modules are here.
+        """
+        tab = QWidget(self)
+        box = QVBoxLayout(tab)
+        self.tuning_panel = TuningPanel(tab)
+        self.tuning_panel.save_pressed.connect(self.save_tuning)
+        self.tuning_panel.revert_pressed.connect(self.revert_tuning)
+        self.tuning_panel.file_selected.connect(self.open_tuning_file)
+        self.tuning_panel.file_save_pressed.connect(self.save_tuning_file)
+        self.tuning_panel.file_reload_pressed.connect(self.reload_tuning_file)
+        # The one control on this tab that is not a save: it re-reads the conf
+        # files off disk. It exists because the values here are read ONCE per
+        # reload and a server, an editor or another Yu'lon window can change a
+        # conf underneath this tab at any time.
+        self.refresh_tuning_button = QPushButton("Refresh", tab)
+        self.refresh_tuning_button.clicked.connect(self.reload_tuning)
+        self.refresh_tuning_button.setToolTip(
+            "Read this install's conf files again. Cheap: the files themselves, no network."
+        )
+        actions = QHBoxLayout()
+        actions.addWidget(self.refresh_tuning_button)
+        actions.addStretch(1)
+        self.tuning_report = QPlainTextEdit(tab)
+        self.tuning_report.setReadOnly(True)
+        box.addLayout(actions)
+        box.addWidget(self.tuning_panel, 4)
+        box.addWidget(self.tuning_report, 1)
+        # "modules", because `icons.py` is a file T43 must not edit and it has
+        # no `tuning` key: the fallback is the SERVER icon, which would collide
+        # with the Server tab. Sharing the Modules puzzle is the smaller
+        # collision and the truer one -- this tab is the modules' settings.
+        self._add_panel_tab(tab, "modules", "Tuning")
+        self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
+        self._tuning_newline = "\n"
+        self.reload_tuning()
+        self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
+
+    def reload_tuning(self) -> None:
+        """Re-read every installed module's conf and redraw the cards.
+
+        Reads files and nothing else -- no git, no docker, no database -- so it
+        is cheap enough to run after every install and every save.
+        """
+        manifests, _broken = self._load_manifests()
+        rows = tuning.rows_for(
+            manifests,
+            self._installed_clones() or {},
+            self.services.controller.server_dir,
+        )
+        self._tuning_rows = rows
+        self.tuning_panel.set_cards(build_tuning_cards(rows))
+        self.tuning_panel.set_files(self._tuning_files())
+
+    def _tuning_files(self) -> tuple[str, ...]:
+        """What the raw editor offers: this install's module confs, then its own.
+
+        Only files that are ON DISK. A conf a manifest names but nothing has
+        deployed would open as an empty editor, and saving that empty editor
+        would create the file -- which is an install step, not a tuning one.
+        """
+        server_dir = self.services.controller.server_dir
+        found: list[str] = []
+        for row in self._tuning_rows:
+            if row.editable and row.file not in found and (server_dir / row.file).is_file():
+                found.append(row.file)
+        for name in TUNING_CORE_FILES:
+            if name not in found and (server_dir / name).is_file():
+                found.append(name)
+        return tuple(found)
+
+    def _tuning_spec(self, family: str, module_id: str, file: str) -> dict[str, ConfKey]:
+        """This module's declared keys for one file, so a value can be type-checked.
+
+        From the MANIFEST and not from the row, because the row carries the
+        declaration flattened for drawing and `tuning.check()` wants the
+        declaration itself -- one object, so a field added to `ConfKey` reaches
+        the refusal without a third place to copy it into.
+
+        By FAMILY as well as id (T42 round 2's key shape), and the family is
+        handed in rather than resolved: every caller has the `TuningCard` the
+        rows came from, and `TuningRow.family` is where `tuning.rows_for()` put
+        the manifest's own `type`. Resolving a bare id here would be a second
+        rule for an ambiguity `_key_for()` already settles once, in the one
+        place that has to guess.
+        """
+        manifest = self._manifests.get((family, module_id))
+        if manifest is None:
+            return {}
+        return {key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys}
+
+    @Slot(str)
+    def save_tuning(self, module_id: str) -> None:
+        """Write this card's changed keys, grouped by the file each one lives in.
+
+        Per card and not per file (T43's definition of done), because a card is
+        what the user installed: NPC Beastmaster declares four keys in its own
+        conf and one in the core's `worldserver.conf`, and asking somebody to
+        press Save twice for one module would be the tab's file layout leaking
+        into their hands.
+        """
+        try:
+            card = self.tuning_panel.card(module_id)
+        except KeyError:
+            return
+        edits = card.edits()
+        if not edits:
+            self.tuning_report.setPlainText(TUNING_NOTHING_CHANGED.format(module=module_id))
+            return
+        per_file: dict[str, dict[str, str]] = {}
+        for row in card.card.rows:
+            if row.key in edits:
+                per_file.setdefault(row.file, {})[row.key] = edits[row.key]
+        said: list[str] = []
+        server_dir = self.services.controller.server_dir
+        for file, values in per_file.items():
+            try:
+                made = tuning.write(
+                    server_dir / file,
+                    values,
+                    spec=self._tuning_spec(card.card.family, module_id, file),
+                )
+            except tuning.TuningError as exc:
+                # The refusal comes back before anything was written, for every
+                # file: the first failure stops the loop, so a later file is
+                # never written on the strength of an earlier one succeeding.
+                self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
+                self.action_failed.emit(str(exc))
+                return
+            except OSError as exc:
+                self.tuning_report.setPlainText(
+                    TUNING_REFUSED.format(
+                        module=module_id, why=f"{file} could not be written: {exc}"
+                    )
+                )
+                self.action_failed.emit(str(exc))
+                return
+            said.append(
+                TUNING_SAVED.format(
+                    module=module_id,
+                    keys=", ".join(values),
+                    file=file,
+                    backup=made.name,
+                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+                )
+            )
+        self.tuning_report.setPlainText("\n".join(said))
+        self.reload_tuning()
+
+    @Slot(str)
+    def revert_tuning(self, module_id: str) -> None:
+        """Put this card's files back from the newest backup Yu'lon took of each."""
+        try:
+            card = self.tuning_panel.card(module_id)
+        except KeyError:
+            return
+        server_dir = self.services.controller.server_dir
+        said: list[str] = []
+        for file in card.card.files:
+            path = server_dir / file
+            backups = tuning.backups_of(path)
+            if not backups:
+                said.append(TUNING_NO_BACKUP.format(module=module_id, file=file))
+                continue
+            try:
+                tuning.restore(backups[-1], path)
+            except OSError as exc:
+                said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
+                continue
+            said.append(
+                TUNING_REVERTED.format(
+                    module=module_id,
+                    file=file,
+                    backup=backups[-1].name,
+                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+                )
+            )
+        self.tuning_report.setPlainText("\n".join(said))
+        self.reload_tuning()
+
+    @Slot(str)
+    def open_tuning_file(self, file: str) -> None:
+        """Show one conf in the raw editor, read-only when it is the server's own."""
+        path = self.services.controller.server_dir / file
+        core = file in TUNING_CORE_FILES
+        try:
+            with open(path, encoding="utf-8", errors="replace", newline="") as handle:
+                raw = handle.read()
+        except OSError as exc:
+            self.tuning_panel.set_file_text("", read_only=True, note=f"{file}: {exc}")
+            return
+        # Remembered at load and re-applied at save: `QPlainTextEdit` hands back
+        # "\n" whatever it was given, so a raw save of a CRLF conf would convert
+        # the whole file -- the same defect `tuning.write()` reads around.
+        self._tuning_newline = "\r\n" if "\r\n" in raw else "\n"
+        note = TUNING_CORE_FILE if core else tuning.apply_sentence(tuning.file_rule(file))
+        self.tuning_panel.set_file_text(raw.replace("\r\n", "\n"), read_only=core, note=note)
+
+    @Slot()
+    def reload_tuning_file(self) -> None:
+        self.open_tuning_file(self.tuning_panel.files.currentText())
+
+    @Slot(str)
+    def save_tuning_file(self, text: str) -> None:
+        """Write the raw editor's text back, after one confirm if it stopped looking like a conf.
+
+        The guard warns and never blocks (T43 point 4): it is a cheap pass, not
+        a parser, and a refusal between a person and their own configuration
+        over a rule this shallow would be worse than the typo it caught.
+        """
+        file = self.tuning_panel.files.currentText()
+        if not file or file in TUNING_CORE_FILES:
+            return
+        said = tuning.lint_sentence(tuning.lint(text))
+        if said is not None:
+            answer = QMessageBox.question(
+                self,
+                TUNING_LINT_CONFIRM_TITLE,
+                said,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            # `==` and an int, not `is`: PySide6's static `question()` returns a
+            # plain int, so `is StandardButton.Yes` is always False (T33).
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        path = self.services.controller.server_dir / file
+        try:
+            made = tuning.backup(path)
+            with open(path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(text.replace("\n", self._tuning_newline))
+        except OSError as exc:
+            self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
+            self.action_failed.emit(str(exc))
+            return
+        self.tuning_report.setPlainText(
+            TUNING_FILE_SAVED.format(
+                file=file,
+                backup=made.name,
+                rule=tuning.apply_sentence(tuning.file_rule(file)),
+            )
+        )
+        self.reload_tuning()
 
     def _build_networking_tab(self) -> None:
         tab = QWidget(self)

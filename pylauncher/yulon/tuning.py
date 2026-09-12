@@ -513,6 +513,21 @@ file that needs a recreate "would be a promise we cannot keep."
 """
 
 
+def file_rule(file: str) -> ApplyRule:
+    """The same clauses as `apply_rule`, for a RAW file that has no row behind it.
+
+    The raw editor opens a file, not a setting, so there is nothing to ask for
+    a `read_only_reason` -- but the sentence under the editor has to be the same
+    sentence the card above it shows, or the tab would price the same change two
+    ways depending on which half of it the user pressed.
+    """
+    if _read_only_reason(file, backend_of(file)) is not None:
+        return "read-only"
+    if any(file.startswith(prefix) for prefix in BOUND_INTO_THE_CONTAINERS):
+        return "restart"
+    return "recreate"
+
+
 def apply_rule(row: TuningRow, *, in_clone: bool = False) -> ApplyRule:
     """What has to happen for a change to this row to reach the running server.
 
@@ -535,9 +550,7 @@ def apply_rule(row: TuningRow, *, in_clone: bool = False) -> ApplyRule:
         return "read-only"
     if in_clone:
         return "rebuild"
-    if any(row.file.startswith(prefix) for prefix in BOUND_INTO_THE_CONTAINERS):
-        return "restart"
-    return "recreate"
+    return file_rule(row.file)
 
 
 def apply_sentence(rule: ApplyRule) -> str:
