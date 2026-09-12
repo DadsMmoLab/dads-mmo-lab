@@ -109,11 +109,17 @@ from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
-from yulon.ui.theme import COLOR_GOLD_LIGHT, COLOR_TEXT_GOLD
+from yulon.ui.theme import (
+    COLOR_BG_PARCHMENT,
+    COLOR_GOLD_LIGHT,
+    COLOR_TEXT_GOLD,
+    COLOR_TEXT_WARNING,
+)
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
+from yulon.ui.widgets.modules_panel import ModulesPanel, SessionState, build_module_rows
 from yulon.ui.widgets.party_panel import PartyPanel
 
 logger = get_logger(__name__)
@@ -2200,38 +2206,24 @@ cancel to offer. Abandoning a `compose up` means terminating it, which stops
 """
 
 _IMPORT_TAIL_LINES = 2
-INSTALLED_MARK = "✓"
-"""What marks a row as installed in this server's modules folder (T41).
-
-A leading glyph rather than a trailing "(installed)", so the installed rows line
-up down the left edge of a list 41 entries long and can be found without reading
-a word. The tests import this rather than spelling it, so the mark can change
-without a test being edited into agreement with whatever the view happens to do.
-"""
-
-NOT_IN_CATALOG = "installed here — not in this game's catalog"
-"""The description for a module folder the manifest store has never heard of.
-
-It is installed whatever the catalog thinks, and `apply_module.module_updates()`
-already takes that position for its own rows. A list that silently omitted a
-hand-cloned module would be the same "None of modules detected" in a smaller
-place.
-"""
 
 
-def _clone_dir_of(kind: str) -> str:
-    """Which directory this manifest family's clones land in, by its plain name.
+def _pending_sql_names(report: ApplyReport) -> tuple[str, ...]:
+    """What a report says is still waiting for the importer, named file by file.
 
-    `apply.CLONE_DIRS` is keyed by the `ManifestType` literal; the view carries
-    families around as plain strings (they arrive from `FAMILY_FILES` and from
-    `manifest.type`). Looked up defensively rather than cast: a family with no
-    clone directory gets its own bucket under its own name, which keeps its
-    rows separate instead of merging them into somebody else's folder.
+    `PendingSql.files` is the glob RESOLVED against the clone, and it has three
+    answers. A tuple of paths is what is really on disk; `()` means the glob
+    matched nothing THIS app could count (the layout is per-repository and
+    upstream's own `UpdateFetcher` walks `data/sql` itself); `None` means the
+    path carried an unresolved `{key}`. The last two are named by their glob
+    rather than dropped, because "this module owes SQL and Yu'lon cannot list
+    it" is a different thing from "this module owes nothing" -- collapsing them
+    is the fault `PendingSql`'s own docstring exists to record.
     """
-    for family, folder in apply_module.CLONE_DIRS.items():
-        if family == kind:
-            return folder
-    return kind
+    names: list[str] = []
+    for pending in report.pending_sql:
+        names += list(pending.files) if pending.files else [pending.path]
+    return tuple(names)
 
 
 UNCATALOGUED_PRESS = (
@@ -2241,9 +2233,30 @@ UNCATALOGUED_PRESS = (
 )
 """What a press on one of T41's uncatalogued rows says.
 
-The rows exist so somebody can SEE what is installed; the buttons above them
-cannot act on a module with no manifest. Saying so is the difference between a
-control that is inert and one that looks broken.
+The rows exist so somebody can SEE what is installed; Yu'lon cannot act on a
+module with no manifest. Saying so is the difference between a control that is
+inert and one that looks broken. Since T42 the row carries no Install or Remove
+button at all and this sentence is reached through its context menu, which is
+the only press such a row still answers.
+"""
+
+REBUILD_BANNER = (
+    "A rebuild is owed: {names}. The module is on disk, but the running worldserver was "
+    "compiled before it arrived, so nothing it does is live yet."
+)
+"""The amber banner above the family cards, shown only while something owes a rebuild.
+
+It names the modules rather than saying "a module", because the sentence is
+read after several installs and "which one?" is the next question. Session state
+only -- see `ControllerView._rebuild_owed`.
+"""
+
+MODULE_LOAD_FAILED = "!! could not load {kind}s: {exc}"
+"""A family whose manifests will not parse, said in the report box.
+
+It used to be a row in the list. There is no list any more, and a card titled
+with an error would be a fifth family; the report is where every other refusal
+on this tab is read.
 """
 
 MODULE_SQL_RUNNING = "Running the importer over the modules installed here. What it prints:"
@@ -2478,14 +2491,6 @@ class ControllerView(QWidget):
         self._status_pending = False
         self._verdict_pending = False
         self._module_pending: str | None = None
-        # Whether the module job in flight is a CUSTOM install. A flag rather
-        # than a reading of `_module_pending`'s text, and rather than
-        # re-listing after every module action: `reload_modules()` clears the
-        # list's selection, and a user who has just pressed "Install selected"
-        # would find the row they chose deselected under them. The rust page
-        # refreshed after every action (`ModuleManager.svelte:439`) because it
-        # had no selection to lose.
-        self._custom_install_pending = False
         self._console_pending = False
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
@@ -2512,6 +2517,25 @@ class ControllerView(QWidget):
         # decides whether the repair offer is hidden and whether Refresh is
         # locked -- overloading it would change the Server tab from here.
         self._module_sql_running = False
+        # T42's three session facts, and the word "session" is the whole of
+        # their contract: nothing on disk records any of them, and a restart
+        # starts empty. The report box has always forgotten them too -- what
+        # changed is only that they are now shown on the rows that own them.
+        #
+        # `_rebuild_owed`: ids whose install said `rebuild_required`, cleared by
+        # a rebuild that SUCCEEDS. `_sql_owed`: ids to the files a report left to
+        # the importer, cleared when the importer finishes. `_behind`: what the
+        # last update check counted, per id, zeroes and "could not ask" left out.
+        self._rebuild_owed: set[str] = set()
+        # Whether the run in `rebuild_log` is a COMPILE. Three actions share
+        # that panel -- the rebuild, the database updates and the adopt -- and
+        # all three arrive at `_rebuild_finished`, so "the panel finished and
+        # said ok" is not "the server was compiled". Clearing `_rebuild_owed` on
+        # the panel's success alone would tell a user their module was live
+        # because an unrelated SQL run went through.
+        self._rebuild_is_compile = False
+        self._sql_owed: dict[str, tuple[str, ...]] = {}
+        self._behind: dict[str, int] = {}
         self._repair_armed = False
         # The last answer the database gave about its own import, and whether it
         # has been asked since the database came up. Remembered because the
@@ -3330,6 +3354,11 @@ class ControllerView(QWidget):
             # a module into the image that no report claims is in it.
             self.module_link_button.setEnabled(False)
             self.module_folder_button.setEnabled(False)
+            # And every row's own Install/Remove, which is where the two greyed
+            # toolbar buttons went (T42). Same rule as the two above it: a clone
+            # landing half-way through a build puts a module into the image no
+            # report claims is in it.
+            self.modules_panel.set_enabled_actions(False)
         else:
             self.refresh_button.setEnabled(True)
             self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -3342,6 +3371,11 @@ class ControllerView(QWidget):
             # would hand the three CMaNGOS games a live button the moment any
             # action of theirs finished.
             self.module_sql_button.setEnabled(self.services.module_sql is not None)
+            # Back to what this install can do, never unconditionally: a game
+            # with no store or no applier must not be handed live row buttons by
+            # a job of its own finishing, and neither must a row the ROW itself
+            # forbids -- `RowWidget.set_enabled_actions` keeps `removable`.
+            self.modules_panel.set_enabled_actions(self._module_actions_allowed())
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
@@ -5387,35 +5421,47 @@ class ControllerView(QWidget):
     def _build_modules_tab(self) -> None:
         tab = QWidget(self)
         box = QVBoxLayout(tab)
-        self.module_list = QListWidget(tab)
-        self.module_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.module_list.customContextMenuRequested.connect(self._show_module_context_menu)
+        # T42: a panel of family cards, not a `QListWidget`. The list showed 41
+        # identical lines in catalog order and said nothing about which of them
+        # this install HAD -- the reading two players sent in as "None of
+        # modules detected" (T41) and "I can't get any modules to work".
+        self.modules_panel = ModulesPanel(tab)
+        self.modules_panel.install_pressed.connect(self._row_install)
+        self.modules_panel.remove_pressed.connect(self._row_remove)
+        self.modules_panel.chip_pressed.connect(self._chip_pressed)
+        self.modules_panel.context_menu_requested.connect(self._show_module_context_menu)
         self.module_report = QPlainTextEdit(tab)
         self.module_report.setReadOnly(True)
-        self.install_module_button = QPushButton("Install selected", tab)
-        self.remove_module_button = QPushButton("Remove selected", tab)
+        # The two buttons that used to act on "the selection" are gone: every
+        # row carries its own Install or Remove, so there is no second place for
+        # the tab and the user to disagree about what is selected.
+        #
         # The third button on this tab, and the only one that is not about one
-        # selected manifest: it applies the pending SQL of everything installed
-        # here, because that is the granularity the importer has — it is handed
-        # the module folder list and ledgers what it applies in `updates`.
+        # module: it applies the pending SQL of everything installed here,
+        # because that is the granularity the importer has -- it is handed the
+        # module folder list and ledgers what it applies in `updates`.
         self.module_sql_button = QPushButton(MODULE_SQL_BUTTON_LABEL, tab)
-        # The fourth, and the only read-only one: it fetches and counts and
-        # writes nothing outside each clone's `.git`. It is a button rather than
-        # part of the status poll because it costs one network round trip per
-        # installed module, and a poll would pay that every few seconds.
+        # The only read-only one: it fetches and counts and writes nothing
+        # outside each clone's `.git`. It is a button rather than part of the
+        # status poll because it costs one network round trip per installed
+        # module, and a poll would pay that every few seconds.
         self.module_updates_button = QPushButton(MODULE_UPDATES_BUTTON_LABEL, tab)
-        # The fifth and sixth, and the only two whose subject is not already in
-        # the list above them: a module this app does not ship, named by the
-        # user. They sit after "Remove selected" and before the module-SQL
-        # button because that is the order the tab is read in — the two that
-        # act on the selection, then the two that add to it, then the two that
-        # act on everything installed.
+        # New with T42 and the cheapest control on the tab: `reload_modules()`
+        # re-reads the clone directories and nothing else. It exists because
+        # every OTHER thing that changes what is installed -- a clone made by
+        # hand, a folder deleted outside the app -- used to need a restart
+        # before the tab noticed.
+        self.refresh_modules_button = QPushButton("Refresh", tab)
+        self.refresh_modules_button.clicked.connect(self.reload_modules)
+        self.refresh_modules_button.setToolTip(
+            "Read this install's module folders again. Cheap: directory names, no network."
+        )
+        # The two whose subject is not in the catalog at all: a module this app
+        # does not ship, named by the user.
         self.module_link_button = QPushButton(MODULE_LINK_BUTTON_LABEL, tab)
         self.module_folder_button = QPushButton(MODULE_FOLDER_BUTTON_LABEL, tab)
         self.module_link_button.clicked.connect(self.install_module_from_link)
         self.module_folder_button.clicked.connect(self.install_module_from_folder)
-        self.install_module_button.clicked.connect(lambda: self._module_action("install"))
-        self.remove_module_button.clicked.connect(lambda: self._module_action("remove"))
         self.module_sql_button.clicked.connect(self.apply_module_sql)
         self.module_updates_button.clicked.connect(self.check_module_updates)
         # The action `_format_report` has always named. It sits on THIS tab
@@ -5484,47 +5530,65 @@ class ControllerView(QWidget):
         # before.
         self.rebuild_log.run_started.connect(self._rebuild_started)
         self.rebuild_log.run_finished.connect(self._rebuild_finished)
-        # Two toolbars rather than one, because nine buttons side by side ask
-        # for ~1400px where the tab has under a thousand — and a single row
-        # clipped each button's text mid-word and let their borders run
-        # together. The split follows the order the tab is read in: the four
-        # that act on the selection (or add to it) on the first row, the five
-        # that act on the whole install on the second.
-        selection_row = QHBoxLayout()
-        selection_row.addWidget(self.install_module_button)
-        selection_row.addWidget(self.remove_module_button)
-        selection_row.addWidget(self.module_link_button)
-        selection_row.addWidget(self.module_folder_button)
-        selection_row.addStretch(1)
+        # ONE action bar, where there used to be two toolbars of nine buttons:
+        # the two that acted on "the selection" have moved onto the rows
+        # themselves and the two custom-module presses have moved into their own
+        # card, which leaves six and room for them. Read left to right: the two
+        # that only READ this install, then the four that change it.
+        actions = QHBoxLayout()
+        actions.addWidget(self.module_updates_button)
+        actions.addWidget(self.refresh_modules_button)
+        actions.addStretch(1)
+        actions.addWidget(self.adopt_button)
+        actions.addWidget(self.updates_button)
+        actions.addWidget(self.module_sql_button)
+        actions.addWidget(self.rebuild_button)
+        # The banner, hidden until something owes a rebuild. It is above the
+        # cards rather than on each owing row because the ACTION is one action
+        # for all of them -- one compile covers every module installed since the
+        # last one -- while the chip on each row says which ones it covers.
+        self.rebuild_banner = QWidget(tab)
+        banner_box = QHBoxLayout(self.rebuild_banner)
+        banner_box.setContentsMargins(8, 6, 8, 6)
+        self.rebuild_banner_label = QLabel("", self.rebuild_banner)
+        self.rebuild_banner_label.setWordWrap(True)
+        self.rebuild_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.rebuild_banner_button = QPushButton(REBUILD_BUTTON_LABEL, self.rebuild_banner)
+        # The SAME slot as the toolbar's, not a copy: the dialog, the refusals
+        # and the busy gate are `rebuild_server()`'s, and a second caller that
+        # skipped any of them would be a second rebuild route to keep in step.
+        self.rebuild_banner_button.clicked.connect(self.rebuild_server)
+        banner_box.addWidget(self.rebuild_banner_label, 1)
+        banner_box.addWidget(self.rebuild_banner_button)
+        self.rebuild_banner.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.rebuild_banner.setVisible(False)
+        # The custom-module card: the one place on this tab whose subject is not
+        # in the catalog and not on disk yet. Its own box with a sentence,
+        # because a link the user pastes is the only control here that can fail
+        # before anything runs.
+        custom = QGroupBox("A module this app does not ship", tab)
+        custom_box = QVBoxLayout(custom)
+        custom_note = QLabel(
+            "Paste a repository link, or point at a folder on this computer. Yu'lon derives "
+            "a manifest from it and installs it the same way as any row above.",
+            custom,
+        )
+        custom_note.setWordWrap(True)
+        custom_box.addWidget(custom_note)
+        custom_row = QHBoxLayout()
+        custom_row.addWidget(self.module_link_button)
+        custom_row.addWidget(self.module_folder_button)
+        custom_row.addStretch(1)
+        custom_box.addLayout(custom_row)
 
-        install_row = QHBoxLayout()
-        install_row.addWidget(self.module_sql_button)
-        install_row.addWidget(self.module_updates_button)
-        install_row.addStretch(1)
-        install_row.addWidget(self.adopt_button)
-        install_row.addWidget(self.updates_button)
-        install_row.addWidget(self.rebuild_button)
-        # Two panels below the toolbars: the module list on the left (the thing
-        # you select from), the result and long-job output on the right.
-        modules = QGroupBox("Modules", tab)
-        self.module_list.setParent(modules)
-        modules_box = QVBoxLayout(modules)
-        modules_box.addWidget(self.module_list, 1)
-
-        output = QWidget(tab)
-        self.module_report.setParent(output)
-        self.rebuild_log.setParent(output)
-        output_box = QVBoxLayout(output)
-        output_box.addWidget(self.module_report, 1)
-        output_box.addWidget(self.rebuild_log, 2)
-
-        box.addLayout(selection_row)
-        box.addLayout(install_row)
-        columns = QHBoxLayout()
-        columns.setSpacing(12)
-        columns.addWidget(modules, 3)
-        columns.addWidget(output, 2)
-        box.addLayout(columns)
+        box.addLayout(actions)
+        box.addWidget(self.rebuild_banner)
+        box.addWidget(self.modules_panel, 3)
+        box.addWidget(custom)
+        box.addWidget(self.module_report, 1)
+        box.addWidget(self.rebuild_log, 2)
         self._add_panel_tab(tab, "modules", "Modules")
         self._manifests: dict[str, Manifest] = {}
         # The importer talks from a worker thread for however long it runs, and
@@ -5534,9 +5598,9 @@ class ControllerView(QWidget):
         self._module_sql_relay = LineRelay(self)
         self._module_sql_relay.line.connect(self._module_sql_line)
         self.reload_modules()
-        enabled = self.services.store is not None and self.services.applier is not None
-        self.install_module_button.setEnabled(enabled)
-        self.remove_module_button.setEnabled(enabled)
+        # The gate that used to grey two toolbar buttons now greys every row's
+        # own press: there is no other control left for it to act on.
+        self.modules_panel.set_enabled_actions(self._module_actions_allowed())
         self.module_sql_button.setEnabled(self.services.module_sql is not None)
         self.module_sql_button.setToolTip(
             MODULE_SQL_TIP if self.services.module_sql is not None else MODULE_SQL_NO_IMPORTER
@@ -5548,13 +5612,14 @@ class ControllerView(QWidget):
             else MODULE_UPDATES_NO_MODULES
         )
         self._set_custom_module_buttons()
-        # A separate gate from the two above, and it must stay separate: the
+        # A separate gate from the one above, and it must stay separate: the
         # three CMaNGOS games have no manifest store at all, and their
         # worldservers are still compiled from a checkout somebody may have
         # patched. Tying the rebuild to `store` would have taken the control
         # away from three of the four games for a reason that is about
         # manifests.
         self.rebuild_button.setEnabled(self.services.rebuild is not None)
+        self.rebuild_banner_button.setEnabled(self.services.rebuild is not None)
         # A third gate, separate again and for the mirror reason: this one is
         # about the install PLAN, not about the store and not about the
         # checkout. It is live for the one game whose plan declares a phase to
@@ -5567,15 +5632,46 @@ class ControllerView(QWidget):
         # every later moment cannot disagree about the rule.
         self._set_adopt_button()
 
+    def _session_state(self) -> SessionState:
+        """What this session has learned, bundled for the row builder.
+
+        Three plain containers on the view rather than one object, because each
+        is filled and cleared by a different slot and a shared mutable object
+        would make "who emptied this?" a question. Built into the frozen bundle
+        here, at the one place that reads all three.
+        """
+        return SessionState(
+            rebuild_owed=frozenset(self._rebuild_owed),
+            sql_owed=dict(self._sql_owed),
+            behind=dict(self._behind),
+        )
+
+    def _module_actions_allowed(self) -> bool:
+        """Whether a row's Install/Remove may be pressed at all.
+
+        The old two-button gate, unchanged in substance: a game with no manifest
+        store or no applier has nothing to run, and nothing on this tab may
+        re-arm the rows while another action of ours is in flight.
+        """
+        return (
+            self.services.store is not None and self.services.applier is not None and not self._busy
+        )
+
     def reload_modules(self) -> None:
-        """Fill the list from the store (every family), newest store contents first."""
-        self.module_list.clear()
+        """Re-read the catalog and the clone folders, and redraw the cards.
+
+        Cheap on purpose and called after everything that changes what is
+        installed: `store.load_all()` reads files this app shipped, and
+        `installed_modules` reads directory names. No git, no network -- that is
+        `check_module_updates()`, which is a button for exactly that reason.
+        """
         self._manifests.clear()
         store = self.services.store
         if store is None:
-            self.module_list.addItem("(this game has no manifests yet)")
+            self.modules_panel.set_rows(())
+            self._refresh_rebuild_banner()
             return
-        # What is actually in this install's modules folder. Cheap enough for
+        # What is actually in this install's clone folders. Cheap enough for
         # every reload (directory names, no git), which is why it is its own
         # seam and not part of `module_updates` — see `ControllerServices`.
         installed: Mapping[str, frozenset[str]] = {}
@@ -5585,58 +5681,83 @@ class ControllerView(QWidget):
                 installed = reader()
             except Exception as exc:  # boundary: an unreadable folder must not kill the UI
                 logger.warning(f"could not read which modules are installed: {exc}")
-        seen: set[tuple[str, str]] = set()
+        manifests: list[Manifest] = []
+        broken: list[str] = []
         for kind in FAMILY_FILES:
             try:
                 items = list(store.load_all(kind))
             except Exception as exc:  # boundary: a broken manifest tree must not kill the UI
-                self.module_list.addItem(f"!! could not load {kind}s: {exc}")
+                broken.append(MODULE_LOAD_FAILED.format(kind=kind, exc=exc))
                 continue
+            manifests += items
             for manifest in items:
-                here = manifest.id in installed.get(manifest.type, frozenset())
-                mark = f"{INSTALLED_MARK} " if here else ""
-                item = QListWidgetItem(
-                    f"{mark}[{manifest.type}] {manifest.name} — {manifest.description}"
-                )
-                item.setData(256, manifest.id)  # Qt.UserRole
-                self.module_list.addItem(item)
                 self._manifests[manifest.id] = manifest
-                seen.add((manifest.type, manifest.id))
-        # A module on disk the catalog has never heard of is still installed.
-        # No manifest is invented for it: it gets a row and no entry in
-        # `_manifests`, so the install/remove buttons stay inert on it rather
-        # than acting on a manifest this app made up.
-        # Accounted for per FOLDER, because that is the unit clones share:
-        # `apply.CLONE_DIRS` puts ale and keg in one directory, so a keg's clone
-        # is read into both families' sets and the keg manifest that matched it
-        # left the ale copy looking unknown — `bmah` matched the shipped keg and
-        # then appeared a second time as an uncatalogued ale, measured on the
-        # live install (2026-09-12). Accounting by bare name instead would have
-        # fixed that and swallowed the opposite case: a clone in `ale_scripts/`
-        # whose name happens to match a MODULE manifest that is not installed.
-        accounted: dict[str, set[str]] = {}
-        for kind_seen, id_seen in seen:
-            accounted.setdefault(_clone_dir_of(kind_seen), set()).add(id_seen)
-        for kind in FAMILY_FILES:
-            known = accounted.setdefault(_clone_dir_of(kind), set())
-            for name in sorted(installed.get(kind, frozenset())):
-                if name in known:
-                    continue
-                known.add(name)
-                self.module_list.addItem(
-                    QListWidgetItem(f"{INSTALLED_MARK} [{kind}] {name} — {NOT_IN_CATALOG}")
-                )
+        self.modules_panel.set_rows(
+            build_module_rows(manifests, installed, self._session_state(), self.services.client_dir)
+        )
+        if broken:
+            # Appended, never `setPlainText`: this runs after an install has put
+            # its report on screen, and a family that will not parse must not
+            # take the report of the action the user just pressed with it.
+            self.module_report.appendPlainText("\n".join(broken))
+        self._refresh_rebuild_banner()
+
+    def _refresh_rebuild_banner(self) -> None:
+        """Show the amber banner iff something owes a rebuild, and name what.
+
+        Session state only. A restart forgets it, exactly as the report box
+        always has -- a persisted marker is a file with its own invalidation
+        rules (whose rebuild? which modules? still true after a folder was moved
+        by hand?) and T42 deliberately leaves it out rather than ship one that
+        can be wrong.
+        """
+        owed = sorted(self._rebuild_owed)
+        self.rebuild_banner.setVisible(bool(owed))
+        self.rebuild_banner_label.setText(REBUILD_BANNER.format(names=", ".join(owed)))
+
+    @Slot(str)
+    def _row_install(self, module_id: str) -> None:
+        """A row's own Install. Selects it first, then the one shared handler."""
+        self.modules_panel.select(module_id)
+        self._module_action("install")
+
+    @Slot(str)
+    def _row_remove(self, module_id: str) -> None:
+        self.modules_panel.select(module_id)
+        self._module_action("remove")
+
+    @Slot(str, str)
+    def _chip_pressed(self, module_id: str, label: str) -> None:
+        """An owed chip's press: its own sentence, in the box every answer is read in.
+
+        The chip carries the detail rather than the view rebuilding it, so the
+        words a press shows are the words the row was built with -- there is no
+        second formatter to drift.
+        """
+        try:
+            row = self.modules_panel.row(module_id)
+        except KeyError:
+            return
+        for chip in row.data.chips:
+            if chip.label == label:
+                self.module_report.setPlainText(chip.detail)
+                return
 
     def _selected_row_is_uncatalogued(self) -> bool:
         """Is the selected row one of T41's "installed here, not in the catalog" rows?"""
-        item = self.module_list.currentItem()
-        return item is not None and NOT_IN_CATALOG in item.text()
+        item_id = self.modules_panel.selected_id()
+        if item_id is None:
+            return False
+        try:
+            return not self.modules_panel.row(item_id).data.catalogued
+        except KeyError:
+            return False
 
     def selected_manifest(self) -> Manifest | None:
-        item = self.module_list.currentItem()
-        if item is None:
+        item_id = self.modules_panel.selected_id()
+        if item_id is None:
             return None
-        return self._manifests.get(str(item.data(256)))
+        return self._manifests.get(item_id)
 
     def _module_action(self, action: str) -> None:
         manifest = self.selected_manifest()
@@ -5767,41 +5888,62 @@ class ControllerView(QWidget):
             # line would put this view's vocabulary in front of a sentence
             # written to be read on its own.
             self._module_pending = None
-            self._custom_install_pending = False
             self.module_report.setPlainText(str(exc))
             self.action_failed.emit(str(exc))
             return
         self._module_pending = f"{what} {manifest.id}"
-        self._custom_install_pending = True
         self.module_report.setPlainText(f"{self._module_pending}…")
         self._run(lambda: route(manifest, folder), self._module_done, self._module_failed)
 
     @Slot(object)
     def _module_done(self, result: object) -> None:
         self._module_pending = None
-        custom, self._custom_install_pending = self._custom_install_pending, False
         if not isinstance(result, ApplyReport):
             return
         self.module_report.setPlainText(_format_report(result))
-        # The list is re-read for exactly two outcomes, both of which changed
-        # what is in it: a custom module was just added, or a record was just
-        # dropped. Asked AFTER the report is on screen and after the remove
-        # returned -- a forget before the remove would drop the record of a
-        # remove that then failed, leaving a folder on disk with no row in the
-        # list to try again with (`purge.py`'s ordering, phase8-decisions).
-        forgotten = False
+        self._note_session_facts(result)
+        # The record is dropped AFTER the report is on screen and after the
+        # remove returned -- a forget before the remove would drop the record of
+        # a remove that then failed, leaving a folder on disk with no row in the
+        # tab to try again with (`purge.py`'s ordering, phase8-decisions).
         forget = self.services.module_forget
         if result.action == "remove" and forget is not None:
             manifest = self._manifests.get(result.item_id)
             if manifest is not None:
-                forgotten = forget(manifest)
-        if custom or forgotten:
-            self.reload_modules()
+                forget(manifest)
+        # Re-read after EVERY report, where it used to happen for the two
+        # outcomes that changed what was in the list (a custom module added, a
+        # record dropped). Since T42 a report also changes what the rows SAY --
+        # the rebuild chip, the SQL chip and the banner all come from the report
+        # that was just filed -- and the reason the old rule was narrow is gone:
+        # `reload_modules()` no longer takes the selection with it, because
+        # `ModulesPanel.set_rows()` keeps it wherever the id still exists.
+        self.reload_modules()
+
+    def _note_session_facts(self, result: ApplyReport) -> None:
+        """Record what this report says is still owed, for the chips and the banner.
+
+        A remove drops the id from all three: the module is gone, so an "update
+        available" for it is about a checkout that no longer exists and a
+        pending-SQL list names files nothing will read.
+        """
+        item_id = result.item_id
+        if result.action == "remove":
+            self._rebuild_owed.discard(item_id)
+            self._sql_owed.pop(item_id, None)
+            self._behind.pop(item_id, None)
+            return
+        if result.rebuild_required:
+            self._rebuild_owed.add(item_id)
+        owed = _pending_sql_names(result)
+        if owed:
+            self._sql_owed[item_id] = owed
+        else:
+            self._sql_owed.pop(item_id, None)
 
     @Slot(object)
     def _module_failed(self, exc: object) -> None:
         what, self._module_pending = self._module_pending or "module action", None
-        self._custom_install_pending = False
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
         self.action_failed.emit(str(exc))
 
@@ -5836,6 +5978,13 @@ class ControllerView(QWidget):
             return
         rows = [row.line for row in result]
         self.module_report.setPlainText("\n".join(rows) if rows else MODULE_UPDATES_NONE)
+        # The figure stays the seam's own -- `ModuleUpdate.line` is still what
+        # the report prints. What is kept here is only the COUNT, for the row's
+        # chip, and `None` ("could not ask") is deliberately not a zero: a
+        # checkout git could not answer for gets no chip rather than a
+        # confident "up to date".
+        self._behind = {row.key: row.behind for row in result if (row.behind or 0) > 0}
+        self.reload_modules()
 
     @Slot(object)
     def _module_updates_failed(self, exc: object) -> None:
@@ -5914,6 +6063,12 @@ class ControllerView(QWidget):
         # — the one 8.7a's other half was fixed for.
         if isinstance(result, docker.AttachedRun):
             self.module_report.appendPlainText(MODULE_SQL_FINISHED)
+        # The importer was handed every module folder on this install, so the
+        # pending-SQL chips are all answered by the one run -- there is no
+        # per-module outcome to keep, and `_module_sql_done` deliberately does
+        # not claim a number (see the comment above).
+        self._sql_owed.clear()
+        self.reload_modules()
         # The run starts this install's database if it was down and leaves it
         # up, so the Server tab's line is stale — and `_set_busy(False)` does
         # not bring Start and Stop back; only a status read does.
@@ -5999,6 +6154,7 @@ class ControllerView(QWidget):
         # a build that is blocked between lines rather than only stopping the
         # reader of them.
         cancel = threading.Event()
+        self._rebuild_is_compile = True
         return self.rebuild_log.run(
             lambda: source(cancel),
             title=f"Rebuilding {self.entry.name}",
@@ -6069,6 +6225,7 @@ class ControllerView(QWidget):
             logger.info(f"database updates for {self.entry.id} declined at the confirmation")
             return False
         cancel = threading.Event()
+        self._rebuild_is_compile = False
         return self.rebuild_log.run(
             lambda: route.press(cancel),
             title=f"Applying database updates to {self.entry.name}",
@@ -6135,6 +6292,7 @@ class ControllerView(QWidget):
             logger.info(f"adopting {self.entry.id} declined at the confirmation")
             return False
         cancel = threading.Event()
+        self._rebuild_is_compile = False
         return self.rebuild_log.run(
             lambda: route.press(cancel),
             title=f"Adopting {self.entry.name}'s databases as a finished import",
@@ -6166,6 +6324,16 @@ class ControllerView(QWidget):
         # has written the row it exists to write.
         self._import_asked = False
         self._forget_the_adopt_reading()
+        compiled, self._rebuild_is_compile = self._rebuild_is_compile, False
+        if ok and compiled:
+            # The compile that just finished covers every module installed
+            # before it started, which is exactly what the set holds. Cleared on
+            # SUCCESS only, and only for a run that really was a COMPILE: a
+            # failed or stopped rebuild leaves the owing intact because nothing
+            # about the running server changed, and a database-updates or adopt
+            # run through this same panel changed no binary at all.
+            self._rebuild_owed.clear()
+            self.reload_modules()
         if not ok:
             self.action_failed.emit(message)
 
@@ -6353,22 +6521,26 @@ class ControllerView(QWidget):
         copy_act.triggered.connect(lambda: self._copy_to_clipboard(path.name))
         menu.exec(self.backup_list.mapToGlobal(pos))
 
-    def _show_module_context_menu(self, pos: QPoint) -> None:
-        item = self.module_list.itemAt(pos)
-        if item is None:
-            return
-        mid = str(item.data(Qt.ItemDataRole.UserRole) or "")
+    @Slot(str, QPoint)
+    def _show_module_context_menu(self, module_id: str, pos: QPoint) -> None:
+        """The row's menu, at a GLOBAL position the panel has already mapped.
+
+        By id since T42, because the row it is about is the row that was
+        right-clicked and not whatever happened to be highlighted -- and because
+        this is the only press an UNCATALOGUED row still answers: those rows
+        carry no buttons, so the menu is where `UNCATALOGUED_PRESS` is reached.
+        """
+        self.modules_panel.select(module_id)
         menu = QMenu(self)
-        if self.install_module_button.isEnabled():
+        if self._module_actions_allowed():
             inst_act = menu.addAction("Install Selected Module")
             inst_act.triggered.connect(lambda: self._module_action("install"))
-        if self.remove_module_button.isEnabled():
             rem_act = menu.addAction("Remove Selected Module")
             rem_act.triggered.connect(lambda: self._module_action("remove"))
-        menu.addSeparator()
+            menu.addSeparator()
         copy_act = menu.addAction("Copy Module ID")
-        copy_act.triggered.connect(lambda: self._copy_to_clipboard(mid))
-        menu.exec(self.module_list.mapToGlobal(pos))
+        copy_act.triggered.connect(lambda: self._copy_to_clipboard(module_id))
+        menu.exec(pos)
 
 
 # ------------------------------------------------------------- formatting

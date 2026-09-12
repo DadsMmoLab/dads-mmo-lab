@@ -382,9 +382,13 @@ def _refuse_shipped(item_id: str, shipped_ids: Container[str]) -> None:
     can be the one that forgets it.
     """
     if item_id in shipped_ids:
+        # The control it names is read off the tab, not remembered: the Modules
+        # tab had one "Install selected" button above a list until T42 and now
+        # has an Install button on each row, and a refusal that still sent the
+        # reader hunting for the old one would be FACT 4 in a smaller place.
         raise DeriveError(
-            f"{item_id} is a module this app already ships — select it in the list "
-            f"and press Install selected. {_NOTHING_CHANGED}"
+            f"{item_id} is a module this app already ships — find it on the Modules "
+            f"tab and press Install on its row. {_NOTHING_CHANGED}"
         )
 
 

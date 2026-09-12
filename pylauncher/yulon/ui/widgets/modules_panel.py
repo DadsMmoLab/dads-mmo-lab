@@ -23,7 +23,7 @@ FOLDER. Reading it per family listed `bmah` twice on the owner's own install
 
 Nothing in this module imports `yulon.ui.controller_view`, and nothing imports
 the decorations modules: upstream `Yulon` carries Baerthe's passes on those and
-`warcraft_decorations.py` is deleted there (T42). Colours come from the
+`dadcraft_decorations.py` there (T42; upstream has since renamed it from `warcraft_`). Colours come from the
 `COLOR_*` constants `theme.py` exports.
 """
 
@@ -667,9 +667,17 @@ class ModulesPanel(QWidget):
                 # you have something in opens on what you HAVE.
                 self._open[kind] = not any(row.installed for row in family)
             card = _FamilyCard(kind, FAMILY_TITLES[kind], self._content)
+            # Built in the order they were HANDED to us and only then split into
+            # the two halves, so `rows()` reports the order the tab draws in
+            # rather than the order the cards happen to be filled in. Building
+            # the installed half first would make `rows()` installed-first
+            # whatever the builder decided -- which is a reading that agrees with
+            # T42's first line by accident and would go on agreeing with it after
+            # the sort was deleted.
+            widgets = [self._make(row) for row in family]
             card.fill(
-                [self._make(row) for row in family if row.installed],
-                [self._make(row) for row in family if not row.installed],
+                [w for w in widgets if w.data.installed],
+                [w for w in widgets if not w.data.installed],
             )
             if card.toggle is not None:
                 card.toggle.clicked.connect(lambda _checked=False, name=kind: self._flip(name))
@@ -706,6 +714,7 @@ class ModulesPanel(QWidget):
         return self._rows[item_id]
 
     def rows(self) -> tuple[RowWidget, ...]:
+        """Every row, in the order `set_rows()` was handed them (= the drawn order)."""
         return tuple(self._rows.values())
 
     def selected_id(self) -> str | None:

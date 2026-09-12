@@ -646,3 +646,25 @@ def test_the_installed_header_counts_that_family_only(qapp: object) -> None:
     assert "(2)" in panel.installed_header("ale").text()
     assert "1" in panel.available_toggle("module").text()
     assert panel.available_toggle("ale") is None, "no uninstalled ale rows, so no toggle"
+
+
+def test_the_panel_reports_rows_in_the_order_it_was_handed_them(qapp: object) -> None:
+    """`rows()` is the DRAWN order, which is the builder's — not the fill order.
+
+    Written after a view test agreed with T42's "installed first" line by
+    accident: the cards used to be filled by building the installed half first,
+    so `rows()` came back installed-first whatever `build_module_rows()` had
+    decided, and deleting the builder's sort left that test green. The rows here
+    are handed over in an order the builder would never produce, so only a panel
+    that preserves what it was given can pass.
+
+    Mutation: fill the card with `[self._make(row) for row in family if
+    row.installed]` first and this comes back `["b", "a"]`.
+    """
+    handed = (
+        mp.ModuleRow("a", "module", "A", "", None, False, True, (), (), True, None),
+        mp.ModuleRow("b", "module", "B", "", None, True, True, (), (), True, None),
+    )
+    panel = _panel(handed)
+
+    assert [r.data.id for r in panel.rows()] == ["a", "b"]
