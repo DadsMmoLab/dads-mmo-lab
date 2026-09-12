@@ -265,7 +265,8 @@ _LAB_BEAKER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 51
   </defs>
 
   <!-- Outer warm aura glow -->
-  <path d="M208 32 L304 32 L304 176 L468 408 C488 436 472 480 432 480 L80 480 C40 480 24 436 44 408 L208 176 Z"
+  <path d="M208 32 L304 32 L304 176 L468 408 C488 436 472 480 432 480 L80 480
+           C40 480 24 436 44 408 L208 176 Z"
         fill="#FFD100" opacity="0.22" />
 
   <!-- Yellow / Golden Potion Liquid Body -->
@@ -289,11 +290,14 @@ _LAB_BEAKER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 51
   <circle cx="245" cy="90" r="8" fill="#FFFFFF" opacity="0.95" />
 
   <!-- Glass Flask Body (thick beveled outline) -->
-  <path d="M192 48 L320 48 M208 48 L208 176 L44 408 C24 436 40 480 80 480 L432 480 C472 480 488 436 468 408 L304 176 L304 48"
-        fill="none" stroke="url(#flaskGlass)" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M192 48 L320 48 M208 48 L208 176 L44 408 C24 436 40 480 80 480
+           L432 480 C472 480 488 436 468 408 L304 176 L304 48"
+        fill="none" stroke="url(#flaskGlass)" stroke-width="28" stroke-linecap="round"
+        stroke-linejoin="round" />
 
   <!-- Flask Lip / Top Rim Collar -->
-  <path d="M180 32 L332 32 C340 32 344 40 338 48 L326 64 C322 68 314 72 304 72 L208 72 C198 72 190 68 186 64 L174 48 C168 40 172 32 180 32 Z"
+  <path d="M180 32 L332 32 C340 32 344 40 338 48 L326 64 C322 68 314 72 304 72
+           L208 72 C198 72 190 68 186 64 L174 48 C168 40 172 32 180 32 Z"
         fill="#D4AF37" stroke="#FFD100" stroke-width="6" />
 
   <!-- Glass Specular Reflection Highlight -->
@@ -301,10 +305,14 @@ _LAB_BEAKER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 51
         fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round" opacity="0.75" />
 
   <!-- Measurement volume markings on glass -->
-  <line x1="270" y1="320" x2="305" y2="320" stroke="#FFEAA0" stroke-width="8" stroke-linecap="round" opacity="0.8"/>
-  <line x1="285" y1="355" x2="325" y2="355" stroke="#FFEAA0" stroke-width="8" stroke-linecap="round" opacity="0.8"/>
-  <line x1="300" y1="390" x2="345" y2="390" stroke="#FFEAA0" stroke-width="8" stroke-linecap="round" opacity="0.8"/>
-  <line x1="315" y1="425" x2="365" y2="425" stroke="#FFEAA0" stroke-width="8" stroke-linecap="round" opacity="0.8"/>
+  <line x1="270" y1="320" x2="305" y2="320" stroke="#FFEAA0" stroke-width="8"
+        stroke-linecap="round" opacity="0.8"/>
+  <line x1="285" y1="355" x2="325" y2="355" stroke="#FFEAA0" stroke-width="8"
+        stroke-linecap="round" opacity="0.8"/>
+  <line x1="300" y1="390" x2="345" y2="390" stroke="#FFEAA0" stroke-width="8"
+        stroke-linecap="round" opacity="0.8"/>
+  <line x1="315" y1="425" x2="365" y2="425" stroke="#FFEAA0" stroke-width="8"
+        stroke-linecap="round" opacity="0.8"/>
 </svg>"""
 
 

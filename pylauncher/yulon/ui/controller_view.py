@@ -108,13 +108,13 @@ from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker
-from yulon.ui.icons import get_tab_icon, dadcraft_icon
+from yulon.ui.icons import dadcraft_icon, get_tab_icon
 from yulon.ui.theme import COLOR_GOLD_LIGHT, COLOR_TEXT_GOLD
+from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
 from yulon.ui.widgets.party_panel import PartyPanel
-from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 
 logger = get_logger(__name__)
 

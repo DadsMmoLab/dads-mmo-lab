@@ -46,9 +46,9 @@ from yulon.log import get_logger
 from yulon.ui.answers import said_yes
 from yulon.ui.icons import dadcraft_icon
 from yulon.ui.theme import COLOR_TEXT_GOLD
+from yulon.ui.widgets.dadcraft_decorations import DadcraftCampaignCard
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter
-from yulon.ui.widgets.dadcraft_decorations import DadcraftCampaignCard
 
 logger = get_logger(__name__)
 
