@@ -27,6 +27,7 @@ from collections.abc import Iterable
 from enum import Enum
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -136,19 +137,21 @@ class Navigator(QObject):
         3. The focused widget's top-level window.
         """
         app = QApplication.instance()
-        popup = app.activePopupWidget() if app is not None else None
-        if popup is not None:
-            return popup
-        modal = app.activeModalWidget() if app is not None else None
-        if modal is not None:
-            return modal
+        if isinstance(app, QApplication):
+            popup = app.activePopupWidget()
+            if popup is not None:
+                return popup
+            modal = app.activeModalWidget()
+            if modal is not None:
+                return modal
+            active = app.activeWindow()
+            if active is not None:
+                return active
         focused = QApplication.focusWidget()
         if focused is not None:
             window = focused.window()
             if window is not None:
                 return window
-        if app is not None and app.activeWindow() is not None:
-            return app.activeWindow()
         raise RuntimeError("no widget context to navigate")
 
     # -- focusable enumeration ------------------------------------------
@@ -268,14 +271,15 @@ class Navigator(QObject):
         # Back is "close the thing I am in": a popup, then a modal. If none is
         # open, it does nothing rather than yanking focus unpredictably.
         app = QApplication.instance()
-        popup = app.activePopupWidget() if app is not None else None
-        if popup is not None:
-            popup.close()
-            return True
-        modal = app.activeModalWidget() if app is not None else None
-        if modal is not None:
-            modal.close()
-            return True
+        if isinstance(app, QApplication):
+            popup = app.activePopupWidget()
+            if popup is not None:
+                popup.close()
+                return True
+            modal = app.activeModalWidget()
+            if modal is not None:
+                modal.close()
+                return True
         return False
 
     def _cycle(self, action: Action) -> bool:
@@ -296,11 +300,13 @@ class Navigator(QObject):
             if isinstance(node, QTabWidget):
                 return node
             node = node.parentWidget()
-        window = QApplication.activeWindow()
-        if window is not None:
-            rail = window.findChild(QTabWidget, "sidebar-tabs")
-            if rail is not None:
-                return rail
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            window = app.activeWindow()
+            if window is not None:
+                rail = window.findChild(QTabWidget, "sidebar-tabs")
+                if rail is not None:
+                    return rail
         return None
 
 
@@ -324,8 +330,9 @@ class KeyboardSource(QObject):
         app = QApplication.instance()
         if app is None or self._app is app:
             return
-        self._app = app
-        app.installEventFilter(self)
+        if isinstance(app, QApplication):
+            self._app = app
+            app.installEventFilter(self)
 
     def stop(self) -> None:
         """Remove the filter (used at teardown to avoid a dangling target)."""
@@ -334,7 +341,7 @@ class KeyboardSource(QObject):
             self._app = None
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.KeyPress:
+        if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
             key = int(event.key())
 
             if key in _KEY_TO_DIRECTION:
