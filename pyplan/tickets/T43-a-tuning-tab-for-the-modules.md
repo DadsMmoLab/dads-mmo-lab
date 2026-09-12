@@ -505,3 +505,151 @@ sentence in front of a user; silence is the honest reading.
 
 `black --check yulon/ tests/` — 212 files unchanged. `ruff check yulon/ tests/` —
 all checks passed. `mypy yulon/` — no issues in 102 source files. Nothing pushed.
+
+## Report — round 2 (hand, Opus 5, 2026-09-13)
+
+**Status:** all six MUST-FIX findings addressed, plus the NOT-required one
+decided and written down. `33586d57` on `hand-t43`. Not pushed.
+
+Finding 1 sent me to **AzerothCore's own config parser**
+(`src/common/Configuration/Config.cpp:305-331`, fetched from `master`
+2026-09-13), which settles more than the finding asked and settles one part of
+it the other way. It is worth reading before the table below:
+
+```cpp
+line = Acore::String::Trim(line, in.getloc());        // 307
+if (line.empty()) continue;                           // 310
+if (line[0] == '#' || line[0] == '[') continue;       // 313
+auto const equal_pos = line.find('=');                // 316
+auto entry = Trim(line.substr(0, equal_pos));         // 324
+auto value = Trim(line.substr(equal_pos + 1, npos));  // 325
+value.erase(remove(value.begin(), value.end(), '"')); // 327
+if (IsDuplicateOption(entry)) continue;               // 330  <- FIRST wins
+```
+
+### What changed
+
+| # | finding | what was done |
+| --- | --- | --- |
+| 1 | the whole line was rebuilt as `key = value` | `_rewrite()` keeps the leading whitespace, the key as the file spells it, the separator exactly as written (`K    =    `), the quotes and the trailing `\r`, and replaces only the value |
+| 2 | `errors="replace"` in, UTF-8 out | a strict decode in `write()` (raises `TuningError`, before the backup, so a refusal leaves the directory untouched), in `_read()` (`current` is `None`, never U+FFFD) and in `open_tuning_file()` (empty, read-only, Save dead) |
+| 3 | no atomic write | `_atomic_write()`: a `.yulon-tmp` sibling and `os.replace`, with the temp removed if anything raises |
+| 4 | two backups in one second collide | the stamp carries microseconds in a fixed-width field and steps to the next free one; a name sort is still a time sort, which `backups_of()` depends on |
+| 5 | `worst()` priced a mixed card too cheaply | `worst()` is gone. `owed()` returns EVERY job, most expensive first; `owed_sentence()` says all of them; `TuningCard.rule` → `rules` |
+| 6 | the refusal was per file, not per card | `save_tuning()` checks every value of every file before opening any of them; `write()`'s own check stays, because it is a public seam |
+
+### Two things the finding did not ask for, found by following it
+
+**`conf_value()` and the writer were reading the wrong line, twice over.** The
+module started with `party.read_conf()`'s rule — column 0, last-wins — which is
+Lua's rule applied to a `.conf`. Against `Config.cpp`:
+
+* line 307 trims BEFORE anything is decided, so an **indented** assignment is
+  live. The old rule answered `None` for one;
+* line 330 skips every later copy, so the **first** occurrence wins. The tab
+  showed a value the running server does not use, and `_last_active()` rewrote
+  a line the server ignores — the value on screen would not have moved and Save
+  would have looked broken. `apply._set_conf_key()`'s `subn(..., count=1)` is
+  the first match and had it right all along.
+
+`conf_value()` is now the core's rule and `lua_value()` keeps Lua's, with
+`value_in(text, key, backend)` picking. `party.py` is **not** changed: its rule
+is right for the file it reads there and this ticket does not own it — worth its
+own ticket that `party.read_conf`'s docstring generalises a Lua measurement.
+
+### Where I disagree, with evidence
+
+**Finding 1's trailing-comment half is wrong, and implementing it would write a
+value the user never asked for.** `K = old # keep this`:
+
+* `Config.cpp:316` takes the FIRST `=`, and :325 takes **the rest of the line**
+  as the value. There is no trailing-comment syntax — a `#` is a comment only
+  when it is the first character of the trimmed line (:313). So the running
+  server's value for that key is literally `old # keep this`.
+* Preserving `# keep this` while replacing `old` therefore writes the value
+  `new # keep this` into a live conf. The person who moved the control asked
+  for `new`.
+
+`test_a_hash_after_the_value_is_part_of_the_value_and_goes_with_it` asserts
+both halves — that `conf_value()` reads the whole thing as the value, and that
+the write replaces the whole thing. The spacing half of the finding is
+implemented exactly as asked, and the `K = old = fallback` case now loses its
+second half **for the same reason**, not by accident: that half is the value.
+
+For what it is worth, the prior art agrees: DML's own `.conf` writer
+(`crates/dml-core/src/conf.rs:171-230`) rewrites the whole line to a canonical
+`{key} = {value}`, rewrites EVERY duplicate rather than one, and drops the
+`\r` on the lines it touches. Yu'lon now preserves strictly more than DML does.
+
+### The NOT-required one, decided
+
+`build_tuning_cards()` still calls `apply_rule(row)` with no `in_clone`, and
+the rebuild branch still has no production caller. Reason, in the code and in a
+test: `ConfFile.file` is relative to the SERVER dir and `ConfFile` has no
+`in_clone` field — only `Patch` does — so no manifest can point a tuning row at
+a file inside a module's source tree. The parameter stays because the schema
+carries the concept one model along, and
+`test_a_conf_file_can_never_be_a_clone_file_so_the_rebuild_branch_has_no_caller`
+fails the day `ConfFile` gains the field, which is the day the branch acquires
+a caller.
+
+### Tests and their mutations (round 2)
+
+Numbering continues from round 1. Same method: applied to a clean tree,
+`__pycache__` purged both sides, run, seen to FAIL, restored — and the runner
+asserts the mutation actually changed the file.
+
+| test | mutation |
+| --- | --- |
+| `test_the_first_assignment_wins_in_a_conf_and_a_commented_one_is_not_read` | (M80) `conf_value` takes the last assignment again; (M81) the column-0 rule put back — the indented key reads `None` |
+| `test_a_comment_and_a_section_header_are_both_lines_that_say_nothing` | (M82) the `[` arm of `_is_conf_comment` removed; (M84) the `#` arm removed |
+| `test_a_lua_script_keeps_luas_own_rule_and_not_the_cores` | (M83) `value_in` sends every backend to `conf_value` |
+| `test_the_line_keeps_its_indentation_and_its_spacing_around_the_equals` | (M85) the line rebuilt canonically; (M86) the separator normalised to `" = "` while the indent is kept |
+| `test_the_whole_value_is_replaced_including_a_second_equals` | (M85) |
+| `test_a_hash_after_the_value_is_part_of_the_value_and_goes_with_it` | (M87) a trailing `#…` kept as a "comment" — which is Codex's request, and this is the test that refuses it |
+| `test_the_first_assignment_is_rewritten_and_the_duplicate_below_it_is_left` | (M88) the writer targets the last assignment; (M85) |
+| `test_a_file_with_no_trailing_newline_keeps_none` | (M85) |
+| `test_a_crlf_line_keeps_its_spacing_and_its_carriage_return` | (M85); (M86) |
+| `test_a_conf_that_is_not_utf8_is_refused_rather_than_rewritten` | (M90) the writer reads with `errors="replace"` again |
+| `test_a_conf_that_is_not_utf8_has_no_current_value_rather_than_a_replaced_one` | (M91) `_read` replaces undecodable bytes |
+| `test_a_conf_that_is_not_utf8_opens_empty_and_read_only` (view) | (M99) the `UnicodeDecodeError` arm of `open_tuning_file` never catches |
+| `test_a_write_that_fails_leaves_the_file_whole` | (M92) a plain truncating `open(path, "w")`; (M93) the temp file left behind on failure |
+| `test_two_saves_inside_one_second_are_two_backups` | (M94) the stamp back to whole seconds; (M95) a taken name reused |
+| `test_a_card_names_every_job_its_rows_owe` | (M96) `owed` returns only the dearest; (M97) `read-only` counted as a job |
+| `test_a_card_that_needs_a_rebuild_and_a_recreate_names_both` | (M96) |
+| `test_owed_lists_each_job_once_most_expensive_first_and_drops_read_only` | (M96); (M97) |
+| `test_a_card_whose_rows_cost_two_different_things_says_both` (panel) | (M100) the card keeps only its first row's cost; (M101) the sentence names only the dearest job |
+| `test_a_card_names_every_job_its_rows_owe_and_a_read_only_row_owes_none` (panel) | (M100) |
+| `test_a_multi_file_card_writes_nothing_when_the_second_files_value_is_bad` (view) | (M98) the card validated file by file again — the first file lands |
+| `test_a_key_that_names_a_family_of_keys_is_listed_read_only` | now 8 cases, not 6: `MountScaling.Flying.Expert.*` and `.Artisan.*` were untested and the docstring said six. Mutations M70–M73 as in round 1 |
+| `test_a_conf_file_can_never_be_a_clone_file_so_the_rebuild_branch_has_no_caller` | (M102) `in_clone` added to `ConfFile` — the day the branch gets a caller |
+
+**One test that agreed by accident, again.** The first version of
+`test_a_section_header_is_not_read_as_a_setting` routed the `[` arm through
+`rows_for` and passed with that arm deleted: a `[` binds to the first token, so
+`[worldserver]` strips to `[worldserver` and the exact key match excludes it
+anyway. The same is true of the `#` arm. Both are now asserted directly on
+`_is_conf_comment`, and both docstrings say the call is redundant where it sits
+and why it is kept — rather than claiming to guard something it does not.
+
+**Three prose-coupled assertions de-coupled** (`test_a_save_that_changed_nothing…`,
+`test_a_revert_with_no_backup…`, `test_a_raw_save_that_stopped_looking_like_a_conf…`):
+each now compares against the constant or the function that produces the
+sentence, so a reworded message is not a test failure and a message that stops
+being produced at all still is.
+
+### Ledger and gate
+
+`pyplan/write-ledger.md`: `tuning.py::write::open(w)` became
+`tuning.py::_atomic_write::open(w)`, and two rows were added
+(`_atomic_write::os.replace`, `_atomic_write::unlink`); the backup row now
+records the microsecond stamp and the conf row the strict decode.
+
+`yt` in the worktree, last line:
+
+```
+4537 passed, 8 skipped, 23 deselected, 2 warnings in 146.75s (0:02:26)
+```
+
+`black --check yulon/ tests/` — 212 files unchanged. `ruff check` — all checks
+passed. `mypy yulon/` — no issues in 102 source files. Nothing pushed.
