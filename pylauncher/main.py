@@ -206,7 +206,7 @@ def build_window() -> object:
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.tab_titles import retitle_controller_tabs
-    from yulon.ui.theme import apply_dadcraft_theme, scale_for_width
+    from yulon.ui.theme import apply_dadcraft_theme
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.update import UpdateCheck, check_for_update
 
@@ -235,17 +235,37 @@ def build_window() -> object:
             The theme is authored at a reference width (1280px); narrower or
             wider windows re-generate the stylesheet so every label, button,
             tab and input scales with the window rather than staying fixed and
-            clipping or sprawling. Debounced on the last scale actually applied
-            so a single resize event that lands on the same scale does not pay
-            for a stylesheet reparse.
+            clipping or sprawling.
+
+            Coalesced on a timer rather than compared against the last applied
+            scale. The old guard was exact float equality on
+            `scale_for_width(self.width())`, which is a distinct value for
+            every 1px of width between the clamp bounds — so a drag-resize
+            reparsed the entire stylesheet, and rebuilt every widget's style,
+            on essentially *every* resize event. A single-shot restyle after the
+            drag settles is what the scale was meant to cost.
             """
             super().resizeEvent(event)  # type: ignore[arg-type]
-            scale = scale_for_width(self.width())
-            last = getattr(self, "_theme_scale", None)
-            if scale == last:
+            timer = getattr(self, "_theme_resize_timer", None)
+            if timer is None:
+                from PySide6.QtCore import QTimer
+
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                # Long enough to coalesce a drag into one restyle, short enough
+                # that a maximise/snap repaints before the user looks at it.
+                timer.setInterval(120)
+                timer.timeout.connect(self._restyle_for_width)
+                self._theme_resize_timer = timer
+            timer.start()
+
+        def _restyle_for_width(self) -> None:
+            """Re-apply the theme at the window's current width, once per settle."""
+            width = self.width()
+            if width == getattr(self, "_theme_width", None):
                 return
-            self._theme_scale = scale
-            apply_dadcraft_theme(self, width=self.width())
+            self._theme_width = width
+            apply_dadcraft_theme(self, width=width)
 
     catalog = load_catalog()
     state = load_state()
@@ -253,7 +273,7 @@ def build_window() -> object:
     window.setWindowTitle(f"Dad's MMO Lab — Yu'lon {__version__}")
     window.setWindowIcon(get_app_icon())
     apply_dadcraft_theme(window)
-    window._theme_scale = 1.0  # matches the unscaled theme just applied
+    window._theme_width = DEFAULT_WINDOW_SIZE[0]  # matches the unscaled theme just applied
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]

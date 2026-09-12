@@ -14,7 +14,7 @@ from yulon.ui.catalog_view import CatalogView
 from yulon.ui.icons import dadcraft_icon, get_app_icon, get_tab_icon
 from yulon.ui.theme import (
     COLOR_BG_DARK,
-    COLOR_BG_PARCHMENT,
+    COLOR_BG_PANEL,
     COLOR_GOLD_BRIGHT,
     COLOR_TEXT_MUTED,
     DADCRAFT_THEME_QSS,
@@ -34,7 +34,7 @@ def test_dadcraft_palette_construction() -> None:
     palette = build_dadcraft_palette()
     assert isinstance(palette, QPalette)
     assert palette.color(QPalette.ColorRole.Window).name().lower() == COLOR_BG_DARK.lower()
-    assert palette.color(QPalette.ColorRole.Button).name().lower() == COLOR_BG_PARCHMENT.lower()
+    assert palette.color(QPalette.ColorRole.Button).name().lower() == COLOR_BG_PANEL.lower()
 
 
 def test_dadcraft_theme_qss_covers_essential_controls() -> None:
@@ -59,21 +59,23 @@ def test_dadcraft_theme_qss_covers_essential_controls() -> None:
 
 def test_input_controls_carry_explicit_minimum_sizes() -> None:
     # The shared input block must give single-line controls a real height floor
-    # (so the caret/selection are never clipped by the padding) and multi-line
-    # panels a taller one (so a log/report box reads as a panel, not a stray
-    # line). Guarded as QSS text because the floor is set in the theme, not in
-    # per-widget Python.
-    assert "min-height: 20px" in DADCRAFT_THEME_QSS
-    assert "min-width: 60px" in DADCRAFT_THEME_QSS
+    # (so the caret/selection are never clipped by the padding, and a thumb can
+    # hit them) and multi-line panels a taller one (so a log/report box reads as
+    # a panel, not a stray line). Guarded as QSS text because the floor is set in
+    # the theme, not in per-widget Python.
     assert "min-height: 90px" in DADCRAFT_THEME_QSS
+    from yulon.ui.theme import TOUCH_TARGET_PX, _touch
+
+    smallest = int(_touch(30, 1.0).rstrip("px"))
+    assert smallest >= TOUCH_TARGET_PX
 
 
 def test_the_pressed_button_state_does_not_shift_padding() -> None:
     # A pressed button's sunken look must come from the fill and border shading
-    # only — the old asymmetric `padding-top: 9px; padding-left: 17px` nudged
-    # the content and broke the shared border edge with its neighbours. The
-    # pressed rule must declare no padding property at all (a prose "padding"
-    # in the explanatory comment is fine; a `padding-` declaration is not).
+    # only — an asymmetric `padding-top`/`padding-left` nudges the content and
+    # breaks the shared border edge with its neighbours. The pressed rule must
+    # declare no padding property at all (a prose "padding" in the explanatory
+    # comment is fine; a `padding-` declaration is not).
     pressed = DADCRAFT_THEME_QSS.split("QPushButton:pressed")[1].split("}")[0]
     assert "padding-top:" not in pressed
     assert "padding-left:" not in pressed
@@ -82,40 +84,62 @@ def test_the_pressed_button_state_does_not_shift_padding() -> None:
     assert "padding:" not in pressed
 
 
-def test_the_button_base_state_draws_a_visible_right_and_bottom_border() -> None:
-    # The base QPushButton rule used COLOR_BRASS_DEEP (#3C2D14) for the right
-    # and bottom edges — a dark brown nearly identical to the button's own
-    # fill, so those two borders read as MISSING. All four edges must use a
-    # colour that is visibly distinct from the fill (the brass, and the gold
-    # on the lit top/left).
+def test_interactive_controls_declare_a_touch_target_floor() -> None:
+    # Every interactive primitive must carry a short-side floor at or above
+    # TOUCH_TARGET_PX, because the launcher ships on a 1280x800 handheld driven
+    # by thumb and D-pad. This is the regression guard for the 16px checkbox and
+    # the icon-sized tab scroll arrows that made the destructive uninstall
+    # checkbox effectively unhittable.
+    from yulon.ui.theme import MIN_FONT_PX, TOUCH_TARGET_PX, _build_qss
+
+    qss = _build_qss(1.0)
+
+    import re
+
+    def floor_of(rule_start: str) -> int:
+        body = qss.split(rule_start)[1].split("}")[0]
+        match = re.search(r"min-(?:height|width):\s*(\d+)px", body)
+        if match is None:
+            raise AssertionError(f"no min-height/min-width in rule {rule_start!r}")
+        return int(match.group(1))
+
+    assert floor_of("QPushButton {") >= TOUCH_TARGET_PX
+    assert floor_of("QLineEdit, QSpinBox, QComboBox {") >= TOUCH_TARGET_PX
+    assert floor_of("QListWidget::item, QTableWidget::item, QTreeWidget::item {") >= TOUCH_TARGET_PX
+    assert floor_of("QTabBar QToolButton {") >= TOUCH_TARGET_PX
+    # The font floor keeps body text legible even where the width scale clamps.
+    assert MIN_FONT_PX >= 12
+
+
+def test_the_button_base_state_draws_a_visible_hairline() -> None:
+    # The base QPushButton rule must pair its panel fill with a hairline that is
+    # visibly distinct from the fill — the near-black `#3C2D14` it once used on
+    # two edges read as a missing border. Asserted against the constant so the
+    # check follows the palette instead of pinning one hex value by hand.
+    from yulon.ui.theme import COLOR_BRASS_DARK
+
     base = DADCRAFT_THEME_QSS.split("QPushButton {")[1].split("}")[0]
-    # The f-string has already interpolated the color constants, so assert the
-    # resolved hex: right/bottom must be the visible brass, not the near-black
-    # deep brown.
-    assert "border-right: 2px solid #785A28;" in base
-    assert "border-bottom: 2px solid #785A28;" in base
-    assert "border-right: 2px solid #3C2D14;" not in base
-    assert "border-bottom: 2px solid #3C2D14;" not in base
+    assert f"border: 1px solid {COLOR_BRASS_DARK};" in base
+    assert "#3C2D14" not in base
 
 
-def test_the_tab_base_state_draws_a_visible_right_and_bottom_border() -> None:
-    # The base `QTabBar::tab` (top bar) must draw visible brass borders on
-    # right and bottom, not the near-black #3C2D14 (which blended into the dark
-    # background and read as missing right-hand borders).
-    tab_rule = DADCRAFT_THEME_QSS.split("QTabBar::tab {")[1].split("}")[0]
-    assert "border-right: 2px solid #785A28;" in tab_rule
-    assert "border-bottom: 2px solid #785A28;" in tab_rule
-    assert "#3C2D14" not in tab_rule
+def test_the_tab_base_state_draws_a_visible_hairline() -> None:
+    from yulon.ui.theme import COLOR_BRASS_DARK
+
+    tab_rule = DADCRAFT_THEME_QSS.split(
+        "QTabBar::tab, QTabBar::tab:top {"
+    )[1].split("}")[0]
+    assert f"border: 1px solid {COLOR_BRASS_DARK};" in tab_rule
 
 
 def test_the_sidebar_tab_is_bounded_to_a_narrow_rail() -> None:
     # The West sidebar (objectName "sidebar-tabs") reads as an icon-first rail:
     # `max-width` caps it near the icon-plus-padding width, `min-width` keeps it
-    # from collapsing, and `border-right: none` lets it merge into the pane.
+    # from collapsing, and it carries a real touch-target height.
     west = DADCRAFT_THEME_QSS.split("QTabWidget#sidebar-tabs QTabBar::tab {")[1].split("}")[0]
-    assert "max-width: 60px" in west
+    assert "max-width: 64px" in west
     assert "min-width: 48px" in west
-    assert "border-right: none;" in west
+    assert "min-height: 44px" in west
 
 
 def test_the_tab_text_font_is_on_the_widget_not_the_subcontrol() -> None:
@@ -123,8 +147,6 @@ def test_the_tab_text_font_is_on_the_widget_not_the_subcontrol() -> None:
     # (the `::tab` sub-control ignores font properties — measured), so the title
     # font lives on the `QTabBar` widget rule, where it does reach the text.
     assert "QTabBar {" in DADCRAFT_THEME_QSS
-    # The single-family fallback is what makes the serif actually apply; the
-    # comma-separated stack broke on the tab rule and left a thin default font.
     from yulon.ui.theme import FONT_TITLE_SINGLE
 
     assert "," not in FONT_TITLE_SINGLE
@@ -133,13 +155,68 @@ def test_the_tab_text_font_is_on_the_widget_not_the_subcontrol() -> None:
 def test_the_theme_scales_font_sizes_with_window_width() -> None:
     # The theme is generated per window width: a narrower window shrinks the
     # base font sizes and a wider one grows them, so text stays in proportion
-    # to the controls instead of clipping or sprawling.
-    from yulon.ui.theme import REFERENCE_WIDTH, _build_qss, scale_for_width
+    # to the controls instead of clipping or sprawling. The rendered-pixel floor
+    # (MIN_FONT_PX) means the narrow end no longer collapses into 10px text.
+    from yulon.ui.theme import MIN_FONT_PX, REFERENCE_WIDTH, _build_qss, scale_for_width
 
-    assert "font-size: 13px" in _build_qss(1.0)
-    assert "font-size: 10px" in _build_qss(scale_for_width(960))
+    assert "font-size: 14px" in _build_qss(1.0)
     assert scale_for_width(REFERENCE_WIDTH) == 1.0
     assert scale_for_width(960) < 1.0 < scale_for_width(1600)
+
+    # No generated font-size may fall below the legibility floor, at any scale
+    # the app can actually be resized to (960 is the window's minimum width).
+    import re
+
+    for width in (960, 1024, 1280, 1600, 2560):
+        qss = _build_qss(scale_for_width(width))
+        sizes = [int(m) for m in re.findall(r"font-size:\s*(\d+)px", qss)]
+        assert sizes, "no font sizes in generated sheet"
+        assert min(sizes) >= MIN_FONT_PX, f"font fell below floor at width {width}"
+
+
+def test_the_generated_sheet_contains_no_negation_selector() -> None:
+    # Qt's QCss parser has no negating pseudo-selector. A single occurrence makes
+    # `Parser::parse()` return false and Qt silently keeps only the rules BEFORE
+    # the failure point — which is how the whole interactive vocabulary (buttons,
+    # inputs, lists, tabs, menus) once vanished and left the app looking "bland".
+    # Text assertions cannot catch that, so the raw string is guarded here and
+    # the parse itself is checked in the test below.
+    from yulon.ui.theme import _build_qss, scale_for_width
+
+    for width in (960, 1280, 1920):
+        qss = _build_qss(scale_for_width(width))
+        assert ":not(" not in qss
+        assert "not(" not in qss
+
+
+def test_qt_actually_parses_the_generated_stylesheet(qapp: QApplication) -> None:
+    # The only test that proves the sheet is VALID, not merely present. Qt emits
+    # `Could not parse application stylesheet` (via qWarning) when the parser
+    # rejects input; this installs a message handler, forces widget polish, and
+    # asserts that warning never appeared. Every other theme test asserts on QSS
+    # *text* and would keep passing with a sheet Qt refuses to load.
+    from PySide6.QtCore import qInstallMessageHandler
+
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    messages: list[str] = []
+    previous = qInstallMessageHandler(lambda _t, _c, msg: messages.append(msg))
+    try:
+        apply_dadcraft_theme(qapp)
+        window = QMainWindow()
+        tabs = QTabWidget(window)
+        tabs.setObjectName("sidebar-tabs")
+        page = QWidget()
+        tabs.addTab(page, "Catalog")
+        window.setCentralWidget(tabs)
+        window.resize(1280, 800)
+        window.show()
+        qapp.processEvents()
+    finally:
+        qInstallMessageHandler(previous)
+
+    parse_errors = [m for m in messages if "parse" in m.lower() and "stylesheet" in m.lower()]
+    assert parse_errors == [], f"Qt rejected the stylesheet: {parse_errors}"
 
 
 def test_muted_text_color_is_lightened_for_legibility() -> None:

@@ -359,12 +359,19 @@ class CatalogView(QWidget):
         header_row.addWidget(self.toggle_console_button)
 
         grid = QGridLayout()
-        grid.setSpacing(14)
+        grid.setSpacing(12)
         grid.setContentsMargins(0, 4, 0, 4)
+        # Two tiles per row, wrapping into further rows. A single row of four
+        # demanded 4x235 + spacing ≈ 980px, well past the 420px the splitter is
+        # free to give this pane, so a horizontal scrollbar appeared on every
+        # narrow window. Two-up drops that floor to ~480px, keeps each tile wide
+        # enough for its buttons, and lets the grid grow downward, where the
+        # vertical scrollbar belongs.
+        columns = 2
         for index, entry in enumerate(catalog.games):
-            grid.addWidget(self._tile(entry), 0, index)
-            grid.setColumnStretch(index, 1)
-        grid.setRowStretch(0, 1)
+            grid.addWidget(self._tile(entry), index // columns, index % columns)
+        for col in range(columns):
+            grid.setColumnStretch(col, 1)
 
         inner = QWidget()
         inner.setLayout(grid)
@@ -423,7 +430,7 @@ class CatalogView(QWidget):
 
         header_box = QHBoxLayout()
         glyph = QLabel(_CAMPAIGN_GLYPHS.get(entry.id, "⚔️"), frame)
-        glyph.setStyleSheet("font-size: 20px; background: transparent;")
+        glyph.setObjectName("tile-glyph")
         header_box.addWidget(glyph)
 
         title_col = QVBoxLayout()
@@ -437,10 +444,6 @@ class CatalogView(QWidget):
         )
         sub_title = QLabel(_CAMPAIGN_SUBTITLES.get(entry.id, entry.emulator.name), frame)
         sub_title.setObjectName("tile-subtitle")
-        sub_title.setStyleSheet(
-            f"font-size: 11px; color: {COLOR_TEXT_GOLD}; font-weight: bold; "
-            "background: transparent;"
-        )
         title_col.addWidget(sub_title)
         header_box.addLayout(title_col, 1)
         box.addLayout(header_box)
