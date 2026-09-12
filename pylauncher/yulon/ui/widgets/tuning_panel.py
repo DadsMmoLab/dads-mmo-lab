@@ -226,6 +226,19 @@ class RowEditor(QWidget):
         self.kind = control_kind(row)
         self._start = starting_value(row)
         self._words = bool_words(row)
+        self._moved = False
+        """Whether the user has moved this control since the row was drawn.
+
+        Necessary, not belt-and-braces: a switch cannot DRAW "no value". A
+        `bool` key the conf does not carry starts at `""` and is rendered as an
+        unchecked box, whose value reads `0` -- so `value() != start` called it
+        changed the moment the card appeared, and pressing Save on a card nobody
+        had touched wrote five of `mod-transmog`'s keys. A spinner has the same
+        hole one control along: it sits at its minimum, not at nothing. Every
+        control's signal fires only on a real change, so this flag is exactly
+        "somebody moved it", and `value() != start` is still required on top so
+        that moving one and moving it back is not a change.
+        """
 
         box = QVBoxLayout(self)
         box.setContentsMargins(0, 4, 0, 4)
@@ -326,9 +339,10 @@ class RowEditor(QWidget):
 
     @property
     def changed(self) -> bool:
-        return self.control is not None and self.value() != self._start
+        return self._moved and self.control is not None and self.value() != self._start
 
     def _touched(self) -> None:
+        self._moved = True
         shown = self.changed
         if shown:
             self.changed_label.setText(CHANGED_FROM.format(old=self._start or NOTHING))

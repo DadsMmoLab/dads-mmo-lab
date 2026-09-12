@@ -7968,10 +7968,14 @@ def test_a_setting_shows_what_the_deployed_conf_says_and_never_invents_one(
     """The five keys carry no `default`, so four of them have no value at all."""
     view = _tuned_view(ps, tmp_path)
     editors = view.tuning_panel.card("mod-transmog").editors
-    assert editors["Transmogrification.Enable"].value() == "1"
-    assert editors["Transmogrification.Enable"].note_label is None
+    here = editors["Transmogrification.Enable"]
+    assert here.control.isChecked() and here.value() == "1"
+    assert here.note_label is None
     missing = editors["Transmogrification.UseCollectionSystem"]
-    assert missing.value() == ""
+    # A switch cannot draw "no value": it is off, and it says WHY it is off
+    # rather than passing the unchecked box off as a reading of the file.
+    assert not missing.control.isChecked()
+    assert not missing.changed, "an untouched switch reported a change nobody made"
     assert missing.note_label is not None
 
 
@@ -7990,7 +7994,7 @@ def test_saving_a_card_writes_what_changed_and_names_the_backup(
     path = tmp_path / TRANSMOG_CONF
     before = path.read_text(encoding="utf-8")
     card = view.tuning_panel.card("mod-transmog")
-    card.editors["Transmogrification.Enable"].control.setText("0")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
     assert card.save_button is not None
     card.save_button.click()
 
@@ -8004,7 +8008,8 @@ def test_saving_a_card_writes_what_changed_and_names_the_backup(
     # And the cards were re-read off the file afterwards: the row that was just
     # written is no longer marked as changed, because the file now says so.
     redrawn = view.tuning_panel.card("mod-transmog").editors["Transmogrification.Enable"]
-    assert redrawn.value() == "0" and not redrawn.changed
+    assert redrawn.value() == "0" and not redrawn.control.isChecked()
+    assert not redrawn.changed
 
 
 def test_a_save_that_changed_nothing_writes_nothing_and_says_so(
@@ -8027,10 +8032,10 @@ def test_a_key_the_conf_never_carried_is_written_for_the_first_time(
     """The whole point of the ticket: 73 of the 107 keys are unreachable today."""
     view = _tuned_view(ps, tmp_path)
     card = view.tuning_panel.card("mod-transmog")
-    card.editors["Transmogrification.UseCollectionSystem"].control.setText("0")
+    card.editors["Transmogrification.UseCollectionSystem"].control.setChecked(True)
     assert card.save_button is not None
     card.save_button.click()
-    assert "Transmogrification.UseCollectionSystem = 0" in (tmp_path / TRANSMOG_CONF).read_text(
+    assert "Transmogrification.UseCollectionSystem = 1" in (tmp_path / TRANSMOG_CONF).read_text(
         encoding="utf-8"
     )
 
@@ -8043,14 +8048,16 @@ def test_a_value_that_fails_its_type_is_refused_and_the_file_is_untouched(
     before = path.read_text(encoding="utf-8")
     card = view.tuning_panel.card("mod-transmog")
     key = "Transmogrification.Enable"
-    # The shipped manifest declares no `type` for this key yet (that is T43
-    # point 7's job), so the refusal is asked for here by declaring one.
+    # The shipped manifest types this key `bool`, and a switch cannot produce a
+    # value that fails its own check. The refusal is asked for by handing
+    # `tuning.check()` a declaration the switch's `0` cannot satisfy -- the spec
+    # is read at SAVE time, and the control was drawn before it.
     monkeypatch.setattr(
         view,
         "_tuning_spec",
-        lambda family, module_id, file: {key: ConfKey(key=key, type="int", min=0, max=1)},
+        lambda family, module_id, file: {key: ConfKey(key=key, type="int", min=5, max=9)},
     )
-    card.editors[key].control.setText("nine")
+    card.editors[key].control.setChecked(False)
     failures: list[str] = []
     view.action_failed.connect(failures.append)
     assert card.save_button is not None
@@ -8066,7 +8073,7 @@ def test_revert_puts_the_conf_back_from_the_backup(qapp: object, ps: _Ps, tmp_pa
     path = tmp_path / TRANSMOG_CONF
     before = path.read_text(encoding="utf-8")
     card = view.tuning_panel.card("mod-transmog")
-    card.editors["Transmogrification.Enable"].control.setText("0")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
     assert card.save_button is not None and card.revert_button is not None
     card.save_button.click()
     assert path.read_text(encoding="utf-8") != before

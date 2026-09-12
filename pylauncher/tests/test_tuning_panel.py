@@ -314,3 +314,44 @@ def test_a_narrow_window_stacks_the_two_halves(qapp: object) -> None:
     panel.resize(500, 600)
     assert panel.split.orientation() == Qt.Orientation.Vertical
     panel.close()
+
+
+def test_a_switch_over_a_key_the_file_never_carried_is_not_changed_until_it_is_moved(
+    qapp: object,
+) -> None:
+    """A checkbox cannot draw "no value": unchecked and off look the same.
+
+    Found by the full gate after point 7 typed the shipped keys. Five of
+    `mod-transmog`'s keys are `bool` with no value in the conf and no default, so
+    every card opened with five unchecked boxes whose starting value was `""` --
+    and `value() != start` made all five read as CHANGED. Pressing Save on a
+    card nobody had touched wrote five keys.
+    """
+    editor = tp.RowEditor(_row(type="bool", current=None, default=None))
+    assert editor.value() == "0"
+    assert not editor.changed, "an untouched switch reported a change nobody made"
+    assert editor.changed_label.isHidden()
+    editor.control.setChecked(True)
+    assert editor.changed and editor.value() == "1"
+    editor.control.setChecked(False)
+    # Back to off, which IS a change from "no value at all": saving it writes
+    # the key for the first time, which is the whole point of the tab.
+    assert editor.changed and editor.changed_label.text() == tp.CHANGED_FROM.format(old=tp.NOTHING)
+
+
+def test_a_spinner_over_a_key_the_file_never_carried_is_not_changed_until_it_is_moved(
+    qapp: object,
+) -> None:
+    """The same hole one control along: a spinner sits at its minimum, not at nothing."""
+    editor = tp.RowEditor(_row(type="int", min=5, max=80, current=None, default=None))
+    assert editor.value() == "5" and not editor.changed
+    editor.control.setValue(6)
+    assert editor.changed
+
+
+def test_a_text_box_typed_into_and_cleared_again_is_not_changed(qapp: object) -> None:
+    editor = tp.RowEditor(_row(current="1"))
+    editor.control.setText("2")
+    assert editor.changed
+    editor.control.setText("1")
+    assert not editor.changed

@@ -2503,6 +2503,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "db-import step; its emptiness verdict is deliberate and is NOT a refusal - a module "
         "that brought no SQL is normal, the same argument apply.py::_pending_sql already makes"
     ),
+    ("tuning.py", "backups_of"): (
+        "lists the directory a conf file lives in to find the backups the Tuning tab has "
+        "taken of it, so Revert can restore the newest (T43); decides no write of its own -- "
+        "the write it feeds is a `shutil.copy2` onto a file the user named. Its own "
+        "`except OSError` answers the EMPTY tuple, and the caller says `there is no backup "
+        "of this file to revert to` rather than restoring something it could not see"
+    ),
     ("module_source.py", "_rewrite_index"): (
         "lists the user manifest directory to REBUILD its index from the files that are "
         "actually there, never appending to it - which is why a crash between the item write "
