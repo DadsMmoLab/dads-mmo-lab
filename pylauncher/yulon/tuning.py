@@ -25,6 +25,7 @@ unreadable answers `None`, and the row still lists with its default.
 
 from __future__ import annotations
 
+import re
 import shutil
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -415,3 +416,61 @@ def backups_of(path: Path) -> tuple[Path, ...]:
     except OSError:
         return ()
     return tuple(sorted((p for p in found if p.suffix == ".bak"), key=lambda p: p.name))
+
+
+# -- the raw editor's guard -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LintIssue:
+    """One line of a raw edit that is not a setting, a comment, a blank or a header."""
+
+    line: int
+    """1-indexed, so it matches what the editor's own gutter says."""
+
+    text: str
+
+
+_SECTION = re.compile(r"^\[.*\]$")
+
+
+def lint(text: str) -> tuple[LintIssue, ...]:
+    """The "does this still look like a `.conf`?" verdict for a raw edit.
+
+    DML's `launcher/src/lib/conf-lint.ts` rule, carried over so the two
+    launchers refuse the same text: a line is fine if it is blank, a comment, an
+    INI section header (`[worldserver]` opens every real AzerothCore conf), or
+    an assignment with a non-empty key before its first `=`. Everything else is
+    reported.
+
+    It is a cheap pass and not a parser, and it never blocks: the panel shows
+    the first offending line and puts Save behind one confirm. A guard that
+    refused would be a guard between a user and their own file, over a rule this
+    shallow.
+    """
+    issues: list[LintIssue] = []
+    for number, raw in enumerate(text.split("\n"), start=1):
+        line = raw.rstrip("\r").strip()
+        if line == "" or line.startswith("#") or _SECTION.match(line):
+            continue
+        if line.find("=") <= 0:
+            issues.append(LintIssue(number, line))
+    return tuple(issues)
+
+
+LINT_SENTENCE = (
+    "Line {line} does not look like a setting: {text!r}. A .conf file holds `Key = Value` "
+    "lines, comments starting with #, and [section] headers. Save it anyway?"
+)
+
+
+def lint_sentence(issues: Sequence[LintIssue]) -> str | None:
+    """The FIRST offending line, in the sentence the confirm asks, or `None` when clean.
+
+    The first and not all of them: one bad line is usually the edit that went
+    wrong, and a dialog listing forty is a dialog nobody reads.
+    """
+    if not issues:
+        return None
+    first = issues[0]
+    return LINT_SENTENCE.format(line=first.line, text=first.text)

@@ -357,3 +357,67 @@ def test_a_backup_can_be_put_back(tmp_path: Path) -> None:
     tuning.restore(made, path)
     assert path.read_text(encoding="utf-8") == CLEAN
     assert made.is_file(), "a Revert must not consume the only record of the old file"
+
+
+# -- point 4: the raw editor's guard ----------------------------------------
+#
+# DML's `launcher/src/lib/conf-lint.test.ts`, case for case, so the two
+# launchers refuse the same text. Its own cases are marked; the last two are
+# this tab's.
+
+
+def test_a_clean_conf_has_nothing_to_say() -> None:
+    assert (
+        tuning.lint(
+            "# playerbots.conf\n"
+            "\n"
+            "AiPlayerbot.RandomBotAutologin = 1\n"
+            "AiPlayerbot.MinRandomBots = 50\n"
+            "   # indented comment\n"
+        )
+        == ()
+    )
+
+
+def test_a_line_with_no_assignment_is_reported_with_its_number_and_text() -> None:
+    assert tuning.lint("Key = 1\nthis is not a setting\nOther = 2") == (
+        tuning.LintIssue(2, "this is not a setting"),
+    )
+
+
+def test_a_line_whose_key_is_empty_is_reported() -> None:
+    assert tuning.lint("= orphan value") == (tuning.LintIssue(1, "= orphan value"),)
+
+
+def test_an_empty_value_and_a_value_holding_an_equals_sign_are_both_fine() -> None:
+    assert tuning.lint("Motd =") == ()
+    assert tuning.lint("Greeting = a = b") == ()
+
+
+def test_line_numbers_are_one_indexed_across_crlf_and_lf() -> None:
+    assert tuning.lint("Good = 1\r\nbad line\r\nAlso = 2\r\nanother bad") == (
+        tuning.LintIssue(2, "bad line"),
+        tuning.LintIssue(4, "another bad"),
+    )
+
+
+def test_trailing_whitespace_does_not_make_a_line_a_problem() -> None:
+    assert tuning.lint("Key = 1   \n   ") == ()
+
+
+def test_an_ini_section_header_is_valid_conf_and_a_broken_one_is_not() -> None:
+    """Every real AzerothCore conf opens with one; flagging it would flag every file."""
+    assert tuning.lint('[worldserver]\n\nLoginDatabaseInfo = "x"\n  [authserver]  ') == ()
+    assert tuning.lint("[worldserver") == (tuning.LintIssue(1, "[worldserver"),)
+
+
+def test_the_confirm_names_the_first_offending_line_and_nothing_else() -> None:
+    """One bad line is usually the edit that went wrong; forty is a dialog nobody reads."""
+    issues = tuning.lint("bad one\nAlso = 2\nbad two")
+    said = tuning.lint_sentence(issues)
+    assert said is not None
+    assert "Line 1" in said and "bad one" in said and "bad two" not in said
+
+
+def test_a_clean_text_asks_nothing(tmp_path: Path) -> None:
+    assert tuning.lint_sentence(tuning.lint("Key = 1\n")) is None
