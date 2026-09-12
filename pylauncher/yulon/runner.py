@@ -25,6 +25,7 @@ import threading
 import weakref
 from collections.abc import Callable, Generator, Iterator, Mapping
 from pathlib import Path
+from typing import Union
 
 from yulon.log import get_logger
 
@@ -35,7 +36,7 @@ logger = get_logger(__name__)
 _SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
-_AnyPopen = subprocess.Popen[str] | subprocess.Popen[bytes]
+_AnyPopen = Union[subprocess.Popen[str], subprocess.Popen[bytes]]
 """A child of either shape, because the two streaming entry points differ there.
 
 `stream()` reads text pipes; `stream_progress()` reads BINARY ones, so that
@@ -717,7 +718,7 @@ def _as_text(captured: object) -> str:
 # A prompt-answering callback for `interact()`: gets each output line (and each
 # quiet partial line, i.e. a prompt with no trailing newline) with ANSI colour
 # codes stripped, returns the text to send to stdin (without newline) or None.
-Responder = Callable[[str], str | None]
+Responder = Callable[[str], Union[str, None]]
 
 # Asked when the child prints the exact marker the CALLER chose, and never
 # otherwise. Returning None means "I cannot answer this either", and the caller
@@ -735,7 +736,7 @@ Responder = Callable[[str], str | None]
 # So the guess is gone. The one prompt that actually needed answering is sudo's,
 # and sudo lets the caller choose its wording through SUDO_PROMPT — an exact,
 # unguessable string no compiler will ever print (review, 2026-08-22).
-Prompter = Callable[[str], str | None]
+Prompter = Callable[[str], Union[str, None]]
 
 _ANSI = re.compile(r"\[[0-9;?]*[ -/]*[@-~]")
 

@@ -391,6 +391,15 @@ class DadcraftCampaignCard(QFrame):
                     p["x"] = random.uniform(0.0, 0.98)
                 if float(p["x"]) > 1.0:
                     p["x"] = 0.0
+            elif self.game_id == "wow-vanilla":
+                # Cinders & ashes fall slowly downward, drifting with the heat
+                p["y"] = float(p["y"]) + float(p["speed"]) * 0.45
+                p["x"] = float(p["x"]) + float(p["speed"]) * 0.12
+                if float(p["y"]) > 1.0:
+                    p["y"] = random.uniform(0.0, 0.06)
+                    p["x"] = random.uniform(0.0, 0.98)
+                if float(p["x"]) > 1.0:
+                    p["x"] = 0.0
             else:
                 # Embers / nature wisps float upwards
                 p["y"] = float(p["y"]) - float(p["speed"])
@@ -495,6 +504,11 @@ class DadcraftCampaignCard(QFrame):
                 alpha = int(
                     255 * min(1.0, (1.0 - float(p["y"])) * 2.0) * min(1.0, float(p["y"]) * 3.0)
                 )
+            elif self.game_id == "wow-vanilla":
+                # Ashes fade in as they fall from above, then settle out at the bottom
+                alpha = int(
+                    255 * min(1.0, float(p["y"]) * 4.0) * min(1.0, (1.0 - float(p["y"])) * 1.6)
+                )
             else:
                 alpha = int(255 * min(1.0, (1.0 - float(p["y"])) * 1.8) * float(p["y"]))
 
@@ -516,10 +530,11 @@ class DadcraftCampaignCard(QFrame):
                     else QColor(70, 240, 30, int(alpha * 0.85))
                 )
             elif self.game_id == "wow-vanilla":
+                # Falling ashes: pale smoke-white motes, a few faint ember cinders
                 col = (
-                    QColor(255, 230, 180, alpha)
+                    QColor(205, 210, 218, alpha)
                     if p["tier"] == "bright"
-                    else QColor(255, 140, 30, int(alpha * 0.8))
+                    else QColor(138, 143, 152, int(alpha * 0.8))
                 )
             else:
                 col = (
