@@ -1,10 +1,10 @@
-"""FontAwesome-compatible SVG icons and Warcraft-tinted QIcon generators (PySide6).
+"""FontAwesome-compatible SVG icons and Dadcraft-tinted QIcon generators (PySide6).
 
 Provides crisp, scalable vector icons rendered directly via QPainter / QSvgRenderer
 without any external web or font runtime dependencies:
 - Navigation & action icons: server, play, stop, refresh, terminal, users, robot,
   modules, network, database, trash, wrench, copy, folder, steam, download, etc.
-- Custom Warcraft color tinting (gold, brass, fel green, arcane blue, crimson red, silver).
+- Custom Dadcraft color tinting (gold, brass, fel green, arcane blue, crimson red, silver).
 """
 
 from __future__ import annotations
@@ -225,7 +225,7 @@ _FA_PATHS: dict[str, tuple[str, int, int]] = {
 }
 
 
-def warcraft_icon(name: str, color: str = COLOR_GOLD_BRIGHT, size: int = 16) -> QIcon:
+def dadcraft_icon(name: str, color: str = COLOR_GOLD_BRIGHT, size: int = 16) -> QIcon:
     """Generate a clean, high-DPI QIcon from FontAwesome SVG vector data."""
     entry = _FA_PATHS.get(name.lower())
     if entry is None:
@@ -249,7 +249,7 @@ def warcraft_icon(name: str, color: str = COLOR_GOLD_BRIGHT, size: int = 16) -> 
 
 
 def get_tab_icon(tab_name: str) -> QIcon:
-    """Retrieve the authentic Warcraft icon for standard launcher tabs."""
+    """Retrieve the authentic Dadcraft icon for standard launcher tabs."""
     mapping = {
         "catalog": ("catalog", COLOR_GOLD_BRIGHT),
         "server": ("server", COLOR_GOLD_BRIGHT),
@@ -265,5 +265,5 @@ def get_tab_icon(tab_name: str) -> QIcon:
     low = tab_name.lower().strip()
     for key, (icon_name, color) in mapping.items():
         if key in low:
-            return warcraft_icon(icon_name, color=color, size=16)
-    return warcraft_icon("server", color=COLOR_GOLD_BRIGHT, size=16)
+            return dadcraft_icon(icon_name, color=color, size=16)
+    return dadcraft_icon("server", color=COLOR_GOLD_BRIGHT, size=16)

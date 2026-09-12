@@ -1,7 +1,7 @@
-"""World of Warcraft & Warcraft III inspired UI Theme for Yu'lon (PySide6).
+"""World of Dadcraft & Dadcraft III inspired UI Theme for Yu'lon (PySide6).
 
 Provides the visual theme, color palette, custom font hierarchies, and Qt Style
-Sheets (QSS) for replicating the classic Warcraft aesthetic:
+Sheets (QSS) for replicating the classic Dadcraft aesthetic:
 - Deep obsidian / dark iron stone backdrops with parchment textured panels
 - Beveled brass and radiant gold filigree borders
 - Spellbook / character sheet style navigation tabs
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from PySide6.QtGui import QPalette
     from PySide6.QtWidgets import QApplication, QWidget
 
-# --- Warcraft & WoW Color Palette Constants ---
+# --- Dadcraft & WoW Color Palette Constants ---
 COLOR_BG_DARK = "#0B0D12"
 COLOR_BG_CONTAINER = "#12161F"
 COLOR_BG_PANEL = "#161A24"
@@ -83,7 +83,7 @@ def _px(base: int, scale: float) -> str:
 def _build_qss(scale: float) -> str:
     return f"""
 /* ==========================================================================
-   Yu'lon Warcraft & World of Warcraft Desktop Theme
+   Yu'lon Dadcraft & World of Dadcraft Desktop Theme
    ========================================================================== */
 
 /* --- Global Base Window & Central Widget --- */
@@ -322,41 +322,56 @@ QPushButton:disabled {{
 }}
 
 /* Special Primary / Prominent Buttons (e.g. Install, Start) */
-QPushButton[primary="true"], QPushButton#start-server, QPushButton#install-btn {{
+QPushButton[primary="true"],
+QPushButton#start-server,
+QPushButton#install-btn,
+QPushButton[objectName^="install-"] {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
-        stop:0 #5C4119, stop:0.45 #3D2B11, stop:0.55 #2B1E0C, stop:1 #171006
+        stop:0 #8A6020, stop:0.2 #6B4916, stop:0.55 #452D0C, stop:1 #241604
     );
-    color: {COLOR_GOLD_LIGHT};
-    border: 2px solid {COLOR_GOLD_BRASS};
-    border-top: 2px solid #FFF8D0;
-    border-left: 2px solid #FFF8D0;
+    color: #FFF8D0;
+    border: 2px solid {COLOR_GOLD_BORDER};
+    border-top: 2.5px solid #FFFDF0;
+    border-left: 2px solid #FFFDF0;
+    border-right: 2px solid {COLOR_BRASS_DARK};
+    border-bottom: 2px solid {COLOR_BRASS_DARK};
+    border-radius: 4px;
+    padding: 8px 16px;
+    font-family: {FONT_TITLE_SINGLE};
+    font-size: {_px(14, scale)};
+    font-weight: bold;
+    min-height: 26px;
+}}
+
+QPushButton[primary="true"]:hover,
+QPushButton#start-server:hover,
+QPushButton#install-btn:hover,
+QPushButton[objectName^="install-"]:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #A87828, stop:0.2 #825B1C, stop:0.55 #573B12, stop:1 #331F07
+    );
+    color: #FFFFFF;
+    border: 2px solid {COLOR_GOLD_BRIGHT};
+    border-top: 2.5px solid #FFFFFF;
+    border-left: 2px solid #FFFFFF;
     border-right: 2px solid {COLOR_GOLD_BRASS};
     border-bottom: 2px solid {COLOR_GOLD_BRASS};
 }}
 
-QPushButton[primary="true"]:hover, QPushButton#start-server:hover, QPushButton#install-btn:hover {{
+QPushButton[primary="true"]:pressed,
+QPushButton#start-server:pressed,
+QPushButton#install-btn:pressed,
+QPushButton[objectName^="install-"]:pressed {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
-        stop:0 #75521E, stop:0.45 #4D3716, stop:0.55 #38280F, stop:1 #1F1508
-    );
-    color: #FFFFFF;
-    border: 2px solid {COLOR_GOLD_BRIGHT};
-    border-top: 2px solid #FFFFFF;
-    border-left: 2px solid #FFFFFF;
-    border-right: 2px solid {COLOR_GOLD_BRIGHT};
-    border-bottom: 2px solid {COLOR_GOLD_BRIGHT};
-}}
-
-QPushButton[primary="true"]:pressed {{
-    background: qlineargradient(
-        x1:0, y1:0, x2:0, y2:1,
-        stop:0 #1F1508, stop:0.5 #38280F, stop:1 #4D3716
+        stop:0 #1A0F02, stop:0.5 #38240A, stop:1 #6B4916
     );
     color: {COLOR_GOLD_BRASS};
     border: 2px solid {COLOR_GOLD_BRASS};
-    border-top: 2px solid #1F1508;
-    border-left: 2px solid #1F1508;
+    border-top: 2px solid #1A0F02;
+    border-left: 2px solid #1A0F02;
     border-right: 2px solid {COLOR_GOLD_BRIGHT};
     border-bottom: 2px solid {COLOR_GOLD_BRIGHT};
 }}
@@ -459,11 +474,6 @@ QFrame#catalog-tile-wow-wotlk:hover {{
     border-left: 2px solid #A0DAFF;
 }}
 
-QFrame#catalog-tile-wow-wotlk QScrollArea#tile-desc-box {{
-    background-color: #080D14;
-    border: 1px solid #1C3248;
-}}
-
 /* TBC - Fel Fire & Brimstone Theme */
 QFrame#catalog-tile-wow-tbc {{
     background: qlineargradient(
@@ -484,11 +494,6 @@ QFrame#catalog-tile-wow-tbc:hover {{
     border: 2px solid #40FF20;
     border-top: 2px solid #D8FFB8;
     border-left: 2px solid #70FF40;
-}}
-
-QFrame#catalog-tile-wow-tbc QScrollArea#tile-desc-box {{
-    background-color: #091207;
-    border: 1px solid #1E3E16;
 }}
 
 /* Vanilla - Classic Polished Steel & Dark Iron Theme */
@@ -513,11 +518,6 @@ QFrame#catalog-tile-wow-vanilla:hover {{
     border-left: 2px solid #D0E0F0;
 }}
 
-QFrame#catalog-tile-wow-vanilla QScrollArea#tile-desc-box {{
-    background-color: #0A0B0E;
-    border: 1px solid #2A323E;
-}}
-
 /* Tortoise - Mystic Emerald Jade Theme */
 QFrame#catalog-tile-wow-tortoise {{
     background: qlineargradient(
@@ -540,28 +540,20 @@ QFrame#catalog-tile-wow-tortoise:hover {{
     border-left: 2px solid #70F0B0;
 }}
 
-QFrame#catalog-tile-wow-tortoise QScrollArea#tile-desc-box {{
-    background-color: #08100C;
-    border: 1px solid #1B402E;
-}}
-
 /* --- Catalog Tile Text Hierarchy & Scrollable Box Cover Inset --- */
-QScrollArea#catalog-shelf-scroll {{
+QScrollArea#catalog-shelf-scroll,
+QScrollArea#tile-desc-box {{
     background-color: transparent;
     border: none;
 }}
 
-QScrollArea#catalog-shelf-scroll > QWidget > QWidget {{
+QScrollArea#catalog-shelf-scroll > QWidget > QWidget,
+QScrollArea#tile-desc-box > QWidget > QWidget {{
     background-color: transparent;
 }}
 
-QScrollArea#tile-desc-box {{
-    background-color: {COLOR_BG_INPUT};
-    border: 1px solid {COLOR_BRASS_DEEP};
-    border-radius: 4px;
-}}
-
-QScrollArea#tile-desc-box QWidget {{
+QScrollArea#tile-desc-box QWidget,
+QLabel#tile-desc {{
     background-color: transparent;
 }}
 
@@ -575,15 +567,13 @@ QLabel#tile-title {{
 QLabel#tile-desc {{
     font-size: {_px(13, scale)};
     color: {COLOR_TEXT_PRIMARY};
+    background-color: transparent;
 }}
 
 QLabel#tile-meta {{
-    font-size: {_px(11, scale)};
-    color: {COLOR_TEXT_PRIMARY};
-    background-color: rgba(10, 13, 18, 0.6);
-    border: 1px solid {COLOR_BRASS_DARK};
-    border-radius: 3px;
-    padding: 2px 6px;
+    font-size: {_px(12, scale)};
+    color: {COLOR_TEXT_MUTED};
+    background-color: transparent;
 }}
 
 QLabel#tile-warning {{
@@ -783,7 +773,7 @@ QProgressBar::chunk {{
     border-radius: 2px;
 }}
 
-/* --- Classic World of Warcraft Item Tooltip Style --- */
+/* --- Classic World of Dadcraft Item Tooltip Style --- */
 QToolTip {{
     background-color: rgba(11, 13, 18, 0.96);
     color: {COLOR_TEXT_PRIMARY};
@@ -840,35 +830,41 @@ QMenuBar::item:selected {{
 
 QMenu {{
     background-color: {COLOR_BG_CONTAINER};
-    border: 1.5px solid {COLOR_GOLD_BRASS};
-    border-radius: 4px;
-    padding: 4px;
+    border: 2px solid {COLOR_GOLD_BRASS};
+    border-top: 2px solid {COLOR_GOLD_BORDER};
+    border-left: 2px solid {COLOR_GOLD_BORDER};
+    border-radius: 5px;
+    padding: 6px;
     color: {COLOR_TEXT_PRIMARY};
 }}
 
 QMenu::item {{
-    padding: 6px 18px 6px 12px;
-    border-radius: 2px;
+    padding: 7px 22px 7px 14px;
+    border-radius: 3px;
     font-family: {FONT_FAMILY_BODY};
     font-size: {_px(13, scale)};
+    font-weight: bold;
+    color: {COLOR_TEXT_PRIMARY};
 }}
 
 QMenu::item:selected {{
     background: qlineargradient(
         x1:0, y1:0, x2:1, y2:0,
-        stop:0 #4A3519, stop:1 #241A0C
+        stop:0 #5C4119, stop:1 #2B1E0C
     );
-    color: {COLOR_GOLD_BRIGHT};
+    color: #FFF4BC;
+    border: 1px solid {COLOR_GOLD_BRASS};
 }}
 
 QMenu::item:disabled {{
     color: #666666;
+    background-color: transparent;
 }}
 
 QMenu::separator {{
     height: 1px;
     background: {COLOR_BRASS_DARK};
-    margin: 4px 6px;
+    margin: 5px 6px;
 }}
 
 /* --- Labels & Status Badges --- */
@@ -886,13 +882,13 @@ QLabel#updateBanner {{
 """
 
 
-WARCRAFT_THEME_QSS = _build_qss(1.0)
+DADCRAFT_THEME_QSS = _build_qss(1.0)
 """The theme at scale 1.0 (the reference width). Tests assert against this;
-`apply_warcraft_theme` re-generates it per window size at runtime."""
+`apply_dadcraft_theme` re-generates it per window size at runtime."""
 
 
-def build_warcraft_palette() -> QPalette:
-    """Build a QPalette matching the dark Warcraft obsidian and gold color scheme."""
+def build_dadcraft_palette() -> QPalette:
+    """Build a QPalette matching the dark Dadcraft obsidian and gold color scheme."""
     from PySide6.QtGui import QColor, QPalette
 
     palette = QPalette()
@@ -927,8 +923,8 @@ def scale_for_width(width: int) -> float:
     return max(0.7, min(1.4, width / REFERENCE_WIDTH))
 
 
-def apply_warcraft_theme(target: QApplication | QWidget, *, width: int | None = None) -> None:
-    """Apply the Warcraft theme stylesheet and palette to a QApplication or QWidget.
+def apply_dadcraft_theme(target: QApplication | QWidget, *, width: int | None = None) -> None:
+    """Apply the Dadcraft theme stylesheet and palette to a QApplication or QWidget.
 
     `width` re-generates the stylesheet at a font scale derived from the window
     width (`scale_for_width`), so text grows/shrinks with the window. Omit it
@@ -948,7 +944,7 @@ def apply_warcraft_theme(target: QApplication | QWidget, *, width: int | None = 
 
     qss = _build_qss(scale_for_width(width) if width is not None else 1.0)
     if isinstance(target, QApplication):
-        target.setPalette(build_warcraft_palette())
+        target.setPalette(build_dadcraft_palette())
         target.setStyleSheet(qss)
     else:
         target.setStyleSheet(qss)

@@ -153,7 +153,7 @@ def test_repo_url_on_allowed_host_is_accepted(host: str) -> None:
 
 
 @pytest.mark.parametrize("field", ["id", "game"])
-@pytest.mark.parametrize("value", ["Mod-AH-Bot", "world of warcraft", "-lead", "double--dash", ""])
+@pytest.mark.parametrize("value", ["Mod-AH-Bot", "world of dadcraft", "-lead", "double--dash", ""])
 def test_ids_must_be_lowercase_kebab_slugs(field: str, value: str) -> None:
     """Style-guide §6/§6a: acronym-only, lowercase, kebab-case ids and game ids."""
     with pytest.raises(ValidationError, match=field):

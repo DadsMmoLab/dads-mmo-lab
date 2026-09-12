@@ -34,7 +34,7 @@ def test_bundled_catalog_describes_exactly_the_four_v1_servers() -> None:
     catalog = load_catalog()
     assert tuple(g.id for g in catalog.games) == V1_GAMES
     for game in catalog.games:
-        assert "Warcraft" not in game.name and "Warcraft" not in game.id
+        assert "Dadcraft" not in game.name and "Dadcraft" not in game.id
         assert game.ports.auth == 3724  # shared by every v1 server (README §12)
         assert game.client.build > 0
 

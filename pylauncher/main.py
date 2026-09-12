@@ -93,12 +93,12 @@ def build_catalog_tab(
     tabs.setElideMode(Qt.TextElideMode.ElideRight)
     central = QWidget(window)
     column = QVBoxLayout(central)
-    # The app's identity banner, styled like a Warcraft III / WoW title bar
-    # with golden filigree and a realm gem. `WarcraftHeader` was authored as a
+    # The app's identity banner, styled like a Dadcraft III / WoW title bar
+    # with golden filigree and a realm gem. `DadcraftHeader` was authored as a
     # decoration but was only ever exercised by tests; this is its home.
-    from yulon.ui.widgets.warcraft_decorations import WarcraftHeader
+    from yulon.ui.widgets.dadcraft_decorations import DadcraftHeader
 
-    header = WarcraftHeader(parent=central)
+    header = DadcraftHeader(parent=central)
     column.addWidget(header)
     banner = QLabel(central)
     banner.setOpenExternalLinks(True)
@@ -206,7 +206,7 @@ def build_window() -> object:
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.icons import get_tab_icon
     from yulon.ui.tab_titles import retitle_controller_tabs
-    from yulon.ui.theme import apply_warcraft_theme, scale_for_width
+    from yulon.ui.theme import apply_dadcraft_theme, scale_for_width
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.update import UpdateCheck, check_for_update
 
@@ -245,13 +245,13 @@ def build_window() -> object:
             if scale == last:
                 return
             self._theme_scale = scale
-            apply_warcraft_theme(self, width=self.width())
+            apply_dadcraft_theme(self, width=self.width())
 
     catalog = load_catalog()
     state = load_state()
     window = _Window()
     window.setWindowTitle(f"Dad's MMO Lab — Yu'lon {__version__}")
-    apply_warcraft_theme(window)
+    apply_dadcraft_theme(window)
     window._theme_scale = 1.0  # matches the unscaled theme just applied
 
     log_panel = LogPanel()
@@ -784,10 +784,10 @@ def main() -> int:
     from PySide6.QtCore import QEvent, QObject
     from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
-    from yulon.ui.theme import apply_warcraft_theme
+    from yulon.ui.theme import apply_dadcraft_theme
 
     app = QApplication(sys.argv)
-    apply_warcraft_theme(app)
+    apply_dadcraft_theme(app)
     # THIS thread runs the event loop, so it is the one thread that must never
     # hold the Windows keep-awake assertion: every install is handed to a
     # `QThread` (`ui/widgets/log_panel.py`), and `SetThreadExecutionState` is

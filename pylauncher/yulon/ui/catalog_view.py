@@ -44,10 +44,11 @@ from yulon.catalog.installer import (
 )
 from yulon.log import get_logger
 from yulon.ui.answers import said_yes
-from yulon.ui.icons import warcraft_icon
+from yulon.ui.icons import dadcraft_icon
 from yulon.ui.theme import COLOR_TEXT_GOLD
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter
+from yulon.ui.widgets.dadcraft_decorations import DadcraftCampaignCard
 
 logger = get_logger(__name__)
 
@@ -130,15 +131,23 @@ def _qt_suggestion_asker(parent: QWidget, game: str, suggested: Path) -> bool:
     one it is wrong for - a second install of the same game - is a folder the
     user is already thinking about.
     """
-    answer = QMessageBox.question(
-        parent,
+    box = QMessageBox(
+        QMessageBox.Icon.Question,
         f"Install {game}",
         f"Install {game} into this new folder?\n\n{suggested}\n\n"
         "It will be created when the install starts. Choose another folder if "
         "you would rather put it somewhere else.",
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        QMessageBox.StandardButton.Yes,
+        parent,
     )
+    box.setDefaultButton(QMessageBox.StandardButton.Yes)
+    yes_btn = box.button(QMessageBox.StandardButton.Yes)
+    if yes_btn is not None:
+        yes_btn.setText("Yes, default location")
+    no_btn = box.button(QMessageBox.StandardButton.No)
+    if no_btn is not None:
+        no_btn.setText("No, custom location")
+    answer = box.exec()
     return said_yes(answer)
 
 
@@ -339,14 +348,14 @@ class CatalogView(QWidget):
         self._prompter: InputPrompter | None = None
 
         header_row = QHBoxLayout()
-        header_label = QLabel("SELECT A SERVER CAMPAIGN", self)
+        header_label = QLabel("Select a Server Emulator", self)
         header_label.setObjectName("section-title")
         header_row.addWidget(header_label)
         header_row.addStretch(1)
 
         self.toggle_console_button = QPushButton("▼ Hide Console", self)
         self.toggle_console_button.setObjectName("toggle-console-btn")
-        self.toggle_console_button.setIcon(warcraft_icon("console", COLOR_TEXT_GOLD, 14))
+        self.toggle_console_button.setIcon(dadcraft_icon("console", COLOR_TEXT_GOLD, 14))
         header_row.addWidget(self.toggle_console_button)
 
         grid = QGridLayout()
@@ -403,11 +412,7 @@ class CatalogView(QWidget):
         return label
 
     def _tile(self, entry: CatalogEntry) -> QFrame:
-        frame = QFrame(self)
-        frame.setObjectName(f"catalog-tile-{entry.id}")
-        frame.setFrameShape(QFrame.Shape.StyledPanel)
-        frame.setFixedHeight(370)
-        frame.setMinimumWidth(235)
+        frame = DadcraftCampaignCard(entry.id, self)
         frame.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         frame.customContextMenuRequested.connect(
             lambda pos, e=entry, f=frame: self._show_tile_context_menu(pos, e, f)
@@ -464,9 +469,10 @@ class CatalogView(QWidget):
         box.addLayout(meta_box)
 
         button = QPushButton("Install", frame)
-        button.setIcon(warcraft_icon("download", "#FFF1A8", 14))
+        button.setIcon(dadcraft_icon("download", "#FFF1A8", 16))
         button.setObjectName(f"install-{entry.id}")
         button.setProperty("primary", True)
+        button.setToolTip(f"Install {entry.name} server into your chosen directory.")
         button.clicked.connect(lambda _checked=False, e=entry: self.start_install(e))
         box.addWidget(button)
         self._buttons[entry.id] = button
@@ -487,7 +493,7 @@ class CatalogView(QWidget):
             self._gated.add(entry.id)
         self._show_installed(entry.id)
         existing = QPushButton("Use existing…", frame)
-        existing.setIcon(warcraft_icon("folder", COLOR_TEXT_GOLD, 14))
+        existing.setIcon(dadcraft_icon("folder", COLOR_TEXT_GOLD, 14))
         existing.setObjectName(f"existing-{entry.id}")
         existing.setToolTip(
             "Manage a server that is already installed (by a script, or before this app)."
@@ -502,7 +508,7 @@ class CatalogView(QWidget):
         # one check covers every case.
         if self._wsl_distros():
             adopt = QPushButton("Find in WSL…", frame)
-            adopt.setIcon(warcraft_icon("network", COLOR_TEXT_GOLD, 14))
+            adopt.setIcon(dadcraft_icon("network", COLOR_TEXT_GOLD, 14))
             adopt.setObjectName(f"adopt-wsl-{entry.id}")
             adopt.setToolTip(
                 "Adopt a server that lives inside a WSL distro — for example one the "
@@ -544,7 +550,7 @@ class CatalogView(QWidget):
         )
 
     def _show_tile_context_menu(self, pos: QPoint, entry: CatalogEntry, frame: QWidget) -> None:
-        menu = QMenu(frame)
+        menu = QMenu(self)
         if entry.id not in self._installed_dirs and entry.install.supports(self._platform_id()):
             install_action = menu.addAction("Install Server…")
             install_action.triggered.connect(lambda: self.start_install(entry))

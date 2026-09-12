@@ -108,19 +108,19 @@ from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker
-from yulon.ui.icons import get_tab_icon, warcraft_icon
+from yulon.ui.icons import get_tab_icon, dadcraft_icon
 from yulon.ui.theme import COLOR_GOLD_LIGHT, COLOR_TEXT_GOLD
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
 from yulon.ui.widgets.party_panel import PartyPanel
-from yulon.ui.widgets.warcraft_decorations import WarcraftRealmBadge
+from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 
 logger = get_logger(__name__)
 
 
 def _realm_badge_status(status: InstallStatus) -> str:
-    """The `WarcraftRealmBadge` state for an `InstallStatus` (Server tab).
+    """The `DadcraftRealmBadge` state for an `InstallStatus` (Server tab).
 
     Maps the three-container reading onto the badge's four visual states: all
     up reads "online", some up reads "starting" (a realm still coming up), and
@@ -2578,18 +2578,18 @@ class ControllerView(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse  # so the remedy can be copied
         )
         self.start_button = QPushButton("Start", tab)
-        self.start_button.setIcon(warcraft_icon("play", COLOR_GOLD_LIGHT, 14))
+        self.start_button.setIcon(dadcraft_icon("play", COLOR_GOLD_LIGHT, 14))
         self.start_button.setProperty("primary", True)
         self.stop_button = QPushButton("Stop", tab)
-        self.stop_button.setIcon(warcraft_icon("stop", "#FFB8B8", 14))
+        self.stop_button.setIcon(dadcraft_icon("stop", "#FFB8B8", 14))
         self.stop_button.setProperty("danger", True)
         self.refresh_button = QPushButton("Refresh", tab)
-        self.refresh_button.setIcon(warcraft_icon("refresh", COLOR_TEXT_GOLD, 14))
+        self.refresh_button.setIcon(dadcraft_icon("refresh", COLOR_TEXT_GOLD, 14))
         # Deliberate, per checklist 6.5: nothing removes a container today, and
         # whatever does must not be a stray click next to Stop. It arms on the
         # first press and acts on the second, and anything else disarms it.
         self.remove_button = QPushButton(REMOVE_IDLE, tab)
-        self.remove_button.setIcon(warcraft_icon("trash", "#FFB8B8", 14))
+        self.remove_button.setIcon(dadcraft_icon("trash", "#FFB8B8", 14))
         self.remove_button.setProperty("danger", True)
         # Hidden unless the database has said there is an unfinished import to
         # finish. A destructive action that is always on screen is one that gets
@@ -2680,7 +2680,7 @@ class ControllerView(QWidget):
         # broken border, not a button. The spare width goes to a trailing gap.
         row.addStretch(1)
         # The header line: the install's name and path, with the realm's live
-        # status as a glowing gem badge on the right. `WarcraftRealmBadge` is
+        # status as a glowing gem badge on the right. `DadcraftRealmBadge` is
         # the one decoration that had a natural home in the view but was only
         # ever exercised by tests.
         name_row = QHBoxLayout()
@@ -2688,7 +2688,7 @@ class ControllerView(QWidget):
             QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}")
         )
         name_row.addStretch(1)
-        self.realm_badge = WarcraftRealmBadge("stopped", tab)
+        self.realm_badge = DadcraftRealmBadge("stopped", tab)
         name_row.addWidget(self.realm_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         box.addLayout(name_row)
         box.addWidget(self.verdict_label)
