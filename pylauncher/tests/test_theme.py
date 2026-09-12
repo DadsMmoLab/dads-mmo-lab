@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication, QFrame, QLabel, QMainWindow, QTabWid
 import main
 from yulon.catalog.catalog import load_catalog
 from yulon.ui.catalog_view import CatalogView
-from yulon.ui.icons import get_tab_icon, dadcraft_icon
+from yulon.ui.icons import dadcraft_icon, get_app_icon, get_tab_icon
 from yulon.ui.theme import (
     COLOR_BG_DARK,
     COLOR_BG_PARCHMENT,
@@ -262,3 +262,13 @@ def test_get_tab_icon_matches_known_tab_names(qapp: QApplication) -> None:
 def test_get_tab_icon_falls_back_to_server_for_unknown_names(qapp: QApplication) -> None:
     icon = get_tab_icon("something-unrelated")
     assert not icon.isNull()
+
+
+def test_get_app_icon_renders_a_valid_non_null_icon(qapp: QApplication) -> None:
+    icon = get_app_icon()
+    assert not icon.isNull()
+    for size in (16, 32, 64, 128, 256):
+        pixmap = icon.pixmap(size, size)
+        assert not pixmap.isNull()
+        assert pixmap.width() == size
+        assert pixmap.height() == size

@@ -1,4 +1,4 @@
-"""World of Dadcraft & Dadcraft III inspired UI Theme for Yu'lon (PySide6).
+"""World of Dadcraft & Dadcraft inspired UI Theme for Yu'lon (PySide6).
 
 Provides the visual theme, color palette, custom font hierarchies, and Qt Style
 Sheets (QSS) for replicating the classic Dadcraft aesthetic:

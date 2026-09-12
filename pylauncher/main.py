@@ -93,7 +93,7 @@ def build_catalog_tab(
     tabs.setElideMode(Qt.TextElideMode.ElideRight)
     central = QWidget(window)
     column = QVBoxLayout(central)
-    # The app's identity banner, styled like a Dadcraft III / WoW title bar
+    # The app's identity banner, styled like a Dadcraft title bar
     # with golden filigree and a realm gem. `DadcraftHeader` was authored as a
     # decoration but was only ever exercised by tests; this is its home.
     from yulon.ui.widgets.dadcraft_decorations import DadcraftHeader
@@ -204,7 +204,7 @@ def build_window() -> object:
     from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
-    from yulon.ui.icons import get_tab_icon
+    from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.tab_titles import retitle_controller_tabs
     from yulon.ui.theme import apply_dadcraft_theme, scale_for_width
     from yulon.ui.widgets.log_panel import LogPanel
@@ -251,6 +251,7 @@ def build_window() -> object:
     state = load_state()
     window = _Window()
     window.setWindowTitle(f"Dad's MMO Lab — Yu'lon {__version__}")
+    window.setWindowIcon(get_app_icon())
     apply_dadcraft_theme(window)
     window._theme_scale = 1.0  # matches the unscaled theme just applied
 
@@ -781,12 +782,24 @@ def main() -> int:
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):
         return provision_headless()
     logger.info("Yu'lon launcher starting")
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "org.dadsmmolab.yulon"
+            )
+        except Exception:
+            pass
+
     from PySide6.QtCore import QEvent, QObject
     from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
+    from yulon.ui.icons import get_app_icon
     from yulon.ui.theme import apply_dadcraft_theme
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(get_app_icon())
     apply_dadcraft_theme(app)
     # THIS thread runs the event loop, so it is the one thread that must never
     # hold the Windows keep-awake assertion: every install is handed to a

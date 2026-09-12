@@ -222,7 +222,90 @@ _FA_PATHS: dict[str, tuple[str, int, int]] = {
         448,
         512,
     ),
+    "flask": (
+        "M437.2 403.5L320 215V64h8c13.3 0 24-10.7 24-24s-10.7-24-24-24H120c-13.3 0-24 10.7-24 "
+        "24s10.7 24 24 24h8v151L10.8 403.5C-1.8 423.6-3.8 449.2 5.7 471.2S33.4 512 64 "
+        "512h320c30.6 0 58.3-20.8 67.8-40.8s7.5-47.6-5.1-67.7z",
+        448,
+        512,
+    ),
+    "beaker": (
+        "M437.2 403.5L320 215V64h8c13.3 0 24-10.7 24-24s-10.7-24-24-24H120c-13.3 0-24 10.7-24 "
+        "24s10.7 24 24 24h8v151L10.8 403.5C-1.8 423.6-3.8 449.2 5.7 471.2S33.4 512 64 "
+        "512h320c30.6 0 58.3-20.8 67.8-40.8s7.5-47.6-5.1-67.7z",
+        448,
+        512,
+    ),
 }
+
+
+_LAB_BEAKER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="flaskGlass" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFEAA0" stop-opacity="0.95"/>
+      <stop offset="40%" stop-color="#D4AF37" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#785A28" stop-opacity="0.95"/>
+    </linearGradient>
+    <linearGradient id="liquidYellow" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFF677"/>
+      <stop offset="30%" stop-color="#FFD100"/>
+      <stop offset="70%" stop-color="#FF9E00"/>
+      <stop offset="100%" stop-color="#D46B00"/>
+    </linearGradient>
+    <linearGradient id="liquidTop" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FFFFA0"/>
+      <stop offset="50%" stop-color="#FFEA40"/>
+      <stop offset="100%" stop-color="#E5B800"/>
+    </linearGradient>
+    <radialGradient id="innerGlow" cx="50%" cy="70%" r="50%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.85"/>
+      <stop offset="40%" stop-color="#FFD100" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#FF9E00" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Outer warm aura glow -->
+  <path d="M208 32 L304 32 L304 176 L468 408 C488 436 472 480 432 480 L80 480 C40 480 24 436 44 408 L208 176 Z"
+        fill="#FFD100" opacity="0.22" />
+
+  <!-- Yellow / Golden Potion Liquid Body -->
+  <path d="M152 256 L360 256 L440 376 C460 404 444 456 408 456 L104 456 C68 456 52 404 72 376 Z"
+        fill="url(#liquidYellow)" />
+  <!-- Liquid Meniscus Surface -->
+  <ellipse cx="256" cy="256" rx="104" ry="18" fill="url(#liquidTop)" />
+
+  <!-- Inner Potion Glow Center -->
+  <ellipse cx="256" cy="370" rx="130" ry="70" fill="url(#innerGlow)" />
+
+  <!-- Rising Bubbles in Liquid -->
+  <circle cx="200" cy="380" r="16" fill="#FFFFA0" opacity="0.8" />
+  <circle cx="290" cy="340" r="20" fill="#FFFFFF" opacity="0.9" />
+  <circle cx="240" cy="300" r="12" fill="#FFFFA0" opacity="0.7" />
+  <circle cx="320" cy="400" r="10" fill="#FFF480" opacity="0.6" />
+  <circle cx="160" cy="340" r="14" fill="#FFFFA0" opacity="0.75" />
+  <!-- Floating bubble steam / vapors -->
+  <circle cx="235" cy="200" r="15" fill="#FFD100" opacity="0.85" />
+  <circle cx="265" cy="150" r="11" fill="#FFF1A8" opacity="0.9" />
+  <circle cx="245" cy="90" r="8" fill="#FFFFFF" opacity="0.95" />
+
+  <!-- Glass Flask Body (thick beveled outline) -->
+  <path d="M192 48 L320 48 M208 48 L208 176 L44 408 C24 436 40 480 80 480 L432 480 C472 480 488 436 468 408 L304 176 L304 48"
+        fill="none" stroke="url(#flaskGlass)" stroke-width="28" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- Flask Lip / Top Rim Collar -->
+  <path d="M180 32 L332 32 C340 32 344 40 338 48 L326 64 C322 68 314 72 304 72 L208 72 C198 72 190 68 186 64 L174 48 C168 40 172 32 180 32 Z"
+        fill="#D4AF37" stroke="#FFD100" stroke-width="6" />
+
+  <!-- Glass Specular Reflection Highlight -->
+  <path d="M224 96 L224 160 L80 364 C68 382 72 420 90 436"
+        fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round" opacity="0.75" />
+
+  <!-- Measurement volume markings on glass -->
+  <line x1="270" y1="320" x2="305" y2="320" stroke="#FFEAA0" stroke-width="8" stroke-linecap="round" opacity="0.8"/>
+  <line x1="285" y1="355" x2="325" y2="355" stroke="#FFEAA0" stroke-width="8" stroke-linecap="round" opacity="0.8"/>
+  <line x1="300" y1="390" x2="345" y2="390" stroke="#FFEAA0" stroke-width="8" stroke-linecap="round" opacity="0.8"/>
+  <line x1="315" y1="425" x2="365" y2="425" stroke="#FFEAA0" stroke-width="8" stroke-linecap="round" opacity="0.8"/>
+</svg>"""
 
 
 def dadcraft_icon(name: str, color: str = COLOR_GOLD_BRIGHT, size: int = 16) -> QIcon:
@@ -267,3 +350,34 @@ def get_tab_icon(tab_name: str) -> QIcon:
         if key in low:
             return dadcraft_icon(icon_name, color=color, size=16)
     return dadcraft_icon("server", color=COLOR_GOLD_BRIGHT, size=16)
+
+
+def get_app_icon() -> QIcon:
+    """Retrieve the application icon for the launcher window, dock, and taskbar.
+
+    If an icon image file exists under the resource tree, loads it directly.
+    Otherwise, procedurally constructs a crisp multi-resolution vector emblem
+    (16, 24, 32, 48, 64, 128, 256px) featuring the glowing yellow lab beaker.
+    """
+    from yulon.resources import bundle_root
+
+    for candidate in ("yulon.png", "yulon.ico", "yulon.icns", "app_icon.png"):
+        icon_path = bundle_root() / candidate
+        if icon_path.exists():
+            return QIcon(str(icon_path))
+        assets_path = bundle_root() / "assets" / candidate
+        if assets_path.exists():
+            return QIcon(str(assets_path))
+
+    renderer = QSvgRenderer(QByteArray(_LAB_BEAKER_SVG.encode("utf-8")))
+    icon = QIcon()
+    for size in (16, 24, 32, 48, 64, 128, 256):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        renderer.render(painter, QRectF(0, 0, size, size))
+        painter.end()
+        icon.addPixmap(pixmap)
+
+    return icon

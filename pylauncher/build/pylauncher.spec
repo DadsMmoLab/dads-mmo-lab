@@ -74,12 +74,16 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+ico_path = os.path.join(ROOT, "assets", "yulon.ico")
+icns_path = os.path.join(ROOT, "assets", "yulon.icns")
+
 exe = EXE(
     pyz,
     a.scripts,
     [],
     exclude_binaries=True,
     name="yulon",
+    icon=ico_path if os.path.exists(ico_path) else None,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -101,6 +105,6 @@ if os.name == "posix" and os.uname().sysname == "Darwin":
     app = BUNDLE(
         coll,
         name="Yulon.app",
-        icon=None,
+        icon=icns_path if os.path.exists(icns_path) else None,
         bundle_identifier="org.dadsmmolab.yulon",
     )

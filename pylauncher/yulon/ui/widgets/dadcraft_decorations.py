@@ -147,7 +147,7 @@ class DadcraftRealmBadge(QWidget):
 
 
 class DadcraftHeader(QFrame):
-    """Ornate Dadcraft III / WoW header banner displaying title, filigree and realm status,
+    """Ornate Dadcraft header banner displaying title, filigree and realm status,
     with an animated warm firepit / hearth background glow and floating ember sparks.
     """
 
@@ -186,7 +186,7 @@ class DadcraftHeader(QFrame):
         left_col = QVBoxLayout()
         title_label = QLabel(f"⚔ {title} ⚔", self)
         title_label.setStyleSheet(
-            f"font-family: {FONT_FAMILY_TITLE}; font-size: 17px; "
+            f"font-family: {FONT_FAMILY_TITLE}; font-size: 22px;"
             f"font-weight: bold; color: {COLOR_GOLD_BRIGHT}; background: transparent;"
         )
         sub_label = QLabel(subtitle, self)
