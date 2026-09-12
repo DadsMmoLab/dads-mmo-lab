@@ -229,6 +229,14 @@ def build_window() -> object:
         yulon_controllers: list[QWidget]
         yulon_log_panels: list[LogPanel]
 
+        # The input sources, so `_stop_background_threads()` can shut them down.
+        # Typed as `Any`-free references to their concrete classes, imported in
+        # `build_window()`; declared here so mypy knows they exist on the window.
+        from yulon.ui.gamepad import GamepadSource, KeyboardSource
+
+        yulon_gamepad: GamepadSource
+        yulon_keyboard: KeyboardSource
+
         def resizeEvent(self, event: object) -> None:
             """Re-scale the theme's font sizes with the window width.
 
@@ -281,7 +289,15 @@ def build_window() -> object:
     # tab tree changes, and the remembered loop runs *during* this function.
     from yulon.ui.gamepad import install_gamepad_navigation
 
-    navigator, _keyboard, _gamepad = install_gamepad_navigation(window)
+    navigator, keyboard, gamepad = install_gamepad_navigation(window)
+    # The gamepad source is a live 120 Hz QThread once a controller is present.
+    # It is held on the window (a pointer, not a `setProperty` copy — see
+    # `_Window`) so `_stop_background_threads()` can `stop()` it at exit. Without
+    # this the thread outlives teardown and Qt aborts (`QThread: Destroyed while
+    # thread is still running`). The keyboard filter's `stop()` is also wired,
+    # for the same reason.
+    window.yulon_gamepad = gamepad
+    window.yulon_keyboard = keyboard
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
@@ -303,6 +319,18 @@ def build_window() -> object:
         installed_games=state.installed_dirs(),
     )
     tabs, banner, _splitter = build_catalog_tab(window, catalog_view, log_panel)
+
+    # TEMPORARY controller diagnostic (macOS "no pickup" investigation). Gated
+    # behind an env var so it never ships, never runs in the test suite, and
+    # never touches SDL unless the owner opts in. It adds one read-only tab
+    # that snapshots the raw-joystick vs mapped-controller split — the most
+    # likely macOS-Bluetooth failure (see yulon/ui/controller_probe.py).
+    if os.environ.get("YULON_CONTROLLER_PROBE"):
+        from yulon.ui.controller_probe import ControllerProbePanel
+
+        probe = ControllerProbePanel()
+        tabs.addTab(probe, "🎮 Controller Probe")
+        tabs.setTabIcon(tabs.indexOf(probe), get_tab_icon("server"))
 
     def _on_tab_bar_context_menu(pos: QPoint) -> None:
         tab_bar = tabs.tabBar()
@@ -933,6 +961,16 @@ def _stop_background_threads(window: object) -> None:
     if isinstance(thread, QThread) and thread.isRunning():
         thread.quit()
         thread.wait(8000)
+    # The gamepad poller and keyboard filter. The gamepad's 120 Hz QThread must
+    # be stopped and joined BEFORE the window is torn down — a QThread destroyed
+    # while running aborts the process, exactly like every other worker here.
+    # Read as attributes (not `setProperty`) for the reason `_Window` documents.
+    gamepad = getattr(window, "yulon_gamepad", None)
+    if gamepad is not None:
+        gamepad.stop()
+    keyboard = getattr(window, "yulon_keyboard", None)
+    if keyboard is not None:
+        keyboard.stop()
     # Whatever the panels and runners above did not own any more: `job.InFlight`
     # keeps every started pair alive until its thread has finished, so this is
     # the join for a worker whose panel is already gone.

@@ -8,25 +8,27 @@ device into *logical* `Direction`/`Action` events and hands them to the one
 
 Two sources ship, for the two ways a pad reaches Qt:
 
-- `GamepadSource` reads the physical controller directly through SDL (`pygame`).
-  On the Steam Deck, adding the AppImage to Steam presents the built-in pad as
-  a **virtual Xbox 360 pad** to any non-Steam game — so "basic XInput" is what
-  every user gets by default, delivered as SDL joystick events. SDL normalizes
-  evdev (SteamOS), XInput (Windows) and IOHID (macOS) to one model, so the same
-  poll loop works on all three with no OS-specific code. This is the
-  lowest-common-denominator source: we cannot ask the user to change Steam
-  Input's template, so we read what Steam Input always produces.
+- `GamepadSource` reads the physical controller through SDL's **GameController**
+  sub-API (`pygame._sdl2.controller`), NOT raw `pygame.joystick`. The controller
+  layer consults SDL's `gamecontrollerdb.txt` to normalize *every* device — the
+  Steam Deck's virtual Xbox 360 pad (Linux evdev), a wired Xbox pad (Windows
+  XInput), and a Bluetooth controller on macOS (IOHID / Game Controller
+  framework) — onto one semantic enum, so `CONTROLLER_BUTTON_A` is always
+  "Submit" and the D-pad always navigates, with zero per-OS code. This is the
+  fix for the macOS-Bluetooth-telemetry failure and the out-of-the-box Deck
+  requirement: we read what Steam Input already assigns, never ask the user to
+  remap.
 - `KeyboardSource` stays as a zero-dependency fallback for desktop arrow-key
-  use and for the keyboard-emulation path, so a checkout without `pygame`
-  still navigates.
+  use and keyboard-emulation, so a checkout without `pygame` still navigates.
 
 `GamepadSource` imports `pygame` lazily and degrades to a no-op when it is not
-installed (CI, an un-reinstalled checkout), so a missing dependency never stops
-the app from launching.
+installed or no controller is present (CI, a headless box), so a missing
+dependency never stops the app from launching.
 
-PySide6/Qt6 has no native gamepad API; `pygame` (SDL2) is the one backend that
-covers all three target OSes — `inputs` drops macOS and `evdev` is Linux-only.
-SDL2 already ships on SteamOS, so the AppImage does not bloat on the Deck.
+PySide6/Qt6 dropped the legacy `QtGamepad` module; `pygame` (SDL2) is the one
+backend that covers all three target OSes — and only its `_sdl2.controller` API
+(not the raw joystick API) provides the cross-device semantic mapping. SDL2
+already ships on SteamOS, so the AppImage on the Deck does not bloat.
 
 Architecture (style-guide §3/§5): this module owns *navigation mechanics only*.
 It knows how focus moves and how a logical action becomes a focus shift or a
@@ -53,42 +55,63 @@ from PySide6.QtWidgets import (
 )
 
 
-class Joystick(Protocol):
-    """The slice of `pygame.joystick.Joystick` the poller reads.
+class GameController(Protocol):
+    """The slice of `pygame._sdl2.controller.Controller` the poller reads.
 
     A Protocol rather than an import of `pygame` because that package is optional
     and absent from CI/desktop checkouts — mypy would otherwise fail on a missing
-    stub. The real object satisfies this surface; nothing else in the module
-    touches `pygame` except `_GamepadWorker.run()`.
+    stub. The object it stands for emits SDL_GameController *semantic* button and
+    axis values (see the `CONTROLLER_*` module constants), which is what makes the
+    mapping portable across evdev / XInput / IOHID.
     """
 
-    def get_numbuttons(self) -> int: ...
-    def get_button(self, index: int) -> bool: ...
-    def get_numaxes(self) -> int: ...
-    def get_axis(self, index: int) -> float: ...
-    def get_numhats(self) -> int: ...
-    def get_hat(self, index: int) -> tuple[float, float]: ...
+    def get_button(self, button: int) -> bool: ...
+    def get_axis(self, axis: int) -> int: ...
+    def quit(self) -> None: ...
 
 
-# --- Xbox/XInput layout + polling timing (module-level: shared by the worker) ---
-# The Steam Deck's base template presents the built-in pad as a virtual Xbox 360
-# pad to any non-Steam game, so these SDL joystick indices are what every user
-# gets without being asked to remap anything.
+# --- SDL_GameController semantic button/axis enum (Xbox-normalized). ---------
+# These are pygame's own `CONTROLLER_*` constants, re-exported here so the poller
+# never imports pygame at module scope. The values are the SDL2 gamecontrollerdb
+# semantic IDs — identical on Linux, Windows and macOS — so a Steam Deck's
+# virtual Xbox pad and a macOS Bluetooth controller both report `A == 0`.
 BTN_A = 0
 BTN_B = 1
 BTN_X = 2
 BTN_Y = 3
-BTN_LB = 4
-BTN_RB = 5
-BTN_BACK = 6
-BTN_START = 7
+BTN_BACK = 4
+BTN_GUIDE = 5
+BTN_START = 6
+BTN_LEFT_STICK = 7
+BTN_RIGHT_STICK = 8
+BTN_LB = 9
+BTN_RB = 10
+BTN_DPAD_UP = 11
+BTN_DPAD_DOWN = 12
+BTN_DPAD_LEFT = 13
+BTN_DPAD_RIGHT = 14
 
-# SDL joystick axes (XInput order). LX/LY drive movement; LT/RT are unmapped on
-# purpose (analog triggers rest under the fingers and would fire actions).
-AXIS_LX = 0
-AXIS_LY = 1
+AXIS_LEFT_X = 0
+AXIS_LEFT_Y = 1
+AXIS_RIGHT_X = 2
+AXIS_RIGHT_Y = 3
+AXIS_TRIGGER_LEFT = 4
+AXIS_TRIGGER_RIGHT = 5
 
-# Deadzone for the stick, in SDL's [-1, 1] axis units.
+# The raw SDL ceiling `SDL_GameControllerAxis` can reach (Sint16 magnitude),
+# used to express the deadzone as a fraction of the full range.
+AXIS_MAX = 32768
+
+# Deadzone for the stick, as a fraction of the full raw SDL range.
+#
+# `pygame._sdl2.controller.Controller.get_axis()` returns the RAW
+# `SDL_GameControllerGetAxis` value — a `Sint16` in [-32768, 32767], NOT the
+# normalized [-1.0, 1.0] float that `pygame.joystick` returns. A deadzone of
+# "0.5" meant to read "half deflection" was therefore compared against a raw
+# integer magnitude, and a resting stick's jitter (a few units around 0) sailed
+# straight through it: every D-pad-less drift registered as a direction. The
+# deadzone is now a fraction of the raw range, so 0.5 == half deflection of a
+# real stick, and the resting jitter of ±a few units is swallowed whole.
 DEADZONE = 0.5
 
 # Hold-repeat timing: a held direction repeats after this delay, then at this
@@ -97,6 +120,13 @@ FIRST_REPEAT_S = 0.45
 REPEAT_S = 0.12
 
 POLL_S = 1 / 120
+
+# How often the worker re-inits the SDL controller subsystem to reveal pads that
+# connected after launch. macOS SDL2 never re-lists a hotplugged Bluetooth pad
+# through `get_count()` alone — only a `quit()`+`init()` rescan does (measured
+# on SDL 2.28.4). A few seconds keeps the launcher responsive to a pad the owner
+# turns on mid-session without re-polling SDL every tick.
+RESCAN_INTERVAL_S = 3.0
 
 
 class Direction(Enum):
@@ -141,6 +171,17 @@ _KEY_TO_ACTION: dict[int, Action] = {
 # Discrete actions must not auto-repeat (holding A must not spam clicks); held
 # *direction* keys DO repeat so a user can fast-scroll a list.
 _NON_REPEATING_ACTIONS = frozenset(_KEY_TO_ACTION.values())
+
+
+# Face + shoulder buttons → logical actions, keyed by SDL_GameController semantic
+# button (the `CONTROLLER_BUTTON_*` enum). A = confirm, B = back, LB/RB cycle the
+# enclosing tab widget. X/Y/BACK/START/GUIDE/sticks are deliberately unmapped.
+_BUTTON_TO_ACTION: dict[int, Action] = {
+    BTN_A: Action.CONFIRM,
+    BTN_B: Action.BACK,
+    BTN_LB: Action.CYCLE_PREV,
+    BTN_RB: Action.CYCLE_NEXT,
+}
 
 
 def _iter_focusable(root: QWidget) -> Iterable[QWidget]:
@@ -242,13 +283,26 @@ class Navigator(QObject):
         root = self._context_root()
         candidates = self._focusable(root)
         current = QApplication.focusWidget()
+        if current is None and candidates:
+            # Nothing focused yet (first D-pad press on a fresh window): seed the
+            # top-left-most focusable so there is a visible origin for both the
+            # user's :focus ring and every later projection. Without this,
+            # `origin` anchors at (0,0) and the first press can land arbitrarily.
+            current = self._top_left(candidates, root)
+            current.setFocus(Qt.FocusReason.OtherFocusReason)
+            return True
 
         origin = _center(current, root) if current is not None else QPoint(0, 0)
-        target = self._pick(candidates, current, origin, direction)
+        target = self._pick(candidates, current, origin, direction, root)
         if target is None:
             return False
         target.setFocus(Qt.FocusReason.OtherFocusReason)
         return True
+
+    @staticmethod
+    def _top_left(candidates: list[QWidget], root: QWidget) -> QWidget:
+        """The candidate closest to `root`'s top-left corner — a stable seed."""
+        return min(candidates, key=lambda w: (_center(w, root).y(), _center(w, root).x()))
 
     @staticmethod
     def _pick(
@@ -256,21 +310,28 @@ class Navigator(QObject):
         current: QWidget | None,
         origin: QPoint,
         direction: Direction,
+        root: QWidget,
     ) -> QWidget | None:
         """The best candidate in `direction`.
 
         For each candidate, project its center onto the travel axis (`proj`,
         positive when it lies *ahead* in the direction of travel) and record the
-        perpendicular distance (`offset`). Among ahead candidates, prefer the
-        one in the same row/column (smallest offset), then the nearest. When no
-        candidate is ahead (we are at an edge), wrap to the nearest candidate in
-        the perpendicular sense, leaning to the far extreme.
+        perpendicular distance (`offset`). Both `origin` and every candidate
+        center are measured in **the same** coordinate space — `root`'s — which is
+        essential: `root` may be a popup or modal, not the top-level window, and
+        measuring one in `root` space and the other in `window()` space would make
+        the projection nonsense (a real defect that skewed navigation inside
+        dropdowns and dialogs).
+
+        Among ahead candidates, prefer the one in the same row/column (smallest
+        offset), then the nearest. When no candidate is ahead (an edge), wrap to
+        the nearest candidate by perpendicular offset.
         """
         scored: list[tuple[float, float, QWidget]] = []
         for other in candidates:
             if other is current:
                 continue
-            center = _center(other, other.window())
+            center = _center(other, root)
             dx = center.x() - origin.x()
             dy = center.y() - origin.y()
             if direction is Direction.RIGHT:
@@ -292,8 +353,12 @@ class Navigator(QObject):
             ahead.sort(key=lambda s: (s[1], s[0]))
             return ahead[0][2]
 
-        # Edge: no candidate ahead. Wrap to the nearest by perpendicular offset,
-        # and among those, the one furthest behind (the opposite extreme).
+        # Edge: nothing is ahead, so wrap. The target is the candidate closest to
+        # the row/column we are leaving (smallest perpendicular offset); when
+        # several tie there, prefer the one FURTHEST behind us so a single press
+        # lands on the far extreme rather than crawling back one step. `proj` is
+        # negative for all of these (none is ahead), so "smallest proj" means
+        # "most negative" = furthest behind.
         scored.sort(key=lambda s: (s[1], s[0]))
         return scored[0][2]
 
@@ -312,7 +377,10 @@ class Navigator(QObject):
     def _confirm(self) -> bool:
         widget = QApplication.focusWidget()
         if isinstance(widget, QAbstractButton):
-            widget.click()
+            # A disabled button's click() is a silent no-op; refuse it so a
+            # greyed-out Install/Start does not pretend to have acted.
+            if widget.isEnabled():
+                widget.click()
             return True
         if isinstance(widget, QLineEdit):
             # Ask the platform for its on-screen keyboard (SteamOS/Windows).
@@ -406,9 +474,13 @@ class KeyboardSource(QObject):
             key = int(event.key())
 
             if key in _KEY_TO_DIRECTION:
-                # Held direction keys repeat (fast scroll); a single tap moves
-                # exactly one step. Either way the navigator handles it.
-                return self._navigator.navigate(_KEY_TO_DIRECTION[key])
+                # A direction key is always CONSUMED by the navigator, even when
+                # it dead-ends at an edge: returning `False` here would let the
+                # arrow key fall through to the focused widget and move a
+                # spinbox value or a text cursor. Navigation either moved focus
+                # or intentionally did nothing — the key must never leak.
+                self._navigator.navigate(_KEY_TO_DIRECTION[key])
+                return True
 
             if key in _KEY_TO_ACTION:
                 action = _KEY_TO_ACTION[key]
@@ -468,22 +540,31 @@ class GamepadSource(QObject):
     def start(self) -> None:
         """Begin polling SDL for a connected pad. No-op if unavailable.
 
-        The `pygame` import lives in the worker's `run()`, but availability is
-        checked HERE on the GUI thread first — if the package is absent, no
-        worker is ever created and the `try/except ImportError` cannot leak a
-        doomed `QThread` into teardown. A missing joystick is also decided here,
-        so a headless box never spawns a poller at all.
+        Availability is decided HERE on the GUI thread — if `pygame` is absent,
+        or no controller is present, no worker/thread is created and teardown
+        cannot be polluted by a doomed poller. The `_sdl2.controller` sub-API is
+        imported lazily; its `init()`/`quit()` pair and `get_count()` here are
+        the exact same surface the worker uses, so the probe is authoritative.
         """
         if self._running:
             return
         try:
             import pygame  # noqa: F401  # availability probe only
+            from pygame._sdl2 import controller as _sdl2ctl  # noqa: F401
         except ImportError:
             return
         try:
+            # The controller subsystem ALONE under-counts on macOS: it reports
+            # only the device SDL enumerated first (a phantom that reads all
+            # zeros) and never sees a second, real pad. `pygame.joystick.init()`
+            # (the raw HID layer) is what forces a full enumeration, after which
+            # `get_count()` sees every device. Both layers are initialized here
+            # and in the worker, in this order.
             pygame.joystick.init()
-            has_stick = pygame.joystick.get_count() > 0
+            _sdl2ctl.init()
+            has_stick = _sdl2ctl.get_count() > 0
         finally:
+            _sdl2ctl.quit()
             pygame.joystick.quit()
         if not has_stick:
             return
@@ -537,37 +618,125 @@ class _GamepadWorker(QObject):
         self._stop = False
         self._held: Direction | None = None
         self._held_since = 0.0
-        self._pressed: set[int] = set()
+        self._pressed: set[tuple[int, int]] = set()
 
     @Slot()
     def run(self) -> None:
-        """Poll SDL until told to stop; the only method that imports/uses `pygame`.
+        """Poll the SDL GameController layer until told to stop.
 
         The whole body is one `try/finally`: whatever happens — `pygame` missing,
-        no joystick present, a poll raising — `finished` is emitted exactly once so
-        the owning `QThread` quits and the pair is torn down, never left running
-        into Qt's interpreter teardown (which aborts with 0xC0000409).
+        no controller present, a poll raising — `finished` is emitted exactly once
+        so the owning `QThread` quits and the pair is torn down, never left
+        running into Qt's interpreter teardown (which aborts with 0xC0000409).
         """
         import pygame  # optional dep; availability is probed on the GUI thread first
+        from pygame._sdl2 import controller as _sdl2ctl
+
         try:
+            # `pygame.joystick.init()` FIRST, or the controller layer under-counts
+            # on macOS: without the raw HID layer initialized, `get_count()` sees
+            # only the first-enumerated device (a phantom) and misses the real pad
+            # sitting at a higher index. See `GamepadSource.start()`.
             pygame.joystick.init()
-            count = pygame.joystick.get_count()
+            _sdl2ctl.init()
         except pygame.error:
-            # No joystick subsystem (headless CI, a container): nothing to read.
+            # No controller subsystem (headless CI, a container): nothing to read.
             self.finished.emit()
             return
-        if count == 0:
-            self.finished.emit()
-            return
-        stick = pygame.joystick.Joystick(0)
-        stick.init()
-        pygame.event.pump()
+
+        sticks: dict[int, GameController] = {}
+
+        def reenumerate() -> bool:
+            """Keep `sticks` in sync with SDL's current controller set.
+
+            Controllers appear ASYNCHRONOUSLY on macOS Bluetooth: the pad often
+            enumerates *after* launch, and — worse — SDL2 on macOS does NOT
+            re-list a freshly-connected device through `get_count()` no matter how
+            long we poll; only a full subsystem `quit()` + `init()` cycle makes it
+            re-scan and expose the new device (verified on macOS / SDL 2.28.4).
+            `GamepadSource.start()`'s probe was always a fresh init, which is why
+            it saw the pad while the long-lived worker did not.
+
+            The loop below therefore re-inits the subsystem periodically (a cheap
+            rescan) to reveal hotplugged pads, and `reenumerate()` re-opens any
+            index SDL now reports that we do not yet hold. Returns False when the
+            subsystem dies.
+            """
+            try:
+                count = _sdl2ctl.get_count()
+            except pygame.error:
+                return False
+            want = set(range(min(count, 4)))
+            for i in list(sticks.keys() - want):
+                try:
+                    sticks.pop(i).quit()
+                except pygame.error:
+                    pass
+            for i in sorted(want - sticks.keys()):
+                try:
+                    sticks[i] = _sdl2ctl.Controller(i)
+                except pygame.error:
+                    # Enumerated a moment ago, gone a moment later: skip.
+                    continue
+            return True
+
+        last_rescan = time.monotonic()
+
+        def rescan_if_due() -> None:
+            """Periodic full subsystem re-init to reveal hotplugged controllers.
+
+            A long-lived process must quit + re-init SDL's controller subsystem to
+            see a Bluetooth pad that connects after launch (macOS SDL2 defect —
+            `get_count()` alone never re-lists it). Doing this every
+            `RESCAN_INTERVAL_S` is cheap enough (a few ms) to be invisible, and it
+            is the difference between "works if the pad was on at launch" and
+            "works whenever the pad turns on".
+            """
+            nonlocal last_rescan
+            now = time.monotonic()
+            if now - last_rescan < RESCAN_INTERVAL_S:
+                return
+            for stick in sticks.values():
+                try:
+                    stick.quit()
+                except pygame.error:
+                    pass
+            sticks.clear()
+            _sdl2ctl.quit()
+            pygame.joystick.quit()
+            pygame.joystick.init()
+            _sdl2ctl.init()
+            last_rescan = time.monotonic()
+
         try:
+            reenumerate()
             while not self._stop:
-                pygame.event.pump()
-                self._poll(stick)
+                # `_sdl2ctl.update()` is `SDL_GameControllerUpdate()`: it
+                # refreshes the controller layer's POLLED state for the
+                # `get_button`/`get_axis` reads below. `pygame.event.pump()`
+                # is NOT used here — it requires `pygame.init()`'s video/event
+                # system, which nothing initializes (we init only the controller
+                # subsystem), so the first pump raises
+                # `pygame.error: video system not initialized`.
+                try:
+                    rescan_if_due()
+                    _sdl2ctl.update()
+                    if not reenumerate():
+                        break
+                    self._poll(sticks)
+                except pygame.error:
+                    # Controller unplugged mid-poll (Bluetooth drop, Deck sleep):
+                    # stop cleanly rather than raising out of the worker thread,
+                    # which would orphan the poller and tear down Qt badly.
+                    break
                 time.sleep(POLL_S)
         finally:
+            for stick in sticks.values():
+                try:
+                    stick.quit()
+                except pygame.error:
+                    pass
+            _sdl2ctl.quit()
             pygame.joystick.quit()
             self.finished.emit()
 
@@ -575,51 +744,47 @@ class _GamepadWorker(QObject):
         """Signal the poll loop to break (thread-safe enough for a bool flag)."""
         self._stop = True
 
-    def _poll(self, stick: Joystick) -> None:
-        """Decode one snapshot of button and axis state into logical events."""
-        # Buttons: edge-triggered. A press emits once; a held button emits
-        # nothing more (except a held direction, handled below).
-        current_pressed: set[int] = set()
-        for idx in range(stick.get_numbuttons()):
-            if stick.get_button(idx):
-                current_pressed.add(idx)
+    def _poll(self, sticks: dict[int, GameController]) -> None:
+        """Decode one snapshot of every controller into logical events.
 
-        for idx in current_pressed - self._pressed:
-            self._handle_button_down(idx)
-        self._pressed = current_pressed
+        `sticks` is keyed by the STABLE SDL controller index (not list position),
+        so a pad's edge-triggered button state survives re-enumeration: opening a
+        new controller elsewhere must not re-key an existing one and make a held
+        button re-emit. Any live pad may be the one the owner is holding (see
+        `run()`'s note about Mac phantoms), so every controller is read each tick
+        and the union of their inputs drives the navigator.
+        """
+        any_direction = False
+        for index, stick in sticks.items():
+            for button, action in _BUTTON_TO_ACTION.items():
+                if stick.get_button(button):
+                    if (index, button) not in self._pressed:
+                        self._pressed.add((index, button))
+                        self.action.emit(action)
+                else:
+                    self._pressed.discard((index, button))
 
-        # D-pad (hat) and left stick: level-triggered with a deadzone, plus a
-        # hold-repeat so a held direction keeps stepping.
-        dx, dy = self._read_stick(stick)
-        hat = self._read_hat(stick)
-        if hat is not None:
-            dx, dy = hat
-        direction = _axis_to_direction(dx, dy, DEADZONE)
-        self._update_direction(direction)
-
-    def _handle_button_down(self, idx: int) -> None:
-        mapping = {
-            BTN_A: Action.CONFIRM,
-            BTN_B: Action.BACK,
-            BTN_LB: Action.CYCLE_PREV,
-            BTN_RB: Action.CYCLE_NEXT,
-        }
-        action = mapping.get(idx)
-        if action is not None:
-            self.action.emit(action)
-
-    def _read_stick(self, stick: Joystick) -> tuple[float, float]:
-        if stick.get_numaxes() > max(AXIS_LX, AXIS_LY):
-            return stick.get_axis(AXIS_LX), stick.get_axis(AXIS_LY)
-        return 0.0, 0.0
-
-    def _read_hat(self, stick: Joystick) -> tuple[float, float] | None:
-        if stick.get_numhats() == 0:
-            return None
-        hx, hy = stick.get_hat(0)  # (-1..1, -1..1): right = +x, up = +y
-        if hx == 0 and hy == 0:
-            return None
-        return float(hx), float(hy)
+            # D-pad and left stick both drive movement. The D-pad edges take
+            # precedence while pressed; otherwise the left stick, deadzoned.
+            d_pad = _dpad_direction(stick)
+            if d_pad is not None:
+                self._update_direction(d_pad)
+                any_direction = True
+                continue
+            dx, dy = (
+                stick.get_axis(AXIS_LEFT_X),
+                stick.get_axis(AXIS_LEFT_Y),
+            )
+            stick_dir = _axis_to_direction(dx, dy, DEADZONE)
+            if stick_dir is not None:
+                self._update_direction(stick_dir)
+                any_direction = True
+        # No controller asserted a direction this tick: clear the held state so
+        # a fresh press next tick re-triggers the immediate-emit path. Skipped
+        # when a pad DID assert one, otherwise the hold-repeat clock would reset
+        # every tick and a held D-pad could never fast-scroll.
+        if not any_direction:
+            self._update_direction(None)
 
     def _update_direction(self, direction: Direction | None) -> None:
         now = time.monotonic()
@@ -644,14 +809,42 @@ class _GamepadWorker(QObject):
                 self.direction.emit(direction)
 
 
-def _axis_to_direction(dx: float, dy: float, deadzone: float) -> Direction | None:
-    """Map a 2D axis/hat vector to a cardinal direction, with a deadzone.
+def _axis_to_direction(dx: int, dy: int, deadzone: float) -> Direction | None:
+    """Map a raw SDL axis pair to a cardinal direction, with a deadzone.
 
-    The dominant axis wins; both are suppressed inside the deadzone so a resting
-    stick (which never reads exactly 0.0) does not drift.
+    `dx`/`dy` are raw `Sint16` values (from `Controller.get_axis()`), so the
+    deadzone is expressed as a fraction of the full range rather than compared
+    against a normalized float. `AXIS_MAX` is the SDL ceiling (32768); the
+    fraction keeps the same "half deflection" meaning the old normalize-in-
+    ones-head comment intended, without ever dividing the raw value.
     """
-    if abs(dx) < deadzone and abs(dy) < deadzone:
+    threshold = int(AXIS_MAX * deadzone)
+    ax, ay = abs(dx), abs(dy)
+    if ax < threshold and ay < threshold:
         return None
-    if abs(dx) >= abs(dy):
+    if ax >= ay:
         return Direction.RIGHT if dx > 0 else Direction.LEFT
     return Direction.DOWN if dy > 0 else Direction.UP
+
+
+def _dpad_direction(stick: GameController) -> Direction | None:
+    """The direction of a pressed D-pad edge, else None.
+
+    SDL's GameController API reports the D-pad as four buttons (DPAD_*), not a
+    hat — so each edge is read individually and collapsed into a cardinal
+    direction, with diagonals resolving by a fixed precedence (vertical over
+    horizontal) to keep a two-edges-held state deterministic.
+    """
+    up = stick.get_button(BTN_DPAD_UP)
+    down = stick.get_button(BTN_DPAD_DOWN)
+    left = stick.get_button(BTN_DPAD_LEFT)
+    right = stick.get_button(BTN_DPAD_RIGHT)
+    if up and not down:
+        return Direction.UP
+    if down and not up:
+        return Direction.DOWN
+    if left and not right:
+        return Direction.LEFT
+    if right and not left:
+        return Direction.RIGHT
+    return None
