@@ -6651,17 +6651,33 @@ class ControllerView(QWidget):
                 per_file.setdefault(row.file, {})[row.key] = edits[row.key]
         said: list[str] = []
         server_dir = self.services.controller.server_dir
+        # Every file's values FIRST, across the whole card, before any of them is
+        # opened. `tuning.write()` makes the same promise per file, which is not
+        # the same promise: a card spanning two files (NPC Beastmaster has its
+        # own conf and one key in the core's `worldserver.conf`) landed the
+        # first file's change and only then refused the second, which is exactly
+        # the half-applied state the guarantee exists to prevent.
+        specs = {
+            file: self._tuning_spec(card.card.family, module_id, file) for file in per_file
+        }
+        for file, values in per_file.items():
+            for key, value in values.items():
+                try:
+                    tuning.check(specs[file].get(key), value)
+                except tuning.TuningError as exc:
+                    self.tuning_report.setPlainText(
+                        TUNING_REFUSED.format(module=module_id, why=exc)
+                    )
+                    self.action_failed.emit(str(exc))
+                    return
         for file, values in per_file.items():
             try:
-                made = tuning.write(
-                    server_dir / file,
-                    values,
-                    spec=self._tuning_spec(card.card.family, module_id, file),
-                )
+                made = tuning.write(server_dir / file, values, spec=specs[file])
             except tuning.TuningError as exc:
-                # The refusal comes back before anything was written, for every
-                # file: the first failure stops the loop, so a later file is
-                # never written on the strength of an earlier one succeeding.
+                # Unreachable through the loop above, which has already checked
+                # every value on the card. Kept because `tuning.write()` is a
+                # public seam with its own refusals and a caller that assumed
+                # otherwise would be the next half-applied save.
                 self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
                 self.action_failed.emit(str(exc))
                 return
@@ -6722,10 +6738,19 @@ class ControllerView(QWidget):
         path = self.services.controller.server_dir / file
         core = file in TUNING_CORE_FILES
         try:
-            with open(path, encoding="utf-8", errors="replace", newline="") as handle:
+            with open(path, encoding="utf-8", newline="") as handle:
                 raw = handle.read()
         except OSError as exc:
             self.tuning_panel.set_file_text("", read_only=True, note=f"{file}: {exc}")
+            return
+        except UnicodeDecodeError as exc:
+            # Shown empty and READ-ONLY rather than with replacement characters
+            # in it: an editor holding U+FFFD where a byte used to be is one
+            # Save away from writing that corruption to disk, and the Save
+            # button is the one control that must not be live here.
+            self.tuning_panel.set_file_text(
+                "", read_only=True, note=tuning.NOT_UTF8.format(file=file, why=exc)
+            )
             return
         # Remembered at load and re-applied at save: `QPlainTextEdit` hands back
         # "\n" whatever it was given, so a raw save of a CRLF conf would convert

@@ -25,11 +25,12 @@ unreadable answers `None`, and the row still lists with its default.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -167,34 +168,119 @@ class TuningRow:
         return self.read_only_reason is None
 
 
-def conf_value(text: str, key: str) -> str | None:
-    """The LAST active setting of `key` in `text`, unquoted, or `None`.
+def _is_conf_comment(line: str) -> bool:
+    """`Config.cpp:310-314`: a trimmed line that is empty, `#` or `[` says nothing.
 
-    Column 0 and last-wins, both for `party.read_conf()`'s measured reasons: a
-    pattern that also matched indented or commented lines read the shipped
-    `mod_ale.conf.dist`'s own commented prose as its settings, and a server
-    reading a file top to bottom takes the last assignment -- which is exactly
-    the line `apply._set_conf_key()` appends when it corrects a key.
+    A whole line and only a whole line. AzerothCore has no trailing-comment
+    syntax: after the first `=`, everything to the end of the line is the value
+    (see `conf_value`), so a `#` further along is part of the value and not a
+    comment, however much it looks like one.
+
+    The `[` arm changes no answer this module gives -- a `[` binds to the first
+    token, so `[worldserver]` strips to `[worldserver` and can never equal a
+    bare key -- and is kept because this function's claim is "what the core
+    skips", not "what happens to matter here". `test_a_comment_and_a_section_
+    header_are_both_lines_that_say_nothing` asserts it directly for that reason.
+    """
+    bare = line.strip()
+    return bare == "" or bare[:1] in ("#", "[")
+
+
+def conf_value(text: str, key: str) -> str | None:
+    """The FIRST active setting of `key` in an AzerothCore `.conf`, or `None`.
+
+    Read off the core's own parser (`src/common/Configuration/Config.cpp:305-331`,
+    read 2026-09-13) rather than inherited, because inheriting it was wrong in
+    two of three ways. `ParseFile`:
+
+    1. TRIMS the whole line before deciding anything -- so an INDENTED
+       assignment is live, and the column-0 rule this module started with
+       reported `None` for one;
+    2. skips the line only when it is then empty or starts with `#` or `[`;
+    3. splits on the FIRST `=`, trims both halves, strips every `"` from the
+       value -- and then `IsDuplicateOption` SKIPS every later copy of a key it
+       has already stored, logging "Duplicate key name". **First wins.** This
+       module started with last-wins, borrowed from `party.read_conf()`, which
+       is Lua's rule (see `lua_value`) and not this file format's -- so the tab
+       showed a value the server does not use, and the writer rewrote a line
+       the server ignores.
+
+    `apply._set_conf_key()` already had it right: its `subn(..., count=1)` is
+    the first match.
+
+    The `_is_conf_comment` call is the core's own first decision and is kept in
+    its place, but it is REDUNDANT here and the mutation says so: the match
+    below is exact, and a `#` or `[` binds to the first token, so `# K = 9`
+    strips to `# K` and can never equal `K`. It earns its place by making the
+    rule readable as `Config.cpp`'s rule rather than by excluding anything;
+    `test_a_comment_and_a_section_header_are_both_lines_that_say_nothing`
+    asserts it where it can actually fail.
+    """
+    for line in text.splitlines():
+        if _is_conf_comment(line):
+            continue
+        head, sep, tail = line.partition("=")
+        if sep and head.strip() == key:
+            return tail.strip().strip('"')
+    return None
+
+
+def lua_value(text: str, key: str) -> str | None:
+    """The LAST assignment of `key` in a deployed Lua script, or `None`.
+
+    A different language, so a different rule, and the row's `backend` is what
+    picks between them. Lua is last-assignment-wins -- DML's own reader takes
+    the last for that reason (`crates/dml-wow/src/tuning.rs`, `lua_cfg_read`) --
+    and its comments are `--`, not `#`.
+
+    Column 0 here, and that IS `party.read_conf()`'s measured rule in the place
+    it was measured: the shipped `mod_ale.conf.dist` carries a commented
+    `ALE.Enabled = true` beside a compiled default of `false`, and a pattern
+    that matched indented or commented lines read a file's own prose as its
+    settings.
     """
     found: str | None = None
     for line in text.splitlines():
         head, sep, tail = line.partition("=")
-        if sep and head.strip() == key and head[:1] not in ("#", " ", "\t"):
+        if sep and head.strip() == key and head[:1] not in ("#", " ", "\t", "-"):
             found = tail.strip().strip('"')
     return found
 
 
+def value_in(text: str, key: str, backend: Backend) -> str | None:
+    """Whichever of the two rules this backend's file format actually follows."""
+    return conf_value(text, key) if backend == "conf" else lua_value(text, key)
+
+
+NOT_UTF8 = "{file} is not UTF-8 text, so Yu'lon will not read or rewrite it: {why}"
+"""A file this app cannot decode is a file it must not write.
+
+`errors="replace"` reads a byte it does not understand as U+FFFD, and a write
+back in UTF-8 then puts that replacement character on disk -- corrupting a line
+this app was never asked to touch, in somebody's live configuration. Refusing
+is the only answer that cannot lose a byte.
+"""
+
+
 def _read(path: Path) -> str | None:
-    """The file's text, or `None` when it is not there or will not open.
+    """The file's text, or `None` when it is not there, will not open, or is not UTF-8.
 
     `None` rather than `""`: an empty file has said every key is absent, and a
     missing one has said nothing at all. The row draws them the same way -- no
     current value -- but only one of them is worth a message about the install.
+
+    A file that will not DECODE answers `None` too, for the sharper reason: a
+    strict decode is the difference between "the file does not say" and "the
+    file says U+FFFD", and `current` may never be the second.
     """
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        with open(path, encoding="utf-8", newline="") as handle:
+            return handle.read()
     except OSError as exc:
         logger.debug(f"tuning: could not read {path}: {exc}")
+        return None
+    except UnicodeDecodeError as exc:
+        logger.debug(f"tuning: {path} is not UTF-8: {exc}")
         return None
 
 
@@ -248,7 +334,7 @@ def rows_for(
                             min=key.min,
                             max=key.max,
                             default=key.default,
-                            current=None if text is None else conf_value(text, key.key),
+                            current=(None if text is None else value_in(text, key.key, backend)),
                             installed=True,
                             backend=backend,
                             read_only_reason=reason,
@@ -331,10 +417,34 @@ def backup(path: Path, *, now: datetime | None = None) -> Path:
     (`copy2`), so the backup's own mtime says when the ORIGINAL was last
     touched and the name says when it was taken.
     """
-    when = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
-    target = path.with_name(f"{path.name}.{when}.bak")
-    shutil.copy2(path, target)
-    return target
+    when = now or datetime.now()
+    for _ in range(_BACKUP_TRIES):
+        # Microseconds, in a FIXED-WIDTH field, so a name sort is a time sort
+        # (`backups_of` depends on that) and two saves in the same second are
+        # two files. A stamp to the second is not hypothetical: Save, read the
+        # result, Save again is well inside one second, and the second backup
+        # landed on top of the first -- destroying the only record of the file
+        # the user actually wanted back.
+        target = path.with_name(f"{path.name}.{when:%Y%m%d-%H%M%S-%f}.bak")
+        if not target.exists():
+            shutil.copy2(path, target)
+            return target
+        # Not a counter suffix: `...-2.bak` sorts BEFORE `....bak`, which would
+        # quietly make `backups_of()` report the wrong one as newest. The next
+        # free microsecond keeps one field and one ordering.
+        when += timedelta(microseconds=1)
+    raise TuningError(f"{path.name}: could not find a free name for a backup")
+
+
+_BACKUP_TRIES = 1000
+TEMP_SUFFIX = ".yulon-tmp"
+"""What a half-written conf is called while it is being written.
+
+The write is a temp file in the SAME directory and an `os.replace` onto the
+target, the pattern `state.py:126-131` and `steam.py::_write_compat` already
+use. A plain `open(path, "w")` truncates first, so an ENOSPC or a SIGKILL
+between the truncate and the last byte leaves the user's conf half a file --
+with only the backup beside it and no sign of which one is which."""
 
 
 def write(
@@ -370,8 +480,15 @@ def write(
     # one, is detected as LF, and is written back converted -- a whole-file diff
     # over a one-key change, on exactly the installs (Windows) most likely to
     # have an editor open on the same file.
-    with open(path, encoding="utf-8", errors="replace", newline="") as handle:
-        raw = handle.read()
+    #
+    # And a STRICT decode: a byte this app cannot read is a byte it must not
+    # rewrite. Refused here, before the backup, so a refusal leaves the
+    # directory exactly as it found it.
+    try:
+        with open(path, encoding="utf-8", newline="") as handle:
+            raw = handle.read()
+    except UnicodeDecodeError as exc:
+        raise TuningError(NOT_UTF8.format(file=path.name, why=exc)) from None
     newline = _newline_of(raw)
     # Split on "\n" alone, so every line of a CRLF file keeps its own trailing
     # "\r" and `"\n".join(...)` puts the file back byte-for-byte. A file with
@@ -381,7 +498,7 @@ def write(
     carriage = "\r" if newline == "\r\n" else ""
     appended: list[str] = []
     for key, value in edits.items():
-        index = _last_active(lines, key)
+        index = _key_line(lines, key)
         if index is None:
             appended.append(f"{key} = {value}{carriage}")
             continue
@@ -394,31 +511,85 @@ def write(
         lines.append(_ADDED_BY.format(date=stamp) + carriage)
         lines += appended
         lines.append("")
-    with open(path, "w", encoding="utf-8", newline="") as handle:
-        handle.write("\n".join(lines))
+    _atomic_write(path, "\n".join(lines))
     return made
 
 
-def _last_active(lines: Sequence[str], key: str) -> int | None:
-    """Where `key`'s last active assignment is, or `None` if the file has none."""
-    found: int | None = None
+def _atomic_write(path: Path, text: str) -> None:
+    """Put `text` on disk in one step, or leave what was there untouched.
+
+    A sibling temp file and `os.replace`, which is atomic on both platforms this
+    app runs on. The temp file is removed if anything goes wrong, so a failed
+    save leaves neither a truncated conf nor a `.yulon-tmp` beside it for
+    somebody to find later and wonder about.
+    """
+    temp = path.with_name(f"{path.name}{TEMP_SUFFIX}")
+    try:
+        with open(temp, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.replace(temp, path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+
+
+def _key_line(lines: Sequence[str], key: str) -> int | None:
+    """Where the assignment the SERVER reads is, or `None` if the file has none.
+
+    The FIRST one, and `conf_value`'s rule exactly, so the line this rewrites is
+    the line the tab read the current value from. `Config.cpp`'s
+    `IsDuplicateOption` skips every later copy of a key, so rewriting the last
+    one changed a line the server ignores: the value on screen would not move,
+    and Save would look broken.
+
+    The `_is_conf_comment` call is the core's own first decision and is kept in
+    its place, but it is REDUNDANT here and the mutation says so: the match
+    below is exact, and a `#` or `[` binds to the first token, so `# K = 9`
+    strips to `# K` and can never equal `K`. It earns its place by making the
+    rule readable as `Config.cpp`'s rule rather than by excluding anything;
+    `test_a_comment_and_a_section_header_are_both_lines_that_say_nothing`
+    asserts it where it can actually fail.
+    """
     for index, line in enumerate(lines):
+        if _is_conf_comment(line):
+            continue
         head, sep, _ = line.partition("=")
-        if sep and head.strip() == key and head[:1] not in ("#", " ", "\t"):
-            found = index
-    return found
+        if sep and head.strip() == key:
+            return index
+    return None
 
 
 def _rewrite(line: str, key: str, value: str) -> str:
-    """Replace the value on one assignment line, keeping its `\\r` if it had one.
+    """Replace the VALUE on one assignment line and leave the rest of it alone.
 
-    `split("\\n")` leaves a CRLF file's `\\r` at the end of every line, and a
-    rewrite that dropped it would convert exactly the lines it touched and leave
-    the rest -- a file with mixed endings, which is worse than either.
+    Kept byte-for-byte: the leading whitespace, the key as the file spells it,
+    the separator exactly as written (`K    =    `), the quotes if the old value
+    had them, and a trailing `\\r`. `split("\\n")` leaves a CRLF file's `\\r` on
+    every line, and a rewrite that dropped it would convert exactly the lines it
+    touched and leave the rest -- a file with mixed endings, worse than either.
+
+    Replaced: everything after the separator, because that is what the server
+    reads as the value. `Config.cpp:325` splits on the FIRST `=` and takes the
+    rest of the line, so `K = old = fallback` has the value `old = fallback` and
+    `K = old # keep this` has the value `old # keep this` -- AzerothCore has no
+    trailing-comment syntax at all. Keeping a trailing `#...` "comment" would
+    write the value `new # keep this` into a live conf, which is not what the
+    person who moved the control asked for.
     """
     tail = "\r" if line.endswith("\r") else ""
-    quoted = '"' if line.partition("=")[2].strip().startswith('"') else ""
-    return f"{key} = {quoted}{value}{quoted}{tail}"
+    body = line[: len(line) - len(tail)]
+    stripped = body.lstrip(" \t")
+    lead = body[: len(body) - len(stripped)]
+    after = stripped[len(key) :]
+    equals = after.find("=")
+    if equals < 0:  # `_key_line` only ever hands us a line that has one
+        return f"{lead}{key} = {value}{tail}"
+    end = equals + 1
+    while end < len(after) and after[end] in " \t":
+        end += 1
+    separator, rest = after[:end], after[end:]
+    quoted = '"' if rest.strip().startswith('"') else ""
+    return f"{lead}{key}{separator}{quoted}{value}{quoted}{tail}"
 
 
 def restore(from_backup: Path, target: Path) -> None:
@@ -584,14 +755,31 @@ def apply_sentence(rule: ApplyRule) -> str:
     return APPLY_SENTENCES[rule]
 
 
-def worst(rules: Iterable[ApplyRule]) -> ApplyRule:
-    """The most expensive rule in a card's worth of changes.
+_JOBS: tuple[ApplyRule, ...] = ("rebuild", "recreate", "restart")
+"""The three rules that are JOBS, most expensive first. `read-only` is not one."""
 
-    A Save writes one file's keys at once, and the banner above them has to name
-    what the WHOLE save costs: if one key needs a rebuild, saying "restart" over
-    the card would be exactly the promise DML refused to make. `read-only` is
-    the cheapest because it is not a job at all.
+
+def owed(rules: Iterable[ApplyRule]) -> tuple[ApplyRule, ...]:
+    """EVERY distinct job a card's changes owe, most expensive first.
+
+    Not the most expensive one. A card whose rows need a rebuild AND a recreate
+    owes both: a rebuild compiles a new image, and a container started from the
+    old one goes on running until something recreates it. Reporting only the
+    rebuild is a cheaper answer than the truth, which is the dangerous
+    direction -- the user does the one job they were told about, sees no change,
+    and concludes the setting does not work.
+
+    This replaced a `worst()` that ranked the four and returned one. It read
+    correctly for every single-rule card, which is every card the shipped
+    catalog can produce today, and would have been wrong the first time one
+    module's keys spanned two costs.
     """
-    order: list[ApplyRule] = ["read-only", "restart", "recreate", "rebuild"]
-    seen = [rule for rule in rules if rule in order]
-    return max(seen, key=order.index) if seen else "read-only"
+    seen = set(rules)
+    return tuple(job for job in _JOBS if job in seen)
+
+
+def owed_sentence(rules: Sequence[ApplyRule]) -> str:
+    """What a card says it costs: one sentence per job, or the read-only one."""
+    if not rules:
+        return APPLY_SENTENCES["read-only"]
+    return " ".join(APPLY_SENTENCES[rule] for rule in rules)

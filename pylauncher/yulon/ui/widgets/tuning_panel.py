@@ -118,11 +118,16 @@ class TuningCard:
     family: str
     rows: tuple[TuningRow, ...]
     files: tuple[str, ...]
-    rule: ApplyRule
+    rules: tuple[ApplyRule, ...]
+    """EVERY job this card's changes owe, most expensive first, `()` for none.
+
+    A tuple and not one rule: a card whose rows span two costs owes both, and
+    naming only the dearer one leaves the cheaper job undone (`tuning.owed`).
+    """
 
     @property
     def rule_sentence(self) -> str:
-        return tuning.apply_sentence(self.rule)
+        return tuning.owed_sentence(self.rules)
 
     @property
     def editable(self) -> bool:
@@ -159,7 +164,13 @@ def build_tuning_cards(rows: Sequence[TuningRow]) -> tuple[TuningCard, ...]:
                 family=mine[0].family,
                 rows=tuple(mine),
                 files=tuple(files),
-                rule=tuning.worst(tuning.apply_rule(row) for row in mine),
+                # `apply_rule()` without `in_clone`, and it can never need it:
+                # `ConfFile.file` is relative to the SERVER dir and the model
+                # has no `in_clone` field -- only `Patch` does -- so no manifest
+                # can point a tuning row at a file inside a module's own source
+                # tree. `test_a_conf_file_can_never_be_a_clone_file_so_the_
+                # rebuild_branch_has_no_caller` fails the day that changes.
+                rules=tuning.owed(tuning.apply_rule(row) for row in mine),
             )
         )
     return tuple(cards)
@@ -376,9 +387,11 @@ class CardWidget(QGroupBox):
         # and the words under the raw editor cannot drift apart.
         self.rule_label = QLabel(card.rule_sentence, self)
         self.rule_label.setWordWrap(True)
-        self.rule_label.setStyleSheet(
-            f"color: {COLOR_TEXT_WARNING if card.rule != 'restart' else COLOR_UNCOMMON};"
-        )
+        # Amber for anything more than a restart, and for a card that owes two
+        # jobs: the cheap end is one press on this tab, the dear end is a
+        # compile or a container replacement.
+        cheap = card.rules in ((), ("restart",))
+        self.rule_label.setStyleSheet(f"color: {COLOR_UNCOMMON if cheap else COLOR_TEXT_WARNING};")
         box.addWidget(self.rule_label)
 
         self.editors: dict[str, RowEditor] = {}

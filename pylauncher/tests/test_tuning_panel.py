@@ -66,15 +66,16 @@ def test_a_card_names_every_file_its_rows_live_in_once_each() -> None:
     assert card.files == (CONF, core)
 
 
-def test_a_card_is_priced_at_its_most_expensive_row() -> None:
+def test_a_card_names_every_job_its_rows_owe_and_a_read_only_row_owes_none() -> None:
     card = tp.build_tuning_cards((_row(file=LUA), _row()))[0]
-    assert card.rule == "restart"
+    assert card.rules == ("restart",)
     assert card.rule_sentence == tuning.apply_sentence("restart")
 
 
 def test_a_card_of_nothing_but_read_only_rows_owes_nothing() -> None:
     card = tp.build_tuning_cards((_row(file=LUA, key="DURATION"),))[0]
-    assert card.rule == "read-only"
+    assert card.rules == ()
+    assert card.rule_sentence == tuning.apply_sentence("read-only")
     assert card.editable is False
 
 
@@ -355,3 +356,17 @@ def test_a_text_box_typed_into_and_cleared_again_is_not_changed(qapp: object) ->
     assert editor.changed
     editor.control.setText("1")
     assert not editor.changed
+
+
+def test_a_card_whose_rows_cost_two_different_things_says_both() -> None:
+    """One module, two files, two costs — and the cheaper job must not vanish.
+
+    The shipped catalog cannot produce this today (every conf it names is under
+    `env/dist/etc/`), which is exactly why it is asserted here with synthetic
+    rows rather than left to the first module that can.
+    """
+    card = tp.build_tuning_cards((_row(key="A"), _row(file="etc/elsewhere.conf", key="B")))[0]
+    assert card.rules == ("recreate", "restart")
+    said = card.rule_sentence
+    assert tuning.apply_sentence("recreate") in said
+    assert tuning.apply_sentence("restart") in said

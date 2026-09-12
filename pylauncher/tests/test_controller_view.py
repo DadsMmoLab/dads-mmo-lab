@@ -8023,7 +8023,11 @@ def test_a_save_that_changed_nothing_writes_nothing_and_says_so(
     card.save_button.click()
     assert path.read_text(encoding="utf-8") == before
     assert tuning.backups_of(path) == ()
-    assert "nothing" in view.tuning_report.toPlainText()
+    # The BEHAVIOUR, not the wording: the report is the one written for a save
+    # with nothing in it, and it names the module it is about.
+    assert view.tuning_report.toPlainText() == (
+        controller_view_module.TUNING_NOTHING_CHANGED.format(module="mod-transmog")
+    )
 
 
 def test_a_key_the_conf_never_carried_is_written_for_the_first_time(
@@ -8088,7 +8092,9 @@ def test_a_revert_with_no_backup_says_so_rather_than_doing_nothing(
     card = view.tuning_panel.card("mod-transmog")
     assert card.revert_button is not None
     card.revert_button.click()
-    assert "no backup" in view.tuning_report.toPlainText()
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_NO_BACKUP.format(
+        module="mod-transmog", file=TRANSMOG_CONF
+    )
 
 
 def test_the_file_picker_lists_the_deployed_confs_and_opens_the_first(
@@ -8148,7 +8154,10 @@ def test_a_raw_save_that_stopped_looking_like_a_conf_asks_once_and_a_no_writes_n
     monkeypatch.setattr(controller_view_module.QMessageBox, "question", refuse)
     view.tuning_panel.editor.setPlainText("this is not a setting\n")
     view.tuning_panel.file_save_button.click()
-    assert said and "Line 1" in said[0]
+    # The confirm is `tuning.lint_sentence()`'s own, not a sentence this test
+    # spells a second time: what matters is that the guard ran on the text in
+    # the box and that its verdict is what the user was shown.
+    assert said == [tuning.lint_sentence(tuning.lint("this is not a setting\n"))]
     assert path.read_text(encoding="utf-8") == before
     assert tuning.backups_of(path) == ()
 
@@ -8179,3 +8188,55 @@ def test_a_card_says_what_applying_its_change_costs(qapp: object, ps: _Ps, tmp_p
     card = view.tuning_panel.card("mod-transmog")
     assert card.rule_label.text() == tuning.apply_sentence("restart")
     assert view.tuning_panel.file_note.text() == tuning.apply_sentence("restart")
+
+
+def test_a_multi_file_card_writes_nothing_when_the_second_files_value_is_bad(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Refused before a byte is written" has to hold over the CARD, not per file.
+
+    NPC Beastmaster is the shipped module with two: four keys in its own conf
+    and `Creatures.CustomIDs` in the core's `worldserver.conf`. Validating and
+    writing one file at a time landed the first file's change and only then
+    refused the second, which is the half-applied state the guarantee exists to
+    prevent.
+    """
+    own = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    core = "env/dist/etc/worldserver.conf"
+    _deploy(tmp_path, own, "[worldserver]\nBeastMaster.Enable = 1\n")
+    _deploy(tmp_path, core, '[worldserver]\nCreatures.CustomIDs = "1,2"\n')
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-npc-beastmaster"}))
+    before = (tmp_path / own).read_bytes()
+    card = view.tuning_panel.card("mod-npc-beastmaster")
+    # The module's own conf comes first in the manifest, so its write is the one
+    # that would already have landed.
+    card.editors["BeastMaster.Enable"].control.setChecked(False)
+    card.editors["Creatures.CustomIDs"].control.setText("not a number")
+    monkeypatch.setattr(
+        view,
+        "_tuning_spec",
+        lambda module_id, file: (
+            {"Creatures.CustomIDs": ConfKey(key="Creatures.CustomIDs", type="int")}
+            if file == core
+            else {}
+        ),
+    )
+    assert card.save_button is not None
+    card.save_button.click()
+    assert (tmp_path / own).read_bytes() == before, "the first file was written anyway"
+    assert tuning.backups_of(tmp_path / own) == ()
+    assert tuning.backups_of(tmp_path / core) == ()
+
+
+def test_a_conf_that_is_not_utf8_opens_empty_and_read_only(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An editor holding U+FFFD is one Save away from writing that to disk."""
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    path.write_bytes(b"[worldserver]\n# \xff\nTransmogrification.Enable = 1\n")
+    view.open_tuning_file(TRANSMOG_CONF)
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.editor.isReadOnly()
+    assert not view.tuning_panel.file_save_button.isEnabled()
+    assert TRANSMOG_CONF in view.tuning_panel.file_note.text()

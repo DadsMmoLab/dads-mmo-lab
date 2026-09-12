@@ -122,26 +122,78 @@ def test_a_conf_that_cannot_be_read_gives_no_current_value(tmp_path: Path) -> No
     assert row.current is None
 
 
-def test_the_last_active_assignment_wins_and_a_commented_one_is_not_read(tmp_path: Path) -> None:
-    """`party.read_conf()`'s rule, for `party.read_conf()`'s measured reason."""
+def test_the_first_assignment_wins_in_a_conf_and_a_commented_one_is_not_read(
+    tmp_path: Path,
+) -> None:
+    """AzerothCore's own rule, read off `Config.cpp:305-331` rather than inherited.
+
+    `ParseFile` trims the whole line, skips it only when it is empty or starts
+    with `#` or `[`, splits on the FIRST `=`, and then `IsDuplicateOption`
+    SKIPS every later copy of a key it has already seen — first occurrence
+    wins, and the later ones are logged as an error.
+
+    Two of those three contradict what this module first did, which was
+    `party.read_conf()`'s rule for a Lua script applied to a `.conf`:
+    last-wins (wrong: the server takes the first) and column-0 only (wrong: the
+    line is trimmed before anything is decided, so an INDENTED assignment is
+    live).
+    """
     _write(
         tmp_path,
         CONF,
-        # The commented and indented copies come AFTER the real one on purpose.
-        # Written above it, "the last active assignment wins" masks them and the
-        # test passes with the column-0 rule deleted -- which is what it did
-        # until the mutation was run.
+        # A commented copy, the live one, a later duplicate the server ignores,
+        # and an INDENTED assignment of a second key. The last two are what this
+        # test turns on; the comment is excluded by the exact key match rather
+        # than by the comment guard (see `_key_line`).
+        "# BeastMaster.Enable = 9\n"
         "BeastMaster.Enable = 1\n"
         "BeastMaster.Enable = 0\n"
-        "# BeastMaster.Enable = 9\n"
-        "  BeastMaster.Enable = 8\n"
-        'BeastMaster.Name = "White Fang"\n',
+        '  BeastMaster.Name = "White Fang"\n',
     )
     manifest = _manifest(
         conf=[_conf(CONF, [{"key": "BeastMaster.Enable"}, {"key": "BeastMaster.Name"}])]
     )
     rows = tuning.rows_for([manifest], {"module": frozenset({"mod-beast"})}, tmp_path)
-    assert [row.current for row in rows] == ["0", "White Fang"]
+    # "1" and not "0": the duplicate below it is what the server logs as an
+    # error and skips. "White Fang" although the line is INDENTED: the core
+    # trims before it decides anything.
+    assert [row.current for row in rows] == ["1", "White Fang"]
+
+
+def test_a_comment_and_a_section_header_are_both_lines_that_say_nothing() -> None:
+    """`Config.cpp:310-314`, asserted where it can actually be falsified.
+
+    The `#` arm decides real answers — a commented copy of a key above the live
+    one is the shape `test_the_first_assignment_wins...` and
+    `test_the_first_assignment_is_rewritten...` both turn on. The `[` arm
+    decides none of them and is here for fidelity: a `[` binds to the first
+    token, so `[worldserver]` strips to `[worldserver` and could never equal a
+    bare key anyway. Pinned directly rather than through a file, because a test
+    that routed it through `rows_for` would pass with the arm deleted and claim
+    to be guarding it.
+    """
+    assert tuning._is_conf_comment("[worldserver]")
+    assert tuning._is_conf_comment("  [authserver]  ")
+    assert tuning._is_conf_comment("# K = 9")
+    assert tuning._is_conf_comment("   ")
+    assert not tuning._is_conf_comment("K = 1")
+
+
+def test_a_lua_script_keeps_luas_own_rule_and_not_the_cores(tmp_path: Path) -> None:
+    """Two languages, two rules, and the row's backend is what picks.
+
+    Lua is last-assignment-wins and comments with `--`, so the AzerothCore rule
+    would read a Lua script's last word as its first. DML's own Lua reader
+    (`crates/dml-wow/src/tuning.rs`, `lua_cfg_read`) takes the last for exactly
+    this reason.
+    """
+    lua = "env/dist/etc/modules/lua_scripts/SitMeansRest.lua"
+    _write(tmp_path, lua, "DURATION = 20\nDURATION = 30\n-- DURATION = 99\n")
+    manifest = _manifest(
+        id="sitmeanrest", name="Sit", type="ale", conf=[_conf(lua, [{"key": "DURATION"}])]
+    )
+    (row,) = tuning.rows_for([manifest], {"ale": frozenset({"sitmeanrest"})}, tmp_path)
+    assert row.current == "30"
 
 
 def test_a_lua_backed_key_is_listed_read_only_and_says_why(tmp_path: Path) -> None:
@@ -245,15 +297,6 @@ def test_only_the_named_keys_move_and_every_other_line_is_untouched(tmp_path: Pa
     assert path.read_text(encoding="utf-8") == CLEAN.replace(
         "BeastMaster.MinLevel = 10", "BeastMaster.MinLevel = 40"
     )
-
-
-def test_the_last_active_assignment_is_rewritten_and_a_commented_copy_is_left(
-    tmp_path: Path,
-) -> None:
-    """The one the server reads, and only it: the comment above is the user's note."""
-    path = _write(tmp_path, CONF, "K = 1\n# K = 9\nK = 2\n  K = 3\n")
-    tuning.write(path, {"K": "7"})
-    assert path.read_text(encoding="utf-8") == "K = 1\n# K = 9\nK = 7\n  K = 3\n"
 
 
 def test_a_key_the_file_does_not_carry_is_appended_under_a_dated_comment(
@@ -507,12 +550,12 @@ def test_every_rule_has_a_sentence_and_no_sentence_has_no_rule() -> None:
     assert set(tuning.APPLY_SENTENCES) == {"rebuild", "recreate", "restart", "read-only"}
 
 
-def test_a_card_is_priced_at_its_most_expensive_row() -> None:
+def test_a_card_names_every_job_its_rows_owe() -> None:
     """Saying "restart" over a save that needs a rebuild is DML's refused promise."""
-    assert tuning.worst(["restart", "rebuild", "read-only"]) == "rebuild"
-    assert tuning.worst(["restart", "recreate"]) == "recreate"
-    assert tuning.worst(["read-only", "restart"]) == "restart"
-    assert tuning.worst([]) == "read-only"
+    assert tuning.owed(["restart", "rebuild", "read-only"]) == ("rebuild", "restart")
+    assert tuning.owed(["restart", "recreate"]) == ("recreate", "restart")
+    assert tuning.owed(["read-only", "restart"]) == ("restart",)
+    assert tuning.owed([]) == ()
 
 
 # -- a catalog shorthand is not a key ---------------------------------------
@@ -523,6 +566,8 @@ def test_a_card_is_priced_at_its_most_expensive_row() -> None:
     [
         "AutoBalance.Enable.*",
         "MountScaling.Ground.Journeyman.*",
+        "MountScaling.Flying.Expert.*",
+        "MountScaling.Flying.Artisan.*",
         "AuctionHouseBot.ListProportion.*",
         "common/rare/ultraRare_*_price",
         "FillRateCommon / FillRateRare / FillRateUltra",
@@ -530,12 +575,18 @@ def test_a_card_is_priced_at_its_most_expensive_row() -> None:
     ],
 )
 def test_a_key_that_names_a_family_of_keys_is_listed_read_only(key: str, tmp_path: Path) -> None:
-    """Six of the 107 shipped "keys" are shorthand for a GROUP of settings.
+    """SEVEN of the 107 shipped "keys" are shorthand for a GROUP of settings.
 
-    `AutoBalance.Enable.*` is eleven real keys (`.Global`, `.5M`, `.10M`, …) and
-    `FillRateCommon / FillRateRare / FillRateUltra` is three. Writing any of
-    them would append a line the module never reads, under a comment saying
-    Yu'lon put it there.
+    `AutoBalance.Enable.*` is eleven real keys (`.Global`, `.5M`, `.10M`, …),
+    `MountScaling` carries three of these on its own (`Ground.Journeyman.*`,
+    `Flying.Expert.*`, `Flying.Artisan.*` — the last two went untested when
+    this said six), and `FillRateCommon / FillRateRare / FillRateUltra` is
+    three keys in one string. Writing any of them would append a line the
+    module never reads, under a comment saying Yu'lon put it there.
+
+    The last case carries a trailing space rather than a `*`: the rule is an
+    ALLOW-list of what a real key looks like, so it refuses anything it cannot
+    recognise rather than hunting for the two characters seen so far.
     """
     _write(tmp_path, CONF, "[worldserver]\n")
     manifest = _manifest(conf=[_conf(CONF, [{"key": key}])])
@@ -552,3 +603,170 @@ def test_an_ordinary_key_is_still_writable(tmp_path: Path) -> None:
         manifest = _manifest(conf=[_conf(CONF, [{"key": key}])])
         (row,) = tuning.rows_for([manifest], {"module": frozenset({"mod-beast"})}, tmp_path)
         assert row.editable, key
+
+
+# -- round 2: the writer preserves the line, and writes the line the core reads
+
+
+def test_the_line_keeps_its_indentation_and_its_spacing_around_the_equals(
+    tmp_path: Path,
+) -> None:
+    """Everything outside the VALUE is the user's, including how they aligned it."""
+    path = _write(tmp_path, CONF, "\tK    =    old\nOther = 2\n")
+    tuning.write(path, {"K": "new"})
+    assert path.read_text(encoding="utf-8") == "\tK    =    new\nOther = 2\n"
+
+
+def test_the_whole_value_is_replaced_including_a_second_equals(tmp_path: Path) -> None:
+    """`Config.cpp:325` splits on the FIRST `=`; the rest of the line is the value.
+
+    So `K = old = fallback` has the value `old = fallback`, and replacing the
+    value replaces all of it. Keeping the `= fallback` would leave the server
+    reading `new = fallback`.
+    """
+    path = _write(tmp_path, CONF, "K = old = fallback\n")
+    tuning.write(path, {"K": "new"})
+    assert path.read_text(encoding="utf-8") == "K = new\n"
+
+
+def test_a_hash_after_the_value_is_part_of_the_value_and_goes_with_it(
+    tmp_path: Path,
+) -> None:
+    """AzerothCore has no trailing-comment syntax, and this is the evidence.
+
+    `Config.cpp:307-314` trims the line and skips it only when it is then empty
+    or begins with `#` or `[`; line 325 then splits on the first `=` and takes
+    EVERYTHING after it as the value. So on `K = old # keep this` the running
+    server's value is literally `old # keep this`.
+
+    Keeping the `# keep this` while changing `old` would therefore write the
+    value `new # keep this` into a live conf — a value the user never asked
+    for. Dropping it is the only answer that leaves the file meaning what the
+    person pressing Save meant.
+    """
+    path = _write(tmp_path, CONF, "K = old # keep this\n")
+    assert tuning.conf_value(path.read_text(encoding="utf-8"), "K") == "old # keep this"
+    tuning.write(path, {"K": "new"})
+    assert path.read_text(encoding="utf-8") == "K = new\n"
+
+
+def test_the_first_assignment_is_rewritten_and_the_duplicate_below_it_is_left(
+    tmp_path: Path,
+) -> None:
+    """The line the server READS. `IsDuplicateOption` skips every later copy."""
+    path = _write(tmp_path, CONF, "# K = 9\n  K = 1\nK = 2\n")
+    tuning.write(path, {"K": "7"})
+    assert path.read_text(encoding="utf-8") == "# K = 9\n  K = 7\nK = 2\n"
+
+
+def test_a_file_with_no_trailing_newline_keeps_none(tmp_path: Path) -> None:
+    path = tmp_path / "x.conf"
+    path.write_bytes(b"K = 1")
+    tuning.write(path, {"K": "2"})
+    assert path.read_bytes() == b"K = 2"
+
+
+def test_a_crlf_line_keeps_its_spacing_and_its_carriage_return(tmp_path: Path) -> None:
+    path = tmp_path / "x.conf"
+    path.write_bytes(b"[worldserver]\r\nK   =   1\r\nOther = 2\r\n")
+    tuning.write(path, {"K": "5"})
+    assert path.read_bytes() == b"[worldserver]\r\nK   =   5\r\nOther = 2\r\n"
+
+
+# -- round 2: a file this app cannot read is refused, never rewritten --------
+
+
+def test_a_conf_that_is_not_utf8_is_refused_rather_than_rewritten(tmp_path: Path) -> None:
+    """`errors="replace"` on the way in and UTF-8 on the way out is corruption.
+
+    One byte in an unrelated comment line comes back as U+FFFD, and the user's
+    file is silently changed in a place this app was never asked to touch.
+    """
+    path = tmp_path / "x.conf"
+    path.write_bytes(b"# \xff\nK = 1\n")
+    with pytest.raises(tuning.TuningError, match="UTF-8"):
+        tuning.write(path, {"K": "2"})
+    assert path.read_bytes() == b"# \xff\nK = 1\n"
+    assert tuning.backups_of(path) == ()
+
+
+def test_a_conf_that_is_not_utf8_has_no_current_value_rather_than_a_replaced_one(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / CONF
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"BeastMaster.Enable = \xff\n")
+    manifest = _manifest(conf=[_conf(CONF, [{"key": "BeastMaster.Enable"}])])
+    (row,) = tuning.rows_for([manifest], {"module": frozenset({"mod-beast"})}, tmp_path)
+    assert row.current is None, "a replacement character is not a reading of the file"
+
+
+# -- round 2: the write is atomic, and every backup is its own file ----------
+
+
+def test_a_write_that_fails_leaves_the_file_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A truncate-then-write interrupted leaves a conf with half a file in it."""
+    path = _write(tmp_path, CONF, CLEAN)
+
+    def boom(src: object, dst: object) -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(tuning.os, "replace", boom)
+    with pytest.raises(OSError):
+        tuning.write(path, {"BeastMaster.MinLevel": "40"})
+    assert path.read_text(encoding="utf-8") == CLEAN
+    (backup,) = tuning.backups_of(path)
+    assert backup.read_text(encoding="utf-8") == CLEAN
+    leftovers = [p.name for p in path.parent.iterdir() if p.suffix == tuning.TEMP_SUFFIX]
+    assert leftovers == [], f"a temp file was left behind: {leftovers}"
+
+
+def test_two_saves_inside_one_second_are_two_backups(tmp_path: Path) -> None:
+    """A stamp to the second collides, and the earlier backup is overwritten."""
+    path = _write(tmp_path, CONF, "K = 1\n")
+    same = datetime(2026, 9, 13, 12, 0, 0)
+    first = tuning.backup(path, now=same)
+    path.write_text("K = 2\n", encoding="utf-8")
+    second = tuning.backup(path, now=same)
+    assert first != second
+    assert first.read_text(encoding="utf-8") == "K = 1\n"
+    assert second.read_text(encoding="utf-8") == "K = 2\n"
+    assert tuning.backups_of(path) == (first, second), "newest last"
+
+
+# -- round 2: a card owes every job, not the most expensive one --------------
+
+
+def test_a_card_that_needs_a_rebuild_and_a_recreate_names_both(tmp_path: Path) -> None:
+    """The dangerous direction: naming only the rebuild leaves the container stale."""
+    assert tuning.owed(["rebuild", "recreate"]) == ("rebuild", "recreate")
+    said = tuning.owed_sentence(("rebuild", "recreate"))
+    assert tuning.apply_sentence("rebuild") in said
+    assert tuning.apply_sentence("recreate") in said
+
+
+def test_owed_lists_each_job_once_most_expensive_first_and_drops_read_only() -> None:
+    assert tuning.owed(["restart", "rebuild", "read-only", "restart"]) == (
+        "rebuild",
+        "restart",
+    )
+    assert tuning.owed(["read-only"]) == ()
+    assert tuning.owed_sentence(()) == tuning.apply_sentence("read-only")
+
+
+def test_a_conf_file_can_never_be_a_clone_file_so_the_rebuild_branch_has_no_caller() -> None:
+    """`apply_rule(in_clone=True)` is unreachable from the catalog, and this pins why.
+
+    `ConfFile.file` is relative to the SERVER dir and the model has no
+    `in_clone` field — only `Patch` has one. So no manifest can point a tuning
+    row at a file inside a module's own source tree, and `build_tuning_cards()`
+    never passes `in_clone=True`. The parameter stays because the schema
+    already carries the concept one model along; this test fails the day
+    `ConfFile` gains the field, which is the day the branch acquires a caller.
+    """
+    from yulon.manifest import ConfFile, Patch
+
+    assert "in_clone" not in ConfFile.model_fields
+    assert "in_clone" in Patch.model_fields
