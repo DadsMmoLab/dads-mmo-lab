@@ -474,3 +474,84 @@ def lint_sentence(issues: Sequence[LintIssue]) -> str | None:
         return None
     first = issues[0]
     return LINT_SENTENCE.format(line=first.line, text=first.text)
+
+
+# -- what a change costs ----------------------------------------------------
+
+ApplyRule = Literal["rebuild", "recreate", "restart", "read-only"]
+
+BOUND_INTO_THE_CONTAINERS: tuple[str, ...] = ("env/dist/etc/",)
+"""The server-dir paths this app's compose binds into the running containers.
+
+Read off `catalog/installers/wow-wotlk/native/base.yml.tmpl:160-165, 243-245`:
+`./env/dist/etc` and `./env/dist/logs` go into `ac-worldserver`, `ac-db-import`
+and `ac-authserver`, and `./modules` into the worldserver alone. Only the conf
+directory matters here -- it is the one a tuning write lands in.
+"""
+
+APPLY_SENTENCES: dict[ApplyRule, str] = {
+    "rebuild": (
+        "The worldserver has to be COMPILED again before this takes effect — this setting "
+        "lives in the module's own source tree, not in a file the server reads at start."
+    ),
+    "recreate": (
+        "The containers have to be RECREATED before this takes effect, not just restarted: "
+        "this file is not one the running containers read from your disk, so the copy they "
+        "are using does not change when you save."
+    ),
+    "restart": (
+        "The worldserver reads this file when it starts, so the change takes effect at the "
+        "next restart. The file itself is on your disk and the server reads it from there."
+    ),
+    "read-only": "Yu'lon does not write this setting, so there is nothing to apply.",
+}
+"""What a person has to do for a change to reach the running server, per rule.
+
+Sentences and not words, because the words are what DML got burned by:
+`ModuleFiles.svelte:124-128` says promising the fast world-only restart over a
+file that needs a recreate "would be a promise we cannot keep."
+"""
+
+
+def apply_rule(row: TuningRow, *, in_clone: bool = False) -> ApplyRule:
+    """What has to happen for a change to this row to reach the running server.
+
+    Computed from the row, never typed into the view, so the chip on a card and
+    the sentence under the raw editor cannot disagree — and so a fifth answer
+    cannot be added by writing one in a layout.
+
+    The three clauses, in the order they decide:
+
+    1. a setting this app does not write at all (a deployed `.lua`, a database
+       table, a glob) is `read-only`: there is nothing to apply;
+    2. a setting in the module's own SOURCE tree needs a `rebuild` — the running
+       worldserver has the old value compiled into it;
+    3. a conf file inside a directory the compose binds is read off the user's
+       own disk at world start, so a `restart` is enough. A conf file OUTSIDE
+       every bind is a copy baked into the image: saving it changes the disk and
+       not the server, and only a `recreate` picks the new one up.
+    """
+    if row.read_only_reason is not None:
+        return "read-only"
+    if in_clone:
+        return "rebuild"
+    if any(row.file.startswith(prefix) for prefix in BOUND_INTO_THE_CONTAINERS):
+        return "restart"
+    return "recreate"
+
+
+def apply_sentence(rule: ApplyRule) -> str:
+    return APPLY_SENTENCES[rule]
+
+
+def worst(rules: Iterable[ApplyRule]) -> ApplyRule:
+    """The most expensive rule in a card's worth of changes.
+
+    A Save writes one file's keys at once, and the banner above them has to name
+    what the WHOLE save costs: if one key needs a rebuild, saying "restart" over
+    the card would be exactly the promise DML refused to make. `read-only` is
+    the cheapest because it is not a job at all.
+    """
+    order: list[ApplyRule] = ["read-only", "restart", "recreate", "rebuild"]
+    seen = [rule for rule in rules if rule in order]
+    return max(seen, key=order.index) if seen else "read-only"

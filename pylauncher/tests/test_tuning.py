@@ -421,3 +421,95 @@ def test_the_confirm_names_the_first_offending_line_and_nothing_else() -> None:
 
 def test_a_clean_text_asks_nothing(tmp_path: Path) -> None:
     assert tuning.lint_sentence(tuning.lint("Key = 1\n")) is None
+
+
+# -- point 5: what a change costs -------------------------------------------
+
+
+def _row(file: str, **over: Any) -> tuning.TuningRow:
+    backend = tuning.backend_of(file)
+    fields: dict[str, Any] = {
+        "module_id": "mod-beast",
+        "module_name": "NPC Beastmaster",
+        "family": "module",
+        "file": file,
+        "key": "K",
+        "label": "K",
+        "explain": None,
+        "type": None,
+        "min": None,
+        "max": None,
+        "default": None,
+        "current": None,
+        "installed": True,
+        "backend": backend,
+        "read_only_reason": tuning._read_only_reason(file, backend),
+    }
+    return tuning.TuningRow(**{**fields, **over})
+
+
+def test_a_setting_this_app_does_not_write_owes_nothing() -> None:
+    for file in (
+        "env/dist/etc/modules/lua_scripts/SitMeansRest.lua",
+        "acore_ale.paragon_config (DB table)",
+        "env/dist/etc/modules/lua_scripts/accountwide/*.lua",
+    ):
+        row = _row(file)
+        assert not row.editable
+        assert tuning.apply_rule(row) == "read-only"
+
+
+def test_a_conf_the_containers_read_off_the_users_disk_needs_a_restart() -> None:
+    row = _row("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    assert row.editable
+    assert tuning.apply_rule(row) == "restart"
+
+
+def test_a_conf_outside_every_bind_needs_the_containers_recreated() -> None:
+    """The running container is using the image's copy; saving changes only the disk."""
+    assert tuning.apply_rule(_row("etc/somewhere-else.conf")) == "recreate"
+
+
+def test_a_setting_in_the_modules_own_source_tree_needs_a_rebuild() -> None:
+    row = _row("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    assert tuning.apply_rule(row, in_clone=True) == "rebuild"
+
+
+def test_the_bound_directory_is_the_one_this_apps_compose_actually_binds() -> None:
+    """A declaration nothing proves is a declaration that can rot (T43's own template).
+
+    Read off the installer template rather than restated, so moving the mount
+    breaks this test instead of quietly turning every "restart" on the tab into
+    a promise the app cannot keep.
+    """
+    template = (
+        Path(__file__).resolve().parents[1]
+        / "catalog"
+        / "installers"
+        / "wow-wotlk"
+        / "native"
+        / "base.yml.tmpl"
+    ).read_text(encoding="utf-8")
+    for prefix in tuning.BOUND_INTO_THE_CONTAINERS:
+        assert f"- ./{prefix.rstrip('/')}:" in template
+
+
+def test_every_rule_has_a_sentence_and_no_sentence_has_no_rule() -> None:
+    """The chip and the banner read these; a rule with no words would draw blank."""
+    for file, clone in (
+        ("env/dist/etc/modules/a.conf", False),
+        ("etc/a.conf", False),
+        ("env/dist/etc/modules/a.conf", True),
+        ("a.lua", False),
+    ):
+        rule = tuning.apply_rule(_row(file), in_clone=clone)
+        assert tuning.apply_sentence(rule).strip() != ""
+    assert set(tuning.APPLY_SENTENCES) == {"rebuild", "recreate", "restart", "read-only"}
+
+
+def test_a_card_is_priced_at_its_most_expensive_row() -> None:
+    """Saying "restart" over a save that needs a rebuild is DML's refused promise."""
+    assert tuning.worst(["restart", "rebuild", "read-only"]) == "rebuild"
+    assert tuning.worst(["restart", "recreate"]) == "recreate"
+    assert tuning.worst(["read-only", "restart"]) == "restart"
+    assert tuning.worst([]) == "read-only"
