@@ -39,6 +39,7 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.log import configure, get_logger, use_utf8_streams
+from yulon.ui import lines
 
 logger = get_logger(__name__)
 
@@ -340,13 +341,35 @@ def main(argv: list[str] | None = None) -> int:
         # the sudo password through it, and a run given no prompter answers
         # neither — which on a password-sudo box is the hang above.
         for line in engine.run(options, cancel=cancel, ask=_terminal_prompter):
-            sys.stdout.write(line + "\n")
+            # STRIPPED OF T35's MARKERS, and this is the site the ticket names.
+            # The gate transcripts in `pyplan/gates/` are this stream and this
+            # log file, and a control character in front of every relayed line
+            # would put `\x1etool ` into every one of them — greppable by
+            # nothing that greps them today. `lines.parse()` hands back the
+            # display text, so every line a run used to write is byte for byte
+            # what it writes now.
+            #
+            # **A progress READING is not written at all, and that is the whole
+            # rule.** It is a header field on a screen this harness does not
+            # have: one number that replaces the last one. Every relayed
+            # reading already has its own raw line written beside it
+            # (`lines.relayed()` yields both), so writing the reading too would
+            # duplicate the 8005 tile lines of a CMaNGOS install with a
+            # rephrased copy of each. The readings with no raw twin are git's
+            # clone percentages, which this file never carried before T35
+            # either — the clone was not streamed at all. So the transcript is
+            # what it always was, plus git's own sentences.
+            parsed = lines.parse(line)
+            if parsed.kind == "progress":
+                continue
+            said = parsed.text
+            sys.stdout.write(said + "\n")
             sys.stdout.flush()
             # Streamed first, recorded second: stdout is what a gate is reading
             # live, and the file is what is read afterwards. These lines are the
             # whole reason the file is worth opening — an install that failed
             # 20 minutes in is answerable only by which stages it got through.
-            logger.info("%s", line)
+            logger.info("%s", said)
     except InstallerError as exc:
         # Both, and not a duplicate to be tidied away: the record is what puts
         # the sentence in `yulon.log` (and carries a timestamp), and the plain

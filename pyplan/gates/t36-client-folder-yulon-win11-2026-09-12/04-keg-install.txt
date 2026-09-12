@@ -1,0 +1,136 @@
+2026-09-12T03:09:15.5948357+02:00
+[Any/*Black Market Auction House*] hits: 0 -> 
+NOT FOUND [*Black Market Auction House*] index 0
+[Button/Install selected] hits: 1 -> Install selected
+chose [Install selected] at 441,497 93x26
+invoked at 2026-09-12T03:08:35.2280855+02:00
+--- app log ---
+This machine cannot install the server yet:
+free space on Docker's disk and the server folder: 20 GB free, and the install needs 48 GB (the 
+server folder and Docker's disk share one drive, so both needs add up) Free some space, or 
+install to a drive that has room, then try again.
+2026-09-12 02:34:46 INFO [yulon.catalog.native] install of wow-wotlk finished
+--- AddOns ---
+Name                        LastWriteTime       
+----                        -------------       
+Blizzard_AchievementUI      9/12/2026 3:00:20 AM
+Blizzard_ArenaUI            9/12/2026 3:00:20 AM
+Blizzard_AuctionUI          9/12/2026 3:00:20 AM
+Blizzard_BarbershopUI       9/12/2026 3:00:20 AM
+Blizzard_BattlefieldMinimap 9/12/2026 3:00:20 AM
+Blizzard_BindingUI          9/12/2026 3:00:20 AM
+Blizzard_Calendar           9/12/2026 3:00:20 AM
+Blizzard_CombatLog          9/12/2026 3:00:20 AM
+Blizzard_CombatText         9/12/2026 3:00:20 AM
+Blizzard_DebugTools         9/12/2026 3:00:20 AM
+Blizzard_GlyphUI            9/12/2026 3:00:20 AM
+Blizzard_GMChatUI           9/12/2026 3:00:21 AM
+Blizzard_GMSurveyUI         9/12/2026 3:00:21 AM
+Blizzard_GuildBankUI        9/12/2026 3:00:21 AM
+Blizzard_InspectUI          9/12/2026 3:00:21 AM
+Blizzard_ItemSocketingUI    9/12/2026 3:00:21 AM
+Blizzard_MacroUI            9/12/2026 3:00:21 AM
+Blizzard_RaidUI             9/12/2026 3:00:21 AM
+Blizzard_TalentUI           9/12/2026 3:00:21 AM
+Blizzard_TimeManager        9/12/2026 3:00:21 AM
+Blizzard_TokenUI            9/12/2026 3:00:21 AM
+Blizzard_TradeSkillUI       9/12/2026 3:00:21 AM
+Blizzard_TrainerUI          9/12/2026 3:00:21 AM
+2026-09-12T03:10:13.0245326+02:00
+list items: 9 -> [module] 1v1 Arena - 1v1 arena matches v | [module] AoE Loot - Loot every nearby co | [module] Auction House Bot - Populates t | [module] AH Bot Plus - Drop-rate-aware,  | [module] Auto Balance - Dynamic dungeon/ | [module] AzerothCore Lua Engine (ALE) -  | [module] Bot Level Brackets - Keeps the  | [module] Challenge Modes - Hardcore, Iro | [module] Individual Progression - Per-c
+NOT FOUND row [*Black Market Auction House*]
+--- app log ---
+2026-09-12 03:06:37 INFO [yulon.channel_setup] no usable credential at 
+C:\Users\pk\AppData\Roaming\yulon\credentials\wow-wotlk-6d51a632.json: FileNotFoundError
+--- AddOns (non-Blizzard) ---
+2026-09-12T03:11:42.0848688+02:00
+visible now: [module] 1v1 Arena - 1v1 arena mat | [module] AoE Loot - Loot every nea | [module] Auction House Bot - Popul | [module] AH Bot Plus - Drop-rate-a | [module] Auto Balance - Dynamic du | [module] AzerothCore Lua Engine (A | [module] Bot Level Brackets - Keep | [module] Challenge Modes - Hardcor | [module] Individual Progression - 
+NOT FOUND row [*Black Market Auction House*]
+--- app log ---
+--- AddOns (non-Blizzard) ---
+2026-09-12T03:12:50.0049286+02:00
+lists: 1
+scroll 0%: 9 items, first: [module] 1v1 Arena - 1v1 arena
+NOT FOUND row [*Black Market Auction House*]
+--- app log ---
+--- AddOns (non-Blizzard) ---
+clicked first row at 483,237
+selection after type-ahead: [keg] Black Market Auction House - MoP-style Black Market AH with a cl
+2026-09-12T03:15:13.3789239+02:00
+[Button/Install selected] hits: 1 -> Install selected
+chose [Install selected] at 441,497 93x26
+invoked at 2026-09-12T03:14:22.4430305+02:00
+--- app log ---
+world server is running, and it holds world in memory and writes back over whatever it finds 
+there. No SQL was run and no rows were written: sql 
+guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql ƒ+' world. Press Stop, then 
+install again ƒ?" the steps this run already took repeat, and the SQL follows them.
+world in memory and writes back over whatever it finds there. No SQL was run and no rows were 
+written: sql guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql ƒ+' world. Press 
+Stop, then install again ƒ?" the steps this run already took repeat, and the SQL follows them.
+--- AddOns (non-Blizzard) ---
+stop pressed 2026-09-12T03:16:24.1383843+02:00
+world down after ~30 s: ac-worldserver Exited (0) 2 seconds ago
+install pressed 2026-09-12T03:17:19.6245865+02:00
+--- uia ---
+invoked at 2026-09-12T03:16:16.0917813+02:00
+invoked at 2026-09-12T03:16:23.2234480+02:00
+invoked at 2026-09-12T03:16:57.4424774+02:00
+selection after type-ahead: [keg] Black Market Auction House - MoP-style Black Market AH with a cl
+[Button/Install selected] hits: 0 -> 
+NOT FOUND [Install selected] index 0
+--- app log ---
+This machine cannot install the server yet:
+free space on Docker's disk and the server folder: 20 GB free, and the install needs 48 GB (the 
+server folder and Docker's disk share one drive, so both needs add up) Free some space, or 
+install to a drive that has room, then try again.
+2026-09-12 02:34:46 INFO [yulon.catalog.native] install of wow-wotlk finished
+world server is running, and it holds world in memory and writes back over whatever it finds 
+there. No SQL was run and no rows were written: sql 
+guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql ƒ+' world. Press Stop, then 
+install again ƒ?" the steps this run already took repeat, and the SQL follows them.
+world in memory and writes back over whatever it finds there. No SQL was run and no rows were 
+written: sql guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql ƒ+' world. Press 
+Stop, then install again ƒ?" the steps this run already took repeat, and the SQL follows them.
+--- AddOns (non-Blizzard) ---
+install pressed 2026-09-12T03:19:42.9767664+02:00
+selection after type-ahead: (unreadable)
+--- app log ---
+--- containers ---
+ac-authserver Exited (0) 4 minutes ago
+ac-worldserver Exited (0) 4 minutes ago
+ac-database Exited (0) 4 minutes ago
+ac-db-import Exited (0) 53 minutes ago
+ac-client-data-init Exited (0) About an hour ago
+--- AddOns (non-Blizzard) ---
+install pressed 2026-09-12T03:22:29.4039410+02:00
+invoked at 2026-09-12T03:22:06.1614856+02:00
+selection after type-ahead: [keg] Black Market Auction House - MoP-style Black Market AH with a cl
+--- app log ---
+--- containers ---
+ac-authserver Exited (0) 5 minutes ago
+ac-worldserver Exited (0) 5 minutes ago
+ac-database Exited (0) 5 minutes ago
+ac-db-import Exited (0) 54 minutes ago
+ac-client-data-init Exited (0) About an hour ago
+--- AddOns (non-Blizzard) ---
+install pressed 2026-09-12T03:25:45.9520949+02:00
+[TabItem/Modules] hits: 1 -> Modules
+chose [Modules] at 847,185 70x24
+invoked at 2026-09-12T03:25:20.6164668+02:00
+no module row on screen
+[Button/Install selected] hits: 1 -> Install selected
+chose [Install selected] at 441,497 93x26
+invoked at 2026-09-12T03:25:44.8540419+02:00
+--- app log ---
+2026-09-12 03:25:46 INFO [yulon.docker] start_database(): starting ac-database alone
+2026-09-12 03:26:20 INFO [yulon.apply] install bmah: 5 step(s), 0 skipped, 0 left unapplied, 
+rebuild=False
+--- containers ---
+ac-database Up About a minute (healthy)
+ac-authserver Exited (0) 11 minutes ago
+ac-worldserver Exited (0) 10 minutes ago
+ac-db-import Exited (0) About an hour ago
+ac-client-data-init Exited (0) About an hour ago
+--- AddOns (non-Blizzard) ---
+BlackMarketUI  09/12/2026 03:14:51  files=25

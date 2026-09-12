@@ -55,12 +55,15 @@ from yulon.manifest import Build, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
+from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import ControllerServices, ControllerView
 from yulon.ui.widgets.job import run_inline
 
 WOTLK = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
 """8.5b's tree: one bot signal, the account prefix, and no registry table."""
+TORTOISE = load_catalog().get("wow-tortoise")
+"""T36's client-folder tests: `required_file=None`, so a bare `Data/` warns rather than refuses."""
 
 
 @pytest.fixture(autouse=True)
@@ -6617,6 +6620,393 @@ def test_a_client_folder_with_no_interface_directory_is_not_written_into(
 
 
 # --------------------------------------------------------------------------
+# T36 -- a client folder can be set, changed or cleared on an install
+# --------------------------------------------------------------------------
+
+
+class _FakeClientDir:
+    """`ControllerServices.set_client_dir` (T36): records writes, raises on demand."""
+
+    def __init__(self, error: OSError | None = None) -> None:
+        self.written: list[Path | None] = []
+        self._error = error
+
+    def __call__(self, client_dir: Path | None) -> None:
+        self.written.append(client_dir)
+        if self._error is not None:
+            raise self._error
+
+
+def _client_dir_view(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    client_dir: Path | None = None,
+    fake: _FakeClientDir | None = None,
+    pick_client_dir: Callable[..., Path | None] = lambda *_: None,
+) -> tuple[ControllerView, _FakeClientDir]:
+    """A tab wired with the T36 write seam, over the real factory wiring.
+
+    `ControllerServices.for_entry()` and not the `_services()` fake: the row's
+    button labels and the press's refusal/warning rules read `entry.client`
+    and (through `preflight.client_spec_for()`) `entry.install.native`, none of
+    which the docker-free fake carries, and the real factory needs no daemon
+    to build.
+    """
+    services = ControllerServices.for_entry(entry, server_dir, client_dir=client_dir)
+    fake = fake if fake is not None else _FakeClientDir()
+    services.set_client_dir = fake
+    view = ControllerView(entry, services, status_poll_ms=0, pick_client_dir=pick_client_dir)
+    return view, fake
+
+
+def test_the_client_folder_row_reads_its_three_sentences(qapp: object, tmp_path: Path) -> None:
+    """None / recorded / recorded-without-`Interface/` (T36 DoD 1)."""
+    view_none, _ = _client_dir_view(WOTLK, tmp_path / "none")
+    assert view_none.client_dir_label.text() == "Client folder: none — addons and Play need one"
+
+    bare = tmp_path / "bare-client"
+    bare.mkdir()
+    view_bare, _ = _client_dir_view(WOTLK, tmp_path / "bare", client_dir=bare)
+    assert view_bare.client_dir_label.text() == (
+        f"Client folder: {bare} — no Interface/ folder yet — start the game once before "
+        "installing addons"
+    )
+
+    real = tmp_path / "real-client"
+    (real / "Interface").mkdir(parents=True)
+    view_real, _ = _client_dir_view(WOTLK, tmp_path / "real", client_dir=real)
+    assert view_real.client_dir_label.text() == f"Client folder: {real}"
+    # Mutation: in `_client_dir_row_text()`, drop the `Interface/` branch so
+    # any non-None folder reads "Client folder: {client_dir}" -- the
+    # `view_bare` assertion above fails, reading the real-client sentence
+    # instead of the "no Interface/" one.
+
+
+def test_the_client_folder_buttons_read_set_or_change_and_forget_appears_once_recorded(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The button labels, exactly as they read (T36 DoD 1)."""
+    view_none, _ = _client_dir_view(WOTLK, tmp_path / "none")
+    assert view_none.set_client_dir_button is not None
+    assert view_none.set_client_dir_button.text() == "Set client folder…"
+    assert view_none.forget_client_dir_button is not None
+    assert view_none.forget_client_dir_button.isHidden()
+
+    real = tmp_path / "real-client"
+    (real / "Interface").mkdir(parents=True)
+    view_real, _ = _client_dir_view(WOTLK, tmp_path / "real", client_dir=real)
+    assert view_real.set_client_dir_button.text() == "Change client folder…"
+    assert not view_real.forget_client_dir_button.isHidden()
+    # Mutation: in `_build_server_tab()`, hardcode
+    # `has_client = self.services.client_dir is not None` to `False` -- the
+    # `view_real` button would still read "Set client folder…" and its
+    # Forget button would stay hidden, both against this test.
+
+
+def test_set_client_dir_none_hides_the_row_and_its_buttons(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A tab built with no write seam gets no client-folder controls (T36 DoD 3)."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.set_client_dir_button is None
+    assert view.forget_client_dir_button is None
+    assert view.client_dir_label.isHidden()
+    # Mutation: change the `if self.services.set_client_dir is not None:` guard
+    # in `_build_server_tab()` to build the buttons unconditionally -- both
+    # `is None` assertions above fail.
+
+
+def test_a_refused_client_folder_writes_nothing_and_shows_the_check_sentence(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `Data/`: `clientdir.validate()`'s own refusal, TBC's `ClientSpec` (T36 DoD 2)."""
+    warned: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "warning", lambda *a, **k: warned.append(a)
+    )
+    not_a_client = tmp_path / "not-a-client"
+    not_a_client.mkdir()
+    view, fake = _client_dir_view(TBC, tmp_path / "server", pick_client_dir=lambda *_: not_a_client)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert fake.written == [], "a folder with no Data/ directory was written anyway"
+    assert failures and "not a game client" in failures[0]
+    assert warned and "not a game client" in warned[0][2]
+    # Mutation: in `change_client_dir()`, drop the `if not report.ok(): ...
+    # return` guard -- `fake.written` gains the folder even though the check
+    # refused it.
+
+
+def test_a_warned_client_folder_writes_only_after_yes(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The static `QMessageBox.question()`'s bare `int` (T33): `==`, never `is`."""
+    warn_client = tmp_path / "TurtleWoW"
+    data = warn_client / "Data"
+    data.mkdir(parents=True)
+    (data / "patch.MPQ").write_bytes(b"")  # 1 of 5: too few is a WARN, zero is a refusal
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    view, fake = _client_dir_view(
+        TORTOISE, tmp_path / "server", pick_client_dir=lambda *_: warn_client
+    )
+
+    view.change_client_dir()
+
+    assert fake.written == [warn_client]
+    # Mutation: change `change_client_dir()`'s `said_yes(answer)` to
+    # `answer is QMessageBox.StandardButton.Yes` -- the bare `int` the fake
+    # returns above is never `is` the enum member, so this write never happens.
+
+
+def test_a_warned_client_folder_answered_no_writes_nothing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of "only after Yes": No leaves the record untouched."""
+    warn_client = tmp_path / "TurtleWoW"
+    data = warn_client / "Data"
+    data.mkdir(parents=True)
+    (data / "patch.MPQ").write_bytes(b"")  # 1 of 5: a WARN this press still has to ASK about
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.No),
+    )
+    view, fake = _client_dir_view(
+        TORTOISE, tmp_path / "server", pick_client_dir=lambda *_: warn_client
+    )
+
+    view.change_client_dir()
+
+    assert fake.written == []
+    # Mutation: drop the `if not said_yes(answer): return` guard in
+    # `change_client_dir()` -- the folder is written even though No was
+    # answered.
+
+
+def test_the_seam_is_called_with_the_picked_path_then_client_dir_changed_is_emitted(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T36 DoD 4: no `ClientSpec` at all (WotLK) writes straight through once it has a `Data/`."""
+    server_dir = tmp_path / "server"
+    chosen = tmp_path / "new-client"
+    (chosen / "Data").mkdir(parents=True)
+    view, fake = _client_dir_view(WOTLK, server_dir, pick_client_dir=lambda *_: chosen)
+    seen: list[tuple[str, object, object]] = []
+    view.client_dir_changed.connect(lambda g, s, c: seen.append((g, s, c)))
+
+    view.change_client_dir()
+
+    assert fake.written == [chosen]
+    assert seen == [("wow-wotlk", server_dir, chosen)]
+    # Mutation: drop the final `self.client_dir_changed.emit(...)` line in
+    # `change_client_dir()` -- `fake.written` still gains the folder, but
+    # `seen` stays empty.
+
+
+def test_a_failing_seam_shows_the_error_and_emits_nothing(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`OSError` from the write seam (T36 DoD 4), the same shape T34's forget answers."""
+    warned: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "warning", lambda *a, **k: warned.append(a)
+    )
+    chosen = tmp_path / "new-client"
+    (chosen / "Data").mkdir(parents=True)
+    fake = _FakeClientDir(error=OSError("config dir is read-only"))
+    view, _ = _client_dir_view(
+        WOTLK, tmp_path / "server", fake=fake, pick_client_dir=lambda *_: chosen
+    )
+    seen: list[object] = []
+    failures: list[str] = []
+    view.client_dir_changed.connect(lambda *a: seen.append(a))
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert seen == [], "the tab was told to rebuild over a write that never happened"
+    assert failures and "config dir is read-only" in failures[0]
+    assert warned and "config dir is read-only" in warned[0][2]
+    # Mutation: drop the `except OSError` branch in `change_client_dir()` --
+    # the exception propagates instead of being shown, and `seen`/`failures`
+    # are never populated the way this test expects.
+
+
+def test_forget_client_dir_writes_none_and_emits_the_rebuild_signal(
+    qapp: object, tmp_path: Path
+) -> None:
+    """ "Forget client folder": no confirmation, unlike "Forget this install…" (T36 DoD 1/4)."""
+    server_dir = tmp_path / "server"
+    real = tmp_path / "real-client"
+    (real / "Interface").mkdir(parents=True)
+    view, fake = _client_dir_view(WOTLK, server_dir, client_dir=real)
+    seen: list[tuple[str, object, object]] = []
+    view.client_dir_changed.connect(lambda g, s, c: seen.append((g, s, c)))
+    assert view.forget_client_dir_button is not None
+
+    view.forget_client_dir()
+
+    assert fake.written == [None]
+    assert seen == [("wow-wotlk", server_dir, None)]
+    # Mutation: in `forget_client_dir()`, call `self.services.set_client_dir(
+    # self.services.client_dir)` instead of `(None)` -- `fake.written` reads
+    # `[real]` rather than `[None]` and this fails.
+
+
+# ----------------------------------------- T36 round 2 review's four fixes
+
+
+def test_busy_disables_the_three_client_folder_buttons(qapp: object, tmp_path: Path) -> None:
+    """Round 2 review fix 1: the same lock `_set_busy()` already puts on Uninstall."""
+    real = tmp_path / "real-client"
+    (real / "Interface").mkdir(parents=True)
+    view, _ = _client_dir_view(WOTLK, tmp_path / "server", client_dir=real)
+    assert view.set_client_dir_button is not None
+    assert view.forget_client_dir_button is not None
+
+    view._set_busy(True)
+
+    assert not view.set_client_dir_button.isEnabled()
+    assert not view.forget_client_dir_button.isEnabled()
+
+    view._set_busy(False)
+
+    assert view.set_client_dir_button.isEnabled()
+    assert view.forget_client_dir_button.isEnabled()
+    # Mutation: drop the four `set_client_dir_button`/`forget_client_dir_button`
+    # `setEnabled()` lines from `_set_busy()` -- both buttons stay enabled
+    # through the `_set_busy(True)` call above.
+
+
+def test_a_busy_press_writes_nothing_on_either_handler(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 review fix 1: a disabled `QPushButton` is not the only way in — `rebuild_server()`'s
+    own shape, `self._busy` checked again inside the handler.
+    """
+    told: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "information", lambda *a, **k: told.append(a)
+    )
+    real = tmp_path / "real-client"
+    (real / "Interface").mkdir(parents=True)
+    chosen = tmp_path / "new-client"
+    (chosen / "Data").mkdir(parents=True)
+    view, fake = _client_dir_view(
+        WOTLK, tmp_path / "server", client_dir=real, pick_client_dir=lambda *_: chosen
+    )
+    view._set_busy(True)
+
+    view.change_client_dir()
+    view.forget_client_dir()
+
+    assert fake.written == [], "a write went through while another action was running"
+    assert len(told) == 2, "each press should have said something else is running"
+    # Mutation: drop the `if self._client_dir_busy(): return` guard from
+    # `change_client_dir()` and `forget_client_dir()` -- `fake.written` gains
+    # entries despite `_set_busy(True)` above (the buttons are disabled, but
+    # nothing stops a call reaching the handler directly, as this test does).
+
+
+def test_zero_archives_is_refused_even_after_yes(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 review fix 2: an empty `Data/` is not "a few too few", it is nothing to extract."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    empty_client = tmp_path / "TurtleWoW"
+    (empty_client / "Data").mkdir(parents=True)
+    view, fake = _client_dir_view(
+        TORTOISE, tmp_path / "server", pick_client_dir=lambda *_: empty_client
+    )
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert fake.written == [], "an empty Data/ was written even after a Yes"
+    assert failures and "0 MPQ archives" in failures[0]
+    # Mutation: in `_mpq_archive_count()`, `return None` unconditionally --
+    # the zero-archive refusal never fires, and this folder is written after
+    # Yes exactly like `test_a_warned_client_folder_writes_only_after_yes`.
+
+
+def test_the_server_folder_or_anything_inside_it_is_refused_before_validation(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Round 2 review fix 3: Uninstall removes that whole tree, client folder included."""
+    server_dir = tmp_path / "server"
+    sub = server_dir / "client-inside"
+    sub.mkdir(parents=True)
+    sibling = tmp_path / "client-next-door"
+    (sibling / "Data").mkdir(parents=True)
+
+    for picked in (server_dir, sub):
+        view, fake = _client_dir_view(WOTLK, server_dir, pick_client_dir=lambda *_, p=picked: p)
+        failures: list[str] = []
+        view.action_failed.connect(failures.append)
+        view.change_client_dir()
+        assert fake.written == [], f"{picked} was written; it is the server folder or inside it"
+        assert failures and "cannot be the server folder or inside it" in failures[0]
+
+    # The sibling is unrelated to the server tree and must still be accepted.
+    view, fake = _client_dir_view(WOTLK, server_dir, pick_client_dir=lambda *_: sibling)
+    view.change_client_dir()
+    assert fake.written == [sibling]
+    # Mutation: drop the `if chosen.resolve().is_relative_to(server_dir.resolve()):
+    # ... return` guard from `change_client_dir()` -- the server folder and its
+    # subfolder are both written above instead of refused.
+
+
+def test_wotlk_requires_at_least_a_data_folder(qapp: object, tmp_path: Path) -> None:
+    """Round 2 review fix 4: no `ClientSpec` still needs SOME evidence this is a WoW client."""
+    empty = tmp_path / "not-a-client"
+    empty.mkdir()
+    view, fake = _client_dir_view(WOTLK, tmp_path / "server", pick_client_dir=lambda *_: empty)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.change_client_dir()
+
+    assert fake.written == [], "a folder with no Data/ was written for a game with no ClientSpec"
+    assert failures and "is not a WoW client" in failures[0]
+
+    real = tmp_path / "real-client"
+    (real / "Data").mkdir(parents=True)
+    view2, fake2 = _client_dir_view(WOTLK, tmp_path / "server2", pick_client_dir=lambda *_: real)
+    view2.change_client_dir()
+    assert fake2.written == [real]
+    # Mutation: drop the `elif not (chosen / clientdir.DATA_DIR).is_dir(): ...
+    # return` branch in `change_client_dir()` -- `empty` above is written
+    # instead of refused.
+
+
+def test_the_row_says_the_folder_is_missing_rather_than_no_interface(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Non-blocking round 2 note: a moved/deleted client needs its own sentence, not "start the
+    game once" -- that instruction cannot be followed on a folder that is not there.
+    """
+    gone = tmp_path / "gone-client"
+    view, _ = _client_dir_view(WOTLK, tmp_path / "server", client_dir=gone)
+    assert view.client_dir_label.text() == f"Client folder: {gone} — the folder is missing"
+    # Mutation: drop the `if not client_dir.is_dir():` branch from
+    # `_client_dir_row_text()` -- the missing folder falls into the
+    # no-`Interface/` sentence instead.
+
+
+# --------------------------------------------------------------------------
 # 8.8 -- Add to Steam...
 # --------------------------------------------------------------------------
 
@@ -6725,3 +7115,35 @@ def test_the_steam_seam_is_built_on_linux_and_carries_the_client_folder(
     assert seam is not None
     assert seam.client_dir == tmp_path / "client"
     assert seam.game == WOTLK.name
+
+
+def test_neither_one_line_sink_can_show_a_control_character(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T35's markers must never reach a `QLabel` or the module report.
+
+    These two sinks are the reason the marking is done at the install engine's
+    bridges and not inside `docker.run_attached()`: they are fed by the same
+    `run_attached()` calls the install uses, and neither is a `LogPanel` — one
+    is a one-line status label, the other a plain report pane — so neither
+    strips anything. `\\x1e` renders as a box glyph in both.
+
+    Belt on top of braces, and asserted because the cost of being wrong is a
+    box glyph in front of every line of a database import with nothing on
+    screen to explain it.
+
+    **Asserted as equality and not as "no `\x1e` in it"**, which was the first
+    version of this test and let the mutation through. `\x1e` is WHITESPACE to
+    Python: `"\x1etool >> x".strip()` is `"tool >> x"`, so the slot that only
+    stripped removed the separator and left the kind's name standing in front of
+    every line. Measured while this test was written, against the real slot.
+
+    Mutation: drop `lines.parse()` from either slot and that half fails with
+    `tool ` in front of the line.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._import_line(log_lines.TOOL + ">> Applying update 2026_01_01_00.sql")
+    view._module_sql_line(log_lines.TOOL + ">> Applying mod-playerbots.sql")
+
+    assert view.problem_label.text().splitlines()[-1] == ">> Applying update 2026_01_01_00.sql"
+    assert view.module_report.toPlainText().splitlines()[-1] == ">> Applying mod-playerbots.sql"

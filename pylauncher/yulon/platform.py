@@ -1763,7 +1763,7 @@ def selinux_enforcing(
 def filesystem_type(path: Path, *, run: RunCmd | None = None) -> str | None:
     """`stat -f -c %T` of the first existing ancestor of `path`; Linux only, `None` if unknown.
 
-    The ancestor walk is `preflight._free_bytes()`'s, for the same reason: the
+    The ancestor walk is `preflight.free_bytes()`'s, for the same reason: the
     server folder is routinely one the user has not created yet.
 
     Never `""`. An empty answer would pass `selinux_labels_supported()` as a

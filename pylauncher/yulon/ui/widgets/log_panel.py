@@ -15,12 +15,24 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QFont, QPalette, QResizeEvent, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from yulon import runner
 from yulon.log import get_logger
+from yulon.ui import lines
 from yulon.ui.widgets.job import in_flight
 
 logger = get_logger(__name__)
@@ -37,6 +49,185 @@ or two pixels short of it is what a scrollbar sitting at the end reports after
 a resize. Requiring exact equality would read a panel that IS following as one
 the user had scrolled away from, and following would stop on its own.
 """
+
+
+@dataclass(frozen=True)
+class Tone:
+    """How one kind of line is painted, said RELATIVE TO THE THEME rather than in ink.
+
+    The panel has no theme of its own — it is a `QPlainTextEdit` in whatever
+    palette the desktop handed the app — so a tone cannot be a hex value. Two
+    ways of being relative, and each kind uses one of them:
+
+    * `fade` is a distance from the window's own text colour towards its
+      background, which is what "muted" and "dimmed" mean in both a light and a
+      dark theme with no second spelling.
+    * `on_light`/`on_dark` are the two hues amber and red need, picked by which
+      side of the middle `QPalette.Text` falls on. Amber that reads on white is
+      too dark to read on charcoal and the other way round, so the one colour a
+      hue cannot be is a single one.
+
+    `band` tints the line's background by that much of the same hue. `weight` is
+    a `QFont` weight, `0` meaning "leave the panel's own".
+    """
+
+    fade: float = 0.0
+    on_light: str = ""
+    on_dark: str = ""
+    band: float = 0.0
+    weight: int = 0
+    bold: bool = False
+
+
+PALETTE: dict[str, Tone] = {
+    "stage": Tone(bold=True),
+    "marker": Tone(fade=0.45),
+    "sentence": Tone(),
+    "tool": Tone(fade=0.62),
+    "warning": Tone(on_light="#8a5300", on_dark="#f2c14e", band=0.15),
+    "failure": Tone(on_light="#a11212", on_dark="#ff8f8f", band=0.17, weight=500),
+}
+"""Every appearance the panel has, in one dict, keyed by `lines.parse()`'s kind.
+
+One place rather than six branches, because the failed run's PROGRESS BAR is
+painted the same red as the failed LINE above it (`_bar_style()`), and a second
+spelling of that colour is a header and a log that disagree about what a
+refusal looks like.
+"""
+
+
+def _blend(one: QColor, two: QColor, part: float) -> QColor:
+    """`one` with `part` of `two` mixed into it."""
+    keep = 1.0 - part
+    return QColor(
+        round(one.red() * keep + two.red() * part),
+        round(one.green() * keep + two.green() * part),
+        round(one.blue() * keep + two.blue() * part),
+    )
+
+
+def tone_colour(tone: Tone, palette: QPalette) -> QColor | None:
+    """The foreground `tone` asks for under `palette`, or None where it wants none.
+
+    Public so a test can ask the same question the panel asks, in whatever
+    theme the box running it happens to have, instead of naming a hex value that
+    would be wrong in the other one.
+    """
+    text = palette.color(QPalette.ColorRole.Text)
+    if tone.fade:
+        return _blend(text, palette.color(QPalette.ColorRole.Base), tone.fade)
+    hue = tone.on_dark if text.lightness() > 127 else tone.on_light
+    return QColor(hue) if hue else None
+
+
+def _line_format(kind: str, palette: QPalette) -> QTextCharFormat:
+    """The character format for one kind of line, built fresh on every append.
+
+    Every kind gets one, `sentence` included, and its format is the default —
+    which is how the panel says "no colour" without a second code path.
+    """
+    fmt = QTextCharFormat()
+    tone = PALETTE.get(kind, PALETTE["sentence"])  # an unknown kind is an ordinary sentence
+    colour = tone_colour(tone, palette)
+    if colour is not None:
+        fmt.setForeground(colour)
+    if tone.band:
+        hue = QColor(tone.on_dark if _is_dark(palette) else tone.on_light)
+        fmt.setBackground(_blend(palette.color(QPalette.ColorRole.Base), hue, tone.band))
+    if tone.bold:
+        fmt.setFontWeight(QFont.Weight.Bold)
+    elif tone.weight:
+        fmt.setFontWeight(tone.weight)
+    return fmt
+
+
+def _is_dark(palette: QPalette) -> bool:
+    """True where the window's text is lighter than its background."""
+    return palette.color(QPalette.ColorRole.Text).lightness() > 127
+
+
+def _bar_style(palette: QPalette) -> str:
+    """The failed run's progress bar, in `PALETTE["failure"]`'s own red.
+
+    A stylesheet rather than a palette role: `QProgressBar`'s chunk takes its
+    colour from the style, not from `QPalette.Highlight`, on every platform
+    style this app has been run under.
+    """
+    red = tone_colour(PALETTE["failure"], palette)
+    if red is None:
+        return ""
+    return f"QProgressBar::chunk {{ background-color: {red.name()}; }}"
+
+
+_BAR_WIDTH_PX = 120
+_STEP_WIDTH_PX = 200
+_PROGRESS_WIDTH_PX = 230
+"""How much of the header row the strip may ever ask for.
+
+Every one of the three is bounded, and for the measured reason the status label
+is wrapped: whatever the header row demands becomes this panel's minimum width,
+`main.py`'s splitter has to honour it, and the pane beside it is starved (T32,
+and the 2026-09-02 measurement on `setWordWrap` above). Git's own progress text
+is what makes this real -- `Receiving objects:  42% (420/1000), 12.53 MiB |
+3.21 MiB/s` -- and it arrives several times a second.
+
+Measured on this box while the T35 tests were written, offscreen platform,
+default font: unbounded labels took the panel's minimum width from 166px to
+406px on one long progress line, which is the bug T32 closed reopening under a
+new widget.
+"""
+
+
+class _StripLabel(QLabel):
+    """One field of the stage strip: it shows what fits and DEMANDS NOTHING.
+
+    `Ignored` horizontally is the whole trick, and it is what keeps T32 closed.
+    A `QLabel`'s minimum size hint is as wide as its text, `setMaximumWidth()`
+    does not bring that hint down, and the header row's minimum width IS this
+    panel's minimum width — so a strip built from ordinary labels took the
+    panel's minimum from 154px to 683px even with both fields capped (measured
+    offscreen on m910q while T35's tests were written; 255px as it stands).
+    `Ignored` says "give me what is left over and never widen anything for me",
+    which is exactly a strip's claim on a header.
+
+    Text is elided rather than wrapped, because a wrapping label in a one-line
+    header grows the row to three or four lines on a long git progress line, and
+    that row holds the Stop button. What it was told is kept whole in `said()`
+    and in the tooltip, so nothing a reader might want is lost to the elision.
+
+    Its own class rather than a helper called from the panel, because the width
+    to elide against only exists once the LAYOUT has run: a helper called at
+    append time elided against the label's previous width and left the strip
+    blank until the next resize of the panel. A widget is told its own size, so
+    this is the one place that can know.
+    """
+
+    def __init__(self, parent: QWidget, cap: int) -> None:
+        super().__init__("", parent)
+        self.setMaximumWidth(cap)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._said = ""
+
+    def said(self) -> str:
+        """The whole of what this field was told, elision and all."""
+        return self._said
+
+    def say(self, text: str) -> None:
+        """Put `text` in this field, showing as much of it as there is room for."""
+        self._said = text
+        self.setToolTip(text)
+        self._show_what_fits()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._show_what_fits()
+
+    def _show_what_fits(self) -> None:
+        fits = self.fontMetrics().elidedText(self._said, Qt.TextElideMode.ElideRight, self.width())
+        # Guarded, because this runs from `resizeEvent` and `setText()` on a
+        # label whose text has not changed still asks the layout to look again.
+        if fits != self.text():
+            self.setText(fits)
 
 
 def _clock(now: float) -> str:
@@ -237,9 +428,30 @@ class LogPanel(QWidget):
         self._stop_button = QPushButton("Stop", self)
         self._stop_button.setEnabled(False)
         self._stop_button.clicked.connect(self.stop)
+        # THE STAGE STRIP (T35), between the status and the elapsed clock. Three
+        # widgets for three different facts: which stage of how many is running
+        # (the engine's own `Step N of M` line, parsed), how far the thing
+        # inside that stage has got, and what it is doing right now.
+        #
+        # Both labels wrap, for the measured reason `self._status` does: git's
+        # progress text runs to `Receiving objects:  42% (420/1000), 12.53 MiB |
+        # 3.21 MiB/s`, and an unwrapped label's size hint is as wide as its text.
+        self._step_label = _StripLabel(self, _STEP_WIDTH_PX)
+        self._bar = QProgressBar(self)
+        self._bar.setMaximumWidth(_BAR_WIDTH_PX)
+        self._bar.setTextVisible(True)
+        self._bar.setVisible(False)
+        self._progress_label = _StripLabel(self, _PROGRESS_WIDTH_PX)
 
         header = QHBoxLayout()
-        header.addWidget(self._status, 1)
+        # Stretch, not size hints. The strip's two fields demand no width of
+        # their own (`_StripLabel`), so a share of the row is the only way they
+        # get any — and a share is what should shrink first when the splitter
+        # narrows, since the status label carries the refusals.
+        header.addWidget(self._status, 3)
+        header.addWidget(self._step_label, 2)
+        header.addWidget(self._bar)
+        header.addWidget(self._progress_label, 2)
         header.addWidget(self._elapsed_label)
         header.addWidget(self._stop_button)
         layout = QVBoxLayout(self)
@@ -333,14 +545,106 @@ class LogPanel(QWidget):
         a timestamp in those would make every one of them a clock-dependent
         test. `text()` returns what is displayed, stamps and all.
 
+        **Every line is classified, and one kind of line is not a line at all.**
+        `lines.parse()` answers what arrived, and T35's three answers about
+        appearance follow from it: the engine's own stage lines are bold, a
+        relayed subprocess's are dimmed, and a warning or a failure is painted.
+        A `progress` line is NOT appended — it is a reading that replaces the
+        last one, so it goes to the header strip and nothing else. The T30
+        install on yulon-arch wrote 97 minutes of `[Map 230] Building tile
+        [32,32] (08 / 12)` into this panel at the weight of a sentence; that
+        torrent is now one moving bar.
+
+        `text()` therefore returns the DISPLAY text, prefixes off, which is why
+        every test in this file that reads it passed unchanged through T35.
+
         Thread-safe only from the UI thread; the worker reaches it by signal.
         """
-        bar = self._text.verticalScrollBar()
-        following = bar.value() >= bar.maximum() - _STICK_SLACK_PX
         clean = runner.strip_ansi(line).replace("\x1b", "")
-        self._text.appendPlainText(f"[{_clock(time.time())}] {clean}")
+        parsed = lines.parse(clean)
+        if parsed.kind == "progress":
+            self._show_progress(parsed)
+            return
+        if parsed.kind == "stage":
+            self._show_step(parsed.text)
+        scrollbar = self._text.verticalScrollBar()
+        following = scrollbar.value() >= scrollbar.maximum() - _STICK_SLACK_PX
+        self._write(f"[{_clock(time.time())}] {parsed.text}", parsed.kind)
         if following:
-            bar.setValue(bar.maximum())
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _write(self, stamped: str, kind: str) -> None:
+        """Put one finished line in the panel, painted for its kind.
+
+        **Appended first, then formatted — never the other way round.** Two
+        reasons, and the second was measured. `appendPlainText()` is the one
+        call whose handling of `maximumBlockCount`, the undo stack and the
+        scrollbar is Qt's own, so the text goes in through it. And a format set
+        on the EDIT'S insertion cursor (`setCurrentCharFormat()`) is carried
+        forward into everything appended after it: measured offscreen on m910q,
+        a red failure line followed by an ordinary sentence left the sentence
+        red too. Formatting the text that has already landed cannot do that —
+        the same measurement, the same day, showed the next line's fragment
+        back at `NoBrush`.
+        """
+        self._text.appendPlainText(stamped)
+        block = self._text.document().lastBlock()
+        cursor = QTextCursor(block)
+        cursor.setPosition(block.position())
+        cursor.setPosition(block.position() + block.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+        cursor.setCharFormat(_line_format(kind, self._text.palette()))
+
+    def _show_step(self, line: str) -> None:
+        """Put this stage line's own three fields on the strip.
+
+        A line that does not parse leaves the label alone rather than blanking
+        it: the format is the engine's and `lines.parse()` has already said this
+        is one of its stage lines, so a `None` here means the format moved — and
+        the last stage that DID parse is still the truer answer to "where is
+        this run" than nothing at all.
+        """
+        step = lines.parse_step(line)
+        if step is None:
+            return
+        self._step_label.say(f"Step {step.number} of {step.total} · {step.name}")
+
+    def _show_progress(self, parsed: lines.Parsed) -> None:
+        """Move the bar to this reading, and say what is being done beside it.
+
+        A missing percent is Qt's busy bar (`setRange(0, 0)`) and never a zero:
+        `Enumerating objects` and `Resolving deltas` report no number, and a bar
+        sitting at 0% for them says nothing has happened yet, which is the
+        opposite of true.
+        """
+        if parsed.percent is None:
+            self._bar.setRange(0, 0)
+        else:
+            self._bar.setRange(0, 100)
+            self._bar.setValue(max(0, min(100, parsed.percent)))
+        self._bar.setVisible(True)
+        self._progress_label.say(parsed.text)
+
+    def _clear_strip(self) -> None:
+        """Take the last run's strip down. Called by `run()`, for the elapsed field's reason."""
+        self._step_label.say("")
+        self._progress_label.say("")
+        self._bar.setStyleSheet("")
+        self._bar.setRange(0, 100)
+        self._bar.reset()
+        self._bar.setVisible(False)
+
+    def step_text(self) -> str:
+        """Which stage the strip was told is going (tests / accessibility).
+
+        What the strip was TOLD, not what its label shows: the label elides to
+        fit the header, and the elision is a property of the font on the box.
+        The same string is the label's tooltip, so it is reachable on screen.
+        """
+        return self._step_label.said()
+
+    def progress_text(self) -> str:
+        """What the strip was told the current stage is doing (tests / accessibility)."""
+        return self._progress_label.said()
 
     def run(
         self,
@@ -368,6 +672,7 @@ class LogPanel(QWidget):
         # started a minute ago.
         self._started_at = time.time()
         self._show_elapsed()
+        self._clear_strip()
         self._ticker.start()
         self._status.setText(title)
         self._stop_button.setEnabled(True)
@@ -489,6 +794,12 @@ class LogPanel(QWidget):
         # the next `run()` resets it.
         self._ticker.stop()
         self._show_elapsed()
+        # The strip is LEFT STANDING, and the bar goes red on a refusal. Which
+        # of the nine stages an install died in is the first thing anybody asks
+        # of a failed run, and it is already on screen — clearing it would
+        # throw away the one field that answers before the log is scrolled.
+        if not ok:
+            self._bar.setStyleSheet(_bar_style(self._text.palette()))
         self._stop_button.setEnabled(False)
         self.run_finished.emit(ok, message)
 

@@ -10,6 +10,7 @@ from collections.abc import Iterator
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette, QTextCharFormat
 
 from tests.conftest import (
     HANG_BOUND,
@@ -22,7 +23,8 @@ from tests.conftest import (
     wait_for_panel,
 )
 from yulon import runner
-from yulon.ui.widgets.log_panel import LogPanel, _StreamWorker
+from yulon.ui import lines
+from yulon.ui.widgets.log_panel import PALETTE, LogPanel, _StreamWorker, tone_colour
 
 STAMP = re.compile(r"^\[(\d\d:\d\d:\d\d)\] ")
 """The wall clock `append()` puts on every line. Elapsed is a header field, not a prefix."""
@@ -53,6 +55,16 @@ deadline is meant to fire, and the number is small because the test's whole
 cost is this wait -- at 0.05s it costs about as much as one `process_events`
 slice, and the report it exists to pin says the same thing at any size.
 """
+
+
+def _distance(one: object, two: object) -> int:
+    """How far apart two colours are, summed over the three channels.
+
+    Enough to say which of two greys is the fainter against a third colour,
+    which is all the tone assertions need and the only comparison that holds in
+    both themes.
+    """
+    return sum(abs(getattr(one, c)() - getattr(two, c)()) for c in ("red", "green", "blue"))
 
 
 def _unstamped(panel: LogPanel) -> list[str]:
@@ -967,3 +979,223 @@ def test_a_worker_run_on_the_gui_thread_never_quits_the_gui_thread(qapp: object)
     loop.exec()
 
     assert ticked == [1], "the GUI thread's event loop had been told to quit"
+
+
+# ---------------------------------------------------------------------------
+# T35: three tones and a stage strip. The panel's own half -- what a line's kind
+# does to how it is painted, and what a progress line does to the header.
+
+
+def _format_of(panel: LogPanel, index: int) -> QTextCharFormat:
+    """The character format the panel painted its `index`th line with."""
+    block = panel._text.document().findBlockByNumber(index)
+    return block.begin().fragment().charFormat()
+
+
+def _theme(panel: LogPanel) -> QPalette:
+    """The palette the tones are resolved against -- the text area's own, as the panel uses."""
+    return panel._text.palette()
+
+
+def test_a_tool_line_reaches_the_panel_as_its_payload_alone(qapp: object) -> None:
+    """`text()` is the display text, so the control character never reaches a reader.
+
+    The promise every existing test in this file depends on: `panel.text()` is
+    what is on screen, stamps and all, and T35's prefixes are not part of it.
+
+    Mutation: append `line` instead of `parse(line).text` and this reads
+    `\\x1etool #12 [5/8] …`, which renders as a box glyph in front of every
+    relayed line in the panel.
+    """
+    panel = LogPanel()
+    panel.append(lines.TOOL + "#12 [5/8] RUN cmake --build .")
+    assert _unstamped(panel) == ["#12 [5/8] RUN cmake --build ."]
+
+
+def test_each_kind_of_line_is_painted_its_own_tone(qapp: object) -> None:
+    """One appearance per kind, read off the document rather than off the code.
+
+    The colours come from `PALETTE` and are resolved against Qt's own palette,
+    so the assertions ask `tone_colour()` for the same answer the panel asked
+    for rather than naming a hex value that would be wrong in the other theme.
+
+    Mutation: route every kind through one format and the four assertions below
+    that distinguish the kinds all fail at once.
+    """
+    panel = LogPanel()
+    theme = _theme(panel)
+    panel.append("Step 3 of 9 (33%): clone-core")
+    panel.append("--- clone-core")
+    panel.append("Sources are in place.")
+    panel.append(lines.TOOL + "#12 [5/8] RUN cmake")
+    panel.append("warning: this machine may go to sleep")
+    panel.append("INSTALL FAILED")
+
+    stage, marker, sentence, tool, warning, failure = (_format_of(panel, i) for i in range(6))
+
+    assert stage.font().bold()
+    assert (
+        sentence.foreground().style() == Qt.BrushStyle.NoBrush
+    ), "the app's own sentences are the panel's normal text and must claim no colour"
+    text_colour = theme.color(QPalette.ColorRole.Text)
+    assert marker.foreground().color() != text_colour
+    assert tool.foreground().color() == tone_colour(PALETTE["tool"], theme)
+    assert _distance(tool.foreground().color(), text_colour) > _distance(
+        marker.foreground().color(), text_colour
+    ), "relayed tool output has to read as fainter than the engine's own stage markers"
+    assert warning.foreground().color() == tone_colour(PALETTE["warning"], theme)
+    assert warning.background().style() != Qt.BrushStyle.NoBrush, "the amber band is missing"
+    assert failure.foreground().color() == tone_colour(PALETTE["failure"], theme)
+    assert failure.background().style() != Qt.BrushStyle.NoBrush, "the red band is missing"
+    assert failure.fontWeight() == PALETTE["failure"].weight
+
+
+def test_a_tone_does_not_bleed_into_the_line_after_it(qapp: object) -> None:
+    """A red failure must not make the next ordinary sentence red too.
+
+    What this pins is `_write()`'s arrangement: the text is appended, and the
+    format is put on the text that has already landed. The natural alternative
+    -- set the tone on the edit's insertion cursor, and only for the kinds that
+    claim a colour -- looks identical on one line and is the bug. Measured
+    offscreen on m910q while T35 was written: `setCurrentCharFormat()` is
+    carried forward into everything appended after it, so a red failure line
+    left the sentence under it red as well, while formatting the landed text
+    left the next fragment back at `NoBrush`.
+
+    Mutation (both halves, because either alone is harmless): paint through
+    `self._text.setCurrentCharFormat()` before the append AND skip the kinds
+    whose tone claims nothing. The sentence below then comes out in the
+    failure's colour, on the failure's band.
+    """
+    panel = LogPanel()
+    panel.append("INSTALL FAILED")
+    panel.append("Sources are in place.")
+    assert _format_of(panel, 1).foreground().style() == Qt.BrushStyle.NoBrush
+    assert _format_of(panel, 1).background().style() == Qt.BrushStyle.NoBrush
+
+
+def test_a_stage_line_names_where_the_run_is_on_the_strip(qapp: object) -> None:
+    """The strip's label is the engine's own three fields, joined for reading.
+
+    Mutation: build the label from the step's `number` twice (the total read off
+    group 1) and it says `Step 3 of 3`, which this refuses.
+    """
+    panel = LogPanel()
+    panel.append("Step 3 of 9 (33%): clone-core")
+    assert panel.step_text() == "Step 3 of 9 · clone-core"
+
+
+def test_a_progress_line_moves_the_bar_and_is_never_appended(qapp: object) -> None:
+    """A progress reading belongs in the header, and NOT in the log.
+
+    This is the whole reason the prefix exists: the T30 install wrote 97 minutes
+    of tile lines into the panel, and a reading that replaces the last one is a
+    field, not a line of history.
+
+    Mutation: append it anyway and `text()` gains a line.
+    """
+    panel = LogPanel()
+    panel.append("Cloning azerothcore-wotlk into .")
+    panel.append(lines.PROGRESS + "clone-core 42 Receiving objects:  42% (420/1000)")
+    assert _unstamped(panel) == ["Cloning azerothcore-wotlk into ."]
+    assert panel._bar.isVisibleTo(panel) is True
+    assert (panel._bar.minimum(), panel._bar.maximum()) == (0, 100)
+    assert panel._bar.value() == 42
+    assert panel.progress_text() == "Receiving objects:  42% (420/1000)"
+
+
+def test_a_progress_line_with_no_percent_leaves_the_bar_busy(qapp: object) -> None:
+    """`-` is "working, with no number to show", which is Qt's own busy bar.
+
+    A bar sitting at 0% says the opposite -- that nothing has happened yet -- for
+    the stages that genuinely cannot count (`Enumerating objects`, a compose
+    start).
+
+    Mutation: treat a missing percent as 0 and the range stays 0-100, which this
+    refuses.
+    """
+    panel = LogPanel()
+    panel.append(lines.PROGRESS + "clone-core - Enumerating objects")
+    assert (panel._bar.minimum(), panel._bar.maximum()) == (0, 0)
+    assert panel.progress_text() == "Enumerating objects"
+
+
+def test_the_bar_is_hidden_until_something_reports_progress(qapp: object) -> None:
+    """Idle, and every stage that cannot count, show no bar at all.
+
+    Mutation: show the bar in `run()` and a nine-stage install with one
+    reporting stage displays an empty bar for the other eight.
+    """
+    panel = LogPanel()
+    assert panel._bar.isVisibleTo(panel) is False
+    panel.append("Step 1 of 9 (11%): preflight")
+    assert panel._bar.isVisibleTo(panel) is False
+
+
+def test_a_new_run_starts_the_strip_over(qapp: object) -> None:
+    """The strip describes THIS run, like the elapsed field beside it.
+
+    Mutation: leave the strip alone in `run()` and the next install's header
+    opens on the last one's last stage.
+    """
+    panel = LogPanel()
+    panel.append("Step 9 of 9 (100%): up")
+    panel.append(lines.PROGRESS + "up 88 Starting the server")
+    panel.run(lambda: iter(()))
+    wait_for_panel(panel)
+    assert panel.step_text() == ""
+    assert panel.progress_text() == ""
+    assert panel._bar.isVisibleTo(panel) is False
+
+
+def test_a_failed_run_turns_the_bar_red_and_keeps_the_label(qapp: object) -> None:
+    """Where the run stopped is the one fact worth keeping on screen after a failure.
+
+    The red is the same `PALETTE["failure"]` the failed LINES are painted with,
+    so the bar and the sentence under it cannot disagree about the colour of a
+    refusal.
+
+    Mutation: clear the strip in `_on_finished()` and the header stops saying
+    which of the nine stages the install died in.
+    """
+    panel = LogPanel()
+    panel.append("Step 3 of 9 (33%): clone-core")
+    panel.append(lines.PROGRESS + "clone-core 42 Receiving objects")
+    assert panel._bar.styleSheet() == ""
+    panel._on_finished(False, "InstallerError: the clone failed")
+    red = tone_colour(PALETTE["failure"], _theme(panel))
+    assert red is not None and red.name() in panel._bar.styleSheet()
+    assert panel.step_text() == "Step 3 of 9 · clone-core"
+
+
+def test_the_strip_does_not_reopen_the_wrap_bug(qapp: object) -> None:
+    """T32's bound, measured over the strip this time.
+
+    The strip sits in the same header row the long-refusal bug was found in
+    (`test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window`), and
+    git's own progress text is long: `Receiving objects:  42% (420/1000), 12.53
+    MiB | 3.21 MiB/s`. An unwrapped label there has a size hint as wide as its
+    text, that hint becomes this panel's minimum width, and the `QSplitter` in
+    `main.py` has to honour it -- the catalog pane next door goes to nothing.
+
+    Mutation: drop the `setMaximumWidth` from either strip label and this
+    fails the way T32's own two tests do -- measured 166px -> 406px.
+    """
+    panel = LogPanel()
+    panel.resize(400, 300)
+    panel._status.setText("idle")
+    panel.layout().activate()
+    short = panel.minimumSizeHint().width()
+
+    panel.append("Step 11 of 12 (91%): mmaps-and-vmaps-for-every-map-in-the-client")
+    panel.append(
+        lines.PROGRESS + "mmaps 66 Receiving objects:  66% (66000/100000), 412.53 MiB "
+        "| 3.21 MiB/s, and a tail this long is what a real clone prints"
+    )
+    panel.layout().activate()
+    long = panel.minimumSizeHint().width()
+
+    assert long <= short * 2, (
+        "the stage strip inflated the panel's minimum width from "
+        f"{short}px to {long}px, so a splitter must starve whatever is beside it"
+    )

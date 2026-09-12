@@ -91,6 +91,7 @@ from yulon.catalog.installer import (
 )
 from yulon.log import get_logger
 from yulon.ownership import Ownership as Ownership
+from yulon.ui import lines
 
 logger = get_logger(__name__)
 
@@ -4346,7 +4347,7 @@ class StagedInstaller:
             yield f"Cloning {source.repo} into {source.dest}"
             if existing is not None:
                 yield "A previous run of this install left it part-way through; finishing it off."
-            self._clone(
+            yield from self._clone_lines(
                 git.CloneSpec(
                     url=source.url,
                     dest=dest,
@@ -4354,7 +4355,8 @@ class StagedInstaller:
                     sparse_path=source.sparse_path,
                     depth=source.depth,
                     rev=source.rev,
-                )
+                ),
+                recorded_as,
             )
         yield "Sources are in place."
 
@@ -4558,6 +4560,7 @@ class StagedInstaller:
                 ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel
             ),
             cancel=ctx.cancel,
+            stage="build",
         )
         self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE)
         yield "The build finished."
@@ -4701,6 +4704,7 @@ class StagedInstaller:
                 service, ctx.server_dir, sink=sink, cancel=ctx.cancel
             ),
             cancel=ctx.cancel,
+            stage="import",
         )
         if run.returncode == docker.CANCELLED_RETURNCODE:
             raise InstallerError(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
@@ -5137,9 +5141,23 @@ class StagedInstaller:
             return (composegen.BASE_FILE,)
         return ()
 
-    def _clone(self, spec: git.CloneSpec) -> None:
+    def _clone_lines(self, spec: git.CloneSpec, stage: str) -> Iterator[str]:
+        """Clone through the seam, relaying whatever git says while it works (T35).
+
+        A generator rather than the plain call it replaced, because the clone is
+        the first stage of an install that takes minutes on a large repository
+        and said one sentence for the whole of it. `git.clone_lines()` decides
+        whether the seam behind this can talk — a plain function cannot, and
+        every test's clone double is one, so those runs are exactly as silent as
+        they were.
+
+        `stage` is this stage's own name, which the body cannot know: it is
+        bound by the FAMILY in its `Stage` tuple, and it rides into the progress
+        line so the header strip attributes the reading to the stage the user
+        can see in `--- <name>`.
+        """
         try:
-            self._seams.clone(spec)
+            yield from git.clone_lines(self._seams.clone, spec, stage=stage)
         except git.GitError as exc:
             raise InstallerError(f"Cloning {spec.url} failed: {exc}") from exc
 
@@ -5155,6 +5173,7 @@ class StagedInstaller:
         call: Callable[[docker.OutputSink], docker.AttachedRun],
         *,
         cancel: threading.Event | None,
+        stage: str,
     ) -> Generator[str, None, docker.AttachedRun]:
         """Turn a push-style docker call into yielded lines, without buffering the run.
 
@@ -5170,24 +5189,35 @@ class StagedInstaller:
         reason `_check_run()` gives about its own note: a default here is the
         shape of the mistake, because the call site that forgets it is exactly
         the one whose worker is left running.
+
+        **Everything that comes through here is a subprocess talking**, which is
+        what makes this the place to mark it (T35). The panel dims tool output
+        and moves its strip on a number in it, and the engine's OWN sentences —
+        which the stage bodies `yield` directly, never through this queue — stay
+        unmarked. Marked on the sink rather than on the way out for the reason
+        `cmangos._stream()` must: that bridge carries both kinds on one queue,
+        and the two have to be distinguishable somewhere.
+
+        `stage` names the activity for the progress line's field; see
+        `lines.relayed()`.
         """
-        lines: queue.Queue[str | None] = queue.Queue()
+        queued: queue.Queue[str | None] = queue.Queue()
         outcome: list[docker.AttachedRun] = []
         failure: list[BaseException] = []
 
         def work() -> None:
             try:
-                outcome.append(call(lines.put))
+                outcome.append(call(lambda line: _put_all(queued, line, stage)))
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
                 failure.append(exc)
             finally:
-                lines.put(None)
+                queued.put(None)
 
         worker = threading.Thread(target=work, daemon=True, name="yulon-install-output")
         worker.start()
         try:
             while True:
-                item = lines.get()
+                item = queued.get()
                 if item is None:
                     break
                 yield item
@@ -5299,6 +5329,18 @@ the extraction has left. The number is read from `runner` rather than typed
 here a second time: `_SHUTDOWN_TIMEOUT_SECONDS` answers the same question one
 layer down, and `test_spine.py` pins that the two agree.
 """
+
+
+def _put_all(queued: queue.Queue[str | None], line: str, stage: str) -> None:
+    """Push every record `lines.relayed()` makes of one relayed line onto the bridge.
+
+    A named function and not a lambda because a relayed line is now one OR two
+    records — the line itself, and the reading taken out of it — and a
+    comprehension inside a lambda reads as a trick where this reads as what it
+    is. `cmangos._stream()` has the same two lines for the same reason.
+    """
+    for record in lines.relayed(line, stage=stage):
+        queued.put(record)
 
 
 def stop_abandoned_worker(

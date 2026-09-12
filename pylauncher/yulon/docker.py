@@ -32,6 +32,7 @@ from typing import IO, BinaryIO, Literal
 
 from yulon import platform, runner, wsl
 from yulon.log import get_logger
+from yulon.ui import lines
 
 logger = get_logger(__name__)
 
@@ -3066,7 +3067,14 @@ def follow_logs(container: str, tail: int = 200, *, wsl_distro: str | None = Non
     try:
         for line in runner.stream([*prefix, "logs", "-f", "--tail", str(tail), container]):
             recent.append(line)
-            yield line
+            # MARKED AS TOOL OUTPUT (T35), because that is exactly what it is:
+            # the worldserver's own log, relayed. The Console tab is the same
+            # `LogPanel` the install uses, and the panel strips the marker out
+            # of `text()` — so what changes is only the weight it is drawn at,
+            # and the tab stops looking like the app is saying these things.
+            # `recent` keeps the UNMARKED line, because it is read by
+            # `wsl.missing_distro_problem()` and not by a reader.
+            yield from lines.relayed(line, stage="console")
     except subprocess.CalledProcessError as exc:
         # The streaming half of what `_run()` does for buffered calls. Without
         # it the Console tab showed wsl.exe's UTF-16 complaint as NUL-riddled

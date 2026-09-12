@@ -1,0 +1,16 @@
+tortoise-test removed: True
+start pressed 2026-09-12T03:50:08.2268708+02:00
+world ready after ~310 s: False
+ac-database Up 15 minutes (healthy)
+chose [Start] at 694,1032 45x48
+start pressed 2026-09-12T03:56:22.6936273+02:00
+world ready after ~340 s: False
+ac-database Up 5 minutes (healthy)
+ac-authserver Up 5 minutes
+ac-worldserver Up 5 minutes
+chose [WoW WotLK - wow-server-playerbots] at 484,150 230x24
+invoked at 2026-09-12T03:56:06.4680018+02:00
+chose [Server] at 430,185 56x24
+invoked at 2026-09-12T03:56:14.0966424+02:00
+chose [Start] at 441,426 281x26
+invoked at 2026-09-12T03:56:21.4440811+02:00

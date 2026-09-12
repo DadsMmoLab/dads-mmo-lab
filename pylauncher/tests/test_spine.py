@@ -48,6 +48,7 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+from yulon.ui import lines as log_lines
 
 ORDER = ("clone-sources", "build", "import", "up")
 CANARY = "hunter2-a2-canary"
@@ -1704,11 +1705,18 @@ def test_an_unfillable_ready_marker_is_a_sentence_not_a_traceback() -> None:
 def test_pumped_output_arrives_in_order_and_before_the_stage_ends(
     tmp_path: Path,
 ) -> None:
-    """`_pump` streams a push-style docker call; nothing is collected into a list first."""
+    """`_pump` streams a push-style docker call; nothing is collected into a list first.
+
+    The compiler's line is marked as tool output since T35 and the engine's own
+    two sentences around it are not, which is the ordering AND the distinction
+    in one assertion: `--- build` is the spine's marker, `compiling` is the
+    build talking, `The build finished.` is the engine again.
+    """
     rec = Recorder(images=False)
     lines = install(rec, tmp_path / "wow")
-    assert lines.index("compiling") < lines.index("The build finished.")
-    assert lines.index("--- build") < lines.index("compiling")
+    compiling = log_lines.TOOL + "compiling"
+    assert lines.index(compiling) < lines.index("The build finished.")
+    assert lines.index("--- build") < lines.index(compiling)
 
 
 # -- SELinux ----------------------------------------------------------------
@@ -3288,8 +3296,8 @@ def test_abandoning_the_pump_stops_its_worker_with_no_cancel_from_the_caller() -
         assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
         return docker.AttachedRun(0, ("built",))
 
-    generator = _pumping(Recorder())._pump(call, cancel=cancel)
-    assert next(generator) == "building"
+    generator = _pumping(Recorder())._pump(call, cancel=cancel, stage="build")
+    assert next(generator) == log_lines.TOOL + "building"
     assert PUMP_THREAD in _live_pump_workers(), "the worker should be running at this point"
 
     generator.close()
@@ -3316,7 +3324,9 @@ def test_finishing_the_pump_normally_does_not_set_the_cancel_event() -> None:
         sink("building")
         return docker.AttachedRun(0, ("built",))
 
-    assert list(_pumping(Recorder())._pump(call, cancel=cancel)) == ["building"]
+    assert list(_pumping(Recorder())._pump(call, cancel=cancel, stage="build")) == [
+        log_lines.TOOL + "building"  # marked as a subprocess's line since T35
+    ]
     assert not cancel.is_set()
 
 
@@ -3411,8 +3421,8 @@ def test_an_interrupt_thrown_into_the_pump_stops_its_worker_too() -> None:
         assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
         return docker.AttachedRun(0, ("built",))
 
-    generator = _pumping(Recorder())._pump(call, cancel=cancel)
-    assert next(generator) == "building"
+    generator = _pumping(Recorder())._pump(call, cancel=cancel, stage="build")
+    assert next(generator) == log_lines.TOOL + "building"
     try:
         with pytest.raises(KeyboardInterrupt):
             generator.throw(KeyboardInterrupt())
@@ -3446,8 +3456,8 @@ def test_abandoning_the_pump_with_no_cancel_event_leaves_the_worker_and_says_so(
         assert release.wait(HANG_BOUND), "the test never released the worker"
         return docker.AttachedRun(0, ("built",))
 
-    generator = _pumping(Recorder())._pump(call, cancel=None)
-    assert next(generator) == "building"
+    generator = _pumping(Recorder())._pump(call, cancel=None, stage="build")
+    assert next(generator) == log_lines.TOOL + "building"
     try:
         with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
             started = time.monotonic()
@@ -3496,3 +3506,119 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
     runs this audit, not only here.
     """
     assert spelled_bounds(__file__) == {"HANG_BOUND", "time.monotonic()"}
+
+
+def test_the_tail_a_refusal_quotes_is_never_marked(tmp_path: Path) -> None:
+    """T35 marks what the PANEL shows, and a refusal is a sentence, not a panel line.
+
+    `run_attached()` keeps a bounded tail for the failure message and appends to
+    it BEFORE handing the line to the sink, so the marking `_pump()` does cannot
+    reach it. That separation is what keeps "its last words were: …" readable: a
+    control character inside a `QLabel`'s sentence is a box glyph, and the same
+    sentence goes into `yulon.log`.
+
+    Mutation: mark inside `run_attached()`'s relay loop before `tail.append()`
+    and the refusal below carries `\\x1etool ` in the middle of it.
+    """
+    engine = _pumping(Recorder())
+    failed = docker.AttachedRun(1, ("cmake: error: no such file",))
+    got: list[docker.AttachedRun] = []
+
+    def call(sink: docker.OutputSink) -> docker.AttachedRun:
+        sink("cmake: error: no such file")
+        return failed
+
+    def drive() -> Iterator[str]:
+        got.append((yield from engine._pump(call, cancel=None, stage="build")))
+
+    pumped = list(drive())
+    assert pumped == [log_lines.TOOL + "cmake: error: no such file"]
+    assert got == [failed]
+    with pytest.raises(InstallerError) as raised:
+        engine._check_run(got[0], "the build", None, "nothing was kept")
+    assert "\x1e" not in str(raised.value)
+    assert "cmake: error: no such file" in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# T35 point 5: nothing greppable moved. The two line shapes below are matched by
+# gate scripts, by log captures and by the interrupted-import watchers -- 7.2's
+# `finished-watcher.sh` greps `^--- \|^Step `, and 7.4c's `watch_74c.py` greps
+# `^--- import\s*$`, which also forbids anything after the stage's name.
+
+STEP_SHAPE = "Step {} of {} ({}%): {}"
+MARKER_SHAPE = "--- {}"
+"""The two formats the spine yields, pinned as the templates they are written as.
+
+Pinned rather than described, because every reader of them is outside this
+repository's test suite: a shell script on a gate box, a watcher parsing a log
+file three days after the install, the owner grepping a transcript. None of
+those fails a test when the format moves -- they just quietly stop matching, and
+one run WAS missed that way on 2026-09-03 by a watcher armed for a stage it
+could no longer see (`_staged()`'s own docstring records it).
+"""
+
+
+def _yielded_templates(module: object) -> list[str]:
+    """Every f-string this module yields, as `{}`-for-each-field templates.
+
+    Over the syntax tree and not over the text: the step line is written as two
+    adjacent f-strings, which is one `ast.JoinedStr` and two different greps.
+    """
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))  # type: ignore[attr-defined]
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Yield) or not isinstance(node.value, ast.JoinedStr):
+            continue
+        found.append(
+            "".join(
+                part.value if isinstance(part, ast.Constant) else "{}" for part in node.value.values
+            )
+        )
+    return found
+
+
+def test_the_two_greppable_shapes_are_yielded_exactly_once_each_and_unchanged() -> None:
+    """The formats are byte-identical to what they were, and there is one of each.
+
+    One of each is half the claim: `_staged()` is "the ONE progress reporter",
+    and the reason it was extracted from `run()` is that a second loop printing
+    a nearly identical marker is a second place for the format to drift.
+
+    Mutation: add a field to either template -- `f"--- {stage.name} ({number})"`
+    is the tempting one -- and this fails naming the new shape.
+    """
+    templates = _yielded_templates(native)
+    steps = [one for one in templates if one.startswith("Step ")]
+    markers = [one for one in templates if one.startswith("--- ")]
+    assert steps == [STEP_SHAPE]
+    assert markers == [MARKER_SHAPE]
+
+
+def test_a_real_run_writes_those_two_shapes_and_no_marker_ever_carries_a_prefix(
+    tmp_path: Path,
+) -> None:
+    """The other direction: what a run actually writes, asserted against the greppers.
+
+    `^--- import\\s*$` is 7.4c's watcher, so the marker has to be the stage's
+    name and NOTHING after it -- T35's markers included. The step line is
+    matched by `^Step ` and read by eye.
+
+    Mutation: prefix the spine's own lines with `lines.TOOL` (the change T35 did
+    not make) and every assertion here fails at once.
+    """
+    rec = Recorder(images=False)
+    written = install(rec, tmp_path / "wow")
+
+    steps = [line for line in written if line.startswith("Step ")]
+    markers = [line for line in written if line.startswith("--- ")]
+    assert steps and markers
+    for line in steps:
+        assert re.fullmatch(r"Step \d+ of \d+ \(\d+%\): \S+", line), line
+    for line in markers:
+        assert re.fullmatch(r"--- \S+", line), line
+    assert not any("\x1e" in line for line in steps + markers)
+    # And the spine's own shapes still classify as what the panel draws them as.
+    assert {log_lines.parse(line).kind for line in steps} == {"stage"}
+    assert {log_lines.parse(line).kind for line in markers} == {"marker"}
+    assert [log_lines.parse(line).text for line in steps + markers] == steps + markers

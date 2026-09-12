@@ -52,3 +52,10 @@ pylauncher/tests/fixtures/cmangos-vmap-8ec338a1/**            text eol=lf
 # the CRLF copy is the one a Windows checkout puts in front of the owner, and
 # he is the person who posts it.
 pyplan/upstream-cmangos-doodad-issue.md                       text eol=lf
+
+# A RECORDING, not a text file: it is git's own `clone --progress` stderr, kept
+# for the carriage returns. `runner.stream_progress()` exists because git ends
+# each progress update with `\r` and not `\n`, and the test that proves the
+# split reads these bytes -- so a checkout that normalised them would leave the
+# fixture asserting the opposite of what it was recorded for.
+pylauncher/tests/fixtures/git-clone-progress.stderr           -text

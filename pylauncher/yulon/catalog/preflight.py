@@ -192,7 +192,7 @@ def gather(
     """
     here = platform_id()
     ready = docker_ready()
-    free = disk_free if disk_free is not None else _free_bytes
+    free = disk_free if disk_free is not None else free_bytes
     facts_vm = vm_resources() if ready else None
     root = data_root() if ready else None
     root_free = free(root) if root is not None else None
@@ -252,7 +252,7 @@ def gather(
     # can is `port_conflicts()`, and it runs last either way. The hoist is right
     # for the order it produces; it was never right for that reason.
     bind = probe(server_dir) if ready else None
-    spec = _client_spec(entry)
+    spec = client_spec_for(entry)
     client_checks: tuple[Check, ...] = ()
     client_bind: bool | None = None
     if spec is not None:
@@ -294,11 +294,14 @@ def _default_bind_probe(server_dir: Path) -> bool | None:
     return docker.bind_mount_ok(server_dir, PROBE_IMAGE)
 
 
-def _client_spec(entry: CatalogEntry) -> ClientSpec | None:
+def client_spec_for(entry: CatalogEntry) -> ClientSpec | None:
     """The entry's client rules, if its family block has any; AzerothCore's has none.
 
     The one place that decides whether this install reads a client at all, so
     `gather()` and `evaluate()` cannot come to different conclusions about it.
+    Public (T36) so a caller outside a fresh install — the Server tab's
+    "Set/Change client folder…" — can validate a folder against the same
+    rules without re-deriving them.
     """
     native = entry.install.native
     if native is None or native.cmangos is None:
@@ -339,12 +342,16 @@ def _default_conflicts(
     return lambda: docker.foreign_port_conflicts(spec, project)
 
 
-def _free_bytes(path: Path) -> int | None:
+def free_bytes(path: Path) -> int | None:
     """Free space on the volume holding `path`, or None if it cannot be asked.
 
     Walks up to the first directory that exists, because the folder being
     installed into is routinely one the user has not created yet — asking about
     a path that is not there answers "unchecked" for a machine with 900 GB free.
+
+    Public (T36) so a caller outside `gather()` — the Server tab's client-folder
+    press — can hand `families/clientdir.py`'s `validate()` the same free-space
+    reading rather than a second implementation of this walk.
     """
     probe = path
     while not probe.exists() and probe != probe.parent:
@@ -434,7 +441,7 @@ def evaluate(entry: CatalogEntry, server_dir: Path, facts: Facts) -> Report:
     # unchanged — its `unchecked` rows stay `unchecked`, the way every
     # measurement this module could not take does.
     checks.extend(facts.client_checks)
-    if _client_spec(entry) is not None and not any(
+    if client_spec_for(entry) is not None and not any(
         check.verdict == "refuse" for check in facts.client_checks
     ):
         # Only when the folder itself survived: a mount test on something that

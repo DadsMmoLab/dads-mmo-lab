@@ -463,6 +463,17 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # flagged phase is missing both seams together or neither, and a day
         # when one is offered without the other is a real gap.
         unadoptable = set() if native.update_phases(entry) else {"adopt"}
+        # T36's client-folder controls, absent here for EVERY game including
+        # the reference -- and for a different kind of reason than the ones
+        # above. `client_dir` and `set_client_dir` are not a per-game
+        # capability a manifest or a catalog block measures; `set_client_dir`
+        # is bound by `main.py` after the fact, over the one live `AppState` a
+        # running window holds, and `client_dir` only ever carries something
+        # when a caller passes one in. `ControllerServices.for_entry()` built
+        # directly, the way this test and the CLI harness do, has neither a
+        # window to bind the write seam into nor a folder to report, so both
+        # read `None` here regardless of which game's entry this loop is on.
+        unwindowed = {"client_dir", "set_client_dir"}
         allowed = (
             unstocked
             | unmeasured
@@ -476,9 +487,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | uncounted
             | unupdatable
             | unadoptable
+            | unwindowed
         )
         if game == "wow-wotlk":
-            reference = unprobed | unupdatable | unadoptable
+            reference = unprobed | unupdatable | unadoptable | unwindowed
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"
