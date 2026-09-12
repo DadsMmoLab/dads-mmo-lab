@@ -74,7 +74,7 @@ def validate(
     of a folder that is not a client would bury the one line that matters.
 
     `free_bytes` is a seam and not `shutil.disk_usage` so the whole table is
-    testable on a `tmp_path`; preflight passes its own `_free_bytes`.
+    testable on a `tmp_path`; preflight passes its own `free_bytes()`.
     """
     if client_dir is None:
         return (

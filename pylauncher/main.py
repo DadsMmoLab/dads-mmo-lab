@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -349,6 +350,38 @@ def build_window() -> object:
 
         return forget
 
+    def _remember_client_live(game: str, server_dir: Path) -> Callable[[Path | None], None]:
+        """`state.remember()` over the window's own live `AppState` (T36).
+
+        The same shape as `_forget_live_record()` above, for the same reason:
+        `ControllerServices.set_client_dir` is the ONE write path a running
+        tab has, and the record it writes into is this closure's, not a fresh
+        `load_state()` that would undo whatever else the session has
+        remembered since.
+
+        `KnownInstall` is a frozen pydantic model rather than a stdlib
+        dataclass, so the replacement is `model_copy(update=...)`, not
+        `dataclasses.replace()` — the two do the same job here.
+        """
+        from yulon.state import save_state
+
+        def set_client_dir(client_dir: Path | None) -> None:
+            install = state.find(game, server_dir)
+            if install is None:
+                return
+            state.remember(install.model_copy(update={"client_dir": client_dir}))
+            try:
+                save_state(state)
+            except OSError:
+                # Restores the WHOLE previous record, `wsl_distro` included —
+                # the point of holding `install` rather than re-deriving a
+                # `KnownInstall` from just `game`/`server_dir`/`client_dir`
+                # would drop it (review pattern, T34 round 2).
+                state.remember(install)
+                raise
+
+        return set_client_dir
+
     def on_uninstalled(game: str, server_dir: object) -> None:
         """An install is gone (8.9a): drop its tab, and recompute its Catalog tile.
 
@@ -377,6 +410,29 @@ def build_window() -> object:
             # title longer than it needs to be.
             retitle_controller_tabs(tabs, controllers.values())
         catalog_view.forget_installed(game, state.installed_dirs())
+
+    def on_client_dir_changed(game: str, server_dir: object, client_dir: object) -> None:
+        """This install's client folder was set, changed or cleared (T36): rebuild its tab.
+
+        Not patched: the folder is baked into a dozen seams at construction
+        (`ControllerServices.for_entry()`'s applier, Steam entry), the same
+        reason `add_controller()`'s own docstring gives for rebuilding on a
+        changed WSL distro rather than mutating a live `Controller`. Dropping
+        the old tab and calling `add_controller()` again reaches every one of
+        those seams at once, which patching any one of them in place cannot.
+
+        `wsl_distro` is read back off `state.json` rather than threaded through
+        the signal, because it never changes here — this is a client-folder
+        press, not an adopt — and `add_controller()` needs an argument, not a
+        guess.
+        """
+        sd = Path(str(server_dir))
+        cd = Path(str(client_dir)) if client_dir is not None else None
+        key = (game, sd)
+        if key in controllers:
+            drop_controller(key)
+        known = state.find(game, sd)
+        add_controller(game, sd, cd, known.wsl_distro if known else None)
 
     def add_controller(
         game: str,
@@ -433,6 +489,12 @@ def build_window() -> object:
             drop_controller(key)
         entry = catalog.get(game)
         services = ControllerServices.for_wotlk(entry, server_dir, client_dir, wsl_distro)
+        # T36. Unconditional, unlike `uninstall.forget` below: the row is
+        # offered on every game's tab (WotLK's client is unread by AzerothCore
+        # but still a host path a manifest's `client` step or the Steam entry
+        # can use), so every tab built through this closure gets the live
+        # write seam rather than only the two families 8.9a gates.
+        services.set_client_dir = _remember_client_live(game, server_dir)
         if services.uninstall is not None:
             # 8.9a. The record is the LAST thing an uninstall forgets, and in a
             # running window "the record" is this closure's live `AppState` -
@@ -449,6 +511,7 @@ def build_window() -> object:
             services.uninstall.forget = _forget_live_record(game, server_dir)
         view = ControllerView(entry, services)
         view.uninstalled.connect(on_uninstalled)
+        view.client_dir_changed.connect(on_client_dir_changed)
         # Every failure this view reports also lands in the app log. Each one is
         # already shown on its own tab, but the log is what a user pastes into a
         # bug report, and until now none of them reached it (review, 2026-08-22).

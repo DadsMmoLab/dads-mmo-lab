@@ -1,0 +1,7 @@
+[TabItem/Modules] hits: 1 -> Modules
+chose [Modules] at 847,185 70x24
+invoked at 2026-09-12T03:07:15.9699119+02:00
+[Button/*] hits: 50 -> Start | Search | Search - California sea lions | Task View | File Explorer pinned | Microsoft Edge pinned | Docker Desktop - 1 running window | yulon.exe - 1 running window | Terminal - 1 running window | Show Hidden Icons | Network Network 2
+Internet access | Volume No audio device is installed | Clock 3:07 AM
+?9/?12/?2026 | Show Desktop | Close Tab | Vertical Small Decrease | Vertical Large Decrease | Vertical Large Increase | Vertical Small Increase | Install selected | Remove selected | Apply module SQL | Check for updates | Install from link. | Install from folder. | Rebuild the server. | Apply pending database updates. | Adopt as imported. | Stop | Search Ctrl+K | Troubleshoot | Notifications | Learning center | Settings | open app switcher | Sign in |  |  | Close window | collapse sidebar | Show charts | Open containers toolbar | expand | Ask Gordon | Stop | Show container actions | Delete | Pause |  | Version 4.90.0 is ready to install
+NOT FOUND [*] index 999

@@ -100,30 +100,22 @@ class WarcraftRealmBadge(QWidget):
         """Update the displayed status with appropriate gem lighting and text."""
         self._status = status.lower()
         if self._status in ("running", "online", "ready", "up"):
-            bg_color = (
-                "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E824C, stop:1 #145A32)"
-            )
+            bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E824C, stop:1 #145A32)"
             border_color = COLOR_UNCOMMON
             text_color = "#E8F8F5"
             display_text = "● REALM ONLINE"
         elif self._status in ("starting", "importing", "working", "building"):
-            bg_color = (
-                "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B7950B, stop:1 #7D6608)"
-            )
+            bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B7950B, stop:1 #7D6608)"
             border_color = COLOR_GOLD_BRIGHT
             text_color = COLOR_GOLD_LIGHT
             display_text = "◈ STARTING / BUSY"
         elif self._status in ("restarting", "loop"):
-            bg_color = (
-                "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1B4F72, stop:1 #154360)"
-            )
+            bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1B4F72, stop:1 #154360)"
             border_color = COLOR_RARE
             text_color = "#EBF5FB"
             display_text = "◆ RESTARTING"
         else:
-            bg_color = (
-                "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2C2C34, stop:1 #1A1A20)"
-            )
+            bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2C2C34, stop:1 #1A1A20)"
             border_color = "#555560"
             text_color = "#A0A0AA"
             display_text = "○ REALM OFFLINE"

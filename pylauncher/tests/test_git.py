@@ -15,13 +15,16 @@ case it was wrong about was a mock. Both run against local repositories only:
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from yulon import git, runner
 from yulon.catalog import native
+from yulon.ui import lines
 
 
 def _completed(
@@ -1509,3 +1512,242 @@ def test_the_behind_figure_equals_the_same_range_run_by_hand(tmp_path: Path) -> 
     # And the guard's question still answers its own: nothing of the user's is
     # in the way of an update that is two commits ahead of this checkout.
     assert impl.no_local_commits(dest, "main") is True
+
+
+# ---------------------------------------------------------------------------
+# T35: the clone says what it is doing while it does it.
+
+GIT_PROGRESS = Path(__file__).parent / "fixtures" / "git-clone-progress.stderr"
+"""The recording `test_runner.py` documents: a real `git clone --progress` stderr."""
+
+
+@pytest.fixture
+def streamed(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Serve the recorded clone through `runner.stream_progress`; record every argv."""
+    calls: list[list[str]] = []
+    fragments = [
+        piece for piece in re.split(r"[\r\n]", GIT_PROGRESS.read_text(encoding="utf-8")) if piece
+    ]
+
+    def fake(argv: list[str], cwd: Path | None = None, env: object = None) -> Iterator[str]:
+        # A GENERATOR, not `iter(list)`: the real `stream_progress()` returns
+        # one and `_streamed_git()` closes it, which is how a clone abandoned
+        # mid-stream ends its child. A list iterator has no `close()` and would
+        # let that requirement pass unasserted.
+        calls.append(argv)
+        yield from fragments
+
+    monkeypatch.setattr(runner, "stream_progress", fake)
+    return calls
+
+
+def _parsed(said: list[str]) -> list[lines.Parsed]:
+    return [lines.parse(line) for line in said]
+
+
+def test_clone_lines_turns_gits_progress_into_progress_lines(
+    streamed: list[list[str]], seen: list[list[str]], tmp_path: Path
+) -> None:
+    """Every reading git printed reaches the panel as a `PROGRESS` line with its percent.
+
+    The four phases named are the four git reports a percentage for. Everything
+    else it says — `Cloning into 'repo'...`, `remote: Enumerating objects` —
+    comes through as `TOOL`, because it is a subprocess talking and the panel
+    dims it rather than dropping it.
+
+    Mutation: yield the fragments as `TOOL` without asking for a percent, and
+    `progress` below is empty while `tool` holds all 216 fragments — a strip
+    that never moves and a panel back to a torrent.
+    """
+    dest = tmp_path / "core"
+    said = list(git.RunnerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=dest)))
+
+    kinds = _parsed(said)
+    progress = [one for one in kinds if one.kind == "progress"]
+    receiving = [one.percent for one in progress if one.text.startswith("Receiving objects")]
+    assert receiving[0] == 0 and receiving[-1] == 100
+    assert len(receiving) > 50
+    assert {one.stage for one in progress} == {"clone"}
+    tool = [one for one in kinds if one.kind == "tool"]
+    assert "Cloning into 'repo'..." in [one.text for one in tool]
+    assert len(progress) + len(tool) == len(said), "a fragment came through as neither"
+
+
+def test_clone_lines_asks_git_for_progress_it_would_not_print_to_a_pipe(
+    streamed: list[list[str]], seen: list[list[str]], tmp_path: Path
+) -> None:
+    """`--progress`, or there is nothing to stream.
+
+    Git suppresses its progress output when stderr is not a terminal, and a
+    pipe never is. Measured while T35's fixture was recorded: the same clone
+    without the flag wrote `Cloning into 'repo'...` and nothing else.
+
+    Mutation: drop `--progress` from the argv and this fails while every other
+    test here still passes, because the fixture is served regardless.
+    """
+    dest = tmp_path / "core"
+    list(git.RunnerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=dest)))
+    assert streamed, "the clone did not go through stream_progress at all"
+    assert "--progress" in streamed[0]
+    assert "clone" in streamed[0]
+
+
+def test_clone_lines_streams_the_update_of_a_checkout_that_is_already_there(
+    streamed: list[list[str]], seen: list[list[str]], tmp_path: Path
+) -> None:
+    """A resumed install fetches, and a fetch has the same progress a clone does.
+
+    Mutation: leave `_update()` on `runner.run` and a resume goes silent again
+    for the whole fetch.
+    """
+    dest = tmp_path / "core"
+    (dest / ".git").mkdir(parents=True)
+    said = list(git.RunnerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=dest)))
+    assert streamed and "fetch" in streamed[0] and "--progress" in streamed[0]
+    assert any(lines.parse(line).kind == "progress" for line in said)
+
+
+def test_clone_lines_leaves_the_sparse_path_alone(
+    streamed: list[list[str]], seen: list[list[str]], tmp_path: Path
+) -> None:
+    """The sparse clone builds its repository by hand and is not one command to stream.
+
+    `_sparse_clone()` runs eight `git` calls of which one is a `pull`, and the
+    checkout it produces is compared byte for byte against `ContainerGit`'s by
+    `test_a_sparse_clone_checks_out_the_same_tree_either_way`. T35 does not
+    touch it: the guide and keg repos are small and the silence is seconds.
+
+    Mutation: route the sparse path through `stream_progress()` too and
+    `streamed` is no longer empty, which this refuses.
+    """
+    dest = tmp_path / "guide"
+    said = list(
+        git.RunnerGit().clone_lines(
+            git.CloneSpec(url="https://x/y.git", dest=dest, sparse_path="guides/x")
+        )
+    )
+    assert streamed == [], "the sparse path was streamed"
+    assert said == []
+    assert any("sparse-checkout" in " ".join(argv) or "pull" in argv for argv in seen)
+
+
+def test_a_seam_that_cannot_stream_still_clones_and_says_nothing(tmp_path: Path) -> None:
+    """The fallback that kept every existing `Git` fake valid without an edit.
+
+    Dozens of tests hand the install engine a clone seam that is one function
+    of a `CloneSpec`. `git.clone_lines()` is what the engine calls, and against
+    such a seam it does exactly what the engine used to do — clone, and yield
+    nothing.
+
+    Mutation: drop the fallback and every one of those tests fails with
+    `AttributeError: 'function' object has no attribute 'clone_lines'`.
+    """
+    cloned: list[git.CloneSpec] = []
+    spec = git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core")
+
+    assert list(git.clone_lines(cloned.append, spec)) == []
+    assert cloned == [spec]
+
+
+def test_a_seam_that_can_stream_is_streamed(tmp_path: Path) -> None:
+    """And the same call against a real `Git` yields its progress.
+
+    Mutation: always take the fallback and the clone stage is silent in
+    production while every test still passes.
+    """
+    spec = git.CloneSpec(url="https://x/y.git", dest=tmp_path / "core")
+
+    class _Streaming:
+        def clone(self, spec: git.CloneSpec) -> None:
+            raise AssertionError("the streaming path must not fall back")
+
+        def clone_lines(self, spec: git.CloneSpec, *, stage: str = "clone") -> Iterator[str]:
+            yield lines.PROGRESS + f"{stage} 42 Receiving objects"
+
+    got = list(git.clone_lines(_Streaming().clone, spec, stage="clone-core"))
+    assert got == [lines.PROGRESS + "clone-core 42 Receiving objects"]
+
+
+def test_the_containerized_clone_streams_the_same_container_the_buffered_one_runs(
+    streamed: list[list[str]],
+    seen: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`docker run` hands the container's stderr to the client's, so the same split works.
+
+    What is asserted is that the STREAMED path runs the argv `_capture()`
+    builds — same image, same mount, same working directory, same untrusted
+    flags — with `--progress` added, and that git's readings come back as
+    `PROGRESS` lines. The container is the one two hundred lines of
+    `_capture()` justify, and a streamed clone through a different one would be
+    a second security posture nobody reviewed.
+
+    Mutation: build the argv here instead of calling `_argv()` and the mount
+    assertion below fails; drop `--progress` and the percents go with it.
+    """
+    monkeypatch.setattr(git.platform, "docker_program", lambda: "docker")
+    monkeypatch.setattr(git.platform, "selinux_enforcing", lambda: False)
+    monkeypatch.setattr(git.platform, "filesystem_type", lambda _p: "ext4")
+    dest = tmp_path / "core"
+    said = list(git.ContainerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=dest)))
+
+    assert streamed, "the containerized clone did not reach stream_progress"
+    argv = streamed[0]
+    assert argv[:3] == ["docker", "run", "--rm"]
+    assert f"{dest}:/git" in argv and "-w" in argv and "/git" in argv
+    assert git._CONTAINER_GIT_IMAGE in argv
+    assert "--progress" in argv
+    receiving = [
+        parsed.percent
+        for parsed in _parsed(said)
+        if parsed.kind == "progress" and parsed.text.startswith("Receiving objects")
+    ]
+    assert receiving[0] == 0 and receiving[-1] == 100
+
+
+def test_no_streamed_git_call_can_run_without_the_no_prompt_environment(
+    monkeypatch: pytest.MonkeyPatch, seen: list[list[str]], tmp_path: Path
+) -> None:
+    """A credential prompt against a pipe is a clone that never ends.
+
+    `_run_git()` has passed `_no_prompt_env()` since the beginning for this
+    reason; the streamed path went without it until the 2026-09-12 review, and
+    the streamed path is the one that runs for minutes. A headless harness has
+    no terminal to type into and no Stop button, so a prompt there is a wait
+    with no end at all.
+
+    Driven through all three streamed routes rather than asserted of
+    `_streamed_git()` alone — the host clone, the host update, and the
+    containerized clone — because what has to hold is that no ROUTE reaches a
+    child without the guard.
+
+    Mutation: drop `env=_no_prompt_env()` from `_streamed_git()` and all three
+    fail; pass the variables to `child_env()`'s caller wrongly (e.g. `env={}`)
+    and they fail naming the missing variable.
+    """
+    monkeypatch.setattr(git.platform, "docker_program", lambda: "docker")
+    monkeypatch.setattr(git.platform, "selinux_enforcing", lambda: False)
+    monkeypatch.setattr(git.platform, "filesystem_type", lambda _p: "ext4")
+    envs: list[dict[str, str] | None] = []
+
+    def fake(argv: list[str], cwd: Path | None = None, env: object = None) -> Iterator[str]:
+        envs.append(env)  # type: ignore[arg-type]
+        yield "Receiving objects:  50% (1/2)"
+
+    monkeypatch.setattr(runner, "stream_progress", fake)
+
+    fresh = tmp_path / "fresh"
+    existing = tmp_path / "existing"
+    (existing / ".git").mkdir(parents=True)
+    containerized = tmp_path / "containerized"
+    list(git.RunnerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=fresh)))
+    list(git.RunnerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=existing)))
+    list(git.ContainerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=containerized)))
+
+    assert len(envs) == 3, "a streamed route did not reach a child"
+    for env in envs:
+        assert env is not None, "a streamed git inherited this process's environment"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_ASKPASS"] == "" and env["SSH_ASKPASS"] == ""
+        assert env["GCM_INTERACTIVE"] == "never"

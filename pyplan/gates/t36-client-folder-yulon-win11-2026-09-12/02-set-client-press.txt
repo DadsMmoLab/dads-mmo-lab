@@ -1,0 +1,81 @@
+2026-09-12T03:00:49.1592329+02:00
+[Button/Set client folder*] hits: 1 -> Set client folder.
+chose [Set client folder.] at 441,308 1140x26
+invoked at 2026-09-12T03:00:31.6406092+02:00
+sent [D:\clients\WoW-WotLK-3.3.5a-min{ENTER}] at 2026-09-12T03:00:42.3319367+02:00
+--- state.json ---
+{
+  "schema_version": 1,
+  "installs": [
+    {
+      "game": "wow-wotlk",
+      "server_dir": "C:\\Users\\pk\\wow-server-playerbots",
+      "client_dir": null,
+      "wsl_distro": null
+    }
+  ]
+}
+--- log ---
+2026-09-12T03:01:46.8700041+02:00
+NOT FOUND edit [Folder*]
+[Button/Select Folder] hits: 0 -> 
+NOT FOUND [Select Folder] index 0
+--- state.json ---
+{
+  "schema_version": 1,
+  "installs": [
+    {
+      "game": "wow-wotlk",
+      "server_dir": "C:\\Users\\pk\\wow-server-playerbots",
+      "client_dir": null,
+      "wsl_distro": null
+    }
+  ]
+}
+--- log ---
+2026-09-12T03:02:39.8967941+02:00
+dialog found: False
+--- state.json ---
+{
+  "schema_version": 1,
+  "installs": [
+    {
+      "game": "wow-wotlk",
+      "server_dir": "C:\\Users\\pk\\wow-server-playerbots",
+      "client_dir": null,
+      "wsl_distro": null
+    }
+  ]
+}
+--- log ---
+2026-09-12T03:03:26.2070404+02:00
+windows:  | C:\WINDOWS\SYSTEM32\cmd.exe | Yu'lon - Dad's MMO Lab launcher 0.8.0-Public | Containers - Docker Desktop | Program Manager
+dialog found: False
+--- state.json client_dir ---
+      "client_dir": null,
+2026-09-12T03:04:10.6492085+02:00
+app child window: Select your 3.3.5a client folder
+windows:  | C:\WINDOWS\SYSTEM32\cmd.exe | Yu'lon - Dad's MMO Lab launcher 0.8.0-Public | Containers - Docker Desktop | Program Manager
+dialog found: True
+dialog controls: ControlType.Button=&Help | ControlType.SplitButton=Details | ControlType.Button=View Slider | ControlType.Button=Organise | ControlType.Button=New folder | ControlType.SplitButton=Name | ControlType.Button=Filter drop-down | ControlType.SplitButton=Date modified | ControlType.Button=Filter drop-down | ControlType.SplitButton=Type | ControlType.Button=Filter drop-down | ControlType
+foreground: True
+typed path into the address bar at 2026-09-12T03:04:02.3517953+02:00
+sent Alt+S (Select Folder) at 2026-09-12T03:04:03.2135947+02:00
+--- state.json client_dir ---
+      "client_dir": null,
+2026-09-12T03:05:04.6963602+02:00
+dialog: True
+select button: False
+--- state.json client_dir ---
+      "client_dir": null,
+2026-09-12T03:05:56.2008429+02:00
+dialog: True
+buttons: [HelpButton]&Help ; [SplitMenuButton]View Slider ; [{7DDC1264-7E4D-4F74-BBC0-D191987C8D0F}]Organise ; [{E44616AD-6DF1-4B94-85A4-E465AE8A19DB}]New folder ; [DropDown]Filter drop-down ; [DropDown]Filter drop-down ; [DropDown]Filter drop-down ; [DropDown]Filter drop-down ; [SearchBoxSearchButton]Search
+no ok button found
+--- state.json client_dir ---
+      "client_dir": null,
+2026-09-12T03:06:45.1856985+02:00
+dialog rect 410,141 625x480
+clicked Select Folder at 860,592 at 2026-09-12T03:06:36.1758660+02:00
+--- state.json client_dir ---
+      "client_dir": "D:\\clients\\WoW-WotLK-3.3.5a-min",

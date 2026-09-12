@@ -234,8 +234,17 @@ def test_warcraft_icon_returns_empty_icon_for_unknown_name(qapp: QApplication) -
 
 
 def test_get_tab_icon_matches_known_tab_names(qapp: QApplication) -> None:
-    for name in ("Catalog", "Server", "Console", "Accounts", "Characters", "Bots",
-                 "Maintenance", "Modules", "Networking"):
+    for name in (
+        "Catalog",
+        "Server",
+        "Console",
+        "Accounts",
+        "Characters",
+        "Bots",
+        "Maintenance",
+        "Modules",
+        "Networking",
+    ):
         icon = get_tab_icon(name)
         assert not icon.isNull(), f"{name} produced a null icon"
 

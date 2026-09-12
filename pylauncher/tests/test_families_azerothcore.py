@@ -58,6 +58,7 @@ from yulon.catalog.installer import (
     cancelled_install_message,
     installer_for,
 )
+from yulon.ui import lines as log_lines
 
 STAGE_NAMES = AzerothCoreInstaller.STAGE_NAMES
 
@@ -323,7 +324,8 @@ def test_a_fresh_install_runs_every_stage_in_order(tmp_path: Path) -> None:
         "query",
         "sql",
     ]
-    assert "compiling" in lines  # the build's output is streamed, not buffered
+    # Marked as the compiler talking since T35; the panel strips it from `text()`.
+    assert log_lines.TOOL + "compiling" in lines  # streamed, not buffered
     state = native.read_state(server_dir, valid=STAGE_NAMES)
     assert state is not None
     assert state.completed == (
@@ -2289,3 +2291,39 @@ def test_a_folder_that_will_not_hold_the_claim_is_refused_before_any_work(
         install(rec, server_dir)
     assert native.STATE_FILE in str(refusal.value)
     assert rec.clones == [], "work started in a folder whose claim could not be written"
+
+
+def test_the_clone_stage_relays_gits_own_progress_under_this_stages_name(
+    tmp_path: Path,
+) -> None:
+    """T35: a seam that can talk is relayed, and the reading carries the stage's name.
+
+    The stage name is not the body's to invent — the family binds it in its
+    `Stage` tuple — so it is threaded into `clone_lines()` and comes back on the
+    progress line. `clone-core` and `clone-modules` are the two this family
+    binds, and both are asserted, because a single name hardcoded in the body
+    would pass a test that only looked at one.
+
+    Mutation: pass a fixed string instead of the stage's own name and the
+    second assertion fails; call `self._seams.clone(spec)` again instead of
+    relaying and no `PROGRESS` line reaches the panel at all.
+    """
+    server_dir = tmp_path / "wow"
+
+    class Talkative:
+        """A clone seam that streams, the way `RunnerGit`/`ContainerGit` do."""
+
+        def clone(self, spec: git.CloneSpec) -> None:
+            (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
+
+        def clone_lines(self, spec: git.CloneSpec, *, stage: str = "clone") -> Iterator[str]:
+            self.clone(spec)
+            yield log_lines.PROGRESS + f"{stage} 42 Receiving objects:  42% (420/1000)"
+
+    rec = Recorder()
+    said = install(rec, server_dir, clone=Talkative().clone)
+
+    progress = [log_lines.parse(line) for line in said if line.startswith(log_lines.PROGRESS)]
+    assert progress, "the clone stage relayed nothing a strip could move on"
+    assert {one.stage for one in progress} == {"clone-core", "clone-modules"}
+    assert {one.percent for one in progress} == {42}

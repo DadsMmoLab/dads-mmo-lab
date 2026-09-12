@@ -88,6 +88,7 @@ from yulon.catalog.native import (
     Stage,
     StageContext,
     StagedInstaller,
+    _put_all,
     import_reads_as_finished,
     rerunnable_phases,
     secret_token_name,
@@ -950,6 +951,7 @@ class CmangosInstaller(StagedInstaller):
                 selinux_enforcing=self._seams.ask_selinux,
             ),
             cancel=ctx.cancel,
+            stage="extract",
         )
         self._check_cancel(ctx.cancel)
         # Option C of `pyplan/upstream-cmangos-doodad-drop.md`, built as the
@@ -1027,6 +1029,7 @@ class CmangosInstaller(StagedInstaller):
                 cancel=ctx.cancel,
             ),
             cancel=ctx.cancel,
+            stage="mmaps",
         )
         self._check_cancel(ctx.cancel)
         yield "Map generation finished."
@@ -1243,6 +1246,7 @@ class CmangosInstaller(StagedInstaller):
                 cancel=ctx.cancel,
             ),
             cancel=ctx.cancel,
+            stage="import",
         )
         self._check_cancel(ctx.cancel)
         try:
@@ -1492,6 +1496,7 @@ class CmangosInstaller(StagedInstaller):
                 cancel_note=RERUN_CANCEL_NOTE,
             ),
             cancel=ctx.cancel,
+            stage="rerun-sql",
         )
         self._check_cancel(ctx.cancel)
         try:
@@ -2030,7 +2035,11 @@ class CmangosInstaller(StagedInstaller):
         return tuple(platform.container_user_args(platform_id=ask))
 
     def _stream(
-        self, call: Callable[[docker.OutputSink], Iterator[str]], *, cancel: threading.Event | None
+        self,
+        call: Callable[[docker.OutputSink], Iterator[str]],
+        *,
+        cancel: threading.Event | None,
+        stage: str,
     ) -> Iterator[str]:
         """Run a stage-kind generator that ALSO takes a sink, and yield both streams live.
 
@@ -2051,24 +2060,34 @@ class CmangosInstaller(StagedInstaller):
         nothing at all. `stop_abandoned_worker()` now does it here, where the
         abandonment is, so a reorder up in the panel is no longer the only
         thing between an extraction and running forever.
+
+        **The sink is marked and the generator's own lines are not** (T35), and
+        this bridge is why the marking happens on the sink rather than on the
+        way out of the queue: the two kinds travel together here. What
+        `extract.run_plan()` pushes into the sink is the extractor's own output
+        — the 97 minutes of `[Map 230] Building tile [32,32] (08 / 12)` the T30
+        install wrote — and what it YIELDS is the app's own sentences about what
+        it is doing. They must not arrive looking alike, which is the report
+        this came from. `stage` names the activity for the progress line's
+        field; see `lines.relayed()`.
         """
-        lines: queue.Queue[str | None] = queue.Queue()
+        queued: queue.Queue[str | None] = queue.Queue()
         failure: list[BaseException] = []
 
         def work() -> None:
             try:
-                for line in call(lines.put):
-                    lines.put(line)
+                for line in call(lambda pushed: _put_all(queued, pushed, stage)):
+                    queued.put(line)
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
                 failure.append(exc)
             finally:
-                lines.put(None)
+                queued.put(None)
 
         worker = threading.Thread(target=work, daemon=True, name="yulon-cmangos-output")
         worker.start()
         try:
             while True:
-                item = lines.get()
+                item = queued.get()
                 if item is None:
                     break
                 yield item

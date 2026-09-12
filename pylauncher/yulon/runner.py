@@ -35,6 +35,17 @@ logger = get_logger(__name__)
 _SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
+_AnyPopen = subprocess.Popen[str] | subprocess.Popen[bytes]
+"""A child of either shape, because the two streaming entry points differ there.
+
+`stream()` reads text pipes; `stream_progress()` reads BINARY ones, so that
+universal-newline translation cannot rewrite git's carriage returns before the
+split sees them. Everything the registry and the teardown do to a child —
+`poll()`, `terminate()`, `wait()`, `kill()` — is the same for both, so they
+share one registry rather than each keeping half of it.
+"""
+
+
 class _Child:
     """What the exit hook needs from a `stream()` it cannot close: the process it started.
 
@@ -53,7 +64,7 @@ class _Child:
     __slots__ = ("proc", "started_on")
 
     def __init__(self) -> None:
-        self.proc: subprocess.Popen[str] | None = None
+        self.proc: _AnyPopen | None = None
         self.started_on: int | None = None
 
 
@@ -74,7 +85,7 @@ def _register(generator: Generator[str, None, None], child: _Child) -> None:
         _LIVE_STREAMS[generator] = child
 
 
-def _end_child(proc: subprocess.Popen[str]) -> None:
+def _end_child(proc: _AnyPopen) -> None:
     """Terminate `proc` if it is still running, and kill it if terminate is not enough."""
     if proc.poll() is None:
         proc.terminate()
@@ -161,7 +172,7 @@ def _close_abandoned_streams() -> None:
 atexit.register(_close_abandoned_streams)
 
 
-def _still_running(proc: subprocess.Popen[str] | None) -> bool:
+def _still_running(proc: _AnyPopen | None) -> bool:
     """True for a child that has been started and has not exited.
 
     **A THREAD IDENT IS REUSED, and this is what stops that mattering.** The
@@ -475,6 +486,168 @@ def _stream_lines(
             proc.stdout.close()
         if proc.stderr is not None:
             proc.stderr.close()
+
+
+_FRAGMENT = re.compile(rb"[\r\n]")
+"""What ends one fragment of a child's output. BOTH separators, and `\r` is the point.
+
+Measured from a real `git clone --progress` of `github.com/psf/requests`,
+recorded on 2026-09-12 into `tests/fixtures/git-clone-progress.stderr`: 9958
+bytes carrying 209 carriage returns and 7 newlines. Git ended every progress
+update with `\r` so that a terminal would overwrite the reading in place, and
+wrote `\n` only when a phase was done — so `Receiving objects` from 0% to 100%
+was 103 readings inside ONE newline-terminated line. Splitting on newlines
+alone yields that whole phase as a single fragment whose only visible
+percentage is the last, which is a progress bar that jumps from nothing to
+finished.
+"""
+
+_READ_SIZE = 1
+"""How much of a pipe is read at a time, and why it is one byte.
+
+A fragment has to be yielded when it ARRIVES, and git's progress readings are
+seconds apart. `read(n)` on a pipe blocks until it has n bytes or the child
+exits, so any larger number holds the last reading back until the next one
+pushes it out; `read1()` would return early but does not exist on the
+`io.StringIO`/`io.BytesIO` doubles the tests serve recordings through. A clone's
+stderr is tens of kilobytes, so the cost of asking per byte is a few tens of
+thousands of Python calls spread over minutes.
+"""
+
+
+def stream_progress(
+    command: list[str], cwd: Path | None = None, env: Mapping[str, str] | None = None
+) -> Generator[str, None, None]:
+    """Run a command, yielding BOTH pipes live, split on carriage returns as well as newlines.
+
+    `stream()` for the one command whose real output is stderr with no newlines
+    in it. It exists rather than a flag on `stream()` because the two differ in
+    every respect that matters: this one reads both pipes on their own threads
+    and merges them through a queue, and it cuts a fragment at `\r` — which
+    `stream()` must never do, since a `\r` inside a line of a build log is part
+    of that line.
+
+    **It does not promise the child's own ordering across the two pipes**, and
+    could not: two independent reader threads race, so a stdout fragment and a
+    stderr fragment written a microsecond apart can be queued either way round.
+    What holds is the order WITHIN each pipe. That is enough for git, whose
+    progress is all stderr and whose stdout is silent, and it is the claim this
+    docstring made too strongly until the 2026-09-12 review.
+
+    Git is what needs it, and `_FRAGMENT` carries the recording that says why.
+    `stream(merge_stderr=True)` was tried first and is not enough: merging puts
+    both pipes in the child's own order, but the fragments still arrive as one
+    newline-terminated line per phase, so the clone stage went from silence to
+    "done" with nothing in between.
+
+    `env` is the complete environment for the child, through `child_env()` and
+    with `run()`'s meaning: it REPLACES this process's rather than adding to it,
+    so a caller that only wants a variable added copies `os.environ` and extends
+    it. `git.py` passes `_no_prompt_env()`, which is that copy plus the four
+    variables that stop a credential helper opening a prompt — the guard
+    `_run_git()` has always had, and the one this function went without until
+    the 2026-09-12 review.
+
+    Yields:
+        Each fragment of either stream, with its own separator removed, decoded
+        UTF-8 and undecodable bytes replaced. **Order holds WITHIN each pipe and
+        not across the two**: the two pipes are read by independent threads, so
+        a stdout fragment and a stderr fragment written a microsecond apart can
+        arrive either way round.
+
+    Raises:
+        subprocess.CalledProcessError: if the command exits non-zero, AFTER
+            everything it wrote has been yielded — the tail of git's stderr is
+            what says why a clone failed.
+        OSError: if `command` cannot be started (propagates from `Popen`).
+
+    Registered in `_LIVE_STREAMS` exactly as `stream()` is, so
+    `end_streams_started_on()` can end the clone a `LogPanel` Stop was pressed
+    on, and `_close_abandoned_streams()` can end one nobody closed. The
+    registration is why this is a plain function returning a generator.
+    """
+    child = _Child()
+    generator = _progress_lines(command, cwd, env, child=child)
+    _register(generator, child)
+    return generator
+
+
+def _progress_lines(
+    command: list[str],
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    *,
+    child: _Child,
+) -> Generator[str, None, None]:
+    """`stream_progress()`'s body. Private so that no caller can skip the registration."""
+    logger.debug(f"stream_progress() called: command={command} cwd={cwd}")
+    # Binary pipes, deliberately. `text=True` puts both through universal-newline
+    # translation, which rewrites every `\r` as `\n` before this function can
+    # see it — and then the carriage returns this exists for are gone, silently,
+    # with the split still looking right.
+    proc = subprocess.Popen(
+        command,
+        cwd=_cwd_arg(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=child_env(env),
+        creationflags=creationflags(),
+    )
+    child.proc = proc
+    child.started_on = threading.get_ident()
+    fragments: queue.Queue[str | None] = queue.Queue()
+
+    def read(pipe: object) -> None:
+        held = b""
+        try:
+            while True:
+                byte = pipe.read(_READ_SIZE)  # type: ignore[attr-defined]
+                if not byte:
+                    break
+                if _FRAGMENT.match(byte):
+                    if held:
+                        fragments.put(held.decode("utf-8", errors="replace"))
+                    held = b""
+                else:
+                    held += byte
+        except (OSError, ValueError) as exc:
+            # A pipe closed under the reader: the generator's `finally` ended the
+            # child and closed it. Not a failure of the command.
+            logger.debug(f"a stream_progress() pipe stopped reading: {exc}")
+        if held:
+            fragments.put(held.decode("utf-8", errors="replace"))
+        fragments.put(None)
+
+    readers = [
+        threading.Thread(target=read, args=(pipe,), daemon=True)
+        for pipe in (proc.stdout, proc.stderr)
+    ]
+    for reader in readers:
+        reader.start()
+
+    try:
+        done = 0
+        while done < len(readers):
+            item = fragments.get()
+            if item is None:
+                done += 1
+                continue
+            yield item
+        for reader in readers:
+            reader.join()
+        proc.wait()
+        if proc.returncode:
+            raise subprocess.CalledProcessError(proc.returncode, command)
+    finally:
+        # `stream()`'s teardown, for `stream()`'s reasons: a caller that
+        # abandoned this generator must not leave a clone running or a reader
+        # thread stuck on a pipe.
+        _end_child(proc)
+        for reader in readers:
+            reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
 
 
 def run(

@@ -717,9 +717,7 @@ def test_two_installs_under_different_parents_do_not_get_the_same_tab_title(
     assert str(tmp_path) not in titles[0]
 
 
-def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(
-    window: Any, tmp_path: Any
-) -> None:
+def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(window: Any, tmp_path: Any) -> None:
     """The rail is narrow, so a long install name elides — the full server dir
     must stay reachable on hover, or elision becomes information loss."""
     server_dir = tmp_path / "DadsMmoLab"
@@ -913,3 +911,100 @@ def test_a_failing_save_restores_the_forgotten_record_in_the_live_state(
     # Mutation: drop the `state.remember(install)` restore in
     # `main._forget_live_record()`'s `except OSError` and this fails — the
     # live state stays forgotten even though nothing was ever written.
+
+
+# ------------------------------------------------ T36: the client-folder seam
+
+
+def test_the_client_dir_seam_replaces_the_record_and_keeps_server_dir_and_distro(
+    window: Any, tmp_path: Any
+) -> None:
+    """`main._remember_client_live()`'s live-`AppState` write, over an adopted install.
+
+    An adopted server carries a `wsl_distro` the client-folder press never
+    touches, and `KnownInstall` is a frozen pydantic model rather than a
+    stdlib dataclass — `model_copy(update=...)`, not `dataclasses.replace()` —
+    so this is also where a rewrite that forgot the copy and rebuilt a bare
+    `KnownInstall` from scratch would show up: the distro would vanish.
+    """
+    server_dir = tmp_path / "client-dir-live"
+    catalog = _catalog_view(window)
+    catalog.adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+    view = _tab_for(window, server_dir)
+    before = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert before is not None and before.wsl_distro == "Ubuntu-24.04"
+
+    client = tmp_path / "TurtleWoW"
+    view.services.set_client_dir(client)
+
+    after = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert after is not None
+    assert after.client_dir == client
+    assert after.server_dir == server_dir
+    assert after.wsl_distro == "Ubuntu-24.04", "the distro was dropped by the client-folder write"
+    # Mutation: in `main._remember_client_live()`, replace
+    # `install.model_copy(update={"client_dir": client_dir})` with a freshly
+    # built `KnownInstall(game=game, server_dir=server_dir,
+    # client_dir=client_dir)` — `after.wsl_distro` reads `None` and this fails.
+
+
+def test_a_failing_client_dir_save_restores_the_old_record(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The T34-round-2 pattern applied to the new seam: nothing durable from a failed write."""
+    server_dir = tmp_path / "client-dir-restore"
+    seen_states: list[Any] = []
+
+    def _refuse(app_state: Any, path: Any = None) -> None:
+        seen_states.append(app_state)
+        raise PermissionError(13, "Access is denied", "state.json")
+
+    monkeypatch.setattr(state, "save_state", _refuse)
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+
+    with pytest.raises(OSError):
+        view.services.set_client_dir(tmp_path / "TurtleWoW")
+
+    live = seen_states[-1]
+    restored = live.find("wow-wotlk", server_dir)
+    assert restored is not None
+    assert restored.client_dir is None, "the failed write was not undone"
+    # Mutation: drop the `state.remember(install)` restore in the `except
+    # OSError` branch of `main._remember_client_live()` — `restored.client_dir`
+    # would read the new folder even though `save_state()` never succeeded.
+
+
+def test_the_client_dir_seam_rebuilds_the_tab_so_the_new_folder_reaches_the_applier(
+    window: Any, tmp_path: Any
+) -> None:
+    """T36 DoD 5, end to end: the folder is baked into the applier at construction.
+
+    `test_a_client_folder_with_no_interface_directory_is_not_written_into`
+    (`test_controller_view.py`) already pins the factory alone; this proves
+    the loop the row actually drives — write, then `client_dir_changed`,
+    then a rebuilt tab whose applier reflects the new folder — through the
+    real signal wiring in `main.py`, on `wow-tortoise`, the one tree whose
+    module applier goes through `_client_dir_for_addons()`.
+    """
+    server_dir = tmp_path / "tw-client-change"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-tortoise", server_dir, None)
+    view = _tab_for(window, server_dir)
+    assert view.services.applier is not None
+    assert view.services.applier.client_dir is None, "a None client dir must refuse the addon step"
+
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface").mkdir(parents=True)
+    assert view.services.set_client_dir is not None
+    view.services.set_client_dir(client)
+    view.client_dir_changed.emit("wow-tortoise", server_dir, client)
+
+    rebuilt = _tab_for(window, server_dir)
+    assert rebuilt is not view, "the old tab was patched in place instead of rebuilt"
+    assert rebuilt.services.applier is not None
+    assert rebuilt.services.applier.client_dir == client
+    # Mutation: in `main.on_client_dir_changed()`, call `add_controller(game,
+    # sd, None, ...)` instead of `add_controller(game, sd, cd, ...)` —
+    # `rebuilt.services.applier.client_dir` reads `None` and this fails.

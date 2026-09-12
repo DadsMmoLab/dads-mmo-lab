@@ -1,0 +1,54 @@
+2026-09-12T03:29:22.1381297+02:00
+chose [Catalog] at 419,150 65x24
+invoked at 2026-09-12T03:28:19.7563312+02:00
+chose [Install] at 452,869 246x26
+invoked at 2026-09-12T03:28:28.3209575+02:00
+chose [Yes] at 1074,596 81x26
+invoked at 2026-09-12T03:28:37.9295555+02:00
+dialog found: True
+dialog controls: ControlType.Button=&Help | ControlType.SplitButton=Medium icons | 
+ControlType.Button=View Slider | ControlType.Button=Organise | ControlType.Button=New folder | 
+ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | 
+ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | 
+ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | 
+ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | 
+ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | ControlType.Edit=Name | 
+ControlType.Edit=Search Box | ControlType.Button=Search
+typed path into the address bar at 2026-09-12T03:28:53.6107777+02:00
+dialog rect 410,141 625x480
+clicked Select Folder at 860,592 at 2026-09-12T03:29:01.9341945+02:00
+--- app log ---
+This machine cannot install the server yet:
+2026-09-12T03:43:02.0671447+02:00
+chose [Catalog] at 419,150 65x24
+invoked at 2026-09-12T03:41:53.3867702+02:00
+chose [Install] at 726,843 246x26
+invoked at 2026-09-12T03:41:53.9261754+02:00
+NOT FOUND [No] index 0
+app child window: Install WoW Tortoise
+dialog found: False
+app child window: Install WoW Tortoise
+dialog found: False
+--- app log ---
+2026-09-12T03:44:47.9072082+02:00
+[Button/No] hits: 1 -> No
+chose [No] at 1161,596 81x26
+invoked at 2026-09-12T03:43:28.5913214+02:00
+dialog found: True
+typed path into the address bar at 2026-09-12T03:43:44.9446679+02:00
+clicked Select Folder at 860,592 at 2026-09-12T03:43:52.5989061+02:00
+dialog found: True
+typed path into the address bar at 2026-09-12T03:44:09.1004300+02:00
+clicked Select Folder at 860,592 at 2026-09-12T03:44:17.7446295+02:00
+--- app log ---
+giving up
+2026-09-12 03:44:31 INFO [yulon.platform] ensure_docker(): daemon already reachable
+2026-09-12 03:44:41 INFO [yulon.platform] holding this machine awake for the build: 
+SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+2026-09-12 03:44:41 INFO [yulon.git] containerized git (streamed): `run --rm -v 
+D:\tortoise-test\src\tortoise-wow:/git -w /git 
+alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c 
+core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 clone --progress --config 
+core.autocrlf=false --config core.eol=lf --config http.version=HTTP/1.1 --depth 1 --branch 
+bot-helpers https://github.com/tortoise-wow/tortoise-wow.git .` into 
+D:\tortoise-test\src\tortoise-wow

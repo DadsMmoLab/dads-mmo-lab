@@ -24,6 +24,7 @@ import pytest
 
 from yulon import docker, runner
 from yulon.controller_wow_wotlk import docker_ctl
+from yulon.ui import lines
 
 SPEC = docker_ctl.SPEC
 _GRACE = str(docker.STOP_GRACE_SECONDS)
@@ -1896,7 +1897,10 @@ def test_follow_logs_streams_from_the_resolved_cli(monkeypatch: pytest.MonkeyPat
         return iter(["a line"])
 
     monkeypatch.setattr(docker.runner, "stream", fake_stream)
-    assert list(docker.follow_logs("ac-worldserver", tail=5)) == ["a line"]
+    # Marked as tool output since T35 — the server's own log IS a subprocess
+    # talking, and the Console tab is a `LogPanel`, which strips the marker out
+    # of `text()` and only draws the line dimmer.
+    assert list(docker.follow_logs("ac-worldserver", tail=5)) == [lines.TOOL + "a line"]
     assert seen == [[OFF_PATH_EXE, "logs", "-f", "--tail", "5", "ac-worldserver"]]
 
 

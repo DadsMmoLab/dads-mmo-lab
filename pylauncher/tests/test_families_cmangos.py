@@ -68,6 +68,7 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.catalog.native import UPDATES_BUTTON_LABEL
+from yulon.ui import lines as log_lines
 
 DB_PASSWORD = "tbc-0123456789abcdef"
 
@@ -1398,7 +1399,18 @@ def test_user_args_ask_platform_py_through_the_seam_and_not_the_real_host(
 
 
 def test_stream_interleaves_the_sink_and_the_generator_without_buffering() -> None:
-    """Both halves arrive as they are produced, and the caller sees one stream."""
+    """Both halves arrive as they are produced, and the caller sees one stream.
+
+    **And the two halves stay TELLABLE APART** (T35). What the stage kind pushes
+    into the sink is a container's own output and is marked `TOOL`; what it
+    yields is the app's own sentence about what it is doing and is marked with
+    nothing. They travelled this queue looking identical, which is what put 97
+    minutes of `[Map 230] Building tile [32,32] (08 / 12)` in the panel at the
+    weight of "Cloning ..." during the T30 install.
+
+    Mutation: mark on the way OUT of the queue instead of on the sink going in,
+    and the two `progress` lines below are marked as tool output too.
+    """
 
     def call(sink: docker.OutputSink) -> Iterator[str]:
         sink("container said one")
@@ -1406,11 +1418,11 @@ def test_stream_interleaves_the_sink_and_the_generator_without_buffering() -> No
         sink("container said two")
         yield "progress two"
 
-    got = list(engine(Recorder())._stream(call, cancel=None))
+    got = list(engine(Recorder())._stream(call, cancel=None, stage="extract"))
     assert got == [
-        "container said one",
+        log_lines.TOOL + "container said one",
         "progress one",
-        "container said two",
+        log_lines.TOOL + "container said two",
         "progress two",
     ]
 
@@ -1424,7 +1436,7 @@ def test_stream_yields_each_line_before_the_next_is_produced() -> None:
         assert released.wait(HANG_BOUND), "the consumer had not been handed line one"
         yield "second"
 
-    stream = engine(Recorder())._stream(call, cancel=None)
+    stream = engine(Recorder())._stream(call, cancel=None, stage="extract")
     assert next(stream) == "first"
     released.set()
     assert next(stream) == "second"
@@ -1446,7 +1458,7 @@ def test_stream_re_raises_an_installer_error_untouched_and_wraps_anything_else()
         raise InstallerError("mmaps was stopped. Finished tiles are kept.")
 
     with pytest.raises(InstallerError) as raised:
-        list(engine(Recorder())._stream(refuses, cancel=None))
+        list(engine(Recorder())._stream(refuses, cancel=None, stage="extract"))
     assert str(raised.value) == "mmaps was stopped. Finished tiles are kept."
 
     def breaks(sink: docker.OutputSink) -> Iterator[str]:
@@ -1454,7 +1466,7 @@ def test_stream_re_raises_an_installer_error_untouched_and_wraps_anything_else()
         yield ""  # pragma: no cover - unreachable, keeps this a generator
 
     with pytest.raises(InstallerError, match="the step could not be run: division by zero"):
-        list(engine(Recorder())._stream(breaks, cancel=None))
+        list(engine(Recorder())._stream(breaks, cancel=None, stage="extract"))
 
 
 WORKER_THREAD = "yulon-cmangos-output"
@@ -1490,7 +1502,7 @@ def test_abandoning_the_stream_stops_its_worker_with_no_cancel_from_the_caller()
         assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
         yield "unreachable for a consumer that has gone"
 
-    generator = engine(Recorder())._stream(call, cancel=cancel)
+    generator = engine(Recorder())._stream(call, cancel=cancel, stage="extract")
     assert next(generator) == "started"
     assert WORKER_THREAD in _live_workers(), "the worker should be running at this point"
 
@@ -1520,8 +1532,8 @@ def test_finishing_the_stream_normally_does_not_set_the_cancel_event() -> None:
         sink("container said one")
         yield "progress one"
 
-    assert list(engine(Recorder())._stream(call, cancel=cancel)) == [
-        "container said one",
+    assert list(engine(Recorder())._stream(call, cancel=cancel, stage="extract")) == [
+        log_lines.TOOL + "container said one",
         "progress one",
     ]
     assert not cancel.is_set()
@@ -1548,7 +1560,7 @@ def test_a_worker_that_ignores_the_cancel_is_left_rather_than_waited_for(
         assert release.wait(HANG_BOUND), "the test never released the deaf worker"
         yield "released"
 
-    generator = engine(Recorder())._stream(call, cancel=cancel)
+    generator = engine(Recorder())._stream(call, cancel=cancel, stage="extract")
     assert next(generator) == "started"
     try:
         with caplog.at_level("WARNING"):
@@ -1588,7 +1600,7 @@ def test_an_interrupt_thrown_into_the_stream_stops_its_worker_too() -> None:
         assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
         yield "unreachable for a consumer that has gone"
 
-    generator = engine(Recorder())._stream(call, cancel=cancel)
+    generator = engine(Recorder())._stream(call, cancel=cancel, stage="extract")
     assert next(generator) == "started"
     try:
         with pytest.raises(KeyboardInterrupt):

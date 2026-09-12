@@ -116,7 +116,7 @@ class AzerothCoreInstaller(StagedInstaller):
         yield f"Cloning {source.repo} into {server_dir} (this is a large repository)"
         if existing is not None:
             yield "A previous run of this install left it part-way through; finishing it off."
-        self._clone(
+        yield from self._clone_lines(
             git.CloneSpec(
                 url=source.url,
                 dest=server_dir,
@@ -127,7 +127,8 @@ class AzerothCoreInstaller(StagedInstaller):
                 # history and a shallow clone hands the build the wrong answer.
                 depth=source.depth,
                 rev=source.rev,
-            )
+            ),
+            "clone-core",
         )
         yield f"{source.repo} is in place."
 
@@ -168,7 +169,7 @@ class AzerothCoreInstaller(StagedInstaller):
             yield f"Cloning {source.repo} into {source.dest}"
             if existing is not None:
                 yield "A previous run of this install left it part-way through; finishing it off."
-            self._clone(
+            yield from self._clone_lines(
                 git.CloneSpec(
                     url=source.url,
                     dest=dest,
@@ -176,7 +177,8 @@ class AzerothCoreInstaller(StagedInstaller):
                     sparse_path=source.sparse_path,
                     depth=source.depth,
                     rev=source.rev,
-                )
+                ),
+                "clone-modules",
             )
         yield "Modules are in place."
 
@@ -202,6 +204,7 @@ class AzerothCoreInstaller(StagedInstaller):
                 service, ctx.server_dir, sink=sink, cancel=ctx.cancel
             ),
             cancel=ctx.cancel,
+            stage="import",
         )
         self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
         yield "Server data is in place."

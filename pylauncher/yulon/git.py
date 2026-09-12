@@ -29,16 +29,20 @@ Two traps are baked in here rather than left for each caller to remember:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from yulon import platform, runner
 from yulon.log import get_logger
+from yulon.ui import lines
 
 logger = get_logger(__name__)
 
@@ -259,6 +263,61 @@ class Git(Protocol):
 
     def clone(self, spec: CloneSpec) -> None: ...
 
+    def clone_lines(self, spec: CloneSpec, *, stage: str = "clone") -> Iterator[str]:
+        """`clone()`, saying what it is doing while it does it (T35)."""
+        ...
+
+
+_PERCENT = re.compile(
+    r"(Receiving objects|Resolving deltas|Compressing objects|Updating files):\s+(\d+)%"
+)
+"""The four phases git reports a percentage for, and the only ones it does.
+
+Anything else it prints — `Cloning into '.'...`, `remote: Enumerating objects:
+26865, done.`, a fatal — carries no number and is relayed as tool output.
+Measured against the recording in `tests/fixtures/git-clone-progress.stderr`:
+209 of its 216 fragments match this, and the 7 that do not are sentences.
+"""
+
+
+def clone_lines(
+    clone: Callable[[CloneSpec], None], spec: CloneSpec, *, stage: str = "clone"
+) -> Iterator[str]:
+    """Stream `clone`'s progress if the seam behind it can produce any; run it if not.
+
+    **The fallback is what let T35 land without touching a single test.** The
+    install engine's clone seam is one callable of a `CloneSpec`
+    (`native.Seams.clone`), and dozens of tests hand it a plain function or a
+    recorder's `append`. Those cannot stream and must not have to: against such
+    a seam this does exactly what the engine did before — clone, yield nothing —
+    so every existing fake stays valid unedited, and the same widening that
+    `git.py` has refused four times over for its read-only questions is refused
+    again here (see the comment under `Git` about `remote_url()`).
+
+    The seam is a BOUND METHOD in production, so the object that knows how to
+    stream is the one it is bound to: `ContainerGit().clone.__self__`. Asked of
+    the object rather than declared on the seam's type, because the seam's type
+    is a callable and a `Callable` cannot carry a second capability.
+    """
+    owner = getattr(clone, "__self__", None)
+    streamer = getattr(owner, "clone_lines", None)
+    if streamer is None:
+        clone(spec)
+        return
+    yield from streamer(spec, stage=stage)
+
+
+def progress_line(fragment: str, stage: str) -> str:
+    """One fragment of git's output as a line for the log panel.
+
+    A `PROGRESS` line where git gave a percentage, so the header strip can move;
+    a `TOOL` line otherwise, so the panel dims it and keeps it.
+    """
+    found = _PERCENT.search(fragment)
+    if found is None:
+        return lines.TOOL + fragment
+    return lines.PROGRESS + f"{stage} {found.group(2)} {fragment}"
+
 
 # `remote_url()` is still deliberately NOT on that Protocol: widening `Git`
 # breaks every fake that implements it for a capability the fake's caller does
@@ -444,6 +503,42 @@ def _run_git(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedPr
     return proc
 
 
+def _streamed_git(argv: list[str], *, stage: str, cwd: Path | None = None) -> Iterator[str]:
+    """One long git command, yielding its output as log-panel lines; `GitError` if it fails.
+
+    `_run_git()`'s contract for a command worth watching, INCLUDING its
+    environment. `_no_prompt_env()` is not optional here and the argument that
+    it was is wrong: this function's whole purpose is the command that takes
+    minutes, and a credential helper that opens a prompt against a pipe makes
+    that command take forever. A headless harness has no Stop button and no
+    terminal to type into, so the wait has no end — which is the exact failure
+    `_run_git()` has passed this environment to prevent since the beginning
+    (review, 2026-09-12).
+
+    The last fragments are kept for the refusal, because the sentence that says
+    why a clone failed is the last thing git wrote.
+    """
+    tail: deque[str] = deque(maxlen=_KEEP_FRAGMENTS)
+    try:
+        with closing(runner.stream_progress(argv, cwd=cwd, env=_no_prompt_env())) as fragments:
+            for fragment in fragments:
+                tail.append(fragment)
+                yield progress_line(fragment, stage)
+    except subprocess.CalledProcessError as exc:
+        raise GitError(f"{' '.join(argv)} exited {exc.returncode}: {' / '.join(tail)}") from exc
+    except OSError as exc:
+        raise GitError(f"{argv[0]} could not be started: {exc}") from exc
+
+
+_KEEP_FRAGMENTS = 5
+"""How many of git's last fragments go into a `GitError`.
+
+`_run_git()` puts the whole of `stderr` in its message because it has it in one
+string. Here the progress is the output, and a refusal quoting two hundred
+`Receiving objects` readings would bury the one line that explains it.
+"""
+
+
 class RunnerGit:
     """`Git` over the host's `git` CLI, through `yulon.runner`."""
 
@@ -602,14 +697,33 @@ class RunnerGit:
             return None
         return _parse_count(proc.stdout)
 
-    def clone(self, spec: CloneSpec) -> None:
+    def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
+        """Clone or update `spec`. With `clear_only`, stop once the destination is ready.
+
+        **The flag has one caller and one reason, and the reason is bookkeeping
+        rather than design.** `shutil.rmtree` at a clone destination is a WRITE:
+        `pyplan/write-ledger.md` lists it, and the walk that keeps that list
+        honest (`tests/write_sites.py`) keys a write by the function it sits in.
+        A copy of it in `clone_lines()` would therefore be a SECOND destructive
+        code path at the same destination — exactly the thing the ledger exists
+        to make visible — so the streamed path asks this one to clear the
+        destination and then runs the clone itself.
+
+        It stops in two places, because "ready" means two different things: a
+        checkout that is already there needs nothing done to it at all, and one
+        that is not needs the leftover gone and the parent made.
+        """
         if (spec.dest / ".git").is_dir():
+            if clear_only:
+                return
             self._update(spec)
             self._pin(spec)
             return
         if spec.dest.exists():
             shutil.rmtree(spec.dest)  # a non-git leftover; wow-manage.sh does the same
         spec.dest.parent.mkdir(parents=True, exist_ok=True)
+        if clear_only:
+            return
         if spec.sparse_path is None:
             argv = [
                 "git",
@@ -626,6 +740,67 @@ class RunnerGit:
         else:
             self._sparse_clone(spec)
         self._pin(spec)
+
+    def clone_lines(self, spec: CloneSpec, *, stage: str = "clone") -> Iterator[str]:
+        """`clone()`, yielding git's own progress as it arrives (T35).
+
+        The same three decisions `clone()` makes — update an existing checkout,
+        remove a leftover that is not one, pin afterwards — with the ONE command
+        that takes minutes run through `runner.stream_progress()` instead of
+        `runner.run()`. What the user gets out of it is the clone stage saying
+        `Receiving objects: 42%` while it happens: `git.py`'s own measurement of
+        the T30 install is that this stage printed one sentence and then nothing
+        for the length of a large repository.
+
+        `--progress` is not optional. Git suppresses progress output when stderr
+        is not a terminal, and a pipe never is — without the flag there is
+        nothing to stream, only `Cloning into '.'...`.
+
+        **The sparse path is not streamed and does not need to be.** It builds
+        its repository out of eight short git calls (`_sparse_clone()`), and the
+        repositories it serves — the guide and keg trees — are seconds rather
+        than minutes.
+
+        The pin and the leftover removal stay on `_run_git()`: a `fetch` by hash
+        at depth 1 and a `checkout --detach` are single-object operations with
+        no percentage to report.
+        """
+        if (spec.dest / ".git").is_dir():
+            yield from self._update_lines(spec, stage)
+            self._pin(spec)
+            return
+        if spec.sparse_path is not None:
+            self.clone(spec)
+            return
+        self.clone(spec, clear_only=True)
+        argv = [
+            "git",
+            *_LINE_ENDING_ARGS,
+            *_HTTP_VERSION_ARGS,
+            "clone",
+            "--progress",
+            *_LINE_ENDING_CONFIG,
+            *_HTTP_VERSION_CONFIG,
+            *_depth_args(spec.depth),
+        ]
+        if spec.branch:
+            argv += ["--branch", spec.branch]
+        yield from _streamed_git([*argv, spec.url, str(spec.dest)], stage=stage)
+        self._pin(spec)
+
+    def _update_lines(self, spec: CloneSpec, stage: str) -> Iterator[str]:
+        """`_update()`'s fetch, streamed; the reset that follows has nothing to report.
+
+        Depth is deliberately not passed here, for the reason `_update()` gives
+        in full: `git fetch --depth=1` truncates a full clone in place.
+        """
+        ref = _fetch_ref(spec.branch)
+        yield from _streamed_git(
+            ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "--progress", "origin", ref],
+            cwd=spec.dest,
+            stage=stage,
+        )
+        _run_git(["git", *_LINE_ENDING_ARGS, "reset", "--hard", "FETCH_HEAD"], cwd=spec.dest)
 
     def _sparse_clone(self, spec: CloneSpec) -> None:
         assert spec.sparse_path is not None
@@ -934,8 +1109,11 @@ class ContainerGit:
             return None
         return _parse_count(proc.stdout)
 
-    def clone(self, spec: CloneSpec) -> None:
+    def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
+        """See `RunnerGit.clone()` for what `clear_only` is and why it exists."""
         if (spec.dest / ".git").is_dir():
+            if clear_only:
+                return
             try:
                 self._run(
                     spec,
@@ -966,6 +1144,8 @@ class ContainerGit:
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
+        if clear_only:
+            return
         argv = [
             "clone",
             *_LINE_ENDING_CONFIG,
@@ -1180,42 +1360,7 @@ class ContainerGit:
         # unconfined container a READ-WRITE mount of a folder this app had just
         # decided was not its own, on a justification (`:ro`, entrypoint `ls`,
         # pinned digest) that belonged to `docker.bind_mount_ok()`'s probe.
-        label = ""
-        hardening: list[str] = []
-        untrusted: list[str] = []
-        if writes:
-            enforcing = self._ask_selinux()
-            label = platform.bind_label(
-                enforcing=enforcing,
-                fs_type=self._ask_filesystem(dest) if enforcing is True else None,
-            )
-        else:
-            label = ":ro"
-            hardening = [
-                *platform.label_disable_args(enforcing=self._ask_selinux()),
-                *_READ_ONLY_CONTAINER_ARGS,
-            ]
-            untrusted = _UNTRUSTED_REPO_ARGS
-        argv = [
-            program,
-            "run",
-            "--rm",
-            *hardening,
-            "-v",
-            f"{dest}:/git{label}",
-            # State the working directory rather than inheriting the image's.
-            # `image` is a public field, so an override would otherwise clone
-            # into the wrong place — silently, since `.` would resolve
-            # somewhere inside the container instead of the bind mount.
-            "-w",
-            "/git",
-            *self._user_args(),
-            self.image,
-            *untrusted,
-            *_LINE_ENDING_ARGS,
-            *_HTTP_VERSION_ARGS,
-            *git_args,
-        ]
+        argv = self._argv(program, dest, git_args, writes=writes)
         # At INFO, and the mount is the point. A Mac tester's clone failed with
         # `/git/.git: No such file or directory` (2026-08-26) and the one fact
         # needed to diagnose it — which host directory was mounted at `/git` —
@@ -1252,6 +1397,170 @@ class ContainerGit:
                 f"{proc.returncode}: {proc.stderr.strip()}"
             )
         return proc
+
+    def _argv(self, program: str, dest: Path, git_args: list[str], *, writes: bool) -> list[str]:
+        """The one docker argv every containerized git call here runs.
+
+        Its own method since T35, because the streamed clone
+        (`_streamed_capture()`) must run the SAME container as the buffered one:
+        the mount, the label, the hardening and the untrusted-repo flags are the
+        decisions `_capture()`'s docstring spends two hundred lines justifying,
+        and a second spelling of them is a second security posture nobody
+        reviewed.
+        """
+        label = ""
+        hardening: list[str] = []
+        untrusted: list[str] = []
+        if writes:
+            enforcing = self._ask_selinux()
+            label = platform.bind_label(
+                enforcing=enforcing,
+                fs_type=self._ask_filesystem(dest) if enforcing is True else None,
+            )
+        else:
+            label = ":ro"
+            hardening = [
+                *platform.label_disable_args(enforcing=self._ask_selinux()),
+                *_READ_ONLY_CONTAINER_ARGS,
+            ]
+            untrusted = _UNTRUSTED_REPO_ARGS
+        return [
+            program,
+            "run",
+            "--rm",
+            *hardening,
+            "-v",
+            f"{dest}:/git{label}",
+            # State the working directory rather than inheriting the image's.
+            # `image` is a public field, so an override would otherwise clone
+            # into the wrong place — silently, since `.` would resolve
+            # somewhere inside the container instead of the bind mount.
+            "-w",
+            "/git",
+            *self._user_args(),
+            self.image,
+            *untrusted,
+            *_LINE_ENDING_ARGS,
+            *_HTTP_VERSION_ARGS,
+            *git_args,
+        ]
+
+    def clone_lines(self, spec: CloneSpec, *, stage: str = "clone") -> Iterator[str]:
+        """`clone()`, streamed — and `run_attached()` was not what could carry it.
+
+        **`docker run` passes the container's stderr straight through to the
+        client's**, so the streaming question here is the same one `RunnerGit`
+        answers: read the client's two pipes live and split on carriage returns.
+        `docker.run_attached()` cannot do it — it is `runner.stream()`
+        underneath, which withholds stderr until the child exits, and its
+        `merge_stderr` puts both pipes in one without cutting at `\r`. So this
+        goes through `runner.stream_progress()` with the argv `_capture()`
+        builds, rather than through `docker.py`: the container is identical, and
+        `docker.py` would have had to learn about git's carriage returns to
+        change nothing else.
+
+        The env `_capture()` passes is not passed here and is not missed:
+        `_no_prompt_env()` configures the DOCKER CLIENT's environment, and
+        `docker run` forwards nothing of it into the container without `-e`, so
+        the git that might have prompted never saw those variables on this path
+        either.
+
+        Every refusal `clone()` makes is made here in the same order, including
+        the two fallbacks to host git and the fresh-mount retry — see
+        `_clone_with_mount_race_retry()` for the measurement behind that retry.
+        A fallback that has already yielded some fragments keeps them: what the
+        panel shows is the container's attempt, then the host clone's progress,
+        which is what happened.
+        """
+        if (spec.dest / ".git").is_dir():
+            try:
+                yield from self._streamed_capture(
+                    spec.dest,
+                    [
+                        "fetch",
+                        "--progress",
+                        *_pull_depth_args(spec.depth),
+                        "origin",
+                        _fetch_ref(spec.branch),
+                    ],
+                    stage=stage,
+                )
+                self._run(spec, ["reset", "--hard", "FETCH_HEAD"])
+            except GitError as exc:
+                if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                    logger.warning(
+                        f"containerized git update failed in {spec.dest} ({exc}); "
+                        "falling back to host git"
+                    )
+                    yield from RunnerGit().clone_lines(spec, stage=stage)
+                    return
+                raise
+            self._pin(spec)
+            return
+        self.clone(spec, clear_only=True)
+        argv = [
+            "clone",
+            "--progress",
+            *_LINE_ENDING_CONFIG,
+            *_HTTP_VERSION_CONFIG,
+            *_depth_args(spec.depth),
+        ]
+        if spec.branch:
+            argv += ["--branch", spec.branch]
+        if spec.sparse_path is not None:
+            argv += ["--filter=blob:none", "--sparse"]
+        try:
+            yield from self._streamed_clone_with_mount_race_retry(
+                spec, [*argv, spec.url, "."], stage=stage
+            )
+        except GitError as exc:
+            if platform.DOCKER_CLI_MISSING_HELP not in str(exc) and git_available():
+                logger.warning(
+                    f"containerized git clone failed in {spec.dest} ({exc}); "
+                    "falling back to host git"
+                )
+                yield from RunnerGit().clone_lines(spec, stage=stage)
+                return
+            raise
+        if spec.sparse_path is not None:
+            # --no-cone, for the measured reason `clone()` gives: cone mode
+            # materialises a different tree than `RunnerGit` produces.
+            self._run(spec, ["sparse-checkout", "set", "--no-cone", spec.sparse_path.rstrip("/")])
+        self._pin(spec)
+
+    def _streamed_clone_with_mount_race_retry(
+        self, spec: CloneSpec, git_args: list[str], *, stage: str
+    ) -> Iterator[str]:
+        """`_clone_with_mount_race_retry()` for the streamed clone; same narrow shape."""
+        try:
+            yield from self._streamed_capture(spec.dest, git_args, stage=stage)
+        except GitError as exc:
+            if not _is_fresh_mount_race(str(exc)):
+                raise
+            logger.warning(
+                f"containerized git clone hit the fresh-mount race in {spec.dest} ({exc}); "
+                "retrying once before falling back to host git"
+            )
+            yield from self._streamed_capture(spec.dest, git_args, stage=stage)
+
+    def _streamed_capture(self, dest: Path, git_args: list[str], *, stage: str) -> Iterator[str]:
+        """One containerized `git` invocation, read live. `_capture()`'s writer container."""
+        program = platform.docker_program()
+        if program is None:
+            raise GitError(platform.DOCKER_CLI_MISSING_HELP)
+        argv = self._argv(program, dest, git_args, writes=True)
+        logger.info(f"containerized git (streamed): `{' '.join(argv[1:])}` into {dest}")
+        try:
+            yield from _streamed_git(argv, stage=stage)
+        except GitError as exc:
+            # The docker CLI's own absence, arriving from `Popen` rather than
+            # from `docker_program()`: the resolution cache pins a hit for the
+            # life of the process, so Docker uninstalled or self-updated while
+            # the launcher is open leaves that path aimed at a file that is
+            # gone. `_capture()` has the same two roads to one sentence.
+            if "could not be started" in str(exc):
+                raise GitError(platform.DOCKER_CLI_MISSING_HELP) from exc
+            raise
 
     @staticmethod
     def _user_args() -> list[str]:

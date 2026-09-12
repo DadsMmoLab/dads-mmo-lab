@@ -1,0 +1,26 @@
+2026-09-12T03:48:14.9694556+02:00
+--- app log (clone) ---
+2026-09-12 03:44:28 WARNING [yulon.runner] docker did not answer within 9.984000000000378s; 
+giving up
+2026-09-12 03:44:31 INFO [yulon.platform] ensure_docker(): daemon already reachable
+2026-09-12 03:44:41 INFO [yulon.platform] holding this machine awake for the build: 
+SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+2026-09-12 03:44:41 INFO [yulon.git] containerized git (streamed): `run --rm -v 
+D:\tortoise-test\src\tortoise-wow:/git -w /git 
+alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c 
+core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 clone --progress --config 
+core.autocrlf=false --config core.eol=lf --config http.version=HTTP/1.1 --depth 1 --branch 
+bot-helpers https://github.com/tortoise-wow/tortoise-wow.git .` into 
+D:\tortoise-test\src\tortoise-wow
+2026-09-12 03:47:59 INFO [yulon.git] containerized git: `run --rm -v 
+D:\tortoise-test\src\tortoise-wow:/git -w /git 
+alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c 
+core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 fetch --depth=1 origin 
+9980181ce9aa5940b6125a5991cc754148ed9b82` into D:\tortoise-test\src\tortoise-wow
+2026-09-12 03:48:03 INFO [yulon.git] containerized git: `run --rm -v 
+D:\tortoise-test\src\tortoise-wow:/git -w /git 
+alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c 
+core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 checkout --detach 
+9980181ce9aa5940b6125a5991cc754148ed9b82` into D:\tortoise-test\src\tortoise-wow
+--- D:\tortoise-test ---
+0.43 GB

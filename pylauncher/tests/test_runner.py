@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -893,9 +894,13 @@ def test_every_spawn_site_in_this_module_sanitises_the_environment(
         def __init__(self, *a: object, **kw: object) -> None:
             seen.append(kw.get("env"))  # type: ignore[arg-type]
             # Real file objects: `stream()` asserts on both and iterates stdout,
-            # so a double with None here fails for the wrong reason.
-            self.stdout = io.StringIO("")
-            self.stderr = io.StringIO("")
+            # so a double with None here fails for the wrong reason. Text or
+            # bytes as the spawn asked: `stream_progress()` reads binary pipes
+            # on purpose (universal-newline translation eats the carriage
+            # returns it exists for), and would decode a `str` as if it were.
+            empty: object = io.StringIO("") if kw.get("text") else io.BytesIO(b"")
+            self.stdout = empty
+            self.stderr = empty
 
         def wait(self, timeout: float | None = None) -> int:
             return 0
@@ -916,8 +921,243 @@ def test_every_spawn_site_in_this_module_sanitises_the_environment(
     runner.run(["true"])
     runner.run(["true"], env={"LD_LIBRARY_PATH": "/bundle/_internal", "X": "1"})
     list(runner.stream(["true"]))
+    list(runner.stream_progress(["true"]))
 
     assert seen, "no spawn site was reached; this test is measuring nothing"
     for env in seen:
         assert env is not None, "a frozen spawn passed env=None and so inherited the bundle's path"
         assert "LD_LIBRARY_PATH" not in env, env
+
+
+# ---------------------------------------------------------------------------
+# T35: `stream_progress()`, for the one command whose progress is stderr with no
+# newlines in it.
+
+GIT_PROGRESS = Path(__file__).parent / "fixtures" / "git-clone-progress.stderr"
+"""A real `git clone --progress` stderr, carriage returns and all.
+
+Recorded on this laptop (WSL2, Ubuntu 24.04, git 2.43.0) on 2026-09-12:
+
+    git clone --progress https://github.com/psf/requests.git repo 2>stderr.raw
+
+9958 bytes, 209 `\\r` and 7 `\\n`: 216 fragments, of which 103 are `Receiving
+objects` readings from 0% to 100%, 102 are `Resolving deltas`, 4 are
+`Compressing objects` and 7 are sentences (`Cloning into 'repo'...`,
+`remote: Enumerating objects: 26865, done.`). Committed with `-text` in
+`.gitattributes` so no checkout can normalise the bytes it was recorded for.
+"""
+
+
+class _Recorded:
+    """A `Popen` double that serves recorded bytes and then exits.
+
+    Binary streams, because `stream_progress()` reads binary: `text=True` puts
+    the pipes through universal-newline translation, which turns every `\\r`
+    into a `\\n` before this code can see it — so a fake that handed back text
+    would make a `\\n`-only split look correct.
+    """
+
+    pid = 4321
+
+    def __init__(self, *a: object, **kw: object) -> None:
+        self.stdout = io.BytesIO(_Recorded.out)
+        self.stderr = io.BytesIO(_Recorded.err)
+        self.returncode = _Recorded.code
+        # A child that has not been reaped answers `None` to `poll()`, and
+        # `end_streams_started_on()` reads exactly that to tell a stream worth
+        # ending from one already finished. A double that answered its exit
+        # code from the start would be invisible to it.
+        self._ended = False
+
+    out: bytes = b""
+    err: bytes = b""
+    code: int = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        self._ended = True
+        return self.returncode
+
+    def poll(self) -> int | None:
+        return self.returncode if self._ended else None
+
+    def terminate(self) -> None:
+        self._ended = True
+
+    def kill(self) -> None:
+        self._ended = True
+
+
+def _serving(
+    monkeypatch: pytest.MonkeyPatch, *, out: bytes = b"", err: bytes = b"", code: int = 0
+) -> None:
+    _Recorded.out, _Recorded.err, _Recorded.code = out, err, code
+    monkeypatch.setattr(runner.subprocess, "Popen", _Recorded)
+
+
+def test_stream_progress_splits_gits_carriage_returns_into_separate_fragments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every progress reading git wrote comes out as its own line.
+
+    Git ends a progress update with a carriage return so a terminal overwrites
+    the line in place, and `\\n` only when a phase finishes — measured in the
+    recording above: 209 `\\r` against 7 `\\n`. A reader that splits on newlines
+    alone therefore gets one enormous line per phase, and the only percentage
+    it can show is the last one in it.
+
+    Mutation: split stderr on `\\n` only (drop `\\r` from `_FRAGMENT`) and the
+    103 `Receiving objects` readings collapse to a single 100%, which is what
+    the assertions below count.
+    """
+    _serving(monkeypatch, err=GIT_PROGRESS.read_bytes())
+    got = list(runner.stream_progress(["git", "clone", "--progress", "x"]))
+
+    receiving = [
+        int(found.group(1))
+        for line in got
+        if (found := re.search(r"Receiving objects:\s+(\d+)%", line))
+    ]
+    assert receiving[0] == 0 and receiving[-1] == 100
+    assert len(receiving) > 50, f"the readings collapsed: {len(receiving)} of them"
+    assert "Cloning into 'repo'..." in got
+    assert not any("\r" in line for line in got), "a fragment kept its own separator"
+    assert not any("\n" in line for line in got)
+
+
+def test_stream_progress_carries_both_pipes_keeping_the_order_within_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both pipes, live, on two threads — which is the difference from `stream()`.
+
+    `stream()` withholds stderr until the child has exited and says why. For a
+    clone that is the whole output: git says nothing at all on stdout, so the
+    panel would have had the entire progress arrive after the clone finished.
+
+    **Nothing here depends on the order BETWEEN the pipes**, because two
+    independent reader threads cannot promise one: what is asserted is that
+    every fragment arrives, and that each pipe's own fragments keep their order.
+    The test claimed cross-pipe arrival order until the 2026-09-12 review found
+    the docstring promising what the implementation cannot.
+
+    Mutation: drop the stderr reader and the two stderr fragments are missing.
+    """
+    _serving(monkeypatch, out=b"one\ntwo\n", err=b"first\rsecond\n")
+    got = list(runner.stream_progress(["git", "fetch"]))
+    assert sorted(got) == ["first", "one", "second", "two"]
+    assert got.index("one") < got.index("two"), "stdout's own order was not kept"
+    assert got.index("first") < got.index("second"), "stderr's own order was not kept"
+
+
+def test_stream_progress_raises_on_a_non_zero_exit_like_stream_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The status is raised and not returned, so a failed clone cannot read as a done one.
+
+    Mutation: return instead of raising and `git.clone_lines()` reports a
+    successful clone for a repository that does not exist.
+    """
+    _serving(monkeypatch, err=b"fatal: repository not found\n", code=128)
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        list(runner.stream_progress(["git", "clone", "nope"]))
+    assert raised.value.returncode == 128
+
+
+def test_stream_progress_yields_everything_written_before_the_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure's own words reach the caller before the exception does.
+
+    The tail of git's stderr is what says WHY a clone failed, and it arrives on
+    the same pipe as the progress.
+
+    Mutation: raise before draining the queue and the sentence is lost, leaving
+    a `CalledProcessError` with nothing but a number.
+    """
+    _serving(monkeypatch, err=b"fatal: could not read Username\n", code=128)
+    said: list[str] = []
+    with pytest.raises(subprocess.CalledProcessError):
+        for line in runner.stream_progress(["git", "clone", "nope"]):
+            said.append(line)
+    assert said == ["fatal: could not read Username"]
+
+
+def test_stream_progress_ends_its_child_when_the_caller_walks_away(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Stop button's path: a generator that is closed leaves no clone running.
+
+    `end_streams_started_on()` is how `LogPanel`'s Stop reaches a blocked read,
+    and it can only reach a stream that REGISTERED itself. A `stream_progress()`
+    that skipped the registry would be a clone nothing could stop.
+
+    Mutation: skip `_register()` and `end_streams_started_on()` returns 0.
+    """
+    _serving(monkeypatch, err=b"Receiving objects:   1% (1/100)\r" * 50)
+    generator = runner.stream_progress(["git", "clone", "x"])
+    next(generator)
+    assert runner.end_streams_started_on(threading.get_ident()) == 1
+    generator.close()
+
+
+def test_stream_progress_asks_for_binary_pipes_so_the_carriage_returns_survive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one fact about this spawn that no recording can show.
+
+    `text=True` (and `universal_newlines`, and an `encoding`) puts both pipes
+    through universal-newline translation, which rewrites every `\\r` as `\\n`
+    BEFORE this module can see it. The split would then look perfectly correct
+    and `_FRAGMENT`'s `\\r` would be dead code — and no fixture can catch it,
+    because a fake process hands back whatever bytes the test chose. So the
+    spawn's own arguments are what is asserted.
+
+    Mutation: add `text=True` to the `Popen` call and this fails while every
+    other `stream_progress` test still passes.
+    """
+    asked: dict[str, object] = {}
+
+    class _Spy(_Recorded):
+        def __init__(self, *a: object, **kw: object) -> None:
+            asked.update(kw)
+            super().__init__(*a, **kw)
+
+    _Recorded.out, _Recorded.err, _Recorded.code = b"", b"", 0
+    monkeypatch.setattr(runner.subprocess, "Popen", _Spy)
+    list(runner.stream_progress(["git", "clone", "x"]))
+
+    assert asked, "the spawn was never reached"
+    assert not asked.get("text")
+    assert not asked.get("universal_newlines")
+    assert asked.get("encoding") is None
+
+
+def test_stream_progress_hands_the_child_the_environment_it_was_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`env` goes through `child_env()`, exactly as `run()`'s does.
+
+    The caller that needs it is the streamed git clone: `_no_prompt_env()` is
+    what stops a credential prompt turning a headless clone into a wait with no
+    end, and `run()` has carried it since the beginning. This took no `env` at
+    all until the 2026-09-12 review, so the one git call that can block forever
+    was the one running without the guard.
+
+    Through `child_env()` and not straight into `Popen`, because that is the
+    function that takes the bundle's `LD_LIBRARY_PATH` back out — a frozen
+    launcher whose git loads the bundle's libraries is the measured failure in
+    `child_env()`'s own docstring.
+
+    Mutation: drop the parameter (or pass it past `child_env()`) and this fails.
+    """
+    asked: dict[str, object] = {}
+
+    class _Spy(_Recorded):
+        def __init__(self, *a: object, **kw: object) -> None:
+            asked.update(kw)
+            super().__init__(*a, **kw)
+
+    _Recorded.out, _Recorded.err, _Recorded.code = b"", b"", 0
+    monkeypatch.setattr(runner.subprocess, "Popen", _Spy)
+    list(runner.stream_progress(["git", "clone", "x"], env={"GIT_TERMINAL_PROMPT": "0"}))
+
+    assert asked.get("env") == {"GIT_TERMINAL_PROMPT": "0"}

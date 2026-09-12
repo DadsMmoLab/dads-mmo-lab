@@ -415,9 +415,7 @@ class CatalogView(QWidget):
                 role="tile-meta",
             )
         )
-        box.addWidget(
-            self._tile_text(f"Emulator: {entry.emulator.name}", frame, role="tile-meta")
-        )
+        box.addWidget(self._tile_text(f"Emulator: {entry.emulator.name}", frame, role="tile-meta"))
         button = QPushButton("Install", frame)
         button.setIcon(warcraft_icon("download", "#FFF1A8", 14))
         button.setObjectName(f"install-{entry.id}")
@@ -498,9 +496,7 @@ class CatalogView(QWidget):
             f"Already installed in {self._installed_dirs[game_id]} — its own tab manages it."
         )
 
-    def _show_tile_context_menu(
-        self, pos: QPoint, entry: CatalogEntry, frame: QWidget
-    ) -> None:
+    def _show_tile_context_menu(self, pos: QPoint, entry: CatalogEntry, frame: QWidget) -> None:
         menu = QMenu(frame)
         if entry.id not in self._installed_dirs and entry.install.supports(self._platform_id()):
             install_action = menu.addAction("Install Server…")

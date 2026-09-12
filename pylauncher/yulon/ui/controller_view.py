@@ -20,6 +20,7 @@ reached servers that have none of them.
 
 from __future__ import annotations
 
+import re
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -73,8 +74,9 @@ from yulon import dashboard as dashboard_module
 from yulon import play as play_module
 from yulon import steam as steam_module
 from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
-from yulon.catalog import composegen, native
+from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.families import clientdir
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_tbc import accounts as tbc_accounts
@@ -101,7 +103,9 @@ from yulon.log import get_logger
 from yulon.manifest import Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
+from yulon.ui import lines
 from yulon.ui.answers import said_yes
+from yulon.ui.catalog_view import DirPicker, _qt_dir_picker
 from yulon.ui.icons import get_tab_icon, warcraft_icon
 from yulon.ui.theme import COLOR_GOLD_LIGHT, COLOR_TEXT_GOLD
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
@@ -647,6 +651,29 @@ class ControllerServices:
     decides when to put it.
     """
 
+    client_dir: Path | None = None
+    """This install's recorded client folder, for the Server tab's row (T36).
+
+    A field and not a re-read of `controller.server_dir`'s neighbour, because
+    nothing on `Controller` or `ContainerSpec` carries it — every other seam
+    below wants it turned into something else first (`_client_dir_for_addons()`
+    for the applier, the Steam entry), and the row wants the raw value, `None`
+    included, to say which of its three sentences applies.
+    """
+
+    set_client_dir: Callable[[Path | None], None] | None = None
+    """Write a new client folder (or clear it with `None`) for THIS install (T36).
+
+    `None` leaves the row with no buttons at all, the same rule `uninstall`
+    follows for a game outside 8.9a/8.9b: a control that cannot write anywhere
+    is worse than no control. Every factory below leaves this `None` — writing
+    it is `main.py`'s job alone, the way `main.py` overwrites `uninstall.forget`,
+    because only the running window holds the live `AppState` every tab shares.
+    A tab built outside that window (the CLI harness, a factory-only test) gets
+    no client-folder controls, which is the honest answer for something with no
+    state file to write back into.
+    """
+
     @classmethod
     def for_entry(
         cls,
@@ -899,6 +926,7 @@ def _assemble(
     """
     spec = entry.container_spec()
     return ControllerServices(
+        client_dir=client_dir,
         steam=_steam_seam(entry, server_dir, client_dir),
         controller=controller,
         logs_source=lambda: docker.follow_logs(spec.world, wsl_distro=wsl_distro),
@@ -1685,6 +1713,53 @@ def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
     return client_dir
 
 
+def _client_dir_row_text(client_dir: Path | None) -> str:
+    """The Server tab's client-folder sentence, in the same states `_client_dir_for_addons()`
+    answers (T36) -- but read with no log line, because this runs on every five-second poll and a
+    client extracted but never started would print its info line forever.
+
+    A missing folder is its own sentence rather than falling into the
+    "no `Interface/`" one below: that sentence tells the owner to start the
+    game, which is no help at all when the folder itself is gone (round 2
+    review, non-blocking) -- a moved or deleted client says so, plainly.
+    """
+    if client_dir is None:
+        return "Client folder: none — addons and Play need one"
+    if not client_dir.is_dir():
+        return f"Client folder: {client_dir} — the folder is missing"
+    if not (client_dir / ADDONS_PARENT).is_dir():
+        return (
+            f"Client folder: {client_dir} — no {ADDONS_PARENT}/ folder yet — start the game "
+            "once before installing addons"
+        )
+    return f"Client folder: {client_dir}"
+
+
+def _check_sentence(check: preflight.Check) -> str:
+    """One `preflight.Check` as the paragraph a user reads -- `Report.message()`'s own join,
+    for a single check `change_client_dir()` shows outside a refusal (a warning, or the
+    zero-archive case `preflight.Report.message()` never sees because it is not a refusal).
+    """
+    return f"{check.name}: {check.detail} {check.remedy}".rstrip()
+
+
+_MPQ_COUNT_RE = re.compile(r"^(\d+) ")
+"""`_mpq_check()`'s own count, at the front of its `detail` (`"0 MPQ archives ..."`)."""
+
+
+def _mpq_archive_count(check: preflight.Check) -> int | None:
+    """The MPQ check's archive count, read off its own `detail` rather than re-walking `Data/`.
+
+    Round 2 review: an empty `Data/` answers `warn`, same as "a few too few", and the press used
+    to let a Yes through either. The ticket's rule is "no archives is a refusal" -- and the count
+    the CHECK already computed is the one number that cannot disagree with what it decided,
+    where a second `mpq_files()` call over the same folder could (a file appearing or vanishing
+    between the two walks, a symlink resolving differently the second time).
+    """
+    match = _MPQ_COUNT_RE.match(check.detail)
+    return int(match.group(1)) if match else None
+
+
 def _for_tortoise(
     entry: CatalogEntry,
     server_dir: Path,
@@ -2275,6 +2350,21 @@ class ControllerView(QWidget):
     removal would take away the only surface that could try again.
     """
 
+    client_dir_changed = Signal(str, object, object)  # game id, server_dir, client_dir (T36)
+    """This install's client folder was set, changed or cleared -- rebuild the tab.
+
+    Not patched in place: the client dir is baked into a dozen seams at
+    construction (`_client_dir_for_addons()` behind the module applier, the
+    Steam entry), and threading a mutable value through each is the wrong
+    shape -- `add_controller()`'s own docstring makes the same call for a
+    changed WSL distro. `main.py` answers this the way it answers `uninstalled`:
+    drop the tab and build a fresh one, which is what makes the new folder
+    reach every seam at once rather than some of them.
+
+    `server_dir` rides along because the tab is keyed on `(game, server_dir)`
+    and `main.py` holds no other way back to this closure's key.
+    """
+
     def __init__(
         self,
         entry: CatalogEntry,
@@ -2285,6 +2375,7 @@ class ControllerView(QWidget):
         prompt_asker: PromptAsker | None = None,
         link_asker: LinkAsker | None = None,
         folder_asker: FolderAsker | None = None,
+        pick_client_dir: DirPicker = _qt_dir_picker,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2296,6 +2387,10 @@ class ControllerView(QWidget):
         # The same shape for the two custom-module dialogs, for the same reason.
         self._link_asker: LinkAsker = link_asker or ask_module_link
         self._folder_asker: FolderAsker = folder_asker or ask_module_folder
+        # T36's client-folder press. The same `DirPicker` shape the Catalog's
+        # own folder pickers use (`catalog_view._qt_dir_picker`), reused rather
+        # than a second modal dialog function that would open the same window.
+        self._pick_client_dir: DirPicker = pick_client_dir
         # Every service call goes through this: on a worker thread in the app,
         # inline in tests (review finding, 2026-08-21 — the window used to
         # freeze for the length of a `docker compose up`).
@@ -2463,6 +2558,35 @@ class ControllerView(QWidget):
         self.repair_channel_button.setVisible(False)
         self.repair_channel_button.clicked.connect(self.repair_channel)
         self.status_label = QLabel("status: unknown", tab)
+        # T36. Visible for every game, including WotLK -- AzerothCore reads no
+        # client itself, but the folder is still a host path a manifest's
+        # `client` step or the Steam entry can use, and hiding the row there
+        # would be the same dead end this ticket exists to close for WotLK's
+        # `client_dir: null` records. Hidden only when `main.py` hands down no
+        # write seam at all (`set_client_dir is None`), the same rule
+        # `uninstall`'s controls follow. Never hidden for a WSL-distro install:
+        # `wsl_distro` names where the SERVER lives, and a client folder is
+        # always a path on this host, not inside that distro.
+        self.client_dir_label = QLabel("", tab)
+        self.client_dir_label.setWordWrap(True)
+        self.client_dir_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.client_dir_label.setVisible(False)
+        self.set_client_dir_button: QPushButton | None = None
+        self.forget_client_dir_button: QPushButton | None = None
+        if self.services.set_client_dir is not None:
+            # The label, not a re-check of `self.services.client_dir` later:
+            # both buttons' presence and this label's text answer the same
+            # fact and must not be able to disagree the way two separate reads
+            # of a value that cannot change without a rebuild never could.
+            has_client = self.services.client_dir is not None
+            change_label = "Change client folder…" if has_client else "Set client folder…"
+            self.set_client_dir_button = QPushButton(change_label, tab)
+            self.set_client_dir_button.clicked.connect(self.change_client_dir)
+            self.forget_client_dir_button = QPushButton("Forget client folder", tab)
+            self.forget_client_dir_button.setVisible(has_client)
+            self.forget_client_dir_button.clicked.connect(self.forget_client_dir)
+            self.client_dir_label.setVisible(True)
+        self.client_dir_label.setText(_client_dir_row_text(self.services.client_dir))
         # Why a whole label and not a dialog: the stop path's refusals are
         # paragraphs naming containers, projects and the file to edit, and they
         # arrive from a worker thread. It was called `conflict_label` while only
@@ -2590,6 +2714,11 @@ class ControllerView(QWidget):
         box.addLayout(name_row)
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
+        box.addWidget(self.client_dir_label)
+        if self.set_client_dir_button is not None:
+            box.addWidget(self.set_client_dir_button)
+        if self.forget_client_dir_button is not None:
+            box.addWidget(self.forget_client_dir_button)
         box.addWidget(self.channel_label)
         box.addWidget(self.test_console_button)
         box.addWidget(self.console_probe_label)
@@ -2877,8 +3006,21 @@ class ControllerView(QWidget):
         self.stop_button.setEnabled(status.any_running and not self._busy)
         self.realm_badge.set_status(_realm_badge_status(status))
         self._update_forget_visibility()
+        self._update_client_dir_row()
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
+
+    def _update_client_dir_row(self) -> None:
+        """Re-read the row's text on the same poll as the status line (T36).
+
+        Only the SENTENCE, never the buttons: the recorded folder cannot
+        change without a rebuild (`client_dir_changed`), but whether it has
+        gained an `Interface/` folder can -- the owner's own case is a client
+        extracted and pointed at before the game has ever been started.
+        """
+        if self.set_client_dir_button is None:
+            return
+        self.client_dir_label.setText(_client_dir_row_text(self.services.client_dir))
 
     def _forget_is_eligible(self) -> bool:
         """The Forget control's whole rule, asked wherever it has to hold (T34).
@@ -3092,6 +3234,14 @@ class ControllerView(QWidget):
                 self.forget_install_button.setEnabled(False)
             self.uninstall_confirm_button.setEnabled(False)
             self.keep_characters_check.setEnabled(False)
+            # T36's client-folder row: a write during any other action races
+            # `main.py`'s rebuild (T36 round 2 review) — the tab this press
+            # would drop and reopen is the very tab a rebuild, an import or a
+            # module install is running ON.
+            if self.set_client_dir_button is not None:
+                self.set_client_dir_button.setEnabled(False)
+            if self.forget_client_dir_button is not None:
+                self.forget_client_dir_button.setEnabled(False)
             self.rebuild_button.setEnabled(False)
             # And the updates press, for the importer's reason above rather than
             # for symmetry: it reaches the same `import` stage against the same
@@ -3146,6 +3296,10 @@ class ControllerView(QWidget):
                 self.forget_install_button.setEnabled(True)
             self.uninstall_confirm_button.setEnabled(True)
             self.keep_characters_check.setEnabled(True)
+            if self.set_client_dir_button is not None:
+                self.set_client_dir_button.setEnabled(True)
+            if self.forget_client_dir_button is not None:
+                self.forget_client_dir_button.setEnabled(True)
             self.rebuild_button.setEnabled(self.services.rebuild is not None)
             # Back to what this install can do, never unconditionally: three of
             # the four games have no such phase and must not be handed a live
@@ -3579,6 +3733,139 @@ class ControllerView(QWidget):
         # view. Nothing may touch `self` after it (mirrors `_uninstall_done()`).
         self.uninstalled.emit(self.entry.id, server_dir)
 
+    def _client_dir_refused(self, message: str) -> None:
+        """One place both refusal paths in `change_client_dir()` report through."""
+        self.action_failed.emit(message)
+        QMessageBox.warning(self, f"{self.entry.name}", message)
+
+    def _client_dir_busy(self) -> bool:
+        """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
+
+        A write here does two things a running action must not race: it
+        replaces `state.json`'s record, and it makes `main.py` drop this tab
+        and rebuild it. `_set_busy()` locks the buttons; this is the second
+        half a disabled `QPushButton` does not give for free -- a press
+        already queued in Qt's event loop, or one this method is called from
+        directly in a test, still has to be told no.
+        """
+        if not self._busy:
+            return False
+        QMessageBox.information(
+            self,
+            "Something else is running",
+            "This server is busy with another action — wait for it to finish on the "
+            "Server tab, then press this again. Nothing was changed.",
+        )
+        return True
+
+    @Slot()
+    def change_client_dir(self) -> None:
+        """Set, change or leave this install's client folder (T36).
+
+        Validated through `families/clientdir.py` -- the same rules the
+        Install preflight applies -- for a game whose catalog entry carries a
+        `ClientSpec`; the entry's own `client` block, obtained the way
+        `preflight.gather()` does (`preflight.client_spec_for()`), so this
+        press and a fresh install cannot disagree about what a client folder
+        has to look like. WotLK's entry carries none -- AzerothCore extracts
+        nothing from a client, so nothing has ever validated its folder -- and
+        a minimal rule stands in for it (round 2 review): the folder must
+        exist and hold a `Data/` directory, the one thing every WoW client
+        ships regardless of expansion. The ONE further question, whether it
+        has an `Interface/` to write an addon into, is the row's own and not
+        this press's (`_client_dir_row_text()`).
+
+        Nothing is written on a refusal. A warning is put to the user as
+        "Use it anyway?" and answered through `said_yes()` (T33) rather than
+        blocking, because every remaining warning here (too few but not zero
+        MPQs, no locale archives, the repack smell, low free space) is
+        `families/clientdir.py`'s own tri-state discipline saying extraction
+        usually still works. Zero archives is pulled out of that and refused
+        outright (round 2 review): an empty `Data/` is not "usually still
+        works", it is the folder holding nothing to extract from at all.
+
+        Round 2 review's third rule, ahead of every other check: the server
+        folder, or anything inside it, is refused before `clientdir.validate()`
+        is ever asked -- Uninstall deletes that whole tree, and a client
+        folder living there would be removed out from under the game the
+        first time this install is uninstalled.
+        """
+        if self.services.set_client_dir is None:
+            return
+        if self._client_dir_busy():
+            return
+        chosen = self._pick_client_dir(
+            self,
+            f"Select your {self.entry.client.version} client folder",
+            self.services.client_dir,
+        )
+        if chosen is None:
+            return
+        server_dir = self.services.controller.server_dir
+        if chosen.resolve().is_relative_to(server_dir.resolve()):
+            self._client_dir_refused(
+                f"The client folder cannot be the server folder or inside it ({server_dir}): "
+                "Uninstall removes that whole tree."
+            )
+            return
+        spec = preflight.client_spec_for(self.entry)
+        if spec is not None:
+            checks = clientdir.validate(chosen, spec, free_bytes=preflight.free_bytes)
+            report = preflight.Report(checks=checks)
+            if not report.ok():
+                self._client_dir_refused(report.message())
+                return
+            mpq_check = next((c for c in checks if c.name == clientdir.MPQ_CHECK), None)
+            if mpq_check is not None and _mpq_archive_count(mpq_check) == 0:
+                self._client_dir_refused(_check_sentence(mpq_check))
+                return
+            warnings = report.warnings()
+            if warnings:
+                text = "\n".join(_check_sentence(c) for c in warnings)
+                answer = QMessageBox.question(
+                    self,
+                    "Use this client folder anyway?",
+                    f"Use it anyway? {text}",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if not said_yes(answer):
+                    return
+        elif not (chosen / clientdir.DATA_DIR).is_dir():
+            self._client_dir_refused(
+                f"{chosen} has no {clientdir.DATA_DIR}/ folder, so it is not a WoW client. "
+                "Nothing was changed."
+            )
+            return
+        try:
+            self.services.set_client_dir(chosen)
+        except OSError as exc:
+            self._client_dir_refused(f"Could not set the client folder: {exc}")
+            return
+        # Last, mirroring `forget_install()`: the window rebuilds this tab on
+        # this signal, which destroys the view.
+        self.client_dir_changed.emit(self.entry.id, self.services.controller.server_dir, chosen)
+
+    @Slot()
+    def forget_client_dir(self) -> None:
+        """Clear this install's recorded client folder (T36).
+
+        No confirmation: unlike "Forget this install…" this drops no tab and
+        touches no Docker object, and the folder is one press away from being
+        set again -- the cost of a mistaken press is one more press, not a
+        server nobody can get back.
+        """
+        if self.services.set_client_dir is None:
+            return
+        if self._client_dir_busy():
+            return
+        try:
+            self.services.set_client_dir(None)
+        except OSError as exc:
+            self._client_dir_refused(f"Could not forget the client folder: {exc}")
+            return
+        self.client_dir_changed.emit(self.entry.id, self.services.controller.server_dir, None)
+
     @Slot()
     def add_to_steam(self) -> None:
         """8.8. Put this server and its client in the Steam library.
@@ -3739,7 +4026,12 @@ class ControllerView(QWidget):
         accumulating in a window that may stay open for days is the defect this
         change exists to avoid rather than one to introduce elsewhere.
         """
-        text = line.strip()
+        # Through `lines.parse()` before anything else: these two sinks are the
+        # reason T35's markers are NOT applied inside `run_attached()`, and a
+        # belt on top of that braces. `QLabel` renders `\x1e` as a box glyph,
+        # and a future caller wiring a marked stream in here would leave one in
+        # front of every line with nothing to say what it was.
+        text = lines.parse(line).text.strip()
         if not text:
             return
         if len(text) > _IMPORT_LINE_CHARS:
@@ -5492,7 +5784,7 @@ class ControllerView(QWidget):
         `--rm` deletes the container when it exits, so `docker compose logs`
         has nothing to add afterwards. What is on screen is what there is.
         """
-        text = line.rstrip()
+        text = lines.parse(line).text.rstrip()  # see `_import_line()` for why
         if not text:
             return
         self.module_report.appendPlainText(text)

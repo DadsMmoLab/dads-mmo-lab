@@ -1,0 +1,29 @@
+stop pressed 2026-09-12T03:48:57.4568913+02:00
+chose [Stop] at 1513,185 81x26
+invoked at 2026-09-12T03:48:56.4987091+02:00
+--- app log ---
+docker ps --format {{.Names}} exited 1: failed to connect to the docker API at 
+npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is 
+running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+docker ps --format {{.Names}} exited 1: failed to connect to the docker API at 
+npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is 
+running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+docker ps --format {{.Names}} exited 1: failed to connect to the docker API at 
+npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is 
+running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+D:\tortoise-test\src\tortoise-wow\modules\TortoiseBots (docker run --rm -v 
+D:\tortoise-test\src\tortoise-wow\modules\TortoiseBots:/git -w /git 
+alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26 -c 
+core.autocrlf=false -c core.eol=lf -c http.version=HTTP/1.1 clone --progress --config 
+core.autocrlf=false --config core.eol=lf --config http.version=HTTP/1.1 --depth 1 --branch main 
+https://github.com/Sagiroth/TortoiseBots.git . exited 1: Updating files:  66% (831/1259) / 
+Updating files:  67% (844/1259) / Updating files:  68% (857/1259) / Updating files:  68% 
+(866/1259) / Updating files:  69% (869/1259)); falling back to host git
+2026-09-12 03:48:57 INFO [yulon.ui.catalog_view] install of wow-tortoise was cancelled; nothing 
+remembered
+tortoise-test: 0.46 GB
+ac-database Up 9 minutes (healthy)
+ac-authserver Exited (0) 32 minutes ago
+ac-worldserver Exited (0) 32 minutes ago
+ac-db-import Exited (0) About an hour ago
+ac-client-data-init Exited (0) About an hour ago
