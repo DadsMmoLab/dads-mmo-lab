@@ -6300,3 +6300,38 @@ def test_buildkit_shaped_output_with_no_failure_marker_falls_back() -> None:
     # slipped through twice.
     assert "------" in said, said
     assert "[3/3]" in said, said
+
+
+def test_installed_module_names_reads_folders_only(tmp_path: Path) -> None:
+    """T41: what the Modules tab marks its rows with.
+
+    The live `modules/` folder holds six loose files beside the checkouts —
+    `CMakeLists.txt`, `create_module.sh`, `how_to_make_a_module.md`,
+    `ModulesLoader.cpp.in.cmake`, `ModulesPCH.h`, `ModulesScriptLoader.h` —
+    read off `yulon-win11` on 2026-09-12 beside `mod-playerbots`. None of them
+    is a module, and a dot-directory is `.git`.
+    """
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    (modules / "mod-playerbots").mkdir()
+    (modules / "mod-transmog").mkdir()
+    (modules / ".git").mkdir()
+    (modules / "CMakeLists.txt").write_text("x", encoding="utf-8")
+    (modules / "how_to_make_a_module.md").write_text("x", encoding="utf-8")
+
+    assert docker.installed_module_names(tmp_path) == frozenset({"mod-playerbots", "mod-transmog"})
+
+
+def test_a_missing_modules_folder_marks_nothing_rather_than_claiming_anything(
+    tmp_path: Path,
+) -> None:
+    """No folder is the empty set, not an error and not "everything is missing".
+
+    The list then marks nothing, which is what it did before T41 — the opposite
+    of `allowed_modules()`, where the same unreadable folder must answer `all`
+    so the importer keeps upstream's default. The two callers share the listing
+    and not that rule, which is why `_module_dir_names()` returns `None` and
+    lets each decide.
+    """
+    assert docker.installed_module_names(tmp_path) == frozenset()
+    assert docker.allowed_modules(tmp_path) == docker.ALL_MODULES

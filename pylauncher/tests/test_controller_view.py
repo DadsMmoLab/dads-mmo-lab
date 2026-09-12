@@ -56,7 +56,7 @@ from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
-from yulon.ui.controller_view import ControllerServices, ControllerView
+from yulon.ui.controller_view import INSTALLED_MARK, ControllerServices, ControllerView
 from yulon.ui.widgets.job import run_inline
 
 WOTLK = load_catalog().get("wow-wotlk")
@@ -7147,3 +7147,64 @@ def test_neither_one_line_sink_can_show_a_control_character(
 
     assert view.problem_label.text().splitlines()[-1] == ">> Applying update 2026_01_01_00.sql"
     assert view.module_report.toPlainText().splitlines()[-1] == ">> Applying mod-playerbots.sql"
+
+
+def _installed_view(ps: _Ps, tmp_path: Path, installed: frozenset[str]) -> ControllerView:
+    """A WotLK view whose install has `installed` in its modules folder."""
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", lambda: installed)
+    return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def test_the_modules_list_says_which_modules_are_installed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T41, 2026-09-12: "None of modules detected lol", on an install that had some.
+
+    `reload_modules()` filled the list from the manifest STORE and read nothing
+    off disk, so the tab showed what this game COULD install and never what it
+    had. Measured on the live install on `yulon-win11`: `mod-playerbots` sits in
+    `modules/` and all 41 catalog rows looked identical to a server with none.
+    """
+    view = _installed_view(ps, tmp_path, frozenset({"mod-transmog"}))
+    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
+
+    transmog = [r for r in rows if "mod-transmog" in r or "Transmogrification" in r]
+    assert transmog, rows[:5]
+    assert any(INSTALLED_MARK in r for r in transmog), transmog
+
+    # And a module the catalog offers but this install does not have is not
+    # marked -- otherwise the mark says nothing.
+    others = [r for r in rows if r not in transmog]
+    assert others, rows[:5]
+    assert not any(INSTALLED_MARK in r for r in others), [r for r in others if INSTALLED_MARK in r]
+
+
+def test_a_module_on_disk_the_catalog_never_heard_of_still_gets_a_row(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """It is installed, whatever the catalog thinks.
+
+    `apply_module.module_updates()` already takes this position for its own
+    rows — "A module on disk that the store has never heard of still gets a
+    row" — and a list that silently omits somebody's hand-cloned module is the
+    same "None of modules detected" in a smaller place.
+    """
+    view = _installed_view(ps, tmp_path, frozenset({"mod-something-homemade"}))
+    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
+
+    mine = [r for r in rows if "mod-something-homemade" in r]
+    assert len(mine) == 1, rows[-5:]
+    assert INSTALLED_MARK in mine[0], mine
+
+
+def test_a_game_with_no_installed_modules_seam_lists_the_catalog_unchanged(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The three CMaNGOS games have no modules folder; their list must not change."""
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", None)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
+    assert rows, "the catalog still lists"
+    assert not any(INSTALLED_MARK in r for r in rows), [r for r in rows if INSTALLED_MARK in r]

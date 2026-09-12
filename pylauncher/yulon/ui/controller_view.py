@@ -580,6 +580,24 @@ class ControllerServices:
     It costs one `git fetch` per installed checkout, which is why it is a button
     and not part of the status poll.
     """
+    installed_modules: Callable[[], frozenset[str]] | None = None
+    """Which module folders exist in this install, or None for a game with no modules.
+
+    T41: the list was built from the manifest STORE alone, so it showed what
+    this game could install and never what it had. A player who pointed Yu'lon
+    at a server he already ran read that as "None of modules detected", and a
+    player who had just installed one correctly saw exactly the same rows he
+    saw before (2026-09-12, both in `#-yulon`).
+
+    A separate seam from `module_updates` on purpose. That one asks every
+    upstream how far behind it is, costs a `git fetch` per checkout and is
+    therefore a button; this one reads directory names and is cheap enough to
+    run on every `reload_modules()`. Folding the cheap fact into the expensive
+    call is what kept it off the list in the first place.
+
+    Returns ids, not paths: the view compares them with `manifest.id` and must
+    not learn where an install keeps its modules.
+    """
     module_from_link: Callable[[str], Manifest] | None = None
     """Derive a manifest from a link the user pasted, or raise with the refusal.
 
@@ -914,6 +932,7 @@ def _assemble(
     uninstall: Uninstall | None = None,
     module_sql: ModuleSqlRoute | None = None,
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
+    installed_modules: Callable[[], frozenset[str]] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
     module_install_custom: CustomModuleInstall | None = None,
@@ -964,6 +983,9 @@ def _assemble(
         # Defaulted for the same reason and passed by the same factory: a game
         # with no `modules/` folder of checkouts has nothing to count.
         module_updates=module_updates,
+        # T41's cheap twin of the line above, and conditional on the same
+        # flag: a game with no `modules/` folder has nothing to mark.
+        installed_modules=installed_modules,
         # Defaulted for the same reason again: the four seams behind "Install
         # from link…" and "Install from folder…" belong to the one game whose
         # modules are checkouts under `modules/`, and that factory passes them.
@@ -1314,6 +1336,12 @@ def _for_wotlk(
         # a future core that compiles modules and imports differently.
         module_updates=(
             (lambda: wotlk_modules.module_updates(server_dir)) if entry.has_manifests else None
+        ),
+        # T41: the cheap half of the same question, on every reload. Bound to
+        # the same `has_manifests` flag, so the three CMaNGOS games — which have
+        # no modules folder — keep a list of the catalog and nothing else.
+        installed_modules=(
+            (lambda: docker.installed_module_names(server_dir)) if entry.has_manifests else None
         ),
         # A module from a link or a folder (design page, lane C's four seams),
         # wired once lanes A and B were on the branch (2026-09-08). Lane C
@@ -2169,6 +2197,24 @@ cancel to offer. Abandoning a `compose up` means terminating it, which stops
 """
 
 _IMPORT_TAIL_LINES = 2
+INSTALLED_MARK = "✓"
+"""What marks a row as installed in this server's modules folder (T41).
+
+A leading glyph rather than a trailing "(installed)", so the installed rows line
+up down the left edge of a list 41 entries long and can be found without reading
+a word. The tests import this rather than spelling it, so the mark can change
+without a test being edited into agreement with whatever the view happens to do.
+"""
+
+NOT_IN_CATALOG = "installed here — not in this game's catalog"
+"""The description for a module folder the manifest store has never heard of.
+
+It is installed whatever the catalog thinks, and `apply_module.module_updates()`
+already takes that position for its own rows. A list that silently omitted a
+hand-cloned module would be the same "None of modules detected" in a smaller
+place.
+"""
+
 MODULE_SQL_RUNNING = "Running the importer over the modules installed here. What it prints:"
 """The heading above the module importer's live output.
 
@@ -5498,6 +5544,17 @@ class ControllerView(QWidget):
         if store is None:
             self.module_list.addItem("(this game has no manifests yet)")
             return
+        # What is actually in this install's modules folder. Cheap enough for
+        # every reload (directory names, no git), which is why it is its own
+        # seam and not part of `module_updates` — see `ControllerServices`.
+        installed: frozenset[str] = frozenset()
+        reader = self.services.installed_modules
+        if reader is not None:
+            try:
+                installed = reader()
+            except Exception as exc:  # boundary: an unreadable folder must not kill the UI
+                logger.warning(f"could not read which modules are installed: {exc}")
+        seen: set[str] = set()
         for kind in FAMILY_FILES:
             try:
                 items = list(store.load_all(kind))
@@ -5505,12 +5562,23 @@ class ControllerView(QWidget):
                 self.module_list.addItem(f"!! could not load {kind}s: {exc}")
                 continue
             for manifest in items:
+                here = manifest.id in installed
+                mark = f"{INSTALLED_MARK} " if here else ""
                 item = QListWidgetItem(
-                    f"[{manifest.type}] {manifest.name} — {manifest.description}"
+                    f"{mark}[{manifest.type}] {manifest.name} — {manifest.description}"
                 )
                 item.setData(256, manifest.id)  # Qt.UserRole
                 self.module_list.addItem(item)
                 self._manifests[manifest.id] = manifest
+                seen.add(manifest.id)
+        # A module on disk the catalog has never heard of is still installed.
+        # No manifest is invented for it: it gets a row and no entry in
+        # `_manifests`, so the install/remove buttons stay inert on it rather
+        # than acting on a manifest this app made up.
+        for name in sorted(installed - seen):
+            self.module_list.addItem(
+                QListWidgetItem(f"{INSTALLED_MARK} [module] {name} — {NOT_IN_CATALOG}")
+            )
 
     def selected_manifest(self) -> Manifest | None:
         item = self.module_list.currentItem()

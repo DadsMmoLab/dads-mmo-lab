@@ -2439,7 +2439,7 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "it must not give is a confident zero for a path it could not resolve, which is why a "
         "`{key}` in the path answers `files=None` instead of globbing the literal braces"
     ),
-    ("docker.py", "allowed_modules"): (
+    ("docker.py", "_module_dir_names"): (
         "lists `<server>/modules` to name the modules the database importer may apply SQL for; "
         "decides no write to that folder and never touches it. Its `except OSError` logs and "
         "answers `all`, which is upstream's own default (the modules COMPILED into the image), "
@@ -2448,7 +2448,10 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "2026-09-07, an empty value means `Loading modules: none` and switches module updates "
         "off, so 'nothing readable' and 'nothing to allow' must not collapse into one string. "
         "Nothing is written on the strength of it either way -- the answer travels in argv "
-        "to a container that then decides file by file"
+        "to a container that then decides file by file. T41 moved the listing itself here out "
+        "of `allowed_modules()` so `installed_module_names()` could share it without inheriting "
+        'its `all`/`""` rule: this function answers `None` for unreadable and `[]` for empty, '
+        "and each caller decides what those two mean to it. Neither caller writes anything"
     ),
     ("docker.py", "_first_populated_ancestor"): (
         "walks up a path looking for a directory that HAS something in it, to tell a real "

@@ -1847,17 +1847,46 @@ def allowed_modules(server_dir: Path) -> str:
     `UpdateFetcher` skips them — and only one of them is safe when the folder
     could not be read.
     """
+    names = _module_dir_names(server_dir)
+    if names is None:
+        return ALL_MODULES
+    return ",".join(names) if names else ALL_MODULES
+
+
+def _module_dir_names(server_dir: Path) -> list[str] | None:
+    """The module folder names in this install, sorted. `None` means unreadable.
+
+    The listing `allowed_modules()` and `installed_module_names()` share. They
+    do NOT share the empty case: an unreadable folder and an empty one are the
+    same answer to the list on screen (nothing to mark) and two different
+    answers to the importer, where `ALL_MODULES` is upstream's default and `""`
+    would switch module updates off. Hence `None` rather than `[]` here, so
+    each caller decides for itself.
+    """
     modules = server_dir / MODULES_DIR_NAME
     try:
-        names = sorted(
+        return sorted(
             entry.name
             for entry in modules.iterdir()
             if entry.is_dir() and not entry.name.startswith(".")
         )
     except OSError as exc:
-        logger.warning(f"could not list {modules}, so the importer keeps upstream's default: {exc}")
-        return ALL_MODULES
-    return ",".join(names) if names else ALL_MODULES
+        logger.warning(f"could not list {modules}: {exc}")
+        return None
+
+
+def installed_module_names(server_dir: Path) -> frozenset[str]:
+    """Which modules are installed here, as a set of folder names (T41).
+
+    What the Modules tab marks its rows with. Cheap on purpose — directory
+    names, no git, no daemon — because it runs on every `reload_modules()`,
+    where `module_updates()` costs a `git fetch` per checkout and is a button.
+
+    An unreadable or missing folder answers the empty set: the list then marks
+    nothing, which is what it did before this existed, rather than claiming
+    every module is missing.
+    """
+    return frozenset(_module_dir_names(server_dir) or ())
 
 
 def run_one_shot(
