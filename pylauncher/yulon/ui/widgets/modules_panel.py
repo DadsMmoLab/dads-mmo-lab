@@ -292,20 +292,38 @@ def build_module_rows(
     each card and sees what he has.
     """
     catalog: list[Manifest] = list(manifests)
-    installed_ids: dict[str, Manifest] = {}
+    # Keyed by (FAMILY, id) and collected as a LIST, and both halves are the
+    # round-2 fix. Nothing makes a manifest id unique across families -- the
+    # store loads `manifests/<game>/<family>/` one directory at a time and no
+    # invariant spans them -- and the two mistakes an id-keyed dict makes are
+    # different. As a membership test it reads the wrong FOLDER: `modules/` and
+    # `sql_scripts/clones/` are different directories, so a `module` and a `mod`
+    # sharing an id both read installed when one clone is on disk. As the source
+    # of the dependency graph it DROPS a manifest: only the last one loaded
+    # under that id contributed its `requires`, so a base another installed
+    # module needs came back removable.
+    installed_keys: set[tuple[str, str]] = set()
+    installed_manifests: list[Manifest] = []
     for manifest in catalog:
         if manifest.id in installed.get(manifest.type, frozenset()):
-            installed_ids[manifest.id] = manifest
+            installed_keys.add((manifest.type, manifest.id))
+            installed_manifests.append(manifest)
     # Who needs what, counted from what is INSTALLED and not from the catalog:
     # a manifest nobody has installed requires nothing of anybody, and letting
     # it lock a row would make half the catalog unremovable on a fresh install.
+    #
+    # Keyed by the required ID and not by (family, id), because `Manifest.
+    # requires` names an id and never a family -- that is the schema's own
+    # precision and inventing a family here would be a guess. The consequence is
+    # deliberate and conservative: where an id really is in two families, both
+    # rows are held by whatever requires it.
     dependants: dict[str, list[str]] = {}
-    for manifest in installed_ids.values():
+    for manifest in installed_manifests:
         for needed in manifest.requires:
             dependants.setdefault(needed, []).append(manifest.name)
 
     def _row(manifest: Manifest) -> ModuleRow:
-        here = manifest.id in installed_ids
+        here = (manifest.type, manifest.id) in installed_keys
         needed_by = dependants.get(manifest.id, [])
         return ModuleRow(
             id=manifest.id,
@@ -336,8 +354,8 @@ def build_module_rows(
     rows: list[ModuleRow] = []
     for kind in FAMILY_FILES:
         family = [m for m in catalog if m.type == kind]
-        rows += [_row(m) for m in family if m.id in installed_ids]
-        rows += [_row(m) for m in family if m.id not in installed_ids]
+        rows += [_row(m) for m in family if (kind, m.id) in installed_keys]
+        rows += [_row(m) for m in family if (kind, m.id) not in installed_keys]
         known = accounted.setdefault(_clone_dir_of(kind), set())
         for name in sorted(installed.get(kind, frozenset())):
             if name in known:
@@ -468,11 +486,12 @@ class RowWidget(QFrame):
                 # Only an owed chip is a press: a fact chip names something no
                 # press can change, and wiring it would put a sentence in the
                 # report that answers nothing.
-                button.clicked.connect(
-                    lambda _checked=False, label=chip.label: self.pressed_chip.emit(
-                        self.data.id, label
-                    )
-                )
+                #
+                # And it SELECTS first, because a child button consumes its own
+                # click and would otherwise leave the row unselected while
+                # writing that row's sentence into the report -- the same reason
+                # `_row_install` selects before acting (round 2).
+                button.clicked.connect(lambda _checked=False, label=chip.label: self._chip(label))
             buttons.append(button)
             chips.addWidget(button)
         chips.addStretch(1)
@@ -531,14 +550,24 @@ class RowWidget(QFrame):
             )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802  (Qt's own name)
-        """A click ANYWHERE on the row selects it — the mockup's rule, and T42's.
+        """A click on the row's BODY selects it — the mockup's rule, and T42's.
 
-        Children that ignore the press (the labels) propagate it here, which is
-        why the description and the paths are part of the target and not dead
-        space.
+        Children that ignore the press (the name, the description, the paths,
+        the badge) propagate it here, which is why they are part of the target
+        and not dead space.
+
+        Two children do not, and the difference is deliberate (round 2). A CHIP
+        consumes its click and selects the row itself, through `_chip()`,
+        because a chip press is a statement about that row. The GITHUB LINK
+        consumes its click and selects nothing: it opens a browser at somebody
+        else's website, and highlighting a row on this tab is not part of that.
         """
         self.clicked.emit(self.data.id)
         super().mousePressEvent(event)
+
+    def _chip(self, label: str) -> None:
+        self.clicked.emit(self.data.id)
+        self.pressed_chip.emit(self.data.id, label)
 
     def _menu_at(self, pos: QPoint) -> None:
         self.menu_requested.emit(self.data.id, self.mapToGlobal(pos))
@@ -586,6 +615,22 @@ class _FamilyCard(QGroupBox):
         else:
             self.available_box.setVisible(False)
 
+    def laid_out_rows(self) -> list[RowWidget]:
+        """The rows as this card really lays them out: the installed box, then the other.
+
+        Read off the layouts and not off the list `fill()` was handed, because
+        the split into two boxes is what a person actually sees -- and a test
+        that reads the handed list can pass while the drawing is wrong.
+        """
+        out: list[RowWidget] = []
+        for layout in (self._installed_layout, self._available_layout):
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                widget = None if item is None else item.widget()
+                if isinstance(widget, RowWidget):
+                    out.append(widget)
+        return out
+
     def set_open(self, is_open: bool) -> None:
         if self.toggle is not None:
             self.toggle.setChecked(is_open)
@@ -623,10 +668,23 @@ class ModulesPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._rows: dict[str, RowWidget] = {}
+        # Keyed by (FAMILY, id) since round 2. Nothing makes an id unique across
+        # families, and an id-keyed dict lost the first of two rows that shared
+        # one: both widgets were still DRAWN, so the user saw two rows and the
+        # panel knew one -- `rows()` was short, `row()` answered with whichever
+        # was built last, and a click on the other one highlighted it.
+        #
+        # The public shape stays id-based (`row`, `select`, `selected_id` and
+        # every signal), because everything below this tab addresses a module by
+        # id alone: `ApplyReport.item_id`, `apply.installed_clones()` and
+        # `docker.allowed_modules()` all do, and T43 reads these names. Where a
+        # bare id matches more than one row they resolve in `FAMILY_FILES`
+        # order, said once in `_key_for()`; a CLICK never uses that rule,
+        # because it carries the widget it happened on.
+        self._rows: dict[tuple[str, str], RowWidget] = {}
         self._cards: dict[str, _FamilyCard] = {}
         self._open: dict[str, bool] = {}
-        self._selected: str | None = None
+        self._selected: tuple[str, str] | None = None
         self._actions_enabled = True
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -686,19 +744,37 @@ class ModulesPanel(QWidget):
             self._content_layout.insertWidget(self._content_layout.count() - 1, card)
         self.empty_label.setVisible(not self._rows)
         self._selected = keep if keep in self._rows else None
-        for item_id, widget in self._rows.items():
-            widget.set_selected(item_id == self._selected)
+        for key, widget in self._rows.items():
+            widget.set_selected(key == self._selected)
 
     def _make(self, data: ModuleRow) -> RowWidget:
         widget = RowWidget(data)
         widget.pressed_install.connect(self.install_pressed.emit)
         widget.pressed_remove.connect(self.remove_pressed.emit)
         widget.pressed_chip.connect(self.chip_pressed.emit)
-        widget.clicked.connect(self.select)
+        # The WIDGET, not its id: a click must select the row it happened on,
+        # and routing it through `select()` would put it through the bare-id
+        # resolution rule and highlight the other family's row (round 2).
+        widget.clicked.connect(lambda _id, w=widget: self._select_widget(w))
         widget.menu_requested.connect(self.context_menu_requested.emit)
         widget.set_enabled_actions(self._actions_enabled)
-        self._rows[data.id] = widget
+        self._rows[(data.family, data.id)] = widget
         return widget
+
+    def _key_for(self, item_id: str) -> tuple[str, str] | None:
+        """The row a bare id names, resolved in `FAMILY_FILES` order.
+
+        The one place the ambiguity of a bare id is settled, so no caller
+        invents a second rule. `None` where no row has that id -- which is the
+        ordinary answer after a remove, not an error.
+        """
+        for family in FAMILY_FILES:
+            if (family, item_id) in self._rows:
+                return (family, item_id)
+        for key in self._rows:
+            if key[1] == item_id:
+                return key
+        return None
 
     def _flip(self, family: str) -> None:
         self._open[family] = not self._open.get(family, True)
@@ -710,15 +786,41 @@ class ModulesPanel(QWidget):
 
     def row(self, item_id: str) -> RowWidget:
         """The widget for this id. Raises rather than answering `None`: every caller
-        of this asks about a row it has just been told exists."""
-        return self._rows[item_id]
+        of this asks about a row it has just been told exists.
+
+        Where an id is in two families this answers the first in `FAMILY_FILES`
+        order -- see `_key_for()`.
+        """
+        key = self._key_for(item_id)
+        if key is None:
+            raise KeyError(item_id)
+        return self._rows[key]
 
     def rows(self) -> tuple[RowWidget, ...]:
-        """Every row, in the order `set_rows()` was handed them (= the drawn order)."""
+        """Every row, in the order `set_rows()` was handed them.
+
+        NOT the drawn order, and the difference matters: the cards split each
+        family into an installed box and an available box, so what a person sees
+        is `drawn_rows()`. This is the order the builder decided, which is what
+        a test of the BUILDER wants (round 2).
+        """
         return tuple(self._rows.values())
 
+    def drawn_rows(self) -> tuple[RowWidget, ...]:
+        """Every row in the order the cards really lay them out, read off the layouts."""
+        out: list[RowWidget] = []
+        for family in FAMILY_FILES:
+            card = self._cards.get(family)
+            if card is not None:
+                out += card.laid_out_rows()
+        return tuple(out)
+
+    def selected_row(self) -> RowWidget | None:
+        """The selected row itself, family included -- what `selected_id()` cannot say."""
+        return None if self._selected is None else self._rows[self._selected]
+
     def selected_id(self) -> str | None:
-        return self._selected
+        return None if self._selected is None else self._selected[1]
 
     def available_open(self, family: str) -> bool:
         """Whether this family's "not installed" half is showing."""
@@ -737,13 +839,22 @@ class ModulesPanel(QWidget):
 
     @Slot(str)
     def select(self, item_id: str) -> None:
-        """Select a row and say so. Unknown ids are ignored, not raised."""
-        if item_id not in self._rows:
-            return
-        self._selected = item_id
-        for known, widget in self._rows.items():
-            widget.set_selected(known == item_id)
-        self.row_selected.emit(item_id)
+        """Select the row this id names, and say so. Unknown ids are ignored, not raised.
+
+        Resolved through `_key_for()`, so a bare id that is in two families
+        selects the first in `FAMILY_FILES` order. A click does not come this
+        way -- see `_make()`.
+        """
+        key = self._key_for(item_id)
+        if key is not None:
+            self._select_widget(self._rows[key])
+
+    def _select_widget(self, widget: RowWidget) -> None:
+        """Select exactly this row. The only place selection is actually set."""
+        self._selected = (widget.data.family, widget.data.id)
+        for known, other in self._rows.items():
+            other.set_selected(known == self._selected)
+        self.row_selected.emit(widget.data.id)
 
     def set_enabled_actions(self, enabled: bool) -> None:
         """Arm or disarm every row's press (the busy lock, and the applier gate)."""

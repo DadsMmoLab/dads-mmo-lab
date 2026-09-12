@@ -40,7 +40,7 @@ Then a general-purpose agent on Opus 5 with: "You are the hand for T42. Read `py
 
 ## Report (hand, Opus 5, 2026-09-12)
 
-**Status:** IMPLEMENTED — unit-gated in the worktree, not pushed. Reviewer, the m910q
+**Status:** SUPERSEDED by the round-2 section below (Codex REJECT, addressed 2026-09-13). Unit-gated in the worktree, not pushed. Reviewer, the m910q
 `--checks` gate, the CHANGELOG line, the merge and the live half on `yulon-win11` are the
 lead's.
 
@@ -270,3 +270,225 @@ run, and seen to FAIL; the tree was restored afterwards. 35 mutations in all.
 `black --check yulon/ tests/` — 208 files unchanged. `ruff check yulon/ tests/` — all checks
 passed. `mypy yulon/` — no issues in 100 source files. Nothing pushed; `--checks` on m910q
 and the `yulon-win11` frames are the lead's.
+
+## Report — round 2 (hand, Opus 5, 2026-09-13)
+
+Codex returned REJECT on `hand-t42`. All four MUST FIX findings are fixed, every test it
+asked for is written, and the two tests it called out for agreeing by accident are fixed
+rather than re-worded. One of its sentences is contradicted below, with the line that
+contradicts it; the finding it belongs to is real and is fixed anyway.
+
+**Status:** ROUND 2 DONE — unit-gated in the worktree, not pushed.
+
+### 1. A cancelled rebuild no longer clears the debt
+
+`_rebuild_finished()` asked two questions and needed three. `LogPanel` reports a STOPPED job
+as `ok=True, message="stopped"` **on purpose** — its worker's `except` branch says so in as
+many words, because `request_stop()` kills the job's children and a terminated child exits
+non-zero, and reporting that as a failure would put a refusal on screen for a button the
+user pressed. So `ok` cannot mean "the compile finished".
+
+The third question is `LogPanel.cancelled`, a property that exists for exactly this and
+whose docstring says "the panel is the only thing that knows the Stop button was pressed".
+`if ok and compiled and not self.rebuild_log.cancelled:`.
+
+The message is deliberately NOT read: `message == "stopped"` would be the same defect in a
+new place — an English string standing in for a fact the object already carries.
+
+**Anything else keying off `run_finished`'s `ok` in the same wrong way: no.** There are two
+consumers. `catalog_view._on_run_finished()` (`ui/catalog_view.py:864-880`) already reads
+`self._log.cancelled` first, with a comment recording the install gate of 2026-08-23 where
+a cancelled install was written into `state.json` as finished. `_rebuild_finished()`'s other
+effects are `_set_busy(False)`, `_import_asked = False`, `_forget_the_adopt_reading()` and
+`if not ok: action_failed.emit(...)` — the three resets are conservative in both directions
+and the emit cannot fire on a stop, since a stop arrives as `ok=True`.
+
+### 2. A shared manifest id no longer corrupts four things
+
+Four keys were widened; none of them is a public name.
+
+* `build_module_rows`: `installed_ids: dict[str, Manifest]` became `installed_keys:
+  set[tuple[str, str]]` **and** `installed_manifests: list[Manifest]`, because the one dict
+  was making two different mistakes — as a membership test it read the wrong FOLDER
+  (`modules/` vs `sql_scripts/clones/`), and as the source of the dependency graph it
+  DROPPED a manifest, so only the last-loaded one under an id contributed its `requires`.
+* `ModulesPanel._rows`: keyed by `(family, id)`. Both widgets were always drawn, so the user
+  saw two rows and the panel knew one.
+* `ControllerView._manifests`: keyed by `(family, id)`, and `selected_manifest()` reads the
+  family off the selected ROW. That object goes straight to `applier.install()`.
+* Selection: a click now carries its widget (`_select_widget`), so it selects the row it
+  happened on. `row()`, `select()` and every signal keep their bare-id shape — T43 reads
+  them — and the ambiguity is settled once, in `_key_for()`, in `FAMILY_FILES` order.
+
+`dependants` stays keyed by the required **id**, because `Manifest.requires` names an id and
+never a family. That is the schema's own precision; inventing a family there would be a
+guess. The consequence is deliberate and conservative: where an id really is in two
+families, both rows are held by whatever requires it.
+
+**One thing the fix deliberately does NOT change.** An id in both `ale` and `keg` reading
+installed in both is correct, not a collision: `apply.CLONE_DIRS` gives those two families
+the same directory and `apply.installed_clones()` returns the same set under both keys, in
+as many words ("`ale` and `keg` share one folder, so they share its answer"). The
+`(family, id)` keying preserves that, because `installed` carries the name under both keys.
+T41's `bmah` case still passes unchanged.
+
+The collision is latent, as Codex said: nothing in the store, the schema or the catalog
+tests makes an id unique across families, and grepping the shipped `wow-wotlk` tree finds
+none today. That is why "state why it is unique and guard it" was not taken — it is not
+unique by construction, a guard that raised would blank the tab on a user manifest that
+merely shares a shipped keg's name, and the widening cost four lines.
+
+### 3. The owed chips reconcile against the disk
+
+Chosen: **reconcile the three session sets in `reload_modules()`**, not gate the chips in
+`build_module_rows()`. The reason is that the two readers disagree about their source — the
+chips are built from the rows, the banner is built from `_rebuild_owed` directly — so gating
+only the chips would have left the banner naming a module that is gone. Reconciling the sets
+makes the two agree by construction, in one place.
+
+`_forget_what_is_no_longer_installed()` runs only where the `installed_modules` seam
+ANSWERED. A game without one reads as "nothing is installed anywhere", and treating that as
+evidence would throw away everything the session has learned on the first reload after an
+install — which is a test of its own.
+
+Known limit, written down rather than discovered later: a manifest that leaves no clone can
+never be reconciled as installed, so its owed facts are dropped on the next reload and only
+the report line carries them. It cannot bite a shipped manifest today — every one of the 15
+`wow-wotlk` manifests with `applied_by="db-import"` SQL is a `module` with a `source`, so
+all of them leave a clone in `modules/` (counted through the manifest files, round 2) — and
+`build.rebuild` is true only for `module`s, which always clone.
+
+### 4. The uncatalogued row's menu offers the answer, not two dead actions
+
+An uncatalogued row's menu now carries one entry, `WHY_UNCATALOGUED` ("Why is there no
+Install or Remove?"), whose whole effect is `UNCATALOGUED_PRESS`, plus Copy Module ID. A
+catalogued row keeps Install/Remove behind `_module_actions_allowed()`.
+
+**One correction to the finding's wording, which does not change the fix.** It says "Round 1
+gave those rows `UNCATALOGUED_PRESS` through the buttons". Round 1 gave them no buttons at
+all — `RowWidget.__init__` builds one only `if data.catalogued`, and the round-1 test
+`test_an_uncatalogued_row_has_no_buttons_at_all` asserts both are `None`. The menu was the
+only place the sentence was reachable, which is what the ticket's point 4 asked for. The
+substantive half of the finding is right and is what changed: two entries that name an
+action and then explain that the action does not exist are two controls that look live.
+
+**And a refactor the test forced, which the code is better for.** `QMenu.exec` is a Shiboken
+slot: `QMenu.exec = <lambda>` is accepted and then ignored, and the real popup runs (measured
+in round 2 — a test that patched it sat on a real nested event loop until it was killed, and
+printed Qt's own `This plugin does not support grabbing the keyboard`). So the building and
+the showing are now two methods: `_module_menu(module_id) -> QMenu` decides, and
+`_show_module_context_menu()` selects and shows. Both branches are testable without a popup,
+and the two lines only the real entry point runs are covered by a test that stubs
+`_module_menu` to an empty `QMenu`, whose `exec` returns at once (measured).
+
+### The two tests that agreed by accident
+
+Both are fixed, not re-worded — and the fix uncovered a third.
+
+* `ModulesPanel.rows()` really is insertion order, as Codex says. It is now documented as
+  "the order `set_rows()` was handed them", and a new `drawn_rows()` walks the cards'
+  layouts through `_FamilyCard.laid_out_rows()`.
+* `test_the_installed_row_is_drawn_above_the_ones_that_are_not` now asserts both the drawn
+  order and the built order, and its docstring says which mutation reaches which.
+* `test_the_cards_draw_the_installed_half_above_the_available_half` hands the panel rows in
+  an order the builder would never produce. This is the third accident: written first
+  against builder-sorted rows, it stayed GREEN under `card.fill(widgets, [])` — because when
+  the rows arrive already sorted the card's split and the builder's split are
+  indistinguishable. Measured, then rewritten.
+* A helper agreed by accident too, and the round-2 keying change exposed it: `_marked(view)`
+  returned marked **ids**, and `test_a_family_is_marked_from_its_own_clone_folder...` then
+  asked `modules_panel.row(id)` which family that was — a bare-id lookup, on the one case
+  (`mod-ale`) where two families hold the id. It returns the widgets now.
+
+### Not required: "clicking anywhere on a row selects it"
+
+Both halves of Codex's option, because the two children differ.
+
+* **A CHIP now selects its row** (`RowWidget._chip`). A chip press is a statement about that
+  row and writes that row's sentence into the report; leaving the row unselected was the
+  same gap `_row_install`/`_row_remove` already close by selecting first.
+* **The GITHUB LINK deliberately does not.** It opens a browser at somebody else's website,
+  and highlighting a row on this tab is not part of that. The claim is narrowed to say so,
+  in `RowWidget.mousePressEvent`'s docstring and in the ticket's shape section above: a
+  click on the row's BODY — name, description, paths, badge — selects it.
+
+### Public names (T43 reads this module)
+
+**Nothing public moved.** `ModuleRow`, `Chip`, `SessionState`, `build_module_rows`,
+`FAMILY_TITLES`, `NOT_IN_CATALOG`, `BADGE_INSTALLED`/`BADGE_NOT_INSTALLED`, the chip label
+constants, `chip_update_label`, `chip_required_by_label`, `NO_MODULES_NOTE`, `RowWidget` and
+its attributes, and `ModulesPanel`'s `set_rows`, `row`, `rows`, `select`, `selected_id`,
+`set_enabled_actions`, `available_open`, `available_toggle`, `installed_header`,
+`empty_label` and all five signals keep their names and signatures.
+
+Added: `ModulesPanel.drawn_rows()`, `ModulesPanel.selected_row()`,
+`_FamilyCard.laid_out_rows()`, `ControllerView._module_menu()`,
+`ControllerView._forget_what_is_no_longer_installed()`, `controller_view.WHY_UNCATALOGUED`.
+
+Changed, both private: `ModulesPanel._rows` and `ControllerView._manifests` are keyed by
+`(family, id)` instead of `id`. If T43 reads either dict directly it needs the tuple key;
+nothing in `ModulesPanel`'s public surface exposes it. `ControllerView._custom_install_pending`
+was already retired in round 1.
+
+Test-only: the helper `_opened_menu` became `_row_menu`, and `_marked` returns widgets.
+
+### Round-2 tests, each with its mutation
+
+Every mutation was applied to a clean tree with `__pycache__` purged on both sides, run, and
+seen to FAIL; the tree was restored afterwards. 19 mutations.
+
+**Builder — `tests/test_modules_panel.py`**
+
+| test | mutation |
+| --- | --- |
+| `test_an_id_in_two_families_is_installed_only_where_its_own_folder_says_so` | add every family's key to `installed_keys` (an id-keyed membership test) |
+| `test_both_families_of_a_shared_id_contribute_their_own_requires` | build the graph from `{m.id: m for m in installed_manifests}.values()` |
+| `test_the_sql_chip_is_absent_when_the_report_listed_no_files` | `if item_id in session.sql_owed:` instead of reading the value |
+
+**Panel — `tests/test_modules_panel.py`**
+
+| test | mutation |
+| --- | --- |
+| `test_an_id_in_two_families_gets_two_addressable_rows` | key `_rows` by the id alone |
+| `test_clicking_the_second_family_of_a_shared_id_selects_that_row` | `widget.clicked.connect(self.select)` (the bare-id route) |
+| `test_a_chip_press_selects_its_row_too` | drop the `clicked.emit` from `RowWidget._chip` |
+| `test_the_cards_draw_the_installed_half_above_the_available_half` | `card.fill(widgets, [])` |
+| `test_a_family_that_disappears_and_comes_back_keeps_its_toggle` | `self._open.clear()` at the top of `set_rows()` |
+| `test_a_family_that_gains_its_first_installed_row_stays_open` | recompute the collapse rule on every `set_rows()` |
+
+**View — `tests/test_controller_view.py`**
+
+| test | mutation |
+| --- | --- |
+| `test_a_stopped_rebuild_keeps_the_debt_it_started_with` | drop `and not self.rebuild_log.cancelled` |
+| `test_an_adopt_through_the_same_panel_clears_no_rebuild` | `_rebuild_is_compile = True` in `adopt_as_imported()` |
+| `test_a_successful_removal_forgets_everything_owed_about_that_module` | drop `self._behind.pop(...)` from the remove branch |
+| `test_a_clone_deleted_outside_the_app_takes_its_chips_and_the_banner_with_it` | drop the `_forget_what_is_no_longer_installed()` call |
+| `test_a_game_with_no_installed_reader_keeps_what_this_session_learned` | reconcile unconditionally (drop `if reader is not None`) |
+| `test_the_menu_on_an_uncatalogued_row_offers_the_answer_and_not_two_dead_actions` | `if False:` on the uncatalogued branch (round 1's shape) |
+| `test_the_menu_on_a_catalogued_row_still_installs_and_removes` | connect the Install entry to `_module_action("remove")` |
+| `test_a_right_click_selects_the_row_and_builds_its_own_menu` | drop the `select()` from `_show_module_context_menu` |
+| `test_the_selected_manifest_of_a_shared_id_is_the_one_whose_row_is_selected` | look the manifest up by id alone, newest entry first (what `_manifests[manifest.id] = manifest` gives) |
+| `test_the_installed_row_is_drawn_above_the_ones_that_are_not` | drop the installed-first split in `build_module_rows` |
+
+One of these took two attempts to make bite and the first attempt is worth recording. The
+shared-id manifest test first asserted only the `mod` row's answer — and an id-keyed dict is
+last-write-wins with `mod` loaded after `module`, so it would have answered that one
+correctly and the test would have passed over the live defect. It asserts both directions
+now. (Ten-ways-a-test-proves-nothing, case 1: which single rule does this fixture violate?)
+
+### Gate
+
+`yt` in the worktree, last line:
+
+```
+4423 passed, 8 skipped, 23 deselected, 2 warnings in 151.06s (0:02:31)
+```
+
+`black --check yulon/ tests/` — 208 files unchanged. `ruff check yulon/ tests/` — all checks
+passed. `mypy yulon/` — no issues in 100 source files. Nothing pushed; `--checks` on m910q
+and the `yulon-win11` frames are still the lead's.
+
+Round 1's own list of "not in scope" and the follow-up it names (a remove that reports
+`rebuild_required` raises no banner, because the ticket's rule drops a removed id from all
+three sets) are unchanged by this round.

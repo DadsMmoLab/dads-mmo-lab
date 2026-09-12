@@ -6,12 +6,13 @@ import logging
 import re
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import pump_until
+from tests.conftest import HANG_BOUND, pump_until
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -7153,19 +7154,20 @@ def _panel_ids(view: ControllerView) -> list[str]:
     return [row.data.id for row in view.modules_panel.rows()]
 
 
-def _marked(view: ControllerView) -> list[str]:
-    """The ids of the rows the tab draws the `Installed` badge on.
+def _marked(view: ControllerView) -> list[object]:
+    """The rows the tab draws the `Installed` badge on — the widgets, not their ids.
 
     Read off the BADGE and not off a substring of the row's words: T41's own
     review found that `INSTALLED_MARK in row` also matched a description that
     happened to contain the glyph, and a name or a description containing the
     word "Installed" would be the same fault in the new surface.
+
+    The WIDGETS, because an id does not name a row: `modules_panel.row(id)`
+    resolves a bare id in `FAMILY_FILES` order, so asking it which family a
+    marked id was in answers about a different row whenever two families share
+    an id -- which is exactly the case `mod-ale` makes below (round 2).
     """
-    return [
-        row.data.id
-        for row in view.modules_panel.rows()
-        if row.badge_label.text() == BADGE_INSTALLED
-    ]
+    return [row for row in view.modules_panel.rows() if row.badge_label.text() == BADGE_INSTALLED]
 
 
 def test_the_modules_tab_says_which_modules_are_installed(
@@ -7188,7 +7190,7 @@ def test_the_modules_tab_says_which_modules_are_installed(
     # Exactly one row, and it is the catalog's own transmog row -- not an
     # erroneous extra "not in catalog" row beside an unmarked one, which an
     # `any(...)` assertion would have accepted.
-    assert marked == ["mod-transmog"], marked
+    assert [row.data.id for row in marked] == ["mod-transmog"], marked
     row = view.modules_panel.row("mod-transmog")
     assert row.data.catalogued is True and NOT_IN_CATALOG not in row.data.description
     assert len(view.modules_panel.rows()) > 5
@@ -7199,15 +7201,28 @@ def test_the_installed_row_is_drawn_above_the_ones_that_are_not(
 ) -> None:
     """T42's first line, end to end through the real store and the real panel.
 
-    Mutation: drop the installed-first split in `build_module_rows` and
-    `mod-transmog` falls back to wherever the catalog index happens to put it,
-    which on the shipped WotLK tree is not the top.
+    TWO claims, and round 2 separated them because this test used to make one
+    and name the other. What a person SEES is `drawn_rows()`, read off the
+    card's layouts -- `_FamilyCard.fill()` puts the installed half in its own
+    box above the available one. What the BUILDER decided is `rows()`, the order
+    `set_rows()` was handed. Both must put `mod-transmog` first, and each has
+    its own mutation.
+
+    Mutation (both halves): drop the installed-first split in
+    `build_module_rows` and `mod-transmog` falls back to wherever the catalog
+    index happens to put it, which on the shipped WotLK tree is not the top.
+    The card's own split cannot be told apart HERE -- rows that arrive already
+    sorted are drawn the same either way -- so it has its own test, which hands
+    the panel an order the builder would never produce
+    (`test_the_cards_draw_the_installed_half_above_the_available_half`).
     """
     view = _installed_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
 
-    modules = [r.data for r in view.modules_panel.rows() if r.data.family == "module"]
-    assert modules[0].id == "mod-transmog", [m.id for m in modules[:3]]
-    assert modules[0].installed is True
+    drawn = [r.data for r in view.modules_panel.drawn_rows() if r.data.family == "module"]
+    assert drawn[0].id == "mod-transmog", [m.id for m in drawn[:3]]
+    assert drawn[0].installed is True
+    built = [r.data.id for r in view.modules_panel.rows() if r.data.family == "module"]
+    assert built[0] == "mod-transmog", built[:3]
     assert view.modules_panel.available_open("module") is False, "it has one, so it collapses"
 
 
@@ -7297,7 +7312,7 @@ def test_a_family_is_marked_from_its_own_clone_folder_not_from_modules(
     marked = _marked(view)
 
     assert marked, "the ale clone is installed and must be marked somewhere"
-    families = {view.modules_panel.row(item).data.family for item in marked}
+    families = {row.data.family for row in marked}
     assert families == {"ale"}, families
 
 
@@ -7588,3 +7603,320 @@ def test_a_rows_install_button_installs_that_row(qapp: object, ps: _Ps, tmp_path
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier) and applier.installed == ["mod-aoe-loot"]
     assert view.modules_panel.selected_id() == "mod-aoe-loot"
+
+
+# ------------------------------------------------------ T42 round 2 (Codex review)
+
+
+def test_a_stopped_rebuild_keeps_the_debt_it_started_with(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`LogPanel` reports a STOPPED job as ok=True, and it is right to.
+
+    Its worker's `except` branch turns the terminated child's non-zero exit into
+    `ok=True, message="stopped"` on purpose -- reporting a refusal for a button
+    the user pressed is the bug that branch exists to fix. So `ok` alone cannot
+    mean "the server was compiled", and reading this clause's success off `ok`
+    emptied the banner on a Stop: the module is still not in the running server.
+
+    `LogPanel.cancelled` is the property that says so, and `catalog_view.
+    _on_run_finished()` already reads it. The MESSAGE is deliberately not read:
+    grepping for the word "stopped" would be the same defect in a new place.
+
+    Mutation: drop `and not self.rebuild_log.cancelled` and the banner vanishes
+    on a Stop.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    reached = threading.Event()
+    release = threading.Event()
+
+    def blocks(cancel: object = None) -> Iterator[str]:
+        yield "configuring"
+        reached.set()
+        release.wait(HANG_BOUND)
+        yield "never gets here"
+
+    services = _services(ps, tmp_path, [])
+    services.rebuild = blocks
+    view = _owing_a_rebuild(ps, tmp_path, services)
+
+    assert view.rebuild_server() is True
+    pump_until(reached.is_set, "the rebuild reached its first line")
+    view.rebuild_log.stop()
+    release.set()
+    pump_until(
+        lambda: not view.rebuild_log.running and not view._busy, "the stopped rebuild finished"
+    )
+
+    assert view.rebuild_log.cancelled is True, "the panel knows it was stopped"
+    assert view.rebuild_banner.isHidden() is False, "a stop did not compile anything"
+    labels = [b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons]
+    assert modules_panel.CHIP_REBUILD_PENDING in labels, labels
+
+
+def test_an_adopt_through_the_same_panel_clears_no_rebuild(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third press on `rebuild_log`, and the one the round-1 tests never covered.
+
+    It starts a database and writes one row. It compiles nothing, so it must say
+    nothing about whether a module is in the server.
+
+    Mutation: set `_rebuild_is_compile = True` in `adopt_as_imported()` (or drop
+    the flag) and the banner goes away on a press that touched no binary.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, started, _asked, _probed = _adopt_services(ps, tmp_path)
+    view = _owing_a_rebuild(ps, tmp_path, services)
+
+    assert view.adopt_as_imported() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the adopt finished")
+
+    assert started, "the route really ran"
+    assert view.rebuild_banner.isHidden() is False
+    labels = [b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons]
+    assert modules_panel.CHIP_REBUILD_PENDING in labels, labels
+
+
+def test_a_successful_removal_forgets_everything_owed_about_that_module(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """All three containers, because each would go on describing something that is gone.
+
+    An update count is about a checkout that no longer exists; a pending-SQL
+    list names files nothing will read; and the banner would name a module that
+    is not installed.
+
+    Mutation: drop any one of the three lines in `_note_session_facts`'s remove
+    branch and that one assertion fails.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    view._module_done(
+        ApplyReport(
+            "install",
+            "mod-transmog",
+            rebuild_required=True,
+            pending_sql=(
+                apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
+            ),
+        )
+    )
+    view._module_updates_done((apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 2),))
+    assert view._rebuild_owed and view._sql_owed and view._behind
+
+    view._module_done(ApplyReport("remove", "mod-transmog"))
+
+    assert view._rebuild_owed == set()
+    assert view._sql_owed == {}
+    assert view._behind == {}
+    assert view.rebuild_banner.isHidden() is True
+
+
+def test_a_clone_deleted_outside_the_app_takes_its_chips_and_the_banner_with_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A folder can leave without this app pressing anything.
+
+    Until round 2 the reload drew the catalog row as `Not installed` with a
+    `Rebuild pending` chip hanging off it, and went on naming the module in the
+    banner. Reconciled in `reload_modules()` rather than by gating the chips,
+    because the banner is built from `_rebuild_owed` and not from the rows -- a
+    chip-only gate would leave the banner claiming a module that is gone.
+
+    Mutation: drop `_forget_what_is_no_longer_installed()` and the chip and the
+    banner both survive the deletion.
+    """
+    on_disk = {"module": frozenset({"mod-transmog"})}
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", lambda: dict(on_disk))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view._module_done(ApplyReport("install", "mod-transmog", rebuild_required=True))
+    assert view.rebuild_banner.isHidden() is False
+
+    on_disk["module"] = frozenset()  # somebody deleted modules/mod-transmog
+    view.reload_modules()
+
+    assert view.modules_panel.row("mod-transmog").badge_label.text() == BADGE_NOT_INSTALLED
+    assert view.modules_panel.row("mod-transmog").chip_buttons == ()
+    assert view.rebuild_banner.isHidden() is True
+
+
+def test_a_game_with_no_installed_reader_keeps_what_this_session_learned(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """ "No reader" is not evidence that nothing is installed.
+
+    A game whose `installed_modules` seam is `None` answers `{}` for every
+    family, and reconciling against that would throw away every fact the session
+    has learned on the first reload after an install.
+
+    Mutation: reconcile unconditionally (drop the `if reader is not None`) and
+    the banner is empty one line after the install that raised it.
+    """
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", None)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view._module_done(ApplyReport("install", "mod-transmog", rebuild_required=True))
+
+    assert view.rebuild_banner.isHidden() is False
+    assert "mod-transmog" in view.rebuild_banner_label.text()
+
+
+def _row_menu(view: ControllerView, module_id: str) -> object:
+    """The row's real context menu, built the way a right-click builds it.
+
+    `QMenu.exec` cannot be replaced from Python -- it is a Shiboken slot, and an
+    assignment to it is accepted and then ignored (measured, round 2: a test
+    that patched it sat on a real popup until it was killed). So the SHOWING and
+    the BUILDING are separate methods, and this drives the builder. What the
+    right-click itself adds -- selecting the row and handing the id over -- is
+    asserted by `test_a_right_click_selects_the_row_and_builds_its_own_menu`.
+    """
+    view.modules_panel.select(module_id)
+    return view._module_menu(module_id)
+
+
+def test_a_right_click_selects_the_row_and_builds_its_own_menu(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two lines `_row_menu()` cannot reach, driven through the real entry point.
+
+    The menu is stubbed to an EMPTY `QMenu`, whose `exec` returns at once
+    (measured) -- so the real `_show_module_context_menu` runs end to end, in
+    the order it really runs in, without a popup to hang on.
+
+    Mutation: drop the `select()` and the menu is built for a row the tab has
+    not selected, which is what every entry on it then acts against.
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+
+    view = _wotlk_modules_view(ps, tmp_path)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        ControllerView,
+        "_module_menu",
+        lambda self, module_id: (asked.append(module_id), QMenu(self))[1],
+    )
+
+    view._show_module_context_menu("mod-aoe-loot", QPoint(0, 0))
+
+    assert asked == ["mod-aoe-loot"]
+    assert view.modules_panel.selected_id() == "mod-aoe-loot"
+
+
+def test_the_menu_on_an_uncatalogued_row_offers_the_answer_and_not_two_dead_actions(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2, Codex: the menu offered Install and Remove where there is no manifest.
+
+    Both ended at `UNCATALOGUED_PRESS`, so nothing was done to the machine --
+    but two entries that name an action and then explain that the action does
+    not exist are two controls that look live and are not, which is the reading
+    this whole ticket exists to remove.
+
+    Mutation: gate the branch on `_module_actions_allowed()` alone (round 1's
+    shape) and the menu carries "Install Selected Module" again.
+    """
+    from yulon.ui.controller_view import UNCATALOGUED_PRESS, WHY_UNCATALOGUED
+
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-something-homemade"}))
+    menu = _row_menu(view, "mod-something-homemade")
+
+    labels = [action.text() for action in menu.actions() if action.text()]
+    assert labels == [WHY_UNCATALOGUED, "Copy Module ID"], labels
+
+    next(a for a in menu.actions() if a.text() == WHY_UNCATALOGUED).trigger()
+    assert view.module_report.toPlainText() == UNCATALOGUED_PRESS
+
+
+def test_the_menu_on_a_catalogued_row_still_installs_and_removes(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The other branch, which round 1 left untested altogether.
+
+    Mutation: leave the Install entry connected to `_module_action("remove")`
+    (or drop the `elif`) and the press does the other thing, or nothing.
+    """
+    view = _wotlk_modules_view(ps, tmp_path)
+    menu = _row_menu(view, "mod-aoe-loot")
+
+    labels = [action.text() for action in menu.actions() if action.text()]
+    assert labels == ["Install Selected Module", "Remove Selected Module", "Copy Module ID"]
+
+    next(a for a in menu.actions() if a.text() == "Install Selected Module").trigger()
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.installed == ["mod-aoe-loot"]
+
+
+def test_the_selected_manifest_of_a_shared_id_is_the_one_whose_row_is_selected(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2, Codex: `_manifests` was id-keyed, so this handed over the wrong steps.
+
+    The object this returns goes straight to `applier.install()`. On an id two
+    families share, a bare-id lookup installs the other family's steps -- a
+    `mod`'s SQL where a `module`'s clone was asked for.
+
+    The collision is constructed rather than found: the shipped catalog has no
+    such id today (Codex checked, and so did this hand), which is precisely why
+    the defect was invisible. BOTH directions are asserted, because an id-keyed
+    dict is last-write-wins and would answer one of them correctly by accident --
+    `FAMILY_FILES` loads `mod` after `module`, so the `mod` row's answer was
+    right and the `module` row's was the other family's steps. The `mod` row is
+    reached through a real CLICK, because a bare id resolves past it by design.
+
+    Mutation: look the manifest up by id alone, newest entry first (which is
+    what `_manifests[manifest.id] = manifest` gives), and the `module` row
+    answers with the `mod` manifest -- the object handed to `applier.install()`.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    services = _services(ps, tmp_path, [])
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    twin = [m for m in view.modules_panel.rows() if m.data.family == "mod"][
+        0
+    ].data.id  # any shipped `mod`
+    # Two manifests, one id, two families -- handed to the panel directly,
+    # because the shipped catalog has no such collision and inventing one in the
+    # store would be testing the store.
+    module_twin = parse_manifest(
+        {
+            "schema_version": 1,
+            "id": twin,
+            "name": "The module one",
+            "type": "module",
+            "game": "wow-wotlk",
+            "source": {"repo": f"acme/{twin}"},
+        }
+    )
+    mod_twin = view._manifests[("mod", twin)]
+    view._manifests[("module", twin)] = module_twin
+    view.modules_panel.set_rows(
+        modules_panel.build_module_rows(
+            [module_twin, mod_twin], {}, modules_panel.SessionState(), None
+        )
+    )
+
+    view.modules_panel.resize(600, 800)
+    view.modules_panel.show()
+
+    view.modules_panel.select(twin)  # the bare id resolves to `module`, the first family
+    picked = view.selected_manifest()
+    assert picked is not None and picked.type == "module", picked
+
+    chosen = [r for r in view.modules_panel.rows() if r.data.family == "mod"][0]
+    QTest.mouseClick(chosen.description_label, Qt.MouseButton.LeftButton)
+    picked = view.selected_manifest()
+    assert picked is not None and picked.type == "mod", picked
+    view.modules_panel.hide()

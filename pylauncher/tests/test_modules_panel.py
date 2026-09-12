@@ -649,7 +649,12 @@ def test_the_installed_header_counts_that_family_only(qapp: object) -> None:
 
 
 def test_the_panel_reports_rows_in_the_order_it_was_handed_them(qapp: object) -> None:
-    """`rows()` is the DRAWN order, which is the builder's — not the fill order.
+    """`rows()` is the order `set_rows()` was HANDED — the builder's answer, unaltered.
+
+    It is NOT the drawn order, and round 2 corrected this docstring for saying
+    so: what a person sees is `drawn_rows()`, because `_FamilyCard.fill()` puts
+    the installed half in its own box above the available one whatever order it
+    was handed. The two are asserted by different tests on purpose.
 
     Written after a view test agreed with T42's "installed first" line by
     accident: the cards used to be filled by building the installed half first,
@@ -668,3 +673,210 @@ def test_the_panel_reports_rows_in_the_order_it_was_handed_them(qapp: object) ->
     panel = _panel(handed)
 
     assert [r.data.id for r in panel.rows()] == ["a", "b"]
+
+
+# ------------------------------------------------- round 2: one id, two families
+
+
+def test_an_id_in_two_families_is_installed_only_where_its_own_folder_says_so() -> None:
+    """`installed` is keyed by FAMILY; a row keyed by id alone reads the wrong folder.
+
+    Round 2, Codex: `installed_ids` was `dict[str, Manifest]`, so a `mod` and a
+    `module` sharing an id collapsed into one entry and BOTH catalog rows read
+    installed when only one clone was on disk. `modules/` and
+    `sql_scripts/clones/` are different directories, so the two answers are
+    genuinely different.
+
+    Not a collision the shipped catalog has today -- nothing enforces that an id
+    is unique across families, and nothing has ever needed it to be, which is
+    exactly why this went unnoticed.
+
+    Mutation: key `installed_ids` by `manifest.id` and both rows read installed.
+    """
+    rows = _rows(
+        [_m("twin"), _m("twin", "mod")],
+        {"module": frozenset({"twin"}), "mod": frozenset()},
+    )
+
+    assert [(r.family, r.installed) for r in rows] == [("module", True), ("mod", False)]
+
+
+def test_both_families_of_a_shared_id_contribute_their_own_requires() -> None:
+    """The dependency graph must not lose a manifest to a name clash.
+
+    Round 2, Codex: the graph was built from `installed_ids.values()`, a dict
+    keyed by id, so of two installed manifests sharing an id only the
+    last-loaded one contributed its `requires` -- and a base module the other
+    one depends on came back `removable=True`.
+
+    `Manifest.requires` names an id and never a family, so a required id is
+    matched by id here too. That is the schema's own precision, not a shortcut:
+    both rows of a shared id are therefore held by anything that requires it,
+    which is the conservative direction.
+
+    Mutation: iterate `installed_ids.values()` (id-keyed) instead of the list of
+    installed manifests and `mod-base` is removable again.
+    """
+    base = _m("mod-base", name="Base")
+    twin_module = _m("twin", name="Twin Module", requires=("mod-base",))
+    twin_mod = _m("twin", "mod", name="Twin Mod")
+    rows = _rows(
+        [base, twin_module, twin_mod],
+        {"module": frozenset({"mod-base", "twin"}), "mod": frozenset({"twin"})},
+    )
+
+    row = _row(rows, "mod-base")
+    assert row.removable is False
+    assert row.remove_reason is not None and "Twin Module" in row.remove_reason
+
+
+# --------------------------------------------- round 2: the owed chips and reality
+
+
+def test_the_sql_chip_is_absent_when_the_report_listed_no_files() -> None:
+    """An empty value is "this module owes nothing", not "owes something unnamed".
+
+    `_pending_sql_names()` only ever stores a non-empty tuple, so an empty one
+    can reach here only as stale state -- and a chip a press cannot explain is
+    worse than no chip.
+
+    Mutation: `if item_id in session.sql_owed:` instead of reading the value and
+    the empty entry grows a chip whose detail names nothing.
+    """
+    session = mp.SessionState(sql_owed={"mod-a": ()})
+    rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
+
+    assert _labels(_row(rows, "mod-a")) == []
+
+
+def test_an_id_in_two_families_gets_two_addressable_rows(qapp: object) -> None:
+    """Round 2, Codex: `_rows` was id-keyed, so the second family overwrote the first.
+
+    Both widgets were still drawn, so the user saw two rows and the panel knew
+    one: `rows()` lost one, `row(id)` answered with the last built, and
+    `select(id)` highlighted the wrong one.
+
+    Mutation: key `_rows` by `data.id` and `rows()` comes back with one entry.
+    """
+    handed = _rows(
+        [_m("twin"), _m("twin", "mod")],
+        {"module": frozenset({"twin"}), "mod": frozenset()},
+    )
+    panel = _panel(handed)
+
+    assert [(r.data.family, r.data.installed) for r in panel.rows()] == [
+        ("module", True),
+        ("mod", False),
+    ]
+    # The bare-id lookups the public shape is built on resolve in `FAMILY_FILES`
+    # order, which is the module family here.
+    assert panel.row("twin").data.family == "module"
+
+
+def test_clicking_the_second_family_of_a_shared_id_selects_that_row(qapp: object) -> None:
+    """A click selects the row that was CLICKED, not whatever `select(id)` resolves to.
+
+    Round 2: selection went through an id lookup, so clicking the `mod` row
+    highlighted the `module` row of the same id. The click now carries the
+    widget, so the resolution rule is only ever used by callers that have
+    nothing but an id.
+
+    Mutation: connect `RowWidget.clicked` to `self.select` (the id route) and
+    the `mod` row cannot be selected at all.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    handed = _rows([_m("twin"), _m("twin", "mod")], {"module": frozenset({"twin"})})
+    panel = _panel(handed)
+    panel.resize(600, 800)
+    panel.show()
+    second = [r for r in panel.rows() if r.data.family == "mod"][0]
+
+    QTest.mouseClick(second.description_label, Qt.MouseButton.LeftButton)
+
+    assert panel.selected_row() is second
+    assert panel.selected_id() == "twin"
+    panel.hide()
+
+
+def test_a_chip_press_selects_its_row_too(qapp: object) -> None:
+    """Round 2: chips consumed their own clicks, so a chip press left the row unselected.
+
+    A chip is about one row, so pressing it is a statement about that row, the
+    same way the Install and Remove presses are (`_row_install` selects first).
+    The GitHub link is deliberately NOT routed here: it opens a browser and
+    belongs to nothing on this tab.
+
+    Mutation: drop the `select` from the chip's handler and `selected_id()`
+    stays `None` after the press.
+    """
+    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+
+    panel.row("mod-a").chip_buttons[0].click()
+
+    assert panel.selected_id() == "mod-a"
+
+
+def test_the_cards_draw_the_installed_half_above_the_available_half(qapp: object) -> None:
+    """Read off the LAYOUTS, which is the only place the drawn order really is.
+
+    Round 2, Codex: two tests claimed "drawn order" while reading `rows()`,
+    which is `set_rows()`'s insertion order. The split into an installed box and
+    an available box is `_FamilyCard.fill()`'s, and this is what asserts it.
+
+    The rows are handed over in an order the builder would never produce
+    (available first), because when they arrive already sorted the two
+    guarantees are indistinguishable -- `card.fill(widgets, [])` was seen to
+    leave this green while the builder's own sort was carrying it.
+
+    Mutation: `card.fill()` puts into the installed box everything it is handed,
+    or the two boxes are added to the card in the other order.
+    """
+    handed = (
+        mp.ModuleRow("a", "module", "A", "", None, False, True, (), (), True, None),
+        mp.ModuleRow("b", "module", "B", "", None, True, True, (), (), True, None),
+    )
+    panel = _panel(handed)
+
+    assert [r.data.id for r in panel.rows()] == ["a", "b"], "handed order"
+    assert [r.data.id for r in panel.drawn_rows()] == ["b", "a"], "drawn order"
+
+
+def test_a_family_that_disappears_and_comes_back_keeps_its_toggle(qapp: object) -> None:
+    """A reload that finds no rows for a family must not forget what the user opened.
+
+    A family can vanish from a reload -- a store that fails to load one, a game
+    whose catalog gains one later -- and the open/closed state is the user's.
+
+    Mutation: clear `self._open` in `set_rows()` and the reopened section snaps
+    shut when the family comes back.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+    panel.available_toggle("module").click()
+    assert panel.available_open("module") is True
+
+    panel.set_rows(_rows([_m("a1", "ale")]))
+    assert panel.available_toggle("module") is None, "the family is gone"
+
+    panel.set_rows(_catalog_rows({"module": frozenset({"mod-a"})}))
+    assert panel.available_open("module") is True
+
+
+def test_a_family_that_gains_its_first_installed_row_stays_open(qapp: object) -> None:
+    """The collapse rule is applied ONCE per family, which is the ticket's own wording.
+
+    An install is the moment a user is reading that card, and shutting the
+    section they are looking at because the count changed would be the tab
+    moving under them.
+
+    Mutation: recompute the rule whenever the family's installed count changes
+    and the card collapses on the press that made it non-empty.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset()}))
+    assert panel.available_open("module") is True
+
+    panel.set_rows(_catalog_rows({"module": frozenset({"mod-a"})}))
+
+    assert panel.available_open("module") is True

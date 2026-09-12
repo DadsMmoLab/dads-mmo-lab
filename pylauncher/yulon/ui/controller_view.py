@@ -2240,6 +2240,17 @@ button at all and this sentence is reached through its context menu, which is
 the only press such a row still answers.
 """
 
+WHY_UNCATALOGUED = "Why is there no Install or Remove?"
+"""The one entry an uncatalogued row's context menu offers, beside Copy Module ID.
+
+Round 2: the menu offered "Install Selected Module" and "Remove Selected Module"
+on a row with no manifest. Both ended at `UNCATALOGUED_PRESS`, so nothing was
+done to the machine -- but two entries that name an action and then explain that
+the action does not exist are two controls that look live and are not, which is
+the reading this whole ticket exists to remove. One entry, and it names what it
+really does.
+"""
+
 REBUILD_BANNER = (
     "A rebuild is owed: {names}. The module is on disk, but the running worldserver was "
     "compiled before it arrived, so nothing it does is live yet."
@@ -5590,7 +5601,16 @@ class ControllerView(QWidget):
         box.addWidget(self.module_report, 1)
         box.addWidget(self.rebuild_log, 2)
         self._add_panel_tab(tab, "modules", "Modules")
-        self._manifests: dict[str, Manifest] = {}
+        # Keyed by (FAMILY, id) since round 2, for `modules_panel._rows`'s
+        # reason: nothing makes an id unique across families, and an id-keyed
+        # dict handed `selected_manifest()` the other family's manifest --
+        # which is the object the applier is then told to install.
+        self._manifests: dict[tuple[str, str], Manifest] = {}
+        # The manifest the module job now in flight is really about. Remembered
+        # rather than looked up again when the report comes back: an
+        # `ApplyReport` carries an id and no family, so a second lookup by id is
+        # a guess where this is the answer (round 2).
+        self._acting_on: Manifest | None = None
         # The importer talks from a worker thread for however long it runs, and
         # this is what carries its lines to the GUI one. Same mechanism as the
         # repair's `_import_relay`, and a separate object because the two runs
@@ -5691,7 +5711,9 @@ class ControllerView(QWidget):
                 continue
             manifests += items
             for manifest in items:
-                self._manifests[manifest.id] = manifest
+                self._manifests[(manifest.type, manifest.id)] = manifest
+        if reader is not None:
+            self._forget_what_is_no_longer_installed(installed)
         self.modules_panel.set_rows(
             build_module_rows(manifests, installed, self._session_state(), self.services.client_dir)
         )
@@ -5701,6 +5723,37 @@ class ControllerView(QWidget):
             # take the report of the action the user just pressed with it.
             self.module_report.appendPlainText("\n".join(broken))
         self._refresh_rebuild_banner()
+
+    def _forget_what_is_no_longer_installed(self, installed: Mapping[str, frozenset[str]]) -> None:
+        """Drop every owed fact about a module that is no longer on disk (round 2).
+
+        A clone can leave without this app pressing anything -- a folder deleted
+        in Explorer, a server directory restored from a backup, a module removed
+        by a script. Until this ran, the catalog row came back reading "Not
+        installed" with a `Rebuild pending` chip on it and the module still
+        named in the banner.
+
+        Reconciled HERE, in one place, rather than by gating the chips in
+        `build_module_rows()`: the chips are built from the rows and the banner
+        is built from `_rebuild_owed` directly, so gating only the chips would
+        leave the banner claiming a module that is gone. Reconciling the sets
+        makes the two agree by construction.
+
+        Only ever called where the seam ANSWERED. A game with no
+        `installed_modules` reader reads as "nothing is installed anywhere",
+        and treating that as evidence would throw away every fact this session
+        has learned.
+
+        Matched by bare id across every family, because that is what an
+        `ApplyReport.item_id` and an update check's `key` are: ids, with no
+        family on them.
+        """
+        here: set[str] = set()
+        for names in installed.values():
+            here |= set(names)
+        self._rebuild_owed &= here
+        self._sql_owed = {key: value for key, value in self._sql_owed.items() if key in here}
+        self._behind = {key: value for key, value in self._behind.items() if key in here}
 
     def _refresh_rebuild_banner(self) -> None:
         """Show the amber banner iff something owes a rebuild, and name what.
@@ -5754,10 +5807,16 @@ class ControllerView(QWidget):
             return False
 
     def selected_manifest(self) -> Manifest | None:
-        item_id = self.modules_panel.selected_id()
-        if item_id is None:
+        """The manifest of the selected row, by its FAMILY as well as its id.
+
+        The family comes off the row rather than from a bare-id lookup, because
+        the answer is handed straight to the applier: on an id that two families
+        share, the id alone would install the other one's steps (round 2).
+        """
+        row = self.modules_panel.selected_row()
+        if row is None or not row.data.catalogued:
             return None
-        return self._manifests.get(item_id)
+        return self._manifests.get((row.data.family, row.data.id))
 
     def _module_action(self, action: str) -> None:
         manifest = self.selected_manifest()
@@ -5780,6 +5839,7 @@ class ControllerView(QWidget):
             )
             return
         run = applier.install if action == "install" else applier.remove
+        self._acting_on = manifest
         self._module_pending = f"{action} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
         self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
@@ -5888,9 +5948,11 @@ class ControllerView(QWidget):
             # line would put this view's vocabulary in front of a sentence
             # written to be read on its own.
             self._module_pending = None
+            self._acting_on = None
             self.module_report.setPlainText(str(exc))
             self.action_failed.emit(str(exc))
             return
+        self._acting_on = manifest
         self._module_pending = f"{what} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
         self._run(lambda: route(manifest, folder), self._module_done, self._module_failed)
@@ -5898,6 +5960,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _module_done(self, result: object) -> None:
         self._module_pending = None
+        acted_on, self._acting_on = self._acting_on, None
         if not isinstance(result, ApplyReport):
             return
         self.module_report.setPlainText(_format_report(result))
@@ -5908,9 +5971,11 @@ class ControllerView(QWidget):
         # tab to try again with (`purge.py`'s ordering, phase8-decisions).
         forget = self.services.module_forget
         if result.action == "remove" and forget is not None:
-            manifest = self._manifests.get(result.item_id)
-            if manifest is not None:
-                forget(manifest)
+            # The manifest the press was really about, not one looked up by the
+            # report's id: the report carries no family, and the record being
+            # dropped is a file on disk named after this manifest (round 2).
+            if acted_on is not None and acted_on.id == result.item_id:
+                forget(acted_on)
         # Re-read after EVERY report, where it used to happen for the two
         # outcomes that changed what was in the list (a custom module added, a
         # record dropped). Since T42 a report also changes what the rows SAY --
@@ -5944,6 +6009,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _module_failed(self, exc: object) -> None:
         what, self._module_pending = self._module_pending or "module action", None
+        self._acting_on = None
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
         self.action_failed.emit(str(exc))
 
@@ -6325,13 +6391,27 @@ class ControllerView(QWidget):
         self._import_asked = False
         self._forget_the_adopt_reading()
         compiled, self._rebuild_is_compile = self._rebuild_is_compile, False
-        if ok and compiled:
+        # THREE questions, not one, and every one of them has bitten this clause.
+        #
+        # `ok` alone is not "the server was compiled": `LogPanel` reports a
+        # STOPPED job as `ok=True, message="stopped"` on purpose (its worker's
+        # `except` branch — a terminated child exits non-zero and reporting that
+        # as a failure would put a refusal on screen for a button the user
+        # pressed), so a Stop pressed half-way through a compile arrived here
+        # indistinguishable from a finished one. `LogPanel.cancelled` is the
+        # property that exists for exactly this and `catalog_view.
+        # _on_run_finished()` already reads it; the message is deliberately NOT
+        # read, because grepping the word "stopped" would be this same defect in
+        # a new place (round 2, Codex).
+        #
+        # `compiled` is not implied either: three actions share this panel — the
+        # rebuild, the database updates and the adopt — and the last two change
+        # no binary at all.
+        if ok and compiled and not self.rebuild_log.cancelled:
             # The compile that just finished covers every module installed
-            # before it started, which is exactly what the set holds. Cleared on
-            # SUCCESS only, and only for a run that really was a COMPILE: a
-            # failed or stopped rebuild leaves the owing intact because nothing
-            # about the running server changed, and a database-updates or adopt
-            # run through this same panel changed no binary at all.
+            # before it started, which is exactly what the set holds. A failed,
+            # stopped or non-compile run leaves the owing intact, because
+            # nothing about the running server changed.
             self._rebuild_owed.clear()
             self.reload_modules()
         if not ok:
@@ -6523,16 +6603,36 @@ class ControllerView(QWidget):
 
     @Slot(str, QPoint)
     def _show_module_context_menu(self, module_id: str, pos: QPoint) -> None:
-        """The row's menu, at a GLOBAL position the panel has already mapped.
+        """Select the row that was right-clicked, then pop its menu up where it was.
 
         By id since T42, because the row it is about is the row that was
         right-clicked and not whatever happened to be highlighted -- and because
         this is the only press an UNCATALOGUED row still answers: those rows
         carry no buttons, so the menu is where `UNCATALOGUED_PRESS` is reached.
+
+        The menu is BUILT by `_module_menu()` and only shown here. That split is
+        a test's doing and the code is better for it: `QMenu.exec` is a Shiboken
+        slot that enters a nested event loop, and it cannot be replaced from
+        Python -- measured in round 2, `QMenu.exec = <lambda>` assigns without
+        error and the real one still runs -- so a test of the whole method sat
+        on a real popup until it was killed. What the branches decide is now
+        askable without showing anything.
         """
         self.modules_panel.select(module_id)
+        self._module_menu(module_id).exec(pos)
+
+    def _module_menu(self, module_id: str) -> QMenu:
+        """The menu for the SELECTED row: what it offers, and what each entry does."""
         menu = QMenu(self)
-        if self._module_actions_allowed():
+        if self._selected_row_is_uncatalogued():
+            # An uncatalogued row has no manifest, so there are no steps to run
+            # and the menu must not offer two that do nothing. It offers the
+            # ANSWER instead, which is what those two entries were reduced to
+            # before round 2: one action, whose whole result is the sentence.
+            why_act = menu.addAction(WHY_UNCATALOGUED)
+            why_act.triggered.connect(lambda: self.module_report.setPlainText(UNCATALOGUED_PRESS))
+            menu.addSeparator()
+        elif self._module_actions_allowed():
             inst_act = menu.addAction("Install Selected Module")
             inst_act.triggered.connect(lambda: self._module_action("install"))
             rem_act = menu.addAction("Remove Selected Module")
@@ -6540,7 +6640,7 @@ class ControllerView(QWidget):
             menu.addSeparator()
         copy_act = menu.addAction("Copy Module ID")
         copy_act.triggered.connect(lambda: self._copy_to_clipboard(module_id))
-        menu.exec(pos)
+        return menu
 
 
 # ------------------------------------------------------------- formatting
