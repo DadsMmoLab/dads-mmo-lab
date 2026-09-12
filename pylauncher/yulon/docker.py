@@ -3123,15 +3123,71 @@ and not enough to push the rest of the tab off screen.
 """
 
 
+_BUILDKIT_FENCE = "------"
+"""The rule BuildKit draws around the failing step's own output.
+
+Exactly six hyphens, and distinct from the twenty it draws around the
+Dockerfile context below it — which is what makes the block findable.
+"""
+
+
+def _buildkit_step_output(said: list[str]) -> list[str]:
+    """The failing step's own lines out of a `docker build` epilogue, or empty.
+
+    A failed build ends in a fixed shape (captured on m910q, Docker 29.7.2,
+    `pyplan/gates/t38-build-failure-reports-the-command-2026-09-12/`)::
+
+        ------
+         > [3/3] RUN sh -c "…":
+        0.213 mod_transmog/src/Transmog.cpp:212:9: error: no member named GetGUID
+        0.213 1 error generated.
+        ------
+        Dockerfile:3
+        --------------------
+           3 | >>> RUN sh -c "…"
+        --------------------
+        ERROR: failed to build: failed to solve: process "/bin/sh -c …" did not complete…
+
+    The last five lines of that are the context and the `ERROR:` line, and that
+    final line embeds the entire `RUN` command — so it alone overruns the
+    character cap and arrives truncated from the left. A user adding a module
+    was shown the middle of a cmake invocation and nothing else (T38, Lac,
+    2026-09-12). The compiler's words are between the fences, and were never
+    missing from the buffer: `KEEP_OUTPUT_LINES` keeps 200.
+
+    The LAST pair of fences is the one taken, because a build that fails twice
+    prints the block twice and the later one is the failure being reported. An
+    empty result means this output is not a failed build — an import, a clone
+    and a map extractor all come through `last_words()` too — and the caller
+    falls back to the plain tail rather than inventing a block.
+    """
+    fences = [index for index, line in enumerate(said) if line == _BUILDKIT_FENCE]
+    if len(fences) < 2:
+        return []
+    opened, closed = fences[-2], fences[-1]
+    # The line under the opening fence is BuildKit's ` > [3/3] RUN …:` header.
+    # Requiring it is what keeps a stray rule in some tool's own output from
+    # being read as a step block, and dropping it is deliberate: naming the
+    # command is what this whole ticket is about not doing.
+    if opened + 1 >= closed or not said[opened + 1].startswith(">"):
+        return []
+    return said[opened + 2 : closed]
+
+
 def last_words(tail: tuple[str, ...]) -> str:
     """The end of a command's output, short enough to put inside a sentence.
 
     Blank lines are dropped before the count, because a shell script's spacing
     is exactly what a five-line window cannot afford to spend itself on.
+
+    For a failed `docker build` the last lines are Docker's own epilogue rather
+    than anything that went wrong, so the failing step's output is preferred
+    when it can be found — see `_buildkit_step_output()`.
     """
     said = [line.strip() for line in tail if line.strip()]
     if not said:
         return "it printed nothing at all"
+    said = _buildkit_step_output(said) or said
     text = " / ".join(said[-_LAST_WORDS_LINES:])
     return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
 

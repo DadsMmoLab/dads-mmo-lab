@@ -6028,3 +6028,119 @@ def test_start_database_says_whether_it_had_to_start_the_container(
     monkeypatch.setattr(docker, "wait_db_healthy", lambda db, timeout=0.0, wsl_distro=None: True)
     assert docker.start_database(SPEC, tmp_path) is True
     assert ran == [["compose", "up", "-d", "--no-deps", SPEC.compose_services()[0]]]
+
+
+# The real epilogue a failed `docker build` prints, captured on m910q (Docker
+# 29.7.2, 2026-09-12) from a busybox stand-in that fails in three seconds --
+# the tool's behaviour is the question, so the payload is not a 40-minute
+# compile (`pyplan/gates/t38-build-failure-reports-the-command-2026-09-12/`).
+_FAILED_BUILD_TAIL = (
+    '#6 ERROR: process "/bin/sh -c sh -c \\"echo ...\\"" did not complete '
+    "successfully: exit code: 1",
+    "------",
+    ' > [3/3] RUN sh -c "echo "mod_transmog/src/Transmog.cpp:212:9: error: no member '
+    'named GetGUID" >&2; echo "1 error generated." >&2; exit 1":',
+    "0.213 mod_transmog/src/Transmog.cpp:212:9: error: no member named GetGUID",
+    "0.213 1 error generated.",
+    "------",
+    "Dockerfile:3",
+    "--------------------",
+    "   1 |     FROM busybox:1.36",
+    '   2 |     RUN echo "configuring" && echo "compiling module mod_transmog"',
+    '   3 | >>> RUN sh -c "echo \\"mod_transmog/src/Transmog.cpp:212:9: error: no member '
+    'named GetGUID\\" >&2; echo \\"1 error generated.\\" >&2; exit 1"',
+    "   4 |     ",
+    "--------------------",
+    'ERROR: failed to build: failed to solve: process "/bin/sh -c sh -c \\"echo '
+    '\\\\\\"mod_transmog/src/Transmog.cpp:212:9: error: no member named GetGUID\\\\\\" >&2; '
+    'echo \\\\\\"1 error generated.\\\\\\" >&2; exit 1\\"" did not complete successfully: '
+    "exit code: 1",
+)
+
+
+def test_a_failed_build_reports_the_compiler_error_not_the_command(tmp_path: Path) -> None:
+    """T38, Lac's 2026-09-12 report: "the build failed" followed by the cmake command line.
+
+    `last_words()` took the last five non-blank lines, and on a failed
+    `docker build` those are always BuildKit's epilogue -- the Dockerfile
+    context and a final `ERROR: failed to solve:` line that embeds the whole
+    `RUN` command. That one line alone is longer than the character cap, so it
+    arrived truncated from the left and a user saw the middle of a cmake
+    invocation. The compiler's own words are eight lines further up, between
+    the two `------` fences, and were in the buffer the whole time
+    (`KEEP_OUTPUT_LINES` is 200). Only the selection was wrong.
+    """
+    said = docker.last_words(_FAILED_BUILD_TAIL)
+
+    assert "Transmog.cpp:212:9: error: no member named GetGUID" in said, said
+    assert "1 error generated." in said, said
+    # None of the epilogue: not the Dockerfile context, not the ERROR line, and
+    # above all not the command, which is what Lac was shown instead of this.
+    assert "failed to solve" not in said, said
+    assert "Dockerfile:3" not in said, said
+    assert "FROM busybox" not in said, said
+    assert ">>>" not in said, said
+    # Nor BuildKit's own ` > [3/3] RUN …:` header, which names the command a
+    # second time and is the line this ticket exists to stop printing.
+    assert "[3/3]" not in said, said
+    assert "RUN sh -c" not in said, said
+
+
+def test_the_last_failing_step_is_the_one_reported() -> None:
+    """A build that prints two step blocks is reporting the later failure.
+
+    Taking the first pair of fences would hand the user an error from a step
+    that is not the one that stopped the build.
+    """
+    tail = (
+        "------",
+        " > [2/9] RUN cmake --version:",
+        "0.1 an earlier complaint",
+        "------",
+        "------",
+        " > [7/9] RUN cmake --build .:",
+        "0.9 the failure that stopped it",
+        "------",
+        "Dockerfile:57",
+        "ERROR: failed to solve: process did not complete successfully: exit code: 1",
+    )
+    said = docker.last_words(tail)
+    assert "the failure that stopped it" in said, said
+    assert "an earlier complaint" not in said, said
+
+
+def test_two_rules_that_are_not_a_step_block_are_left_alone() -> None:
+    """A tool drawing its own `------` rules must not be read as a failed build.
+
+    The header under the opening fence is what tells the two apart, so a pair
+    of rules with ordinary text under the first falls back to the plain tail.
+    """
+    # TWO lines between the rules, deliberately. With only one, the slice that
+    # skips the header comes out empty whether the guard is there or not, and a
+    # mutation removing the guard survives — it did, on the first pass.
+    tail = (
+        "------",
+        "Import summary",
+        "42 files applied",
+        "------",
+        "ERROR 1064 (42000): syntax error near 'x'",
+    )
+    said = docker.last_words(tail)
+    assert "ERROR 1064" in said, said
+    assert "42 files applied" in said, said
+
+
+def test_output_with_no_buildkit_block_still_reports_its_last_lines(tmp_path: Path) -> None:
+    """The other shape, unchanged: a plain tool that failed without Docker's fences.
+
+    The T38 fix must not make a non-build failure worse by hunting for a block
+    that was never printed -- an import, a git clone and a map extractor all
+    come through `last_words()` too.
+    """
+    plain = ("Reading table", "applying update 3", "ERROR 1064 (42000): syntax error near 'x'")
+    said = docker.last_words(plain)
+    assert "ERROR 1064" in said, said
+    assert "Reading table" in said, said
+
+    assert docker.last_words(()) == "it printed nothing at all"
+    assert docker.last_words(("", "   ", "")) == "it printed nothing at all"
