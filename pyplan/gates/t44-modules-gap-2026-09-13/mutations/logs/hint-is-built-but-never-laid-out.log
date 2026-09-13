@@ -1,0 +1,26 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m      [100%][0m
+=================================== FAILURES ===================================
+[31m[1m________ test_a_family_card_draws_its_hint_beside_the_installed_header _________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x28a44990) at 0x7d98f041c700>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_family_card_draws_its_hint_beside_the_installed_header[39;49;00m(qapp: [96mobject[39;49;00m) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""A mapping nothing renders is a mapping that is not on the tab.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: build the label and never add it to the card's layout ->[39;49;00m
+    [33m    `family_hint()` answers `None`. The first version of this test asserted[39;49;00m
+    [33m    `isVisibleTo()` alone and SURVIVED that mutation (measured): a QLabel[39;49;00m
+    [33m    parented to the card but laid out nowhere is still visible-to it and still[39;49;00m
+    [33m    carries its text, so the reading has to come off the layout.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        panel = _panel(_catalog_rows({[33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m: [96mfrozenset[39;49;00m({[33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m})}))[90m[39;49;00m
+    [90m[39;49;00m
+        hint = panel.family_hint([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+>       [94massert[39;49;00m hint [95mis[39;49;00m [95mnot[39;49;00m [94mNone[39;49;00m[90m[39;49;00m
+[1m[31mE       assert None is not None[0m
+
+[1m[31mtests/test_modules_panel.py[0m:920: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_modules_panel.py::[1mtest_a_family_card_draws_its_hint_beside_the_installed_header[0m - assert None is not None
+[31m[31m[1m1 failed[0m, [32m66 passed[0m[31m in 0.52s[0m[0m

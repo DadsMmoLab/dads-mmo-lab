@@ -2340,6 +2340,18 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "that lists as empty falls back to the conventional name in the folder the user "
         "named, which is a path they can see and correct"
     ),
+    ("ui/gamepad.py", "_iter_focusable"): (
+        "NOT a folder listing. `walk` is one of the eight spellings this audit reads, and "
+        "here it is a LOCAL generator over Qt's `QWidget.children()` that `_iter_focusable` "
+        "calls on the widget tree -- no path, no filesystem, and nothing written anywhere. "
+        "Kept in the map rather than special-cased out of `_LISTING_CALLS`: the audit is an "
+        "equality, and narrowing the set it matches on to dodge one false positive is how it "
+        "stops seeing the class it enumerates (see `_LISTING_CALLS`'s own record of that "
+        "happening twice)"
+    ),
+    ("ui/gamepad.py", "walk"): (
+        "the same generator calling itself on each child widget, for the reason above"
+    ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"
@@ -2387,20 +2399,20 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "cannot be read still has to be offerable for removal - it decides no write, only a "
         "number in a sentence"
     ),
-    ("purge.py", "_clear_read_only"): (
-        "walks the tree the uninstall is about to delete, to add the write bit back to "
+    ("rmtree.py", "_clear_read_only"): (
+        "walks the tree a caller is about to delete, to add the write bit back to "
         "everything in it. It IS reached on the way to a write, and it is the one place that "
         "is right: the delete has ALREADY failed once when this runs, so the folder is one "
-        "the user asked to remove and `remove_tree()` re-raises against the tree if the "
+        "the caller asked to delete and `remove_tree()` re-raises against the tree if the "
         "retry still cannot finish. A failure on any single entry is skipped here on purpose "
         "- the report belongs to the rmtree that follows, not to one chmod"
     ),
-    ("purge.py", "_remove_unenterable"): (
+    ("rmtree.py", "_remove_unenterable"): (
         "walks the same tree, after the same first failure, to find the entries the walk "
         "cannot ENTER - on Windows a WSL-made symlink the clone container left as an LX "
         "reparse point, on POSIX a directory whose mode refuses scandir - and `os.rmdir`s "
         "each one where it stands, which removes a link rather than following it. It "
-        "decides no write on its own: the folder is one the user asked to remove and the "
+        "decides no write on its own: the folder is one the caller asked to delete and the "
         "delete has already failed once, and an rmdir it cannot do is left for the retry "
         "to name against the tree"
     ),
@@ -2462,17 +2474,6 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "claim every module is missing. Takes the folder and not the server directory because "
         "`apply.CLONE_DIRS` gives each family its own"
     ),
-    ("ui/gamepad.py", "_iter_focusable"): (
-        "walks the QWidget TREE, not a directory: it yields the focusable, enabled, visible "
-        "descendants of a root widget so the D-pad has somewhere to go, and skips a read-only "
-        "text surface because one swallows the arrow keys. It reads no path, decides no write, "
-        "and touches no filesystem; it is here because the scan cannot tell a child-widget "
-        "walk from a folder walk by shape alone"
-    ),
-    ("ui/gamepad.py", "walk"): (
-        "the recursive half of `_iter_focusable()` and the same answer: QWidget children, "
-        "never directory entries"
-    ),
     ("docker.py", "_first_populated_ancestor"): (
         "walks up a path looking for a directory that HAS something in it, to tell a real "
         "mount from an empty mount point; its own `except OSError` logs and answers None, "
@@ -2502,6 +2503,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "lists a derived module's data/sql/ to map each database directory to a deferred "
         "db-import step; its emptiness verdict is deliberate and is NOT a refusal - a module "
         "that brought no SQL is normal, the same argument apply.py::_pending_sql already makes"
+    ),
+    ("tuning.py", "backups_of"): (
+        "lists the directory a conf file lives in to find the backups the Tuning tab has "
+        "taken of it, so Revert can restore the newest (T43); decides no write of its own -- "
+        "the write it feeds is a `shutil.copy2` onto a file the user named. Its own "
+        "`except OSError` answers the EMPTY tuple, and the caller says `there is no backup "
+        "of this file to revert to` rather than restoring something it could not see"
     ),
     ("module_source.py", "_rewrite_index"): (
         "lists the user manifest directory to REBUILD its index from the files that are "

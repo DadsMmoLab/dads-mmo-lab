@@ -1,0 +1,14 @@
+# gate: tests/test_controller_view.py -q -k refresh_forgets
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..86f81009 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -5643,7 +5643,7 @@ class ControllerView(QWidget):
+         # version cache away. Every OTHER caller of `reload_modules()` is a
+         # redraw after something this app did, and those invalidate the one
+         # clone they changed (T44 item 1).
+-        self.refresh_modules_button.clicked.connect(self.refresh_modules)
++        self.refresh_modules_button.clicked.connect(self.reload_modules)
+         self.refresh_modules_button.setToolTip(
+             "Read this install's module folders again. Cheap: directory names and one "
+             "`git log -1` per module, no network."

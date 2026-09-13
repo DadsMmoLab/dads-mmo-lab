@@ -17,7 +17,10 @@
       "keys": [
         {
           "key": "TalentButton.Enable",
-          "note": "set to 1 to activate"
+          "note": "set to 1 to activate",
+          "label": "Enable the talent button",
+          "explain": "Enable or disable the module.",
+          "type": "bool"
         }
       ],
       "template": "conf/mod_talentbutton.conf.dist"

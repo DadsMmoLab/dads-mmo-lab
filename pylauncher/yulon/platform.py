@@ -133,10 +133,29 @@ def folder_is_gone(path: Path) -> bool:
     try:
         os.stat(path)
     except FileNotFoundError:
-        return True
+        pass
     except OSError:
         return False
-    return False
+    else:
+        return False
+    # The leaf is absent. That is NOT yet an answer: `os.stat()` raises the same
+    # FileNotFoundError for `E:\Games\Yulon Wotlk` when the folder was deleted
+    # and when the whole of `E:` is unplugged, asleep, or a disconnected share.
+    # Telling those apart needs the PARENT: if the folder's container is there,
+    # the folder really is gone; if it is not, the volume is what is missing and
+    # this function must say "cannot tell" (review, 2026-09-13).
+    #
+    # It mattered the moment T54 revealed the Forget control while Docker is
+    # unreachable -- an offline drive takes Docker with it often enough -- and
+    # the button drops the only record of what may be a LIVE install.
+    parent = path.parent
+    if parent == path:
+        return True  # the anchor itself; nothing above it to corroborate with
+    try:
+        os.stat(parent)
+    except OSError:
+        return False
+    return True
 
 
 def in_wsl() -> bool:

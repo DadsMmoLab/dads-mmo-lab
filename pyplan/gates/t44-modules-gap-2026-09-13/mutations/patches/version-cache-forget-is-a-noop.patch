@@ -1,0 +1,15 @@
+# gate: tests/test_modules_panel.py -q -k forget_drops
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..a9132a81 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -360,8 +360,7 @@ class VersionCache:
+         family on them (the rule
+         `_forget_what_is_no_longer_installed()` already follows).
+         """
+-        for key in [k for k in self._known if k[2] == item_id]:
+-            del self._known[key]
++        return
+ 
+     def clear(self) -> None:
+         """Forget everything -- what the Refresh press means."""

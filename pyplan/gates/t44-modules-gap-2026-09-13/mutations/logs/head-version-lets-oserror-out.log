@@ -1,0 +1,69 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[31m            [100%][0m
+=================================== FAILURES ===================================
+[31m[1m____________ test_head_version_answers_nothing_rather_than_guessing ____________[0m
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x79d9e6bd3d90>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-775/test_head_version_answers_noth0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_head_version_answers_nothing_rather_than_guessing[39;49;00m([90m[39;49;00m
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Four ways it cannot answer, and all four are silence (T44 item 1).[39;49;00m
+    [33m[39;49;00m
+    [33m    A sha is the one thing on this row a user may paste into an issue, so an[39;49;00m
+    [33m    invented one is worse than a blank. And none of the four may turn a reload[39;49;00m
+    [33m    into a failure, which is why `OSError` -- a `git` that is not on PATH at[39;49;00m
+    [33m    all -- is caught here rather than at the caller.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: return `raw.strip()` unconditionally and a git that printed a[39;49;00m
+    [33m    warning to stdout becomes a version; drop the `OSError` arm and a machine[39;49;00m
+    [33m    with no git raises out of `reload_modules()`.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        dest = tmp_path / [33m"[39;49;00m[33mmod-aoe-loot[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        (dest / [33m"[39;49;00m[33m.git[39;49;00m[33m"[39;49;00m).mkdir(parents=[94mTrue[39;49;00m)[90m[39;49;00m
+        impl = git.RunnerGit()[90m[39;49;00m
+    [90m[39;49;00m
+        [94massert[39;49;00m impl.head_version(tmp_path / [33m"[39;49;00m[33mnot-a-checkout[39;49;00m[33m"[39;49;00m) [95mis[39;49;00m [94mNone[39;49;00m, [33m"[39;49;00m[33mno .git[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+    [90m[39;49;00m
+        answers: [96mlist[39;49;00m[[96mobject[39;49;00m] = [][90m[39;49;00m
+    [90m[39;49;00m
+        [94mdef[39;49;00m[90m [39;49;00m[92mfake_run[39;49;00m(argv: [96mlist[39;49;00m[[96mstr[39;49;00m], **_kwargs: [96mobject[39;49;00m) -> subprocess.CompletedProcess[[96mstr[39;49;00m]:[90m[39;49;00m
+            answer = answers.pop([94m0[39;49;00m)[90m[39;49;00m
+            [94mif[39;49;00m [96misinstance[39;49;00m(answer, [96mException[39;49;00m):[90m[39;49;00m
+                [94mraise[39;49;00m answer[90m[39;49;00m
+            [94massert[39;49;00m [96misinstance[39;49;00m(answer, subprocess.CompletedProcess)[90m[39;49;00m
+            [94mreturn[39;49;00m answer[90m[39;49;00m
+    [90m[39;49;00m
+        monkeypatch.setattr(runner, [33m"[39;49;00m[33mrun[39;49;00m[33m"[39;49;00m, fake_run)[90m[39;49;00m
+    [90m[39;49;00m
+        answers.append(_completed(returncode=[94m128[39;49;00m, stderr=[33m"[39;49;00m[33mnot a git repository[39;49;00m[33m"[39;49;00m))[90m[39;49;00m
+        [94massert[39;49;00m impl.head_version(dest) [95mis[39;49;00m [94mNone[39;49;00m, [33m"[39;49;00m[33mgit refused[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+    [90m[39;49;00m
+        answers.append([96mOSError[39;49;00m([33m"[39;49;00m[33mNo such file or directory: [39;49;00m[33m'[39;49;00m[33mgit[39;49;00m[33m'[39;49;00m[33m"[39;49;00m))[90m[39;49;00m
+>       [94massert[39;49;00m impl.head_version(dest) [95mis[39;49;00m [94mNone[39;49;00m, [33m"[39;49;00m[33mno git on PATH[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+               ^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+
+[1m[31mtests/test_git.py[0m:1825: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+[1m[31myulon/git.py[0m:711: in head_version
+    [0mproc = _run_git([[33m"[39;49;00m[33mgit[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mlog[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33m-1[39;49;00m[33m"[39;49;00m, [33mf[39;49;00m[33m"[39;49;00m[33m--format=[39;49;00m[33m{[39;49;00mVERSION_FORMAT[33m}[39;49;00m[33m"[39;49;00m], cwd=dest)[90m[39;49;00m
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31myulon/git.py[0m:528: in _run_git
+    [0mproc = runner.run(argv, cwd=cwd, env=_no_prompt_env())[90m[39;49;00m
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+argv = ['git', 'log', '-1', '--format=%h %cs']
+_kwargs = {'cwd': PosixPath('/tmp/pytest-of-perzi/pytest-775/test_head_version_answers_noth0/mod-aoe-loot'), 'env': {'SHELL': '/...ACK_ENABLE_AUTO_PIN': '0', 'CLAUDE_CODE_SUBAGENT_MODEL': 'claude-opus-4-6[1m]', 'CLAUDE_CODE_CHILD_SESSION': '1', ...}}
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mfake_run[39;49;00m(argv: [96mlist[39;49;00m[[96mstr[39;49;00m], **_kwargs: [96mobject[39;49;00m) -> subprocess.CompletedProcess[[96mstr[39;49;00m]:[90m[39;49;00m
+        answer = answers.pop([94m0[39;49;00m)[90m[39;49;00m
+        [94mif[39;49;00m [96misinstance[39;49;00m(answer, [96mException[39;49;00m):[90m[39;49;00m
+>           [94mraise[39;49;00m answer[90m[39;49;00m
+[1m[31mE           OSError: No such file or directory: 'git'[0m
+
+[1m[31mtests/test_git.py[0m:1815: OSError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_git.py::[1mtest_head_version_answers_nothing_rather_than_guessing[0m - OSError: No such file or directory: 'git'
+[31m[31m[1m1 failed[0m, [32m60 passed[0m[31m in 2.39s[0m[0m

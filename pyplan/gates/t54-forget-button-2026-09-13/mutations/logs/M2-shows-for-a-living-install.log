@@ -1,0 +1,120 @@
+yt: Python 3.13.15 in /home/perzi/wt-t54/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t54/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollecting 265 items                                                           [0m[1mcollected 265 items / 252 deselected / 13 selected                             [0m
+
+tests/test_controller_view.py [32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[31m                              [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m_ test_the_forget_button_is_hidden_while_the_folder_exists_and_appears_once_gone _[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x312d5860) at 0x7211d1925c40>
+ps = <tests.test_controller_view._Ps object at 0x7211d1b2d310>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-907/test_the_forget_button_is_hidd0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_the_forget_button_is_hidden_while_the_folder_exists_and_appears_once_gone[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Re-checked on the same poll as the status line, not only at tab-build time.[39;49;00m
+    [33m[39;49;00m
+    [33m    The owner's box had two stale tabs open with their folders already gone —[39;49;00m
+    [33m    the folder can disappear under a tab that has been open for a while, and[39;49;00m
+    [33m    the button has to notice without a restart.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        fake = _FakeUninstall(tmp_path)[90m[39;49;00m
+        view = _uninstall_view(ps, tmp_path, fake)[90m[39;49;00m
+        [94massert[39;49;00m view.forget_install_button [95mis[39;49;00m [95mnot[39;49;00m [94mNone[39;49;00m[90m[39;49;00m
+        view.refresh_status()[90m[39;49;00m
+>       [94massert[39;49;00m view.forget_install_button.isHidden()[90m[39;49;00m
+[1m[31mE       assert False[0m
+[1m[31mE        +  where False = <built-in method isHidden of PySide6.QtWidgets.QPushButton object at 0x7211d3a9bf00>()[0m
+[1m[31mE        +    where <built-in method isHidden of PySide6.QtWidgets.QPushButton object at 0x7211d3a9bf00> = <PySide6.QtWidgets.QPushButton(0x31c598c0) at 0x7211d3a9bf00>.isHidden[0m
+[1m[31mE        +      where <PySide6.QtWidgets.QPushButton(0x31c598c0) at 0x7211d3a9bf00> = <yulon.ui.controller_view.ControllerView(0x31bd4b90) at 0x7211d1603000>.forget_install_button[0m
+
+[1m[31mtests/test_controller_view.py[0m:5105: AssertionError
+[31m[1m_________ test_the_folder_reappearing_before_the_press_forgets_nothing _________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x312d5860) at 0x7211d1925c40>
+ps = <tests.test_controller_view._Ps object at 0x7211d1ec2030>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-907/test_the_folder_reappearing_be0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7211d1bd96d0>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_the_folder_reappearing_before_the_press_forgets_nothing[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The visibility poll is not trusted at press time (review, T34 round 2).[39;49;00m
+    [33m[39;49;00m
+    [33m    A restore, or simply undoing an accidental delete, can put the folder back[39;49;00m
+    [33m    in the gap between the five-second poll that showed the button and the[39;49;00m
+    [33m    click that reached it.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        asked: [96mlist[39;49;00m[[96mobject[39;49;00m] = [][90m[39;49;00m
+        monkeypatch.setattr([90m[39;49;00m
+            controller_view_module.QMessageBox,[90m[39;49;00m
+            [33m"[39;49;00m[33mquestion[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+            [94mlambda[39;49;00m *a, **k: asked.append([94m1[39;49;00m),[90m[39;49;00m
+        )[90m[39;49;00m
+        fake = _FakeUninstall(tmp_path)[90m[39;49;00m
+        view = _uninstall_view(ps, tmp_path, fake)[90m[39;49;00m
+        shutil.rmtree(tmp_path)[90m[39;49;00m
+        view.refresh_status()[90m[39;49;00m
+        [94massert[39;49;00m [95mnot[39;49;00m view.forget_install_button.isHidden()[90m[39;49;00m
+        tmp_path.mkdir()  [90m# back before the press[39;49;00m[90m[39;49;00m
+        seen: [96mlist[39;49;00m[[96mobject[39;49;00m] = [][90m[39;49;00m
+        view.uninstalled.connect([94mlambda[39;49;00m game, folder: seen.append(game))[90m[39;49;00m
+    [90m[39;49;00m
+        view.forget_install()[90m[39;49;00m
+    [90m[39;49;00m
+        [94massert[39;49;00m fake.forgets == [94m0[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m seen == [][90m[39;49;00m
+>       [94massert[39;49;00m asked == [], [33m"[39;49;00m[33mthe confirmation must not open for a folder that is back[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: the confirmation must not open for a folder that is back[0m
+[1m[31mE       assert [1] == [][0m
+[1m[31mE         [0m
+[1m[31mE         Left contains one more item: [0m[94m1[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         Use -v to get more diff[0m
+
+[1m[31mtests/test_controller_view.py[0m:5243: AssertionError
+[31m[1m_____ test_the_folder_reappearing_during_the_confirmation_forgets_nothing ______[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x312d5860) at 0x7211d1925c40>
+ps = <tests.test_controller_view._Ps object at 0x7211d263dc50>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-907/test_the_folder_reappearing_du0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7211d27a8210>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_the_folder_reappearing_during_the_confirmation_forgets_nothing[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The second re-check (review, T34 round 2): the gap between Yes and the write is real too.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: drop the second `_forget_is_eligible()` call in[39;49;00m
+    [33m    `forget_install()` — the first call still sees the folder gone, so only[39;49;00m
+    [33m    the second one stands between this press and a forgotten record.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+    [90m[39;49;00m
+        [94mdef[39;49;00m[90m [39;49;00m[92mquestion[39;49;00m(*a: [96mobject[39;49;00m, **k: [96mobject[39;49;00m) -> [96mobject[39;49;00m:[90m[39;49;00m
+            tmp_path.mkdir()[90m[39;49;00m
+            [94mreturn[39;49;00m [96mint[39;49;00m(controller_view_module.QMessageBox.StandardButton.Yes)[90m[39;49;00m
+    [90m[39;49;00m
+        monkeypatch.setattr(controller_view_module.QMessageBox, [33m"[39;49;00m[33mquestion[39;49;00m[33m"[39;49;00m, question)[90m[39;49;00m
+        fake = _FakeUninstall(tmp_path)[90m[39;49;00m
+        view = _uninstall_view(ps, tmp_path, fake)[90m[39;49;00m
+        shutil.rmtree(tmp_path)[90m[39;49;00m
+        view.refresh_status()[90m[39;49;00m
+        seen: [96mlist[39;49;00m[[96mobject[39;49;00m] = [][90m[39;49;00m
+        view.uninstalled.connect([94mlambda[39;49;00m game, folder: seen.append(game))[90m[39;49;00m
+    [90m[39;49;00m
+        view.forget_install()[90m[39;49;00m
+    [90m[39;49;00m
+>       [94massert[39;49;00m fake.forgets == [94m0[39;49;00m[90m[39;49;00m
+[1m[31mE       assert 1 == 0[0m
+[1m[31mE        +  where 1 = <tests.test_controller_view._FakeUninstall object at 0x7211d1ec3020>.forgets[0m
+
+[1m[31mtests/test_controller_view.py[0m:5271: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_the_forget_button_is_hidden_while_the_folder_exists_and_appears_once_gone[0m - assert False
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_the_folder_reappearing_before_the_press_forgets_nothing[0m - AssertionError: the confirmation must not open for a folder that is back
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_the_folder_reappearing_during_the_confirmation_forgets_nothing[0m - assert 1 == 0
+[31m================= [31m[1m3 failed[0m, [32m10 passed[0m, [33m252 deselected[0m[31m in 1.28s[0m[31m =================[0m

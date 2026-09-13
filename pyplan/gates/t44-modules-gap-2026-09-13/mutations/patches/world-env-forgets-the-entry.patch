@@ -1,0 +1,14 @@
+# gate: tests/test_catalog_operations.py -q
+diff --git a/pylauncher/yulon/catalog/composegen.py b/pylauncher/yulon/catalog/composegen.py
+index 71e33b84..5acb598b 100644
+--- a/pylauncher/yulon/catalog/composegen.py
++++ b/pylauncher/yulon/catalog/composegen.py
+@@ -180,7 +180,7 @@ def world_env(entry: CatalogEntry, override: Mapping[str, str] | None = None) ->
+     )
+     if override is not None:
+         return dict(override)
+-    return {**DEFAULT_WORLD_ENV, **entry_env}
++    return dict(DEFAULT_WORLD_ENV)
+ 
+ 
+ _world_env = world_env

@@ -29,19 +29,34 @@
       "file": "env/dist/etc/modules/transmog.conf",
       "keys": [
         {
-          "key": "Transmogrification.Enable"
+          "key": "Transmogrification.Enable",
+          "label": "Enable transmog",
+          "explain": "Enables/Disables transmog. Players won't be able to see any transmogrified item while disabled, however, database data remains intact.",
+          "type": "bool"
         },
         {
-          "key": "Transmogrification.ShowSetDisclaimer"
+          "key": "Transmogrification.ShowSetDisclaimer",
+          "label": "Show the set disclaimer",
+          "explain": "If enabled, players receive a chat notice when transmogrifying an item that belongs to a set, explaining that set bonuses remain active even though the tooltip won't reflect them. Players can suppress the notice per-character with: .transmog disclaimer off",
+          "type": "bool"
         },
         {
-          "key": "Transmogrification.UseCollectionSystem"
+          "key": "Transmogrification.UseCollectionSystem",
+          "label": "Legion-style appearance collection",
+          "explain": "Enables/Disables Legion-style appearance collection system. If enabled, players can use the appearance of any item equipped or rewarded from a completed quest. If disabled, players must have an item in their bags to use as a transmogrification appearance source.",
+          "type": "bool"
         },
         {
-          "key": "Transmogrification.UseVendorInterface"
+          "key": "Transmogrification.UseVendorInterface",
+          "label": "Use the vendor interface",
+          "explain": "Enables/Disables the use of a fake vendor interface for item selection. If enabled, players can select items from a vendor menu, complete with ctrl-click previews. If disabled, players will use the gossip menu to select items and will not have access to previews.",
+          "type": "bool"
         },
         {
-          "key": "Transmogrification.AllowHiddenTransmog"
+          "key": "Transmogrification.AllowHiddenTransmog",
+          "label": "Allow hidden (invisible) transmog",
+          "explain": "Enables/Disables the hiding of equipment through transmog. If enabled, players can select an \"invisible\" appearance for items at the transmog vendor.",
+          "type": "bool"
         }
       ],
       "template": "conf/transmog.conf.dist"

@@ -24,12 +24,22 @@
         {
           "key": "DURATION",
           "default": "{duration}",
-          "note": "seconds"
+          "note": "seconds",
+          "label": "Rest duration (seconds)",
+          "explain": "How long the sit-to-rest regen buff lasts.",
+          "type": "int",
+          "min": 1,
+          "max": 86400
         },
         {
           "key": "REGEN_AURA",
           "default": "{regen_aura}",
-          "note": "spell id"
+          "note": "spell id",
+          "label": "Regen spell id",
+          "explain": "The spell applied while resting. 25990 restores health and mana at any level.",
+          "type": "int",
+          "min": 1,
+          "max": 999999
         }
       ]
     }

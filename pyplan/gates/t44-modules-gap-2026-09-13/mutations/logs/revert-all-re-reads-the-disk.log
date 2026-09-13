@@ -1,0 +1,60 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[31mF[0m[31m                                                                        [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______ test_revert_all_changes_drops_the_unsaved_edits_and_writes_nothing ______[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x259b6400) at 0x7dd09e9820c0>
+ps = <tests.test_controller_view._Ps object at 0x7dd0a16c7620>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-794/test_revert_all_changes_drops_0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_revert_all_changes_drops_the_unsaved_edits_and_writes_nothing[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Item 7's second button, and it is the one that cannot destroy anything.[39;49;00m
+    [33m[39;49;00m
+    [33m    It is the undo for "I typed in six boxes and changed my mind": the cards[39;49;00m
+    [33m    are rebuilt from the rows already read, so no file is touched and no disk[39;49;00m
+    [33m    is re-read. The per-card Revert is the one that restores from a backup.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: have it call `reload_tuning()` and it silently becomes a second[39;49;00m
+    [33m    Reload from disk -- which also picks up somebody else's edits, which is[39;49;00m
+    [33m    not what a user pressing "revert MY changes" asked for.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        view = _tuning_view(ps, tmp_path)[90m[39;49;00m
+        card = view.tuning_panel.cards()[[94m0[39;49;00m][90m[39;49;00m
+        editor = [96mnext[39;49;00m([96miter[39;49;00m(card.editors.values()))[90m[39;49;00m
+        [94massert[39;49;00m editor.control [95mis[39;49;00m [95mnot[39;49;00m [94mNone[39;49;00m[90m[39;49;00m
+        before = view.services.controller.server_dir / [33m"[39;49;00m[33menv/dist/etc/modules/mod_npc_beastmaster.conf[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        text = before.read_text(encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        [94mfrom[39;49;00m[90m [39;49;00m[04m[96mPySide6[39;49;00m[04m[96m.[39;49;00m[04m[96mQtWidgets[39;49;00m[90m [39;49;00m[94mimport[39;49;00m QCheckBox, QLineEdit[90m[39;49;00m
+    [90m[39;49;00m
+        [94mif[39;49;00m [96misinstance[39;49;00m(editor.control, QLineEdit):[90m[39;49;00m
+            editor.control.setText([33m"[39;49;00m[33msomething else[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        [94melif[39;49;00m [96misinstance[39;49;00m(editor.control, QCheckBox):[90m[39;49;00m
+            editor.control.setChecked([95mnot[39;49;00m editor.control.isChecked())[90m[39;49;00m
+        [94melse[39;49;00m:[90m[39;49;00m
+            editor.control.setValue(editor.control.value() + [94m1[39;49;00m)[90m[39;49;00m
+        [94massert[39;49;00m view.tuning_revert_all_button.isEnabled() [95mis[39;49;00m [94mTrue[39;49;00m[90m[39;49;00m
+    [90m[39;49;00m
+        [90m# Somebody else changes the file while the tab is open. Revert all changes[39;49;00m[90m[39;49;00m
+        [90m# must NOT pick that up -- it is the undo for what this person typed --[39;49;00m[90m[39;49;00m
+        [90m# and Reload from disk must.[39;49;00m[90m[39;49;00m
+        before.write_text([33m"[39;49;00m[33mBeastMaster.Enable = 0[39;49;00m[33m\n[39;49;00m[33m"[39;49;00m, encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        view.tuning_revert_all_button.click()[90m[39;49;00m
+    [90m[39;49;00m
+        [94massert[39;49;00m view.tuning_panel.cards()[[94m0[39;49;00m].edits() == {}[90m[39;49;00m
+        [94massert[39;49;00m view.tuning_revert_all_button.isEnabled() [95mis[39;49;00m [94mFalse[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m before.read_text(encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m) == [33m"[39;49;00m[33mBeastMaster.Enable = 0[39;49;00m[33m\n[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mit wrote to disk[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        reverted = [96mnext[39;49;00m([96miter[39;49;00m(view.tuning_panel.cards()[[94m0[39;49;00m].editors.values()))[90m[39;49;00m
+>       [94massert[39;49;00m reverted.row.current == [33m"[39;49;00m[33m1[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mRevert all changes re-read the file[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: Revert all changes re-read the file[0m
+[1m[31mE       assert '0' == '1'[0m
+[1m[31mE         [0m
+[1m[31mE         [0m[91m- 1[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         [92m+ 0[39;49;00m[90m[39;49;00m[0m
+
+[1m[31mtests/test_controller_view.py[0m:8739: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_revert_all_changes_drops_the_unsaved_edits_and_writes_nothing[0m - AssertionError: Revert all changes re-read the file
+[31m[31m[1m1 failed[0m, [33m319 deselected[0m[31m in 0.93s[0m[0m

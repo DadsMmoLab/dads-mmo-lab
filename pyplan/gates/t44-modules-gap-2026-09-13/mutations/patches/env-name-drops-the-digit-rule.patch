@@ -1,0 +1,13 @@
+# gate: tests/test_catalog_operations.py -q
+diff --git a/pylauncher/yulon/catalog/composegen.py b/pylauncher/yulon/catalog/composegen.py
+index 71e33b84..f50400d8 100644
+--- a/pylauncher/yulon/catalog/composegen.py
++++ b/pylauncher/yulon/catalog/composegen.py
+@@ -150,7 +150,6 @@ def env_name_for(ini_key: str) -> str:
+             continue
+         boundary = previous and (
+             (previous.islower() and char.isupper())
+-            or (previous.isalpha() and char.isdigit())
+             or (previous.isdigit() and char.isalpha())
+         )
+         if boundary:

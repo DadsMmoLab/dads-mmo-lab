@@ -30,23 +30,36 @@
       "file": "env/dist/etc/modules/lua_scripts/BMAH.lua",
       "keys": [
         {
-          "key": "common/rare/ultraRare_*_price"
+          "key": "common/rare/ultraRare_*_price",
+          "label": "Item prices by rarity",
+          "explain": "Pricing, in gold, per item category and rarity (pets, mounts, gear, ...)."
         },
         {
           "key": "FillRateCommon / FillRateRare / FillRateUltra",
-          "note": "85/10/5 %"
+          "note": "85/10/5 %",
+          "label": "Rarity fill rates",
+          "explain": "Fill-rarity thresholds (cumulative roll 0-1): 0.00 <= r < FillRateCommon -> common; FillRateCommon <= r < FillRateRare -> rare; FillRateRare <= r <= 1.0 -> ultraRare."
         },
         {
           "key": "MinBidIncrementG",
-          "note": "10g"
+          "note": "10g",
+          "label": "Minimum bid increment (gold)",
+          "explain": "Minimum gold above last bid.",
+          "type": "int"
         },
         {
           "key": "AutoFillChance",
-          "note": "0.50"
+          "note": "0.50",
+          "label": "Auto-fill chance",
+          "explain": "Chance to auto-fill when table empties.",
+          "type": "text"
         },
         {
           "key": "PotentialDurations",
-          "note": "720,1440 minutes"
+          "note": "720,1440 minutes",
+          "label": "Auction durations (minutes)",
+          "explain": "Auction duration options, in minutes.",
+          "type": "list"
         }
       ]
     }

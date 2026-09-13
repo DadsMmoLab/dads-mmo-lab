@@ -1,0 +1,44 @@
+yt: Python 3.13.15 in /home/perzi/wt-t54/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t54/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollected 90 items / 89 deselected / 1 selected                                [0m
+
+tests/test_platform.py [31mF[0m[31m                                                 [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m_______ test_a_folder_on_a_drive_that_is_not_there_is_not_confirmed_gone _______[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-947/test_a_folder_on_a_drive_that_0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_folder_on_a_drive_that_is_not_there_is_not_confirmed_gone[39;49;00m(tmp_path: Path) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""An absent VOLUME is not an absent folder (T54 review).[39;49;00m
+    [33m[39;49;00m
+    [33m    `os.stat()` raises `FileNotFoundError` for `E:\\Games\\Yulon Wotlk` both when[39;49;00m
+    [33m    the folder was deleted and when the whole of `E:` is unplugged, asleep, or a[39;49;00m
+    [33m    disconnected network share. The two are indistinguishable at the leaf.[39;49;00m
+    [33m[39;49;00m
+    [33m    That mattered the moment T54 made the Forget control appear while Docker is[39;49;00m
+    [33m    unreachable: an offline drive takes Docker's daemon with it often enough[39;49;00m
+    [33m    (VM on that disk, machine just woken), and the user is then told the folder[39;49;00m
+    [33m    "no longer exists" and offered a button that drops the only record of a[39;49;00m
+    [33m    LIVE install, with its containers and volumes still on the machine.[39;49;00m
+    [33m[39;49;00m
+    [33m    Before T54 this was prevented by accident -- no Docker, no reveal. The fix[39;49;00m
+    [33m    removed the accident, so the predicate has to mean what it says.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        [90m# A path whose PARENT does not exist either: the volume is what is missing.[39;49;00m[90m[39;49;00m
+        missing_volume = tmp_path / [33m"[39;49;00m[33mnot-a-mounted-thing[39;49;00m[33m"[39;49;00m / [33m"[39;49;00m[33mserver[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m [95mnot[39;49;00m platform.folder_is_gone(missing_volume), ([90m[39;49;00m
+            [33m"[39;49;00m[33ma folder under a root that is not there was reported as confirmed gone[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        )[90m[39;49;00m
+[1m[31mE       AssertionError: a folder under a root that is not there was reported as confirmed gone[0m
+[1m[31mE       assert not True[0m
+[1m[31mE        +  where True = <function folder_is_gone at 0x7e394bd245e0>(PosixPath('/tmp/pytest-of-perzi/pytest-947/test_a_folder_on_a_drive_that_0/not-a-mounted-thing/server'))[0m
+[1m[31mE        +    where <function folder_is_gone at 0x7e394bd245e0> = platform.folder_is_gone[0m
+
+[1m[31mtests/test_platform.py[0m:1126: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_platform.py::[1mtest_a_folder_on_a_drive_that_is_not_there_is_not_confirmed_gone[0m - AssertionError: a folder under a root that is not there was reported as con...
+[31m======================= [31m[1m1 failed[0m, [33m89 deselected[0m[31m in 0.15s[0m[31m =======================[0m

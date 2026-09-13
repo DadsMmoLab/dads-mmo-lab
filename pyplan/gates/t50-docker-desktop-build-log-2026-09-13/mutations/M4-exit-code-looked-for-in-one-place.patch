@@ -1,0 +1,16 @@
+--- /tmp/d.orig	2026-09-13 20:41:59.074856952 +0200
++++ pylauncher/yulon/docker.py	2026-09-13 20:41:59.091476563 +0200
+@@ -3312,11 +3312,8 @@
+     `docker build` itself, and 137 is an out-of-memory kill that nothing else
+     in a Docker Desktop stream says out loud.
+     """
+-    for line in reversed(said):
+-        found = _EXIT_CODE.search(line)
+-        if found:
+-            return f"exit code: {found.group(1)} — "
+-    return ""
++    found = _EXIT_CODE.search(said[-1])  # M4: round 1's two-place lookup
++    return f"exit code: {found.group(1)} — " if found else ""
+ 
+ 
+ def last_words(tail: tuple[str, ...]) -> str:

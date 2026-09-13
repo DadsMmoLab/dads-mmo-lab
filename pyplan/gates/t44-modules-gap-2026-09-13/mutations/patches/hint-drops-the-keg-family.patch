@@ -1,0 +1,13 @@
+# gate: tests/test_modules_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..acb26648 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -85,7 +85,6 @@ drift.
+ FAMILY_HINTS: dict[ManifestType, str] = {
+     "module": "compiled into the worldserver — a rebuild is owed before one of these runs",
+     "ale": "no rebuild — the world reloads them on restart",
+-    "keg": "Dad's MMO Lab bundles: server side plus a client addon",
+     "mod": "SQL and conf only — no compile; the importer applies the SQL",
+ }
+ """The sentence under each card's title, saying what that family COSTS (T44 item 3).

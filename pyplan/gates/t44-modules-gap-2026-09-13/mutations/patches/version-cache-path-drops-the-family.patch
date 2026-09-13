@@ -1,0 +1,14 @@
+# gate: tests/test_modules_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..51827180 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -330,7 +330,7 @@ class VersionCache:
+ 
+     def path_of(self, server_dir: Path, family: str, item_id: str) -> Path:
+         """Where this family's clone of `item_id` lives, by `apply.CLONE_DIRS`."""
+-        return server_dir / _clone_dir_of(family) / item_id
++        return server_dir / _clone_dir_of("module") / item_id
+ 
+     def has(self, server_dir: Path, family: str, item_id: str) -> bool:
+         """Whether this clone has been read at all -- which "the answer was None" is not."""

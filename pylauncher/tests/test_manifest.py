@@ -323,3 +323,158 @@ def test_origin_is_optional_and_every_shipped_manifest_has_none() -> None:
         item_dir = index_file.with_suffix("")
         for item_file in sorted(item_dir.glob("*.json")) if item_dir.is_dir() else []:
             assert parse_manifest(json.loads(item_file.read_text(encoding="utf-8"))).origin is None
+
+
+# -- T43: the tuning fields on a conf key ----------------------------------
+
+
+def _with_keys(keys: list[dict[str, Any]]) -> Manifest:
+    return parse_manifest(
+        {
+            **README_EXAMPLE,
+            "conf": [{"file": "env/dist/etc/modules/mod_ahbot.conf", "keys": keys}],
+        }
+    )
+
+
+def test_a_conf_key_carries_its_label_explain_type_and_bounds() -> None:
+    """T43's four optional fields parse and arrive on the model."""
+    key = (
+        _with_keys(
+            [
+                {
+                    "key": "AuctionHouseBot.MinItems",
+                    "default": "500",
+                    "label": "Items on sale, minimum",
+                    "explain": "The bot tops the house back up to this many lots.",
+                    "type": "int",
+                    "min": 0,
+                    "max": 200000,
+                }
+            ]
+        )
+        .conf[0]
+        .keys[0]
+    )
+    assert key.label == "Items on sale, minimum"
+    assert key.explain == "The bot tops the house back up to this many lots."
+    assert key.type == "int" and key.min == 0 and key.max == 200000
+
+
+def test_a_conf_key_with_none_of_them_still_parses_and_answers_none() -> None:
+    """The 107 keys authored before T43 must be byte-identical in meaning."""
+    key = _with_keys([{"key": "AuctionHouseBot.Account"}]).conf[0].keys[0]
+    assert (key.label, key.explain, key.type, key.min, key.max) == (None, None, None, None, None)
+
+
+@pytest.mark.parametrize("kind", ["bool", "list", "text", None])
+def test_a_bound_on_a_key_that_is_not_an_int_is_a_parse_error(kind: str | None) -> None:
+    """`min`/`max` mean nothing off an `int` and would mislead whoever read them.
+
+    `None` included on purpose: a key with no `type` renders as a text box
+    (T43's safety rule), and a bound on a text box is the same lie as a bound
+    on a switch.
+    """
+    for bound in ({"min": 1}, {"max": 9}, {"min": 1, "max": 9}):
+        entry: dict[str, Any] = {"key": "AuctionHouseBot.Account", **bound}
+        if kind is not None:
+            entry["type"] = kind
+        with pytest.raises(ValidationError, match="int"):
+            _with_keys([entry])
+
+
+def test_an_int_key_may_carry_one_bound_or_none_at_all() -> None:
+    """No clamping is invented where a bound is absent (T43's safety rule)."""
+    only_min = _with_keys([{"key": "A.B", "type": "int", "min": 0}]).conf[0].keys[0]
+    assert only_min.min == 0 and only_min.max is None
+    neither = _with_keys([{"key": "A.B", "type": "int"}]).conf[0].keys[0]
+    assert neither.min is None and neither.max is None
+
+
+def test_a_type_the_schema_does_not_name_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        _with_keys([{"key": "A.B", "type": "switch"}])
+
+
+def test_an_int_key_whose_min_is_above_its_max_is_a_parse_error() -> None:
+    """A range no value can satisfy, caught where a reader would trust it."""
+    with pytest.raises(ValidationError, match="min"):
+        _with_keys([{"key": "A.B", "type": "int", "min": 10, "max": 9}])
+
+
+# -- T43 point 7: what the enriched catalog must keep true ------------------
+
+WOTLK_KEYS = [
+    (path, conf.file, key)
+    for path in sorted((MANIFESTS_DIR / "wow-wotlk").glob("*/*.json"))
+    for conf in manifest.parse_manifest(json.loads(path.read_text(encoding="utf-8"))).conf
+    for key in conf.keys
+]
+
+
+def test_a_bool_key_the_catalog_also_writes_agrees_with_its_own_default() -> None:
+    """A `type` that disagrees with the `default` beside it would write a wrong value.
+
+    The relationship has no owner otherwise: `ConfKey` can check a bound against
+    a bound, but only a pass over the shipped catalog can check that the TYPE a
+    key was given matches the VALUE the same key tells the installer to write.
+    """
+    for path, file, key in WOTLK_KEYS:
+        if key.type != "bool" or key.default is None or "{" in key.default:
+            continue
+        assert key.default.strip().lower() in (
+            "0",
+            "1",
+            "true",
+            "false",
+        ), f"{path.name}:{file}:{key.key} is typed `bool` but its default is {key.default!r}"
+
+
+def test_an_int_key_the_catalog_also_writes_parses_and_sits_in_its_own_bounds() -> None:
+    for path, file, key in WOTLK_KEYS:
+        if key.type != "int" or key.default is None or "{" in key.default:
+            continue
+        where = f"{path.name}:{file}:{key.key}"
+        number = int(key.default.strip())  # raises here rather than at save time
+        assert key.min is None or number >= key.min, f"{where}: default below its own min"
+        assert key.max is None or number <= key.max, f"{where}: default above its own max"
+
+
+def test_every_key_the_tuning_tab_can_write_says_what_kind_of_setting_it_is() -> None:
+    """T43 point 7, pinned by NAME rather than by a count.
+
+    A count would pass on the wrong twelve. These are the twelve keys deliberately
+    left with no `type`, and every one of them is a key the tab refuses to write
+    anyway: seven are catalog shorthand for a GROUP of keys (`tuning.NOT_ONE_KEY`)
+    and five are `paragon`'s, whose values live in a database table and whose
+    source states nothing about them — the author's silence, kept.
+    """
+    bare = {
+        f"{path.parent.name}/{path.name}:{key.key}"
+        for path, _file, key in WOTLK_KEYS
+        if key.type is None
+    }
+    assert bare == {
+        "ale/paragon.json:LEVEL_LINKED_TO_ACCOUNT",
+        "ale/paragon.json:PARAGON_LEVEL_CAP",
+        "ale/paragon.json:BASE_MAX_EXPERIENCE",
+        "ale/paragon.json:POINTS_PER_LEVEL",
+        "ale/paragon.json:UNIVERSAL_CREATURE_EXPERIENCE",
+        "kegs/bmah.json:common/rare/ultraRare_*_price",
+        "kegs/bmah.json:FillRateCommon / FillRateRare / FillRateUltra",
+        "modules/mod-ah-bot-plus.json:AuctionHouseBot.ListProportion.*",
+        "modules/mod-autobalance.json:AutoBalance.Enable.*",
+        "modules/mod-mount-scaling.json:MountScaling.Ground.Journeyman.*",
+        "modules/mod-mount-scaling.json:MountScaling.Flying.Expert.*",
+        "modules/mod-mount-scaling.json:MountScaling.Flying.Artisan.*",
+    }
+
+
+def test_a_label_is_a_name_and_not_the_authors_whole_sentence() -> None:
+    """The label goes beside a control; the sentence goes under it."""
+    for path, file, key in WOTLK_KEYS:
+        if key.label is None:
+            continue
+        where = f"{path.name}:{file}:{key.key}"
+        assert len(key.label) <= 40, f"{where}: label is a sentence, not a name"
+        assert not key.label.endswith("."), f"{where}: label ends in a full stop"

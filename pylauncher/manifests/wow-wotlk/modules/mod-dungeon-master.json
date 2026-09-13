@@ -30,13 +30,22 @@
       "file": "env/dist/etc/modules/mod_dungeon_master.conf",
       "keys": [
         {
-          "key": "Scaling.LevelBand"
+          "key": "DungeonMaster.Scaling.LevelBand",
+          "label": "Creature level window",
+          "explain": "Creature selection window: effective_level \u00b1 this value. Default: 3.",
+          "type": "int"
         },
         {
-          "key": "Rewards.BaseGold"
+          "key": "DungeonMaster.Rewards.BaseGold",
+          "label": "Base gold reward (copper)",
+          "explain": "Base gold reward, in copper. Default: 50000 (5g).",
+          "type": "int"
         },
         {
-          "key": "Roguelike.Enable"
+          "key": "DungeonMaster.Roguelike.Enable",
+          "label": "Enable Roguelike Mode",
+          "explain": "Master switch for Roguelike Mode.",
+          "type": "bool"
         }
       ],
       "template": "conf/mod_dungeon_master.conf.dist"

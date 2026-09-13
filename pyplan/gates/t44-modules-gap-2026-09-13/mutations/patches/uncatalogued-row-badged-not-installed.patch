@@ -1,0 +1,14 @@
+# gate: tests/test_modules_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..dd11cf77 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -576,7 +576,7 @@ def build_module_rows(
+                     ),
+                     removable=False,
+                     remove_reason=None,
+-                    badge=_badge_for(True, bool(session.sql_owed.get((kind, name)))),
++                    badge=BADGE_NOT_INSTALLED,
+                     version=seen_versions.get((kind, name)),
+                 )
+             )

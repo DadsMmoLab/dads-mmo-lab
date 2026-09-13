@@ -24,15 +24,28 @@
         {
           "key": "UnlimitedAmmoNamespace.ENABLED",
           "default": "{enabled}",
-          "note": "ships false; .ua enables at runtime only (resets on restart)"
+          "note": "ships false; .ua enables at runtime only (resets on restart)",
+          "label": "Enable unlimited ammo",
+          "explain": "Ships off. When on, Hunters' arrows and bullets refill automatically so they never run out.",
+          "type": "bool"
         },
         {
           "key": "UnlimitedAmmoNamespace.MAX_AMMO",
-          "default": "{max_ammo}"
+          "default": "{max_ammo}",
+          "label": "Ammo to keep stocked",
+          "explain": "How many arrows or bullets to top the quiver up to on each refill.",
+          "type": "int",
+          "min": 1,
+          "max": 100000
         },
         {
           "key": "UnlimitedAmmoNamespace.MIN_AMMO_THRESHOLD",
-          "default": "{min_threshold}"
+          "default": "{min_threshold}",
+          "label": "Refill when below",
+          "explain": "Top the ammo back up once it drops under this many.",
+          "type": "int",
+          "min": 1,
+          "max": 100000
         }
       ]
     }

@@ -21,28 +21,46 @@
         {
           "key": "AuctionHouseBot.GUIDs",
           "default": "{bot_guid}",
-          "note": "PLURAL key, unquoted integer; Plus has no Account/GUID keys"
+          "note": "PLURAL key, unquoted integer; Plus has no Account/GUID keys",
+          "label": "Bot character GUIDs",
+          "explain": "These are the character GUIDS (from characters->characters table) that will be used to create auctions and otherwise interact with auctions. It can be a single value or multiple values that are separated by a comma (do not have spaces!). Note: a GUID of \"0\" will be ignored! Important: Do not use a bot character (such as playerbot bots) or it will likely crash the server.",
+          "type": "list"
         },
         {
           "key": "AuctionHouseBot.EnableSeller",
           "default": "true",
-          "note": "boolean word, not 1"
+          "note": "boolean word, not 1",
+          "label": "Sell items",
+          "explain": "Enable/Disable the part of AHBot that puts items up for auction.",
+          "type": "bool"
         },
         {
-          "key": "AuctionHouseBot.Buyer.Enabled"
+          "key": "AuctionHouseBot.Buyer.Enabled",
+          "label": "Buy items",
+          "explain": "Enable/Disable the buying bot.",
+          "type": "bool"
         },
         {
           "key": "AuctionHouseBot.ItemsPerCycle",
-          "note": "default 150"
+          "note": "default 150",
+          "label": "Items posted per cycle",
+          "explain": "How many items to post on the auction house every house update. Items in a cycle will be posted by a randomly selected bot.",
+          "type": "int"
         },
         {
-          "key": "AuctionHouseBot.MinutesBetweenSellCycle"
+          "key": "AuctionHouseBot.MinutesBetweenSellCycle",
+          "label": "Minutes between sell cycles",
+          "explain": "How many minutes to wait before selling items again. Value can be a single number in order to wait X minutes before selling again, or a pair of numbers separated by a ':' to wait a random number of minutes between X and Y (e.g. 3:15 to wait 3-15 minutes between cycles).",
+          "type": "text"
         },
         {
           "key": "AuctionHouseBot.ListProportion.*"
         },
         {
-          "key": "AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled"
+          "key": "AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled",
+          "label": "Use drop rates when listing",
+          "explain": "Enable/Disable the Seller using items' in-game drop rates from Enemies and GameObjects to determine the probability of listing them on the AH. This makes rare items appear less frequently on the AH.",
+          "type": "bool"
         }
       ],
       "template": "conf/mod_ahbot.conf.dist"

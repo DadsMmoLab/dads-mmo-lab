@@ -1,0 +1,30 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m             [100%][0m
+=================================== FAILURES ===================================
+[31m[1m____________ test_a_changed_row_names_its_key_and_the_value_it_had _____________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x3136a500) at 0x7805e3b01e80>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_changed_row_names_its_key_and_the_value_it_had[39;49;00m(qapp: [96mobject[39;49;00m) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Item 10. `changed from 10` does not say WHICH key, on a card of twelve.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: drop the key from the sentence and the line reads `· was 10`[39;49;00m
+    [33m    with nothing to attach it to.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        editor = tp.RowEditor([90m[39;49;00m
+            _row(key=[33m"[39;49;00m[33mbeastmaster.min_level[39;49;00m[33m"[39;49;00m, [96mtype[39;49;00m=[33m"[39;49;00m[33mint[39;49;00m[33m"[39;49;00m, [96mmin[39;49;00m=[94m0[39;49;00m, [96mmax[39;49;00m=[94m80[39;49;00m, current=[33m"[39;49;00m[33m10[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        )[90m[39;49;00m
+        [94massert[39;49;00m [96misinstance[39;49;00m(editor.control, QSpinBox)[90m[39;49;00m
+    [90m[39;49;00m
+        editor.control.setValue([94m20[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+>       [94massert[39;49;00m editor.changed_label.text() == [33m"[39;49;00m[33mbeastmaster.min_level · was 10[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: assert 'changed from 10' == 'beastmaster....evel · was 10'[0m
+[1m[31mE         [0m
+[1m[31mE         [0m[91m- beastmaster.min_level · was 10[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         [92m+ changed from 10[39;49;00m[90m[39;49;00m[0m
+
+[1m[31mtests/test_tuning_panel.py[0m:563: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_tuning_panel.py::[1mtest_a_changed_row_names_its_key_and_the_value_it_had[0m - AssertionError: assert 'changed from 10' == 'beastmaster....evel · was 10'
+[31m[31m[1m1 failed[0m, [32m59 passed[0m[31m in 0.29s[0m[0m
