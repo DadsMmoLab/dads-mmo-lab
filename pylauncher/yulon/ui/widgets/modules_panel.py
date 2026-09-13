@@ -405,8 +405,12 @@ def _chips_for(
                 "owed",
                 chip_update_label(behind),
                 f"{item_id}: its upstream has {behind} commit(s) this checkout does not. "
-                "Yu'lon has no per-module pull yet, so updating it is a job for git in "
-                "the clone folder.",
+                "Update runs the same steps an install does over the folder that is already "
+                "there: it fetches and RESETS the clone to the upstream tip, then re-deploys "
+                "and re-applies everything the manifest declares. It will discard anything "
+                "changed inside the clone folder, and it may ask this module's install "
+                "questions again.",
+                "update",
             )
         )
     if manifest is not None and not installed:

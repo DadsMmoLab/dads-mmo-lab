@@ -1355,3 +1355,28 @@ def test_set_version_on_a_row_that_is_gone_is_ignored(qapp: object) -> None:
     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
 
     panel.set_version("module", "mod-gone", "7c02b1d · 2026-09-01")  # must not raise
+
+
+# ------------------------------------------------------- the Update press (T44)
+
+
+def test_the_update_chip_offers_the_pull_and_says_what_it_costs() -> None:
+    """T44 item 2: the chip stops saying Yu'lon cannot do this, because it can.
+
+    T42's sentence was "Yu'lon has no per-module pull yet, so updating it is a
+    job for git in the clone folder". The pull is `install()` over an existing
+    clone -- `git.RunnerGit.clone()` fetches and resets a checkout that is
+    already there -- so the chip now names the press and, because that press
+    is a `reset --hard`, says what it throws away.
+
+    Mutation: drop the `action` and the subpanel shows a sentence with no
+    button, which is the tab exactly as T42 shipped it.
+    """
+    session = mp.SessionState(behind={"mod-a": 3})
+    rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
+
+    chip = next(c for c in _row(rows, "mod-a").chips if c.kind == "owed")
+    assert chip.label == mp.chip_update_label(3)
+    assert chip.action == "update"
+    assert "no per-module pull" not in chip.detail
+    assert "discard" in chip.detail, "a reset --hard has to say what it destroys"

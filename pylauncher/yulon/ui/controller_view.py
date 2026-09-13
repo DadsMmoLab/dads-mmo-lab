@@ -6036,6 +6036,23 @@ class ControllerView(QWidget):
             self.rebuild_server()
         elif action == "sql":
             self.apply_module_sql()
+        elif action == "update":
+            # T44 item 2. The INSTALL route, because over a clone that is
+            # already on disk that route IS the pull: `RunnerGit.clone()` on a
+            # folder with a `.git` in it fetches, resets to `FETCH_HEAD` and
+            # re-applies the pin, and everything after it -- deploy, patches,
+            # SQL, conf, client files -- is what has to be redone once the
+            # source has moved. It therefore carries `_require_own_clone()`'s
+            # refusals unchanged, and reports the module's rebuild and SQL
+            # consequences exactly as an install reports them, because it is
+            # one. A second route would be a second copy of that guard.
+            #
+            # What it does NOT add is a refusal of its own: a clone this app's
+            # own claim vouches for is reset without asking `unmodified`, which
+            # is true of the Install button today as well. The chip's own
+            # sentence, which the subpanel shows directly above this button,
+            # says so before the press.
+            self._module_action("install", called="update")
 
     def _selected_row_is_uncatalogued(self) -> bool:
         """Is the selected row one of T41's "installed here, not in the catalog" rows?"""
@@ -6059,7 +6076,14 @@ class ControllerView(QWidget):
             return None
         return self._manifests.get((row.data.family, row.data.id))
 
-    def _module_action(self, action: str) -> None:
+    def _module_action(self, action: str, *, called: str | None = None) -> None:
+        """Run `action` on the selected row, saying `called` if that is a better word.
+
+        `called` changes the SENTENCE and never the route. T44's Update press
+        runs `install`, because over an existing clone that is what a pull is,
+        and a user who pressed a button marked Update must not read
+        "install mod-x…" back from it.
+        """
         manifest = self.selected_manifest()
         applier = self.services.applier
         if manifest is None and self._selected_row_is_uncatalogued():
@@ -6073,15 +6097,16 @@ class ControllerView(QWidget):
         if manifest is None or applier is None:
             return
         go_ahead, values = self._module_values(manifest, action)
+        word = called or action
         if not go_ahead:
             self._module_pending = None
             self.module_report.setPlainText(
-                f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
+                f"{word} {manifest.id}: cancelled — nothing on this machine was changed."
             )
             return
         run = applier.install if action == "install" else applier.remove
         self._acting_on = manifest
-        self._module_pending = f"{action} {manifest.id}"
+        self._module_pending = f"{word} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
         self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
 
@@ -6248,6 +6273,13 @@ class ControllerView(QWidget):
             self._sql_owed.pop(item_id, None)
             self._behind.pop(item_id, None)
             return
+        # The clone has just been fetched and reset to its upstream tip -- that
+        # is what `install()` does over a folder that is already there -- so
+        # any "N commits behind" this session counted is now a figure about a
+        # commit the checkout has moved off. Dropped rather than recounted: a
+        # recount costs a network round trip, and a stale number is a wrong one
+        # (T44 item 2).
+        self._behind.pop(item_id, None)
         if result.rebuild_required:
             self._rebuild_owed.add(item_id)
         owed = _pending_sql_names(result)

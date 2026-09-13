@@ -8423,3 +8423,62 @@ def test_refresh_forgets_every_version_and_a_report_forgets_one(
     pump_until(lambda: not view._filling_versions, "the fill after Refresh never finished")
 
     assert len(read) == 5, "Refresh re-reads every installed clone"
+
+
+def test_the_update_press_runs_the_install_route_over_the_clone_that_is_there(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T44 item 2: Update is a real pull, and it is the install seam that does it.
+
+    `Applier.install()` over an existing clone IS the pull: `RunnerGit.clone()`
+    on a folder that already has a `.git` runs `fetch` + `reset --hard
+    FETCH_HEAD` and then re-applies the pin. Routing Update anywhere else would
+    be a second clone path with a second copy of `_require_own_clone()`'s
+    refusals to keep in step.
+
+    Mutation: route the press to `applier.remove` (or to nothing at all) and
+    the module the user asked to update is uninstalled, or the button is the
+    thing item 2 forbids -- one that looks like an update and is not.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
+    view._behind = {"mod-solocraft": 3}
+    view.reload_modules()
+    row = view.modules_panel.row("mod-solocraft")
+    chip = next(b for b in row.chip_buttons if "Update available" in b.text())
+
+    chip.click()
+    assert row.detail_button is not None
+    assert row.detail_button.text() == "Update"
+    row.detail_button.click()
+    pump_until(lambda: not view._busy, "the update never finished")
+
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed[-1] == "mod-solocraft"
+    assert applier.removed == []
+
+
+def test_a_finished_update_drops_the_commits_behind_it_just_pulled(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The count is stale the moment the clone moves, and a stale count is a wrong one.
+
+    Mutation: leave `_behind` alone on a non-remove report and the row goes on
+    offering "Update available -- 3 commits behind" over a clone that is now at
+    the tip, forever, until the user presses Check for updates again.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
+    view._behind = {"mod-solocraft": 3}
+    view.reload_modules()
+    assert any(
+        "Update available" in b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons
+    )
+
+    view._module_done(ApplyReport("install", "mod-solocraft"))
+
+    assert view._behind == {}
+    assert not [
+        b
+        for b in view.modules_panel.row("mod-solocraft").chip_buttons
+        if "Update available" in b.text()
+    ]
