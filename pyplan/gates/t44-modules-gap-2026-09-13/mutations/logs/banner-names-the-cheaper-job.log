@@ -1,0 +1,34 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[31mF[0m[31m                                                                        [100%][0m
+=================================== FAILURES ===================================
+[31m[1m____ test_a_file_outside_every_bind_owes_a_recreate_and_the_banner_says_so _____[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0xb2c2b10) at 0x7f3a3de153c0>
+ps = <tests.test_controller_view._Ps object at 0x7f3a409bb620>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-757/test_a_file_outside_every_bind0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_file_outside_every_bind_owes_a_recreate_and_the_banner_says_so[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The dearer half of the same rule, and the banner must name the DEARER job.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: let the banner's button be whichever job was noted last and a[39;49;00m
+    [33m    user who changed two files presses Restart over a change that needs the[39;49;00m
+    [33m    containers replaced.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        view = _tuning_view(ps, tmp_path)[90m[39;49;00m
+        view._note_tuning_owed([33m"[39;49;00m[33menv/dist/etc/modules/mod_npc_beastmaster.conf[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        view._note_tuning_owed([33m"[39;49;00m[33mmodules/mod-x/conf/mod-x.conf[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        [94massert[39;49;00m view.tuning_restart_button.isEnabled() [95mis[39;49;00m [94mTrue[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m view.tuning_recreate_button.isEnabled() [95mis[39;49;00m [94mTrue[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m view.tuning_banner_button.text() == view.tuning_recreate_button.text()[90m[39;49;00m
+[1m[31mE       AssertionError: assert 'Restart server…' == 'Recreate containers…'[0m
+[1m[31mE         [0m
+[1m[31mE         [0m[91m- Recreate containers…[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         [92m+ Restart server…[39;49;00m[90m[39;49;00m[0m
+
+[1m[31mtests/test_controller_view.py[0m:8696: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_a_file_outside_every_bind_owes_a_recreate_and_the_banner_says_so[0m - AssertionError: assert 'Restart server…' == 'Recreate containers…'
+[31m[31m[1m1 failed[0m, [33m319 deselected[0m[31m in 0.94s[0m[0m

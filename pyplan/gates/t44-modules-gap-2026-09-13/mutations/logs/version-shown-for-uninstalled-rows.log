@@ -1,0 +1,36 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m      [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_____ test_the_builder_carries_the_version_it_was_handed_and_nothing_else ______[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_the_builder_carries_the_version_it_was_handed_and_nothing_else[39;49;00m() -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Only INSTALLED rows, and only what is already known (item 1's two rules).[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: call the version lookup for every row and a catalog of 41 rows[39;49;00m
+    [33m    reads 41 clone folders, 20 of which are not there.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        rows = mp.build_module_rows([90m[39;49;00m
+            [_m([33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m), _m([33m"[39;49;00m[33mmod-b[39;49;00m[33m"[39;49;00m)],[90m[39;49;00m
+            {[33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m: [96mfrozenset[39;49;00m({[33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m})},[90m[39;49;00m
+            mp.SessionState(),[90m[39;49;00m
+            [94mNone[39;49;00m,[90m[39;49;00m
+            [90m# `mod-b` is NOT installed and a version is offered for it anyway --[39;49;00m[90m[39;49;00m
+            [90m# which is the shape a stale cache entry has after a remove. An[39;49;00m[90m[39;49;00m
+            [90m# uninstalled row has no clone, so it must show nothing.[39;49;00m[90m[39;49;00m
+            versions={[90m[39;49;00m
+                ([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m): [33m"[39;49;00m[33m7c02b1d · 2026-09-01[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                ([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-b[39;49;00m[33m"[39;49;00m): [33m"[39;49;00m[33mffffff0 · 2020-01-01[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+            },[90m[39;49;00m
+        )[90m[39;49;00m
+    [90m[39;49;00m
+        [94massert[39;49;00m _row(rows, [33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m).version == [33m"[39;49;00m[33m7c02b1d · 2026-09-01[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m _row(rows, [33m"[39;49;00m[33mmod-b[39;49;00m[33m"[39;49;00m).version [95mis[39;49;00m [94mNone[39;49;00m, [33m"[39;49;00m[33man uninstalled row has no clone to be AT[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: an uninstalled row has no clone to be AT[0m
+[1m[31mE       assert 'ffffff0 · 2020-01-01' is None[0m
+[1m[31mE        +  where 'ffffff0 · 2020-01-01' = ModuleRow(id='mod-b', family='module', name='Mod B', description='mod-b does a thing', url='https://github.com/acme/mo...ed=True, paths=(), chips=(), removable=True, remove_reason=None, badge='Not installed', version='ffffff0 · 2020-01-01').version[0m
+[1m[31mE        +    where ModuleRow(id='mod-b', family='module', name='Mod B', description='mod-b does a thing', url='https://github.com/acme/mo...ed=True, paths=(), chips=(), removable=True, remove_reason=None, badge='Not installed', version='ffffff0 · 2020-01-01') = _row((ModuleRow(id='mod-a', family='module', name='Mod A', description='mod-a does a thing', url='https://github.com/acme/m...d=True, paths=(), chips=(), removable=True, remove_reason=None, badge='Not installed', version='ffffff0 · 2020-01-01')), 'mod-b')[0m
+
+[1m[31mtests/test_modules_panel.py[0m:1229: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_modules_panel.py::[1mtest_the_builder_carries_the_version_it_was_handed_and_nothing_else[0m - AssertionError: an uninstalled row has no clone to be AT
+[31m[31m[1m1 failed[0m, [32m66 passed[0m[31m in 0.52s[0m[0m

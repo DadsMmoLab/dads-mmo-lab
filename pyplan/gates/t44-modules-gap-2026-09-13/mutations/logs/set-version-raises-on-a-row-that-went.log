@@ -1,0 +1,44 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[31m      [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________ test_set_version_on_a_row_that_is_gone_is_ignored _______________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x346321c0) at 0x7ab7e8471c00>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_set_version_on_a_row_that_is_gone_is_ignored[39;49;00m(qapp: [96mobject[39;49;00m) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The fill is asynchronous, so a row can be removed between the read and the write.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: index `self._rows[key]` directly and a remove during a fill[39;49;00m
+    [33m    raises a KeyError out of a timer callback.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        panel = _panel(_catalog_rows({[33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m: [96mfrozenset[39;49;00m({[33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m})}))[90m[39;49;00m
+    [90m[39;49;00m
+>       panel.set_version([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-gone[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33m7c02b1d · 2026-09-01[39;49;00m[33m"[39;49;00m)  [90m# must not raise[39;49;00m[90m[39;49;00m
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+
+[1m[31mtests/test_modules_panel.py[0m:1267: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <yulon.ui.widgets.modules_panel.ModulesPanel(0x368f7570) at 0x7ab7e7b14240>
+family = 'module', item_id = 'mod-gone', version = '7c02b1d · 2026-09-01'
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mset_version[39;49;00m([96mself[39;49;00m, family: [96mstr[39;49;00m, item_id: [96mstr[39;49;00m, version: [96mstr[39;49;00m | [94mNone[39;49;00m) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Fill one row's version line IN PLACE, without redrawing anything else.[39;49;00m
+    [33m[39;49;00m
+    [33m    In place and not through `set_rows()`, because the fill is[39;49;00m
+    [33m    asynchronous and happens once per installed module: a reload per[39;49;00m
+    [33m    module would take the user's selection and their open sections away[39;49;00m
+    [33m    from them up to twenty times in a row.[39;49;00m
+    [33m[39;49;00m
+    [33m    A row that is no longer here is ignored rather than raised on: the[39;49;00m
+    [33m    read and the write are separated by an event-loop turn, and a remove[39;49;00m
+    [33m    can land between them.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+>       [96mself[39;49;00m._rows[(family, item_id)].set_version(version)[90m[39;49;00m
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31mE       KeyError: ('module', 'mod-gone')[0m
+
+[1m[31myulon/ui/widgets/modules_panel.py[0m:1184: KeyError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_modules_panel.py::[1mtest_set_version_on_a_row_that_is_gone_is_ignored[0m - KeyError: ('module', 'mod-gone')
+[31m[31m[1m1 failed[0m, [32m66 passed[0m[31m in 0.55s[0m[0m

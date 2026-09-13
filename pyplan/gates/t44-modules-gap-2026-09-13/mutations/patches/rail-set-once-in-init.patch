@@ -1,0 +1,17 @@
+# gate: tests/test_tuning_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/tuning_panel.py b/pylauncher/yulon/ui/widgets/tuning_panel.py
+index fe8ef679..6092c2a8 100644
+--- a/pylauncher/yulon/ui/widgets/tuning_panel.py
++++ b/pylauncher/yulon/ui/widgets/tuning_panel.py
+@@ -567,10 +567,7 @@ class RowEditor(QWidget):
+         rail every row wears marks nothing, and a value moved and moved back
+         is not a change (`changed` asks both questions).
+         """
+-        if self.changed:
+-            self.setStyleSheet(f"border-left: 2px solid {COLOR_TEXT_WARNING}; padding-left: 6px;")
+-        else:
+-            self.setStyleSheet("")
++        self.setStyleSheet(f"border-left: 2px solid {COLOR_TEXT_WARNING}; padding-left: 6px;")
+ 
+     def set_enabled_actions(self, enabled: bool) -> None:
+         if self.control is not None:

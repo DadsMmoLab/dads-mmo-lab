@@ -1,0 +1,16 @@
+# gate: tests/test_controller_view.py -q -k tuning_bar_goes_dead
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..ec866fa7 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -3532,9 +3532,7 @@ class ControllerView(QWidget):
+             # that is still in flight.
+             self.tuning_reload_button.setEnabled(False)
+             self.tuning_revert_all_button.setEnabled(False)
+-            self.tuning_recreate_button.setEnabled(False)
+-            self.tuning_restart_button.setEnabled(False)
+-            self.tuning_banner_button.setEnabled(False)
++
+         else:
+             self.refresh_button.setEnabled(True)
+             self.module_updates_button.setEnabled(self.services.module_updates is not None)

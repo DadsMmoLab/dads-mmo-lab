@@ -411,3 +411,234 @@ finished tree.
 **Status:** the eight definition-of-done items are implemented, tested and
 committed on `hand-t44` (nothing pushed). Owed before this can close: the two
 `yulon-win11` screenshots, and the Codex adversarial review the ticket names.
+
+## Round 2 (hand, Opus 5, 2026-09-13)
+
+Codex's REJECT was right on all five. Nothing in it needed arguing back, and
+two of the five — the `origin` hole and the wrong remedy on the shadow warning
+— were things round 1 had not thought to ask about at all.
+
+| sha | what |
+|---|---|
+| `e730b25c` | findings 4 and 5 — the badge told the truth about the wrong row |
+| `0e28375e` | findings 1 and 2 — Update asks before it resets |
+| `9ed0f5a9` | finding 3 — the shadow warning, where it is true and with a remedy that works |
+
+### Finding 1 and 2 — the data loss
+
+`install()` returns from `_require_own_clone()` the moment this app's own claim
+reads `OWNED`, before `origin`, before `is_unmodified()` and before
+`no_local_commits()`, and the clone seam then runs `git fetch` +
+`git reset --hard FETCH_HEAD`. For a FIRST install into a folder this app made
+that silence is correct and stays correct — there is nothing to lose, and
+asking would cost a round trip on every install. The guard therefore went on
+the UPDATE path, not inside `_require_own_clone()`.
+
+`Applier.update()` (`apply.py`) runs `_update_refusal()` and then `install()`.
+The refusal asks three questions, cheapest and most certain first:
+
+1. **the repository** — `remote_url()` against `manifest.source.url` through
+   `same_repo()`. A local read, asked first, and both names go into the
+   sentence. This is finding 2, and the review is right that it is worse than
+   finding 1: an app claim is a JSON file under a path this app can write, and
+   it was authorising a reset of a DIFFERENT repository followed by this
+   manifest's deploy, patches and SQL over the result.
+2. **the working tree** — `is_unmodified(clone, ".")`. Also local.
+3. **HEAD** — `no_local_commits(clone, branch)`, last because it runs the
+   update's own `git fetch`.
+
+**Three of the review's four named inputs fall to one question, and I would
+rather say that than imply there are four checks.** `no_local_commits()` counts
+`FETCH_HEAD..HEAD` after its own fetch, so local commits, a remote that has
+REWOUND, and a detached HEAD with unique commits are all "HEAD carries what the
+new tip does not", counted the same way whoever put it there. Uncommitted
+tracked edits are the separate one, and `is_unmodified()` is what sees them.
+
+`is True` throughout, never truthiness: `None` is "git could not be asked",
+fails closed, and says so in its own words rather than telling an offline user
+they have uncommitted changes.
+
+The view now has three words and three routes (`MODULE_ACTION_STEPS` maps each
+press to the manifest steps it runs), where round 1 had two routes and a nicer
+noun for one of them.
+
+### Finding 3 — the shadow warning
+
+Two things were wrong and the review named both.
+
+**Where it was shown.** `not read_only` put it on every editable conf. It is
+now driven by `composegen.shadowed_by_env()`, which matches a file's own keys
+against the `AC_*` rows this install's override really carries.
+
+**The transform had to be measured, and my first instinct was wrong.** I
+believed AzerothCore mapped a key by uppercasing it and turning `.` into `_`,
+which gives `AC_AIPLAYERBOT_MINRANDOMBOTS` — and a warning built on that finds
+nothing shadowed anywhere and fires on nothing. The real rule is
+`"AC_" + upper_snake(key)` and it is already recorded in this tree:
+`pyplan/phase8-reads/azerothcore.md` cites `Config.cpp:435-438` for the name,
+`:370-374` for the case rule with three worked examples, `:391-394` for the
+separators and `:540-552` for the environment winning at read time. Those three
+upstream examples are the test's fixtures BECAUSE they are upstream's; a rule
+checked against examples this repo invented would only prove this repo is
+self-consistent. A second test pins all four names this app actually writes
+against the same function.
+
+**The remedy.** Round 1 said "recreate the containers". That cannot work: the
+containers are recreated FROM `docker-compose.override.yml`, which is
+regenerated from the same data, so the same `AC_*` value comes back. The row
+has to change or go first, and only then does the recreate matter. A remedy
+that cannot work is worse than none, because the user pays a server outage to
+find out.
+
+Recorded while measuring it, and pinned by its own test: every `AC_*` row this
+app writes is an `AiPlayerbot.*` or `Playerbots.*` key, and those live in
+`env/dist/etc/modules/playerbots.conf`, which this tab shows READ-ONLY
+(`TUNING_CORE_FILES`). So on a shipped install the warning mostly concerns a
+file nobody can edit here. The test fails the day that file becomes writable,
+which is the day the warning starts doing real work.
+
+### Finding 4 — the cross-family badge
+
+Fixed, and for all three session facts rather than the one the review named.
+`rebuild_owed` and `behind` carry the identical collision; it is invisible only
+because neither draws a badge. One pair-keyed field and two id-keyed ones would
+be two rules for one ambiguity, which is what T42 round 2 found four places
+along — "finish the job" means all three.
+
+Both fillers already knew the family. `_note_session_facts()` is handed the
+manifest the press was about; where that is somehow absent it LOGS and records
+nothing rather than resolving a bare id to a family, because a chip missing is
+a gap and a chip on the wrong family's row is a lie. `module_updates()`
+enumerates one clone directory, so its keys are `("module", …)` by
+construction. `_forget_what_is_no_longer_installed()` becomes an exact
+comparison instead of a bare-id match that also forgot an `ale` when a `module`
+of that name went.
+
+Ten view tests called `_module_done()` bare, which no live route does; they now
+go through `_deliver_report()`, which sets the manifest the way a press does.
+
+### Finding 5 — `Not for this game` is deleted
+
+The review offered delete or make-it-real. I took delete. Making it real means
+changing `ManifestStore._load_at()`, which raises on a foreign-game manifest
+and is a guard in its own right — its raise is also what catches a wrong `type`
+and a wrong `id`, and narrowing only the `game` arm is a change to the store's
+contract that wants its own ticket and its own review. Left as an open finding
+below.
+
+### Every round-2 test, with its mutation
+
+Mutations are now DATA rather than prose:
+`pyplan/gates/t44-modules-gap-2026-09-13/mutations/` holds `run-mutation.sh`,
+**76 `.patch` files**, the gate output each produced in `logs/`, and
+`RESULTS.txt`. `./run-mutation.sh --all` re-runs the lot; each patch carries
+the gate it is to be judged by in its own `# gate:` header, and a patch whose
+gate stays green is reported SURVIVED and exits non-zero. **76 run, 76
+killed.**
+
+The sweep earned its keep twice on the first pass, in ways prose could not
+have:
+
+* `update-treats-unknown-as-clean` SURVIVED as first written. The patch was
+  `if clean is not True:` -> `if not clean:` — which for a `bool | None` seam
+  is the same expression. An equivalent mutant, not a hole: no test can kill
+  a change that changes nothing. Replaced with the real thing (drop the `None`
+  arm so an unanswered `is_unmodified()` falls through to the reset), killed,
+  and `update-treats-an-unreachable-remote-as-clean` added beside it for the
+  other seam.
+* Two round-1 mutations could not be regenerated at all — their anchors no
+  longer exist in the code they were quoted against. A paragraph claiming
+  those two were killed would have gone on reading fine forever.
+
+**Findings 1 and 2 (`test_apply.py`, `test_controller_view.py`)**
+- `test_an_update_over_a_checkout_with_uncommitted_work_refuses` — `update-skips-the-tree-check`.
+- `test_an_update_over_a_checkout_carrying_its_own_commits_refuses` — `update-skips-the-history-check`.
+- `test_an_update_refuses_when_git_could_not_be_asked[tree-unseen|history-unseen]` — `update-treats-unknown-as-clean`.
+- `test_an_update_over_a_different_repository_refuses_by_name` — `update-skips-the-origin-check`.
+- `test_an_update_asks_the_cheap_local_questions_before_the_one_that_fetches` — `update-fetches-before-it-looks`.
+- `test_a_clean_owned_checkout_of_the_right_repository_updates` — `update-always-refuses`. This is the one that keeps the five above from passing on a route that refuses everything.
+- `test_an_update_of_a_module_that_is_not_installed_says_so` — `update-installs-a-missing-clone`.
+- `test_the_update_press_runs_the_real_pull_over_a_clean_checkout` — `update-press-routes-to-remove`.
+- `test_the_update_press_refuses_a_checkout_with_work_in_it_and_says_why` — `update-press-routes-to-install` (round 1's own routing).
+- `test_the_update_press_refuses_a_checkout_of_another_repository` — `update-skips-the-origin-check`.
+- `test_a_failed_install_forgets_the_version_the_clone_may_no_longer_be_at` — `failed-install-keeps-the-version`.
+
+**Finding 3 (`test_catalog_operations.py`, `test_tuning.py`, `test_tuning_panel.py`, `test_controller_view.py`)**
+- `test_the_env_name_is_ac_plus_upper_snake_of_the_ini_key` — `env-name-ignores-case-boundaries`.
+- `test_the_transform_agrees_with_every_env_name_this_app_actually_writes` — `env-name-drops-the-digit-rule`.
+- `test_world_env_is_the_same_answer_the_generator_writes` — `world-env-forgets-the-entry`.
+- `test_shadowed_by_env_names_the_keys_the_environment_beats` — `shadow-match-is-case-blind`.
+- `test_a_file_with_nothing_shadowed_reports_nothing` — `shadow-match-returns-every-key`.
+- `test_conf_keys_lists_the_assignments_and_nothing_else` — `conf-keys-reads-comments`.
+- `test_a_key_named_twice_is_listed_once` — covered by the same patch.
+- `test_the_shadow_warning_is_shown_only_where_a_key_is_really_shadowed` — `shadow-warning-on-every-editable-file`.
+- `test_the_shadow_warning_names_the_keys_and_the_remedy_that_works` — `shadow-warning-says-recreate-is-enough`.
+- `test_a_read_only_file_gets_no_shadow_warning_whatever_it_carries` — same patch set.
+- `test_the_tuning_tab_warns_about_the_keys_this_installs_compose_really_beats` — `tuning-view-passes-no-shadowed`.
+- `test_the_file_this_install_shadows_most_is_the_one_it_will_not_write` — a recorded fact; its mutation is removing `playerbots.conf` from `TUNING_CORE_FILES`.
+
+**Finding 4 (`test_modules_panel.py`)**
+- `test_one_familys_pending_sql_does_not_badge_another_familys_row` — `sql-badge-keyed-by-bare-id`.
+- `test_the_chips_are_keyed_by_family_too_and_all_three_facts_move_together` — `chips-keyed-by-bare-id`.
+
+**Finding 5** — three tests DELETED (`…another_game_is_drawn_greyed…`,
+`…no_game_given…`, `…row_for_another_game_gets_no_install_button`) along with
+the code they covered. `test_an_uncatalogued_clone_is_badged_installed` keeps
+the half that is real, under `uncatalogued-row-badged-not-installed`.
+
+**The weak assertion the review named.** `assert "discard" in chip.detail` is
+gone. It checked a promise about the user's work by looking for one word that a
+sentence saying the opposite contains just as happily. The behaviour is now
+asserted where it lives — the four applier refusal tests and the press test —
+and the chip test says so in its docstring rather than pretending a substring
+was evidence.
+
+### Open findings — for the owner, not in this diff
+
+1. **`Not for this game` needs a store change to exist.** `_load_at()` raises on
+   a foreign-game manifest and `_load_manifests()` reports the whole family
+   broken, so such a row cannot reach the tab. Worth noting the raise is itself
+   a defect of a kind: ONE bad user-derived manifest takes down every shipped
+   module of that family, replacing 20 rows with a `!!` line. Narrowing it to
+   skip-and-report is the change that would make the badge real and fix that at
+   the same time — a store contract change, its own ticket.
+2. **The custom-module install can still reset an app-owned clone unasked.**
+   `install_module_from_link` / `install_module_from_folder` reach
+   `Applier.install()` with a derived manifest, and if a clone of that id is
+   already on disk with this app's claim on it, the unguarded reset runs. It is
+   pre-existing and not T44's, and the row Install button cannot reach it (an
+   installed row offers Remove, not Install) — but now that `update()` asks
+   three questions before a reset, the asymmetry is visible and should be
+   closed deliberately rather than left as an accident.
+3. **`rebuild_owed` / `behind` are now pair-keyed, but `ApplyReport` still
+   carries no family.** The view supplies it from `_acting_on`. The structurally
+   right fix is a family on the report itself, which ripples through `apply.py`
+   and its tests; worth doing when something else opens that file.
+4. **The two `yulon-win11` screenshots are still owed**, as in round 1.
+
+### Two process notes I owe the lead
+
+- **A helper of mine ran `git checkout -- pylauncher` and destroyed about forty
+  minutes of uncommitted work** while generating mutation patches. The shipped
+  runner never does that: it applies and reverse-applies a patch (`git apply
+  -R`) and the generator writes mutated text to a scratch mirror and diffs with
+  `git diff --no-index`, so neither can touch the working tree. Worth a memory
+  entry: a mutation tool that can `checkout` is a mutation tool that will eat
+  the work it is supposed to be testing.
+- **Round 1's own claim of "60 killed mutations" was prose, and the review was
+  right to refuse it.** It is now 75 patches with a runner and logs, and
+  regenerating them found two round-1 mutations whose anchors no longer exist —
+  which is itself the argument for keeping them as files.
+
+### The gate
+
+`YULON_REPO=/home/perzi/dads-mmo-lab/.claude/worktrees/t44 yt`, last line:
+
+```
+4648 passed, 8 skipped, 23 deselected, 2 warnings in 183.86s (0:03:03)
+```
+
+`black --check .`, `ruff check .` and `mypy` over `yulon` all clean.
+
+**Status:** all five REJECT findings addressed on `hand-t44` (nothing pushed),
+four items recorded above as open for the owner.

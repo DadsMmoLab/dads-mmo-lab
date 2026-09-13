@@ -1,0 +1,14 @@
+# gate: tests/test_git.py -q
+diff --git a/pylauncher/yulon/git.py b/pylauncher/yulon/git.py
+index 773d7a56..f76b615c 100644
+--- a/pylauncher/yulon/git.py
++++ b/pylauncher/yulon/git.py
+@@ -713,7 +713,7 @@ class RunnerGit:
+             logger.debug(f"could not read what {dest} is at: {exc}")
+             return None
+         parts = proc.stdout.strip().split()
+-        if len(parts) != 2:
++        if len(parts) > 2:
+             logger.debug(
+                 f"git log -1 in {dest} did not answer with a sha and a date: {proc.stdout!r}"
+             )
