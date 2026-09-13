@@ -726,6 +726,21 @@ def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     offscreen test they wait for a click that never comes, and the whole run
     hangs. Tests that care about a dialog patch it themselves and see their own
     patch (this one is applied first).
+
+    **`exec` is covered as well as the static calls, and that is the point.**
+    A dialog can be spelled two ways -- the class method
+    `QMessageBox.question(...)`, or an instance plus `box.exec()` -- and only
+    the first went through the names above. The moment `_qt_suggestion_asker`
+    was rebuilt as an instance so its buttons could be relabelled, this fixture
+    stopped covering it and `test_install_asks_for_folders_then_streams_the_installer`
+    blocked forever: at zero CPU, with no failure and no output, until something
+    killed the run. A guard that promises "never block on a modal" has to cover
+    both spellings or it is only a guard against the one somebody happened to
+    use first.
+
+    `exec` answers `No` for the same reason `question` does: it is the reply
+    that takes no action, so a test that did not opt in cannot be walked through
+    a destructive path by the guard itself.
     """
     try:
         from PySide6.QtWidgets import QMessageBox
@@ -734,6 +749,7 @@ def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("warning", "information", "critical", "about"):
         monkeypatch.setattr(QMessageBox, name, lambda *a, **k: QMessageBox.StandardButton.Ok)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    monkeypatch.setattr(QMessageBox, "exec", lambda *a, **k: QMessageBox.StandardButton.No)
 
 
 @pytest.fixture(autouse=True)

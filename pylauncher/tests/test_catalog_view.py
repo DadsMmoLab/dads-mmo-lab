@@ -41,6 +41,15 @@ def _completed() -> subprocess.CompletedProcess[str]:
 CATALOG = load_catalog()
 
 _REAL_QMESSAGEBOX_QUESTION = QMessageBox.question
+_REAL_QMESSAGEBOX_EXEC = QMessageBox.exec
+"""The real `QMessageBox.exec`, captured before any fixture can replace it.
+
+`_no_modal_dialogs` fakes this too, because `_qt_suggestion_asker` builds a
+`QMessageBox` and calls `exec()` on it rather than the static `question()`.
+The tests below are the ones that WANT the real dialog, so they put both
+back — restoring only `question` would leave them driving a box that never
+opens, which is a hang dressed up as a timeout.
+"""
 """The real static `QMessageBox.question`, captured before any fixture can replace it.
 
 `_no_modal_dialogs` (autouse, `conftest.py`) fakes this for every other test in
@@ -2149,6 +2158,7 @@ def _ask_with_real_dialog(
     from PySide6.QtWidgets import QApplication
 
     monkeypatch.setattr(QMessageBox, "question", _REAL_QMESSAGEBOX_QUESTION)
+    monkeypatch.setattr(QMessageBox, "exec", _REAL_QMESSAGEBOX_EXEC)
     clicked: list[bool] = []
     _click_active_message_box(which, clicked, QDeadlineTimer(_REAL_DIALOG_BOUND_MS))
 
@@ -2382,3 +2392,24 @@ def test_forgetting_a_game_that_was_never_installed_changes_nothing(
     view.forget_installed("wow-tbc", {"wow-wotlk": tmp_path / "wotlk"})
     assert view.button_for("wow-wotlk").text() == "Installed"
     assert view.button_for("wow-tbc").text() == "Install"
+
+
+def test_the_modal_guard_covers_a_dialog_built_as_an_instance(qapp: object) -> None:
+    """The guard has to cover `box.exec()`, not only `QMessageBox.question(...)`.
+
+    `_qt_suggestion_asker` is built as a `QMessageBox` instance so its buttons
+    can read "Yes, default location" / "No, custom location", and an instance
+    plus `exec()` never goes through the static `question` the `_no_modal_dialogs`
+    fixture used to patch. When that happened,
+    `test_install_asks_for_folders_then_streams_the_installer` stopped failing
+    and started BLOCKING -- no output, no failure, zero CPU, until something
+    killed the run, which on CI is a job that never returns.
+
+    Asserted here on the real function rather than on the fixture, because what
+    matters is that calling the asker in a test returns at all. It answers
+    `False` (the guard's `No`), which is what the suite saw before the dialog
+    was rebuilt.
+    """
+    asked = catalog_view._qt_suggestion_asker(QWidget(), "WoW WotLK", Path("/tmp/whatever"))
+
+    assert asked is False

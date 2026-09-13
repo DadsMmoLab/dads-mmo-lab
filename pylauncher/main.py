@@ -320,18 +320,6 @@ def build_window() -> object:
     )
     tabs, banner, _splitter = build_catalog_tab(window, catalog_view, log_panel)
 
-    # TEMPORARY controller diagnostic (macOS "no pickup" investigation). Gated
-    # behind an env var so it never ships, never runs in the test suite, and
-    # never touches SDL unless the owner opts in. It adds one read-only tab
-    # that snapshots the raw-joystick vs mapped-controller split — the most
-    # likely macOS-Bluetooth failure (see yulon/ui/controller_probe.py).
-    if os.environ.get("YULON_CONTROLLER_PROBE"):
-        from yulon.ui.controller_probe import ControllerProbePanel
-
-        probe = ControllerProbePanel()
-        tabs.addTab(probe, "🎮 Controller Probe")
-        tabs.setTabIcon(tabs.indexOf(probe), get_tab_icon("server"))
-
     def _on_tab_bar_context_menu(pos: QPoint) -> None:
         tab_bar = tabs.tabBar()
         index = tab_bar.tabAt(pos)
