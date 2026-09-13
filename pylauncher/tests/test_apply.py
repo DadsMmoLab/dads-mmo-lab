@@ -3822,8 +3822,8 @@ def test_a_hand_copied_module_with_no_git_still_blocks_its_conflict(tmp_path: Pa
         applier.install(plus)
 
 
-def test_every_shipped_ale_manifest_deploys_and_undeploys_for_real(tmp_path: Path) -> None:
-    """The catalog's own deploy steps, driven rather than read (T59).
+def test_every_shipped_single_file_ale_deploy_installs_and_removes(tmp_path: Path) -> None:
+    """The catalog's own single-file deploy steps, driven rather than read (T59).
 
     A manifest with a single-file `src` and a `rename` was merged (#160) and
     every Loot Pet install failed with `NotADirectoryError` -- after copying, so
@@ -3835,6 +3835,12 @@ def test_every_shipped_ale_manifest_deploys_and_undeploys_for_real(tmp_path: Pat
     holding exactly the files each one says it deploys, and asserts the deploy
     lands and the remove takes it away. It is a catalog test, not a unit test:
     the manifests are data, and data that cannot be applied is a broken build.
+
+    What it does NOT prove, named so nobody counts it (review round 2): the fake
+    clone is built FROM the manifest, so it cannot tell whether a pinned `rev`
+    exists or holds the `src` named. That is a question for the repository, and
+    no test here asks it. Directory deploys are skipped as well; they need a
+    tree this fixture does not build.
     """
     ale = Path(__file__).resolve().parents[1] / "manifests" / "wow-wotlk" / "ale"
     checked = 0

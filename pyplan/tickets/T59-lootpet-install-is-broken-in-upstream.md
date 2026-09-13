@@ -1,6 +1,6 @@
 # T59 — the Loot Pet manifest on `Yulon` cannot install
 
-**Status:** FIXED on the branch; gate and review below.
+**Status:** FIXED on the branch; gated, reviewed twice, PR pending.
 **Filed:** 2026-09-14 by the lead, from our own review of the T53 follow-up.
 **Branch:** `fix/lootpet-install-is-broken-in-upstream`, from `upstream/Yulon` 936beda5.
 
@@ -68,3 +68,32 @@ code in `apply.py` read it.
 3. A named mutation per test, each killed.
 4. Gate: full narrow suite, black, ruff, mypy on linux/win32/darwin.
 5. `/adv-review` on the committed branch BEFORE the PR.
+
+## Gate — 2026-09-14
+
+`1 failed, 4662 passed, 8 skipped, 23 deselected` on 3.13 and on 3.11. The one failure is
+`test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker`, which fails on
+pure `upstream/Yulon` too and is fixed by #162. ruff, black clean; mypy clean on linux, win32 and
+darwin. Lines in `pyplan/gates/t59-lootpet-broken-in-upstream-2026-09-14/gate-py3*.txt`.
+
+The first gate run failed a second test, and it was ours: the port from #157 dropped the
+`_conflict_refusal` entry in `test_spine._ACCOUNTED_LISTINGS`. Restored from f2c9e8ee. That run
+is the entry's mutation.
+
+## Review round 1 — one HIGH, declined on the owner's decision
+
+Codex adversarial, on the committed branch, before any PR. *"Upgrade leaves the previously
+deployed script behind"* — the stranded `LootPet2.lua`. True, and the case cut above.
+
+## Review round 2 — one MEDIUM, taken
+
+*"Catalog test fabricates the repinned source tree."* The fake clone is built from the manifest,
+so a pin that does not exist, or lacks the named `src`, still passes. Also: the test's name said
+every ALE manifest while it skips directory deploys.
+
+- Renamed to `test_every_shipped_single_file_ale_deploy_installs_and_removes`; its docstring
+  now names what it does not prove.
+- The pin read from the repository by hand: `pin-provenance.txt` in the gate folder.
+  `LootPet.lua` at 4b1c3ed is blob 184464ab, the same blob as `LootPet2.lua` at 56d15536.
+- A test that asks the repository whether every pinned `rev` holds its `src` belongs to the
+  whole catalog (`sitmeanrest` is pinned the same way), so it is the pinning ticket, not this one.
