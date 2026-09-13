@@ -113,6 +113,37 @@ context menu is pressed on it (`controller_view.UNCATALOGUED_PRESS`).
 
 BADGE_INSTALLED = "Installed"
 BADGE_NOT_INSTALLED = "Not installed"
+BADGE_SQL_NOT_APPLIED = "Cloned, SQL not applied"
+"""An installed module whose SQL is still waiting (T44 item 5).
+
+Not a shade of `Installed`: the clone is on disk and the worldserver will
+compile it, and the rows it needs are not in the database. That is the state
+T43's probe produced on a real install, and it is the half-installed reading
+T41 was reported for -- a module that is "there" and does nothing.
+"""
+
+BADGE_NOT_FOR_THIS_GAME = "Not for this game"
+"""A manifest whose `game` is not the one this controller is looking at.
+
+Drawn greyed and with NOTHING TO PRESS, which is the whole of why it is shown
+at all: `Not installed` on such a row is an invitation, and the button beside
+it would clone another game's module into this server directory.
+"""
+
+
+def _badge_for(installed: bool, for_this_game: bool, sql_owed: bool) -> str:
+    """The one word the badge column says, decided here and never in a widget.
+
+    Order matters and it is the order of what stops a user first: a row this
+    install cannot use says so whatever else is true of it; an installed module
+    whose SQL has not run is not simply `Installed`.
+    """
+    if not for_this_game:
+        return BADGE_NOT_FOR_THIS_GAME
+    if installed and sql_owed:
+        return BADGE_SQL_NOT_APPLIED
+    return BADGE_INSTALLED if installed else BADGE_NOT_INSTALLED
+
 
 CHIP_REBUILD_PENDING = "Rebuild pending"
 CHIP_SQL_PENDING = "SQL pending"
@@ -174,6 +205,17 @@ class ModuleRow:
     chips: tuple[Chip, ...]
     removable: bool
     remove_reason: str | None
+    for_this_game: bool = True
+    """Whether this manifest's `game` is the one this controller is looking at.
+
+    Defaulted True so every caller that does not name a game -- and every T42
+    test -- keeps the answer it had: absent must never mean "none of them fit",
+    which would grey the whole catalog.
+    """
+
+    badge: str = BADGE_NOT_INSTALLED
+    """The badge column's one word, from `_badge_for()`. Decided here so the
+    widget renders a decision rather than taking one (T42's split)."""
 
 
 @dataclass(frozen=True)
@@ -299,6 +341,7 @@ def build_module_rows(
     installed: Mapping[str, frozenset[str]],
     session: SessionState,
     client_dir: Path | None,
+    game: str | None = None,
 ) -> tuple[ModuleRow, ...]:
     """Every row the Modules tab draws, in the order it draws them.
 
@@ -346,6 +389,10 @@ def build_module_rows(
     def _row(manifest: Manifest) -> ModuleRow:
         here = (manifest.type, manifest.id) in installed_keys
         needed_by = dependants.get(manifest.id, [])
+        # `game is None` is "nobody said", not "no game matches": every caller
+        # before T44 omitted it and the whole catalog would grey on a `==`
+        # against an empty string.
+        mine = game is None or manifest.game == game
         return ModuleRow(
             id=manifest.id,
             family=manifest.type,
@@ -362,6 +409,8 @@ def build_module_rows(
                 if here and needed_by
                 else None
             ),
+            for_this_game=mine,
+            badge=_badge_for(here, mine, bool(session.sql_owed.get(manifest.id))),
         )
 
     # T41's per-FOLDER accounting, moved here from `reload_modules()`. `ale` and
@@ -397,6 +446,11 @@ def build_module_rows(
                     ),
                     removable=False,
                     remove_reason=None,
+                    # A clone with no manifest has no `game` to disagree with
+                    # this one: it is installed HERE, which is the only fact
+                    # about it anybody has (T41).
+                    for_this_game=True,
+                    badge=_badge_for(True, True, bool(session.sql_owed.get(name))),
                 )
             )
     return tuple(rows)
@@ -487,10 +541,18 @@ class RowWidget(QFrame):
 
         middle = QVBoxLayout()
         middle.setSpacing(4)
-        self.badge_label = QLabel(BADGE_INSTALLED if data.installed else BADGE_NOT_INSTALLED, self)
-        self.badge_label.setStyleSheet(
-            f"color: {COLOR_UNCOMMON if data.installed else COLOR_TEXT_MUTED}; font-weight: bold;"
-        )
+        self.badge_label = QLabel(data.badge, self)
+        # Three tones for four badges, and the pairing is by what the badge
+        # ASKS OF THE READER rather than by its text: green for a module that
+        # is here and working, amber for one that is here and not finished,
+        # muted for the two that ask nothing.
+        if data.badge == BADGE_SQL_NOT_APPLIED:
+            badge_colour = COLOR_TEXT_WARNING
+        elif data.installed and data.for_this_game:
+            badge_colour = COLOR_UNCOMMON
+        else:
+            badge_colour = COLOR_TEXT_MUTED
+        self.badge_label.setStyleSheet(f"color: {badge_colour}; font-weight: bold;")
         middle.addWidget(self.badge_label)
         chips = QHBoxLayout()
         chips.setSpacing(4)
@@ -524,11 +586,14 @@ class RowWidget(QFrame):
         self.install_button: QPushButton | None = None
         self.remove_button: QPushButton | None = None
         column = QVBoxLayout()
-        if data.catalogued and not data.installed:
+        if data.catalogued and not data.installed and data.for_this_game:
+            # `for_this_game` is part of the condition and not a `setEnabled`
+            # afterwards: a greyed button is still a control, and the thing
+            # this row must not offer is the control itself.
             self.install_button = QPushButton("Install", self)
             self.install_button.clicked.connect(lambda: self.pressed_install.emit(self.data.id))
             column.addWidget(self.install_button)
-        elif data.catalogued:
+        elif data.catalogued and data.for_this_game:
             self.remove_button = QPushButton("Remove", self)
             self.remove_button.clicked.connect(lambda: self.pressed_remove.emit(self.data.id))
             if not data.removable:

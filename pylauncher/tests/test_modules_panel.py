@@ -920,3 +920,115 @@ def test_a_family_card_draws_its_hint_beside_the_installed_header(qapp: object) 
     assert hint is not None
     assert hint.text() == mp.FAMILY_HINTS["module"]
     assert hint.isVisibleTo(panel)
+
+
+# ------------------------------------------------------------------ badges (T44)
+
+
+def test_an_installed_module_whose_sql_is_waiting_says_so_in_its_badge() -> None:
+    """`Cloned, SQL not applied` is a real state, and `Installed` hides it (T44 item 5).
+
+    It is the state T43's probe produced on a real install: the folder is there,
+    the worldserver will compile it, and the rows it needs are NOT in the
+    database. A badge reading `Installed` over that is the reading T41 was
+    reported for, one step further along.
+
+    Mutation: drop the `sql_owed` clause from `_badge_for()` and the row goes
+    back to `Installed` while the SQL chip beside it still says otherwise.
+    """
+    session = mp.SessionState(sql_owed={"mod-a": ("a.sql",)})
+    rows = _rows([_m("mod-a"), _m("mod-b")], {"module": frozenset({"mod-a", "mod-b"})}, session)
+
+    assert _row(rows, "mod-a").badge == mp.BADGE_SQL_NOT_APPLIED
+    assert _row(rows, "mod-b").badge == mp.BADGE_INSTALLED
+
+
+def test_a_manifest_for_another_game_is_drawn_greyed_and_offers_no_install() -> None:
+    """A row this install cannot use is SHOWN, and shown as unusable (T44 item 5).
+
+    `Not installed` on it would be an invitation: the button beside it would
+    clone somebody else's game's module into this server directory.
+
+    Mutation: ignore the `game` argument and the row comes back `Not installed`
+    with `for_this_game` True, which is what puts an Install button on it.
+    """
+    mine = _m("mod-a")
+    theirs = Manifest(
+        id="mod-tbc",
+        name="Mod Tbc",
+        type="module",
+        game="wow-tbc",
+        description="another game's module",
+        source=Source(repo="acme/mod-tbc"),
+    )
+    rows = mp.build_module_rows([mine, theirs], {}, mp.SessionState(), None, game="wow-wotlk")
+
+    assert _row(rows, "mod-tbc").badge == mp.BADGE_NOT_FOR_THIS_GAME
+    assert _row(rows, "mod-tbc").for_this_game is False
+    assert _row(rows, "mod-a").for_this_game is True
+
+
+def test_no_game_given_means_every_manifest_belongs_here() -> None:
+    """The argument is optional, and absent must never mean "none of them fit".
+
+    Every existing caller and every T42 test builds rows without it, and a
+    default that answered `Not for this game` would grey the whole catalog.
+
+    Mutation: default `game` to `""` and compare with `==` and every row in
+    this file's other 40-odd tests turns grey.
+    """
+    rows = _rows([_m("mod-a")])
+
+    assert _row(rows, "mod-a").for_this_game is True
+    assert _row(rows, "mod-a").badge == mp.BADGE_NOT_INSTALLED
+
+
+def test_an_uncatalogued_clone_is_installed_and_belongs_here() -> None:
+    """T41's own rows have no manifest, so they have no `game` to disagree with.
+
+    Mutation: build them with `for_this_game=False` and a module the user
+    cloned by hand is greyed as another game's.
+    """
+    rows = mp.build_module_rows(
+        [], {"module": frozenset({"mod-hand"})}, mp.SessionState(), None, game="wow-wotlk"
+    )
+
+    assert _row(rows, "mod-hand").for_this_game is True
+    assert _row(rows, "mod-hand").badge == mp.BADGE_INSTALLED
+
+
+def test_the_row_widget_draws_the_badge_the_builder_decided(qapp: object) -> None:
+    """The widget renders the decision; it does not take it (T42's split).
+
+    Mutation: go back to `BADGE_INSTALLED if data.installed else
+    BADGE_NOT_INSTALLED` in `RowWidget` and both new badges vanish from the
+    screen while the builder's tests stay green.
+    """
+    session = mp.SessionState(sql_owed={"mod-a": ("a.sql",)})
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+
+    assert panel.row("mod-a").badge_label.text() == mp.BADGE_SQL_NOT_APPLIED
+
+
+def test_a_row_for_another_game_gets_no_install_button(qapp: object) -> None:
+    """The greying is not cosmetic: there must be nothing to press.
+
+    Mutation: keep `if data.catalogued and not data.installed` alone and the
+    row offers an Install that clones another game's module into this server.
+    """
+    theirs = Manifest(
+        id="mod-tbc",
+        name="Mod Tbc",
+        type="module",
+        game="wow-tbc",
+        description="another game's module",
+        source=Source(repo="acme/mod-tbc"),
+    )
+    rows = mp.build_module_rows(
+        [_m("mod-a"), theirs], {}, mp.SessionState(), None, game="wow-wotlk"
+    )
+    panel = _panel(rows)
+
+    assert panel.row("mod-a").install_button is not None
+    assert panel.row("mod-tbc").install_button is None
+    assert panel.row("mod-tbc").remove_button is None

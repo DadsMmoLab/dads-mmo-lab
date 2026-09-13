@@ -5807,7 +5807,17 @@ class ControllerView(QWidget):
         if answered is not None:
             self._forget_what_is_no_longer_installed(installed)
         self.modules_panel.set_rows(
-            build_module_rows(manifests, installed, self._session_state(), self.services.client_dir)
+            build_module_rows(
+                manifests,
+                installed,
+                self._session_state(),
+                self.services.client_dir,
+                # The STORE's game, which is the game this controller is
+                # looking at. A manifest that names another one is drawn greyed
+                # rather than dropped (T44 item 5), so a row this install
+                # cannot use never carries an Install button.
+                game=self.services.store.game,
+            )
         )
         if broken:
             # Appended, never `setPlainText`: this runs after an install has put
