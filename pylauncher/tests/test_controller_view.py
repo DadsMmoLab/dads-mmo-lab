@@ -9,8 +9,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import NoReturn
-from typing import cast
+from typing import NoReturn, cast
 
 import pytest
 
@@ -7361,10 +7360,9 @@ def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another
     line up.
     """
     view = _installed_view(ps, tmp_path, ale=frozenset({"bmah"}), keg=frozenset({"bmah"}))
-    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
-    bmah = [r for r in rows if r.startswith(INSTALLED_MARK) and "bmah" in r.lower()]
+    bmah = [r for r in view.modules_panel.rows() if r.data.id == "bmah"]
     assert len(bmah) == 1, bmah
-    assert NOT_IN_CATALOG not in bmah[0], bmah
+    assert bmah[0].data.family == "keg" and bmah[0].data.catalogued is True
 
 
 def test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker(

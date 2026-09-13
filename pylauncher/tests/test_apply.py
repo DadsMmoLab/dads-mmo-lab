@@ -12,14 +12,12 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from yulon import apply as apply_module
-from yulon import rmtree as rmtree_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native
 from yulon.git import CloneSpec, RunnerGit
