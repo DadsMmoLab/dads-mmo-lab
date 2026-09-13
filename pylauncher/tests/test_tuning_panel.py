@@ -204,14 +204,15 @@ def test_a_card_whose_rows_are_all_read_only_offers_no_save(qapp: object) -> Non
 
 def test_a_cards_save_and_revert_name_their_own_module(qapp: object) -> None:
     card = tp.CardWidget(tp.build_tuning_cards((_row(key="A"),))[0])
-    saved: list[str] = []
-    reverted: list[str] = []
-    card.save_pressed.connect(saved.append)
-    card.revert_pressed.connect(reverted.append)
+    saved: list[tuple[str, str]] = []
+    reverted: list[tuple[str, str]] = []
+    card.save_pressed.connect(lambda family, item: saved.append((family, item)))
+    card.revert_pressed.connect(lambda family, item: reverted.append((family, item)))
     assert card.save_button is not None and card.revert_button is not None
     card.save_button.click()
     card.revert_button.click()
-    assert saved == ["mod-beast"] and reverted == ["mod-beast"]
+    assert saved == [("module", "mod-beast")]
+    assert reverted == [("module", "mod-beast")]
 
 
 def test_the_panel_draws_a_card_per_module_and_finds_one_by_id(qapp: object) -> None:
@@ -370,3 +371,77 @@ def test_a_card_whose_rows_cost_two_different_things_says_both() -> None:
     said = card.rule_sentence
     assert tuning.apply_sentence("recreate") in said
     assert tuning.apply_sentence("restart") in said
+
+
+# -- the collision T42 round 2 found, one tab along --------------------------
+
+
+def _twin(family: str, key: str, file: str) -> tuning.TuningRow:
+    return _row(module_id="bmah", module_name="BMAH", family=family, key=key, file=file)
+
+
+def test_an_id_in_two_families_gets_two_cards_not_one_merged_card() -> None:
+    """Nothing makes a manifest id unique across families (T42 round 2).
+
+    Grouped by id alone, an `ale` and a `keg` sharing `bmah` became ONE card
+    titled with the first family's name, holding both families' rows — and
+    `save_tuning()` would then read the whole card's spec out of the FIRST
+    family's manifest, type-checking one module's values against another's
+    declarations before writing them to the other one's file.
+    """
+    cards = tp.build_tuning_cards(
+        (
+            _twin("ale", "A", "env/dist/etc/modules/lua_scripts/a.lua"),
+            _twin("keg", "B", "env/dist/etc/modules/k.conf"),
+        )
+    )
+    assert [(card.family, card.module_id) for card in cards] == [
+        ("ale", "bmah"),
+        ("keg", "bmah"),
+    ]
+    assert [row.key for row in cards[0].rows] == ["A"]
+    assert [row.key for row in cards[1].rows] == ["B"]
+
+
+def test_the_panel_addresses_both_families_of_a_shared_id(qapp: object) -> None:
+    panel = tp.TuningPanel()
+    panel.set_cards(
+        tp.build_tuning_cards(
+            (
+                _twin("ale", "A", "env/dist/etc/modules/lua_scripts/a.lua"),
+                _twin("keg", "B", "env/dist/etc/modules/k.conf"),
+            )
+        )
+    )
+    assert len(panel.cards()) == 2
+    # The bare id keeps working and resolves in `FAMILY_FILES` order, which is
+    # `ModulesPanel._key_for()`'s rule rather than a second one invented here.
+    assert panel.card("bmah").card.family == "ale"
+    assert panel.card(("keg", "bmah")).card.family == "keg"
+
+
+def test_a_cards_save_carries_its_family_so_the_view_never_guesses(qapp: object) -> None:
+    """The press names the card it happened on, not an id two cards can answer to.
+
+    `ModulesPanel` solved the same thing by letting a click carry its widget
+    (T42 round 2). Here the card already knows its family, so the signal
+    carries it and `save_tuning()` has nothing left to resolve.
+    """
+    panel = tp.TuningPanel()
+    panel.set_cards(
+        tp.build_tuning_cards(
+            (
+                _twin("ale", "A", "env/dist/etc/modules/lua_scripts/a.lua"),
+                _twin("keg", "B", "env/dist/etc/modules/k.conf"),
+            )
+        )
+    )
+    saved: list[tuple[str, str]] = []
+    reverted: list[tuple[str, str]] = []
+    panel.save_pressed.connect(lambda family, item: saved.append((family, item)))
+    panel.revert_pressed.connect(lambda family, item: reverted.append((family, item)))
+    keg = panel.card(("keg", "bmah"))
+    assert keg.save_button is not None and keg.revert_button is not None
+    keg.save_button.click()
+    keg.revert_button.click()
+    assert saved == [("keg", "bmah")] and reverted == [("keg", "bmah")]

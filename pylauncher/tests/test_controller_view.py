@@ -59,7 +59,7 @@ from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import ControllerServices, ControllerView
-from yulon.ui.widgets import modules_panel
+from yulon.ui.widgets import modules_panel, tuning_panel
 from yulon.ui.widgets.job import run_inline
 from yulon.ui.widgets.modules_panel import (
     BADGE_INSTALLED,
@@ -7922,6 +7922,7 @@ def test_the_selected_manifest_of_a_shared_id_is_the_one_whose_row_is_selected(
     assert picked is not None and picked.type == "mod", picked
     view.modules_panel.hide()
 
+
 # -- T43: the Tuning tab ----------------------------------------------------
 
 
@@ -8240,3 +8241,67 @@ def test_a_conf_that_is_not_utf8_opens_empty_and_read_only(
     assert view.tuning_panel.editor.isReadOnly()
     assert not view.tuning_panel.file_save_button.isEnabled()
     assert TRANSMOG_CONF in view.tuning_panel.file_note.text()
+
+
+def test_a_saved_card_of_a_shared_id_writes_that_familys_file_and_no_other(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T42 round 2's collision, on the Tuning tab, end to end through the view.
+
+    The shipped `wow-wotlk` catalog has no id in two families, so the panel
+    tests build the twin from synthetic rows and this one builds it the way
+    `test_the_selected_manifest_of_a_shared_id_is_the_one_whose_row_is_selected`
+    does: two real manifests under one id, handed to the panel directly.
+    """
+    mine = "env/dist/etc/modules/mine.conf"
+    theirs = "env/dist/etc/modules/theirs.conf"
+    shared = "env/dist/etc/worldserver.conf"
+    _deploy(tmp_path, mine, "[worldserver]\nK = 1\n")
+    _deploy(tmp_path, theirs, "[worldserver]\nK = 1\n")
+    _deploy(tmp_path, shared, "[worldserver]\nS = 1\n")
+    view = _tuned_view(ps, tmp_path)
+    twins = [
+        parse_manifest(
+            {
+                "schema_version": 1,
+                "id": "twin",
+                "name": "Twin",
+                "type": family,
+                "game": "wow-wotlk",
+                "description": "two families, one id",
+                "source": {"repo": "acme/twin"},
+                **({"sparse_path": "x"} if False else {}),
+                # DIFFERENT declarations for the same key name, so reading the
+                # wrong family's manifest is visible: `9` is a fine `int` and
+                # not an on/off value, so a spec taken from the `module` twin
+                # refuses the `mod` twin's save.
+                "conf": [
+                    {"file": file, "keys": [{"key": "K", "type": kind}]},
+                    # And a key both families declare in the SAME file with
+                    # DIFFERENT types, which is the only shape that can catch a
+                    # spec read from the wrong family: `9` is a fine `int` and
+                    # not an on/off value.
+                    {"file": shared, "keys": [{"key": "S", "type": kind}]},
+                ],
+            }
+        )
+        for family, file, kind in (("module", mine, "bool"), ("mod", theirs, "int"))
+    ]
+    for manifest in twins:
+        view._manifests[(manifest.type, manifest.id)] = manifest
+    rows = tuning.rows_for(
+        twins, {"module": frozenset({"twin"}), "mod": frozenset({"twin"})}, tmp_path
+    )
+    view.tuning_panel.set_cards(tuning_panel.build_tuning_cards(rows))
+
+    card = view.tuning_panel.card(("mod", "twin"))
+    assert card.card.files == (theirs, shared), card.card.files
+    card.editors["K"].control.setText("9")
+    card.editors["S"].control.setText("9")
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert (tmp_path / theirs).read_text(encoding="utf-8") == "[worldserver]\nK = 9\n"
+    assert (tmp_path / mine).read_text(encoding="utf-8") == "[worldserver]\nK = 1\n"
+    assert (tmp_path / shared).read_text(encoding="utf-8") == "[worldserver]\nS = 9\n"
+    assert "wrote" in view.tuning_report.toPlainText()

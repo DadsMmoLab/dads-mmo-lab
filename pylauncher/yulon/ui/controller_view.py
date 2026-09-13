@@ -6627,8 +6627,8 @@ class ControllerView(QWidget):
             return {}
         return {key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys}
 
-    @Slot(str)
-    def save_tuning(self, module_id: str) -> None:
+    @Slot(str, str)
+    def save_tuning(self, family: str, module_id: str) -> None:
         """Write this card's changed keys, grouped by the file each one lives in.
 
         Per card and not per file (T43's definition of done), because a card is
@@ -6638,7 +6638,7 @@ class ControllerView(QWidget):
         into their hands.
         """
         try:
-            card = self.tuning_panel.card(module_id)
+            card = self.tuning_panel.card((family, module_id))
         except KeyError:
             return
         edits = card.edits()
@@ -6657,9 +6657,7 @@ class ControllerView(QWidget):
         # own conf and one key in the core's `worldserver.conf`) landed the
         # first file's change and only then refused the second, which is exactly
         # the half-applied state the guarantee exists to prevent.
-        specs = {
-            file: self._tuning_spec(card.card.family, module_id, file) for file in per_file
-        }
+        specs = {file: self._tuning_spec(family, module_id, file) for file in per_file}
         for file, values in per_file.items():
             for key, value in values.items():
                 try:
@@ -6701,11 +6699,11 @@ class ControllerView(QWidget):
         self.tuning_report.setPlainText("\n".join(said))
         self.reload_tuning()
 
-    @Slot(str)
-    def revert_tuning(self, module_id: str) -> None:
+    @Slot(str, str)
+    def revert_tuning(self, family: str, module_id: str) -> None:
         """Put this card's files back from the newest backup Yu'lon took of each."""
         try:
-            card = self.tuning_panel.card(module_id)
+            card = self.tuning_panel.card((family, module_id))
         except KeyError:
             return
         server_dir = self.services.controller.server_dir

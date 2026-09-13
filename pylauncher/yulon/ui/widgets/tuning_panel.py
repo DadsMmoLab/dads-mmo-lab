@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import tuning
+from yulon.manifest_store import FAMILY_FILES
 from yulon.tuning import ApplyRule, TuningRow
 from yulon.ui.theme import (
     COLOR_BG_PANEL,
@@ -143,16 +144,26 @@ def build_tuning_cards(rows: Sequence[TuningRow]) -> tuple[TuningCard, ...]:
     file and key order. A second sort in the view would be a second place for
     the catalog's own ordering to be overruled.
     """
-    order: list[str] = []
-    grouped: dict[str, list[TuningRow]] = {}
+    # Keyed by (family, id), not by id. Nothing in the store, the schema or the
+    # catalog tests makes a manifest id unique across families, and T42 round 2
+    # found the same collision four places along on the Modules tab. Grouped by
+    # id alone, an `ale` and a `keg` that share `bmah` became ONE card titled
+    # with the first family's name and holding both families' rows -- and
+    # `save_tuning()` then reads the whole card's declarations out of the FIRST
+    # family's manifest, type-checking one module's values against another's
+    # before writing them to the other one's file.
+    order: list[tuple[str, str]] = []
+    grouped: dict[tuple[str, str], list[TuningRow]] = {}
     for row in rows:
-        if row.module_id not in grouped:
-            order.append(row.module_id)
-            grouped[row.module_id] = []
-        grouped[row.module_id].append(row)
+        key = (row.family, row.module_id)
+        if key not in grouped:
+            order.append(key)
+            grouped[key] = []
+        grouped[key].append(row)
     cards: list[TuningCard] = []
-    for module_id in order:
-        mine = grouped[module_id]
+    for key in order:
+        module_id = key[1]
+        mine = grouped[key]
         files: list[str] = []
         for row in mine:
             if row.file not in files:
@@ -368,8 +379,14 @@ class RowEditor(QWidget):
 class CardWidget(QGroupBox):
     """One module's card: its rows, what a save costs, and the two presses."""
 
-    save_pressed = Signal(str)
-    revert_pressed = Signal(str)
+    save_pressed = Signal(str, str)
+    revert_pressed = Signal(str, str)
+    """`(family, module_id)`, because an id alone can name two cards.
+
+    The card knows which one it is, so the press says so and no reader has to
+    resolve it -- `ModulesPanel` solves the same problem by letting a click
+    carry its widget (T42 round 2).
+    """
 
     def __init__(self, card: TuningCard, parent: QWidget | None = None) -> None:
         super().__init__(card.module_name, parent)
@@ -413,11 +430,13 @@ class CardWidget(QGroupBox):
                 "Put this module's conf back from the backup Yu'lon took at the last save."
             )
             self.revert_button.clicked.connect(
-                lambda: self.revert_pressed.emit(self.card.module_id)
+                lambda: self.revert_pressed.emit(self.card.family, self.card.module_id)
             )
             actions.addWidget(self.revert_button)
             self.save_button = QPushButton("Save", self)
-            self.save_button.clicked.connect(lambda: self.save_pressed.emit(self.card.module_id))
+            self.save_button.clicked.connect(
+                lambda: self.save_pressed.emit(self.card.family, self.card.module_id)
+            )
             actions.addWidget(self.save_button)
             box.addLayout(actions)
 
@@ -446,16 +465,16 @@ class TuningPanel(QWidget):
     editor holds. It opens nothing.
     """
 
-    save_pressed = Signal(str)
-    revert_pressed = Signal(str)
+    save_pressed = Signal(str, str)
+    revert_pressed = Signal(str, str)
     file_selected = Signal(str)
     file_save_pressed = Signal(str)
     file_reload_pressed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._cards: dict[str, CardWidget] = {}
-        self._order: list[str] = []
+        self._cards: dict[tuple[str, str], CardWidget] = {}
+        self._order: list[tuple[str, str]] = []
         self._actions_enabled = True
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -526,19 +545,38 @@ class TuningPanel(QWidget):
             widget.save_pressed.connect(self.save_pressed.emit)
             widget.revert_pressed.connect(self.revert_pressed.emit)
             widget.set_enabled_actions(self._actions_enabled)
-            self._cards[card.module_id] = widget
-            self._order.append(card.module_id)
+            self._cards[(card.family, card.module_id)] = widget
+            self._order.append((card.family, card.module_id))
             self._content_layout.insertWidget(self._content_layout.count() - 1, widget)
         self.empty_label.setVisible(not self._cards)
 
     def cards(self) -> tuple[CardWidget, ...]:
-        return tuple(self._cards[module_id] for module_id in self._order)
+        return tuple(self._cards[key] for key in self._order)
 
-    def card(self, module_id: str) -> CardWidget:
-        return self._cards[module_id]
+    def _key_for(self, which: str | tuple[str, str]) -> tuple[str, str]:
+        """The card a caller names, by `(family, id)` or by a bare id.
 
-    def edits(self, module_id: str) -> dict[str, str]:
-        return self._cards[module_id].edits()
+        `ModulesPanel._key_for()`'s rule rather than a second one invented here:
+        a bare id resolves in `FAMILY_FILES` order, so the ambiguity is settled
+        in one place per panel and both panels settle it the same way. Callers
+        that HAVE the family -- every one inside this module, and the view,
+        which reads `TuningCard.family` -- pass the pair and never guess.
+        """
+        if isinstance(which, tuple):
+            return which
+        for family in FAMILY_FILES:
+            if (family, which) in self._cards:
+                return (family, which)
+        for key in self._cards:
+            if key[1] == which:
+                return key
+        raise KeyError(which)
+
+    def card(self, which: str | tuple[str, str]) -> CardWidget:
+        return self._cards[self._key_for(which)]
+
+    def edits(self, which: str | tuple[str, str]) -> dict[str, str]:
+        return self.card(which).edits()
 
     def set_enabled_actions(self, enabled: bool) -> None:
         self._actions_enabled = enabled
