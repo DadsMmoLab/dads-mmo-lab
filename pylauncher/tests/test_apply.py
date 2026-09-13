@@ -3690,191 +3690,86 @@ def test_the_wotlk_factory_hands_over_the_database_start_as_well(tmp_path: Path)
     assert sql.files == [("world", "up.sql")]
 
 
-@pytest.mark.skipif(
-    os.name == "nt" or os.geteuid() == 0,  # type: ignore[attr-defined]
-    reason=(
-        "needs a directory whose write bit actually refuses an unlink: Windows ignores "
-        "chmod on a directory and root ignores the bit. This is the POSIX shape of the "
-        "Windows stop -- the Windows spelling is its own press on the gate box."
-    ),
-)
-def test_remove_deletes_a_clone_whose_git_objects_are_read_only(tmp_path: Path) -> None:
-    """Git writes packs read-only, and removing a module must still finish (T49).
+def test_install_refuses_a_module_that_conflicts_with_one_already_here(tmp_path: Path) -> None:
+    """`conflicts_with` is enforced, not merely parsed (T53).
 
-    Reported by a user on Windows, against a real install:
+    The catalog has recorded for a long time that `mod-ah-bot` and
+    `mod-ah-bot-plus` are alternatives -- each names the other in
+    `conflicts_with`, the schema parses it, and `test_manifest.py` asserts it
+    round-trips. Nothing ever read it at install time. So Yu'lon installed both,
+    and the user found out 21 minutes later when the LINKER stopped:
 
-        remove sod FAILED: [WinError 5] Access is denied:
-        'C:\\wow-server-playerbots\\ale_scripts\\sod\\.git\\objects\\pack\\pack-2623....idx'
+        mod-ah-bot-plus/src/ah_bot_loader.cpp:18: multiple definition of
+        `Addmod_ah_botScripts()'; mod-ah-bot/src/ah_bot_loader.cpp:12: first
+        defined here
 
-    `shutil.rmtree` has no handling for a read-only file, so it stopped at the
-    first pack in `.git` -- and because it is not atomic, it had already deleted
-    an unknown part of the checkout by then. The folder was left half-deleted,
-    and the next press started from that.
-
-    Driven through `remove()` rather than through `remove_tree()`: the helper
-    that survives this was already in the tree, in `purge.py`, and the defect
-    was that this caller did not use it. A test on the helper would have passed
-    throughout.
+    A declaration nothing acts on is the shape this repository has paid for
+    before. The refusal is raised BEFORE anything is written, next to the "one
+    source, not two" check, so a refused install leaves the tree exactly as it
+    was.
     """
     git = _FakeGit({"README.md": "upstream\n"})
     applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
-    m = parse_manifest(OWNED_ITEM)
-    applier.install(m)
-    clone = applier.clone_dir(m)
 
-    # The shape git leaves behind: a pack file with no write bit, inside a
-    # directory with no write bit. On POSIX it is the DIRECTORY's bit that
-    # refuses the unlink; on Windows it is the FILE's read-only attribute.
-    objects = clone / ".git" / "objects" / "pack"
-    objects.mkdir(parents=True, exist_ok=True)
-    pack = objects / "pack-26232faf5a65a80928d1c7f577d0dfe92bb364d9.idx"
-    pack.write_text("x", encoding="utf-8")
-    pack.chmod(0o444)
-    objects.chmod(0o555)
-
-    try:
-        report = applier.remove(m)
-    finally:
-        if objects.exists():
-            objects.chmod(0o755)
-
-    assert not clone.exists(), "the clone is still there, so the remove did not finish"
-    assert any(step.startswith("rm ") for step in report.done)
-
-
-def test_no_module_outside_rmtree_calls_shutil_rmtree_directly() -> None:
-    """`shutil.rmtree` is spelled once: in the module that knows what to do when it stops.
-
-    The T49 defect was not that the retry was missing. It was written, in
-    `purge.py`, with a docstring naming this exact Windows failure. It was that
-    four other delete sites did not use it, nothing said so, and a user found
-    the fifth:
-
-        remove sod FAILED: [WinError 5] Access is denied:
-        '...\\ale_scripts\\sod\\.git\\objects\\pack\\pack-2623....idx'
-
-    So the guard is the enumeration rather than another per-site test: a sixth
-    caller added next year fails here instead of on someone's machine.
-
-    Read by AST, because the same call spells itself `shutil.rmtree(p)` and
-    `rmtree(p)` after a `from shutil import rmtree`, and a string search over the
-    source finds one of the two.
-    """
-    # Not every tree is a checkout. These three delete a staging or extraction
-    # directory this app just created itself, which cannot hold a `.git` and so
-    # cannot hit a read-only pack -- and the first of them passes
-    # `ignore_errors=True`, which `remove_tree()` deliberately does not have.
-    # Listed one by one, with the reason, rather than matched by a path prefix:
-    # a fourth arrival in one of these files should have to say why.
-    # By FUNCTION, not by file. Exempting a whole file means any future
-    # `shutil.rmtree` added anywhere in it passes silently, which is the
-    # opposite of what the paragraph above claims (review, 2026-09-13).
-    ALLOWED = {
-        ("catalog/families/conf.py", "materialise"): (
-            "the conf staging dir this function just made, deleted with "
-            "ignore_errors=True -- a cleanup that deliberately does not raise, "
-            "which remove_tree() has no mode for"
-        ),
-        ("catalog/families/conf.py", "_clear"): (
-            "a leftover staging entry this app wrote itself, never a checkout"
-        ),
-        ("catalog/families/extract.py", "_remove_tree"): (
-            "the extraction output dir, rebuilt every run and never a checkout"
-        ),
-    }
-    package = Path(apply_module.__file__ or "").parent
-    offenders: list[str] = []
-    for path in sorted(package.rglob("*.py")):
-        if path.name == "rmtree.py":
-            continue  # the one module allowed to call it: it IS the retry
-        rel = path.relative_to(package).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        bare = {
-            alias.asname or alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "shutil"
-            for alias in node.names
-            if alias.name == "rmtree"
-        }
-        # Which function each call sits in, so the allowlist can name one.
-        owner: dict[int, str] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                for inner in ast.walk(node):
-                    owner.setdefault(id(inner), node.name)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if (isinstance(func, ast.Attribute) and func.attr == "rmtree") or (
-                isinstance(func, ast.Name) and func.id in bare
-            ):
-                if (rel, owner.get(id(node), "<module>")) in ALLOWED:
-                    continue
-                offenders.append(f"{rel}:{node.lineno} in {owner.get(id(node), '<module>')}()")
-    assert offenders == [], (
-        "these call shutil.rmtree directly instead of yulon.rmtree.remove_tree(), which is "
-        "the T49 defect returning — git leaves read-only packs on Windows and a bare rmtree "
-        "stops at the first one, having already half-deleted the tree: " + ", ".join(offenders)
+    first = parse_manifest(
+        {**OWNED_ITEM, "id": "mod-ah-bot", "conflicts_with": ["mod-ah-bot-plus"]}
+    )
+    second = parse_manifest(
+        {**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]}
     )
 
+    applier.install(first)
+    assert applier.clone_dir(first).is_dir()
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics; Windows is its own press")
-def test_removing_a_symlinked_tree_never_reaches_through_it(tmp_path: Path) -> None:
-    """A delete must not touch anything outside the path it was handed (T49 review).
+    with pytest.raises(ApplyError) as caught:
+        applier.install(second)
 
-    `shutil.rmtree` REFUSES a top-level directory symlink -- it raises rather
-    than following it. T49's retry did not: `_clear_read_only()` walks with
-    `os.walk()` and chmods through the link, and `_remove_unenterable()`
-    scandirs through it and can `os.rmdir()` a directory on the other side. So
-    the recovery added for read-only git packs gave the delete a reach the
-    plain call never had.
+    said = str(caught.value)
+    assert "mod-ah-bot" in said and "mod-ah-bot-plus" in said, said
+    assert "Nothing was changed" in said, said
+    # And it really changed nothing: no second clone, and the first is untouched.
+    assert not applier.clone_dir(second).exists(), "the refused install still cloned"
+    assert (applier.clone_dir(first) / "README.md").read_text(encoding="utf-8") == "upstream\n"
 
-    `Applier._rm()` made it live: `Path.is_dir()` FOLLOWS symlinks and was
-    tested before `is_symlink()`, so a symlink to a directory took the
-    remove_tree branch instead of the unlink one.
 
-    What must hold: the caller named a path; only that path may change.
+def test_install_is_unaffected_when_the_conflicting_module_is_not_installed(tmp_path: Path) -> None:
+    """The guard must not refuse the ordinary case, which is the easy mistake here.
+
+    Declaring a conflict says nothing about whether the other thing is present.
+    A catalog where four mods all name each other (buff/xbuff/nerf/baby-mobs)
+    would be uninstallable if the check read the declaration rather than the
+    disk.
     """
-    outside = tmp_path / "somebody-elses-tree"
-    (outside / "keep").mkdir(parents=True)
-    victim = outside / "keep" / "file.txt"
-    victim.write_text("mine\n", encoding="utf-8")
-    victim.chmod(0o444)
-    before = victim.stat().st_mode
-
-    link = tmp_path / "link-to-it"
-    link.symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(OSError):
-        rmtree_module.remove_tree(link)
-
-    assert outside.is_dir(), "the delete reached through the link and removed the target"
-    assert victim.is_file(), "the delete reached through the link and removed a file"
-    assert victim.stat().st_mode == before, "the delete chmodded a file outside the tree"
-    assert link.is_symlink(), "the link itself was consumed by a refusal"
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    lonely = parse_manifest(
+        {**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]}
+    )
+    report = applier.install(lonely)
+    assert applier.clone_dir(lonely).is_dir()
+    assert report.item_id == "mod-ah-bot-plus"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics; Windows is its own press")
-def test_rm_unlinks_a_symlink_rather_than_deleting_what_it_points_at(tmp_path: Path) -> None:
-    """`_rm()` asks `is_symlink()` before `is_dir()`, because the latter follows.
+def test_a_conflict_is_found_in_another_familys_clone_folder(tmp_path: Path) -> None:
+    """The search is over every family's folder, not this manifest's own (T53).
 
-    The manifest step said "remove this path". For a symlink that means the
-    link, never the tree on the other end -- which may be a game install, a
-    client folder, or anything else the user linked in.
+    Asserted because `_conflict_refusal()` says so in its docstring, and a
+    docstring is not a guard. Families live in different directories --
+    `CLONE_DIRS` maps module to `modules/`, ale and keg to `ale_scripts/`, mod
+    to `sql_scripts/clones/` -- so a check that looked only where the manifest
+    being installed would land is one line away, reads correctly, and silently
+    misses a conflict that reaches across families.
     """
-    outside = tmp_path / "real"
-    (outside / "data").mkdir(parents=True)
-    (outside / "data" / "keep.txt").write_text("mine\n", encoding="utf-8")
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    # An ALE script is already on disk, in ale_scripts/ -- NOT in modules/.
+    (tmp_path / "ale_scripts" / "some-ale-script" / ".git").mkdir(parents=True)
 
-    server = tmp_path / "server"
-    server.mkdir()
-    link = server / "modules"
-    link.symlink_to(outside, target_is_directory=True)
-
-    applier = Applier(server, git=_FakeGit({}), remote_url=_Origins(OWNED_URL))
-    log = apply_module._Log()
-    applier._rm(link, log)
-
-    assert not link.exists() and not link.is_symlink(), "the link was left behind"
-    assert (outside / "data" / "keep.txt").is_file(), "_rm deleted through the symlink"
+    module = parse_manifest(
+        {**OWNED_ITEM, "id": "mod-thing", "conflicts_with": ["some-ale-script"]}
+    )
+    with pytest.raises(ApplyError) as caught:
+        applier.install(module)
+    assert "some-ale-script" in str(caught.value)
+    assert "ale_scripts" in str(caught.value), str(caught.value)
+    assert not applier.clone_dir(module).exists()

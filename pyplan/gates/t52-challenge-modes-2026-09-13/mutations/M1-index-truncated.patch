@@ -1,0 +1,11 @@
+--- /tmp/idx.orig	2026-09-13 22:04:59.901539124 +0200
++++ pylauncher/manifests/wow-wotlk/modules.json	2026-09-13 22:04:59.915865327 +0200
+@@ -20,7 +20,6 @@
+     "mod-talentbutton",
+     "mod-transmog",
+     "mod-profession-progression",
+-    "mod-mount-scaling",
+-    "mod-custom-login"
++    "mod-mount-scaling"
+   ]
+ }

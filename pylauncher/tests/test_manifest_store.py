@@ -26,14 +26,37 @@ BUNDLED = Path(__file__).resolve().parents[1] / "manifests"
 
 
 def test_bundled_store_loads_every_family_typed() -> None:
-    """Every shipped WotLK manifest loads as a typed `Manifest` via the store."""
+    """Every id each family index lists loads as a typed `Manifest`, and none is skipped.
+
+    The count is taken from the INDEX rather than compared against a number
+    written here. `assert total >= 40` was the floor until 2026-09-13, and it
+    was doing two jobs badly: it guarded against the loop iterating nothing,
+    which is worth guarding, and it encoded "we ship about forty things", which
+    is not a fact about correctness and rots on every catalog edit. Dropping
+    two broken entries in one evening took the total 41 -> 39 and tripped it,
+    having warned one removal earlier that it would.
+
+    Comparing against the index instead is strictly stronger: a truncated index
+    and a manifest that will not load both still fail, and adding or removing a
+    module never does.
+    """
     store = modules.store()
-    total = 0
     for kind in FAMILY_FILES:
+        listed = list(store.load_index(kind).items)
         for item in store.load_all(kind):
             assert item.type == kind and item.game == "wow-wotlk"
-            total += 1
-    assert total >= 40
+        # The index cannot check itself: `load_all()` is DRIVEN by it, so a
+        # truncated index yields fewer items and every index-vs-loaded
+        # comparison still agrees. Measured -- dropping the last id from the
+        # module index left such a comparison green (T52 mutation M1). The
+        # directory is the independent witness.
+        on_disk = sorted(
+            f.stem for f in (BUNDLED / "wow-wotlk" / FAMILY_FILES[kind]).glob("*.json")
+        )
+        assert sorted(listed) == on_disk, (
+            f"the {kind} index lists {sorted(listed)} but {FAMILY_FILES[kind]}/ holds {on_disk} — "
+            f"a manifest was added or removed without its index entry"
+        )
 
 
 def test_load_module_rejects_invalid_repo(tmp_path: Path) -> None:
