@@ -2,7 +2,7 @@
 
 > Scoped 2026-09-06 on branch `yulon-phase8`, before Phase 7 exits, on the owner's decision of
 > 2026-09-04 that Phase 8 is scoped now and its code waits for this scoping to be reviewed
-> (memory record `phase8-kickoff-prompt.md`; the brief is `pyplan/phase8-kickoff.md`). Companion to
+> (memory record `phase8-kickoff-prompt.md`; the brief is `pyplan/archive/phase8-kickoff.md`). Companion to
 > `pyplan/roadmap.md` §8, which is not edited; Appendix A holds the proposed §8 text. Sibling of
 > `pyplan/phase8-decisions.md`, the uninstall/purge page of 2026-08-31, whose two owner answers are
 > copied verbatim below as group (g) and which this page does not reopen.
@@ -14,7 +14,7 @@
 > round and answered on 2026-09-06 after the judges reported — answer 10 narrowed the winning
 > design's channel list after it had won, and where the page still named the third channel is
 > recorded under "Review findings". Three designs were written independently from
-> three angles (`pyplan/phase8-designs/`) and scored by three judges (`pyplan/phase8-judges/`).
+> three angles (`pyplan/phase8-designs/`) and scored by three judges (`pyplan/archive/phase8-judges/`).
 > Every source read, design and verdict is committed beside this page, so what was rejected can be
 > read rather than summarised.
 
@@ -208,7 +208,7 @@ preference.
 ### Facts settled by reading after the panel reported, which the designs had booked as spikes
 
 Recorded because each removes work, and because a spike a read can answer is a spike this project
-does not run. **The reads themselves are committed at `pyplan/phase8-judges/panel-reads.md`** — with
+does not run. **The reads themselves are committed at `pyplan/archive/phase8-judges/panel-reads.md`** — with
 the command and the lines as they came back — because the first version of this table asserted six
 facts that no committed reader had produced, and one of the six was wrong. That is the failure this
 table exists to prevent, committed by the page enforcing the rule; the artefact is the remedy.
@@ -545,7 +545,7 @@ row.**
 Hedges restored to their sources: Tortoise's missing set-level command is now "no console route
 found", because the read searched two handler names and not that tree's whole table; the reads
 behind the six "settled by reading" facts were committed rather than summarised
-(`pyplan/phase8-judges/panel-reads.md`).
+(`pyplan/archive/phase8-judges/panel-reads.md`).
 
 Citation and record fixes: four citations off by a line or a range — claimed in the first round and
 actually made in the second, recorded here rather than smoothed over; the delta's declared path
@@ -734,7 +734,7 @@ replaced, keeping the reversal visible the way Phase 7's was:
 
 Three designs, written independently from three angles by `fable` and committed unchanged under
 `pyplan/phase8-designs/`; three judges, two on `opus` and the skeptic on `fable`, committed under
-`pyplan/phase8-judges/`. Seven criteria each scored 1–5: style-guide fit, DRY and one seam,
+`pyplan/archive/phase8-judges/`. Seven criteria each scored 1–5: style-guide fit, DRY and one seam,
 testability, operator safety on a live server, per-family correctness, gate quality, and blast
 radius with incremental delivery. 35 maximum.
 

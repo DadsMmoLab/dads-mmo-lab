@@ -1,6 +1,6 @@
 # Phase 8 — the feature delta against what Yu'lon ships
 
-> Step 2 of `pyplan/phase8-kickoff.md`: one row per candidate feature from The Lab and the Rust
+> Step 2 of `pyplan/archive/phase8-kickoff.md`: one row per candidate feature from The Lab and the Rust
 > "Hypeer Launcher", what Yu'lon already has for it at the pinned Phase 7 tip, and the mechanism
 > each emulator tree offers — measured per tree, never inherited. Written 2026-09-06 from five
 > read-only source reads whose full reports are committed beside this page under

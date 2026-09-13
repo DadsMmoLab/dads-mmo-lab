@@ -157,7 +157,7 @@ the memory records or is UNVERIFIED.
   `PlayerbotFactory` call, an `.additem`-style path, or a MySQL write) — nothing in any record
   addresses gearing at all.
 - **Mechanism on the CMaNGOS lineage (TBC, Vanilla, Tortoise).** **UNVERIFIED**, and explicitly a
-  different project per tree — `pyplan/phase8-kickoff.md:234-236`: *"The genuinely open spike is the
+  different project per tree — `pyplan/archive/phase8-kickoff.md:234-236`: *"The genuinely open spike is the
   CMaNGOS family: their playerbots are a different project per tree (TBC and Vanilla one, Tortoise
   its own fork), so read each tree for its own add-bot command before firing anything."* No CMaNGOS
   guide in `archive/guides/` shows any bot command; `grep -rn '\.playerbots'` over the guides returns
@@ -479,13 +479,13 @@ worldserver/mangosd console (`AC>` / `mangos>`); **chat** = typed in the WoW cha
 
 1. **No guide anywhere teaches a `.playerbots` command.** `grep -rn '\.playerbots'` across the whole
    repo returns only `pylauncher/yulon/catalog/catalog.py:913-914` (a catalog field, not a command)
-   and three lines of `pyplan/phase8-kickoff.md`. Zero hits in `archive/`. Everything the guides
+   and three lines of `pyplan/archive/phase8-kickoff.md`. Zero hits in `archive/`. Everything the guides
    teach about a bot party is **NPCBots**, a different module.
 2. **Two command channels, one of them stateful.** Every console command above is reached through
    `docker attach`, whose safe exit is Ctrl+P Ctrl+Q and whose unsafe exit kills the server
    (`CONTROLS-2.md:35-45`). RECORD (observed), memory `wsl-console-pty-via-script` (2026-08-27):
    *"kill-teardown stops the container through wsl.exe; Ctrl+P Ctrl+Q does not"* — so the detach
-   sequence is not reliable through every host wrapper. `pyplan/phase8-kickoff.md:207-208` states the
+   sequence is not reliable through every host wrapper. `pyplan/archive/phase8-kickoff.md:207-208` states the
    constraint that binds both channels: *"every command channel — SOAP and the console/attach alike —
    executes on the single world thread and is serialised; only direct MySQL reads bypass it"*.
 
@@ -505,7 +505,7 @@ Each is a "could-not-ask", not a "no".
    No command for map/x/y/z is recorded, offline-capable or otherwise.
 4. **Every CMaNGOS-lineage mechanism, for every feature.** No record in this repo or the memory
    directory establishes any of them; per memory `upstream-conventions-differ-per-fork` and
-   `phase8-kickoff.md:234-236`, three separate trees (TBC/Vanilla share a playerbots project,
+   `archive/phase8-kickoff.md:234-236`, three separate trees (TBC/Vanilla share a playerbots project,
    Tortoise has its own fork). The guides for those games teach only `account create` /
    `account set gmlevel` at a `mangos>` prompt — no `.tele`, no mail, no bot commands.
 5. **How Steam integration is implemented.** Only the manual procedure is recorded

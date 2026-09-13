@@ -2,7 +2,7 @@
 
 > Written 2026-09-06 by the judge who runs the live gates. Designs read in full:
 > `designs/seam.md` (**A**), `designs/surface.md` (**B**), `designs/risk.md` (**C**).
-> Governing pages read: `pyplan/phase8-kickoff.md` §§3–7, `phase8-parity-decisions.md`,
+> Governing pages read: `pyplan/archive/phase8-kickoff.md` §§3–7, `phase8-parity-decisions.md`,
 > `phase8-delta.md` ("Facts that govern every row", "Could not ask"),
 > `notes/STATE-2026-09-06-morning.md`, `notes/resume-2026-09-05.md`, `phase7-decisions.md`
 > "Delivery order and gates" + Appendix B, `checklist.md:2120` (7.9) and `:2331` (7.10),

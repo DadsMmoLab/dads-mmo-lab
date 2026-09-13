@@ -2,7 +2,7 @@
 
 > One of three independent designs for `pyplan/phase8-parity-decisions.md`, written 2026-09-06
 > from the server-side angle: one typed command/query layer both emulator families share, with
-> every family difference as data on the catalog entry. Inputs: `pyplan/phase8-kickoff.md`,
+> every family difference as data on the catalog entry. Inputs: `pyplan/archive/phase8-kickoff.md`,
 > `phase8-parity-decisions.md` (the eight answers and the nine-step cut — not re-litigated),
 > `phase8-delta.md` (facts 1–9), the five reads under `phase8-reads/`, and the tree
 > `C:\Users\perzi\dml-phase8` at `82241478`, whose `pylauncher/` is byte-identical to `7bc5ebd3`

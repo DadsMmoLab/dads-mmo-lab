@@ -24,10 +24,11 @@ There are **three `README.md`s**, each with a distinct audience, plus the `pypla
 | `pyplan/phase6-decisions.md` | **The Phase 6 decisions log ("why")**: reasoning, rejections, incident history. |
 | `pyplan/phase7-decisions.md` | **The Phase 7 decisions log**: one install engine for all four servers; what it overturns in the pages above, by name. |
 | `pyplan/phase7-plans/` | **The Phase 7 implementation plans**, one per gated step: bite-sized TDD tasks with the code, against the interface contract each plan embeds. Executed task by task; ticked in the checklist. |
-| `pyplan/phase8-kickoff.md`, `phase8-decisions.md`, `phase8-parity-decisions.md`, `phase8-delta.md` | **Phase 8's scope and decisions**: the kickoff (29 boxes), the decisions log, the parity decisions across the four trees, and the delta against the Rust launcher. |
-| `pyplan/phase8-designs/`, `phase8-reads/`, `phase8-reviews/`, `phase8-judges/` | **Phase 8's working papers**: the designs per feature, the reads of the prior art, the review rounds and the judges' verdicts. |
+| `pyplan/phase8-decisions.md`, `phase8-parity-decisions.md`, `phase8-delta.md` | **Phase 8's scope and decisions**: the decisions log, the parity decisions across the four trees, and the delta against the Rust launcher. The kickoff brief is in `archive/`. |
+| `pyplan/phase8-designs/`, `phase8-reads/` | **Phase 8's working papers**: the designs per feature and the reads of the prior art. The review rounds and the judges' verdicts are in `archive/`. |
 | `pyplan/phase8-owner-answers-2026-09-08.md`, `phase8-exit-review-2026-09-09.md` | **Owner answers and the exit review** — decision sources cited from code and tests, kept beside the phase. |
 | `pyplan/notes/` | **Session handoffs** (`STATE-*`, `resume-*`, the morning questions): how to resume; the newest supersedes the rest. Not decisions. |
+| `pyplan/archive/` | **Finished papers nothing in the code cites**: the Phase 8 kickoff brief, its review rounds and judges, the 8.9a gate plan, the Phase 6 gap matrix and the Tortoise upstream-switch note. Records, not instructions — see its README. |
 
 **Precedence (restated once, here and in the other two):** `README.md` wins on *what/why*;
 `style-guide.md` wins on *how*; `roadmap.md` wins on *order*. If they conflict, flag it — don't

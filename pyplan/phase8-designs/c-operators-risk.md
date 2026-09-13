@@ -1,6 +1,6 @@
 # Phase 8 from the operator's risk — what each feature can break on a live server
 
-> One of three independent Phase 8 designs (`pyplan/phase8-kickoff.md` §3), written 2026-09-06
+> One of three independent Phase 8 designs (`pyplan/archive/phase8-kickoff.md` §3), written 2026-09-06
 > against `yulon-phase7` tip **7bc5ebd3** (paths relative to `pylauncher/`), the delta table
 > `pyplan/phase8-delta.md`, the five reads under `pyplan/phase8-reads/`, and the owner's eight
 > answers in `pyplan/phase8-parity-decisions.md`, which this page does not re-litigate. The angle

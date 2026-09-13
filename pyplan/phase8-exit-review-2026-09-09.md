@@ -368,7 +368,7 @@ one-shot ones.
 the entry declares the attach console and the tab says so instead of offering a set-up button."*
 **False on both halves, and this is the largest of the corrections.**
 **Correction:** the fork re-added SOAP on 2026-09-07 — `src/mangosd/MaNGOSsoap.cpp`, `src/mangosd/soap/`,
-commit `3f9a062` (`pyplan/tortoise-upstream-switch.md`). **Tortoise's catalog pin then moved to
+commit `3f9a062` (`pyplan/archive/tortoise-upstream-switch.md`). **Tortoise's catalog pin then moved to
 `3a8472e` on 2026-09-08** (`2da4c516`, *"Tortoise's pin moves to 3a8472e: the SOAP interface and the
 account-lockout fix"*), and the entry became a SOAP entry the same day (`c7e577c7`):
 `wow-tortoise.operations.channel = "soap"`, port 7878, rank 4, `SOAP.Enabled = 1`. The consequences
@@ -394,7 +394,7 @@ be re-run without changing a line of this app."*
 **The condition has been satisfied**, so the sentence has stopped being a forecast and become an owed
 action.
 **Correction:** the account-lockout fix landed and **the catalog pin moved onto it** — `3a8472e` is
-that fix (`2da4c516`; `pyplan/tortoise-upstream-switch.md` names it *"the account-lockout fix
+that fix (`2da4c516`; `pyplan/archive/tortoise-upstream-switch.md` names it *"the account-lockout fix
 (`3a8472e`)"*). 8.3d's password clause is now owed a re-run against an install built at the new pin,
 by the box's own words. Two further sentences in the same line go with it:
 * *"correctly NEVER CREATED on a core whose channel is its console"* — that reason is gone; the
