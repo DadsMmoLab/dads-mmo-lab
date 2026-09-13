@@ -113,3 +113,30 @@ The button's condition is "the install is gone". **Ask what else is usually true
 condition** — here, that the user has also removed Docker, which is what the reveal depended
 on. A control with one stated condition often has an unstated correlate, and that correlate is
 where it breaks.
+
+## Review round 1 — HIGH, and the fix had created it
+
+Adversarial Codex review, 2026-09-13, on the pushed branch. Verdict **needs-attention**.
+
+> A transiently unavailable install drive is treated as a deleted install … the user is then
+> told the folder "no longer exists" and can remove Yu'lon's state record, leaving a live
+> install and its Docker resources unmanaged.
+
+`folder_is_gone()` returned `True` for any `FileNotFoundError` from `os.stat`. That is the same
+error for `E:\Games\Yulon Wotlk` when the folder was deleted **and** when the whole of `E:` is
+unplugged, asleep, or a disconnected share. Its docstring promised *"CONFIRMED absence — never
+'cannot tell'"*; it delivered "the leaf did not stat".
+
+**This ticket is what made it dangerous.** Before it, an offline drive was protected by
+accident: no Docker, no reveal. An offline drive takes Docker with it often enough — the VM
+lives on that disk, or the machine has just woken — so the two failures arrive together, and
+the reveal would have offered to drop the only record of a LIVE install.
+
+Fixed by making the parent corroborate: the leaf being absent is not an answer until the
+directory that would contain it is seen. Parent present → the folder really is gone. Parent
+absent → the VOLUME is missing, and the predicate says so by refusing.
+
+The reporter's own install is on `E:\`, which is exactly the shape this would have bitten.
+
+Gate after: `4369 passed, 8 skipped`. ruff/black clean, mypy clean on all three.
+M3 (take the leaf's absence as the answer) — KILLED.

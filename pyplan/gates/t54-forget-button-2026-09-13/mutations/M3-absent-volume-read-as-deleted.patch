@@ -1,0 +1,18 @@
+--- /tmp/pf.orig	2026-09-13 23:48:21.133259325 +0200
++++ pylauncher/yulon/platform.py	2026-09-13 23:48:21.144280347 +0200
+@@ -148,14 +148,7 @@
+     # It mattered the moment T54 revealed the Forget control while Docker is
+     # unreachable -- an offline drive takes Docker with it often enough -- and
+     # the button drops the only record of what may be a LIVE install.
+-    parent = path.parent
+-    if parent == path:
+-        return True  # the anchor itself; nothing above it to corroborate with
+-    try:
+-        os.stat(parent)
+-    except OSError:
+-        return False
+-    return True
++    return True  # M3: the leaf's absence alone is taken as the answer
+ 
+ 
+ def in_wsl() -> bool:

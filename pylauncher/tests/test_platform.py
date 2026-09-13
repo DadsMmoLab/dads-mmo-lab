@@ -1103,3 +1103,33 @@ def test_container_user_args_leaves_evidence_when_it_cannot_ask_for_a_uid(
     with caplog.at_level("WARNING"):
         assert platform.container_user_args(platform_id=lambda: "windows") == []
     assert caplog.text == "", "Docker Desktop having no getuid is normal, not a warning"
+
+
+def test_a_folder_on_a_drive_that_is_not_there_is_not_confirmed_gone(tmp_path: Path) -> None:
+    """An absent VOLUME is not an absent folder (T54 review).
+
+    `os.stat()` raises `FileNotFoundError` for `E:\\Games\\Yulon Wotlk` both when
+    the folder was deleted and when the whole of `E:` is unplugged, asleep, or a
+    disconnected network share. The two are indistinguishable at the leaf.
+
+    That mattered the moment T54 made the Forget control appear while Docker is
+    unreachable: an offline drive takes Docker's daemon with it often enough
+    (VM on that disk, machine just woken), and the user is then told the folder
+    "no longer exists" and offered a button that drops the only record of a
+    LIVE install, with its containers and volumes still on the machine.
+
+    Before T54 this was prevented by accident -- no Docker, no reveal. The fix
+    removed the accident, so the predicate has to mean what it says.
+    """
+    # A path whose PARENT does not exist either: the volume is what is missing.
+    missing_volume = tmp_path / "not-a-mounted-thing" / "server"
+    assert not platform.folder_is_gone(
+        missing_volume
+    ), "a folder under a root that is not there was reported as confirmed gone"
+
+    # The ordinary case is unchanged: the parent is there, the folder is not.
+    assert platform.folder_is_gone(tmp_path / "deleted-server")
+
+    # And a folder that exists is still not gone.
+    (tmp_path / "real").mkdir()
+    assert not platform.folder_is_gone(tmp_path / "real")
