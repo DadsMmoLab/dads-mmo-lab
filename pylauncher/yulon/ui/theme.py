@@ -955,11 +955,25 @@ def scale_for_width(width: int) -> float:
     """The font scale for a window of `width` px, against `REFERENCE_WIDTH`.
 
     Linear, so a window at half the reference width gets half-size text, but
-    clamped so it never drops below a legible floor or grows absurdly. The
-    reference width is the default window size, so the default view renders at
-    exactly scale 1.0.
+    clamped so it never drops below a legible floor. The reference width is the
+    default window size, so the default view renders at exactly scale 1.0.
+
+    **The upper bound is 1.0: sizes scale DOWN for a small window and never up.**
+    Every base here is authored at `REFERENCE_WIDTH`, so a wider window rendering
+    them larger is rendering something nobody chose. The old 1.4 ceiling meant a
+    maximised 1920 desktop -- `min(1.4, 1.5)` -- drew every label, button, tab and
+    input 40% over its authored size at once, and Pass 11's base raises (`_px(13,
+    ...)` -> `_px(14, ...)`) were multiplied by it: 14 became 20px. On a handheld
+    the same raises are invisible, because `MIN_FONT_PX` has already floored that
+    range -- so the bump bought nothing where it was aimed and cost 40% where it
+    was not (T45, the owner on a 1920 desktop).
+
+    Narrower windows are untouched: at and below `REFERENCE_WIDTH` the new bound
+    is never the active one, the linear scale still applies, and `MIN_FONT_PX` /
+    `TOUCH_TARGET_PX` still catch the bottom. The Steam Deck renders exactly as
+    it does today.
     """
-    return max(0.7, min(1.4, width / REFERENCE_WIDTH))
+    return max(0.7, min(1.0, width / REFERENCE_WIDTH))
 
 
 # The base QStyle is installed exactly once, before any style sheet exists.
