@@ -3827,9 +3827,9 @@ def test_every_shipped_ale_manifest_deploys_and_undeploys_for_real(tmp_path: Pat
 
     A manifest with a single-file `src` and a `rename` was merged (#160) and
     every Loot Pet install failed with `NotADirectoryError` -- after copying, so
-    the script was left in `lua_scripts/` under its old name. Nothing caught it: the rename test uses a DIRECTORY src, which is the shape
-    that works, and no test had ever driven a SHIPPED manifest through
-    `install()`.
+    the script was left in `lua_scripts/` under its old name. Nothing caught
+    it: the rename test uses a DIRECTORY src, which is the shape that works,
+    and no test had ever driven a SHIPPED manifest through `install()`.
 
     This walks the real `manifests/wow-wotlk/ale/` entries with a fake clone
     holding exactly the files each one says it deploys, and asserts the deploy

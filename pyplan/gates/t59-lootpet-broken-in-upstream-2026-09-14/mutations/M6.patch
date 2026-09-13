@@ -1,0 +1,13 @@
+diff --git a/pylauncher/yulon/apply.py b/pylauncher/yulon/apply.py
+index ea58c2d7..429ccb5e 100644
+--- a/pylauncher/yulon/apply.py
++++ b/pylauncher/yulon/apply.py
+@@ -2030,7 +2030,7 @@ class Applier:
+             for name in sorted(deployed):
+                 self._rm(target / name, log)
+             return
+-        if target.is_file():
++        if False:
+             self._rm(target, log)
+         elif target.is_dir():
+             log.skipped.append(
