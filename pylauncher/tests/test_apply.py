@@ -3766,17 +3766,28 @@ def test_no_module_outside_rmtree_calls_shutil_rmtree_directly() -> None:
     # `ignore_errors=True`, which `remove_tree()` deliberately does not have.
     # Listed one by one, with the reason, rather than matched by a path prefix:
     # a fourth arrival in one of these files should have to say why.
+    # By FUNCTION, not by file. Exempting a whole file means any future
+    # `shutil.rmtree` added anywhere in it passes silently, which is the
+    # opposite of what the paragraph above claims (review, 2026-09-13).
     ALLOWED = {
-        "catalog/families/conf.py": "the conf staging dir this function just made",
-        "catalog/families/extract.py": "the extraction output dir, rebuilt every run",
+        ("catalog/families/conf.py", "materialise"): (
+            "the conf staging dir this function just made, deleted with "
+            "ignore_errors=True -- a cleanup that deliberately does not raise, "
+            "which remove_tree() has no mode for"
+        ),
+        ("catalog/families/conf.py", "_clear"): (
+            "a leftover staging entry this app wrote itself, never a checkout"
+        ),
+        ("catalog/families/extract.py", "_remove_tree"): (
+            "the extraction output dir, rebuilt every run and never a checkout"
+        ),
     }
     package = Path(apply_module.__file__ or "").parent
     offenders: list[str] = []
     for path in sorted(package.rglob("*.py")):
         if path.name == "rmtree.py":
             continue  # the one module allowed to call it: it IS the retry
-        if path.relative_to(package).as_posix() in ALLOWED:
-            continue
+        rel = path.relative_to(package).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
         bare = {
             alias.asname or alias.name
@@ -3785,6 +3796,12 @@ def test_no_module_outside_rmtree_calls_shutil_rmtree_directly() -> None:
             for alias in node.names
             if alias.name == "rmtree"
         }
+        # Which function each call sits in, so the allowlist can name one.
+        owner: dict[int, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                for inner in ast.walk(node):
+                    owner.setdefault(id(inner), node.name)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -3792,7 +3809,9 @@ def test_no_module_outside_rmtree_calls_shutil_rmtree_directly() -> None:
             if (isinstance(func, ast.Attribute) and func.attr == "rmtree") or (
                 isinstance(func, ast.Name) and func.id in bare
             ):
-                offenders.append(f"{path.relative_to(package)}:{node.lineno}")
+                if (rel, owner.get(id(node), "<module>")) in ALLOWED:
+                    continue
+                offenders.append(f"{rel}:{node.lineno} in {owner.get(id(node), '<module>')}()")
     assert offenders == [], (
         "these call shutil.rmtree directly instead of yulon.rmtree.remove_tree(), which is "
         "the T49 defect returning — git leaves read-only packs on Windows and a bare rmtree "
