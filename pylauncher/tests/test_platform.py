@@ -1146,3 +1146,32 @@ def test_compose_ready_is_true_when_the_plugin_answers(monkeypatch: pytest.Monke
         lambda argv, **kw: _completed(returncode=0),
     )
     assert platform.compose_ready() is True
+
+
+def test_the_compose_probe_actually_bounds_the_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default path must carry the deadline to the child (T56 review).
+
+    `_bounded()` bounds a runner of OURS and returns anything else unchanged:
+
+        return do.bounded(seconds) if isinstance(do, _DefaultRunner) else do
+
+    so `runner.run` passed straight through and the advertised 10 seconds never
+    reached the subprocess. The probe's own docstring claimed it was "shaped
+    exactly like docker_ready()" while differing in that one line. A hung Docker
+    CLI would have stalled the whole preflight.
+
+    Asserted against the DEFAULT runner rather than an injected fake, because an
+    injected fake is exactly what the original tests used and exactly why they
+    could not see this.
+    """
+    monkeypatch.setattr(platform, "docker_programs", lambda: ["docker"])
+    seen: list[object] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(kwargs.get("timeout"))
+        return _completed(returncode=1)
+
+    monkeypatch.setattr(platform.runner, "run", fake_run)
+    platform.compose_ready(timeout=7.0)
+    assert seen, "the probe never ran the subprocess"
+    assert all(isinstance(bound, float) for bound in seen), f"unbounded probe: {seen}"

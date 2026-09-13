@@ -1239,6 +1239,10 @@ def test_a_machine_with_docker_but_no_compose_is_refused_before_the_install_star
     assert check.name == preflight.COMPOSE_CHECK
     assert check.verdict == "refuse"
     assert "pacman -S docker-compose" in (check.remedy or "")
+    # The Debian package must be the one Yu'lon's OWN installer uses there.
+    # Recommending `docker-compose-plugin` to a machine on distro packages ends
+    # in "Unable to locate package", immediately after we blocked them.
+    assert "docker-compose-v2" in (check.remedy or "")
     assert "docker compose version" in (check.remedy or "")
     # The hyphenated v1 is a different program and is not what Yu'lon runs.
     assert "hyphen" in (check.remedy or "").lower()
@@ -1264,3 +1268,23 @@ def test_the_compose_remedy_names_docker_desktop_off_linux() -> None:
     assert "Docker Desktop" in preflight._compose_remedy("windows")
     assert "Docker Desktop" in preflight._compose_remedy("darwin")
     assert "pacman" not in preflight._compose_remedy("windows")
+
+
+def test_the_compose_remedy_names_the_package_our_own_installer_uses() -> None:
+    """The refusal and the provisioning must not name different packages (T56 review).
+
+    `platform._ensure_docker_linux()` installs `docker.io docker-compose-v2
+    docker-buildx` on Debian family. The first version of this remedy said
+    `docker-compose-plugin`, which lives in Docker's own apt repository -- so a
+    user on distro packages, which is what we install for them, would hit
+    "Unable to locate package" straight after being blocked.
+
+    Read out of `platform.py` rather than written here, so the two cannot drift:
+    a change to the provisioning list fails this test.
+    """
+    source = Path(platform_module.__file__ or "").read_text(encoding="utf-8")
+    assert "docker-compose-v2" in source, "the provisioning package list changed"
+    remedy = preflight._compose_remedy("linux")
+    assert "docker-compose-v2" in remedy
+    # The upstream-repo alternative is mentioned, not asserted as universal.
+    assert "docker-compose-plugin" in remedy

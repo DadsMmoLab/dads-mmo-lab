@@ -72,3 +72,34 @@ reason it already faked `docker_ready`.
 A press on a real Steam Deck, or any machine with the engine and no plugin. The probe and the
 refusal are unit-tested; nobody has yet watched the refusal appear on a machine that genuinely
 lacks the plugin.
+
+## Review round 1 — the probe was not bounded, and the remedy named the wrong package
+
+Adversarial Codex review, 2026-09-13. Verdict **needs-attention**.
+
+**HIGH — the advertised deadline never reached the subprocess.** `_bounded()` bounds a runner
+of ours and returns anything else unchanged:
+
+```python
+return do.bounded(seconds) if isinstance(do, _DefaultRunner) else do
+```
+
+`docker_ready()` passes `_DefaultRunner()`. This probe passed `runner.run`, which goes straight
+through, so a hung Docker CLI would have stalled the whole preflight indefinitely. Its own
+docstring said it was *"shaped exactly like `docker_ready()` above"* — and it differed in the
+one line that made it safe. The tests could not see it: every one injected a fake runner, which
+is precisely the path that is bounded.
+
+Fixed, with a test that asserts the DEFAULT runner receives a float timeout.
+
+**MEDIUM — the Debian remedy pointed at a package we do not install.** `platform.py:1698`
+provisions `docker.io docker-compose-v2 docker-buildx`; the refusal told every Debian/Ubuntu
+user `sudo apt install docker-compose-plugin`, which lives in Docker's own apt repository. A
+user on distro packages — which is what Yu'lon installs for them — would meet "Unable to locate
+package" immediately after being blocked.
+
+Now names `docker-compose-v2` first and mentions `docker-compose-plugin` for Docker's own
+repository. The test reads the package list out of `platform.py` rather than restating it, so
+a change to provisioning fails the test instead of silently disagreeing with the advice.
+
+Gate after: `4374 passed, 8 skipped`. ruff/black clean, mypy clean on all three.

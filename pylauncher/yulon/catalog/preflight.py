@@ -513,7 +513,9 @@ def _compose_remedy(platform_id: str) -> str:
         return (
             "Install Docker Compose v2 and try again. On Arch or SteamOS: "
             "`sudo pacman -S docker-compose`. On Debian or Ubuntu: "
-            "`sudo apt install docker-compose-plugin`. Check it with "
+            "`sudo apt install docker-compose-v2` -- which is the package Yu'lon's own "
+            "installer uses there; if your Docker came from Docker's own apt repository "
+            "instead, that package is called `docker-compose-plugin`. Check it with "
             "`docker compose version` -- note the SPACE: `docker-compose` with a hyphen is the "
             "old v1 and is not what Yu'lon runs."
         )

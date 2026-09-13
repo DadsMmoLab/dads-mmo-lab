@@ -1349,7 +1349,13 @@ def compose_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_S
     Bounded and shaped exactly like `docker_ready()` above — same candidate
     list, same shared budget, same "cannot start it at all is not an answer".
     """
-    do = run if run is not None else runner.run
+    # `_DefaultRunner()`, not `runner.run`: `_bounded()` only bounds a runner of
+    # ours (`do.bounded(seconds) if isinstance(do, _DefaultRunner) else do`), so
+    # the plain function passes through UNBOUNDED and the advertised deadline
+    # never reaches the subprocess. This probe claimed to be "shaped exactly like
+    # docker_ready()" while differing in the one line that made it safe, and a
+    # hung Docker CLI would have stalled the whole preflight (review, 2026-09-13).
+    do = run if run is not None else _DefaultRunner()
     deadline = time.monotonic() + timeout
     for program in docker_programs():
         left = deadline - time.monotonic()
