@@ -3299,7 +3299,7 @@ def _build_log_elsewhere(said: list[str]) -> str:
     return ""
 
 
-def _exit_code(said: list[str]) -> str:
+def _exit_code(said: Sequence[str]) -> str:
     """`"exit code: 137 — "` from the LAST line that carries one, else `""`.
 
     The whole tail is searched, not the `ERROR:` line and not the final line.
@@ -3319,7 +3319,7 @@ def _exit_code(said: list[str]) -> str:
     return ""
 
 
-def last_words(tail: tuple[str, ...]) -> str:
+def last_words(tail: tuple[str, ...], *, from_build: bool = False) -> str:
     """The end of a command's output, short enough to put inside a sentence.
 
     Blank lines are dropped before the count, because a shell script's spacing
@@ -3343,13 +3343,27 @@ def last_words(tail: tuple[str, ...]) -> str:
             # says where to look (review, 2026-09-12).
             text = text[:_LAST_WORDS_CHARS] + "…"
         return f"{text} / {_elided(error_line)}" if error_line else text
-    kept = _build_log_elsewhere(said)
+    kept = _build_log_elsewhere(said) if from_build else ""
     if kept:
         # T50. The step output is not in the buffer to be selected from, so the
         # honest answer is where it IS -- not the left-truncated command echo
         # below, which is the one thing already known to tell a reader nothing.
-        code = _exit_code(said)
-        return f"{code}Docker Desktop kept this build's log instead of printing it: {kept}"
+        # Correlated, not searched independently: the exit-code clause must come
+        # at or before the URL, because Docker prints the URL after the failure.
+        # Two reverse searches over the whole tail could take a code from a
+        # later, unrelated line and attribute it to this build -- 137 in
+        # particular sends recovery in the wrong direction (review, 2026-09-13).
+        where = max(i for i, line in enumerate(said) if _BUILD_DETAILS.search(line))
+        code = _exit_code(said[: where + 1])
+        # The plain tail is kept BESIDE the link, not replaced by it: a
+        # `docker-desktop://` URL resolves only where Docker Desktop is
+        # installed, and this app runs headless and under WSL too.
+        nearby = [ln for ln in said[:where] if not _BUILD_DETAILS.search(ln)]
+        said_too = f" / {_elided(nearby[-1])}" if nearby else ""
+        return (
+            f"{code}Docker Desktop kept this build's log instead of printing it: {kept}"
+            f"{said_too}"
+        )
     text = " / ".join(said[-_LAST_WORDS_LINES:])
     return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
 

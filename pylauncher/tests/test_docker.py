@@ -6375,7 +6375,7 @@ def test_when_docker_desktop_keeps_the_build_log_we_say_where_it_is(tmp_path: Pa
        kill and nothing else in the output says so;
     2. WHERE THE LOG IS, verbatim, so it can be pasted into a browser.
     """
-    said = docker.last_words(_DOCKER_DESKTOP_TAIL)
+    said = docker.last_words(_DOCKER_DESKTOP_TAIL, from_build=True)
 
     # Where to actually read the error, unmangled -- this is the whole point.
     assert "docker-desktop://dashboard/build/default/default/c6g4h689yvm5emfs0xe29iae7" in said
@@ -6427,6 +6427,68 @@ def test_the_exit_code_survives_when_no_line_says_ERROR(tmp_path: Path) -> None:
         "View build details: docker-desktop://dashboard/build/default/default/abc123",
         "",
     )
-    said = docker.last_words(tail)
+    said = docker.last_words(tail, from_build=True)
     assert "137" in said, said
     assert "docker-desktop://dashboard/build/default/default/abc123" in said
+
+
+def test_a_non_build_command_never_claims_docker_desktop_kept_its_log() -> None:
+    """`last_words()` is shared; the Docker Desktop branch is the BUILD's (T50 review).
+
+    Imports, extractors, map generation and plain `docker run`s all go through
+    this function, and container output is not ours. A line reading
+    `View build details: ...` can arrive in any of those tails -- left over from
+    an earlier build in a compose stream, or printed by the image itself -- and
+    the first version of this branch fired on nothing more than that string.
+
+    The cost was not cosmetic: it DISCARDED the real final lines and told the
+    user to open a link, which on a headless box or under WSL resolves to
+    nothing at all. So the one caller that knows it is a build says so, and
+    every other caller keeps the behaviour it had.
+    """
+    tail = (
+        "acore-db-import | ERROR 1064 (42000) at line 12: You have an error in your SQL syntax",
+        "View build details: docker-desktop://dashboard/build/default/default/leftover",
+        "ac-db-import exited with code 1",
+    )
+    said = docker.last_words(tail)
+    assert "Docker Desktop kept" not in said, said
+    assert "ERROR 1064" in said or "exited with code 1" in said, said
+
+
+def test_the_exit_code_is_taken_from_before_the_link_not_from_anywhere() -> None:
+    """Code and URL must describe the same failure (T50 review).
+
+    Both were reverse-searched over the whole 200-line tail independently, so a
+    later unrelated clause could be attributed to the linked build. `137` is the
+    one that matters: it means an out-of-memory kill and sends recovery in a
+    completely different direction from an ordinary exit 1.
+
+    Docker prints the URL AFTER the failure, so the code that belongs to it is
+    the last one at or before the link.
+    """
+    tail = (
+        'process "/bin/sh -c cmake --build ." did not complete successfully: exit code: 137',
+        "View build details: docker-desktop://dashboard/build/default/default/theone",
+        "some later unrelated line: exit code: 1",
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert "137" in said, said
+    assert "exit code: 1 —" not in said, said
+    assert "theone" in said
+
+
+def test_the_plain_tail_survives_beside_the_link() -> None:
+    """A `docker-desktop://` URL resolves only where Docker Desktop is installed.
+
+    Yu'lon also runs headless and under WSL, where that protocol opens nothing.
+    Handing such a user a link INSTEAD of the last lines leaves them with
+    neither, so the link is added to what was there rather than replacing it.
+    """
+    tail = (
+        '#24 ERROR: process "/bin/sh -c cmake" did not complete successfully: exit code: 1',
+        "View build details: docker-desktop://dashboard/build/default/default/abc",
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert "docker-desktop://" in said
+    assert "cmake" in said, "the plain tail was thrown away for a link that may not open"

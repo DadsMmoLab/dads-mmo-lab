@@ -153,3 +153,34 @@ exit code: 137 — Docker Desktop kept this build's log instead of printing it: 
 
 Fixture corrected to what he actually has. Gate `4370 passed`; M4 (restore the two-place
 lookup) killed.
+
+## Review round 1 — the branch was firing for callers it was never about
+
+Adversarial Codex review, 2026-09-13. Verdict **needs-attention**.
+
+**HIGH — `last_words()` is shared, and the Docker Desktop branch is the BUILD's.** Imports,
+extractors, map generation and plain `docker run`s all reach this function, and container
+output is not ours to predict. A line reading `View build details: …` can arrive in any of
+those tails — left over from an earlier build in a compose stream, or printed by the image
+itself — and the branch fired on nothing more than that string being present. It then
+**discarded the real final lines** and told the user to open a link, which on a headless box or
+under WSL resolves to nothing at all. Worse than the message it replaced.
+
+Fixed by making it opt-in: `last_words(tail, *, from_build=False)`, and exactly one caller
+passes `from_build=True` — `native.py:4565`, `self._check_run(run, "the build", …)`. Every
+other caller keeps the behaviour it had.
+
+**MEDIUM — the exit code and the URL were chosen independently.** Both were reverse-searched
+over the whole 200-line tail, so a later unrelated `exit code:` clause could be attributed to
+the linked build. `137` is the one that matters: it is an out-of-memory kill and sends recovery
+in a different direction from an ordinary exit 1. Docker prints the URL *after* the failure, so
+the code is now taken from at-or-before the link.
+
+**Also taken from the review:** the plain tail is kept BESIDE the link rather than replaced by
+it, because `docker-desktop://` opens nothing where Docker Desktop is not installed — and this
+app runs headless and under WSL.
+
+Three tests added for exactly these: a non-build caller with that line in its tail, a tail with
+two exit codes either side of the link, and a tail where the plain lines must survive.
+
+Gate after: `4373 passed, 8 skipped`. ruff/black clean, mypy clean on all three.
