@@ -52,6 +52,14 @@ the bug was measured against. Module import runs before any fixture, so this
 reference is unaffected by fixture ordering.
 """
 
+_REAL_QMESSAGEBOX_EXEC = QMessageBox.exec
+"""The real `QMessageBox.exec` slot, same capture reasoning as the question one above.
+
+Pass 12 moved `_qt_suggestion_asker` onto `box.exec()`, so the real-dialog
+helper must reinstate the real `exec` too — the widened `_no_modal_dialogs` guard
+fakes it otherwise.
+"""
+
 
 class _FakeInstaller:
     """An engine whose run() is a canned stream; preflight is a no-op.
@@ -2149,6 +2157,11 @@ def _ask_with_real_dialog(
     from PySide6.QtWidgets import QApplication
 
     monkeypatch.setattr(QMessageBox, "question", _REAL_QMESSAGEBOX_QUESTION)
+    # `_qt_suggestion_asker` now asks through an instance `.exec()` (Pass 12 moved
+    # the Yes/No labels onto a real box), so the autouse `_no_modal_dialogs` guard
+    # that disarmed `exec` must be undone here too — otherwise the box returns the
+    # faked No instantly and the click-poller below finds no modal to click.
+    monkeypatch.setattr(QMessageBox, "exec", _REAL_QMESSAGEBOX_EXEC)
     clicked: list[bool] = []
     _click_active_message_box(which, clicked, QDeadlineTimer(_REAL_DIALOG_BOUND_MS))
 
