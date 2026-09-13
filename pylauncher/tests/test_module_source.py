@@ -157,14 +157,24 @@ def test_an_empty_link_asks_for_one_rather_than_explaining_the_host_rule() -> No
     assert _refused(lambda: _link("   ")) == f"Paste a link first. {NOTHING_CHANGED}"
 
 
-def test_a_link_to_a_shipped_module_says_to_use_the_list_instead() -> None:
-    """The shadow rule at the press: a user file may never stand in front of a shipped id."""
+def test_a_link_to_a_shipped_module_says_to_use_the_tab_instead() -> None:
+    """The shadow rule at the press: a user file may never stand in front of a shipped id.
+
+    The sentence names a control that is really there. It said "select it in the
+    list and press Install selected" until T42 replaced the list and its two
+    toolbar buttons with a card per family and an Install on each row -- the
+    same defect FACT 4 records for the rebuild sentence, which sent its reader
+    hunting for a button no tab had.
+
+    Mutation: put either old spelling back and this fails on the word.
+    """
     message = _refused(lambda: _link("azerothcore/mod-aoe-loot", shipped_ids=("mod-aoe-loot",)))
 
     assert message == (
-        "mod-aoe-loot is a module this app already ships — select it in the list "
-        f"and press Install selected. {NOTHING_CHANGED}"
+        "mod-aoe-loot is a module this app already ships — find it on the Modules "
+        f"tab and press Install on its row. {NOTHING_CHANGED}"
     )
+    assert "Install selected" not in message
 
 
 # -- deriving from a folder ------------------------------------------------

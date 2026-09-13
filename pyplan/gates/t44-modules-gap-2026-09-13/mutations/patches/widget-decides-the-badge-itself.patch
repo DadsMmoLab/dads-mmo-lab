@@ -1,0 +1,14 @@
+# gate: tests/test_modules_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..c796c4f8 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -685,7 +685,7 @@ class RowWidget(QFrame):
+ 
+         middle = QVBoxLayout()
+         middle.setSpacing(4)
+-        self.badge_label = QLabel(data.badge, self)
++        self.badge_label = QLabel(BADGE_INSTALLED if data.installed else BADGE_NOT_INSTALLED, self)
+         # Three tones for four badges, and the pairing is by what the badge
+         # ASKS OF THE READER rather than by its text: green for a module that
+         # is here and working, amber for one that is here and not finished,

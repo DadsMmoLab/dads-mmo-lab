@@ -17,22 +17,39 @@
       "keys": [
         {
           "key": "ProfessionProgression.ExpansionStage",
-          "note": "0=Vanilla(300) 1=TBC(375) 2=Wrath(425)"
+          "note": "0=Vanilla(300) 1=TBC(375) 2=Wrath(425)",
+          "label": "Profession era",
+          "explain": "Profession era / progression lock. 0 = Vanilla: cap 300, classic 9 professions only. 1 = TBC: cap 375, Jewelcrafting available if AutoExpansionProfessions is on. 2 = Wrath: cap 425 by default here, Inscription available if AutoExpansionProfessions is on.",
+          "type": "int",
+          "min": 0,
+          "max": 2
         },
         {
           "key": "ProfessionProgression.BaseSlots",
-          "note": "default 2"
+          "note": "default 2",
+          "label": "Primary profession slots",
+          "explain": "Default primary slots before progression unlocks.",
+          "type": "int"
         },
         {
           "key": "ProfessionProgression.UnlockThirdAt",
-          "note": "75"
+          "note": "75",
+          "label": "Third slot unlocks at",
+          "explain": "First extra slot unlocks when the player's top two primary professions both reach this value.",
+          "type": "int"
         },
         {
           "key": "ProfessionProgression.UnlockFourthAt",
-          "note": "150"
+          "note": "150",
+          "label": "Fourth slot unlocks at",
+          "explain": "Fourth slot unlocks when the player's top two primary professions both reach this value.",
+          "type": "int"
         },
         {
-          "key": "ProfessionProgression.AutoExpansionProfessions"
+          "key": "ProfessionProgression.AutoExpansionProfessions",
+          "label": "Include expansion professions",
+          "explain": "Automatically include Jewelcrafting at TBC and Inscription at Wrath.",
+          "type": "bool"
         }
       ],
       "template": "conf/mod-profession-progression.conf.dist"

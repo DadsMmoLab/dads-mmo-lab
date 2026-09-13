@@ -1,0 +1,35 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[31mF[0m[31m                                                                        [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_______ test_forget_drops_one_module_in_every_family_and_clear_drops_all _______[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_forget_drops_one_module_in_every_family_and_clear_drops_all[39;49;00m() -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Invalidation: an install, a remove or an update changes exactly one clone.[39;49;00m
+    [33m[39;49;00m
+    [33m    `forget()` matches by BARE ID across every family, because that is what an[39;49;00m
+    [33m    `ApplyReport.item_id` is -- there is no family on it (T42 round 2's rule,[39;49;00m
+    [33m    and `_forget_what_is_no_longer_installed()`'s).[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: make `forget()` a no-op and a module updated in place goes on[39;49;00m
+    [33m    showing the sha it had before the pull, which is a wrong sha rather than[39;49;00m
+    [33m    no sha.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        reader = _Reader({[33m"[39;49;00m[33mbmah[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33maaaaaaa · 2026-01-01[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+        cache = mp.VersionCache(reader)[90m[39;49;00m
+        root = Path([33m"[39;49;00m[33m/srv[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        cache.fill(root, [33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mbmah[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        cache.fill(root, [33m"[39;49;00m[33mkeg[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mbmah[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        cache.fill(root, [33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        asked = [96mlen[39;49;00m(reader.asked)[90m[39;49;00m
+    [90m[39;49;00m
+        cache.forget([33m"[39;49;00m[33mbmah[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+>       [94massert[39;49;00m cache.has(root, [33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mbmah[39;49;00m[33m"[39;49;00m) [95mis[39;49;00m [94mFalse[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: assert True is False[0m
+[1m[31mE        +  where True = has(PosixPath('/srv'), 'module', 'bmah')[0m
+[1m[31mE        +    where has = <yulon.ui.widgets.modules_panel.VersionCache object at 0x70ef57e2d160>.has[0m
+
+[1m[31mtests/test_modules_panel.py[0m:1163: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_modules_panel.py::[1mtest_forget_drops_one_module_in_every_family_and_clear_drops_all[0m - AssertionError: assert True is False
+[31m[31m[1m1 failed[0m, [33m66 deselected[0m[31m in 0.18s[0m[0m

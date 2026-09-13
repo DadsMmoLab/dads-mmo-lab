@@ -1751,3 +1751,112 @@ def test_no_streamed_git_call_can_run_without_the_no_prompt_environment(
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         assert env["GIT_ASKPASS"] == "" and env["SSH_ASKPASS"] == ""
         assert env["GCM_INTERACTIVE"] == "never"
+
+
+# --------------------------------------------------------------------------
+# head_version (T44 item 1: the sha and date a row shows)
+# --------------------------------------------------------------------------
+
+
+def test_head_version_reads_the_clone_and_never_fetches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One local `git log -1`, and nothing that touches the network (T44 item 1).
+
+    The whole reason the version line is affordable at all is that it is a
+    LOCAL read: `commits_behind()` costs a round trip per module and lives
+    behind a button for that reason, and a version line that fetched would put
+    that cost back on every reload.
+
+    Mutation: add `--fetch`-shaped argv, or count against a remote ref, and the
+    `not [a for a in argv if "fetch" in a]` assertion fails.
+    """
+    dest = tmp_path / "mod-aoe-loot"
+    (dest / ".git").mkdir(parents=True)
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _completed(stdout="7c02b1d 2026-09-01\n")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+
+    assert git.RunnerGit().head_version(dest) == "7c02b1d · 2026-09-01"
+    assert len(seen) == 1, "one command, not a fetch and a read"
+    assert seen[0][-3:] == ["log", "-1", "--format=%h %cs"]
+    assert not [arg for arg in seen[0] if "fetch" in arg]
+
+
+def test_head_version_answers_nothing_rather_than_guessing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Four ways it cannot answer, and all four are silence (T44 item 1).
+
+    A sha is the one thing on this row a user may paste into an issue, so an
+    invented one is worse than a blank. And none of the four may turn a reload
+    into a failure, which is why `OSError` -- a `git` that is not on PATH at
+    all -- is caught here rather than at the caller.
+
+    Mutation: return `raw.strip()` unconditionally and a git that printed a
+    warning to stdout becomes a version; drop the `OSError` arm and a machine
+    with no git raises out of `reload_modules()`.
+    """
+    dest = tmp_path / "mod-aoe-loot"
+    (dest / ".git").mkdir(parents=True)
+    impl = git.RunnerGit()
+
+    assert impl.head_version(tmp_path / "not-a-checkout") is None, "no .git"
+
+    answers: list[object] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        assert isinstance(answer, subprocess.CompletedProcess)
+        return answer
+
+    monkeypatch.setattr(runner, "run", fake_run)
+
+    answers.append(_completed(returncode=128, stderr="not a git repository"))
+    assert impl.head_version(dest) is None, "git refused"
+
+    answers.append(OSError("No such file or directory: 'git'"))
+    assert impl.head_version(dest) is None, "no git on PATH"
+
+    answers.append(_completed(stdout="\n"))
+    assert impl.head_version(dest) is None, "git said nothing"
+
+    answers.append(_completed(stdout="7c02b1d\n"))
+    assert impl.head_version(dest) is None, "a sha with no date is not the line"
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_the_version_line_equals_what_git_log_prints_by_hand(tmp_path: Path) -> None:
+    """The figure against real git, not against a mock (8.7a's own rule, applied here).
+
+    A mock proves the argv; this proves the STRING a user reads is the sha and
+    the date `git log -1` prints for the same checkout.
+
+    Mutation: use `%H` instead of `%h` and the line stops matching the short
+    sha this asserts against; use `%cd` instead of `%cs` and the date arrives
+    in git's long default format.
+    """
+    dest = tmp_path / "clone"
+    dest.mkdir()
+    for argv in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "t@example.invalid"],
+        ["git", "config", "user.name", "T"],
+        ["git", "commit", "-q", "--allow-empty", "-m", "one"],
+    ):
+        subprocess.run(argv, cwd=dest, check=True, capture_output=True, text=True)
+    by_hand = subprocess.run(
+        ["git", "log", "-1", "--format=%h %cs"],
+        cwd=dest,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+
+    assert git.RunnerGit().head_version(dest) == f"{by_hand[0]} · {by_hand[1]}"

@@ -1,0 +1,14 @@
+# gate: tests/test_modules_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..e46a3320 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -387,7 +387,7 @@ def _chips_for(
+     fetches.
+     """
+     chips: list[Chip] = []
+-    key = (family, item_id)
++    key = item_id  # type: ignore[assignment]
+     if key in session.rebuild_owed:
+         chips.append(
+             Chip(

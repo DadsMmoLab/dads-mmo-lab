@@ -1,0 +1,55 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[31mF[0m[31m                                                                        [100%][0m
+=================================== FAILURES ===================================
+[31m[1m________ test_restart_and_recreate_both_ask_first_and_do_nothing_on_no _________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x1892ae00) at 0x7751165cde40>
+ps = <tests.test_controller_view._Ps object at 0x7751191bb620>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-778/test_restart_and_recreate_both0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x775118c31480>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_restart_and_recreate_both_ask_first_and_do_nothing_on_no[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Both take the server down, so both carry the ellipsis and the dialog.[39;49;00m
+    [33m[39;49;00m
+    [33m    The answer is read through `said_yes()`, which is T33's closed bug: the[39;49;00m
+    [33m    static `question()` returns a plain int, so `is StandardButton.Yes` is[39;49;00m
+    [33m    always False -- and here the direction of that bug is a server that never[39;49;00m
+    [33m    restarts, which reads as a dead button.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: drop the `_confirm()` call and the button takes the world down[39;49;00m
+    [33m    on the first press, with no warning, from a settings tab.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        [94mfrom[39;49;00m[90m [39;49;00m[04m[96mPySide6[39;49;00m[04m[96m.[39;49;00m[04m[96mQtWidgets[39;49;00m[90m [39;49;00m[94mimport[39;49;00m QMessageBox[90m[39;49;00m
+    [90m[39;49;00m
+        view = _tuning_view(ps, tmp_path)[90m[39;49;00m
+        view._note_tuning_owed([33m"[39;49;00m[33menv/dist/etc/modules/mod_npc_beastmaster.conf[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        view._note_tuning_owed([33m"[39;49;00m[33mmodules/mod-x/conf/mod-x.conf[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        asked: [96mlist[39;49;00m[[96mstr[39;49;00m] = [][90m[39;49;00m
+    [90m[39;49;00m
+        monkeypatch.setattr([90m[39;49;00m
+            QMessageBox,[90m[39;49;00m
+            [33m"[39;49;00m[33mquestion[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+            [94mlambda[39;49;00m *args, **kwargs: (asked.append([96mstr[39;49;00m(args[[94m1[39;49;00m])), QMessageBox.StandardButton.No)[[94m1[39;49;00m],[90m[39;49;00m
+        )[90m[39;49;00m
+        view.tuning_restart_button.click()[90m[39;49;00m
+        view.tuning_recreate_button.click()[90m[39;49;00m
+    [90m[39;49;00m
+>       [94massert[39;49;00m asked == [TUNING_RESTART_LABEL, TUNING_RECREATE_LABEL][90m[39;49;00m
+[1m[31mE       AssertionError: assert ['Recreate containers…'] == ['Restart ser... containers…'][0m
+[1m[31mE         [0m
+[1m[31mE         At index 0 diff: [0m[33m'[39;49;00m[33mRecreate containers…[39;49;00m[33m'[39;49;00m[90m[39;49;00m != [0m[33m'[39;49;00m[33mRestart server…[39;49;00m[33m'[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         Right contains one more item: [0m[33m'[39;49;00m[33mRecreate containers…[39;49;00m[33m'[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         Use -v to get more diff[0m
+
+[1m[31mtests/test_controller_view.py[0m:8815: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-13 04:24:29 INFO [yulon.docker] stop_staged(): none of this install's servers were running
+2026-09-13 04:24:29 INFO [yulon.docker] start_staged(): `compose up -d --no-deps ac-database ac-authserver ac-worldserver` in /tmp/pytest-of-perzi/pytest-778/test_restart_and_recreate_both0
+------------------------------ Captured log call -------------------------------
+[32mINFO    [0m yulon.docker:docker.py:2480 stop_staged(): none of this install's servers were running
+[32mINFO    [0m yulon.docker:docker.py:892 start_staged(): `compose up -d --no-deps ac-database ac-authserver ac-worldserver` in /tmp/pytest-of-perzi/pytest-778/test_restart_and_recreate_both0
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_restart_and_recreate_both_ask_first_and_do_nothing_on_no[0m - AssertionError: assert ['Recreate containers…'] == ['Restart ser... contain...
+[31m[31m[1m1 failed[0m, [33m319 deselected[0m[31m in 0.93s[0m[0m

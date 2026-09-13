@@ -1,0 +1,89 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m [ 50%]
+[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[31m [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_________ test_a_clean_owned_checkout_of_the_right_repository_updates __________[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-811/test_a_clean_owned_checkout_of0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_clean_owned_checkout_of_the_right_repository_updates[39;49;00m(tmp_path: Path) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The refusals have to be REAL refusals, not a route that never runs.[39;49;00m
+    [33m[39;49;00m
+    [33m    Without this the four above would pass just as happily on an `update()`[39;49;00m
+    [33m    that refused everything, which is the mirror of the defect they exist for.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: `update-always-refuses` -- return a refusal unconditionally and[39;49;00m
+    [33m    the Update button becomes the thing item 2 forbids, one that cannot work.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        _owned_clone(tmp_path)[90m[39;49;00m
+        git = _FakeGit({}, unmodified=[94mTrue[39;49;00m, no_local_commits=[94mTrue[39;49;00m)[90m[39;49;00m
+        applier = _updater(tmp_path, git)[90m[39;49;00m
+    [90m[39;49;00m
+>       report = applier.update(parse_manifest(OWNED_ITEM))[90m[39;49;00m
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+
+[1m[31mtests/test_apply.py[0m:3864: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <yulon.apply.Applier object at 0x75a0cb6eb8b0>
+manifest = Manifest(schema_version=1, id='mod-ah-bot', name='AH Bot', type='module', game='wow-wotlk', description='', source=Sou...(), conflicts_with=(), sql=(), conf=(), deploy=(), patches=(), client=(), server_dbc=(), npcs=(), prompts=(), notes=())
+values = None
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mupdate[39;49;00m([96mself[39;49;00m, manifest: Manifest, values: Mapping[[96mstr[39;49;00m, [96mstr[39;49;00m] | [94mNone[39;49;00m = [94mNone[39;49;00m) -> ApplyReport:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Fast-forward this module's clone and re-apply it — refusing anything a reset destroys.[39;49;00m
+    [33m[39;49;00m
+    [33m    `install()` over a folder that is already a checkout IS the pull: the[39;49;00m
+    [33m    clone seam runs `git fetch` then `git reset --hard FETCH_HEAD` and[39;49;00m
+    [33m    re-applies the pin, and everything after it — deploy, patches, SQL,[39;49;00m
+    [33m    conf, client files — is what has to be redone once the source has[39;49;00m
+    [33m    moved. So this runs `install()` and does not reimplement any of it.[39;49;00m
+    [33m[39;49;00m
+    [33m    **What it adds is the three questions `install()` does not ask, and it[39;49;00m
+    [33m    adds them here rather than inside `_require_own_clone()` on purpose.**[39;49;00m
+    [33m    That guard returns the moment this app's own claim reads `OWNED` —[39;49;00m
+    [33m    before `origin`, before `is_unmodified()` and before[39;49;00m
+    [33m    `no_local_commits()` — and for a FIRST install into a folder this app[39;49;00m
+    [33m    made that is right: there is nothing there to lose, and asking would[39;49;00m
+    [33m    cost a network round trip on every install. For an update the same[39;49;00m
+    [33m    silence is a `reset --hard` over work nobody looked at, which is the[39;49;00m
+    [33m    one thing T44's ticket says must not happen: "a dirty clone is not[39;49;00m
+    [33m    fast-forwarded".[39;49;00m
+    [33m[39;49;00m
+    [33m    The three, in the order of what costs least and is most certain:[39;49;00m
+    [33m[39;49;00m
+    [33m    1. **The repository.** The update never consults `CloneSpec.url`: the[39;49;00m
+    [33m       clone seam fetches whatever `origin` the checkout already has. So an[39;49;00m
+    [33m       app claim — a JSON file under a path this app can write — would[39;49;00m
+    [33m       otherwise authorise resetting a folder that is a DIFFERENT[39;49;00m
+    [33m       repository and then deploying this manifest's files, patching them[39;49;00m
+    [33m       and running its SQL over the result. A local read (`git remote[39;49;00m
+    [33m       get-url`), so it is asked first and both names go in the refusal.[39;49;00m
+    [33m    2. **The working tree.** `reset --hard` destroys precisely what `git[39;49;00m
+    [33m       status` reports. Also a local read.[39;49;00m
+    [33m    3. **HEAD.** `status` compares the tree and the index against HEAD and[39;49;00m
+    [33m       says nothing about what HEAD itself carries, so a user who[39;49;00m
+    [33m       COMMITTED their work passes 1 and 2. `no_local_commits()` counts[39;49;00m
+    [33m       `FETCH_HEAD..HEAD` after running the update's own fetch, which is[39;49;00m
+    [33m       why it is asked LAST — it is the one that costs a round trip — and[39;49;00m
+    [33m       why it also refuses a remote that has REWOUND and a detached HEAD[39;49;00m
+    [33m       with commits of its own: all three are "HEAD carries something the[39;49;00m
+    [33m       new tip does not", counted the same way whoever put it there.[39;49;00m
+    [33m[39;49;00m
+    [33m    `is True` throughout and never truthiness: `None` is "git could not be[39;49;00m
+    [33m    asked", which fails closed and says so in its own words. Telling an[39;49;00m
+    [33m    offline user that they have uncommitted changes is telling them[39;49;00m
+    [33m    something nobody established (`Ownership`'s three outcomes).[39;49;00m
+    [33m[39;49;00m
+    [33m    A folder that is not there at all is refused rather than quietly[39;49;00m
+    [33m    installed: the press the user made was Update, and an Update that[39;49;00m
+    [33m    silently installs is a different action wearing the same button.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        refusal = [96mself[39;49;00m._update_refusal(manifest) [95mor[39;49;00m [33m"[39;49;00m[33mno[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        [94mif[39;49;00m refusal [95mis[39;49;00m [95mnot[39;49;00m [94mNone[39;49;00m:[90m[39;49;00m
+>           [94mraise[39;49;00m ApplyError(refusal)[90m[39;49;00m
+[1m[31mE           yulon.apply.ApplyError: no[0m
+
+[1m[31myulon/apply.py[0m:1310: ApplyError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_apply.py::[1mtest_a_clean_owned_checkout_of_the_right_repository_updates[0m - yulon.apply.ApplyError: no
+[31m[31m[1m1 failed[0m, [32m143 passed[0m[31m in 1.94s[0m[0m

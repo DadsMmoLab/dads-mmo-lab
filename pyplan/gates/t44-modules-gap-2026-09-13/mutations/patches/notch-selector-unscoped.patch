@@ -1,0 +1,14 @@
+# gate: tests/test_panel_style.py -q
+diff --git a/pylauncher/yulon/ui/widgets/panel_style.py b/pylauncher/yulon/ui/widgets/panel_style.py
+index 8a66b3fe..24cc182e 100644
+--- a/pylauncher/yulon/ui/widgets/panel_style.py
++++ b/pylauncher/yulon/ui/widgets/panel_style.py
+@@ -47,7 +47,7 @@ def panel_qss() -> str:
+     function would be two answers to check.
+     """
+     notch = "\n".join(
+-        f"QGroupBox#{name}::title {{ subcontrol-position: top center; left: 0px; }}"
++        "QGroupBox::title { subcontrol-position: top center; left: 0px; }"
+         for name in CARD_OBJECT_NAMES
+     )
+     return f"""

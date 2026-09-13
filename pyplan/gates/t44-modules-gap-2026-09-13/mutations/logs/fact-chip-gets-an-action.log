@@ -1,0 +1,31 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+
+==================================== ERRORS ====================================
+[31m[1m_________________ ERROR collecting tests/test_modules_panel.py _________________[0m
+[31m/home/perzi/y313/lib/python3.13/site-packages/_pytest/python.py:508: in importtestmodule
+    mod = import_path(
+/home/perzi/y313/lib/python3.13/site-packages/_pytest/pathlib.py:596: in import_path
+    importlib.import_module(module_name)
+/home/perzi/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/importlib/__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1395: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1331: in _find_and_load_unlocked
+    ???
+<frozen importlib._bootstrap>:935: in _load_unlocked
+    ???
+/home/perzi/y313/lib/python3.13/site-packages/_pytest/assertion/rewrite.py:188: in exec_module
+    exec(co, module.__dict__)
+tests/test_modules_panel.py:15: in <module>
+    from yulon.ui.widgets import modules_panel as mp
+E     File "/home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher/yulon/ui/widgets/modules_panel.py", line 442
+E       )
+E       ^
+E   SyntaxError: positional argument follows keyword argument[0m
+[36m[1m=========================== short test summary info ============================[0m
+[31mERROR[0m tests/test_modules_panel.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+[31m[31m[1m1 error[0m[31m in 0.15s[0m[0m

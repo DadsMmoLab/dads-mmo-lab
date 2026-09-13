@@ -1,0 +1,13 @@
+# gate: tests/test_tuning_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/tuning_panel.py b/pylauncher/yulon/ui/widgets/tuning_panel.py
+index fe8ef679..262a3d5e 100644
+--- a/pylauncher/yulon/ui/widgets/tuning_panel.py
++++ b/pylauncher/yulon/ui/widgets/tuning_panel.py
+@@ -937,7 +937,6 @@ class TuningPanel(QWidget):
+         self.file_save_button.setEnabled(self._actions_enabled and not read_only)
+         # A backup of the file you were looking at a moment ago is not a
+         # backup of this one, so the name goes with the text it described.
+-        self.set_backup(None)
+         self._relint()
+ 
+     def _file_picked(self, name: str) -> None:

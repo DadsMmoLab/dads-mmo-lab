@@ -1,0 +1,16 @@
+# gate: tests/test_modules_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..9043b4e9 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -1181,9 +1181,7 @@ class ModulesPanel(QWidget):
+         read and the write are separated by an event-loop turn, and a remove
+         can land between them.
+         """
+-        widget = self._rows.get((family, item_id))
+-        if widget is not None:
+-            widget.set_version(version)
++        self._rows[(family, item_id)].set_version(version)
+ 
+     def selected_row(self) -> RowWidget | None:
+         """The selected row itself, family included -- what `selected_id()` cannot say."""

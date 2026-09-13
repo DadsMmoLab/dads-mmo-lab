@@ -28,19 +28,34 @@
       "file": "env/dist/etc/modules/challenge_modes.conf",
       "keys": [
         {
-          "key": "ChallengeModes.Enable"
+          "key": "ChallengeModes.Enable",
+          "label": "Enable challenge modes",
+          "explain": "Enable challenge modes. If set to 0, all challenges will be disabled, and the challenge mode selection object will not be present in starting areas.",
+          "type": "bool"
         },
         {
-          "key": "Hardcore.Enable"
+          "key": "Hardcore.Enable",
+          "label": "Offer the Hardcore challenge",
+          "explain": "If set to 0, this challenge option will not be selectable at the challenge modes object.",
+          "type": "bool"
         },
         {
-          "key": "Hardcore.XPMultiplier"
+          "key": "Hardcore.XPMultiplier",
+          "label": "Hardcore XP multiplier",
+          "explain": "Multiplies XP the player gains if this challege is enabled. This is a multiplier values, so bonus are applied multiplicatively.",
+          "type": "text"
         },
         {
-          "key": "Hardcore.TalentRewards"
+          "key": "Hardcore.TalentRewards",
+          "label": "Hardcore talent rewards",
+          "explain": "Rewards talent points for players when reaching the given levels with the challenge enabled. The format is the level followed by the number of talent points given at that level, separated by commas.",
+          "type": "text"
         },
         {
-          "key": "Hardcore.ItemRewards"
+          "key": "Hardcore.ItemRewards",
+          "label": "Hardcore item rewards",
+          "explain": "Rewards items for players when reaching the given levels with the challenge enabled. The IDs used are item entry IDs. The format is the level followed by the item ID, separated by commas. Example: Hardcore.ItemRewards = \"80 54811\".",
+          "type": "text"
         }
       ],
       "template": "conf/challenge_modes.conf.dist"
@@ -51,7 +66,10 @@
         {
           "key": "EnablePlayerSettings",
           "default": "1",
-          "note": "MUST be 1 or the module does nothing"
+          "note": "MUST be 1 or the module does nothing",
+          "label": "Character-specific settings",
+          "explain": "Enables the usage of character specific settings.",
+          "type": "bool"
         }
       ]
     }

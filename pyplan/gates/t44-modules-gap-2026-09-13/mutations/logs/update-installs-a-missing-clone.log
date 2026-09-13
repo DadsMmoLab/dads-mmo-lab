@@ -1,0 +1,51 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m [ 50%]
+[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[31m [100%][0m
+=================================== FAILURES ===================================
+[31m[1m___________ test_an_update_of_a_module_that_is_not_installed_says_so ___________[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-814/test_an_update_of_a_module_tha0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_an_update_of_a_module_that_is_not_installed_says_so[39;49;00m(tmp_path: Path) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Update is for a clone that exists; a folder that is not there is an INSTALL.[39;49;00m
+    [33m[39;49;00m
+    [33m    Said rather than silently turned into one: the press the user made was[39;49;00m
+    [33m    Update, and an Update that quietly installs is a different action under the[39;49;00m
+    [33m    same button.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: `update-installs-a-missing-clone` -- fall through to `install()`[39;49;00m
+    [33m    when the folder is absent and the press changes meaning without saying so.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        _installed_by_this_app(tmp_path)[90m[39;49;00m
+        git = _FakeGit({}, unmodified=[94mTrue[39;49;00m, no_local_commits=[94mTrue[39;49;00m)[90m[39;49;00m
+        applier = _updater(tmp_path, git)[90m[39;49;00m
+    [90m[39;49;00m
+        [94mwith[39;49;00m pytest.raises(ApplyError, match=[33m"[39;49;00m[33mis not installed[39;49;00m[33m"[39;49;00m):[90m[39;49;00m
+>           applier.update(parse_manifest(OWNED_ITEM))[90m[39;49;00m
+
+[1m[31mtests/test_apply.py[0m:3885: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+[1m[31myulon/apply.py[0m:1311: in update
+    [0m[94mreturn[39;49;00m [96mself[39;49;00m.install(manifest, values)[90m[39;49;00m
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31myulon/apply.py[0m:1213: in install
+    [0m[96mself[39;49;00m.git.clone([90m[39;49;00m
+[1m[31mtests/test_apply.py[0m:73: in clone
+    [0m(spec.dest / [33m"[39;49;00m[33m.git[39;49;00m[33m"[39;49;00m).mkdir(exist_ok=[94mTrue[39;49;00m)[90m[39;49;00m
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = PosixPath('/tmp/pytest-of-perzi/pytest-814/test_an_update_of_a_module_tha0/modules/mod-ah-bot/.git')
+mode = 511, parents = False, exist_ok = True
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mmkdir[39;49;00m([96mself[39;49;00m, mode=[94m0o777[39;49;00m, parents=[94mFalse[39;49;00m, exist_ok=[94mFalse[39;49;00m):[90m[39;49;00m
+    [90m    [39;49;00m[33m"""[39;49;00m
+    [33m    Create a new directory at this given path.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        [94mtry[39;49;00m:[90m[39;49;00m
+>           os.mkdir([96mself[39;49;00m, mode)[90m[39;49;00m
+[1m[31mE           FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-perzi/pytest-814/test_an_update_of_a_module_tha0/modules/mod-ah-bot/.git'[0m
+
+[1m[31m/home/perzi/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/pathlib/_local.py[0m:722: FileNotFoundError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_apply.py::[1mtest_an_update_of_a_module_that_is_not_installed_says_so[0m - FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-per...
+[31m[31m[1m1 failed[0m, [32m143 passed[0m[31m in 1.96s[0m[0m
