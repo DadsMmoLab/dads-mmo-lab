@@ -8697,3 +8697,30 @@ def test_restart_and_recreate_both_ask_first_and_do_nothing_on_no(
 
     assert view._tuning_owed.get("restart") is None, "the restart covered what owed one"
     assert view._tuning_owed.get("recreate"), "and nothing else"
+
+
+def test_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_what_is_owed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The busy gate has to reach this bar: Restart stops the containers an
+    install, a rebuild or an importer run is using.
+
+    And it must come back to what is OWED rather than to "on": a job of its own
+    finishing must not hand the tab a live "Restart server…" over a change
+    nobody made.
+
+    Mutation: re-enable the four unconditionally in `_set_busy(False)` and a
+    finished install arms Restart and Recreate on a tab with nothing waiting.
+    """
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+
+    view._set_busy(True)
+    assert view.tuning_restart_button.isEnabled() is False
+    assert view.tuning_recreate_button.isEnabled() is False
+    assert view.tuning_reload_button.isEnabled() is False
+
+    view._set_busy(False)
+    assert view.tuning_restart_button.isEnabled() is True, "a restart is still owed"
+    assert view.tuning_recreate_button.isEnabled() is False, "nothing owes a recreate"
+    assert view.tuning_reload_button.isEnabled() is True

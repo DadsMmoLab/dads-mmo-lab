@@ -3506,6 +3506,15 @@ class ControllerView(QWidget):
             # And the Tuning tab's saves: they write conf files an install,
             # a rebuild or an importer run is reading at the same moment.
             self.tuning_panel.set_enabled_actions(False)
+            # And its action bar (T44 item 7). The two expensive ones stop and
+            # start the very containers an install, a rebuild or an importer
+            # run is using; the two cheap ones redraw the cards under a save
+            # that is still in flight.
+            self.tuning_reload_button.setEnabled(False)
+            self.tuning_revert_all_button.setEnabled(False)
+            self.tuning_recreate_button.setEnabled(False)
+            self.tuning_restart_button.setEnabled(False)
+            self.tuning_banner_button.setEnabled(False)
         else:
             self.refresh_button.setEnabled(True)
             self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -3524,6 +3533,14 @@ class ControllerView(QWidget):
             # forbids -- `RowWidget.set_enabled_actions` keeps `removable`.
             self.modules_panel.set_enabled_actions(self._module_actions_allowed())
             self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
+            # Back to what is OWED, never unconditionally: a job of its own
+            # finishing must not hand this tab a live "Restart server…" over a
+            # change nobody made. `_refresh_tuning_owed()` is the one place
+            # that rule lives, so it is what unlocks them.
+            self.tuning_reload_button.setEnabled(True)
+            self.tuning_banner_button.setEnabled(True)
+            self._set_tuning_revert_all()
+            self._refresh_tuning_owed()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
