@@ -53,6 +53,18 @@ def remove_tree(path: Path) -> None:
     success having deleted nothing is the failure this function exists to make
     impossible.
     """
+    if path.is_symlink():
+        # `shutil.rmtree` REFUSES a top-level directory symlink; the retry below
+        # would not. `_clear_read_only()` walks with `os.walk()` and chmods
+        # THROUGH the link, and `_remove_unenterable()` scandirs through it and
+        # can `os.rmdir()` on the far side -- so the recovery added for
+        # read-only git packs would reach outside the tree it was handed
+        # (review, 2026-09-13). Refused here rather than in each caller: this is
+        # the function that knows it is about to walk.
+        raise TreeRemovalError(
+            f"{path} is a symbolic link, not a directory this app may delete through. "
+            f"Remove the link itself if that is what was meant; nothing was changed."
+        )
     try:
         shutil.rmtree(path)
     except OSError:

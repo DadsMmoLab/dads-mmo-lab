@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from yulon import apply as apply_module
+from yulon import rmtree as rmtree_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native
 from yulon.git import CloneSpec, RunnerGit
@@ -3797,3 +3798,64 @@ def test_no_module_outside_rmtree_calls_shutil_rmtree_directly() -> None:
         "the T49 defect returning — git leaves read-only packs on Windows and a bare rmtree "
         "stops at the first one, having already half-deleted the tree: " + ", ".join(offenders)
     )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics; Windows is its own press")
+def test_removing_a_symlinked_tree_never_reaches_through_it(tmp_path: Path) -> None:
+    """A delete must not touch anything outside the path it was handed (T49 review).
+
+    `shutil.rmtree` REFUSES a top-level directory symlink -- it raises rather
+    than following it. T49's retry did not: `_clear_read_only()` walks with
+    `os.walk()` and chmods through the link, and `_remove_unenterable()`
+    scandirs through it and can `os.rmdir()` a directory on the other side. So
+    the recovery added for read-only git packs gave the delete a reach the
+    plain call never had.
+
+    `Applier._rm()` made it live: `Path.is_dir()` FOLLOWS symlinks and was
+    tested before `is_symlink()`, so a symlink to a directory took the
+    remove_tree branch instead of the unlink one.
+
+    What must hold: the caller named a path; only that path may change.
+    """
+    outside = tmp_path / "somebody-elses-tree"
+    (outside / "keep").mkdir(parents=True)
+    victim = outside / "keep" / "file.txt"
+    victim.write_text("mine\n", encoding="utf-8")
+    victim.chmod(0o444)
+    before = victim.stat().st_mode
+
+    link = tmp_path / "link-to-it"
+    link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        rmtree_module.remove_tree(link)
+
+    assert outside.is_dir(), "the delete reached through the link and removed the target"
+    assert victim.is_file(), "the delete reached through the link and removed a file"
+    assert victim.stat().st_mode == before, "the delete chmodded a file outside the tree"
+    assert link.is_symlink(), "the link itself was consumed by a refusal"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics; Windows is its own press")
+def test_rm_unlinks_a_symlink_rather_than_deleting_what_it_points_at(tmp_path: Path) -> None:
+    """`_rm()` asks `is_symlink()` before `is_dir()`, because the latter follows.
+
+    The manifest step said "remove this path". For a symlink that means the
+    link, never the tree on the other end -- which may be a game install, a
+    client folder, or anything else the user linked in.
+    """
+    outside = tmp_path / "real"
+    (outside / "data").mkdir(parents=True)
+    (outside / "data" / "keep.txt").write_text("mine\n", encoding="utf-8")
+
+    server = tmp_path / "server"
+    server.mkdir()
+    link = server / "modules"
+    link.symlink_to(outside, target_is_directory=True)
+
+    applier = Applier(server, git=_FakeGit({}), remote_url=_Origins(OWNED_URL))
+    log = apply_module._Log()
+    applier._rm(link, log)
+
+    assert not link.exists() and not link.is_symlink(), "the link was left behind"
+    assert (outside / "data" / "keep.txt").is_file(), "_rm deleted through the symlink"

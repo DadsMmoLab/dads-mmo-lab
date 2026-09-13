@@ -1869,10 +1869,18 @@ class Applier:
             )
 
     def _rm(self, path: Path, log: _Log) -> None:
-        if path.is_dir():
+        # `is_symlink()` FIRST, because `is_dir()` follows the link: a symlink to
+        # a directory used to take the tree branch and, since T49 gave that
+        # branch a retry that walks, would have been followed into somebody
+        # else's files (review, 2026-09-13). A manifest that says "remove this
+        # path" means the link, never what it points at.
+        if path.is_symlink():
+            path.unlink()
+            log.done.append(f"rm {_rel(self.server_dir, path)}")
+        elif path.is_dir():
             rmtree.remove_tree(path)  # T49: may be a checkout, so read-only packs
             log.done.append(f"rm -r {_rel(self.server_dir, path)}")
-        elif path.is_file() or path.is_symlink():
+        elif path.is_file():
             path.unlink()
             log.done.append(f"rm {_rel(self.server_dir, path)}")
 

@@ -120,3 +120,38 @@ callers not using one that had been written, with nothing in the tree to say so.
 - **The Windows press.** Everything above is the POSIX spelling of the stop. The Windows
   spelling wants `yulon-win11` against a real clone, which is also the only way to show the
   user's own error is gone.
+
+## Review round 1 — a HIGH finding, and it was mine
+
+Adversarial Codex review, 2026-09-13, after the branch was already pushed. It found something
+the mutations could not, because mutations only probe what the author already considered.
+
+**HIGH — the retry could reach outside the tree it was handed.** `shutil.rmtree` REFUSES a
+top-level directory symlink. T49's recovery did not: `_clear_read_only()` walks with
+`os.walk()` and chmods THROUGH the link, and `_remove_unenterable()` scandirs through it and
+can `os.rmdir()` on the far side. `Applier._rm()` made it reachable — `Path.is_dir()` follows
+symlinks and was tested before `is_symlink()`, so a symlink to a directory took the tree
+branch. Before this ticket that branch was a bare `rmtree` that simply raised.
+
+So a ticket about *a delete that stops half way* gave the delete a reach the plain call never
+had. Reproduced before fixing:
+
+```
+FAILED test_removing_a_symlinked_tree_never_reaches_through_it
+  AssertionError: the delete chmodded a file outside the tree
+```
+
+Fixed in two places, because either alone leaves the other wrong: `remove_tree()` refuses a
+top-level symlink before any recovery runs, and `_rm()` asks `is_symlink()` before `is_dir()`
+so a manifest's `rm` step removes the LINK rather than what it points at.
+
+**MEDIUM — the audit allowlist exempts whole files.** Taken up below.
+
+**MEDIUM — the write ledger cannot separate the two clone seams.** `RunnerGit.clone()` and
+`ContainerGit.clone()` both key as `git.py::clone::rmtree.remove_tree`, so removing either
+call leaves the other and both ledger directions still pass. **Not fixed here:** the collision
+is in the ledger's `module::function::callee` key shape, predates this ticket (the bare
+`shutil.rmtree` calls collided identically), and changing that shape touches every row. The
+claim "all five sites stay enumerated" was overstated and is corrected: four keys, five sites.
+
+Gate after the fix: `4371 passed, 8 skipped`. ruff/black clean, mypy clean on all three.
