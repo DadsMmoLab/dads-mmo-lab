@@ -2462,6 +2462,17 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "claim every module is missing. Takes the folder and not the server directory because "
         "`apply.CLONE_DIRS` gives each family its own"
     ),
+    ("ui/gamepad.py", "_iter_focusable"): (
+        "walks the QWidget TREE, not a directory: it yields the focusable, enabled, visible "
+        "descendants of a root widget so the D-pad has somewhere to go, and skips a read-only "
+        "text surface because one swallows the arrow keys. It reads no path, decides no write, "
+        "and touches no filesystem; it is here because the scan cannot tell a child-widget "
+        "walk from a folder walk by shape alone"
+    ),
+    ("ui/gamepad.py", "walk"): (
+        "the recursive half of `_iter_focusable()` and the same answer: QWidget children, "
+        "never directory entries"
+    ),
     ("docker.py", "_first_populated_ancestor"): (
         "walks up a path looking for a directory that HAS something in it, to tell a real "
         "mount from an empty mount point; its own `except OSError` logs and answers None, "
