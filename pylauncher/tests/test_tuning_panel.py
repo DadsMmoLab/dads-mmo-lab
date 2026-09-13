@@ -173,7 +173,7 @@ def test_a_changed_row_is_marked_and_says_what_it_changed_from(qapp: object) -> 
     assert not editor.changed and editor.changed_label.isHidden()
     editor.control.setValue(40)
     assert editor.changed
-    assert editor.changed_label.text() == tp.CHANGED_FROM.format(old="30")
+    assert editor.changed_label.text() == tp.CHANGED_FROM.format(key="BeastMaster.Enable", old="30")
     editor.control.setValue(30)
     assert not editor.changed
     # The MARK, not just the property: asserting `changed` alone left
@@ -184,7 +184,9 @@ def test_a_changed_row_is_marked_and_says_what_it_changed_from(qapp: object) -> 
 def test_a_row_that_was_not_in_the_file_says_it_changed_from_nothing(qapp: object) -> None:
     editor = tp.RowEditor(_row(current=None, default=None))
     editor.control.setText("7")
-    assert editor.changed_label.text() == tp.CHANGED_FROM.format(old=tp.NOTHING)
+    assert editor.changed_label.text() == tp.CHANGED_FROM.format(
+        key="BeastMaster.Enable", old=tp.NOTHING
+    )
 
 
 def test_a_card_offers_only_the_keys_that_changed(qapp: object) -> None:
@@ -286,7 +288,8 @@ def test_a_read_only_file_is_shown_and_cannot_be_saved(qapp: object) -> None:
 def test_an_editable_file_lints_live_and_never_blocks(qapp: object) -> None:
     panel = tp.TuningPanel()
     panel.set_file_text("A = 1\n", read_only=False, note=None)
-    assert panel.lint_label.text() == ""
+    # T44 item 14: a clean file now says so, where T43 left the label empty.
+    assert panel.lint_label.text() == tp.LINT_OK
     assert panel.file_save_button.isEnabled()
     panel.editor.setPlainText("A = 1\nnot a setting\n")
     said = panel.lint_label.text()
@@ -338,7 +341,10 @@ def test_a_switch_over_a_key_the_file_never_carried_is_not_changed_until_it_is_m
     editor.control.setChecked(False)
     # Back to off, which IS a change from "no value at all": saving it writes
     # the key for the first time, which is the whole point of the tab.
-    assert editor.changed and editor.changed_label.text() == tp.CHANGED_FROM.format(old=tp.NOTHING)
+    assert editor.changed
+    assert editor.changed_label.text() == tp.CHANGED_FROM.format(
+        key="BeastMaster.Enable", old=tp.NOTHING
+    )
 
 
 def test_a_spinner_over_a_key_the_file_never_carried_is_not_changed_until_it_is_moved(
@@ -445,3 +451,158 @@ def test_a_cards_save_carries_its_family_so_the_view_never_guesses(qapp: object)
     keg.save_button.click()
     keg.revert_button.click()
     assert saved == [("keg", "bmah")] and reverted == [("keg", "bmah")]
+
+
+# -- what the tab already knew and threw away (T44 items 9-12, 14) -----------
+
+
+def test_a_row_that_cannot_be_written_says_so_in_a_chip() -> None:
+    """Item 9's third chip, out of a fact `TuningRow` has carried since T43.
+
+    `read_only_reason` is already drawn as a SENTENCE under the row; the chip
+    is the same fact at a glance, so a person scanning a card of twelve
+    settings can see which of them are not theirs to change.
+
+    Mutation: return `()` for a read-only row and the only mark left is a
+    paragraph of prose halfway down the row.
+    """
+    assert tp.row_chips(_row(file=LUA)) == (tp.CHIP_READ_ONLY,)
+
+
+def test_a_key_with_no_declared_type_is_chipped_as_free_text() -> None:
+    """Item 9's second chip. The fact is `control_kind() == "box" and type is None`.
+
+    That pair is exactly T43's safety rule: a key the catalog says nothing
+    about gets the one control that can express anything, and the chip is the
+    tab admitting it is not validating what you type.
+
+    Mutation: chip every text box and an `int` with one bound -- which IS
+    validated on save by `tuning.check()` -- claims it is free text.
+    """
+    assert tp.row_chips(_row(type=None)) == (tp.CHIP_FREE_TEXT,)
+    assert tp.row_chips(_row(type="int", min=0)) == ()
+    assert tp.row_chips(_row(type="bool")) == ()
+
+
+def test_a_changed_row_is_chipped_with_the_job_that_change_owes() -> None:
+    """Item 9's first chip, and its word comes from `tuning.apply_rule()`.
+
+    Computed and never typed: the card above already prices the same change
+    through the same function, and a chip spelled by hand would be a second
+    place for `recreate` to be called a restart.
+
+    Mutation: hard-code "Restart pending" and a key in a conf OUTSIDE every
+    bind -- which needs the containers replaced -- promises the fast restart.
+    """
+    bound = _row(file=CONF, type="bool")
+    unbound = _row(file="modules/mod-x/conf/mod-x.conf", type="bool")
+
+    assert tp.row_chips(bound, changed=True) == (tp.PENDING_CHIPS["restart"],)
+    assert tp.row_chips(unbound, changed=True) == (tp.PENDING_CHIPS["recreate"],)
+    assert tuning.apply_rule(unbound) == "recreate"
+
+
+def test_an_int_with_both_bounds_shows_them_beside_the_control() -> None:
+    """Item 11. The bounds are already what earn the row a spinner (`control_kind`).
+
+    Mutation: show them for a one-bound int too and the row claims a limit the
+    catalog never stated -- which is the invention `control_kind()` refuses a
+    spinner over in the first place.
+    """
+    assert tp.bounds_note(_row(type="int", min=0, max=80)) == "0–80"
+    assert tp.bounds_note(_row(type="int", min=0)) is None
+    assert tp.bounds_note(_row(type="int")) is None
+    assert tp.bounds_note(_row(type="bool")) is None
+
+
+def test_a_card_hint_comes_from_the_backends_its_rows_really_use() -> None:
+    """Item 12's per-card sentence, derived and not typed.
+
+    A conf card is read at world start; a card with a `.lua` row in it is
+    patched into a script that was deployed into the server, which is why
+    those rows are read-only in this version.
+
+    Mutation: key the hint off the module's FAMILY and a `module` whose only
+    tuning row is a deployed Lua script claims its settings are read at world
+    start.
+    """
+    conf_card = tp.build_tuning_cards((_row(),))[0]
+    lua_card = tp.build_tuning_cards((_row(file=LUA),))[0]
+
+    assert tp.card_hint(conf_card) == tp.HINT_CONF
+    assert tp.card_hint(lua_card) == tp.HINT_LUA
+
+
+def test_a_card_says_how_many_settings_it_carries(qapp: object) -> None:
+    """Item 12's count, beside the module's name.
+
+    Mutation: count the FILES instead and Beastmaster's five settings across
+    two files read as `Settings 2`.
+    """
+    card = tp.build_tuning_cards((_row(key="A"), _row(key="B"), _row(key="C")))[0]
+    widget = tp.CardWidget(card)
+
+    assert widget.count_label.text() == "Settings 3"
+
+
+def test_a_changed_row_names_its_key_and_the_value_it_had(qapp: object) -> None:
+    """Item 10. `changed from 10` does not say WHICH key, on a card of twelve.
+
+    Mutation: drop the key from the sentence and the line reads `· was 10`
+    with nothing to attach it to.
+    """
+    editor = tp.RowEditor(
+        _row(key="beastmaster.min_level", type="int", min=0, max=80, current="10")
+    )
+    assert isinstance(editor.control, QSpinBox)
+
+    editor.control.setValue(20)
+
+    assert editor.changed_label.text() == "beastmaster.min_level · was 10"
+
+
+def test_a_changed_row_gets_a_rail_down_its_left_edge(qapp: object) -> None:
+    """Item 10's other half: the change is findable by scrolling, not by reading.
+
+    Mutation: set the rail once in `__init__` and every row on the card wears
+    it, changed or not.
+    """
+    editor = tp.RowEditor(_row(type="bool", current="0"))
+    assert "border-left" not in editor.styleSheet()
+
+    assert isinstance(editor.control, QCheckBox)
+    editor.control.setChecked(True)
+
+    assert "border-left" in editor.styleSheet()
+
+
+def test_the_lint_verdict_is_shown_when_the_file_is_clean(qapp: object) -> None:
+    """Item 14: `lint()` already answers; T43 drew only the half that complains.
+
+    A guard that is silent when it passes is a guard a user cannot tell from a
+    guard that is not running.
+
+    Mutation: keep `said or ""` and a clean file shows nothing, which is what
+    an unlinted file also shows.
+    """
+    panel = tp.TuningPanel()
+    panel.set_file_text("A = 1\n# a comment\n", read_only=False, note=None)
+
+    assert panel.lint_label.text() == tp.LINT_OK
+
+    panel.editor.setPlainText("A = 1\nnonsense\n")
+
+    assert panel.lint_label.text() != tp.LINT_OK
+    assert "nonsense" in panel.lint_label.text()
+
+
+def test_a_read_only_file_gets_no_verdict_either_way(qapp: object) -> None:
+    """Nothing can be typed into it, so there is nothing to say about what was.
+
+    Mutation: lint read-only files too and `worldserver.conf` -- 700 lines this
+    app will not write -- gets a verdict about somebody else's file.
+    """
+    panel = tp.TuningPanel()
+    panel.set_file_text("nonsense\n", read_only=True, note=None)
+
+    assert panel.lint_label.text() == ""

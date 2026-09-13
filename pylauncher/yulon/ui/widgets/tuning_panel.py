@@ -56,13 +56,62 @@ from yulon.ui.theme import (
 
 ControlKind = Literal["switch", "spinner", "box", "none"]
 
+CHIP_READ_ONLY = "read-only in this version"
+"""The chip on a row this app will not write (T44 item 9).
+
+The same fact `read_only_reason` already spells out in a sentence under the
+row, at a glance: a person scanning a card of twelve settings needs to see
+which of them are not theirs to change without reading twelve paragraphs.
+"""
+
+CHIP_FREE_TEXT = "free text"
+"""The chip on a key the catalog declared no `type` for.
+
+Exactly `control_kind(row) == "box" and row.type is None`, which is T43's
+safety rule from the other side: such a key gets the one control that can
+express anything, and nothing checks what is typed into it -- `tuning.check()`
+has no declaration to check it against. An `int` with one bound is NOT free
+text: it gets a text box for want of a range, and its value is still checked.
+"""
+
+PENDING_CHIPS: dict[ApplyRule, str] = {
+    "rebuild": "Rebuild pending",
+    "recreate": "Recreate pending",
+    "restart": "Restart pending",
+}
+"""What a CHANGED row owes, by the rule `tuning.apply_rule()` gives it.
+
+Keyed by the rule rather than written out per row, so the chip and the card's
+own sentence -- which prices the same change through the same function --
+cannot come to disagree about whether a file needs a restart or a replacement
+of the containers. `read-only` has no entry because a read-only row cannot be
+changed and so can owe nothing.
+"""
+
+HINT_CONF = "read at world start"
+HINT_LUA = "patched into a deployed Lua script"
+HINT_OTHER = "not a file this version writes"
+"""The per-card sentence (T44 item 12), keyed off the BACKENDS the card's rows use.
+
+Off the backends and not off the module's family: a `module` whose only tuning
+row is a deployed `.lua` is not read at world start, it is patched into a
+script that was copied into the server -- which is the same fact that makes
+those rows read-only in this version.
+"""
+
 NOTHING = "nothing"
 """What a row that had no value at all says it changed FROM.
 
 An empty string in that sentence reads as a value the file held and lost.
 """
 
-CHANGED_FROM = "changed from {old}"
+CHANGED_FROM = "{key} · was {old}"
+"""What a changed row says, and it NAMES THE KEY (T44 item 10).
+
+`changed from 10` on a card of twelve settings says which value, not which
+setting. The mockup's own spelling, and the key is the string a user will
+search the module's documentation for.
+"""
 
 NOT_IN_THE_FILE = "not in the file — this is the catalog's default, not a setting"
 """The note under a key the deployed conf does not carry.
@@ -72,6 +121,14 @@ either: `apply.py` declines to write a key with no default, so the conf on disk
 never mentions it. Showing the default with no note would read as a setting
 that is already there, and pressing Save would look like a no-op when it is
 the first time the key has ever been written.
+"""
+
+LINT_OK = "✓ every line reads as Key = Value"
+"""The verdict when `tuning.lint()` finds nothing (T44 item 14).
+
+Its words are the lint's own rule, not a tick on its own: the guard checks
+that each line is blank, a comment, a `[section]` header, or a `Key = Value`
+assignment, and a bare "looks fine" would not tell anybody what was checked.
 """
 
 NOTHING_TO_TUNE = (
@@ -206,6 +263,57 @@ def control_kind(row: TuningRow) -> ControlKind:
     return "box"
 
 
+def row_chips(row: TuningRow, *, changed: bool = False) -> tuple[str, ...]:
+    """Everything this row has to say about itself in one word each (T44 item 9).
+
+    Every one of them is a fact T43 already computed and then drew only as
+    prose, or not at all: `read_only_reason`, `control_kind()` against
+    `row.type`, and `tuning.apply_rule()`.
+
+    `changed` is the live half and is passed in rather than read off the row,
+    because "has the user moved this control?" is a property of the WIDGET and
+    this function is on the pure side of the module.
+    """
+    if not row.editable:
+        return (CHIP_READ_ONLY,)
+    chips: list[str] = []
+    if changed:
+        pending = PENDING_CHIPS.get(tuning.apply_rule(row))
+        if pending is not None:
+            chips.append(pending)
+    if control_kind(row) == "box" and row.type is None:
+        chips.append(CHIP_FREE_TEXT)
+    return tuple(chips)
+
+
+def bounds_note(row: TuningRow) -> str | None:
+    """`0–80` for an int the catalog gave BOTH bounds for, else `None` (T44 item 11).
+
+    Both, and never one: the pair is exactly what earns this row a spinner
+    (`control_kind`), and printing a half-range would state a limit the
+    catalog never declared -- the invention that function refuses a spinner
+    over in the first place.
+    """
+    if row.type != "int" or row.min is None or row.max is None:
+        return None
+    return f"{row.min}–{row.max}"
+
+
+def card_hint(card: TuningCard) -> str:
+    """What KIND of thing this card's settings are, from its rows' own backends.
+
+    One sentence per card and the dearest backend wins, because a card that
+    spans two is honest only about the half a user is most likely to be
+    surprised by.
+    """
+    backends = {row.backend for row in card.rows}
+    if "lua" in backends:
+        return HINT_LUA
+    if "other" in backends:
+        return HINT_OTHER
+    return HINT_CONF
+
+
 def starting_value(row: TuningRow) -> str:
     """What the control opens at: the file's value, else the catalog's default, else empty.
 
@@ -272,7 +380,22 @@ class RowEditor(QWidget):
         self.label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
         self.label.setToolTip(row.key)
         top.addWidget(self.label)
+        # The chips, between the name and the control. Rebuilt on every edit
+        # rather than toggled, because the `pending` one comes and goes with
+        # the value and the other two never change -- one code path for both
+        # keeps them from drifting out of the order `row_chips()` decides.
+        self.chips = QLabel("", self)
+        self.chips.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        top.addWidget(self.chips)
         top.addStretch(1)
+        bounds = bounds_note(row)
+        self.bounds_label: QLabel | None = None
+        if bounds is not None:
+            # Beside the spinner, not under it: a spinner shows one number and
+            # the question a person has about it is what else it will accept.
+            self.bounds_label = QLabel(bounds, self)
+            self.bounds_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+            top.addWidget(self.bounds_label)
         self.control: QCheckBox | QSpinBox | QLineEdit | None = self._make_control()
         if self.control is not None:
             top.addWidget(self.control)
@@ -320,6 +443,8 @@ class RowEditor(QWidget):
         self.changed_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
         self.changed_label.setVisible(False)
         box.addWidget(self.changed_label)
+        self._draw_chips()
+        self._draw_rail()
 
     def _make_control(self) -> QCheckBox | QSpinBox | QLineEdit | None:
         if self.kind == "none":
@@ -367,9 +492,31 @@ class RowEditor(QWidget):
         self._moved = True
         shown = self.changed
         if shown:
-            self.changed_label.setText(CHANGED_FROM.format(old=self._start or NOTHING))
+            self.changed_label.setText(
+                CHANGED_FROM.format(key=self.row.key, old=self._start or NOTHING)
+            )
         self.changed_label.setVisible(shown)
+        self._draw_chips()
+        self._draw_rail()
         self.edited.emit()
+
+    def _draw_chips(self) -> None:
+        """Redraw this row's chips for what is true of it NOW."""
+        marks = row_chips(self.row, changed=self.changed)
+        self.chips.setText("  ".join(marks))
+        self.chips.setVisible(bool(marks))
+
+    def _draw_rail(self) -> None:
+        """The amber edge down a changed row (T44 item 10).
+
+        Set here and not once in `__init__`, because it has to come and go: a
+        rail every row wears marks nothing, and a value moved and moved back
+        is not a change (`changed` asks both questions).
+        """
+        if self.changed:
+            self.setStyleSheet(f"border-left: 2px solid {COLOR_TEXT_WARNING}; padding-left: 6px;")
+        else:
+            self.setStyleSheet("")
 
     def set_enabled_actions(self, enabled: bool) -> None:
         if self.control is not None:
@@ -393,6 +540,19 @@ class CardWidget(QGroupBox):
         self.card = card
         box = QVBoxLayout(self)
         box.setSpacing(4)
+
+        heading = QHBoxLayout()
+        self.count_label = QLabel(f"Settings {len(card.rows)}", self)
+        self.count_label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
+        heading.addWidget(self.count_label)
+        # What KIND of thing these settings are, derived from the rows' own
+        # backends (`card_hint`) rather than from the module's family.
+        self.hint_label = QLabel(card_hint(card), self)
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-style: italic;")
+        heading.addWidget(self.hint_label)
+        heading.addStretch(1)
+        box.addLayout(heading)
 
         self.files_label = QLabel("\n".join(card.files), self)
         self.files_label.setFont(QFont("monospace"))
@@ -627,7 +787,14 @@ class TuningPanel(QWidget):
             self.lint_label.setText("")
             return
         said = tuning.lint_sentence(tuning.lint(self.editor.toPlainText()))
-        self.lint_label.setText(said or "")
+        # The verdict BOTH ways (T44 item 14). T43 drew only the complaint, so
+        # a clean file and an unlinted one looked identical -- and a guard a
+        # user cannot tell from a guard that is not running is not reassuring
+        # anybody.
+        self.lint_label.setText(said or LINT_OK)
+        self.lint_label.setStyleSheet(
+            f"color: {COLOR_TEXT_WARNING};" if said else f"color: {COLOR_UNCOMMON};"
+        )
 
     # ------------------------------------------------------------ the shape
 
