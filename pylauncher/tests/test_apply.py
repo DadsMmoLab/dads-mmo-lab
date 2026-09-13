@@ -3686,3 +3686,202 @@ def test_the_wotlk_factory_hands_over_the_database_start_as_well(tmp_path: Path)
     assert start.calls == 1
     assert "started the database alone; the world server was left stopped" in report.done
     assert sql.files == [("world", "up.sql")]
+
+
+# --------------------------------------------------------------------------
+# update() — the pull the Modules tab's Update press runs (T44 round 2)
+# --------------------------------------------------------------------------
+#
+# `install()` over a clone that is already on disk IS a pull: the clone seam
+# runs `git fetch` then `git reset --hard FETCH_HEAD`. What `install()` does
+# NOT do is look inside a folder its own claim vouches for -- it returns from
+# `_require_own_clone()` the moment the claim reads OWNED, before `origin`,
+# before `is_unmodified()` and before `no_local_commits()`. For a first install
+# into an empty folder that is right and must stay right; for an UPDATE it
+# means a reset over work nobody looked at, which is the one thing T44's own
+# ticket says must not happen ("a dirty clone is not fast-forwarded").
+#
+# So `update()` asks the three questions `install()` skips, in the order of
+# what costs least and is most certain: the repository, then the working tree,
+# then HEAD. Every test below asserts the same three things: the refusal is
+# raised, the CLONE SEAM WAS NEVER REACHED, and the bytes the user had are
+# still there.
+
+
+def _owned_clone(server_dir: Path) -> tuple[Path, bytes]:
+    """A `modules/mod-ah-bot` THIS APP made, with work in it worth keeping."""
+    clone, before = _user_module(server_dir, checkout_of=OWNED_URL)
+    apply_module.write_clone_claim(clone, item_id="mod-ah-bot", url=OWNED_URL)
+    _installed_by_this_app(server_dir)
+    return clone, before
+
+
+def _updater(tmp_path: Path, git: _FakeGit, origin: str | None = OWNED_URL) -> Applier:
+    return Applier(tmp_path, git=git, remote_url=_Origins(origin))
+
+
+def test_an_update_over_a_checkout_with_uncommitted_work_refuses(tmp_path: Path) -> None:
+    """The ticket's own sentence: a dirty clone is not fast-forwarded.
+
+    `git reset --hard FETCH_HEAD` destroys precisely what `git status` reports,
+    and the claim that says this app made the folder says nothing whatever
+    about what is in it now.
+
+    Mutation: `update-skips-the-tree-check` -- drop the `is_unmodified()` arm
+    from `_update_refusal()` and the reset runs over the user's edits.
+    """
+    clone, before = _owned_clone(tmp_path)
+    git = _FakeGit({}, unmodified=False, no_local_commits=True)
+    applier = _updater(tmp_path, git)
+
+    with pytest.raises(ApplyError, match="has changes in it"):
+        applier.update(parse_manifest(OWNED_ITEM))
+
+    assert git.calls == []
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+def test_an_update_over_a_checkout_carrying_its_own_commits_refuses(tmp_path: Path) -> None:
+    """`status` is not this question and cannot be made into it.
+
+    A user who COMMITTED their work has a perfectly clean tree; `reset --hard`
+    moves HEAD off those commits and leaves them reachable only through the
+    reflog. `no_local_commits()` counts `FETCH_HEAD..HEAD` after running the
+    update's own fetch, so it is also what refuses a remote that has REWOUND:
+    the commits HEAD carries that the new tip does not are counted the same way
+    whoever put them there.
+
+    Mutation: `update-skips-the-history-check` -- drop the
+    `no_local_commits()` arm and the reset throws the commits away.
+    """
+    clone, before = _owned_clone(tmp_path)
+    git = _FakeGit({}, unmodified=True, no_local_commits=False)
+    applier = _updater(tmp_path, git)
+
+    with pytest.raises(ApplyError, match="commits of its own"):
+        applier.update(parse_manifest(OWNED_ITEM))
+
+    assert git.calls == []
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("unmodified", "no_local_commits", "expected"),
+    [
+        (None, True, "could not say whether"),
+        (True, None, "could not reach"),
+    ],
+    ids=["tree-unseen", "history-unseen"],
+)
+def test_an_update_refuses_when_git_could_not_be_asked(
+    tmp_path: Path, unmodified: bool | None, no_local_commits: bool | None, expected: str
+) -> None:
+    """ "Could not check" is not "there is nothing to lose", and it never refuses silently.
+
+    Both fail closed, and they say DIFFERENT things while failing: telling an
+    offline user that they have uncommitted changes is telling them something
+    nobody established (`Ownership`'s three-outcome rule).
+
+    Mutation: `update-treats-unknown-as-clean` -- use truthiness instead of
+    `is True` and a machine that cannot run git resets the folder.
+    """
+    clone, before = _owned_clone(tmp_path)
+    git = _FakeGit({}, unmodified=unmodified, no_local_commits=no_local_commits)
+    applier = _updater(tmp_path, git)
+
+    with pytest.raises(ApplyError, match=expected):
+        applier.update(parse_manifest(OWNED_ITEM))
+
+    assert git.calls == []
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+def test_an_update_over_a_different_repository_refuses_by_name(tmp_path: Path) -> None:
+    """The one the review found and nobody had thought to ask about.
+
+    The update never consults `CloneSpec.url`: it fetches whatever `origin` the
+    checkout already has and resets to that. So an app claim -- a JSON file
+    under a path this app can write -- authorises resetting a folder that is a
+    DIFFERENT repository, and then deploying this manifest's files, patching
+    them and running its SQL over the result.
+
+    Both names are in the refusal because the answer to "why?" is which two
+    repositories these are.
+
+    Mutation: `update-skips-the-origin-check` -- drop the `same_repo()` arm and
+    the wrong repository is fast-forwarded and then treated as this module.
+    """
+    clone, before = _owned_clone(tmp_path)
+    git = _FakeGit({}, unmodified=True, no_local_commits=True)
+    applier = _updater(tmp_path, git, origin="https://github.com/someone/else.git")
+
+    with pytest.raises(ApplyError) as raised:
+        applier.update(parse_manifest(OWNED_ITEM))
+
+    assert "someone/else" in str(raised.value)
+    assert "mod-ah-bot" in str(raised.value)
+    assert git.calls == []
+    assert (clone / "src" / "mine.cpp").read_bytes() == before
+
+
+def test_an_update_asks_the_cheap_local_questions_before_the_one_that_fetches(
+    tmp_path: Path,
+) -> None:
+    """Order, and it is not cosmetic: `no_local_commits()` costs a network round trip.
+
+    `remote_url()` and `is_unmodified()` are local reads. Asking them first
+    means an offline machine, and a folder that is the wrong repository, are
+    both refused without waiting on a fetch that would fail anyway.
+
+    Mutation: `update-fetches-before-it-looks` -- ask `no_local_commits()`
+    first and the wrong-repository case pays a fetch before refusing.
+    """
+    _owned_clone(tmp_path)
+    git = _FakeGit({}, unmodified=True, no_local_commits=True)
+    origins = _Origins("https://github.com/someone/else.git")
+    applier = Applier(tmp_path, git=git, remote_url=origins)
+
+    with pytest.raises(ApplyError):
+        applier.update(parse_manifest(OWNED_ITEM))
+
+    assert origins.asked, "the repository was never checked"
+    assert git.branches_asked == [], "a fetch was paid for a folder already refused"
+
+
+def test_a_clean_owned_checkout_of_the_right_repository_updates(tmp_path: Path) -> None:
+    """The refusals have to be REAL refusals, not a route that never runs.
+
+    Without this the four above would pass just as happily on an `update()`
+    that refused everything, which is the mirror of the defect they exist for.
+
+    Mutation: `update-always-refuses` -- return a refusal unconditionally and
+    the Update button becomes the thing item 2 forbids, one that cannot work.
+    """
+    _owned_clone(tmp_path)
+    git = _FakeGit({}, unmodified=True, no_local_commits=True)
+    applier = _updater(tmp_path, git)
+
+    report = applier.update(parse_manifest(OWNED_ITEM))
+
+    assert report.action == "install", "an update IS the install steps over the new content"
+    assert [spec.url for spec in git.calls] == [OWNED_URL]
+
+
+def test_an_update_of_a_module_that_is_not_installed_says_so(tmp_path: Path) -> None:
+    """Update is for a clone that exists; a folder that is not there is an INSTALL.
+
+    Said rather than silently turned into one: the press the user made was
+    Update, and an Update that quietly installs is a different action under the
+    same button.
+
+    Mutation: `update-installs-a-missing-clone` -- fall through to `install()`
+    when the folder is absent and the press changes meaning without saying so.
+    """
+    _installed_by_this_app(tmp_path)
+    git = _FakeGit({}, unmodified=True, no_local_commits=True)
+    applier = _updater(tmp_path, git)
+
+    with pytest.raises(ApplyError, match="is not installed"):
+        applier.update(parse_manifest(OWNED_ITEM))
+
+    assert git.calls == []

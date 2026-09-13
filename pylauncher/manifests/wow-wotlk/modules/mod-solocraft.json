@@ -23,20 +23,35 @@
       "file": "env/dist/etc/modules/Solocraft.conf",
       "keys": [
         {
-          "key": "Solocraft.Enable"
+          "key": "Solocraft.Enable",
+          "label": "Enable Solocraft",
+          "explain": "Enable the module? (1: true | 0: false)",
+          "type": "bool"
         },
         {
-          "key": "Solocraft.Announce"
+          "key": "Solocraft.Announce",
+          "label": "Announce at login",
+          "explain": "Announce the module when the player logs in?",
+          "type": "bool"
         },
         {
           "key": "SoloCraft.Debuff.Enable",
-          "note": "note the mixed case"
+          "note": "note the mixed case",
+          "label": "Enable the debuff",
+          "explain": "Default: 1 (on), 0 (off).",
+          "type": "bool"
         },
         {
-          "key": "SoloCraft.Spellpower.Mult"
+          "key": "SoloCraft.Spellpower.Mult",
+          "label": "Spell power multiplier",
+          "explain": "Default: 1.0. 0.0 (Disable).",
+          "type": "text"
         },
         {
-          "key": "SoloCraft.Stats.Mult"
+          "key": "SoloCraft.Stats.Mult",
+          "label": "Stats multiplier",
+          "explain": "Default: 100.0. 0.0 (Disable).",
+          "type": "text"
         }
       ],
       "template": "conf/Solocraft.conf.dist"

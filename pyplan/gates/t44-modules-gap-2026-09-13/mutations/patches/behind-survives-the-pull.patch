@@ -1,0 +1,13 @@
+# gate: tests/test_controller_view.py -q -k finished_update
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..9ff74db8 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -6371,7 +6371,6 @@ class ControllerView(QWidget):
+         # commit the checkout has moved off. Dropped rather than recounted: a
+         # recount costs a network round trip, and a stale number is a wrong one
+         # (T44 item 2).
+-        self._behind.pop(key, None)
+         if result.rebuild_required:
+             self._rebuild_owed.add(key)
+         owed = _pending_sql_names(result)

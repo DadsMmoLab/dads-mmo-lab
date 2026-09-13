@@ -1,0 +1,43 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[31mF[0m[31m                                                                        [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_ test_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_what_is_owed _[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x18254b40) at 0x7ed705ed3a00>
+ps = <tests.test_controller_view._Ps object at 0x7ed708ad3620>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-761/test_the_tuning_bar_goes_dead_0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_what_is_owed[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The busy gate has to reach this bar: Restart stops the containers an[39;49;00m
+    [33m    install, a rebuild or an importer run is using.[39;49;00m
+    [33m[39;49;00m
+    [33m    And it must come back to what is OWED rather than to "on": a job of its own[39;49;00m
+    [33m    finishing must not hand the tab a live "Restart server…" over a change[39;49;00m
+    [33m    nobody made.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: re-enable the four unconditionally in `_set_busy(False)` and a[39;49;00m
+    [33m    finished install arms Restart and Recreate on a tab with nothing waiting.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        view = _tuning_view(ps, tmp_path)[90m[39;49;00m
+        view._note_tuning_owed([33m"[39;49;00m[33menv/dist/etc/modules/mod_npc_beastmaster.conf[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        view._set_busy([94mTrue[39;49;00m)[90m[39;49;00m
+        [94massert[39;49;00m view.tuning_restart_button.isEnabled() [95mis[39;49;00m [94mFalse[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m view.tuning_recreate_button.isEnabled() [95mis[39;49;00m [94mFalse[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m view.tuning_reload_button.isEnabled() [95mis[39;49;00m [94mFalse[39;49;00m[90m[39;49;00m
+    [90m[39;49;00m
+        view._set_busy([94mFalse[39;49;00m)[90m[39;49;00m
+        [94massert[39;49;00m view.tuning_restart_button.isEnabled() [95mis[39;49;00m [94mTrue[39;49;00m, [33m"[39;49;00m[33ma restart is still owed[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m view.tuning_recreate_button.isEnabled() [95mis[39;49;00m [94mFalse[39;49;00m, [33m"[39;49;00m[33mnothing owes a recreate[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: nothing owes a recreate[0m
+[1m[31mE       assert True is False[0m
+[1m[31mE        +  where True = <built-in method isEnabled of PySide6.QtWidgets.QPushButton object at 0x7ed705d1b740>()[0m
+[1m[31mE        +    where <built-in method isEnabled of PySide6.QtWidgets.QPushButton object at 0x7ed705d1b740> = <PySide6.QtWidgets.QPushButton(0x18f85aa0) at 0x7ed705d1b740>.isEnabled[0m
+[1m[31mE        +      where <PySide6.QtWidgets.QPushButton(0x18f85aa0) at 0x7ed705d1b740> = <yulon.ui.controller_view.ControllerView(0x1829a330) at 0x7ed705e486c0>.tuning_recreate_button[0m
+
+[1m[31mtests/test_controller_view.py[0m:8852: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_what_is_owed[0m - AssertionError: nothing owes a recreate
+[31m[31m[1m1 failed[0m, [33m319 deselected[0m[31m in 0.92s[0m[0m

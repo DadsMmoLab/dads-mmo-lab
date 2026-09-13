@@ -24,16 +24,28 @@
       "file": "env/dist/etc/modules/mount_scaling.conf",
       "keys": [
         {
-          "key": "MountScaling.Enable"
+          "key": "MountScaling.Enable",
+          "label": "Enable mount scaling",
+          "explain": "Enable or disable the module.",
+          "type": "bool"
         },
         {
-          "key": "MountScaling.Ground.SpeedPerLevel"
+          "key": "MountScaling.Ground.SpeedPerLevel",
+          "label": "Ground speed per level",
+          "explain": "Speed increase per level (default: 2.5 \u2192 level 40 = 100%).",
+          "type": "text"
         },
         {
-          "key": "MountScaling.Ground.MinSpeed"
+          "key": "MountScaling.Ground.MinSpeed",
+          "label": "Minimum ground speed",
+          "explain": "Minimum ground mount speed at level 1 (default: 20).",
+          "type": "int"
         },
         {
-          "key": "MountScaling.Ground.MaxSpeed"
+          "key": "MountScaling.Ground.MaxSpeed",
+          "label": "Maximum ground speed",
+          "explain": "Maximum ground mount speed cap (default: 100).",
+          "type": "int"
         },
         {
           "key": "MountScaling.Ground.Journeyman.*"

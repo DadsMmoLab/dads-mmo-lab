@@ -23,16 +23,27 @@
       "file": "env/dist/etc/modules/mod_aoe_loot.conf",
       "keys": [
         {
-          "key": "AOELoot.Enable"
+          "key": "AOELoot.Enable",
+          "label": "Enable area loot",
+          "explain": "Enables Module.",
+          "type": "bool"
         },
         {
-          "key": "AOELoot.Message"
+          "key": "AOELoot.Message",
+          "label": "Area-loot message",
+          "type": "bool"
         },
         {
-          "key": "AOELoot.Range"
+          "key": "AOELoot.Range",
+          "label": "Maximum loot range",
+          "explain": "Maximum reach range search loot. Default: 55.0. Range: 5.0 - 100.0.",
+          "type": "text"
         },
         {
-          "key": "AOELoot.Group"
+          "key": "AOELoot.Group",
+          "label": "Area loot in a group",
+          "explain": "Enables area loot if the player is in a group.",
+          "type": "bool"
         }
       ],
       "template": "conf/mod_aoe_loot.conf.dist"

@@ -6,12 +6,14 @@ import logging
 import re
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from tests.conftest import pump_until
+from tests.conftest import HANG_BOUND, pump_until
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -27,6 +29,7 @@ from yulon import (
     runner,
     state,
     steam,
+    tuning,
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql
@@ -51,18 +54,24 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
-from yulon.manifest import Build, Manifest, ManifestType, Source, parse_manifest
+from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
-    INSTALLED_MARK,
-    NOT_IN_CATALOG,
+    TUNING_RECREATE_LABEL,
+    TUNING_RESTART_LABEL,
     ControllerServices,
     ControllerView,
 )
+from yulon.ui.widgets import modules_panel, tuning_panel
 from yulon.ui.widgets.job import run_inline
+from yulon.ui.widgets.modules_panel import (
+    BADGE_INSTALLED,
+    BADGE_NOT_INSTALLED,
+    NOT_IN_CATALOG,
+)
 
 WOTLK = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
@@ -120,8 +129,32 @@ class _Ps:
 
 
 class _FakeApplier(Applier):
-    def __init__(self) -> None:
-        super().__init__(Path("/srv"), git=None)  # type: ignore[arg-type]
+    """Records what the tab asked for instead of cloning — but NOT `update()`.
+
+    `update()` is deliberately NOT overridden (round 2). It is the method that
+    decides whether a `git reset --hard` may go near a folder, and a fake that
+    answered for it would let the Modules tab's Update press be tested against
+    a refusal path that never runs — which is exactly what the first version of
+    `test_the_update_press…` did. So the real `Applier.update()` executes here,
+    over a real `server_dir`, and only the `install()` it delegates to is
+    faked.
+    """
+
+    def __init__(
+        self,
+        server_dir: Path | None = None,
+        *,
+        unmodified: bool | None = True,
+        no_local_commits: bool | None = True,
+        origin: str | None = None,
+    ) -> None:
+        super().__init__(
+            server_dir or Path("/srv"),
+            git=None,  # type: ignore[arg-type]
+            unmodified=lambda _dest, _path: unmodified,
+            no_local_commits=lambda _dest, _branch: no_local_commits,
+            remote_url=lambda _dest: origin,
+        )
         self.installed: list[str] = []
         # What the tab handed down as the `values` argument, per call. Recorded
         # because for two of the 41 shipped manifests that argument WAS the
@@ -565,11 +598,8 @@ def test_modules_tab_lists_manifests_and_installs_selected(
         status_poll_ms=0,
         prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
     )
-    assert view.module_list.count() >= 40
-    for i in range(view.module_list.count()):
-        if view.module_list.item(i).data(256) == "mod-ah-bot":
-            view.module_list.setCurrentRow(i)
-            break
+    assert len(view.modules_panel.rows()) >= 40
+    view.modules_panel.select("mod-ah-bot")
     assert view.selected_manifest() is not None and view.selected_manifest().id == "mod-ah-bot"
     view._module_action("install")
     applier = view.services.applier
@@ -675,11 +705,8 @@ def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> N
 
 
 def _select_module(view: ControllerView, item_id: str) -> None:
-    for i in range(view.module_list.count()):
-        if view.module_list.item(i).data(256) == item_id:
-            view.module_list.setCurrentRow(i)
-            return
-    raise AssertionError(f"{item_id} is not in the Modules list")
+    assert item_id in _panel_ids(view), f"{item_id} is in no row of the Modules tab"
+    view.modules_panel.select(item_id)
 
 
 def test_installing_a_module_whose_prompt_has_no_default_asks_first(
@@ -736,16 +763,15 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
-    for i in range(view.module_list.count()):
-        if view.module_list.item(i).data(256) not in view._manifests:
-            continue
-        view.module_list.setCurrentRow(i)
+    catalogued = [r.data.id for r in view.modules_panel.rows() if r.data.catalogued]
+    for item_id in catalogued:
+        view.modules_panel.select(item_id)
         view._module_action("install")
 
     assert sorted(asked) == ["mod-ah-bot", "mod-ah-bot-plus"], asked
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier)
-    assert len(applier.installed) == view.module_list.count()
+    assert len(applier.installed) == len(catalogued)
     unasked = [v for m, v in zip(applier.installed, applier.values, strict=True) if m not in asked]
     assert all(v is None for v in unasked), "a manifest with no question was given values"
 
@@ -1178,26 +1204,18 @@ def _with_custom_route(
 
 
 def _listed(view: ControllerView) -> list[str]:
-    return [view.module_list.item(i).text() for i in range(view.module_list.count())]
+    """Every row's name and description, the way the cards read them out."""
+    return [f"{r.data.name} — {r.data.description}" for r in view.modules_panel.rows()]
 
 
-def _rows_for(view: ControllerView, item_id: str) -> list[int]:
+def _rows_for(view: ControllerView, item_id: str) -> list[str]:
     """Every row whose manifest id is `item_id` -- the id, not the visible text.
 
-    A shipped manifest's row reads `[module] AoE Loot — ...`: the id is the
-    row's `Qt.UserRole` data and appears nowhere in the line, so a search over
-    the text finds a custom module (whose name IS its id) and silently misses
-    every shipped one.
+    A shipped manifest's row is titled `AoE Loot`: the id appears nowhere in the
+    words, so a search over the text finds a custom module (whose name IS its
+    id) and silently misses every shipped one.
     """
-    return [
-        i for i in range(view.module_list.count()) if view.module_list.item(i).data(256) == item_id
-    ]
-
-
-def _row_for(view: ControllerView, item_id: str) -> int:
-    rows = _rows_for(view, item_id)
-    assert rows, f"{item_id!r} is in no row of the modules list"
-    return rows[0]
+    return [r.data.id for r in view.modules_panel.rows() if r.data.id == item_id]
 
 
 def test_the_link_button_derives_installs_and_relists_as_a_custom_module(
@@ -1227,8 +1245,8 @@ def test_the_link_button_derives_installs_and_relists_as_a_custom_module(
     assert route.derived_from == ["https://github.com/you/mod-my-thing"]
     assert route.installed == [("mod-my-thing", None)]
     assert "install mod-my-thing:" in view.module_report.toPlainText()
-    assert f"[module] mod-my-thing — {CUSTOM_LINK_DESC}" in _listed(view)
-    view.module_list.setCurrentRow(_row_for(view, "mod-my-thing"))
+    assert f"mod-my-thing — {CUSTOM_LINK_DESC}" in _listed(view)
+    view.modules_panel.select("mod-my-thing")
     chosen = view.selected_manifest()
     assert chosen is not None and chosen.id == "mod-my-thing"
 
@@ -1300,7 +1318,7 @@ def test_the_folder_button_hands_the_install_route_the_folder_it_was_given(
 
     assert route.derived_from == [source]
     assert route.installed == [("mod-hand-made", source)]
-    assert f"[module] mod-hand-made — {CUSTOM_FOLDER_DESC}" in _listed(view)
+    assert f"mod-hand-made — {CUSTOM_FOLDER_DESC}" in _listed(view)
 
 
 def test_a_game_with_no_custom_module_route_gets_dead_buttons_that_do_nothing_when_pressed(
@@ -1365,14 +1383,14 @@ def test_removing_a_custom_module_forgets_it_and_removing_a_shipped_one_keeps_it
     applier = services.applier
     assert isinstance(applier, _FakeApplier)
 
-    view.module_list.setCurrentRow(_row_for(view, "mod-my-thing"))
+    view.modules_panel.select("mod-my-thing")
     view._module_action("remove")
 
     assert route.forgotten == ["mod-my-thing"]
     assert applier.removed == ["mod-my-thing"]
     assert _rows_for(view, "mod-my-thing") == []
 
-    view.module_list.setCurrentRow(_row_for(view, "mod-aoe-loot"))
+    view.modules_panel.select("mod-aoe-loot")
     view._module_action("remove")
 
     assert route.forgotten == ["mod-my-thing", "mod-aoe-loot"]
@@ -5516,10 +5534,7 @@ def test_the_rebuild_sentence_names_a_button_that_is_really_on_the_tab(
         status_poll_ms=0,
         prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
     )
-    for i in range(view.module_list.count()):
-        if view.module_list.item(i).data(256) == "mod-ah-bot":
-            view.module_list.setCurrentRow(i)
-            break
+    view.modules_panel.select("mod-ah-bot")
     view._module_action("install")
 
     report = view.module_report.toPlainText()
@@ -7166,20 +7181,34 @@ def _installed_view(ps: _Ps, tmp_path: Path, **families: frozenset[str]) -> Cont
     return ControllerView(WOTLK, services, status_poll_ms=0)
 
 
-def _marked(view: ControllerView) -> list[str]:
-    """Rows the list marks as installed — by LEADING mark, not a substring.
+def _panel_ids(view: ControllerView) -> list[str]:
+    return [row.data.id for row in view.modules_panel.rows()]
 
-    `INSTALLED_MARK in row` would also match a description that happens to
-    contain the glyph (review, 2026-09-12).
+
+def _marked(view: ControllerView) -> list[object]:
+    """The rows the tab draws the `Installed` badge on — the widgets, not their ids.
+
+    Read off the BADGE and not off a substring of the row's words: T41's own
+    review found that `INSTALLED_MARK in row` also matched a description that
+    happened to contain the glyph, and a name or a description containing the
+    word "Installed" would be the same fault in the new surface.
+
+    The WIDGETS, because an id does not name a row: `modules_panel.row(id)`
+    resolves a bare id in `FAMILY_FILES` order, so asking it which family a
+    marked id was in answers about a different row whenever two families share
+    an id -- which is exactly the case `mod-ale` makes below (round 2).
     """
-    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
-    return [r for r in rows if r.startswith(INSTALLED_MARK)]
+    return [row for row in view.modules_panel.rows() if row.badge_label.text() == BADGE_INSTALLED]
 
 
-def test_the_modules_list_says_which_modules_are_installed(
+def test_the_modules_tab_says_which_modules_are_installed(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """T41, 2026-09-12: "None of modules detected lol", on an install that had some.
+
+    Re-seeded for T42 from `test_the_modules_list_says_which_modules_are_
+    installed`: the leading `INSTALLED_MARK` on a list line is now the row's own
+    `Installed` badge, read off the widget.
 
     `reload_modules()` filled the list from the manifest STORE and read nothing
     off disk, so the tab showed what this game COULD install and never what it
@@ -7192,11 +7221,40 @@ def test_the_modules_list_says_which_modules_are_installed(
     # Exactly one row, and it is the catalog's own transmog row -- not an
     # erroneous extra "not in catalog" row beside an unmarked one, which an
     # `any(...)` assertion would have accepted.
-    assert len(marked) == 1, marked
-    assert "Transmogrification" in marked[0], marked
-    assert NOT_IN_CATALOG not in marked[0], marked
-    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
-    assert len(rows) > 5, rows
+    assert [row.data.id for row in marked] == ["mod-transmog"], marked
+    row = view.modules_panel.row("mod-transmog")
+    assert row.data.catalogued is True and NOT_IN_CATALOG not in row.data.description
+    assert len(view.modules_panel.rows()) > 5
+
+
+def test_the_installed_row_is_drawn_above_the_ones_that_are_not(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T42's first line, end to end through the real store and the real panel.
+
+    TWO claims, and round 2 separated them because this test used to make one
+    and name the other. What a person SEES is `drawn_rows()`, read off the
+    card's layouts -- `_FamilyCard.fill()` puts the installed half in its own
+    box above the available one. What the BUILDER decided is `rows()`, the order
+    `set_rows()` was handed. Both must put `mod-transmog` first, and each has
+    its own mutation.
+
+    Mutation (both halves): drop the installed-first split in
+    `build_module_rows` and `mod-transmog` falls back to wherever the catalog
+    index happens to put it, which on the shipped WotLK tree is not the top.
+    The card's own split cannot be told apart HERE -- rows that arrive already
+    sorted are drawn the same either way -- so it has its own test, which hands
+    the panel an order the builder would never produce
+    (`test_the_cards_draw_the_installed_half_above_the_available_half`).
+    """
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+
+    drawn = [r.data for r in view.modules_panel.drawn_rows() if r.data.family == "module"]
+    assert drawn[0].id == "mod-transmog", [m.id for m in drawn[:3]]
+    assert drawn[0].installed is True
+    built = [r.data.id for r in view.modules_panel.rows() if r.data.family == "module"]
+    assert built[0] == "mod-transmog", built[:3]
+    assert view.modules_panel.available_open("module") is False, "it has one, so it collapses"
 
 
 def test_a_module_on_disk_the_catalog_never_heard_of_still_gets_a_row(
@@ -7204,38 +7262,53 @@ def test_a_module_on_disk_the_catalog_never_heard_of_still_gets_a_row(
 ) -> None:
     """It is installed, whatever the catalog thinks.
 
+    Re-seeded for T42 from the T41 test of the same name: the row is a
+    `ModuleRow` with `catalogued=False` rather than a list line carrying the
+    sentence, and it is the panel that is asked.
+
     `apply_module.module_updates()` already takes this position for its own
     rows — "A module on disk that the store has never heard of still gets a
     row" — and a list that silently omits somebody's hand-cloned module is the
     same "None of modules detected" in a smaller place.
     """
     view = _installed_view(ps, tmp_path, module=frozenset({"mod-something-homemade"}))
-    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
 
-    mine = [r for r in rows if "mod-something-homemade" in r]
-    assert len(mine) == 1, rows[-5:]
-    assert mine[0].startswith(INSTALLED_MARK), mine
-    assert NOT_IN_CATALOG in mine[0], mine
-    # No manifest is invented for it, so the buttons have nothing to act on.
+    assert _panel_ids(view).count("mod-something-homemade") == 1
+    row = view.modules_panel.row("mod-something-homemade")
+    assert row.badge_label.text() == BADGE_INSTALLED
+    assert row.data.description == NOT_IN_CATALOG
+    # No manifest is invented for it, so there is nothing for a press to act on
+    # -- and the row carries no press at all.
     assert "mod-something-homemade" not in view._manifests
+    assert row.install_button is None and row.remove_button is None
 
 
 def test_a_game_with_no_installed_modules_seam_lists_the_catalog_unchanged(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The three CMaNGOS games have no modules folder; their list must not change."""
+    """The three CMaNGOS games have no modules folder; every row reads Not installed.
+
+    Re-seeded for T42: the absence of a mark is now the `Not installed` badge,
+    which is a stronger assertion — a row that said nothing at all would pass
+    the old one.
+    """
     services = _services(ps, tmp_path, [])
     object.__setattr__(services, "installed_modules", None)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
+
+    rows = view.modules_panel.rows()
     assert rows, "the catalog still lists"
-    assert not any(INSTALLED_MARK in r for r in rows), [r for r in rows if INSTALLED_MARK in r]
+    assert {row.badge_label.text() for row in rows} == {BADGE_NOT_INSTALLED}
 
 
-def test_pressing_install_on_an_uncatalogued_row_says_why_nothing_happened(
+def test_the_context_menu_on_an_uncatalogued_row_says_why_nothing_happened(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """Review, 2026-09-12: those rows were inert and silent.
+
+    Re-seeded for T42 from `test_pressing_install_on_an_uncatalogued_row_says_
+    why_nothing_happened`. The row now has no buttons at all, so the press that
+    has to be answered is the context menu's — which is the only one it offers.
 
     T41 added rows for modules on disk the catalog has never heard of. They
     carry no manifest, so `_module_action` returned at its first line and the
@@ -7245,11 +7318,10 @@ def test_pressing_install_on_an_uncatalogued_row_says_why_nothing_happened(
     from yulon.ui.controller_view import UNCATALOGUED_PRESS
 
     view = _installed_view(ps, tmp_path, module=frozenset({"mod-something-homemade"}))
-    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
-    index = next(i for i, r in enumerate(rows) if "mod-something-homemade" in r)
-    view.module_list.setCurrentRow(index)
+    view.modules_panel.select("mod-something-homemade")
 
     assert view.selected_manifest() is None, "the row must carry no manifest"
+    assert view._selected_row_is_uncatalogued() is True
     view._module_action("install")
     assert view.module_report.toPlainText() == UNCATALOGUED_PRESS, view.module_report.toPlainText()
 
@@ -7259,19 +7331,20 @@ def test_a_family_is_marked_from_its_own_clone_folder_not_from_modules(
 ) -> None:
     """Review, 2026-09-12: `apply.CLONE_DIRS` gives each family a different folder.
 
-    A module lands in `modules/`, an ale and a keg in `ale_scripts/`, a mod in
-    `sql_scripts/clones/`. Reading `modules/` for all four marked an ale
-    installed because a MODULE of the same id was, and never marked a real ale
-    at all. The seam hands a set per family, and a row is marked only from its
-    own family's set.
+    Re-seeded for T42 against the panel. A module lands in `modules/`, an ale
+    and a keg in `ale_scripts/`, a mod in `sql_scripts/clones/`. Reading
+    `modules/` for all four marked an ale installed because a MODULE of the same
+    id was, and never marked a real ale at all.
     """
     # `mod-ale` is a shipped module id. Claim it is present in the ALE family's
     # folder and absent from the module family's: the module row must stay
     # unmarked, and a row must appear for the ale clone instead.
     view = _installed_view(ps, tmp_path, module=frozenset(), ale=frozenset({"mod-ale"}))
     marked = _marked(view)
+
     assert marked, "the ale clone is installed and must be marked somewhere"
-    assert all("[module]" not in r for r in marked), marked
+    families = {row.data.family for row in marked}
+    assert families == {"ale"}, families
 
 
 def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another(
@@ -7279,14 +7352,1596 @@ def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another
 ) -> None:
     """Measured live, 2026-09-12: `bmah` appeared twice.
 
-    `apply.CLONE_DIRS` puts ale and keg in one folder, so a keg's clone is read
-    into BOTH families' sets. The keg manifest matched it and marked its row;
-    the ale copy then looked like a module nobody had a manifest for and got an
-    "installed here — not in this game's catalog" row of its own, for a thing
-    the list had already named one line up.
+    Re-seeded for T42 against the panel. `apply.CLONE_DIRS` puts ale and keg in
+    one folder, so a keg's clone is read into BOTH families' sets. The keg
+    manifest matched it and marked its row; the ale copy then looked like a
+    module nobody had a manifest for and got an "installed here — not in this
+    game's catalog" row of its own, for a thing the list had already named one
+    line up.
     """
     view = _installed_view(ps, tmp_path, ale=frozenset({"bmah"}), keg=frozenset({"bmah"}))
-    rows = [view.module_list.item(i).text() for i in range(view.module_list.count())]
-    bmah = [r for r in rows if r.startswith(INSTALLED_MARK) and "bmah" in r.lower()]
-    assert len(bmah) == 1, bmah
-    assert NOT_IN_CATALOG not in bmah[0], bmah
+
+    assert _panel_ids(view).count("bmah") == 1
+    row = view.modules_panel.row("bmah")
+    assert row.badge_label.text() == BADGE_INSTALLED
+    assert row.data.catalogued is True and row.data.family == "keg"
+
+
+# --------------------------------------------------- T42: the session's own facts
+
+
+def _deliver_report(view: ControllerView, report: ApplyReport, family: str = "module") -> None:
+    """Deliver an `ApplyReport` the way a real press does -- with the manifest set.
+
+    `_module_done()` reads `_acting_on` to key this session's chips by
+    `(family, id)` (round 2): nothing makes an id unique across families and an
+    `ApplyReport` carries no family. Both live routes set `_acting_on`
+    immediately before their `_run()`, so a test that called `_module_done()`
+    bare was exercising a path no press reaches.
+
+    The manifest comes out of the view's own `_manifests` where the shipped
+    catalog has one, so these tests keep using the ids they always used; a
+    stand-in is built only for an id it does not carry.
+    """
+    manifest = view._manifests.get((family, report.item_id))
+    if manifest is None:
+        manifest = Manifest(
+            id=report.item_id,
+            name=report.item_id,
+            type=cast(ManifestType, family),
+            game="wow-wotlk",
+            description="x",
+        )
+    view._acting_on = manifest
+    view._module_done(report)
+
+
+def _wotlk_modules_view(ps: _Ps, tmp_path: Path, **families: frozenset[str]) -> ControllerView:
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", lambda: dict(families))
+    return ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+    )
+
+
+def test_an_install_that_needs_a_rebuild_raises_the_banner_and_the_chip(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The sentence `_format_report` has always printed, now attached to a control.
+
+    The banner names WHICH module owes it, because the next question after "a
+    rebuild is owed" is "for what?" — and the chip puts the same fact on the row
+    that owes it, where a user scrolling the card will meet it.
+
+    Mutation: drop the `_note_session_facts` call from `_module_done` and both
+    the banner and the chip stay away while the report says a rebuild is owed.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
+    assert view.rebuild_banner.isHidden() is True
+
+    _deliver_report(view, ApplyReport("install", "mod-solocraft", rebuild_required=True))
+
+    assert view.rebuild_banner.isHidden() is False
+    assert "mod-solocraft" in view.rebuild_banner_label.text()
+    labels = [b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons]
+    assert modules_panel.CHIP_REBUILD_PENDING in labels, labels
+
+
+def _owing_a_rebuild(
+    ps: _Ps, tmp_path: Path, services: ControllerServices | None = None
+) -> ControllerView:
+    """A view whose `mod-solocraft` install has just reported `rebuild_required`."""
+    services = services or _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    _deliver_report(view, ApplyReport("install", "mod-solocraft", rebuild_required=True))
+    assert view.rebuild_banner.isHidden() is False, "the ground for every assertion below"
+    return view
+
+
+def test_only_a_compile_that_succeeds_clears_the_banner_and_the_chip(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Driven through `rebuild_server()`, not by calling the slot -- the slot is shared.
+
+    Three actions run through `rebuild_log` (the rebuild, the database updates
+    and the adopt) and all three reach `_rebuild_finished`, so "the panel said
+    ok" is not "the server was compiled". And a rebuild that FAILS owes the same
+    rebuild it did before, because nothing about the running server changed.
+
+    Mutation: clear `_rebuild_owed` on `ok` alone, or on `_rebuild_finished`
+    being reached at all, and one of the two halves below goes green while the
+    tab tells a user their module is live.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+
+    def fails(cancel: object = None) -> Iterator[str]:
+        yield "configuring"
+        raise InstallerError("the build failed (exit 1)")
+
+    def works(cancel: object = None) -> Iterator[str]:
+        yield "built"
+
+    services = _services(ps, tmp_path, [])
+    services.rebuild = fails
+    view = _owing_a_rebuild(ps, tmp_path, services)
+
+    assert view.rebuild_server() is True
+    pump_until(
+        lambda: not view.rebuild_log.running and not view._busy, "the failed rebuild finished"
+    )
+    assert view.rebuild_banner.isHidden() is False, "a failed rebuild owes the same rebuild"
+
+    services.rebuild = works
+    assert view.rebuild_server() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the rebuild finished")
+
+    assert view.rebuild_banner.isHidden() is True
+    assert view.modules_panel.row("mod-solocraft").chip_buttons == ()
+
+
+def test_a_database_update_through_the_same_panel_clears_no_rebuild(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other two presses on that panel compile nothing, and must say nothing about it.
+
+    `rebuild_log` is deliberately ONE panel for every long job on this tab, so
+    `_rebuild_finished(True, ...)` arrives for a database-updates run and for an
+    adopt as readily as for a compile. A user who applied three SQL files would
+    otherwise watch the rebuild banner disappear and read that as "my module is
+    in the server now".
+
+    Mutation: drop `_rebuild_is_compile` and clear on `ok` alone -- this test is
+    the only one that sees it, because the compile path is green either way.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, started, _asked = _updates_services(ps, tmp_path)
+    view = _owing_a_rebuild(ps, tmp_path, services)
+
+    assert view.apply_database_updates() is True
+    pump_until(
+        lambda: not view.rebuild_log.running and not view._busy,
+        "the database updates finished",
+    )
+
+    assert started, "the route really ran"
+    assert view.rebuild_banner.isHidden() is False
+    labels = [b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons]
+    assert modules_panel.CHIP_REBUILD_PENDING in labels, labels
+
+
+def test_a_report_with_pending_sql_puts_the_files_on_the_chip(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An owed chip's press writes its own detail into the report box.
+
+    Mutation: name the chip and not the files (`detail = label`) and the press
+    tells the reader nothing they could not see on the chip.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    _deliver_report(
+        view,
+        ApplyReport(
+            "install",
+            "mod-transmog",
+            pending_sql=(
+                apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
+            ),
+        ),
+    )
+
+    chips = {b.text(): b for b in view.modules_panel.row("mod-transmog").chip_buttons}
+    assert modules_panel.CHIP_SQL_PENDING in chips, list(chips)
+    chips[modules_panel.CHIP_SQL_PENDING].click()
+    assert "one.sql" in view.module_report.toPlainText()
+
+
+def test_the_importer_finishing_clears_every_sql_chip(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """One run covers every module on this install, which is the granularity it has.
+
+    Mutation: leave `_sql_owed` alone in `_module_sql_done` and the chip stands
+    after the very press it asks for.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    _deliver_report(
+        view,
+        ApplyReport(
+            "install",
+            "mod-transmog",
+            pending_sql=(
+                apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
+            ),
+        ),
+    )
+    assert view.modules_panel.row("mod-transmog").chip_buttons
+
+    view._module_sql_done(docker.AttachedRun(0, ()))
+
+    assert view.modules_panel.row("mod-transmog").chip_buttons == ()
+
+
+def test_an_update_check_puts_the_count_on_the_row_it_counted(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.7a's figure, on the row rather than only in a block of text.
+
+    The report keeps `ModuleUpdate.line` verbatim — 8.7a's definition of done is
+    that the number equals `git rev-list --count HEAD..FETCH_HEAD` run by hand,
+    and the view must not re-format it — so the chip carries the same integer
+    and nothing derived.
+
+    Mutation: keep `behind=None` ("could not ask") as a zero or as a chip, and a
+    checkout git never answered for is reported as up to date or as behind by
+    nothing.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog", "mod-aoe-loot"}))
+    view._module_updates_done(
+        (
+            apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 3),
+            apply_module.ModuleUpdate("mod-aoe-loot", tmp_path, True, None),
+        )
+    )
+
+    assert "3 commits behind" in view.module_report.toPlainText()
+    labels = [b.text() for b in view.modules_panel.row("mod-transmog").chip_buttons]
+    assert modules_panel.chip_update_label(3) in labels, labels
+    assert view.modules_panel.row("mod-aoe-loot").chip_buttons == ()
+
+
+def test_busy_greys_every_row_button_and_gives_them_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The gate that used to grey two toolbar buttons now greys every row's own.
+
+    Mutation: drop the `set_enabled_actions(False)` from `_set_busy` and a press
+    during a rebuild reaches the applier while the compile is reading the very
+    folder it clones into.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+
+    def presses() -> list[bool]:
+        return [
+            (row.install_button or row.remove_button).isEnabled()
+            for row in view.modules_panel.rows()
+            if row.install_button is not None or row.remove_button is not None
+        ]
+
+    assert all(presses())
+    view._set_busy(True)
+    assert not any(presses())
+    view._set_busy(False)
+    assert all(presses())
+
+
+def test_a_game_with_no_applier_has_no_live_row_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The `store is None or applier is None` gate, moved onto the rows.
+
+    Mutation: call `set_enabled_actions(True)` at build time and a game with no
+    applier offers a press that returns at `_module_action`'s second line.
+    """
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "applier", None)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    live = [
+        row.data.id
+        for row in view.modules_panel.rows()
+        if (row.install_button is not None and row.install_button.isEnabled())
+        or (row.remove_button is not None and row.remove_button.isEnabled())
+    ]
+    assert live == [], live
+
+
+def test_a_rows_install_button_installs_that_row(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The press that replaced "Install selected", through the one shared handler.
+
+    Mutation: connect `install_pressed` straight to `applier.install` and the
+    prompt dialog, the cancel path and the report are all skipped.
+    """
+    view = _wotlk_modules_view(ps, tmp_path)
+
+    view.modules_panel.row("mod-aoe-loot").install_button.click()
+
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.installed == ["mod-aoe-loot"]
+    assert view.modules_panel.selected_id() == "mod-aoe-loot"
+
+
+# ------------------------------------------------------ T42 round 2 (Codex review)
+
+
+def test_a_stopped_rebuild_keeps_the_debt_it_started_with(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`LogPanel` reports a STOPPED job as ok=True, and it is right to.
+
+    Its worker's `except` branch turns the terminated child's non-zero exit into
+    `ok=True, message="stopped"` on purpose -- reporting a refusal for a button
+    the user pressed is the bug that branch exists to fix. So `ok` alone cannot
+    mean "the server was compiled", and reading this clause's success off `ok`
+    emptied the banner on a Stop: the module is still not in the running server.
+
+    `LogPanel.cancelled` is the property that says so, and `catalog_view.
+    _on_run_finished()` already reads it. The MESSAGE is deliberately not read:
+    grepping for the word "stopped" would be the same defect in a new place.
+
+    Mutation: drop `and not self.rebuild_log.cancelled` and the banner vanishes
+    on a Stop.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    reached = threading.Event()
+    release = threading.Event()
+
+    def blocks(cancel: object = None) -> Iterator[str]:
+        yield "configuring"
+        reached.set()
+        release.wait(HANG_BOUND)
+        yield "never gets here"
+
+    services = _services(ps, tmp_path, [])
+    services.rebuild = blocks
+    view = _owing_a_rebuild(ps, tmp_path, services)
+
+    assert view.rebuild_server() is True
+    pump_until(reached.is_set, "the rebuild reached its first line")
+    view.rebuild_log.stop()
+    release.set()
+    pump_until(
+        lambda: not view.rebuild_log.running and not view._busy, "the stopped rebuild finished"
+    )
+
+    assert view.rebuild_log.cancelled is True, "the panel knows it was stopped"
+    assert view.rebuild_banner.isHidden() is False, "a stop did not compile anything"
+    labels = [b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons]
+    assert modules_panel.CHIP_REBUILD_PENDING in labels, labels
+
+
+def test_an_adopt_through_the_same_panel_clears_no_rebuild(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third press on `rebuild_log`, and the one the round-1 tests never covered.
+
+    It starts a database and writes one row. It compiles nothing, so it must say
+    nothing about whether a module is in the server.
+
+    Mutation: set `_rebuild_is_compile = True` in `adopt_as_imported()` (or drop
+    the flag) and the banner goes away on a press that touched no binary.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, started, _asked, _probed = _adopt_services(ps, tmp_path)
+    view = _owing_a_rebuild(ps, tmp_path, services)
+
+    assert view.adopt_as_imported() is True
+    pump_until(lambda: not view.rebuild_log.running and not view._busy, "the adopt finished")
+
+    assert started, "the route really ran"
+    assert view.rebuild_banner.isHidden() is False
+    labels = [b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons]
+    assert modules_panel.CHIP_REBUILD_PENDING in labels, labels
+
+
+def test_a_successful_removal_forgets_everything_owed_about_that_module(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """All three containers, because each would go on describing something that is gone.
+
+    An update count is about a checkout that no longer exists; a pending-SQL
+    list names files nothing will read; and the banner would name a module that
+    is not installed.
+
+    Mutation: drop any one of the three lines in `_note_session_facts`'s remove
+    branch and that one assertion fails.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+    _deliver_report(
+        view,
+        ApplyReport(
+            "install",
+            "mod-transmog",
+            rebuild_required=True,
+            pending_sql=(
+                apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
+            ),
+        ),
+    )
+    view._module_updates_done((apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 2),))
+    assert view._rebuild_owed and view._sql_owed and view._behind
+
+    _deliver_report(view, ApplyReport("remove", "mod-transmog"))
+
+    assert view._rebuild_owed == set()
+    assert view._sql_owed == {}
+    assert view._behind == {}
+    assert view.rebuild_banner.isHidden() is True
+
+
+def test_a_clone_deleted_outside_the_app_takes_its_chips_and_the_banner_with_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A folder can leave without this app pressing anything.
+
+    Until round 2 the reload drew the catalog row as `Not installed` with a
+    `Rebuild pending` chip hanging off it, and went on naming the module in the
+    banner. Reconciled in `reload_modules()` rather than by gating the chips,
+    because the banner is built from `_rebuild_owed` and not from the rows -- a
+    chip-only gate would leave the banner claiming a module that is gone.
+
+    Mutation: drop `_forget_what_is_no_longer_installed()` and the chip and the
+    banner both survive the deletion.
+    """
+    on_disk = {"module": frozenset({"mod-transmog"})}
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", lambda: dict(on_disk))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    _deliver_report(view, ApplyReport("install", "mod-transmog", rebuild_required=True))
+    assert view.rebuild_banner.isHidden() is False
+
+    on_disk["module"] = frozenset()  # somebody deleted modules/mod-transmog
+    view.reload_modules()
+
+    assert view.modules_panel.row("mod-transmog").badge_label.text() == BADGE_NOT_INSTALLED
+    assert view.modules_panel.row("mod-transmog").chip_buttons == ()
+    assert view.rebuild_banner.isHidden() is True
+
+
+def test_a_game_with_no_installed_reader_keeps_what_this_session_learned(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """ "No reader" is not evidence that nothing is installed.
+
+    A game whose `installed_modules` seam is `None` answers `{}` for every
+    family, and reconciling against that would throw away every fact the session
+    has learned on the first reload after an install.
+
+    Mutation: reconcile unconditionally (drop the `if reader is not None`) and
+    the banner is empty one line after the install that raised it.
+    """
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", None)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    _deliver_report(view, ApplyReport("install", "mod-transmog", rebuild_required=True))
+
+    assert view.rebuild_banner.isHidden() is False
+    assert "mod-transmog" in view.rebuild_banner_label.text()
+
+
+def _row_menu(view: ControllerView, module_id: str) -> object:
+    """The row's real context menu, built the way a right-click builds it.
+
+    `QMenu.exec` cannot be replaced from Python -- it is a Shiboken slot, and an
+    assignment to it is accepted and then ignored (measured, round 2: a test
+    that patched it sat on a real popup until it was killed). So the SHOWING and
+    the BUILDING are separate methods, and this drives the builder. What the
+    right-click itself adds -- selecting the row and handing the id over -- is
+    asserted by `test_a_right_click_selects_the_row_and_builds_its_own_menu`.
+    """
+    view.modules_panel.select(module_id)
+    return view._module_menu(module_id)
+
+
+def test_a_right_click_selects_the_row_and_builds_its_own_menu(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two lines `_row_menu()` cannot reach, driven through the real entry point.
+
+    The menu is stubbed to an EMPTY `QMenu`, whose `exec` returns at once
+    (measured) -- so the real `_show_module_context_menu` runs end to end, in
+    the order it really runs in, without a popup to hang on.
+
+    Mutation: drop the `select()` and the menu is built for a row the tab has
+    not selected, which is what every entry on it then acts against.
+    """
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+
+    view = _wotlk_modules_view(ps, tmp_path)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        ControllerView,
+        "_module_menu",
+        lambda self, module_id: (asked.append(module_id), QMenu(self))[1],
+    )
+
+    view._show_module_context_menu("mod-aoe-loot", QPoint(0, 0))
+
+    assert asked == ["mod-aoe-loot"]
+    assert view.modules_panel.selected_id() == "mod-aoe-loot"
+
+
+def test_the_menu_on_an_uncatalogued_row_offers_the_answer_and_not_two_dead_actions(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2, Codex: the menu offered Install and Remove where there is no manifest.
+
+    Both ended at `UNCATALOGUED_PRESS`, so nothing was done to the machine --
+    but two entries that name an action and then explain that the action does
+    not exist are two controls that look live and are not, which is the reading
+    this whole ticket exists to remove.
+
+    Mutation: gate the branch on `_module_actions_allowed()` alone (round 1's
+    shape) and the menu carries "Install Selected Module" again.
+    """
+    from yulon.ui.controller_view import UNCATALOGUED_PRESS, WHY_UNCATALOGUED
+
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-something-homemade"}))
+    menu = _row_menu(view, "mod-something-homemade")
+
+    labels = [action.text() for action in menu.actions() if action.text()]
+    assert labels == [WHY_UNCATALOGUED, "Copy Module ID"], labels
+
+    next(a for a in menu.actions() if a.text() == WHY_UNCATALOGUED).trigger()
+    assert view.module_report.toPlainText() == UNCATALOGUED_PRESS
+
+
+def test_the_menu_on_a_catalogued_row_still_installs_and_removes(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The other branch, which round 1 left untested altogether.
+
+    Mutation: leave the Install entry connected to `_module_action("remove")`
+    (or drop the `elif`) and the press does the other thing, or nothing.
+    """
+    view = _wotlk_modules_view(ps, tmp_path)
+    menu = _row_menu(view, "mod-aoe-loot")
+
+    labels = [action.text() for action in menu.actions() if action.text()]
+    assert labels == ["Install Selected Module", "Remove Selected Module", "Copy Module ID"]
+
+    next(a for a in menu.actions() if a.text() == "Install Selected Module").trigger()
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.installed == ["mod-aoe-loot"]
+
+
+def test_the_selected_manifest_of_a_shared_id_is_the_one_whose_row_is_selected(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2, Codex: `_manifests` was id-keyed, so this handed over the wrong steps.
+
+    The object this returns goes straight to `applier.install()`. On an id two
+    families share, a bare-id lookup installs the other family's steps -- a
+    `mod`'s SQL where a `module`'s clone was asked for.
+
+    The collision is constructed rather than found: the shipped catalog has no
+    such id today (Codex checked, and so did this hand), which is precisely why
+    the defect was invisible. BOTH directions are asserted, because an id-keyed
+    dict is last-write-wins and would answer one of them correctly by accident --
+    `FAMILY_FILES` loads `mod` after `module`, so the `mod` row's answer was
+    right and the `module` row's was the other family's steps. The `mod` row is
+    reached through a real CLICK, because a bare id resolves past it by design.
+
+    Mutation: look the manifest up by id alone, newest entry first (which is
+    what `_manifests[manifest.id] = manifest` gives), and the `module` row
+    answers with the `mod` manifest -- the object handed to `applier.install()`.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    services = _services(ps, tmp_path, [])
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    twin = [m for m in view.modules_panel.rows() if m.data.family == "mod"][
+        0
+    ].data.id  # any shipped `mod`
+    # Two manifests, one id, two families -- handed to the panel directly,
+    # because the shipped catalog has no such collision and inventing one in the
+    # store would be testing the store.
+    module_twin = parse_manifest(
+        {
+            "schema_version": 1,
+            "id": twin,
+            "name": "The module one",
+            "type": "module",
+            "game": "wow-wotlk",
+            "source": {"repo": f"acme/{twin}"},
+        }
+    )
+    mod_twin = view._manifests[("mod", twin)]
+    view._manifests[("module", twin)] = module_twin
+    view.modules_panel.set_rows(
+        modules_panel.build_module_rows(
+            [module_twin, mod_twin], {}, modules_panel.SessionState(), None
+        )
+    )
+
+    view.modules_panel.resize(600, 800)
+    view.modules_panel.show()
+
+    view.modules_panel.select(twin)  # the bare id resolves to `module`, the first family
+    picked = view.selected_manifest()
+    assert picked is not None and picked.type == "module", picked
+
+    chosen = [r for r in view.modules_panel.rows() if r.data.family == "mod"][0]
+    QTest.mouseClick(chosen.description_label, Qt.MouseButton.LeftButton)
+    picked = view.selected_manifest()
+    assert picked is not None and picked.type == "mod", picked
+    view.modules_panel.hide()
+
+
+# -- T43: the Tuning tab ----------------------------------------------------
+
+
+def _deploy(server_dir: Path, rel: str, text: str) -> Path:
+    path = server_dir / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+TRANSMOG_CONF = "env/dist/etc/modules/transmog.conf"
+
+
+def _tuned_view(ps: _Ps, tmp_path: Path) -> ControllerView:
+    """A WotLK view with `mod-transmog` installed and its conf deployed.
+
+    The same module the live install on `yulon-win11` reported five unwritten
+    keys for on 2026-09-12, which is the report this whole ticket came from.
+    """
+    _deploy(
+        tmp_path,
+        TRANSMOG_CONF,
+        "[worldserver]\n"
+        "#\n"
+        "Transmogrification.Enable = 1\n"
+        "Transmogrification.ShowSetDisclaimer = 1\n",
+    )
+    return _installed_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+
+
+def test_the_tuning_tab_lists_the_settings_of_installed_modules_only(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    cards = [card.card.module_id for card in view.tuning_panel.cards()]
+    assert cards == ["mod-transmog"], cards
+    keys = list(view.tuning_panel.card("mod-transmog").editors)
+    assert "Transmogrification.Enable" in keys and len(keys) == 5
+
+
+def test_a_setting_shows_what_the_deployed_conf_says_and_never_invents_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The five keys carry no `default`, so four of them have no value at all."""
+    view = _tuned_view(ps, tmp_path)
+    editors = view.tuning_panel.card("mod-transmog").editors
+    here = editors["Transmogrification.Enable"]
+    assert here.control.isChecked() and here.value() == "1"
+    assert here.note_label is None
+    missing = editors["Transmogrification.UseCollectionSystem"]
+    # A switch cannot draw "no value": it is off, and it says WHY it is off
+    # rather than passing the unchecked box off as a reading of the file.
+    assert not missing.control.isChecked()
+    assert not missing.changed, "an untouched switch reported a change nobody made"
+    assert missing.note_label is not None
+
+
+def test_a_game_with_nothing_installed_says_so_instead_of_an_empty_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.tuning_panel.cards() == ()
+    assert not view.tuning_panel.empty_label.isHidden()
+
+
+def test_saving_a_card_writes_what_changed_and_names_the_backup(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
+    assert card.save_button is not None
+    card.save_button.click()
+
+    after = path.read_text(encoding="utf-8")
+    assert "Transmogrification.Enable = 0" in after
+    assert "Transmogrification.ShowSetDisclaimer = 1" in after, "an untouched key moved"
+    (backup,) = tuning.backups_of(path)
+    assert backup.read_text(encoding="utf-8") == before
+    said = view.tuning_report.toPlainText()
+    assert "Transmogrification.Enable" in said and backup.name in said
+    # And the cards were re-read off the file afterwards: the row that was just
+    # written is no longer marked as changed, because the file now says so.
+    redrawn = view.tuning_panel.card("mod-transmog").editors["Transmogrification.Enable"]
+    assert redrawn.value() == "0" and not redrawn.control.isChecked()
+    assert not redrawn.changed
+
+
+def test_a_save_that_changed_nothing_writes_nothing_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    assert card.save_button is not None
+    card.save_button.click()
+    assert path.read_text(encoding="utf-8") == before
+    assert tuning.backups_of(path) == ()
+    # The BEHAVIOUR, not the wording: the report is the one written for a save
+    # with nothing in it, and it names the module it is about.
+    assert view.tuning_report.toPlainText() == (
+        controller_view_module.TUNING_NOTHING_CHANGED.format(module="mod-transmog")
+    )
+
+
+def test_a_key_the_conf_never_carried_is_written_for_the_first_time(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The whole point of the ticket: 73 of the 107 keys are unreachable today."""
+    view = _tuned_view(ps, tmp_path)
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.UseCollectionSystem"].control.setChecked(True)
+    assert card.save_button is not None
+    card.save_button.click()
+    assert "Transmogrification.UseCollectionSystem = 1" in (tmp_path / TRANSMOG_CONF).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_a_value_that_fails_its_type_is_refused_and_the_file_is_untouched(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    key = "Transmogrification.Enable"
+    # The shipped manifest types this key `bool`, and a switch cannot produce a
+    # value that fails its own check. The refusal is asked for by handing
+    # `tuning.check()` a declaration the switch's `0` cannot satisfy -- the spec
+    # is read at SAVE time, and the control was drawn before it.
+    monkeypatch.setattr(
+        view,
+        "_tuning_spec",
+        lambda family, module_id, file: {key: ConfKey(key=key, type="int", min=5, max=9)},
+    )
+    card.editors[key].control.setChecked(False)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    assert card.save_button is not None
+    card.save_button.click()
+    assert path.read_text(encoding="utf-8") == before
+    assert tuning.backups_of(path) == ()
+    assert key in view.tuning_report.toPlainText()
+    assert failures and key in failures[0]
+
+
+def test_revert_puts_the_conf_back_from_the_backup(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    card = view.tuning_panel.card("mod-transmog")
+    card.editors["Transmogrification.Enable"].control.setChecked(False)
+    assert card.save_button is not None and card.revert_button is not None
+    card.save_button.click()
+    assert path.read_text(encoding="utf-8") != before
+    view.tuning_panel.card("mod-transmog").revert_button.click()
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_revert_with_no_backup_says_so_rather_than_doing_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    card = view.tuning_panel.card("mod-transmog")
+    assert card.revert_button is not None
+    card.revert_button.click()
+    assert view.tuning_report.toPlainText() == controller_view_module.TUNING_NO_BACKUP.format(
+        module="mod-transmog", file=TRANSMOG_CONF
+    )
+
+
+def test_the_file_picker_lists_the_deployed_confs_and_opens_the_first(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    # T44 item 13: the picker is a row of buttons, and each one's tooltip is
+    # the FILE it stands for -- the label is a basename and is not the identity.
+    listed = [b.toolTip() for b in view.tuning_panel.file_buttons()]
+    assert listed == [TRANSMOG_CONF], listed
+    assert "Transmogrification.Enable = 1" in view.tuning_panel.editor.toPlainText()
+    assert not view.tuning_panel.editor.isReadOnly()
+
+
+def test_the_servers_own_conf_is_listed_read_only_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T43's own follow-up: who owns core configuration is a bigger question."""
+    _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
+    view = _tuned_view(ps, tmp_path)
+    core = next(
+        b
+        for b in view.tuning_panel.file_buttons()
+        if b.toolTip() == "env/dist/etc/worldserver.conf"
+    )
+    assert core.text().endswith(tuning_panel.READ_ONLY_SUFFIX)
+    core.click()
+    assert view.tuning_panel.editor.isReadOnly()
+    assert view.tuning_panel.file_note.text() == controller_view_module.TUNING_CORE_FILE
+    assert not view.tuning_panel.file_save_button.isEnabled()
+
+
+def test_a_raw_save_that_still_looks_like_a_conf_asks_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: asked.append("asked")
+        or int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    view = _tuned_view(ps, tmp_path)
+    view.tuning_panel.editor.setPlainText("[worldserver]\nTransmogrification.Enable = 0\n")
+    view.tuning_panel.file_save_button.click()
+    assert asked == []
+    assert (tmp_path / TRANSMOG_CONF).read_text(encoding="utf-8") == (
+        "[worldserver]\nTransmogrification.Enable = 0\n"
+    )
+
+
+def test_a_raw_save_that_stopped_looking_like_a_conf_asks_once_and_a_no_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard warns and gates; it never blocks (T43 point 4)."""
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    before = path.read_text(encoding="utf-8")
+    said: list[str] = []
+
+    def refuse(parent: object, title: str, text: str, *rest: object) -> int:
+        said.append(text)
+        return int(controller_view_module.QMessageBox.StandardButton.No)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", refuse)
+    view.tuning_panel.editor.setPlainText("this is not a setting\n")
+    view.tuning_panel.file_save_button.click()
+    # The confirm is `tuning.lint_sentence()`'s own, not a sentence this test
+    # spells a second time: what matters is that the guard ran on the text in
+    # the box and that its verdict is what the user was shown.
+    assert said == [tuning.lint_sentence(tuning.lint("this is not a setting\n"))]
+    assert path.read_text(encoding="utf-8") == before
+    assert tuning.backups_of(path) == ()
+
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    view.tuning_panel.file_save_button.click()
+    assert path.read_text(encoding="utf-8") == "this is not a setting\n"
+
+
+def test_busy_greys_the_tuning_saves_and_gives_them_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _tuned_view(ps, tmp_path)
+    card = view.tuning_panel.card("mod-transmog")
+    assert card.save_button is not None
+    view._set_busy(True)
+    assert not card.save_button.isEnabled()
+    view._set_busy(False)
+    assert card.save_button.isEnabled()
+
+
+def test_a_card_says_what_applying_its_change_costs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Computed, not typed into the view: the same sentence the raw editor shows."""
+    view = _tuned_view(ps, tmp_path)
+    card = view.tuning_panel.card("mod-transmog")
+    assert card.rule_label.text() == tuning.apply_sentence("restart")
+    assert view.tuning_panel.file_note.text() == tuning.apply_sentence("restart")
+
+
+def test_a_multi_file_card_writes_nothing_when_the_second_files_value_is_bad(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Refused before a byte is written" has to hold over the CARD, not per file.
+
+    NPC Beastmaster is the shipped module with two: four keys in its own conf
+    and `Creatures.CustomIDs` in the core's `worldserver.conf`. Validating and
+    writing one file at a time landed the first file's change and only then
+    refused the second, which is the half-applied state the guarantee exists to
+    prevent.
+    """
+    own = "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    core = "env/dist/etc/worldserver.conf"
+    _deploy(tmp_path, own, "[worldserver]\nBeastMaster.Enable = 1\n")
+    _deploy(tmp_path, core, '[worldserver]\nCreatures.CustomIDs = "1,2"\n')
+    view = _installed_view(ps, tmp_path, module=frozenset({"mod-npc-beastmaster"}))
+    before = (tmp_path / own).read_bytes()
+    card = view.tuning_panel.card("mod-npc-beastmaster")
+    # The module's own conf comes first in the manifest, so its write is the one
+    # that would already have landed.
+    card.editors["BeastMaster.Enable"].control.setChecked(False)
+    card.editors["Creatures.CustomIDs"].control.setText("not a number")
+    monkeypatch.setattr(
+        view,
+        "_tuning_spec",
+        lambda module_id, file: (
+            {"Creatures.CustomIDs": ConfKey(key="Creatures.CustomIDs", type="int")}
+            if file == core
+            else {}
+        ),
+    )
+    assert card.save_button is not None
+    card.save_button.click()
+    assert (tmp_path / own).read_bytes() == before, "the first file was written anyway"
+    assert tuning.backups_of(tmp_path / own) == ()
+    assert tuning.backups_of(tmp_path / core) == ()
+
+
+def test_a_conf_that_is_not_utf8_opens_empty_and_read_only(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An editor holding U+FFFD is one Save away from writing that to disk."""
+    view = _tuned_view(ps, tmp_path)
+    path = tmp_path / TRANSMOG_CONF
+    path.write_bytes(b"[worldserver]\n# \xff\nTransmogrification.Enable = 1\n")
+    view.open_tuning_file(TRANSMOG_CONF)
+    assert view.tuning_panel.editor.toPlainText() == ""
+    assert view.tuning_panel.editor.isReadOnly()
+    assert not view.tuning_panel.file_save_button.isEnabled()
+    assert TRANSMOG_CONF in view.tuning_panel.file_note.text()
+
+
+def test_a_saved_card_of_a_shared_id_writes_that_familys_file_and_no_other(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T42 round 2's collision, on the Tuning tab, end to end through the view.
+
+    The shipped `wow-wotlk` catalog has no id in two families, so the panel
+    tests build the twin from synthetic rows and this one builds it the way
+    `test_the_selected_manifest_of_a_shared_id_is_the_one_whose_row_is_selected`
+    does: two real manifests under one id, handed to the panel directly.
+    """
+    mine = "env/dist/etc/modules/mine.conf"
+    theirs = "env/dist/etc/modules/theirs.conf"
+    shared = "env/dist/etc/worldserver.conf"
+    _deploy(tmp_path, mine, "[worldserver]\nK = 1\n")
+    _deploy(tmp_path, theirs, "[worldserver]\nK = 1\n")
+    _deploy(tmp_path, shared, "[worldserver]\nS = 1\n")
+    view = _tuned_view(ps, tmp_path)
+    twins = [
+        parse_manifest(
+            {
+                "schema_version": 1,
+                "id": "twin",
+                "name": "Twin",
+                "type": family,
+                "game": "wow-wotlk",
+                "description": "two families, one id",
+                "source": {"repo": "acme/twin"},
+                **({"sparse_path": "x"} if False else {}),
+                # DIFFERENT declarations for the same key name, so reading the
+                # wrong family's manifest is visible: `9` is a fine `int` and
+                # not an on/off value, so a spec taken from the `module` twin
+                # refuses the `mod` twin's save.
+                "conf": [
+                    {"file": file, "keys": [{"key": "K", "type": kind}]},
+                    # And a key both families declare in the SAME file with
+                    # DIFFERENT types, which is the only shape that can catch a
+                    # spec read from the wrong family: `9` is a fine `int` and
+                    # not an on/off value.
+                    {"file": shared, "keys": [{"key": "S", "type": kind}]},
+                ],
+            }
+        )
+        for family, file, kind in (("module", mine, "bool"), ("mod", theirs, "int"))
+    ]
+    for manifest in twins:
+        view._manifests[(manifest.type, manifest.id)] = manifest
+    rows = tuning.rows_for(
+        twins, {"module": frozenset({"twin"}), "mod": frozenset({"twin"})}, tmp_path
+    )
+    view.tuning_panel.set_cards(tuning_panel.build_tuning_cards(rows))
+
+    card = view.tuning_panel.card(("mod", "twin"))
+    assert card.card.files == (theirs, shared), card.card.files
+    card.editors["K"].control.setText("9")
+    card.editors["S"].control.setText("9")
+    assert card.save_button is not None
+    card.save_button.click()
+
+    assert (tmp_path / theirs).read_text(encoding="utf-8") == "[worldserver]\nK = 9\n"
+    assert (tmp_path / mine).read_text(encoding="utf-8") == "[worldserver]\nK = 1\n"
+    assert (tmp_path / shared).read_text(encoding="utf-8") == "[worldserver]\nS = 9\n"
+    assert "wrote" in view.tuning_report.toPlainText()
+
+
+# ---------------------------------------------------- the version line (T44 item 1)
+
+
+def test_the_first_paint_of_the_modules_tab_reads_no_clone_at_all(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Item 1's hard rule: building the tab must not cost a `git log` per module.
+
+    A `git log -1` per installed row on every reload is what T41 refused and
+    T42 restated, and `reload_modules()` runs after every install, every
+    remove, every update check and every Refresh.
+
+    Mutation: have `_known_versions()` call `VersionCache.fill()` instead of
+    `known()` and the reader is asked once per installed module while the tab
+    is still being laid out -- and every other test in this file stays green.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    object.__setattr__(
+        services, "module_version", lambda path: (read.append(path), "7c02b1d · 2026-09-01")[1]
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert read == [], "the tab was built by reading clones"
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == ""
+
+
+def test_the_version_fills_in_after_the_tab_is_up_and_only_for_installed_rows(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A row that renders late is fine; a tab that takes a second per module is not.
+
+    Mutation: drop the `_start_filling_versions()` call from `reload_modules()`
+    and the line never arrives -- the tab looks exactly as it did before T44
+    and the first test above still passes.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    object.__setattr__(
+        services, "module_version", lambda path: (read.append(path), "7c02b1d · 2026-09-01")[1]
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    pump_until(lambda: not view._filling_versions, "the version fill never finished")
+
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == "7c02b1d · 2026-09-01"
+    assert read == [tmp_path / "modules" / "mod-solocraft"], "one read, and only the installed row"
+    assert view.modules_panel.row("mod-transmog").version_label.text() == ""
+
+
+def test_a_reload_after_the_fill_reads_nothing_again(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The cache is the point: the second reload costs no subprocess at all.
+
+    Mutation: drop the `_known` write in `VersionCache.fill()` and every
+    reload pays the reads again -- which is the cost item 1 exists to remove.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    object.__setattr__(
+        services, "module_version", lambda path: (read.append(path), "7c02b1d · 2026-09-01")[1]
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    pump_until(lambda: not view._filling_versions, "the first fill never finished")
+    before = len(read)
+
+    view.reload_modules()
+    pump_until(lambda: not view._filling_versions, "the second fill never finished")
+
+    assert len(read) == before
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == "7c02b1d · 2026-09-01"
+
+
+def test_refresh_forgets_every_version_and_a_report_forgets_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The two invalidations, and they are different sizes on purpose.
+
+    Refresh means "read the disk again" -- a clone can change under this app,
+    through a `git pull` in a terminal. A report is about ONE module, and
+    dropping the whole cache for it would re-read every other clone for
+    nothing.
+
+    Mutation: bind Refresh back to `reload_modules` and a module pulled in a
+    terminal keeps showing the sha it had when the tab opened, forever.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "installed_modules",
+        lambda: {"module": frozenset({"mod-solocraft", "mod-transmog"})},
+    )
+    object.__setattr__(
+        services, "module_version", lambda path: (read.append(path), "7c02b1d · 2026-09-01")[1]
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    pump_until(lambda: not view._filling_versions, "the first fill never finished")
+    assert len(read) == 2
+
+    _deliver_report(view, ApplyReport("install", "mod-solocraft"))
+    pump_until(lambda: not view._filling_versions, "the fill after the report never finished")
+    assert read[2:] == [tmp_path / "modules" / "mod-solocraft"], "one module, not both"
+
+    view.refresh_modules_button.click()
+    pump_until(lambda: not view._filling_versions, "the fill after Refresh never finished")
+
+    assert len(read) == 5, "Refresh re-reads every installed clone"
+
+
+def _update_view(ps: _Ps, tmp_path: Path, **seams: object) -> ControllerView:
+    """A view whose applier is rooted at `tmp_path`, with a real clone on disk.
+
+    The clone is real because `Applier.update()`'s first question is whether
+    the folder is a checkout at all, and a fixture that skipped it would test
+    a refusal the press never reaches.
+    """
+    clone = tmp_path / "modules" / "mod-solocraft"
+    (clone / ".git").mkdir(parents=True)
+    (clone / "mine.cpp").write_text("// three evenings\n", encoding="utf-8")
+    applier = _FakeApplier(tmp_path, **seams)  # type: ignore[arg-type]
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "applier", applier)
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+    )
+    view._behind = {("module", "mod-solocraft"): 3}
+    view.reload_modules()
+    return view
+
+
+def _press_update(view: ControllerView) -> None:
+    row = view.modules_panel.row("mod-solocraft")
+    chip = next(b for b in row.chip_buttons if "Update available" in b.text())
+    chip.click()
+    assert row.detail_button is not None
+    assert row.detail_button.text() == "Update"
+    row.detail_button.click()
+    pump_until(lambda: not view._busy, "the update never finished")
+
+
+def test_the_update_press_runs_the_real_pull_over_a_clean_checkout(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T44 item 2, tested through `Applier.update()` rather than past it (round 2).
+
+    The first version of this test used a fake applier that overrode
+    `update()`, so it asserted only that the tab SELECTED the right method --
+    and would have passed just as happily while the real path reset a user's
+    work. The fake now overrides `install()` alone, so every refusal
+    `update()` carries really runs here.
+
+    Mutation: `update-press-routes-to-remove` -- route the press to
+    `applier.remove` and the module the user asked to update is uninstalled.
+    """
+    solocraft = "https://github.com/azerothcore/mod-solocraft.git"
+    view = _update_view(ps, tmp_path, origin=solocraft)
+
+    _press_update(view)
+
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed[-1] == "mod-solocraft"
+    assert applier.removed == []
+
+
+def test_the_update_press_refuses_a_checkout_with_work_in_it_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The whole of round 2's finding 1, at the control the user actually presses.
+
+    The refusal is the applier's own sentence, in the report box every other
+    answer on this tab is read in, and the file is still there.
+
+    Mutation: `update-press-routes-to-install` -- send the press to
+    `applier.install` again (round 1's routing) and the press resets the
+    folder: `installed` grows and no refusal is shown.
+    """
+    solocraft = "https://github.com/azerothcore/mod-solocraft.git"
+    view = _update_view(ps, tmp_path, origin=solocraft, unmodified=False)
+
+    _press_update(view)
+
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == [], "the pull ran over uncommitted work"
+    assert "has changes in it" in view.module_report.toPlainText()
+    assert (tmp_path / "modules" / "mod-solocraft" / "mine.cpp").exists()
+
+
+def test_the_update_press_refuses_a_checkout_of_another_repository(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2's finding 2, at the control: an app claim is not a repository check.
+
+    Mutation: `update-skips-the-origin-check` -- drop the `same_repo()` arm
+    from `_update_refusal()` and the press fast-forwards somebody else's
+    repository and then deploys this module over it.
+    """
+    view = _update_view(ps, tmp_path, origin="https://github.com/someone/else.git")
+
+    _press_update(view)
+
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == []
+    said = view.module_report.toPlainText()
+    assert "someone/else" in said and "mod-solocraft" in said
+
+
+def test_a_finished_update_drops_the_commits_behind_it_just_pulled(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The count is stale the moment the clone moves, and a stale count is a wrong one.
+
+    Mutation: leave `_behind` alone on a non-remove report and the row goes on
+    offering "Update available -- 3 commits behind" over a clone that is now at
+    the tip, forever, until the user presses Check for updates again.
+    """
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
+    view._behind = {("module", "mod-solocraft"): 3}
+    view.reload_modules()
+    assert any(
+        "Update available" in b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons
+    )
+
+    _deliver_report(view, ApplyReport("install", "mod-solocraft"))
+
+    assert view._behind == {}
+    assert not [
+        b
+        for b in view.modules_panel.row("mod-solocraft").chip_buttons
+        if "Update available" in b.text()
+    ]
+
+
+# --------------------------------------------- the Tuning tab's controls (T44)
+
+
+def _tuning_view(ps: _Ps, tmp_path: Path) -> ControllerView:
+    """A WotLK view with one installed module whose conf is really on disk."""
+    conf = tmp_path / "env" / "dist" / "etc" / "modules" / "mod_npc_beastmaster.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-npc-beastmaster"})}
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def test_the_tuning_action_bar_greys_the_two_that_cost_something_until_one_is_owed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T44 item 7. Nothing is waiting when the tab opens, so nothing may be pressed.
+
+    Mutation: enable them at build time and the tab offers to take the server
+    down before anybody has changed a setting.
+    """
+    view = _tuning_view(ps, tmp_path)
+
+    assert view.tuning_restart_button.isEnabled() is False
+    assert view.tuning_recreate_button.isEnabled() is False
+    assert view.tuning_revert_all_button.isEnabled() is False
+    assert view.tuning_reload_button.isEnabled() is True
+    assert view.tuning_banner.isHidden() is True
+
+
+def test_a_save_arms_exactly_the_job_that_file_owes_and_raises_the_banner(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Items 7 and 8. The job comes from `tuning.file_rule()`, never from a guess.
+
+    A conf under `env/dist/etc/` is bound into the containers, so the world
+    re-reads it at the next start: a RESTART. The banner names the file that
+    is waiting, and its button is the one that answers it.
+
+    Mutation: arm both buttons on every save and the tab offers to replace the
+    containers over a change a restart covers.
+    """
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+
+    assert view.tuning_restart_button.isEnabled() is True
+    assert view.tuning_recreate_button.isEnabled() is False
+    assert view.tuning_banner.isHidden() is False
+    assert "mod_npc_beastmaster.conf" in view.tuning_banner_label.text()
+    assert view.tuning_banner_button.text() == view.tuning_restart_button.text()
+
+
+def test_a_file_outside_every_bind_owes_a_recreate_and_the_banner_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The dearer half of the same rule, and the banner must name the DEARER job.
+
+    Mutation: let the banner's button be whichever job was noted last and a
+    user who changed two files presses Restart over a change that needs the
+    containers replaced.
+    """
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    view._note_tuning_owed("modules/mod-x/conf/mod-x.conf")
+
+    assert view.tuning_restart_button.isEnabled() is True
+    assert view.tuning_recreate_button.isEnabled() is True
+    assert view.tuning_banner_button.text() == view.tuning_recreate_button.text()
+
+
+def test_revert_all_changes_drops_the_unsaved_edits_and_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Item 7's second button, and it is the one that cannot destroy anything.
+
+    It is the undo for "I typed in six boxes and changed my mind": the cards
+    are rebuilt from the rows already read, so no file is touched and no disk
+    is re-read. The per-card Revert is the one that restores from a backup.
+
+    Mutation: have it call `reload_tuning()` and it silently becomes a second
+    Reload from disk -- which also picks up somebody else's edits, which is
+    not what a user pressing "revert MY changes" asked for.
+    """
+    view = _tuning_view(ps, tmp_path)
+    card = view.tuning_panel.cards()[0]
+    editor = next(iter(card.editors.values()))
+    assert editor.control is not None
+    before = view.services.controller.server_dir / "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    text = before.read_text(encoding="utf-8")
+    from PySide6.QtWidgets import QCheckBox, QLineEdit
+
+    if isinstance(editor.control, QLineEdit):
+        editor.control.setText("something else")
+    elif isinstance(editor.control, QCheckBox):
+        editor.control.setChecked(not editor.control.isChecked())
+    else:
+        editor.control.setValue(editor.control.value() + 1)
+    assert view.tuning_revert_all_button.isEnabled() is True
+
+    # Somebody else changes the file while the tab is open. Revert all changes
+    # must NOT pick that up -- it is the undo for what this person typed --
+    # and Reload from disk must.
+    before.write_text("BeastMaster.Enable = 0\n", encoding="utf-8")
+
+    view.tuning_revert_all_button.click()
+
+    assert view.tuning_panel.cards()[0].edits() == {}
+    assert view.tuning_revert_all_button.isEnabled() is False
+    assert before.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n", "it wrote to disk"
+    reverted = next(iter(view.tuning_panel.cards()[0].editors.values()))
+    assert reverted.row.current == "1", "Revert all changes re-read the file"
+
+    view.tuning_reload_button.click()
+
+    reloaded = next(iter(view.tuning_panel.cards()[0].editors.values()))
+    assert reloaded.row.current == "0", "Reload from disk did not re-read the file"
+    assert text == "BeastMaster.Enable = 1\n"
+
+
+def test_the_raw_revert_restores_from_the_backup_and_says_which(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Item 15. From the BACKUP, never by re-reading the form.
+
+    Mutation: re-open the file instead of copying the backup over it and
+    Revert becomes Reload from disk under another name -- it puts back what
+    was just saved, not what was there before.
+    """
+    view = _tuning_view(ps, tmp_path)
+    path = view.services.controller.server_dir / "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    view.open_tuning_file("env/dist/etc/modules/mod_npc_beastmaster.conf")
+
+    view.save_tuning_file("BeastMaster.Enable = 0\n")
+    assert path.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+    backup = view.tuning_panel.backup_label.text()
+    assert ".bak" in backup
+
+    view.revert_tuning_file()
+
+    assert path.read_text(encoding="utf-8") == "BeastMaster.Enable = 1\n"
+    assert ".bak" in view.tuning_report.toPlainText()
+
+
+def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Item 13's other half: WHICH files are read-only is the view's list, not the panel's.
+
+    Mutation: pass no `read_only` and `worldserver.conf` sits in the row
+    looking exactly like a file this tab will write.
+    """
+    core = tmp_path / "env" / "dist" / "etc" / "worldserver.conf"
+    core.parent.mkdir(parents=True, exist_ok=True)
+    core.write_text("[worldserver]\n", encoding="utf-8")
+    view = _tuning_view(ps, tmp_path)
+
+    labels = [b.text() for b in view.tuning_panel.file_buttons()]
+    assert "worldserver.conf · read-only" in labels
+
+
+def test_restart_and_recreate_both_ask_first_and_do_nothing_on_no(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both take the server down, so both carry the ellipsis and the dialog.
+
+    The answer is read through `said_yes()`, which is T33's closed bug: the
+    static `question()` returns a plain int, so `is StandardButton.Yes` is
+    always False -- and here the direction of that bug is a server that never
+    restarts, which reads as a dead button.
+
+    Mutation: drop the `_confirm()` call and the button takes the world down
+    on the first press, with no warning, from a settings tab.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    view._note_tuning_owed("modules/mod-x/conf/mod-x.conf")
+    asked: list[str] = []
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: (asked.append(str(args[1])), QMessageBox.StandardButton.No)[1],
+    )
+    view.tuning_restart_button.click()
+    view.tuning_recreate_button.click()
+
+    assert asked == [TUNING_RESTART_LABEL, TUNING_RECREATE_LABEL]
+    assert view._busy is False, "a refused dialog must start nothing"
+    assert view._tuning_owed, "a refused dialog must forget nothing either"
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    view.tuning_restart_button.click()
+    pump_until(lambda: not view._busy, "the restart never finished")
+
+    assert view._tuning_owed.get("restart") is None, "the restart covered what owed one"
+    assert view._tuning_owed.get("recreate"), "and nothing else"
+
+
+def test_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_what_is_owed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The busy gate has to reach this bar: Restart stops the containers an
+    install, a rebuild or an importer run is using.
+
+    And it must come back to what is OWED rather than to "on": a job of its own
+    finishing must not hand the tab a live "Restart server…" over a change
+    nobody made.
+
+    Mutation: re-enable the four unconditionally in `_set_busy(False)` and a
+    finished install arms Restart and Recreate on a tab with nothing waiting.
+    """
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+
+    view._set_busy(True)
+    assert view.tuning_restart_button.isEnabled() is False
+    assert view.tuning_recreate_button.isEnabled() is False
+    assert view.tuning_reload_button.isEnabled() is False
+
+    view._set_busy(False)
+    assert view.tuning_restart_button.isEnabled() is True, "a restart is still owed"
+    assert view.tuning_recreate_button.isEnabled() is False, "nothing owes a recreate"
+    assert view.tuning_reload_button.isEnabled() is True
+
+
+def test_a_failed_install_forgets_the_version_the_clone_may_no_longer_be_at(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2. A failure is not "nothing happened" — the clone may already have moved.
+
+    `Applier.install()` fetches and resets the checkout FIRST and then runs
+    deploy, patches, SQL, conf and the client copy. Any of those can raise, and
+    by then the folder is at a different commit than the one this tab read. The
+    success path drops the cached version through `_note_session_facts()`; the
+    failure path left it, so the row went on showing a sha the clone had moved
+    off — which is a wrong sha, and worse than no sha at all (T44 item 1's own
+    rule).
+
+    Mutation: `failed-install-keeps-the-version` -- drop the `forget()` from
+    `_module_failed()` and the row keeps the old sha until something else
+    invalidates it.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    object.__setattr__(
+        services,
+        "module_version",
+        lambda path: (read.append(path), f"aaaaaa{len(read)} · 2026-09-01")[1],
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    pump_until(lambda: not view._filling_versions, "the first fill never finished")
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == "aaaaaa1 · 2026-09-01"
+
+    view._acting_on = view._manifests[("module", "mod-solocraft")]
+    view._module_failed(RuntimeError("the SQL step blew up after the reset"))
+    view.reload_modules()
+    pump_until(lambda: not view._filling_versions, "the fill after the failure never finished")
+
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == "aaaaaa2 · 2026-09-01"
+
+
+def test_the_tuning_tab_warns_about_the_keys_this_installs_compose_really_beats(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2's finding 3, end to end: the warning follows the environment, not the file mode.
+
+    The WotLK entry's `world_env` pins `AiPlayerbot.MinRandomBots`, so a conf
+    carrying that key is shadowed and a conf carrying only a module's own key
+    is not — and until round 2 both got the same warning because both were
+    writable.
+
+    Mutation: `tuning-view-passes-no-shadowed` -- drop the `shadowed=` argument
+    and the warning is never shown at all, which is the mirror failure: a user
+    edits the bot population and nothing tells them the world will ignore it.
+    """
+    conf = tmp_path / "env" / "dist" / "etc" / "modules" / "mod_npc_beastmaster.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    view = _tuning_view(ps, tmp_path)
+
+    # Same file, same permissions: only the CONTENT decides.
+    view.open_tuning_file("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    assert not view.tuning_panel.shadow_warning.isVisibleTo(view.tuning_panel)
+
+    conf.write_text("BeastMaster.Enable = 1\nAiPlayerbot.MinRandomBots = 500\n", encoding="utf-8")
+    view.open_tuning_file("env/dist/etc/modules/mod_npc_beastmaster.conf")
+
+    assert view.tuning_panel.shadow_warning.isVisibleTo(view.tuning_panel)
+    said = view.tuning_panel.shadow_warning.text()
+    assert "AiPlayerbot.MinRandomBots" in said
+    assert "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" in said
+    assert "BeastMaster.Enable" not in said, "only the shadowed key is named"
+
+
+def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A fact worth pinning: `playerbots.conf` is where the shadowed keys really live.
+
+    Every `AC_*` row this app writes is an `AiPlayerbot.*` or `Playerbots.*`
+    key, and those live in `env/dist/etc/modules/playerbots.conf` -- which is
+    in `TUNING_CORE_FILES` and so is shown READ-ONLY (T43's own follow-up). So
+    on a shipped install the warning is mostly a statement about a file nobody
+    can edit here anyway, and the honest place to change those values is the
+    override itself.
+
+    Recorded rather than assumed: if that file ever becomes writable on this
+    tab, the warning is what stands between a user and an edit the world
+    ignores, and this test is where somebody will find that out.
+
+    Mutation: drop `playerbots.conf` from `TUNING_CORE_FILES` and this fails,
+    which is the review this change would owe.
+    """
+    assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES

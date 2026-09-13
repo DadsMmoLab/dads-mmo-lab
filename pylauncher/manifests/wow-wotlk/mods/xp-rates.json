@@ -11,15 +11,24 @@
       "keys": [
         {
           "key": "Rate.XP.Kill",
-          "default": "{kill}"
+          "default": "{kill}",
+          "label": "XP from kills",
+          "explain": "Experience rates (outside battleground).",
+          "type": "text"
         },
         {
           "key": "Rate.XP.Quest",
-          "default": "{quest}"
+          "default": "{quest}",
+          "label": "XP from quests",
+          "explain": "Experience rates (outside battleground).",
+          "type": "text"
         },
         {
           "key": "Rate.XP.Explore",
-          "default": "{explore}"
+          "default": "{explore}",
+          "label": "XP from exploring",
+          "explain": "Experience rates (outside battleground).",
+          "type": "text"
         }
       ]
     }

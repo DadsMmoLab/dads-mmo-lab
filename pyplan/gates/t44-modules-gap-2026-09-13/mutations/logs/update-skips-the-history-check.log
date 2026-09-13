@@ -1,0 +1,76 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m [ 50%]
+[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_______ test_an_update_over_a_checkout_carrying_its_own_commits_refuses ________[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-817/test_an_update_over_a_checkout1')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_an_update_over_a_checkout_carrying_its_own_commits_refuses[39;49;00m(tmp_path: Path) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""`status` is not this question and cannot be made into it.[39;49;00m
+    [33m[39;49;00m
+    [33m    A user who COMMITTED their work has a perfectly clean tree; `reset --hard`[39;49;00m
+    [33m    moves HEAD off those commits and leaves them reachable only through the[39;49;00m
+    [33m    reflog. `no_local_commits()` counts `FETCH_HEAD..HEAD` after running the[39;49;00m
+    [33m    update's own fetch, so it is also what refuses a remote that has REWOUND:[39;49;00m
+    [33m    the commits HEAD carries that the new tip does not are counted the same way[39;49;00m
+    [33m    whoever put them there.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: `update-skips-the-history-check` -- drop the[39;49;00m
+    [33m    `no_local_commits()` arm and the reset throws the commits away.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        clone, before = _owned_clone(tmp_path)[90m[39;49;00m
+        git = _FakeGit({}, unmodified=[94mTrue[39;49;00m, no_local_commits=[94mFalse[39;49;00m)[90m[39;49;00m
+        applier = _updater(tmp_path, git)[90m[39;49;00m
+    [90m[39;49;00m
+>       [94mwith[39;49;00m pytest.raises(ApplyError, match=[33m"[39;49;00m[33mcommits of its own[39;49;00m[33m"[39;49;00m):[90m[39;49;00m
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31mE       Failed: DID NOT RAISE ApplyError[0m
+
+[1m[31mtests/test_apply.py[0m:3761: Failed
+----------------------------- Captured stderr call -----------------------------
+2026-09-13 04:25:05 INFO [yulon.apply] install mod-ah-bot: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+------------------------------ Captured log call -------------------------------
+[32mINFO    [0m yulon.apply:apply.py:2376 install mod-ah-bot: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+[31m[1m______ test_an_update_refuses_when_git_could_not_be_asked[history-unseen] ______[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-817/test_an_update_refuses_when_gi1')
+unmodified = True, no_local_commits = None, expected = 'could not reach'
+
+    [0m[37m@pytest[39;49;00m.mark.parametrize([90m[39;49;00m
+        ([33m"[39;49;00m[33munmodified[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mno_local_commits[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mexpected[39;49;00m[33m"[39;49;00m),[90m[39;49;00m
+        [[90m[39;49;00m
+            ([94mNone[39;49;00m, [94mTrue[39;49;00m, [33m"[39;49;00m[33mcould not say whether[39;49;00m[33m"[39;49;00m),[90m[39;49;00m
+            ([94mTrue[39;49;00m, [94mNone[39;49;00m, [33m"[39;49;00m[33mcould not reach[39;49;00m[33m"[39;49;00m),[90m[39;49;00m
+        ],[90m[39;49;00m
+        ids=[[33m"[39;49;00m[33mtree-unseen[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mhistory-unseen[39;49;00m[33m"[39;49;00m],[90m[39;49;00m
+    )[90m[39;49;00m
+    [94mdef[39;49;00m[90m [39;49;00m[92mtest_an_update_refuses_when_git_could_not_be_asked[39;49;00m([90m[39;49;00m
+        tmp_path: Path, unmodified: [96mbool[39;49;00m | [94mNone[39;49;00m, no_local_commits: [96mbool[39;49;00m | [94mNone[39;49;00m, expected: [96mstr[39;49;00m[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m""" "Could not check" is not "there is nothing to lose", and it never refuses silently.[39;49;00m
+    [33m[39;49;00m
+    [33m    Both fail closed, and they say DIFFERENT things while failing: telling an[39;49;00m
+    [33m    offline user that they have uncommitted changes is telling them something[39;49;00m
+    [33m    nobody established (`Ownership`'s three-outcome rule).[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: `update-treats-unknown-as-clean` -- use truthiness instead of[39;49;00m
+    [33m    `is True` and a machine that cannot run git resets the folder.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        clone, before = _owned_clone(tmp_path)[90m[39;49;00m
+        git = _FakeGit({}, unmodified=unmodified, no_local_commits=no_local_commits)[90m[39;49;00m
+        applier = _updater(tmp_path, git)[90m[39;49;00m
+    [90m[39;49;00m
+>       [94mwith[39;49;00m pytest.raises(ApplyError, match=expected):[90m[39;49;00m
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31mE       Failed: DID NOT RAISE ApplyError[0m
+
+[1m[31mtests/test_apply.py[0m:3792: Failed
+----------------------------- Captured stderr call -----------------------------
+2026-09-13 04:25:05 INFO [yulon.apply] install mod-ah-bot: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+------------------------------ Captured log call -------------------------------
+[32mINFO    [0m yulon.apply:apply.py:2376 install mod-ah-bot: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_apply.py::[1mtest_an_update_over_a_checkout_carrying_its_own_commits_refuses[0m - Failed: DID NOT RAISE ApplyError
+[31mFAILED[0m tests/test_apply.py::[1mtest_an_update_refuses_when_git_could_not_be_asked[history-unseen][0m - Failed: DID NOT RAISE ApplyError
+[31m[31m[1m2 failed[0m, [32m142 passed[0m[31m in 1.88s[0m[0m

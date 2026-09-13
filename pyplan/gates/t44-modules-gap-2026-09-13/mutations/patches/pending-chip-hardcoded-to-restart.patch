@@ -1,0 +1,14 @@
+# gate: tests/test_tuning_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/tuning_panel.py b/pylauncher/yulon/ui/widgets/tuning_panel.py
+index fe8ef679..c67983fb 100644
+--- a/pylauncher/yulon/ui/widgets/tuning_panel.py
++++ b/pylauncher/yulon/ui/widgets/tuning_panel.py
+@@ -332,7 +332,7 @@ def row_chips(row: TuningRow, *, changed: bool = False) -> tuple[str, ...]:
+         return (CHIP_READ_ONLY,)
+     chips: list[str] = []
+     if changed:
+-        pending = PENDING_CHIPS.get(tuning.apply_rule(row))
++        pending = PENDING_CHIPS["restart"]
+         if pending is not None:
+             chips.append(pending)
+     if control_kind(row) == "box" and row.type is None:

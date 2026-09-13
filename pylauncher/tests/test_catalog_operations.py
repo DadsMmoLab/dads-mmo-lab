@@ -10,7 +10,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from yulon.catalog.catalog import CatalogEntry, ConfEnable, Operations, load_catalog
+from yulon.catalog import composegen
+from yulon.catalog.catalog import (
+    CatalogEntry,
+    ConfEnable,
+    Operations,
+    load_catalog,
+)
 
 WOTLK = load_catalog().get("wow-wotlk")
 
@@ -385,3 +391,108 @@ def test_a_channel_rank_above_the_trees_own_level_scale_is_refused() -> None:
     too_high = entry.operations.model_copy(update={"gm_level": entry.accounts.level.max_level + 1})
     with pytest.raises(ValidationError, match="level"):
         CatalogEntry.model_validate({**entry.model_dump(), "operations": too_high.model_dump()})
+
+
+# -- the AC_* env transform, and which conf keys this install's compose shadows --
+
+
+def test_the_env_name_is_ac_plus_upper_snake_of_the_ini_key() -> None:
+    """AzerothCore's own transform, against the three examples its source documents.
+
+    `Config.cpp:370-374` is a doc comment carrying exactly these three, and
+    `:391-394` is the separator rule (`.`, `-` and space become `_`); the read
+    is `pyplan/phase8-reads/azerothcore.md`. They are the fixtures BECAUSE they
+    are upstream's own: a rule checked against examples this repo invented
+    would only prove this repo is self-consistent.
+
+    Mutation: `env-name-ignores-case-boundaries` -- uppercase and replace dots
+    only, and `AiPlayerbot.MinRandomBots` becomes
+    `AC_AIPLAYERBOT_MINRANDOMBOTS`, which is not what this install writes and
+    not what the server reads, so every shadowed key stops being found.
+    """
+    assert composegen.env_name_for("SomeConfig") == "AC_SOME_CONFIG"
+    assert composegen.env_name_for("myNestedConfig.opt1") == "AC_MY_NESTED_CONFIG_OPT_1"
+    assert composegen.env_name_for("LogDB.Opt.ClearTime") == "AC_LOG_DB_OPT_CLEAR_TIME"
+
+
+def test_the_transform_agrees_with_every_env_name_this_app_actually_writes() -> None:
+    """The proof the rule is generic rather than four names somebody typed.
+
+    Each of these is written by this app into the generated
+    `docker-compose.override.yml`, and each is here paired with the conf key it
+    is meant to shadow. If the transform and the written names ever stop
+    agreeing, one of the two is wrong and this says so.
+
+    Mutation: `env-name-drops-the-digit-rule` or any other change to the
+    transform -- one of these four stops matching.
+    """
+    pairs = {
+        "AiPlayerbot.MinRandomBots": "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS",
+        "AiPlayerbot.MaxRandomBots": "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS",
+        "AiPlayerbot.RandomBotAutologin": "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN",
+        "Playerbots.Updates.EnableDatabases": "AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES",
+    }
+    written = set(composegen.DEFAULT_WORLD_ENV) | {
+        "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS",
+        "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS",
+    }
+
+    for key, name in pairs.items():
+        assert composegen.env_name_for(key) == name
+    assert set(pairs.values()) == written
+
+
+def test_world_env_is_the_same_answer_the_generator_writes() -> None:
+    """One function for "what env does this install's override carry?".
+
+    Asked by the generator when it writes the file and by the Tuning tab when
+    it warns about a shadowed key. Two spellings of it would be two answers,
+    and the tab's job is to say what the FILE says.
+
+    Mutation: `world-env-forgets-the-entry` -- return `DEFAULT_WORLD_ENV` alone
+    and the two keys `catalog.json` adds stop counting as shadows, so the bot
+    population -- the one setting a person is most likely to try to change --
+    is edited with no warning at all.
+    """
+    entry = load_catalog().get("wow-wotlk")
+
+    env = composegen.world_env(entry)
+
+    assert set(composegen.DEFAULT_WORLD_ENV) <= set(env)
+    assert env["AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] == "500"
+
+
+def test_shadowed_by_env_names_the_keys_the_environment_beats() -> None:
+    """Which of THIS file's keys the running containers will override.
+
+    `Config.cpp:540-552`: the environment wins over both the file and the
+    compiled default, so a key with an env row behind it can be edited here all
+    day and the world will not read it.
+
+    Mutation: `shadow-match-is-case-blind` -- compare the raw names instead of
+    the transform and nothing ever matches, which puts the tab back to warning
+    on every file or on none.
+    """
+    text = (
+        "[worldserver]\n"
+        "AiPlayerbot.MinRandomBots = 500\n"
+        "AiPlayerbot.KeepAlive = 30\n"
+        "#AiPlayerbot.MaxRandomBots = 500\n"
+    )
+    env = {"AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500", "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS": "500"}
+
+    assert composegen.shadowed_by_env(text, env) == (
+        ("AiPlayerbot.MinRandomBots", "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"),
+    )
+
+
+def test_a_file_with_nothing_shadowed_reports_nothing() -> None:
+    """The whole point of round 2's finding 3: the warning is not for every file.
+
+    Mutation: `shadow-match-returns-every-key` -- report every key in the file
+    and the warning is back to noise on a module conf no env row touches.
+    """
+    text = "[worldserver]\nTransmogrification.Enable = 1\n"
+    env = {"AC_AI_PLAYERBOT_MIN_RANDOM_BOTS": "500"}
+
+    assert composegen.shadowed_by_env(text, env) == ()

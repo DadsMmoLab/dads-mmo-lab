@@ -28,19 +28,34 @@
       "file": "env/dist/etc/modules/individualProgression.conf",
       "keys": [
         {
-          "key": "IndividualProgression.Enable"
+          "key": "IndividualProgression.Enable",
+          "label": "Enable Individual Progression",
+          "explain": "Enable Individual Progression Module. Please note that like all AzerothCore modules, database changes cannot be undone through config settings. Disabling the module will disable functionality like access restrictions, level caps, damage adjustments, etc.",
+          "type": "bool"
         },
         {
-          "key": "IndividualProgression.EnforceGroupRules"
+          "key": "IndividualProgression.EnforceGroupRules",
+          "label": "Group only within a phase",
+          "explain": "Enable this to only allow players to group with others in the same progression phase.",
+          "type": "bool"
         },
         {
-          "key": "IndividualProgression.VanillaPowerAdjustment"
+          "key": "IndividualProgression.VanillaPowerAdjustment",
+          "label": "Vanilla attack-power adjustment",
+          "explain": "Adjustment to player's attack power before completing Vanilla content and opening the Dark Portal. Applied linearly per level between levels 11 and 60. Default: 1 - No Adjustment. Suggested: between 0.5 and 0.6 (50-60% of regular damage).",
+          "type": "text"
         },
         {
-          "key": "IndividualProgression.VanillaHealingAdjustment"
+          "key": "IndividualProgression.VanillaHealingAdjustment",
+          "label": "Vanilla healing adjustment",
+          "explain": "Adjustment to player's healing power before completing Vanilla content and opening the Dark Portal. Applied linearly per level between levels 11 and 60. Default: 1 - No Adjustment. Suggested: 0.5 (50% of regular healing).",
+          "type": "text"
         },
         {
-          "key": "IndividualProgression.QuestXPFix"
+          "key": "IndividualProgression.QuestXPFix",
+          "label": "Restore original quest XP",
+          "explain": "Quest XP for Vanilla and TBC quests was boosted as a catchup mechanism in patches 2.3.0 and 3.0.2. Enable this option to reduce quest XP for affected quest to be closer to original values.",
+          "type": "bool"
         }
       ],
       "template": "conf/individualProgression.conf.dist"
