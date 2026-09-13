@@ -6179,6 +6179,24 @@ class ControllerView(QWidget):
             return
         if manifest is None or applier is None:
             return
+        row = self.modules_panel.selected_row()
+        if (
+            action == "install"
+            and row is not None
+            and not row.data.installed
+            and not row.data.installable
+        ):
+            # T55. The row's own Install is disabled for this, but the context
+            # menu reaches the same handler, and the prompt dialog below is
+            # asked BEFORE the applier: `mod-ah-bot-plus` has a question with no
+            # default, so the user answered it and was then told no. Refused
+            # here, first, in the row's own words.
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"install {manifest.id}: not started — {row.data.install_reason} "
+                f"Nothing on this machine was changed."
+            )
+            return
         # An update re-runs the INSTALL-time steps -- it is the install over
         # content that has moved -- so it answers the install's prompts.
         go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action])

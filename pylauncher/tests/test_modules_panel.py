@@ -1381,7 +1381,8 @@ def test_a_row_whose_conflict_is_installed_cannot_be_installed_from_the_tab() ->
     blocked = _row(rows, "mod-ah-bot-plus")
     assert not blocked.installable
     assert blocked.install_reason is not None
-    assert "mod-ah-bot" in blocked.install_reason
+    # By NAME, as `required by` is: the name is what the other row shows.
+    assert "Mod Ah Bot" in blocked.install_reason
 
     # The one that IS installed is untouched: it offers Remove, not Install.
     assert _row(rows, "mod-ah-bot").installed
@@ -1402,3 +1403,61 @@ def test_a_declared_conflict_that_is_not_installed_blocks_nothing() -> None:
     for item in ("buff-mobs", "nerf-mobs"):
         assert _row(rows, item).installable, item
         assert _row(rows, item).install_reason is None
+
+
+def test_a_blocked_row_carries_the_reason_where_it_can_be_read(qapp: object) -> None:
+    """Disabled, with the reason as tooltip AND as a chip, and it stays disabled (T55).
+
+    A tooltip alone is invisible on a gamepad or a touch screen, which is why the
+    chip is there -- the same pair `required by` gives a locked Remove.
+
+    `set_enabled_actions(True)` is what every finished job calls; a row that
+    re-armed its Install there would offer the refused press again the moment
+    any other install completed.
+
+    Mutation: drop `and self.data.installable` from `set_enabled_actions()` and
+    the button comes back after the job.
+    """
+    catalog = [
+        _m("mod-ah-bot", name="Auction House Bot", conflicts_with=("mod-ah-bot-plus",)),
+        _m("mod-ah-bot-plus", name="Auction House Bot Plus", conflicts_with=("mod-ah-bot",)),
+    ]
+    row = _row(_rows(catalog, {"module": frozenset({"mod-ah-bot"})}), "mod-ah-bot-plus")
+    assert mp.chip_conflicts_with_label("Auction House Bot") in _labels(row)
+    assert row.install_reason is not None and "Auction House Bot" in row.install_reason
+
+    widget = mp.RowWidget(row)
+    assert widget.install_button is not None
+    assert not widget.install_button.isEnabled()
+    assert widget.install_button.toolTip() == row.install_reason
+    widget.set_enabled_actions(False)
+    widget.set_enabled_actions(True)
+    assert not widget.install_button.isEnabled(), "a finished job re-armed a refused Install"
+
+
+def test_an_empty_leftover_greys_the_row_while_the_applier_would_allow_it(
+    tmp_path: Path,
+) -> None:
+    """The one direction the tab and the applier may differ in, pinned (T55, T59).
+
+    An empty `modules/mod-ah-bot` is listed by `installed_clones()`, so the tab
+    greys `mod-ah-bot-plus`; the applier looks inside and lets it through. The
+    tab is stricter, never looser -- and the row it points at is drawn installed,
+    with a Remove, so the way out is on screen.
+
+    If this ever flips -- the applier refusing what the tab offers -- that is the
+    defect T55 exists for. If the tab is taught to open folders so both allow,
+    this test should be rewritten to say so, not deleted.
+    """
+    from yulon.apply import Applier, installed_clones
+
+    (tmp_path / "modules" / "mod-ah-bot").mkdir(parents=True)
+    plus = _m("mod-ah-bot-plus", conflicts_with=("mod-ah-bot",))
+    catalog = [_m("mod-ah-bot", conflicts_with=("mod-ah-bot-plus",)), plus]
+    rows = _rows(catalog, installed_clones(tmp_path))
+
+    assert _row(rows, "mod-ah-bot").installed
+    assert not _row(rows, "mod-ah-bot-plus").installable
+    assert Applier(tmp_path)._conflict_refusal(plus) is None
+    (tmp_path / "modules" / "mod-ah-bot" / "AuctionHouseBot.cpp").write_text("//\n")
+    assert Applier(tmp_path)._conflict_refusal(plus) is not None, "content must still refuse"
