@@ -3825,10 +3825,9 @@ def test_a_hand_copied_module_with_no_git_still_blocks_its_conflict(tmp_path: Pa
 def test_every_shipped_ale_manifest_deploys_and_undeploys_for_real(tmp_path: Path) -> None:
     """The catalog's own deploy steps, driven rather than read (T59).
 
-    A manifest with a single-file `src` and a `rename` was merged and broke
-    every Loot Pet install with `NotADirectoryError` -- after copying, so the
-    folder was left holding a file the remove step would not take away either.
-    Nothing caught it: the rename test uses a DIRECTORY src, which is the shape
+    A manifest with a single-file `src` and a `rename` was merged (#160) and
+    every Loot Pet install failed with `NotADirectoryError` -- after copying, so
+    the script was left in `lua_scripts/` under its old name. Nothing caught it: the rename test uses a DIRECTORY src, which is the shape
     that works, and no test had ever driven a SHIPPED manifest through
     `install()`.
 
@@ -3844,14 +3843,13 @@ def test_every_shipped_ale_manifest_deploys_and_undeploys_for_real(tmp_path: Pat
         steps = raw.get("deploy") or []
         if not steps or any(s["src"].endswith("/") for s in steps):
             continue  # directory deploys need a tree; this test is the file case
-        manifest = parse_manifest(
-            {**raw, "type": "module", "source": {"repo": "azerothcore/mod-x"}}
-        )
+        manifest = parse_manifest(raw)  # as shipped: its own type, repo and pin
+        assert manifest.source is not None, f"{raw['id']}: an ALE script with no repository"
         server = tmp_path / raw["id"]
         applier = Applier(
             server,
             git=_FakeGit({s["src"]: f"-- {s['src']}\n" for s in steps}),
-            remote_url=_Origins(OWNED_URL),
+            remote_url=_Origins(manifest.source.url),
         )
         applier.install(manifest)
         landed = [

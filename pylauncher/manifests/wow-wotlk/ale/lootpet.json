@@ -17,8 +17,5 @@
       "src": "LootPet.lua",
       "dest": "env/dist/etc/modules/lua_scripts/"
     }
-  ],
-  "obsolete": [
-    "env/dist/etc/modules/lua_scripts/LootPet2.lua"
   ]
 }

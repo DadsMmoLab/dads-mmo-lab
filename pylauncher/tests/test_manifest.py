@@ -486,10 +486,9 @@ def test_a_rename_on_a_single_file_deploy_is_refused_at_load() -> None:
     `_deploy_target()` returns the full filename for a single-file deploy, so
     `(target / old).replace(target / new)` builds a path INSIDE the copied file:
     `.../LootPet2.lua/LootPet.lua`. Install raised `NotADirectoryError` after
-    already copying, and `_undeploy()` applies renames only on its directory
-    branch, so remove left the file behind.
+    already copying, leaving the file under its old name.
 
-    That shipped in a manifest of ours and no test caught it: the existing
+    That was merged in a manifest of ours (#160) and no test caught it: the existing
     rename test uses a directory src, which is the shape that works. A runtime
     `NotADirectoryError` deep in an install is the wrong place to learn this —
     the manifest is wrong, and a wrong manifest should not load.
