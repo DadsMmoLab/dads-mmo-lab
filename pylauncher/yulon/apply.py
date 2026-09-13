@@ -1185,6 +1185,9 @@ class Applier:
         vals = self._values(manifest, values)
         log = _Log()
         self._check_values(manifest, "install", vals, log)
+        clash = self._conflict_refusal(manifest)
+        if clash:
+            raise ApplyError(clash)
         clone = self.clone_dir(manifest)
         if folder is not None and manifest.source is not None:
             raise ApplyError(
@@ -1462,6 +1465,45 @@ class Applier:
             )
 
     # -- the guard ---------------------------------------------------------
+
+    def _conflict_refusal(self, manifest: Manifest) -> str | None:
+        """Why this cannot be installed beside what is already here, or `None`.
+
+        `conflicts_with` had been in the schema, in the catalog and in a test
+        that asserts it round-trips, and NOTHING read it (T53). Yu'lon installed
+        `mod-ah-bot` and `mod-ah-bot-plus` together and the user discovered it
+        when the linker stopped 21 minutes into a rebuild with `multiple
+        definition of Addmod_ah_botScripts()`. A declaration nothing acts on is
+        worse than no declaration: it reads, to anyone auditing the catalog, as
+        a guarantee that was being kept.
+
+        Asked of the DISK, never of the declaration. Four of the mods name each
+        other (buff/xbuff/nerf/baby-mobs), so a check that refused on the
+        presence of a conflict rather than of the conflicting CLONE would make
+        all four uninstallable.
+
+        Every family folder is searched rather than this manifest's own. Ids are
+        unique across the catalog, the two known pairs are same-family, and a
+        conflict that reaches across families -- an ale script against the
+        module it shadows -- is exactly the one a same-family check would miss.
+        """
+        if not manifest.conflicts_with:
+            return None
+        here = installed_clones(self.server_dir)
+        for other in manifest.conflicts_with:
+            # Over CLONE_DIRS rather than over `here`, so the family key keeps its
+            # Literal type and the folder comes from the one mapping that owns it.
+            for kind, folder in CLONE_DIRS.items():
+                if other not in here.get(str(kind), frozenset()):
+                    continue
+                where = _rel(self.server_dir, self.server_dir / folder / other)
+                return (
+                    f"{manifest.id} and {other} cannot both be installed: they are alternatives "
+                    f"to each other, and the catalog records the conflict. {other} is already "
+                    f"here, at {where}. Remove it first, or keep it and leave {manifest.id} "
+                    f"out. Nothing was changed."
+                )
+        return None
 
     def _require_own_clone(self, manifest: Manifest, clone: Path, action: When) -> None:
         """Refuse `modules/<id>` unless this app can show the folder is its own.

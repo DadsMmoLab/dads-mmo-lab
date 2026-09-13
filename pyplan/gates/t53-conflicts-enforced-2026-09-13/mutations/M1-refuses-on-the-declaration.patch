@@ -1,0 +1,11 @@
+--- /tmp/a.orig	2026-09-13 22:12:56.837896482 +0200
++++ pylauncher/yulon/apply.py	2026-09-13 22:12:56.853321784 +0200
+@@ -1489,7 +1489,7 @@
+         """
+         if not manifest.conflicts_with:
+             return None
+-        here = installed_clones(self.server_dir)
++        here = {str(k): frozenset(manifest.conflicts_with) for k in CLONE_DIRS}  # M1
+         for other in manifest.conflicts_with:
+             # Over CLONE_DIRS rather than over `here`, so the family key keeps its
+             # Literal type and the folder comes from the one mapping that owns it.
