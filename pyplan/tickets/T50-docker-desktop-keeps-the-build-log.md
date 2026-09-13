@@ -80,3 +80,35 @@ What the sentence must carry, in order:
 
 The gate's last line, a named mutation per test, and the fixture recorded beside the ticket
 with its provenance (a screenshot in a DM, transcribed).
+
+## Done — evidence
+
+**Status:** FIXED 2026-09-13.
+
+| | |
+|---|---|
+| before | `the build failed (exit 1). Its last words were: …MPILER_LAUNCHER="ccache" … -DBoost_USE_STATIC_LIBS="ON" && cmake --build …` |
+| after | `exit code: 1 — Docker Desktop kept this build's log instead of printing it: docker-desktop://dashboard/build/default/default/c6g4h689yvm5emfs0xe29iae7` |
+
+The Linux shape is asserted unchanged by its own test, because the new branch is reached from
+the same `if not block` fallback T38 left behind and a condition written one word too wide
+would have taken the fenced path with it.
+
+**Gate:** `4369 passed, 8 skipped, 23 deselected`. ruff, black, mypy clean on `linux`,
+`win32`, `darwin`.
+
+**Mutations**, 3 run, 3 killed (`pyplan/gates/t50-docker-desktop-build-log-2026-09-13/mutations/`):
+
+| | | |
+|---|---|---|
+| M1 | the URL is never looked for | falls back to the command echo |
+| M2 | the exit code is dropped | `137` would stop being sayable |
+| M3 | the Linux branch swallows every case | the fenced path stops being reachable |
+
+The fixture's provenance is beside the gate: `the-fixture-and-where-it-came-from.md`.
+
+## Still owed
+
+A press against a real Docker Desktop failure. The fixture is a faithful transcription, but it
+is still a transcription — only a real failed build on Windows proves the URL is matched as it
+is actually printed.

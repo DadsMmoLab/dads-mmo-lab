@@ -3272,6 +3272,45 @@ def _buildkit_failure(said: list[str]) -> tuple[list[str], str]:
     return said[opened + 2 : closed], error_line
 
 
+_BUILD_DETAILS = re.compile(r"View build details:\s*(\S+)")
+"""Docker Desktop's stand-in for the build output it did not print.
+
+Measured from a user's own failed build, 2026-09-13 (T50): Docker Desktop for
+Windows sends the step output to its Build view and leaves this line in the
+stream. There is no `------` fence and no step header, so `_buildkit_failure()`
+answers nothing and has nothing to answer with -- the compiler's words are not
+in the buffer at all, which is the premise T38 inherited from measuring Docker
+CE on Linux and stated as a guarantee.
+"""
+
+_EXIT_CODE = re.compile(r"exit(?:ed with)? code:? (\d+)")
+
+
+def _build_log_elsewhere(said: list[str]) -> str:
+    """The URL Docker Desktop printed instead of the build's output, or `""`.
+
+    Searched from the END: a build that failed twice in one stream leaves two,
+    and the one that matters is the last.
+    """
+    for line in reversed(said):
+        found = _BUILD_DETAILS.search(line)
+        if found:
+            return found.group(1)
+    return ""
+
+
+def _exit_code(line: str) -> str:
+    """`"exit code: 137 — "` from a line that carries one, else `""`.
+
+    Kept even though the caller already has the process's own return code,
+    because this is the code of the step INSIDE the build rather than of
+    `docker build` itself, and 137 is an out-of-memory kill that nothing else
+    in a Docker Desktop stream says out loud.
+    """
+    found = _EXIT_CODE.search(line)
+    return f"exit code: {found.group(1)} — " if found else ""
+
+
 def last_words(tail: tuple[str, ...]) -> str:
     """The end of a command's output, short enough to put inside a sentence.
 
@@ -3296,6 +3335,13 @@ def last_words(tail: tuple[str, ...]) -> str:
             # says where to look (review, 2026-09-12).
             text = text[:_LAST_WORDS_CHARS] + "…"
         return f"{text} / {_elided(error_line)}" if error_line else text
+    kept = _build_log_elsewhere(said)
+    if kept:
+        # T50. The step output is not in the buffer to be selected from, so the
+        # honest answer is where it IS -- not the left-truncated command echo
+        # below, which is the one thing already known to tell a reader nothing.
+        code = _exit_code(error_line or said[-1])
+        return f"{code}Docker Desktop kept this build's log instead of printing it: {kept}"
     text = " / ".join(said[-_LAST_WORDS_LINES:])
     return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
 

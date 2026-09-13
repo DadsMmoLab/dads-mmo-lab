@@ -6335,3 +6335,66 @@ def test_a_missing_modules_folder_marks_nothing_rather_than_claiming_anything(
     """
     assert docker.clone_names(tmp_path / "modules") == frozenset()
     assert docker.allowed_modules(tmp_path) == docker.ALL_MODULES
+
+
+# The reporter's own tail, transcribed from the screenshot he posted at 17:08 on
+# 2026-09-13, on a build that provably carries T38's fix (module removal worked
+# for him, and that exists only in 0.8.66-fixtest). Docker Desktop for Windows.
+# NOT invented: the shape is the finding, and an invented one would have had the
+# fences this one is missing.
+_DOCKER_DESKTOP_TAIL = (
+    '#24 [wow-wotlk builder 5/7] RUN sh -c "cmake ../ -DCMAKE_INSTALL_PREFIX=/azeroth-server"',
+    "",
+    'ERROR: failed to solve: process "/bin/sh -c cmake ../ '
+    '-DCMAKE_INSTALL_PREFIX=/azeroth-server -DCMAKE_CXX_COMPILER_LAUNCHER=\\"ccache\\" '
+    '-DCMAKE_C_COMPILER_LAUNCHER=\\"ccache\\" -DBoost_USE_STATIC_LIBS=\\"ON\\" '
+    '&& cmake --build . --config \\"$CTYPE\\" -j $(($(nproc) + 1)) '
+    '&& cmake --install . --config \\"$CTYPE\\"" did not complete successfully: exit code: 1',
+    "",
+    "",
+    "View build details: docker-desktop://dashboard/build/default/default/c6g4h689yvm5emfs0xe29iae7",
+    "",
+)
+
+
+def test_when_docker_desktop_keeps_the_build_log_we_say_where_it_is(tmp_path: Path) -> None:
+    """T50: the compiler's words are not in the stream, so stop pretending they are.
+
+    T38 fixed the SELECTION when the step output is present. It was measured on
+    Docker CE on Linux and its docstring states the premise it inherited from
+    that measurement -- "the compiler's words are between the fences, and were
+    never missing from the buffer". On Docker Desktop for Windows that is false:
+    there are no fences, no step output, and a `View build details:` URL
+    instead. The extractor found nothing, and the fallback showed the user the
+    middle of a cmake invocation -- the exact complaint T38 was filed for, from
+    the build that was supposed to have fixed it.
+
+    Two things must survive, in this order:
+
+    1. the EXIT CODE, which is load-bearing alone -- `137` is an out-of-memory
+       kill and nothing else in the output says so;
+    2. WHERE THE LOG IS, verbatim, so it can be pasted into a browser.
+    """
+    said = docker.last_words(_DOCKER_DESKTOP_TAIL)
+
+    # Where to actually read the error, unmangled -- this is the whole point.
+    assert "docker-desktop://dashboard/build/default/default/c6g4h689yvm5emfs0xe29iae7" in said
+    # And the exit code, which is the only diagnosis available from the stream.
+    assert "exit code: 1" in said
+    # NOT the middle of the command. That is what the user was shown twice.
+    assert "-DBoost_USE_STATIC_LIBS" not in said, said
+    assert not said.startswith("…"), said
+    assert len(said) <= 400, f"{len(said)} chars: {said}"
+
+
+def test_the_linux_shape_is_untouched_by_the_docker_desktop_branch() -> None:
+    """T50 must not cost T38 what it bought: fenced output still wins.
+
+    Asserted rather than assumed, because the new branch is reached from the
+    same `if not block` fallback T38 left behind -- a condition written slightly
+    too wide would take the Linux path with it, and that path is the one with a
+    real compiler diagnostic in it.
+    """
+    said = docker.last_words(_FAILED_BUILD_TAIL)
+    assert "Transmog.cpp:212:9: error: no member named GetGUID" in said
+    assert "docker-desktop://" not in said

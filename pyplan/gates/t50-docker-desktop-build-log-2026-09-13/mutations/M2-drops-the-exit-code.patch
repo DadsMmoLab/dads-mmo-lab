@@ -1,0 +1,11 @@
+--- /tmp/d.orig	2026-09-13 19:51:04.493782849 +0200
++++ pylauncher/yulon/docker.py	2026-09-13 19:51:04.509382488 +0200
+@@ -3340,7 +3340,7 @@
+         # T50. The step output is not in the buffer to be selected from, so the
+         # honest answer is where it IS -- not the left-truncated command echo
+         # below, which is the one thing already known to tell a reader nothing.
+-        code = _exit_code(error_line or said[-1])
++        code = ""  # M2: the exit code is dropped
+         return f"{code}Docker Desktop kept this build's log instead of printing it: {kept}"
+     text = " / ".join(said[-_LAST_WORDS_LINES:])
+     return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
