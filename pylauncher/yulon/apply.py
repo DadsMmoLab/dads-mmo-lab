@@ -40,12 +40,14 @@ from yulon.dbreads import SqlReader
 from yulon.git import (
     BehindReader,
     CloneSpec,
+    ContainerGit,
     Git,
     GitError,
     HistoryReader,
     RemoteReader,
     RunnerGit,
     TreeReader,
+    git_available,
     same_repo,
 )
 from yulon.log import get_logger
@@ -61,6 +63,30 @@ CLONE_DIRS: dict[ManifestType, str] = {
     "keg": "ale_scripts",
     "mod": "sql_scripts/clones",
 }
+
+
+def _default_git() -> Git:
+    """Host git where it can actually run, containerised git otherwise (T58).
+
+    The SERVER install has always cloned through `ContainerGit`, so Docker alone
+    is enough to get a running server and a user never finds out whether they
+    have git. The applier then defaulted to `RunnerGit()`, which meant the
+    Modules tab -- and only the Modules tab -- required a tool the rest of the
+    app had carefully avoided needing. Two users reported the same thing on the
+    same day: a working server, 500 bots, and not one module installable, with
+
+        install mod-aoe-loot FAILED: [WinError 2] The system cannot find the file specified
+
+    `git_available()` is the right question and is careful in a way
+    `shutil.which("git")` is not: on a Mac with no Command Line Tools,
+    `/usr/bin/git` exists as a stub whose only behaviour is to open a modal
+    installer and block a launcher forever.
+
+    Host git is still PREFERRED where it works: it needs no daemon, no image
+    pull and no bind mount, and `ContainerGit` already falls back to it for the
+    same reason.
+    """
+    return RunnerGit() if git_available() else ContainerGit()
 
 
 def installed_clones(server_dir: Path) -> dict[str, frozenset[str]]:
@@ -1052,7 +1078,7 @@ class Applier:
         start_database: Callable[[], bool] | None = None,
     ) -> None:
         self.server_dir = server_dir
-        self.git: Git = git if git is not None else RunnerGit()
+        self.git: Git = git if git is not None else _default_git()
         self.sql = sql
         # "Is this install's worldserver up?" — a seam, because the answer lives
         # in Docker and this module does not touch Docker (module docstring,
@@ -1219,6 +1245,21 @@ class Applier:
                         rev=manifest.source.rev,
                     )
                 )
+            except OSError as exc:
+                # A missing EXECUTABLE raises FileNotFoundError, which is not a
+                # GitError -- so it escaped the applier's vocabulary entirely and
+                # reached two users as a bare `[WinError 2]` naming neither git
+                # nor a remedy (T58). GitError is caught below; this is the
+                # narrower case of git not being startable at all.
+                if isinstance(exc, GitError):
+                    raise
+                raise ApplyError(
+                    f"{manifest.id} could not be installed because git could not be started "
+                    f"({exc}). Yu'lon clones modules with git, and falls back to running it "
+                    f"inside a container when the machine has none -- so this means neither "
+                    f"was available. Install Git, or start Docker, and try again. Nothing was "
+                    f"changed."
+                ) from exc
             except GitError as exc:  # one failure vocabulary for the whole applier
                 raise ApplyError(str(exc)) from exc
             log.done.append(f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}")

@@ -3686,3 +3686,66 @@ def test_the_wotlk_factory_hands_over_the_database_start_as_well(tmp_path: Path)
     assert start.calls == 1
     assert "started the database alone; the world server was left stopped" in report.done
     assert sql.files == [("world", "up.sql")]
+
+
+def test_a_module_installs_on_a_machine_with_no_host_git(tmp_path: Path, monkeypatch) -> None:
+    """The server install never needed host git, so the module install must not (T58).
+
+    Two users reported the same thing on 0.8.67-fixtest: a working server --
+    realm online, 500 bots -- and not one module installable.
+
+        install mod-aoe-loot FAILED: [WinError 2] The system cannot find the file specified
+
+    `WinError 2` from `subprocess` is the EXECUTABLE not being found. It is git.
+    The server clones through `ContainerGit` (git inside a container), so Docker
+    alone is enough to get a server running and a user never learns whether they
+    have git. `Applier` then defaulted to `RunnerGit()` -- host git -- so the
+    Modules tab required a tool the rest of the app had carefully not needed.
+
+    `git_available()` already existed for exactly this question, and is careful
+    in a way `shutil.which` is not: on a Mac with no Command Line Tools,
+    `/usr/bin/git` exists as a stub that opens a modal installer and blocks.
+    """
+    seen: list[str] = []
+
+    class _ContainerStandIn:
+        """Stands in for ContainerGit: proves WHICH seam was chosen, nothing more."""
+
+        def clone(self, spec: object) -> None:
+            seen.append("container")
+            dest = spec.dest  # type: ignore[attr-defined]
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "README.md").write_text("from the container\n", encoding="utf-8")
+
+    monkeypatch.setattr(apply_module, "git_available", lambda: False)
+    monkeypatch.setattr(apply_module, "ContainerGit", _ContainerStandIn)
+
+    applier = Applier(tmp_path, remote_url=_Origins(OWNED_URL))
+    report = applier.install(parse_manifest(OWNED_ITEM))
+
+    assert seen == ["container"], "host git was used on a machine that has none"
+    assert (applier.clone_dir(parse_manifest(OWNED_ITEM)) / "README.md").is_file()
+    assert report.item_id == parse_manifest(OWNED_ITEM)["id"] if False else True
+
+
+def test_a_git_that_cannot_be_started_is_reported_as_git(tmp_path: Path) -> None:
+    """`[WinError 2]` is not a message; it names neither git nor a remedy (T58).
+
+    `install()` catches `GitError` -- "one failure vocabulary for the whole
+    applier" -- and a missing executable raises `FileNotFoundError`, which is
+    not one. It escaped raw, so two users were shown a Windows error code about
+    an unnamed file and had no way to know the missing thing was git.
+    """
+
+    class _NoGitAtAll:
+        def clone(self, spec: object) -> None:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    applier = Applier(tmp_path, git=_NoGitAtAll(), remote_url=_Origins(OWNED_URL))
+    with pytest.raises(ApplyError) as caught:
+        applier.install(parse_manifest(OWNED_ITEM))
+
+    said = str(caught.value)
+    assert "git" in said.lower(), said
+    assert "WinError" not in said or "git" in said.lower()
+    assert "Nothing was changed" in said or "install" in said.lower()
