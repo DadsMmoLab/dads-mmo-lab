@@ -5498,6 +5498,7 @@ class ControllerView(QWidget):
         self.modules_panel.install_pressed.connect(self._row_install)
         self.modules_panel.remove_pressed.connect(self._row_remove)
         self.modules_panel.chip_pressed.connect(self._chip_pressed)
+        self.modules_panel.chip_action_pressed.connect(self._chip_action_pressed)
         self.modules_panel.context_menu_requested.connect(self._show_module_context_menu)
         self.module_report = QPlainTextEdit(tab)
         self.module_report.setReadOnly(True)
@@ -5897,6 +5898,25 @@ class ControllerView(QWidget):
             if chip.label == label:
                 self.module_report.setPlainText(chip.detail)
                 return
+
+    @Slot(str, str)
+    def _chip_action_pressed(self, module_id: str, action: str) -> None:
+        """The subpanel's own press: run the job that chip names (T44 item 4).
+
+        Routed to the SAME slots the action bar's buttons are bound to, not to
+        copies of them: those carry the confirm dialog, the busy gate and the
+        refusals, and a second caller that skipped any of them would be a
+        second route to keep in step.
+
+        The row is selected first for `_row_install()`'s reason -- a child
+        button consumes its own click, and a job started from a row the tab has
+        not selected writes its report against the wrong subject.
+        """
+        self.modules_panel.select(module_id)
+        if action == "rebuild":
+            self.rebuild_server()
+        elif action == "sql":
+            self.apply_module_sql()
 
     def _selected_row_is_uncatalogued(self) -> bool:
         """Is the selected row one of T41's "installed here, not in the catalog" rows?"""

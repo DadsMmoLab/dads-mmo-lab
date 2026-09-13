@@ -1032,3 +1032,129 @@ def test_a_row_for_another_game_gets_no_install_button(qapp: object) -> None:
     assert panel.row("mod-a").install_button is not None
     assert panel.row("mod-tbc").install_button is None
     assert panel.row("mod-tbc").remove_button is None
+
+
+# ---------------------------------------------------------- the subpanel (T44)
+
+
+def test_each_owed_chip_names_the_action_that_answers_it_and_a_fact_names_none() -> None:
+    """An owed chip is a job, and the job has one button (T44 item 4).
+
+    The action is a KEY and not a label: the view routes on it, and a button
+    whose text the tab reworded would otherwise stop reaching its slot.
+
+    Mutation: give the `asks a question` chip an action and a row offers a
+    button for something no press can change.
+    """
+    asks = _m(
+        "mod-ask",
+        prompts=(Prompt(key="g", question="Which GUID?"),),
+        patches=(Patch(file="x.conf", find="a", replace="{g}"),),
+    )
+    session = mp.SessionState(
+        rebuild_owed=frozenset({"mod-a"}),
+        sql_owed={"mod-a": ("a.sql",)},
+    )
+    rows = _rows([_m("mod-a"), asks], {"module": frozenset({"mod-a"})}, session)
+
+    owed = {c.label: c.action for c in _row(rows, "mod-a").chips if c.kind == "owed"}
+    assert owed[mp.CHIP_REBUILD_PENDING] == "rebuild"
+    assert owed[mp.CHIP_SQL_PENDING] == "sql"
+    assert all(c.action is None for c in _row(rows, "mod-ask").chips if c.kind == "fact")
+
+
+def test_every_chip_action_has_a_button_label() -> None:
+    """A key with no label is a button that renders empty. Mutation: drop one key."""
+    assert set(mp.CHIP_ACTION_LABELS) == {"rebuild", "sql", "update"}
+    assert mp.CHIP_ACTION_LABELS["sql"] == "Apply module SQL"
+
+
+def test_an_owed_chip_press_opens_a_subpanel_under_its_own_row(qapp: object) -> None:
+    """The chip's sentence, where the row is, with the button that answers it.
+
+    Mutation: keep only the report line and `detail_visible()` stays False --
+    which is the tab as T42 shipped it.
+    """
+    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+    row = panel.row("mod-a")
+    row.show()
+
+    assert row.detail_visible() is False
+    row.chip_buttons[0].click()
+
+    assert row.detail_visible() is True
+    assert row.detail_label.text() == row.data.chips[0].detail
+    assert row.detail_button is not None
+    assert row.detail_button.text() == mp.CHIP_ACTION_LABELS["rebuild"]
+    row.hide()
+
+
+def test_a_second_press_on_the_same_chip_closes_the_subpanel(qapp: object) -> None:
+    """A row that can only ever grow is a row that eats the card.
+
+    Mutation: always `setVisible(True)` and the subpanel never shuts again.
+    """
+    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+    row = panel.row("mod-a")
+    row.show()
+
+    row.chip_buttons[0].click()
+    assert row.detail_visible() is True
+    row.chip_buttons[0].click()
+    assert row.detail_visible() is False
+    row.hide()
+
+
+def test_a_chip_press_still_writes_the_report_line(qapp: object) -> None:
+    """T44 keeps it: the report is what a user copies into a bug report.
+
+    Mutation: replace the `pressed_chip` emit with the expansion and the one
+    copyable surface on this tab goes silent.
+    """
+    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+    pressed: list[tuple[str, str]] = []
+    panel.chip_pressed.connect(lambda mid, label: pressed.append((mid, label)))
+
+    panel.row("mod-a").chip_buttons[0].click()
+
+    assert pressed == [("mod-a", mp.CHIP_REBUILD_PENDING)]
+
+
+def test_the_subpanels_button_emits_the_rows_id_and_the_action_key(qapp: object) -> None:
+    """The press the subpanel exists for, carried as (id, key) for the view to route.
+
+    Mutation: emit the button's TEXT instead of the key and the view's mapping
+    misses every action the day one of these labels is reworded.
+    """
+    session = mp.SessionState(sql_owed={"mod-a": ("a.sql",)})
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+    acted: list[tuple[str, str]] = []
+    panel.chip_action_pressed.connect(lambda mid, key: acted.append((mid, key)))
+    row = panel.row("mod-a")
+
+    row.chip_buttons[0].click()
+    assert row.detail_button is not None
+    row.detail_button.click()
+
+    assert acted == [("mod-a", "sql")]
+
+
+def test_a_fact_chip_opens_nothing(qapp: object) -> None:
+    """A fact chip is not a press, and T44 does not make it one.
+
+    Mutation: expand on every chip and `needs the client folder` opens a
+    subpanel with no button in it.
+    """
+    needs = _m("mod-client", client=(ClientFile(src="a", dest="addons"),))
+    panel = _panel(_catalog_rows(catalog=[needs]))
+    row = panel.row("mod-client")
+    row.show()
+
+    assert [c.text() for c in row.chip_buttons] == [mp.CHIP_NEEDS_CLIENT_FOLDER]
+    row.chip_buttons[0].click()
+
+    assert row.detail_visible() is False
+    row.hide()

@@ -152,6 +152,27 @@ CHIP_NEEDS_CLIENT_FOLDER = "needs the client folder"
 
 ChipKind = Literal["owed", "fact"]
 
+ChipAction = Literal["rebuild", "sql", "update"]
+"""The job an owed chip's subpanel offers one press for (T44 item 4).
+
+A KEY and not a label. The view routes on it -- `rebuild` is the tab's own
+Rebuild server…, `sql` is Apply module SQL, `update` is the per-module pull --
+and routing on the button's TEXT would break the day one of these is reworded.
+"""
+
+CHIP_ACTION_LABELS: dict[ChipAction, str] = {
+    "rebuild": "Rebuild server…",
+    "sql": "Apply module SQL",
+    "update": "Update",
+}
+"""What each action's button says, spelled HERE rather than imported.
+
+The two of them that also exist on the action bar are worded the same way on
+purpose, and cannot be imported from `controller_view` -- this module deliberately
+imports nothing from it (module docstring). The ellipsis on the rebuild carries
+the app's own convention: that press opens a dialog first.
+"""
+
 
 def chip_update_label(behind: int) -> str:
     """The update chip's own label, so the view and the tests cannot spell it apart."""
@@ -182,6 +203,12 @@ class Chip:
     kind: ChipKind
     label: str
     detail: str
+    action: ChipAction | None = None
+    """The job this chip's subpanel offers, or `None` for a chip that offers none.
+
+    Always `None` on a `fact` chip, and asserted so: a fact names something no
+    press can change, and a button under it would be a control for nothing.
+    """
 
 
 @dataclass(frozen=True)
@@ -276,6 +303,7 @@ def _chips_for(
                 CHIP_REBUILD_PENDING,
                 f"{item_id}: the worldserver has not been compiled since this changed, so it "
                 "is not in the running server yet. Press Rebuild server… on this tab.",
+                "rebuild",
             )
         )
     owed_sql = session.sql_owed.get(item_id)
@@ -287,6 +315,7 @@ def _chips_for(
                 f"{item_id}: this SQL is on disk and has NOT been applied — "
                 + ", ".join(owed_sql)
                 + ". Press Apply module SQL on this tab.",
+                "sql",
             )
         )
     behind = session.behind.get(item_id, 0)
@@ -491,6 +520,7 @@ class RowWidget(QFrame):
     pressed_install = Signal(str)
     pressed_remove = Signal(str)
     pressed_chip = Signal(str, str)
+    pressed_chip_action = Signal(str, str)
     clicked = Signal(str)
     menu_requested = Signal(str, QPoint)
 
@@ -502,9 +532,18 @@ class RowWidget(QFrame):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu_at)
 
-        box = QHBoxLayout(self)
-        box.setContentsMargins(10, 8, 10, 8)
+        # Two rows now, not one: the row proper, and the subpanel an owed chip
+        # opens under it (T44 item 4). The outer layout is vertical so the
+        # subpanel is INSIDE this row's frame -- an expander drawn as a sibling
+        # would open under whatever the card laid out next, which after a
+        # reload is not necessarily the same module.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(6)
+        box = QHBoxLayout()
+        box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(10)
+        outer.addLayout(box)
 
         left = QVBoxLayout()
         left.setSpacing(2)
@@ -574,7 +613,7 @@ class RowWidget(QFrame):
                 # click and would otherwise leave the row unselected while
                 # writing that row's sentence into the report -- the same reason
                 # `_row_install` selects before acting (round 2).
-                button.clicked.connect(lambda _checked=False, label=chip.label: self._chip(label))
+                button.clicked.connect(lambda _checked=False, which=chip: self._chip(which))
             buttons.append(button)
             chips.addWidget(button)
         chips.addStretch(1)
@@ -607,6 +646,34 @@ class RowWidget(QFrame):
         holder.setLayout(column)
         holder.setFixedWidth(BUTTON_COLUMN_WIDTH)
         box.addWidget(holder)
+
+        # The subpanel: hidden until an owed chip is pressed, and rebuilt per
+        # press rather than one panel per chip. A row can owe three things at
+        # once and only one of them is being read at a time.
+        self._open_chip: Chip | None = None
+        self._actions_enabled = True
+        self.detail = QFrame(self)
+        self.detail.setObjectName("moduleRowDetail")
+        self.detail.setStyleSheet(
+            f"QFrame#moduleRowDetail {{ background-color: {COLOR_BG_PARCHMENT_LIGHT}; "
+            f"border-left: 3px solid {COLOR_TEXT_WARNING}; }}"
+        )
+        detail_box = QVBoxLayout(self.detail)
+        detail_box.setContentsMargins(10, 6, 10, 6)
+        detail_box.setSpacing(4)
+        self.detail_label = QLabel("", self.detail)
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY};")
+        detail_box.addWidget(self.detail_label)
+        detail_actions = QHBoxLayout()
+        detail_actions.addStretch(1)
+        self.detail_button: QPushButton | None = QPushButton("", self.detail)
+        self.detail_button.clicked.connect(self._detail_action)
+        detail_actions.addWidget(self.detail_button)
+        detail_box.addLayout(detail_actions)
+        self.detail.setVisible(False)
+        outer.addWidget(self.detail)
+
         self.set_enabled_actions(True)
         self.set_selected(False)
 
@@ -617,10 +684,19 @@ class RowWidget(QFrame):
         installed needs stays unremovable when a job finishes, the same rule
         `_set_busy(False)` follows for every other gated control in the view.
         """
+        self._actions_enabled = enabled
         if self.install_button is not None:
             self.install_button.setEnabled(enabled)
         if self.remove_button is not None:
             self.remove_button.setEnabled(enabled and self.data.removable)
+        if self.detail_button is not None:
+            # The subpanel's press is an APPLIER press like the two above it,
+            # so the busy gate has to reach it too -- a Rebuild started from a
+            # subpanel while an install is in flight is the same collision the
+            # row buttons are locked for.
+            self.detail_button.setEnabled(
+                enabled and self._open_chip is not None and self._open_chip.action is not None
+            )
 
     def set_selected(self, selected: bool) -> None:
         """Highlight, through the theme's own constants (T42 forbids touching `theme.py`)."""
@@ -651,9 +727,57 @@ class RowWidget(QFrame):
         self.clicked.emit(self.data.id)
         super().mousePressEvent(event)
 
-    def _chip(self, label: str) -> None:
+    def _chip(self, chip: Chip) -> None:
+        """Select the row, write the report line, and open (or shut) the subpanel.
+
+        All three, and the report line is the one that must not be dropped: it
+        is the surface a user copies into a bug report, which is why T44 keeps
+        it beside the panel rather than replacing it with one.
+
+        Pressing the chip that is already open shuts it. A row that can only
+        ever grow is a row that eats the card it is on.
+        """
         self.clicked.emit(self.data.id)
-        self.pressed_chip.emit(self.data.id, label)
+        self.pressed_chip.emit(self.data.id, chip.label)
+        if self._open_chip is chip:
+            self._open_chip = None
+            self.detail.setVisible(False)
+            return
+        self._open_chip = chip
+        self.detail_label.setText(chip.detail)
+        if self.detail_button is not None:
+            has_action = chip.action is not None
+            self.detail_button.setText(
+                CHIP_ACTION_LABELS[chip.action] if chip.action is not None else ""
+            )
+            self.detail_button.setVisible(has_action)
+            self.detail_button.setEnabled(self._actions_enabled and has_action)
+        self.detail.setVisible(True)
+
+    def _detail_action(self) -> None:
+        chip = self._open_chip
+        if chip is not None and chip.action is not None:
+            self.pressed_chip_action.emit(self.data.id, chip.action)
+
+    def detail_visible(self) -> bool:
+        """Whether this row's subpanel is open, read off the widget and the LAYOUT.
+
+        `isVisibleTo(self)` rather than `isVisible()`, because a row inside a
+        panel nothing has shown is not on screen and the question here is
+        whether the row itself is holding the subpanel open.
+
+        The layout half is the other lesson from `family_hint()`: a frame
+        parented here but added to no layout answers `isVisibleTo` True while
+        being drawn nowhere, so both have to be asked.
+        """
+        layout = self.layout()
+        if layout is None:
+            return False
+        laid_out = any(
+            (item := layout.itemAt(i)) is not None and item.widget() is self.detail
+            for i in range(layout.count())
+        )
+        return laid_out and self.detail.isVisibleTo(self)
 
     def _menu_at(self, pos: QPoint) -> None:
         self.menu_requested.emit(self.data.id, self.mapToGlobal(pos))
@@ -766,6 +890,15 @@ class ModulesPanel(QWidget):
     install_pressed = Signal(str)
     remove_pressed = Signal(str)
     chip_pressed = Signal(str, str)
+    chip_action_pressed = Signal(str, str)
+    """`(module id, `ChipAction` key)` -- the press an owed chip's subpanel offers.
+
+    A second signal beside `chip_pressed` rather than a flag on it: the two are
+    different events. `chip_pressed` is "the user wants to read about this",
+    which writes the report line; this one is "the user wants the job run",
+    which the view turns into the applier press that answers it.
+    """
+
     row_selected = Signal(str)
     context_menu_requested = Signal(str, QPoint)
     """The row's id and a GLOBAL position, for the view's own context menu.
@@ -862,6 +995,7 @@ class ModulesPanel(QWidget):
         widget.pressed_install.connect(self.install_pressed.emit)
         widget.pressed_remove.connect(self.remove_pressed.emit)
         widget.pressed_chip.connect(self.chip_pressed.emit)
+        widget.pressed_chip_action.connect(self.chip_action_pressed.emit)
         # The WIDGET, not its id: a click must select the row it happened on,
         # and routing it through `select()` would put it through the bare-id
         # resolution rule and highlight the other family's row (round 2).
