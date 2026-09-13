@@ -214,6 +214,118 @@ def test_the_floors_add_when_both_needs_are_on_one_volume() -> None:
     assert "share one drive" in report.message()
 
 
+def test_a_full_docker_disk_is_not_answered_with_move_the_install() -> None:
+    """Doc's 2026-09-12 refusal: the remedy named the one thing he had already done.
+
+    Reported in #-yulon with the log: installing into `E:\\wow wotlk`, which the
+    run's own rows agree about --- "free space on the server folder: 1336 GB
+    free" and "the server folder: E:\\wow wotlk looks usable" both pass --- while
+    "free space on Docker's disk: 16 GB free, and the install needs 40 GB"
+    refuses and stops the install. The refusal was true: Docker Desktop keeps
+    its images and build cache in its own disk image on C:, and nothing about
+    the folder the user picks moves them.
+
+    What was wrong was the sentence under it. Both free-space rows shared one
+    remedy, "Free some space, or install to a drive that has room" --- correct
+    for the server-folder row, and a circle for this one, because the drive
+    with room is where the install already points. Doc read it and asked
+    whether the app could be pointed anywhere but C: at all.
+
+    So the Docker row must name the thing that actually moves those bytes, and
+    must not repeat the advice that sent him round.
+    """
+    doc = facts(
+        platform_id="windows",
+        data_root_free=16 * GIB,
+        server_dir_free=1336 * GIB,
+        same_volume=False,
+    )
+    report = preflight.evaluate(ENTRY, SERVER_DIR, doc)
+    assert not report.ok()
+    refused = report.refusals()
+    assert [check.name for check in refused] == ["free space on Docker's disk"], [
+        check.line() for check in refused
+    ]
+
+    remedy = refused[0].remedy
+    assert "install to a drive that has room" not in remedy, remedy
+    assert "Disk image location" in remedy, remedy
+
+    # The server-folder row keeps the advice that is right for it, and is not
+    # dragged along by this change.
+    # Under `min_server_dir_gb`, which is 8 and not the data root's 40 — the
+    # floors differ per row, so the mirror case needs the folder's own number.
+    roomless_folder = facts(
+        platform_id="windows",
+        data_root_free=1336 * GIB,
+        server_dir_free=4 * GIB,
+        same_volume=False,
+    )
+    folder_row = [
+        check
+        for check in preflight.evaluate(ENTRY, SERVER_DIR, roomless_folder).refusals()
+        if check.name == "free space on the server folder"
+    ]
+    assert len(folder_row) == 1, folder_row
+    assert "install to a drive that has room" in folder_row[0].remedy, folder_row[0].remedy
+
+
+def test_every_free_space_row_gets_the_remedy_that_can_actually_move_its_bytes() -> None:
+    """The other three rows T37's first pass left untested (review, 2026-09-12).
+
+    One test per row because each names a different action, and the one that was
+    wrong was wrong precisely by being shared.
+    """
+    # Linux: two daemons answer to `platform_id == "linux"`. `detect()` reports
+    # it inside WSL too, where `docker` is often Docker Desktop's through WSL
+    # integration and never reads the distro's /etc/docker/daemon.json. Naming
+    # only `data-root` there is the same dead end in a new place, so both routes
+    # must be on the line.
+    linux = preflight.evaluate(
+        ENTRY,
+        SERVER_DIR,
+        facts(platform_id="linux", data_root_free=16 * GIB, server_dir_free=1336 * GIB),
+    ).refusals()
+    assert [check.name for check in linux] == ["free space on Docker's disk"], linux
+    assert "data-root" in linux[0].remedy, linux[0].remedy
+    assert "Disk image location" in linux[0].remedy, linux[0].remedy
+
+    # macOS reaches `_space_check_macos_bounded()`, a separate function that
+    # carried its own copy of the same wrong sentence.
+    mac = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="macos", data_root_free=10 * GIB)
+    ).refusals()
+    assert [check.name for check in mac] == ["free space on Docker's disk"], mac
+    assert "install to a drive that has room" not in mac[0].remedy, mac[0].remedy
+    assert "Disk image location" in mac[0].remedy, mac[0].remedy
+
+    # One drive holding both: every action is open, so all three are offered.
+    one = preflight.evaluate(
+        ENTRY,
+        SERVER_DIR,
+        facts(data_root_free=4 * GIB, server_dir_free=4 * GIB, same_volume=True),
+    ).refusals()
+    assert [check.name for check in one] == [f"free space on {preflight.ONE_VOLUME_SPACE}"], one
+    for offer in ("Free space on it", "install to a drive that has room", "move Docker's disk"):
+        assert offer in one[0].remedy, (offer, one[0].remedy)
+
+
+def test_an_unnamed_free_space_row_does_not_claim_two_paths_share_a_drive() -> None:
+    """The fallthrough the first pass left open (review, 2026-09-12).
+
+    `_space_remedy()` ended in an unguarded `return` of the one-volume sentence,
+    so a row added later — "the client cache", say — would have told the user
+    that the install folder and Docker's disk are on the same drive. That is an
+    assertion about their machine, and under any row but `ONE_VOLUME_SPACE` it
+    is simply untrue. A row with no remedy written for it must say less, not
+    guess.
+    """
+    said = preflight._space_remedy("the client cache", facts())
+    assert "same drive" not in said, said
+    assert "install to a drive that has room" not in said, said
+    assert said, "a row with no remedy of its own still needs one sentence"
+
+
 def _space_rows(report: preflight.Report) -> list[preflight.Check]:
     return [check for check in report.checks if check.name.startswith("free space on ")]
 

@@ -749,7 +749,14 @@ def _no_modal_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("warning", "information", "critical", "about"):
         monkeypatch.setattr(QMessageBox, name, lambda *a, **k: QMessageBox.StandardButton.Ok)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
-    monkeypatch.setattr(QMessageBox, "exec", lambda *a, **k: QMessageBox.StandardButton.No)
+    # The static convenience methods above are not the only modal in `QMessageBox`:
+    # an instance `.exec()` (`QMessageBox(...)`, then `box.exec()`) blocks the same
+    # way, but never passes through `question`/`warning`/etc., so it slips past a
+    # guard that only fakes the static spellings. Pass 12 rebuilt the suggestion
+    # asker onto `box.exec()` and a run that reached it hung the suite for hours.
+    # Disarm the slot too, so NO `QMessageBox` modal can block an offscreen run
+    # (verified: the class-level `exec` patch takes effect on Shiboken 6.11.2).
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.No)
 
 
 @pytest.fixture(autouse=True)

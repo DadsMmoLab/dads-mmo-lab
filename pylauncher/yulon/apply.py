@@ -34,7 +34,7 @@ from pathlib import Path
 from string import Formatter
 from typing import IO, Literal, Protocol
 
-from yulon import platform, runner
+from yulon import docker, platform, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -61,6 +61,25 @@ CLONE_DIRS: dict[ManifestType, str] = {
     "keg": "ale_scripts",
     "mod": "sql_scripts/clones",
 }
+
+
+def installed_clones(server_dir: Path) -> dict[str, frozenset[str]]:
+    """What is on disk per family, read from each family's own clone directory (T41).
+
+    `CLONE_DIRS` is the whole point: a module lands in `modules/`, an ale and a
+    keg in `ale_scripts/`, a mod in `sql_scripts/clones/`. Marking every family
+    against `modules/` said an ale was installed because a module of the same
+    id was, and never marked a real ale at all.
+
+    `ale` and `keg` share one folder, so they share its answer. Nothing here can
+    tell which of the two a directory belongs to without opening it, and this
+    function is the cheap read that runs on every reload — the row it might
+    over-mark is one whose manifest the user can still read.
+    """
+    return {
+        str(kind): docker.clone_names(server_dir / folder) for kind, folder in CLONE_DIRS.items()
+    }
+
 
 # Manifest `db` → MySQL schema name (AzerothCore defaults; acore_ale is Paragon's).
 DB_NAMES: dict[Db, str] = {

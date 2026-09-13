@@ -433,7 +433,11 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             "module_install_custom",
             "module_forget",
         }
-        uncounted = set() if counted else {"module_updates"} | custom
+        # T41's `installed_modules` rides with `module_updates` because it is the
+        # same fact asked cheaply: which folders are under `modules/`. A game
+        # with no such folder has nothing to read and nothing to mark, so its
+        # absence there is the module surface and not a gap.
+        uncounted = set() if counted else {"module_updates", "installed_modules"} | custom
         # 8.6's My Party, and the one seam whose absence is decided by the
         # ENGINE rather than by a measurement. The route is `mod-ale`, an
         # AzerothCore Lua module hooking AzerothCore's command table, and the

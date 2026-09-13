@@ -61,6 +61,14 @@ the bug was measured against. Module import runs before any fixture, so this
 reference is unaffected by fixture ordering.
 """
 
+_REAL_QMESSAGEBOX_EXEC = QMessageBox.exec
+"""The real `QMessageBox.exec` slot, same capture reasoning as the question one above.
+
+Pass 12 moved `_qt_suggestion_asker` onto `box.exec()`, so the real-dialog
+helper must reinstate the real `exec` too — the widened `_no_modal_dialogs` guard
+fakes it otherwise.
+"""
+
 
 class _FakeInstaller:
     """An engine whose run() is a canned stream; preflight is a no-op.
