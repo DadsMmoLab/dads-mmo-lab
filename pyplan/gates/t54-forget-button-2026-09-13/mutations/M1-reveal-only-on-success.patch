@@ -1,0 +1,10 @@
+--- /tmp/cv.orig	2026-09-13 22:35:58.367384763 +0200
++++ pylauncher/yulon/ui/controller_view.py	2026-09-13 22:35:58.382137608 +0200
+@@ -3255,6 +3255,7 @@
+         self._status_pending = False
+         self.status_label.setText(f"status: Docker not reachable ({exc})")
+         self.realm_badge.set_status("stopped")
++        return  # M1
+         # T54. The reveal used to run only on the success path, and the control
+         # it reveals exists for an install that is GONE -- which is the case
+         # most likely to have taken Docker with it. A user deleted their server

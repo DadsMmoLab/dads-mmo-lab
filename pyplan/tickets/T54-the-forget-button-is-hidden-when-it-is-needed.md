@@ -70,3 +70,46 @@ schema field nobody read, and a declaration nobody enforced. This one is a widge
 
 The gate's last line and a named mutation per test — at minimum, one that restores the reveal
 to the success path only and is seen to fail.
+
+## Done — evidence
+
+**Status:** FIXED 2026-09-13.
+
+The reveal now runs on **every** poll outcome. `_status_failed()` calls it, and
+`_status_ready()`'s early return no longer skips it. `_forget_is_eligible()` is unchanged and
+needs nothing from Docker: it asks `wsl_distro` and `folder_is_gone()`, both local.
+
+**Confirmed against the user's ACTUAL build**, `v0.8.65-Public`, rather than against this
+branch:
+
+```
+_status_ready    2965   early return 2969   reveal 2987     (success path only)
+_status_failed   3174   label, badge, end                   (no reveal)
+_forget_is_eligible -> wsl_distro is None and folder_is_gone(server_dir)
+```
+
+That also settles the workaround given to them: on their build, a poll that SUCCEEDS with the
+folder gone does reveal the button. So "reinstall Docker Desktop, start Yu'lon, press Forget"
+is verified rather than assumed — it was offered with a caveat first, and the caveat was
+removed only after reading the released file.
+
+**Gate:** `4368 passed, 8 skipped, 23 deselected`. ruff, black, mypy clean on `linux`, `win32`,
+`darwin`.
+
+**Mutations**, 2 run, 2 killed (`pyplan/gates/t54-forget-button-2026-09-13/mutations/`):
+
+| | | |
+|---|---|---|
+| M1 | the reveal goes back to the success path only | the new test fails — the shipped bug |
+| M2 | the folder check dropped from the predicate | the button shows for a living install |
+
+The gate was taken twice: the first run passed with a `F821 Undefined name` in the new test,
+which ruff caught afterwards. Fixing it changed the file under test, so the run was repeated
+rather than quoted.
+
+## Note for whoever reads this next
+
+The button's condition is "the install is gone". **Ask what else is usually true in that
+condition** — here, that the user has also removed Docker, which is what the reveal depended
+on. A control with one stated condition often has an unstated correlate, and that correlate is
+where it breaks.

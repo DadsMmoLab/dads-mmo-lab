@@ -3043,6 +3043,9 @@ class ControllerView(QWidget):
         self._status_pending = False
         status = result
         if not isinstance(status, InstallStatus):
+            # Same hole, one branch narrower: a result that is not a status
+            # skipped the reveal too (T54).
+            self._update_forget_visibility()
             return
         if not self._busy:
             # Only while nothing of ours is running. The five-second poll used to
@@ -3252,6 +3255,13 @@ class ControllerView(QWidget):
         self._status_pending = False
         self.status_label.setText(f"status: Docker not reachable ({exc})")
         self.realm_badge.set_status("stopped")
+        # T54. The reveal used to run only on the success path, and the control
+        # it reveals exists for an install that is GONE -- which is the case
+        # most likely to have taken Docker with it. A user deleted their server
+        # folder and Docker Desktop, was told by the uninstall refusal to press
+        # "Forget this install…", and could not be shown it. The predicate needs
+        # nothing from Docker: it asks `wsl_distro` and `folder_is_gone()`.
+        self._update_forget_visibility()
 
     def _set_busy(self, busy: bool) -> None:
         """Lock the Server buttons while an action of ours is running.

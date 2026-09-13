@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -7290,3 +7291,45 @@ def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another
     bmah = [r for r in rows if r.startswith(INSTALLED_MARK) and "bmah" in r.lower()]
     assert len(bmah) == 1, bmah
     assert NOT_IN_CATALOG not in bmah[0], bmah
+
+
+def test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The button's whole case is an install that is gone — Docker usually with it (T54).
+
+    Reported on 0.8.65-Public. A user deleted `E:\\Games\\Yulon Wotlk` by hand and
+    uninstalled Docker Desktop. Uninstall refused and told them exactly what to
+    do next:
+
+        ... If the folder is gone for good, "Forget this install…" drops this tab.
+
+    and they answered: *"Where is 'Forget this install' — Cannot find that at
+    all within Yulon"*.
+
+    They could not find it because it cannot be shown to them.
+    `_update_forget_visibility()` had ONE caller, on the success path of the
+    Docker status poll; with Docker gone every poll takes `_status_failed()`,
+    which sets a label and returns. The control built for "everything is gone"
+    was reachable only while enough was still there to answer.
+
+    The reveal needs nothing from Docker: `_forget_is_eligible()` asks
+    `wsl_distro` and `folder_is_gone()`, both local.
+    """
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+
+    def no_docker() -> NoReturn:
+        raise RuntimeError("Cannot connect to the Docker daemon")
+
+    view.services.controller.status = no_docker  # type: ignore[method-assign]
+    shutil.rmtree(tmp_path)
+
+    view.refresh_status()
+
+    assert view.forget_install_button is not None
+    assert (
+        not view.forget_install_button.isHidden()
+    ), "the poll failed, so the user is told to press a button they cannot see"
+    # The failure is still reported — this must not paper over Docker being gone.
+    assert "Docker not reachable" in view.status_label.text()
