@@ -280,9 +280,12 @@ def test_one_patch_of_a_platform_probe_gets_one_answer_out_of_the_whole_install(
         # `docker ps`; and `bind_mount_ok` went furthest, doing a real
         # `docker run` of `alpine/git` over `tmp_path`, which took the whole
         # suite from 50 s to 148 s on m910q (all measured 2026-09-05).
+        # T56 added a fourth: `compose_ready` runs `docker compose version`,
+        # which is the same class of reach as the three below it.
         vm_resources=lambda: None,
         bind_mount_ok=lambda server_dir: True,
         port_conflicts=lambda: [],
+        compose_ready=lambda: True,
     )
 
     # Both consumers, one patch, one answer each.

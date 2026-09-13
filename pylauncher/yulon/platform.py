@@ -1348,6 +1348,47 @@ def docker_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SE
     return False
 
 
+def compose_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SECONDS) -> bool:
+    """True if `docker compose version` succeeds — the PLUGIN, not the daemon.
+
+    A separate question from `docker_ready()`, and it has to be, because
+    `docker info` answers happily on a machine that cannot run a single one of
+    this app's builds. Yu'lon drives every build and every start through
+    `docker compose`; without the v2 plugin that word is not a command, the
+    `-f` after it falls through to `docker` itself, and the user is shown
+    Docker's top-level usage text (T56, from a Steam Deck whose owner installed
+    the engine by hand):
+
+        the build failed (exit 125). Its last words were:
+        unknown shorthand flag: 'f' in -f / Usage: docker [OPTIONS] COMMAND
+
+    `docker-compose` with a hyphen is NOT what is asked for. That is Compose v1,
+    a different program, and this app does not invoke it.
+
+    Bounded and shaped exactly like `docker_ready()` above — same candidate
+    list, same shared budget, same "cannot start it at all is not an answer".
+    """
+    # `_DefaultRunner()`, not `runner.run`: `_bounded()` only bounds a runner of
+    # ours (`do.bounded(seconds) if isinstance(do, _DefaultRunner) else do`), so
+    # the plain function passes through UNBOUNDED and the advertised deadline
+    # never reaches the subprocess. This probe claimed to be "shaped exactly like
+    # docker_ready()" while differing in the one line that made it safe, and a
+    # hung Docker CLI would have stalled the whole preflight (review, 2026-09-13).
+    do = run if run is not None else _DefaultRunner()
+    deadline = time.monotonic() + timeout
+    for program in docker_programs():
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            logger.debug(f"{timeout}s of compose probe spent before {program} was tried")
+            return False
+        try:
+            if _bounded(do, left)([program, "compose", "version"]).returncode == 0:
+                return True
+        except OSError as exc:
+            logger.debug(f"could not start {program}: {exc}")
+    return False
+
+
 # ------------------------------------------------------- the docker group ask
 # Joining the `docker` group is the one thing provisioning does that changes
 # what the machine can be made to do: membership is root-equivalent, because

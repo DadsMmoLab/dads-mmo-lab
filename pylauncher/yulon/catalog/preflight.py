@@ -99,6 +99,9 @@ class Facts:
 
     platform_id: str
     docker_ready: bool
+    compose_ready: bool | None = None
+    """Whether `docker compose` works. `None` = not asked, because with no
+    daemon there is nothing to ask (T56)."""
     vm: platform.VmResources | None = None
     data_root: Path | None = None
     data_root_free: int | None = None
@@ -159,6 +162,7 @@ def gather(
     client_validate: ClientValidate | None = None,
     platform_id: Callable[[], str] = platform.detect,
     docker_ready: Callable[[], bool] = platform.docker_ready,
+    compose_ready: Callable[[], bool] = platform.compose_ready,
     vm_resources: Callable[[], platform.VmResources | None] = platform.vm_resources,
     data_root: Callable[[], Path | None] = platform.docker_desktop_data_root,
     disk_free: Callable[[Path], int | None] | None = None,
@@ -192,6 +196,10 @@ def gather(
     """
     here = platform_id()
     ready = docker_ready()
+    # Asked only when the daemon answered, like every other Docker fact here:
+    # with no Docker the plugin question has no meaning and its probe would
+    # just be a second wait for the same absence.
+    compose = compose_ready() if ready else None
     free = disk_free if disk_free is not None else free_bytes
     facts_vm = vm_resources() if ready else None
     root = data_root() if ready else None
@@ -274,6 +282,7 @@ def gather(
     return Facts(
         platform_id=here,
         docker_ready=ready,
+        compose_ready=compose,
         vm=facts_vm,
         data_root=root,
         data_root_free=root_free,
@@ -414,7 +423,7 @@ def evaluate(entry: CatalogEntry, server_dir: Path, facts: Facts) -> Report:
                 ),
             )
         )
-    checks: list[Check] = [_docker_check(facts)]
+    checks: list[Check] = [_docker_check(facts), _compose_check(facts)]
     checks.append(_ram_check(facts, native.min_ram_gb, native.warn_ram_gb))
     checks.append(_cpu_check(native, facts))
     refuse_root, warn_root = native.min_data_root_gb, native.warn_data_root_gb
@@ -462,6 +471,60 @@ def _docker_check(facts: Facts) -> Check:
     )
 
 
+def _compose_check(facts: Facts) -> Check:
+    """`docker compose` is how every build and every start is run (T56).
+
+    Its own row rather than a clause inside `_docker_check()`, because the two
+    fail independently and the remedies share nothing: a dead daemon is started,
+    a missing plugin is installed. A Steam Deck user installed the engine by
+    hand, passed the Docker row, and was failed on step 4 of 9 by
+    `unknown shorthand flag: 'f' in -f` -- which names neither Compose nor the
+    fix, because at that point `docker` is printing its own top-level usage.
+
+    `unchecked` rather than `refuse` when the daemon never answered: the Docker
+    row above has already refused, and a second refusal about a plugin nobody
+    could ask about adds noise to a screen that is already telling the user the
+    one thing that matters.
+    """
+    if facts.compose_ready is None:
+        return Check(
+            COMPOSE_CHECK,
+            "unchecked",
+            "not asked, because no Docker daemon answered",
+        )
+    if facts.compose_ready:
+        return Check(COMPOSE_CHECK, "pass", "`docker compose` answered")
+    return Check(
+        COMPOSE_CHECK,
+        "refuse",
+        "Docker is running, but the Docker Compose plugin is missing",
+        _compose_remedy(facts.platform_id),
+    )
+
+
+def _compose_remedy(platform_id: str) -> str:
+    """What to install, in the words of THIS machine's package manager.
+
+    Named per platform because "install the compose plugin" is not an
+    instruction anyone can follow, and because pointing a Steam Deck at Docker
+    Desktop is the mistake T40 is about.
+    """
+    if platform_id == "linux":
+        return (
+            "Install Docker Compose v2 and try again. On Arch or SteamOS: "
+            "`sudo pacman -S docker-compose`. On Debian or Ubuntu: "
+            "`sudo apt install docker-compose-v2` -- which is the package Yu'lon's own "
+            "installer uses there; if your Docker came from Docker's own apt repository "
+            "instead, that package is called `docker-compose-plugin`. Check it with "
+            "`docker compose version` -- note the SPACE: `docker-compose` with a hyphen is the "
+            "old v1 and is not what Yu'lon runs."
+        )
+    return (
+        "Docker Desktop ships Compose. Update Docker Desktop to a current version, then check "
+        "with `docker compose version` in a terminal and try again."
+    )
+
+
 def _ram_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
     """RAM the container ENGINE reports — the VM's, not the host's.
 
@@ -494,6 +557,14 @@ def _ram_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
             f"{warn_gb:.0f} GB makes the build markedly less likely to be killed.",
         )
     return Check("memory", "pass", f"Docker's VM has {gigabytes:.1f} GB")
+
+
+COMPOSE_CHECK = "Docker Compose"
+"""What the Compose row is called (T56).
+
+Named rather than spelled at each of its four uses, so the row and the tests
+that assert on it cannot come to disagree about what it is called.
+"""
 
 
 JOBS_CHECK = "compiler jobs vs memory"
