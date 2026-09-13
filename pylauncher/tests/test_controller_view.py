@@ -58,7 +58,12 @@ from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
-from yulon.ui.controller_view import ControllerServices, ControllerView
+from yulon.ui.controller_view import (
+    TUNING_RECREATE_LABEL,
+    TUNING_RESTART_LABEL,
+    ControllerServices,
+    ControllerView,
+)
 from yulon.ui.widgets import modules_panel, tuning_panel
 from yulon.ui.widgets.job import run_inline
 from yulon.ui.widgets.modules_panel import (
@@ -8102,7 +8107,9 @@ def test_the_file_picker_lists_the_deployed_confs_and_opens_the_first(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     view = _tuned_view(ps, tmp_path)
-    listed = [view.tuning_panel.files.itemText(i) for i in range(view.tuning_panel.files.count())]
+    # T44 item 13: the picker is a row of buttons, and each one's tooltip is
+    # the FILE it stands for -- the label is a basename and is not the identity.
+    listed = [b.toolTip() for b in view.tuning_panel.file_buttons()]
     assert listed == [TRANSMOG_CONF], listed
     assert "Transmogrification.Enable = 1" in view.tuning_panel.editor.toPlainText()
     assert not view.tuning_panel.editor.isReadOnly()
@@ -8114,7 +8121,13 @@ def test_the_servers_own_conf_is_listed_read_only_and_says_why(
     """T43's own follow-up: who owns core configuration is a bigger question."""
     _deploy(tmp_path, "env/dist/etc/worldserver.conf", "[worldserver]\nMotd = hi\n")
     view = _tuned_view(ps, tmp_path)
-    view.tuning_panel.files.setCurrentText("env/dist/etc/worldserver.conf")
+    core = next(
+        b
+        for b in view.tuning_panel.file_buttons()
+        if b.toolTip() == "env/dist/etc/worldserver.conf"
+    )
+    assert core.text().endswith(tuning_panel.READ_ONLY_SUFFIX)
+    core.click()
     assert view.tuning_panel.editor.isReadOnly()
     assert view.tuning_panel.file_note.text() == controller_view_module.TUNING_CORE_FILE
     assert not view.tuning_panel.file_save_button.isEnabled()
@@ -8482,3 +8495,205 @@ def test_a_finished_update_drops_the_commits_behind_it_just_pulled(
         for b in view.modules_panel.row("mod-solocraft").chip_buttons
         if "Update available" in b.text()
     ]
+
+
+# --------------------------------------------- the Tuning tab's controls (T44)
+
+
+def _tuning_view(ps: _Ps, tmp_path: Path) -> ControllerView:
+    """A WotLK view with one installed module whose conf is really on disk."""
+    conf = tmp_path / "env" / "dist" / "etc" / "modules" / "mod_npc_beastmaster.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-npc-beastmaster"})}
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def test_the_tuning_action_bar_greys_the_two_that_cost_something_until_one_is_owed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T44 item 7. Nothing is waiting when the tab opens, so nothing may be pressed.
+
+    Mutation: enable them at build time and the tab offers to take the server
+    down before anybody has changed a setting.
+    """
+    view = _tuning_view(ps, tmp_path)
+
+    assert view.tuning_restart_button.isEnabled() is False
+    assert view.tuning_recreate_button.isEnabled() is False
+    assert view.tuning_revert_all_button.isEnabled() is False
+    assert view.tuning_reload_button.isEnabled() is True
+    assert view.tuning_banner.isHidden() is True
+
+
+def test_a_save_arms_exactly_the_job_that_file_owes_and_raises_the_banner(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Items 7 and 8. The job comes from `tuning.file_rule()`, never from a guess.
+
+    A conf under `env/dist/etc/` is bound into the containers, so the world
+    re-reads it at the next start: a RESTART. The banner names the file that
+    is waiting, and its button is the one that answers it.
+
+    Mutation: arm both buttons on every save and the tab offers to replace the
+    containers over a change a restart covers.
+    """
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+
+    assert view.tuning_restart_button.isEnabled() is True
+    assert view.tuning_recreate_button.isEnabled() is False
+    assert view.tuning_banner.isHidden() is False
+    assert "mod_npc_beastmaster.conf" in view.tuning_banner_label.text()
+    assert view.tuning_banner_button.text() == view.tuning_restart_button.text()
+
+
+def test_a_file_outside_every_bind_owes_a_recreate_and_the_banner_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The dearer half of the same rule, and the banner must name the DEARER job.
+
+    Mutation: let the banner's button be whichever job was noted last and a
+    user who changed two files presses Restart over a change that needs the
+    containers replaced.
+    """
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    view._note_tuning_owed("modules/mod-x/conf/mod-x.conf")
+
+    assert view.tuning_restart_button.isEnabled() is True
+    assert view.tuning_recreate_button.isEnabled() is True
+    assert view.tuning_banner_button.text() == view.tuning_recreate_button.text()
+
+
+def test_revert_all_changes_drops_the_unsaved_edits_and_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Item 7's second button, and it is the one that cannot destroy anything.
+
+    It is the undo for "I typed in six boxes and changed my mind": the cards
+    are rebuilt from the rows already read, so no file is touched and no disk
+    is re-read. The per-card Revert is the one that restores from a backup.
+
+    Mutation: have it call `reload_tuning()` and it silently becomes a second
+    Reload from disk -- which also picks up somebody else's edits, which is
+    not what a user pressing "revert MY changes" asked for.
+    """
+    view = _tuning_view(ps, tmp_path)
+    card = view.tuning_panel.cards()[0]
+    editor = next(iter(card.editors.values()))
+    assert editor.control is not None
+    before = view.services.controller.server_dir / "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    text = before.read_text(encoding="utf-8")
+    from PySide6.QtWidgets import QCheckBox, QLineEdit
+
+    if isinstance(editor.control, QLineEdit):
+        editor.control.setText("something else")
+    elif isinstance(editor.control, QCheckBox):
+        editor.control.setChecked(not editor.control.isChecked())
+    else:
+        editor.control.setValue(editor.control.value() + 1)
+    assert view.tuning_revert_all_button.isEnabled() is True
+
+    # Somebody else changes the file while the tab is open. Revert all changes
+    # must NOT pick that up -- it is the undo for what this person typed --
+    # and Reload from disk must.
+    before.write_text("BeastMaster.Enable = 0\n", encoding="utf-8")
+
+    view.tuning_revert_all_button.click()
+
+    assert view.tuning_panel.cards()[0].edits() == {}
+    assert view.tuning_revert_all_button.isEnabled() is False
+    assert before.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n", "it wrote to disk"
+    reverted = next(iter(view.tuning_panel.cards()[0].editors.values()))
+    assert reverted.row.current == "1", "Revert all changes re-read the file"
+
+    view.tuning_reload_button.click()
+
+    reloaded = next(iter(view.tuning_panel.cards()[0].editors.values()))
+    assert reloaded.row.current == "0", "Reload from disk did not re-read the file"
+    assert text == "BeastMaster.Enable = 1\n"
+
+
+def test_the_raw_revert_restores_from_the_backup_and_says_which(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Item 15. From the BACKUP, never by re-reading the form.
+
+    Mutation: re-open the file instead of copying the backup over it and
+    Revert becomes Reload from disk under another name -- it puts back what
+    was just saved, not what was there before.
+    """
+    view = _tuning_view(ps, tmp_path)
+    path = view.services.controller.server_dir / "env/dist/etc/modules/mod_npc_beastmaster.conf"
+    view.open_tuning_file("env/dist/etc/modules/mod_npc_beastmaster.conf")
+
+    view.save_tuning_file("BeastMaster.Enable = 0\n")
+    assert path.read_text(encoding="utf-8") == "BeastMaster.Enable = 0\n"
+    backup = view.tuning_panel.backup_label.text()
+    assert ".bak" in backup
+
+    view.revert_tuning_file()
+
+    assert path.read_text(encoding="utf-8") == "BeastMaster.Enable = 1\n"
+    assert ".bak" in view.tuning_report.toPlainText()
+
+
+def test_the_picker_marks_the_core_files_read_only(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Item 13's other half: WHICH files are read-only is the view's list, not the panel's.
+
+    Mutation: pass no `read_only` and `worldserver.conf` sits in the row
+    looking exactly like a file this tab will write.
+    """
+    core = tmp_path / "env" / "dist" / "etc" / "worldserver.conf"
+    core.parent.mkdir(parents=True, exist_ok=True)
+    core.write_text("[worldserver]\n", encoding="utf-8")
+    view = _tuning_view(ps, tmp_path)
+
+    labels = [b.text() for b in view.tuning_panel.file_buttons()]
+    assert "worldserver.conf · read-only" in labels
+
+
+def test_restart_and_recreate_both_ask_first_and_do_nothing_on_no(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both take the server down, so both carry the ellipsis and the dialog.
+
+    The answer is read through `said_yes()`, which is T33's closed bug: the
+    static `question()` returns a plain int, so `is StandardButton.Yes` is
+    always False -- and here the direction of that bug is a server that never
+    restarts, which reads as a dead button.
+
+    Mutation: drop the `_confirm()` call and the button takes the world down
+    on the first press, with no warning, from a settings tab.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    view._note_tuning_owed("modules/mod-x/conf/mod-x.conf")
+    asked: list[str] = []
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: (asked.append(str(args[1])), QMessageBox.StandardButton.No)[1],
+    )
+    view.tuning_restart_button.click()
+    view.tuning_recreate_button.click()
+
+    assert asked == [TUNING_RESTART_LABEL, TUNING_RECREATE_LABEL]
+    assert view._busy is False, "a refused dialog must start nothing"
+    assert view._tuning_owed, "a refused dialog must forget nothing either"
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    view.tuning_restart_button.click()
+    pump_until(lambda: not view._busy, "the restart never finished")
+
+    assert view._tuning_owed.get("restart") is None, "the restart covered what owed one"
+    assert view._tuning_owed.get("recreate"), "and nothing else"

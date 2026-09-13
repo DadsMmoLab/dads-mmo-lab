@@ -268,11 +268,13 @@ def test_the_file_box_lists_the_files_it_was_handed_and_names_the_one_picked(
     picked: list[str] = []
     panel.file_selected.connect(picked.append)
     panel.set_files((CONF, "env/dist/etc/worldserver.conf"))
-    assert [panel.files.itemText(i) for i in range(panel.files.count())] == [
+    # T44 item 13: buttons, not a combo box. The FILE each one stands for is
+    # its tooltip -- the label is a basename and is not the identity.
+    assert [b.toolTip() for b in panel.file_buttons()] == [
         CONF,
         "env/dist/etc/worldserver.conf",
     ]
-    panel.files.setCurrentIndex(1)
+    panel.file_buttons()[1].click()
     assert picked[-1] == "env/dist/etc/worldserver.conf"
 
 
@@ -606,3 +608,122 @@ def test_a_read_only_file_gets_no_verdict_either_way(qapp: object) -> None:
     panel.set_file_text("nonsense\n", read_only=True, note=None)
 
     assert panel.lint_label.text() == ""
+
+
+# -- the picker, the backup and the recreate warning (T44 items 13, 15, 16) --
+
+
+def test_the_picker_is_buttons_and_a_read_only_file_says_so_on_its_own(qapp: object) -> None:
+    """Item 13. A combo box hides every other file behind a press; buttons do not.
+
+    The label is the BASENAME, because the paths are 40 characters of
+    `env/dist/etc/modules/` that every row shares, and the full path is the
+    tooltip.
+
+    Mutation: label every button with the full path and the row of them is
+    wider than the window at any size the mockup draws.
+    """
+    core = "env/dist/etc/worldserver.conf"
+    panel = tp.TuningPanel()
+    panel.set_files((CONF, core), read_only=(core,))
+
+    labels = [b.text() for b in panel.file_buttons()]
+    assert labels == ["mod_npc_beastmaster.conf", "worldserver.conf · read-only"]
+    assert panel.file_buttons()[0].toolTip() == CONF
+
+
+def test_two_files_with_the_same_basename_are_told_apart_by_their_paths(qapp: object) -> None:
+    """A basename is only a label while it is unique, and nothing makes it unique.
+
+    Mutation: always use the basename and two modules that both ship `mod.conf`
+    give the user two identical buttons.
+    """
+    a = "env/dist/etc/modules/mod.conf"
+    b = "env/dist/etc/other/mod.conf"
+    panel = tp.TuningPanel()
+    panel.set_files((a, b), read_only=())
+
+    assert [button.text() for button in panel.file_buttons()] == [a, b]
+
+
+def test_pressing_a_file_button_selects_it_and_says_which(qapp: object) -> None:
+    """Mutation: emit nothing and the editor never changes file again."""
+    core = "env/dist/etc/worldserver.conf"
+    panel = tp.TuningPanel()
+    picked: list[str] = []
+    panel.file_selected.connect(picked.append)
+    panel.set_files((CONF, core), read_only=(core,))
+    picked.clear()
+
+    panel.file_buttons()[1].click()
+
+    assert picked == [core]
+    assert panel.current_file() == core
+
+
+def test_the_editable_file_carries_the_recreate_warning_and_a_read_only_one_does_not(
+    qapp: object,
+) -> None:
+    """Item 16, and it is a safety message rather than decoration.
+
+    This install's compose sets `AC_*` environment keys on the worldserver
+    (`catalog/composegen.py`'s `DEFAULT_WORLD_ENV` plus `catalog.json`'s
+    `world_env`), and an `AC_*` key SHADOWS the matching line in the conf. A
+    container keeps the environment it was created with, so a raw rewrite that
+    changed a shadowed key looks as though it did nothing until the containers
+    are RECREATED -- which is the promise `ModuleFiles.svelte:124-128` on
+    `rust-main` says cannot be kept.
+
+    Mutation: show it for read-only files too and `worldserver.conf`, which
+    this tab will not write at all, warns about a rewrite nobody can make.
+    """
+    panel = tp.TuningPanel()
+    panel.set_file_text("A = 1\n", read_only=False, note=None)
+    assert panel.recreate_warning.isVisibleTo(panel)
+    assert "AC_" in panel.recreate_warning.text()
+    assert "RECREATED" in panel.recreate_warning.text()
+
+    panel.set_file_text("A = 1\n", read_only=True, note=None)
+    assert not panel.recreate_warning.isVisibleTo(panel)
+
+
+def test_the_backup_name_is_shown_after_a_save_and_cleared_on_the_next_file(
+    qapp: object,
+) -> None:
+    """Item 15. `tuning.write()` takes one every time; the tab never said its name.
+
+    Cleared when the file changes, because a backup of the file you were
+    looking at a moment ago is not a backup of this one.
+
+    Mutation: leave it set across `set_file_text()` and the name of one file's
+    backup sits under another file's text.
+    """
+    panel = tp.TuningPanel()
+    panel.set_file_text("A = 1\n", read_only=False, note=None)
+    assert panel.backup_label.text() == ""
+
+    panel.set_backup("mod.conf.2026-09-13T01-02-03.bak")
+    assert "mod.conf.2026-09-13T01-02-03.bak" in panel.backup_label.text()
+
+    panel.set_file_text("B = 2\n", read_only=False, note=None)
+    assert panel.backup_label.text() == ""
+
+
+def test_the_raw_editor_offers_a_revert_beside_save_file(qapp: object) -> None:
+    """Item 15's other half, and it is dead until a save has made a backup.
+
+    Mutation: enable it always and the first press on a file nobody has saved
+    is a press with nothing to restore from.
+    """
+    panel = tp.TuningPanel()
+    pressed: list[bool] = []
+    panel.file_revert_pressed.connect(lambda: pressed.append(True))
+    panel.set_file_text("A = 1\n", read_only=False, note=None)
+
+    assert panel.file_revert_button.isEnabled() is False
+
+    panel.set_backup("mod.conf.2026-09-13T01-02-03.bak")
+    assert panel.file_revert_button.isEnabled() is True
+    panel.file_revert_button.click()
+
+    assert pressed == [True]

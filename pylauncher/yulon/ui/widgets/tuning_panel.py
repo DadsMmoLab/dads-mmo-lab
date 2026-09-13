@@ -28,7 +28,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -121,6 +120,34 @@ either: `apply.py` declines to write a key with no default, so the conf on disk
 never mentions it. Showing the default with no note would read as a setting
 that is already there, and pressing Save would look like a no-op when it is
 the first time the key has ever been written.
+"""
+
+READ_ONLY_SUFFIX = " · read-only"
+"""What a file button says about a file this tab will not write (T44 item 13)."""
+
+RAW_REWRITE_NEEDS_RECREATE = (
+    "A raw rewrite changes this FILE and nothing else. This install's compose sets AC_* "
+    "environment keys on the worldserver, and an AC_* key SHADOWS the matching line in the "
+    "conf — a container keeps the environment it was created with, so those keys change only "
+    "when the containers are RECREATED, not when the world restarts. If the key you edit here "
+    "is one of them, restarting the server will look as though your edit did nothing."
+)
+"""The warning under the raw editor, and it is a safety message (T44 item 16).
+
+Measured in THIS tree rather than inherited: `catalog/composegen.py` writes a
+`docker-compose.override.yml` carrying `DEFAULT_WORLD_ENV` plus
+`catalog.json`'s `install.native.azerothcore.world_env`, and its own comment
+(composegen.py, "an env key SHADOWS the matching row in playerbots.conf")
+records that a settings surface editing that file "will appear to do nothing
+until this key is removed", and that a running container keeps what it started
+with until it is RECREATED.
+
+The guided save has the same exposure and says the same thing through
+`tuning.apply_sentence()`; this sentence exists because the RAW route has no
+row, no declaration and no rule to price -- it is a person rewriting a whole
+file, and `ModuleFiles.svelte:124-128` on `rust-main` is the prior art:
+promising the fast world-only restart there "would be a promise we cannot
+keep".
 """
 
 LINT_OK = "✓ every line reads as Key = Value"
@@ -261,6 +288,19 @@ def control_kind(row: TuningRow) -> ControlKind:
     if row.type == "int" and row.min is not None and row.max is not None:
         return "spinner"
     return "box"
+
+
+def picker_label(file: str, *, duplicate: bool, read_only: bool) -> str:
+    """What one file's button says (T44 item 13).
+
+    The BASENAME while it is unique among the files offered, because every
+    path here starts with the same 20 characters of `env/dist/etc/` and a row
+    of full paths is wider than the window. The full path the moment it is
+    not: nothing makes a basename unique, and two modules that both ship
+    `mod.conf` must not give a person two identical buttons.
+    """
+    name = file if duplicate else file.rsplit("/", 1)[-1]
+    return f"{name}{READ_ONLY_SUFFIX}" if read_only else name
 
 
 def row_chips(row: TuningRow, *, changed: bool = False) -> tuple[str, ...]:
@@ -527,6 +567,9 @@ class CardWidget(QGroupBox):
     """One module's card: its rows, what a save costs, and the two presses."""
 
     save_pressed = Signal(str, str)
+    edited = Signal()
+    """Somebody moved a control on this card -- which arms "Revert all changes"."""
+
     revert_pressed = Signal(str, str)
     """`(family, module_id)`, because an id alone can name two cards.
 
@@ -574,6 +617,7 @@ class CardWidget(QGroupBox):
         self.editors: dict[str, RowEditor] = {}
         for row in card.rows:
             editor = RowEditor(row, self)
+            editor.edited.connect(self.edited.emit)
             self.editors[row.key] = editor
             box.addWidget(editor)
 
@@ -630,6 +674,9 @@ class TuningPanel(QWidget):
     file_selected = Signal(str)
     file_save_pressed = Signal(str)
     file_reload_pressed = Signal()
+    file_revert_pressed = Signal()
+    edited = Signal()
+    """Somebody moved a control on any card (T44 item 7's "Revert all changes")."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -656,16 +703,27 @@ class TuningPanel(QWidget):
         right = QWidget(self.split)
         right_box = QVBoxLayout(right)
         right_box.setContentsMargins(4, 0, 0, 0)
-        picker_row = QHBoxLayout()
-        picker_row.addWidget(QLabel("File:", right))
-        self.files = QComboBox(right)
-        self.files.currentTextChanged.connect(self._file_picked)
-        picker_row.addWidget(self.files, 1)
-        right_box.addLayout(picker_row)
+        # The picker as BUTTONS (T44 item 13). A combo box shows one file and
+        # hides the rest behind a press; this install offers a handful, and
+        # which ones they are is half the answer to "what can I tune here?".
+        self.files = QWidget(right)
+        self._files_layout = QHBoxLayout(self.files)
+        self._files_layout.setContentsMargins(0, 0, 0, 0)
+        self._files_layout.setSpacing(4)
+        self._file_buttons: list[QPushButton] = []
+        self._current_file = ""
+        right_box.addWidget(self.files)
         self.file_note = QLabel("", right)
         self.file_note.setWordWrap(True)
         self.file_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         right_box.addWidget(self.file_note)
+        # Item 16. Under the note and above the box a person types into,
+        # because it is about what typing into it will and will not do.
+        self.recreate_warning = QLabel(RAW_REWRITE_NEEDS_RECREATE, right)
+        self.recreate_warning.setWordWrap(True)
+        self.recreate_warning.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.recreate_warning.setVisible(False)
+        right_box.addWidget(self.recreate_warning)
         self.editor = QPlainTextEdit(right)
         self.editor.setFont(QFont("monospace"))
         self.editor.setStyleSheet(
@@ -678,11 +736,28 @@ class TuningPanel(QWidget):
         self.lint_label.setWordWrap(True)
         self.lint_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
         right_box.addWidget(self.lint_label)
+        # The backup's name, said rather than implied (T44 item 15). It is the
+        # only record of what the file said before, and the one thing a user
+        # needs in order to look at it by hand.
+        self.backup_label = QLabel("", right)
+        self.backup_label.setWordWrap(True)
+        self.backup_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        right_box.addWidget(self.backup_label)
         file_actions = QHBoxLayout()
         self.file_reload_button = QPushButton("Reload from disk", right)
         self.file_reload_button.clicked.connect(self.file_reload_pressed.emit)
         file_actions.addWidget(self.file_reload_button)
         file_actions.addStretch(1)
+        # Dead until there is a backup to restore FROM. A Revert with nothing
+        # behind it is a press that can only explain itself, and the card's own
+        # Revert already answers that case with a sentence.
+        self.file_revert_button = QPushButton("Revert", right)
+        self.file_revert_button.setToolTip(
+            "Put this file back from the backup Yu'lon took at the last save on this tab."
+        )
+        self.file_revert_button.setEnabled(False)
+        self.file_revert_button.clicked.connect(self.file_revert_pressed.emit)
+        file_actions.addWidget(self.file_revert_button)
         self.file_save_button = QPushButton("Save file", right)
         self.file_save_button.clicked.connect(
             lambda: self.file_save_pressed.emit(self.editor.toPlainText())
@@ -704,6 +779,7 @@ class TuningPanel(QWidget):
             widget = CardWidget(card, self._content)
             widget.save_pressed.connect(self.save_pressed.emit)
             widget.revert_pressed.connect(self.revert_pressed.emit)
+            widget.edited.connect(self.edited.emit)
             widget.set_enabled_actions(self._actions_enabled)
             self._cards[(card.family, card.module_id)] = widget
             self._order.append((card.family, card.module_id))
@@ -712,6 +788,10 @@ class TuningPanel(QWidget):
 
     def cards(self) -> tuple[CardWidget, ...]:
         return tuple(self._cards[key] for key in self._order)
+
+    def has_edits(self) -> bool:
+        """Whether anything on this tab has been changed and not saved."""
+        return any(widget.edits() for widget in self._cards.values())
 
     def _key_for(self, which: str | tuple[str, str]) -> tuple[str, str]:
         """The card a caller names, by `(family, id)` or by a bare id.
@@ -745,20 +825,70 @@ class TuningPanel(QWidget):
         self.files.setEnabled(enabled)
         self.file_reload_button.setEnabled(enabled)
         self.file_save_button.setEnabled(enabled and not self.editor.isReadOnly())
+        self.file_revert_button.setEnabled(
+            enabled and bool(self.backup_label.text()) and not self.editor.isReadOnly()
+        )
 
     # ------------------------------------------------------------- the file
 
-    def set_files(self, files: Sequence[str]) -> None:
-        """Fill the picker, keeping the file already open if it is still listed."""
-        keep = self.files.currentText()
-        blocked = self.files.blockSignals(True)
-        self.files.clear()
-        self.files.addItems(list(files))
-        self.files.blockSignals(blocked)
+    def set_files(self, files: Sequence[str], *, read_only: Sequence[str] = ()) -> None:
+        """Draw one button per file, keeping the file already open if it is still listed.
+
+        `read_only` is handed IN rather than decided here: which files this
+        app will not write is `controller_view.TUNING_CORE_FILES`, a decision
+        about who owns core configuration, and this widget must not carry a
+        second copy of that list.
+        """
+        keep = self._current_file
+        for button in self._file_buttons:
+            button.setParent(None)
+            button.deleteLater()
+        self._file_buttons.clear()
+        seen: dict[str, int] = {}
+        for file in files:
+            name = file.rsplit("/", 1)[-1]
+            seen[name] = seen.get(name, 0) + 1
+        for file in files:
+            button = QPushButton(
+                picker_label(
+                    file,
+                    duplicate=seen[file.rsplit("/", 1)[-1]] > 1,
+                    read_only=file in read_only,
+                ),
+                self.files,
+            )
+            button.setCheckable(True)
+            button.setToolTip(file)
+            button.clicked.connect(lambda _checked=False, name=file: self._file_picked(name))
+            self._file_buttons.append(button)
+            self._files_layout.insertWidget(self._files_layout.count(), button)
         if keep in files:
-            self.files.setCurrentText(keep)
+            self._mark_current(keep)
         elif files:
             self._file_picked(files[0])
+        else:
+            self._current_file = ""
+            self._mark_current("")
+
+    def file_buttons(self) -> tuple[QPushButton, ...]:
+        """The picker's buttons, in the order they are drawn."""
+        return tuple(self._file_buttons)
+
+    def current_file(self) -> str:
+        """Which file the editor is showing, or `""` when there is none."""
+        return self._current_file
+
+    def set_backup(self, name: str | None) -> None:
+        """Name the backup the last save took, and arm Revert (T44 item 15)."""
+        self.backup_label.setText(f"Backup of this file as it was: {name}" if name else "")
+        self.file_revert_button.setEnabled(
+            self._actions_enabled and bool(name) and not self.editor.isReadOnly()
+        )
+
+    def _mark_current(self, file: str) -> None:
+        self._current_file = file
+        for button in self._file_buttons:
+            button.setChecked(button.toolTip() == file)
 
     def set_file_text(self, text: str, *, read_only: bool, note: str | None) -> None:
         blocked = self.editor.blockSignals(True)
@@ -767,10 +897,17 @@ class TuningPanel(QWidget):
         self.editor.setReadOnly(read_only)
         self.file_note.setText(note or "")
         self.file_note.setVisible(bool(note))
+        # Only on a file this tab will actually write: a warning about a
+        # rewrite nobody can make is noise over `worldserver.conf` (item 16).
+        self.recreate_warning.setVisible(not read_only)
         self.file_save_button.setEnabled(self._actions_enabled and not read_only)
+        # A backup of the file you were looking at a moment ago is not a
+        # backup of this one, so the name goes with the text it described.
+        self.set_backup(None)
         self._relint()
 
     def _file_picked(self, name: str) -> None:
+        self._mark_current(name)
         if name:
             self.file_selected.emit(name)
 

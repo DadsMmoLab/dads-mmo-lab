@@ -2358,6 +2358,54 @@ TUNING_FILE_FAILED = "{file} was NOT written: {exc}"
 
 TUNING_LINT_CONFIRM_TITLE = "Save this file anyway?"
 
+TUNING_RELOAD_LABEL = "Reload from disk"
+TUNING_REVERT_ALL_LABEL = "Revert all changes"
+TUNING_RECREATE_LABEL = "Recreate containers…"
+TUNING_RESTART_LABEL = "Restart server…"
+"""The Tuning tab's action bar (T44 item 7). Both ellipses are this app's own
+convention for "this opens a dialog first", and both of these take the server
+down."""
+
+TUNING_RECREATE_TIP = (
+    "Stop and DELETE this install's containers, then start them again from the current "
+    "configuration. Your characters are not affected — the database lives in a Docker volume, "
+    "which is kept. Needed for a setting the running containers do not read from your disk."
+)
+
+TUNING_RESTART_TIP = (
+    "Stop the server and start it again, so the world re-reads the conf files on your disk. "
+    "Everybody online is disconnected."
+)
+
+TUNING_RESTART_CONFIRM = (
+    "Restart the server now?\n\nThe world stops and starts again, so it re-reads the conf "
+    "files on your disk. Anybody playing is disconnected. Waiting on a restart:\n{files}"
+)
+
+TUNING_RECREATE_CONFIRM = (
+    "Recreate the containers now?\n\nThis install's containers are DELETED and created again "
+    "from the current configuration. Your characters are not affected — the database lives in "
+    "a Docker volume, which is kept — but the server goes down and comes back up, which takes "
+    "longer than a restart. Waiting on a recreate:\n{files}"
+)
+
+TUNING_BANNER = "Waiting on a {job}: {files}"
+"""The Tuning tab's banner (T44 item 8), naming the DEAREST job owed and its files."""
+
+TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
+
+TUNING_REVERTED_FILE = "Put {file} back from {backup}.\n{rule}"
+
+TUNING_ALL_REVERTED = (
+    "Every control on this tab is back to what its file says. Nothing was written — this is "
+    "the undo for what you typed here, not for what you saved."
+)
+
+TUNING_NO_FILE_BACKUP = (
+    "There is no backup of {file} to revert to. Yu'lon takes one every time it saves, so the "
+    "first save on this tab is what creates it."
+)
+
 TUNING_CORE_FILE = (
     "This is the server's own configuration, not a module's. Yu'lon shows it read-only in "
     "this version: who owns core configuration is a bigger question than one module's conf."
@@ -6733,21 +6781,70 @@ class ControllerView(QWidget):
         self.tuning_panel.file_selected.connect(self.open_tuning_file)
         self.tuning_panel.file_save_pressed.connect(self.save_tuning_file)
         self.tuning_panel.file_reload_pressed.connect(self.reload_tuning_file)
+        self.tuning_panel.file_revert_pressed.connect(self.revert_tuning_file)
+        self.tuning_panel.edited.connect(self._set_tuning_revert_all)
         # The one control on this tab that is not a save: it re-reads the conf
         # files off disk. It exists because the values here are read ONCE per
         # reload and a server, an editor or another Yu'lon window can change a
-        # conf underneath this tab at any time.
-        self.refresh_tuning_button = QPushButton("Refresh", tab)
-        self.refresh_tuning_button.clicked.connect(self.reload_tuning)
-        self.refresh_tuning_button.setToolTip(
-            "Read this install's conf files again. Cheap: the files themselves, no network."
+        # conf underneath this tab at any time. Named for what it does since
+        # T44 -- "Refresh" said nothing about where the values come from.
+        self.tuning_reload_button = QPushButton(TUNING_RELOAD_LABEL, tab)
+        self.tuning_reload_button.clicked.connect(self.reload_tuning)
+        self.tuning_reload_button.setToolTip(
+            "Read this install's conf files again. Cheap: the files themselves, no network. "
+            "Anything you have typed here and not saved is dropped."
         )
+        # The undo for the FORM, and the one control on this bar that cannot
+        # destroy anything: the cards are rebuilt from the rows already read,
+        # so nothing is written and nothing is re-read. The per-card Revert is
+        # the one that restores a file from its backup (T44 item 7).
+        self.tuning_revert_all_button = QPushButton(TUNING_REVERT_ALL_LABEL, tab)
+        self.tuning_revert_all_button.clicked.connect(self.revert_all_tuning_edits)
+        self.tuning_revert_all_button.setToolTip(
+            "Put every control on this tab back to what its file says. Writes nothing."
+        )
+        self.tuning_revert_all_button.setEnabled(False)
+        # The two that cost something. They are on THIS tab because this is
+        # the tab that prices a change -- `tuning.apply_sentence()` has been
+        # naming a restart and a recreate since T43 while the app had no
+        # control for either. Both ask first: they take the server down.
+        self.tuning_recreate_button = QPushButton(TUNING_RECREATE_LABEL, tab)
+        self.tuning_recreate_button.clicked.connect(self.recreate_containers)
+        self.tuning_recreate_button.setToolTip(TUNING_RECREATE_TIP)
+        self.tuning_recreate_button.setEnabled(False)
+        self.tuning_restart_button = QPushButton(TUNING_RESTART_LABEL, tab)
+        self.tuning_restart_button.clicked.connect(self.restart_server)
+        self.tuning_restart_button.setToolTip(TUNING_RESTART_TIP)
+        self.tuning_restart_button.setEnabled(False)
         actions = QHBoxLayout()
-        actions.addWidget(self.refresh_tuning_button)
+        actions.addWidget(self.tuning_reload_button)
+        actions.addWidget(self.tuning_revert_all_button)
         actions.addStretch(1)
+        actions.addWidget(self.tuning_recreate_button)
+        actions.addWidget(self.tuning_restart_button)
+        # The banner, hidden until something is waiting. Above the cards for
+        # `rebuild_banner`'s reason: the ACTION is one action for every file
+        # that owes it, and its button is the one that answers the DEAREST job
+        # owed -- a user who changed two files must not be offered the cheaper
+        # of the two (T44 item 8).
+        self.tuning_banner = QWidget(tab)
+        tuning_banner_box = QHBoxLayout(self.tuning_banner)
+        tuning_banner_box.setContentsMargins(8, 6, 8, 6)
+        self.tuning_banner_label = QLabel("", self.tuning_banner)
+        self.tuning_banner_label.setWordWrap(True)
+        self.tuning_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.tuning_banner_button = QPushButton("", self.tuning_banner)
+        self.tuning_banner_button.clicked.connect(self._tuning_banner_pressed)
+        tuning_banner_box.addWidget(self.tuning_banner_label, 1)
+        tuning_banner_box.addWidget(self.tuning_banner_button)
+        self.tuning_banner.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.tuning_banner.setVisible(False)
         self.tuning_report = QPlainTextEdit(tab)
         self.tuning_report.setReadOnly(True)
         box.addLayout(actions)
+        box.addWidget(self.tuning_banner)
         box.addWidget(self.tuning_panel, 4)
         box.addWidget(self.tuning_report, 1)
         # "modules", because `icons.py` is a file T43 must not edit and it has
@@ -6757,6 +6854,11 @@ class ControllerView(QWidget):
         self._add_panel_tab(tab, "modules", "Tuning")
         self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
         self._tuning_newline = "\n"
+        # What this session has written that the running server has not picked
+        # up, by the job it owes. Session state exactly like `_rebuild_owed`,
+        # and forgotten on restart for the same reason: a persisted marker is
+        # a file with its own invalidation rules (T42's "Not in scope").
+        self._tuning_owed: dict[str, set[str]] = {}
         self.reload_tuning()
         self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
 
@@ -6774,7 +6876,179 @@ class ControllerView(QWidget):
         )
         self._tuning_rows = rows
         self.tuning_panel.set_cards(build_tuning_cards(rows))
-        self.tuning_panel.set_files(self._tuning_files())
+        # WHICH files are read-only is this module's list and not the panel's:
+        # `TUNING_CORE_FILES` is a decision about who owns core configuration,
+        # and a second copy of it inside a widget is a second place for it to
+        # drift (T44 item 13).
+        self.tuning_panel.set_files(self._tuning_files(), read_only=TUNING_CORE_FILES)
+        self._set_tuning_revert_all()
+
+    @Slot()
+    def _set_tuning_revert_all(self) -> None:
+        """Arm "Revert all changes" iff there is an unsaved edit to drop."""
+        self.tuning_revert_all_button.setEnabled(
+            self._module_actions_allowed() and self.tuning_panel.has_edits()
+        )
+
+    @Slot()
+    def revert_all_tuning_edits(self) -> None:
+        """Drop every unsaved edit on this tab, writing nothing (T44 item 7).
+
+        The cards are rebuilt from `self._tuning_rows` -- the rows this tab
+        has already read -- rather than by calling `reload_tuning()`: a reload
+        also re-reads the files, which would pick up a change somebody ELSE
+        made, and that is not what a person pressing "revert my changes"
+        asked for.
+        """
+        self.tuning_panel.set_cards(build_tuning_cards(self._tuning_rows))
+        self._set_tuning_revert_all()
+        self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
+
+    def _confirm(self, title: str, question: str) -> bool:
+        """One Yes/No dialog, defaulting to No, read through `said_yes()`.
+
+        `said_yes()` and never `== StandardButton.Yes` by hand: PySide6's
+        static `question()` returns a plain int on some builds, which is T33's
+        closed bug, and one helper is the one place that can be got right.
+        """
+        return said_yes(
+            QMessageBox.question(
+                self,
+                title,
+                question,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        )
+
+    def _note_tuning_owed(self, file: str) -> None:
+        """Record that `file` has been written and the server has not picked it up.
+
+        The job is `tuning.file_rule()`'s, never a guess: a conf inside a
+        directory the compose binds is read off the user's own disk at world
+        start and a restart is enough; one outside every bind is a copy baked
+        into the image, and only a recreate picks the new one up.
+        """
+        rule = tuning.file_rule(file)
+        if rule in TUNING_JOB_WORDS:
+            self._tuning_owed.setdefault(rule, set()).add(file)
+        self._refresh_tuning_owed()
+
+    def _refresh_tuning_owed(self) -> None:
+        """Arm the two expensive buttons and draw the banner for what is owed.
+
+        The banner's button answers the DEAREST job owed, not the last one
+        noted: a user who changed one file needing a restart and another
+        needing the containers replaced must not be offered the cheaper of the
+        two and told that is enough.
+        """
+        recreate = sorted(self._tuning_owed.get("recreate", ()))
+        restart = sorted(self._tuning_owed.get("restart", ()))
+        self.tuning_recreate_button.setEnabled(bool(recreate) and not self._busy)
+        self.tuning_restart_button.setEnabled(bool(restart or recreate) and not self._busy)
+        job = "recreate" if recreate else ("restart" if restart else None)
+        if job is None:
+            self.tuning_banner.setVisible(False)
+            return
+        files = recreate if job == "recreate" else restart
+        self.tuning_banner_label.setText(
+            TUNING_BANNER.format(job=TUNING_JOB_WORDS[job], files=", ".join(files))
+        )
+        self.tuning_banner_button.setText(
+            TUNING_RECREATE_LABEL if job == "recreate" else TUNING_RESTART_LABEL
+        )
+        self.tuning_banner.setVisible(True)
+
+    @Slot()
+    def _tuning_banner_pressed(self) -> None:
+        """The banner's own press: the SAME slot the bar's button is bound to."""
+        if self.tuning_banner_button.text() == TUNING_RECREATE_LABEL:
+            self.recreate_containers()
+        else:
+            self.restart_server()
+
+    @Slot()
+    def restart_server(self) -> None:
+        """Stop the world and start it again, so it re-reads the confs on disk.
+
+        Asks first, and names what is waiting: everybody playing is
+        disconnected. One job on the worker rather than two presses, because a
+        stop the user then has to follow with a start is a server left down by
+        a control that promised a restart.
+        """
+        if self._busy:
+            return
+        owed = sorted(self._tuning_owed.get("restart", ())) or ["(nothing recorded)"]
+        if not self._confirm(
+            TUNING_RESTART_LABEL, TUNING_RESTART_CONFIRM.format(files="\n".join(owed))
+        ):
+            return
+        self._set_busy(True)
+        self.tuning_report.setPlainText("restarting the server…")
+        self._run(self._do_restart, self._tuning_job_done("restart"), self._tuning_job_failed)
+
+    @Slot()
+    def recreate_containers(self) -> None:
+        """Delete this install's containers and start them again from the current config.
+
+        `controller.remove()` then `controller.start()`: `remove` deletes the
+        containers and KEEPS the volumes, and the next start creates them
+        again -- which is exactly the Server tab's own sentence for the same
+        pair of calls.
+        """
+        if self._busy:
+            return
+        owed = sorted(self._tuning_owed.get("recreate", ())) or ["(nothing recorded)"]
+        if not self._confirm(
+            TUNING_RECREATE_LABEL, TUNING_RECREATE_CONFIRM.format(files="\n".join(owed))
+        ):
+            return
+        self._set_busy(True)
+        self.tuning_report.setPlainText("recreating the containers…")
+        self._run(self._do_recreate, self._tuning_job_done("recreate"), self._tuning_job_failed)
+
+    def _do_restart(self) -> bool:
+        """Stop, then start. ONE worker job: a stop the user then has to follow with a
+        start by hand is a server left down by a control that promised a restart."""
+        controller = self.services.controller
+        stopped = controller.stop()
+        controller.start()
+        return stopped
+
+    def _do_recreate(self) -> bool:
+        """Delete the containers, then start. `remove()` keeps the volumes, so the
+        characters are not touched and the next start creates the containers again --
+        the Server tab's own sentence for the same pair of calls."""
+        controller = self.services.controller
+        removed = controller.remove()
+        controller.start()
+        return removed
+
+    def _tuning_job_done(self, job: str) -> Callable[[object], None]:
+        """The handler for a finished restart or recreate: forget what it covered.
+
+        A recreate covers a restart as well -- the containers are new, so they
+        have both the current environment and the current conf files -- which
+        is why it clears both and a restart clears only its own.
+        """
+
+        def done(_result: object) -> None:
+            self._set_busy(False)
+            self._tuning_owed.pop("restart", None)
+            if job == "recreate":
+                self._tuning_owed.pop("recreate", None)
+            self._refresh_tuning_owed()
+            self.tuning_report.setPlainText(f"{job}: done.")
+            self.refresh_status()
+
+        return done
+
+    @Slot(object)
+    def _tuning_job_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        self._refresh_tuning_owed()
+        self.tuning_report.setPlainText(f"FAILED: {exc}")
+        self.action_failed.emit(str(exc))
 
     def _tuning_files(self) -> tuple[str, ...]:
         """What the raw editor offers: this install's module confs, then its own.
@@ -6873,6 +7147,7 @@ class ControllerView(QWidget):
                 )
                 self.action_failed.emit(str(exc))
                 return
+            self._note_tuning_owed(file)
             said.append(
                 TUNING_SAVED.format(
                     module=module_id,
@@ -6905,6 +7180,7 @@ class ControllerView(QWidget):
             except OSError as exc:
                 said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
                 continue
+            self._note_tuning_owed(file)
             said.append(
                 TUNING_REVERTED.format(
                     module=module_id,
@@ -6945,7 +7221,41 @@ class ControllerView(QWidget):
 
     @Slot()
     def reload_tuning_file(self) -> None:
-        self.open_tuning_file(self.tuning_panel.files.currentText())
+        self.open_tuning_file(self.tuning_panel.current_file())
+
+    @Slot()
+    def revert_tuning_file(self) -> None:
+        """Put the open file back FROM ITS BACKUP, and say which one (T44 item 15).
+
+        From the backup and never by re-reading the form: the editor holds
+        what was last saved, so a "revert" that re-read it would put back the
+        very change the user is trying to undo. `tuning.restore()` copies
+        rather than moves, so a second Revert still has something to restore.
+        """
+        file = self.tuning_panel.current_file()
+        if not file or file in TUNING_CORE_FILES:
+            return
+        path = self.services.controller.server_dir / file
+        backups = tuning.backups_of(path)
+        if not backups:
+            self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
+            return
+        try:
+            tuning.restore(backups[-1], path)
+        except OSError as exc:
+            self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
+            self.action_failed.emit(str(exc))
+            return
+        self.tuning_report.setPlainText(
+            TUNING_REVERTED_FILE.format(
+                file=file,
+                backup=backups[-1].name,
+                rule=tuning.apply_sentence(tuning.file_rule(file)),
+            )
+        )
+        self._note_tuning_owed(file)
+        self.open_tuning_file(file)
+        self.reload_tuning()
 
     @Slot(str)
     def save_tuning_file(self, text: str) -> None:
@@ -6955,7 +7265,7 @@ class ControllerView(QWidget):
         a parser, and a refusal between a person and their own configuration
         over a rule this shallow would be worse than the typo it caught.
         """
-        file = self.tuning_panel.files.currentText()
+        file = self.tuning_panel.current_file()
         if not file or file in TUNING_CORE_FILES:
             return
         said = tuning.lint_sentence(tuning.lint(text))
@@ -6987,6 +7297,10 @@ class ControllerView(QWidget):
                 rule=tuning.apply_sentence(tuning.file_rule(file)),
             )
         )
+        # The backup's name on the tab and not only in the report, because it
+        # is what arms Revert beside Save file (T44 item 15).
+        self.tuning_panel.set_backup(made.name)
+        self._note_tuning_owed(file)
         self.reload_tuning()
 
     def _build_networking_tab(self) -> None:
