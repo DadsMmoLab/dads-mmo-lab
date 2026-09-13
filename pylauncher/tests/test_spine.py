@@ -2399,20 +2399,20 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "cannot be read still has to be offerable for removal - it decides no write, only a "
         "number in a sentence"
     ),
-    ("purge.py", "_clear_read_only"): (
-        "walks the tree the uninstall is about to delete, to add the write bit back to "
+    ("rmtree.py", "_clear_read_only"): (
+        "walks the tree a caller is about to delete, to add the write bit back to "
         "everything in it. It IS reached on the way to a write, and it is the one place that "
         "is right: the delete has ALREADY failed once when this runs, so the folder is one "
-        "the user asked to remove and `remove_tree()` re-raises against the tree if the "
+        "the caller asked to delete and `remove_tree()` re-raises against the tree if the "
         "retry still cannot finish. A failure on any single entry is skipped here on purpose "
         "- the report belongs to the rmtree that follows, not to one chmod"
     ),
-    ("purge.py", "_remove_unenterable"): (
+    ("rmtree.py", "_remove_unenterable"): (
         "walks the same tree, after the same first failure, to find the entries the walk "
         "cannot ENTER - on Windows a WSL-made symlink the clone container left as an LX "
         "reparse point, on POSIX a directory whose mode refuses scandir - and `os.rmdir`s "
         "each one where it stands, which removes a link rather than following it. It "
-        "decides no write on its own: the folder is one the user asked to remove and the "
+        "decides no write on its own: the folder is one the caller asked to delete and the "
         "delete has already failed once, and an rmdir it cannot do is left for the retry "
         "to name against the tree"
     ),

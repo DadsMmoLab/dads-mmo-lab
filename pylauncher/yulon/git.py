@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from yulon import platform, runner
+from yulon import platform, rmtree, runner
 from yulon.log import get_logger
 from yulon.ui import lines
 
@@ -785,7 +785,9 @@ class RunnerGit:
             self._pin(spec)
             return
         if spec.dest.exists():
-            shutil.rmtree(spec.dest)  # a non-git leftover; wow-manage.sh does the same
+            # T49: read-only git objects stop a bare rmtree on Windows, and a
+            # half-deleted destination is then cloned into.
+            rmtree.remove_tree(spec.dest)  # a non-git leftover; wow-manage.sh does the same
         spec.dest.parent.mkdir(parents=True, exist_ok=True)
         if clear_only:
             return
@@ -1207,7 +1209,7 @@ class ContainerGit:
             self._pin(spec)
             return
         if spec.dest.exists():
-            shutil.rmtree(spec.dest)
+            rmtree.remove_tree(spec.dest)  # T49
         spec.dest.mkdir(parents=True, exist_ok=True)
         if clear_only:
             return

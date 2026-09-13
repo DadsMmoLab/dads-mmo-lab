@@ -34,7 +34,7 @@ from pathlib import Path
 from string import Formatter
 from typing import IO, Literal, Protocol
 
-from yulon import docker, platform, runner
+from yulon import docker, platform, rmtree, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -1417,7 +1417,11 @@ class Applier:
         for step in manifest.deploy:
             self._undeploy(step, clone, log)
         if clone.exists():
-            shutil.rmtree(clone)
+            # T49: not `shutil.rmtree`. Git writes packs read-only on Windows and
+            # a bare rmtree stops at the first one, having already deleted an
+            # unknown part of the checkout. Reported from a real install:
+            # `remove sod FAILED: [WinError 5] Access is denied: ...\\pack-2623....idx`.
+            rmtree.remove_tree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
         return self._report("remove", manifest, log)
 
@@ -1980,10 +1984,18 @@ class Applier:
             )
 
     def _rm(self, path: Path, log: _Log) -> None:
-        if path.is_dir():
-            shutil.rmtree(path)
+        # `is_symlink()` FIRST, because `is_dir()` follows the link: a symlink to
+        # a directory used to take the tree branch and, since T49 gave that
+        # branch a retry that walks, would have been followed into somebody
+        # else's files (review, 2026-09-13). A manifest that says "remove this
+        # path" means the link, never what it points at.
+        if path.is_symlink():
+            path.unlink()
+            log.done.append(f"rm {_rel(self.server_dir, path)}")
+        elif path.is_dir():
+            rmtree.remove_tree(path)  # T49: may be a checkout, so read-only packs
             log.done.append(f"rm -r {_rel(self.server_dir, path)}")
-        elif path.is_file() or path.is_symlink():
+        elif path.is_file():
             path.unlink()
             log.done.append(f"rm {_rel(self.server_dir, path)}")
 

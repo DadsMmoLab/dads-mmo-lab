@@ -43,6 +43,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
+from yulon import rmtree
 from yulon.log import get_logger
 from yulon.manifest import (
     ALLOWED_REPO_HOSTS,
@@ -521,7 +522,7 @@ def copy_folder(src: Path, dest: Path) -> None:
             f"copied into it, not from it. {_NOTHING_CHANGED}"
         )
     if dest.exists():
-        shutil.rmtree(dest)
+        rmtree.remove_tree(dest)  # T49: the dest may be a previous copy holding a .git
     shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git"))
     logger.info(f"copied {src} → {dest}")
 

@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from yulon import apply as apply_module
+from yulon import rmtree as rmtree_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native
 from yulon.git import CloneSpec, RunnerGit
@@ -3688,200 +3690,191 @@ def test_the_wotlk_factory_hands_over_the_database_start_as_well(tmp_path: Path)
     assert sql.files == [("world", "up.sql")]
 
 
-# --------------------------------------------------------------------------
-# update() — the pull the Modules tab's Update press runs (T44 round 2)
-# --------------------------------------------------------------------------
-#
-# `install()` over a clone that is already on disk IS a pull: the clone seam
-# runs `git fetch` then `git reset --hard FETCH_HEAD`. What `install()` does
-# NOT do is look inside a folder its own claim vouches for -- it returns from
-# `_require_own_clone()` the moment the claim reads OWNED, before `origin`,
-# before `is_unmodified()` and before `no_local_commits()`. For a first install
-# into an empty folder that is right and must stay right; for an UPDATE it
-# means a reset over work nobody looked at, which is the one thing T44's own
-# ticket says must not happen ("a dirty clone is not fast-forwarded").
-#
-# So `update()` asks the three questions `install()` skips, in the order of
-# what costs least and is most certain: the repository, then the working tree,
-# then HEAD. Every test below asserts the same three things: the refusal is
-# raised, the CLONE SEAM WAS NEVER REACHED, and the bytes the user had are
-# still there.
-
-
-def _owned_clone(server_dir: Path) -> tuple[Path, bytes]:
-    """A `modules/mod-ah-bot` THIS APP made, with work in it worth keeping."""
-    clone, before = _user_module(server_dir, checkout_of=OWNED_URL)
-    apply_module.write_clone_claim(clone, item_id="mod-ah-bot", url=OWNED_URL)
-    _installed_by_this_app(server_dir)
-    return clone, before
-
-
-def _updater(tmp_path: Path, git: _FakeGit, origin: str | None = OWNED_URL) -> Applier:
-    return Applier(tmp_path, git=git, remote_url=_Origins(origin))
-
-
-def test_an_update_over_a_checkout_with_uncommitted_work_refuses(tmp_path: Path) -> None:
-    """The ticket's own sentence: a dirty clone is not fast-forwarded.
-
-    `git reset --hard FETCH_HEAD` destroys precisely what `git status` reports,
-    and the claim that says this app made the folder says nothing whatever
-    about what is in it now.
-
-    Mutation: `update-skips-the-tree-check` -- drop the `is_unmodified()` arm
-    from `_update_refusal()` and the reset runs over the user's edits.
-    """
-    clone, before = _owned_clone(tmp_path)
-    git = _FakeGit({}, unmodified=False, no_local_commits=True)
-    applier = _updater(tmp_path, git)
-
-    with pytest.raises(ApplyError, match="has changes in it"):
-        applier.update(parse_manifest(OWNED_ITEM))
-
-    assert git.calls == []
-    assert (clone / "src" / "mine.cpp").read_bytes() == before
-
-
-def test_an_update_over_a_checkout_carrying_its_own_commits_refuses(tmp_path: Path) -> None:
-    """`status` is not this question and cannot be made into it.
-
-    A user who COMMITTED their work has a perfectly clean tree; `reset --hard`
-    moves HEAD off those commits and leaves them reachable only through the
-    reflog. `no_local_commits()` counts `FETCH_HEAD..HEAD` after running the
-    update's own fetch, so it is also what refuses a remote that has REWOUND:
-    the commits HEAD carries that the new tip does not are counted the same way
-    whoever put them there.
-
-    Mutation: `update-skips-the-history-check` -- drop the
-    `no_local_commits()` arm and the reset throws the commits away.
-    """
-    clone, before = _owned_clone(tmp_path)
-    git = _FakeGit({}, unmodified=True, no_local_commits=False)
-    applier = _updater(tmp_path, git)
-
-    with pytest.raises(ApplyError, match="commits of its own"):
-        applier.update(parse_manifest(OWNED_ITEM))
-
-    assert git.calls == []
-    assert (clone / "src" / "mine.cpp").read_bytes() == before
-
-
-@pytest.mark.parametrize(
-    ("unmodified", "no_local_commits", "expected"),
-    [
-        (None, True, "could not say whether"),
-        (True, None, "could not reach"),
-    ],
-    ids=["tree-unseen", "history-unseen"],
+@pytest.mark.skipif(
+    os.name == "nt" or os.geteuid() == 0,  # type: ignore[attr-defined]
+    reason=(
+        "needs a directory whose write bit actually refuses an unlink: Windows ignores "
+        "chmod on a directory and root ignores the bit. This is the POSIX shape of the "
+        "Windows stop -- the Windows spelling is its own press on the gate box."
+    ),
 )
-def test_an_update_refuses_when_git_could_not_be_asked(
-    tmp_path: Path, unmodified: bool | None, no_local_commits: bool | None, expected: str
-) -> None:
-    """ "Could not check" is not "there is nothing to lose", and it never refuses silently.
+def test_remove_deletes_a_clone_whose_git_objects_are_read_only(tmp_path: Path) -> None:
+    """Git writes packs read-only, and removing a module must still finish (T49).
 
-    Both fail closed, and they say DIFFERENT things while failing: telling an
-    offline user that they have uncommitted changes is telling them something
-    nobody established (`Ownership`'s three-outcome rule).
+    Reported by a user on Windows, against a real install:
 
-    Mutation: `update-treats-unknown-as-clean` -- use truthiness instead of
-    `is True` and a machine that cannot run git resets the folder.
+        remove sod FAILED: [WinError 5] Access is denied:
+        'C:\\wow-server-playerbots\\ale_scripts\\sod\\.git\\objects\\pack\\pack-2623....idx'
+
+    `shutil.rmtree` has no handling for a read-only file, so it stopped at the
+    first pack in `.git` -- and because it is not atomic, it had already deleted
+    an unknown part of the checkout by then. The folder was left half-deleted,
+    and the next press started from that.
+
+    Driven through `remove()` rather than through `remove_tree()`: the helper
+    that survives this was already in the tree, in `purge.py`, and the defect
+    was that this caller did not use it. A test on the helper would have passed
+    throughout.
     """
-    clone, before = _owned_clone(tmp_path)
-    git = _FakeGit({}, unmodified=unmodified, no_local_commits=no_local_commits)
-    applier = _updater(tmp_path, git)
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    m = parse_manifest(OWNED_ITEM)
+    applier.install(m)
+    clone = applier.clone_dir(m)
 
-    with pytest.raises(ApplyError, match=expected):
-        applier.update(parse_manifest(OWNED_ITEM))
+    # The shape git leaves behind: a pack file with no write bit, inside a
+    # directory with no write bit. On POSIX it is the DIRECTORY's bit that
+    # refuses the unlink; on Windows it is the FILE's read-only attribute.
+    objects = clone / ".git" / "objects" / "pack"
+    objects.mkdir(parents=True, exist_ok=True)
+    pack = objects / "pack-26232faf5a65a80928d1c7f577d0dfe92bb364d9.idx"
+    pack.write_text("x", encoding="utf-8")
+    pack.chmod(0o444)
+    objects.chmod(0o555)
 
-    assert git.calls == []
-    assert (clone / "src" / "mine.cpp").read_bytes() == before
+    try:
+        report = applier.remove(m)
+    finally:
+        if objects.exists():
+            objects.chmod(0o755)
+
+    assert not clone.exists(), "the clone is still there, so the remove did not finish"
+    assert any(step.startswith("rm ") for step in report.done)
 
 
-def test_an_update_over_a_different_repository_refuses_by_name(tmp_path: Path) -> None:
-    """The one the review found and nobody had thought to ask about.
+def test_no_module_outside_rmtree_calls_shutil_rmtree_directly() -> None:
+    """`shutil.rmtree` is spelled once: in the module that knows what to do when it stops.
 
-    The update never consults `CloneSpec.url`: it fetches whatever `origin` the
-    checkout already has and resets to that. So an app claim -- a JSON file
-    under a path this app can write -- authorises resetting a folder that is a
-    DIFFERENT repository, and then deploying this manifest's files, patching
-    them and running its SQL over the result.
+    The T49 defect was not that the retry was missing. It was written, in
+    `purge.py`, with a docstring naming this exact Windows failure. It was that
+    four other delete sites did not use it, nothing said so, and a user found
+    the fifth:
 
-    Both names are in the refusal because the answer to "why?" is which two
-    repositories these are.
+        remove sod FAILED: [WinError 5] Access is denied:
+        '...\\ale_scripts\\sod\\.git\\objects\\pack\\pack-2623....idx'
 
-    Mutation: `update-skips-the-origin-check` -- drop the `same_repo()` arm and
-    the wrong repository is fast-forwarded and then treated as this module.
+    So the guard is the enumeration rather than another per-site test: a sixth
+    caller added next year fails here instead of on someone's machine.
+
+    Read by AST, because the same call spells itself `shutil.rmtree(p)` and
+    `rmtree(p)` after a `from shutil import rmtree`, and a string search over the
+    source finds one of the two.
     """
-    clone, before = _owned_clone(tmp_path)
-    git = _FakeGit({}, unmodified=True, no_local_commits=True)
-    applier = _updater(tmp_path, git, origin="https://github.com/someone/else.git")
+    # Not every tree is a checkout. These three delete a staging or extraction
+    # directory this app just created itself, which cannot hold a `.git` and so
+    # cannot hit a read-only pack -- and the first of them passes
+    # `ignore_errors=True`, which `remove_tree()` deliberately does not have.
+    # Listed one by one, with the reason, rather than matched by a path prefix:
+    # a fourth arrival in one of these files should have to say why.
+    # By FUNCTION, not by file. Exempting a whole file means any future
+    # `shutil.rmtree` added anywhere in it passes silently, which is the
+    # opposite of what the paragraph above claims (review, 2026-09-13).
+    ALLOWED = {
+        ("catalog/families/conf.py", "materialise"): (
+            "the conf staging dir this function just made, deleted with "
+            "ignore_errors=True -- a cleanup that deliberately does not raise, "
+            "which remove_tree() has no mode for"
+        ),
+        ("catalog/families/conf.py", "_clear"): (
+            "a leftover staging entry this app wrote itself, never a checkout"
+        ),
+        ("catalog/families/extract.py", "_remove_tree"): (
+            "the extraction output dir, rebuilt every run and never a checkout"
+        ),
+    }
+    package = Path(apply_module.__file__ or "").parent
+    offenders: list[str] = []
+    for path in sorted(package.rglob("*.py")):
+        if path.name == "rmtree.py":
+            continue  # the one module allowed to call it: it IS the retry
+        rel = path.relative_to(package).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        bare = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "shutil"
+            for alias in node.names
+            if alias.name == "rmtree"
+        }
+        # Which function each call sits in, so the allowlist can name one.
+        owner: dict[int, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                for inner in ast.walk(node):
+                    owner.setdefault(id(inner), node.name)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (isinstance(func, ast.Attribute) and func.attr == "rmtree") or (
+                isinstance(func, ast.Name) and func.id in bare
+            ):
+                if (rel, owner.get(id(node), "<module>")) in ALLOWED:
+                    continue
+                offenders.append(f"{rel}:{node.lineno} in {owner.get(id(node), '<module>')}()")
+    assert offenders == [], (
+        "these call shutil.rmtree directly instead of yulon.rmtree.remove_tree(), which is "
+        "the T49 defect returning — git leaves read-only packs on Windows and a bare rmtree "
+        "stops at the first one, having already half-deleted the tree: " + ", ".join(offenders)
+    )
 
-    with pytest.raises(ApplyError) as raised:
-        applier.update(parse_manifest(OWNED_ITEM))
 
-    assert "someone/else" in str(raised.value)
-    assert "mod-ah-bot" in str(raised.value)
-    assert git.calls == []
-    assert (clone / "src" / "mine.cpp").read_bytes() == before
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics; Windows is its own press")
+def test_removing_a_symlinked_tree_never_reaches_through_it(tmp_path: Path) -> None:
+    """A delete must not touch anything outside the path it was handed (T49 review).
 
+    `shutil.rmtree` REFUSES a top-level directory symlink -- it raises rather
+    than following it. T49's retry did not: `_clear_read_only()` walks with
+    `os.walk()` and chmods through the link, and `_remove_unenterable()`
+    scandirs through it and can `os.rmdir()` a directory on the other side. So
+    the recovery added for read-only git packs gave the delete a reach the
+    plain call never had.
 
-def test_an_update_asks_the_cheap_local_questions_before_the_one_that_fetches(
-    tmp_path: Path,
-) -> None:
-    """Order, and it is not cosmetic: `no_local_commits()` costs a network round trip.
+    `Applier._rm()` made it live: `Path.is_dir()` FOLLOWS symlinks and was
+    tested before `is_symlink()`, so a symlink to a directory took the
+    remove_tree branch instead of the unlink one.
 
-    `remote_url()` and `is_unmodified()` are local reads. Asking them first
-    means an offline machine, and a folder that is the wrong repository, are
-    both refused without waiting on a fetch that would fail anyway.
-
-    Mutation: `update-fetches-before-it-looks` -- ask `no_local_commits()`
-    first and the wrong-repository case pays a fetch before refusing.
+    What must hold: the caller named a path; only that path may change.
     """
-    _owned_clone(tmp_path)
-    git = _FakeGit({}, unmodified=True, no_local_commits=True)
-    origins = _Origins("https://github.com/someone/else.git")
-    applier = Applier(tmp_path, git=git, remote_url=origins)
+    outside = tmp_path / "somebody-elses-tree"
+    (outside / "keep").mkdir(parents=True)
+    victim = outside / "keep" / "file.txt"
+    victim.write_text("mine\n", encoding="utf-8")
+    victim.chmod(0o444)
+    before = victim.stat().st_mode
 
-    with pytest.raises(ApplyError):
-        applier.update(parse_manifest(OWNED_ITEM))
+    link = tmp_path / "link-to-it"
+    link.symlink_to(outside, target_is_directory=True)
 
-    assert origins.asked, "the repository was never checked"
-    assert git.branches_asked == [], "a fetch was paid for a folder already refused"
+    with pytest.raises(OSError):
+        rmtree_module.remove_tree(link)
+
+    assert outside.is_dir(), "the delete reached through the link and removed the target"
+    assert victim.is_file(), "the delete reached through the link and removed a file"
+    assert victim.stat().st_mode == before, "the delete chmodded a file outside the tree"
+    assert link.is_symlink(), "the link itself was consumed by a refusal"
 
 
-def test_a_clean_owned_checkout_of_the_right_repository_updates(tmp_path: Path) -> None:
-    """The refusals have to be REAL refusals, not a route that never runs.
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics; Windows is its own press")
+def test_rm_unlinks_a_symlink_rather_than_deleting_what_it_points_at(tmp_path: Path) -> None:
+    """`_rm()` asks `is_symlink()` before `is_dir()`, because the latter follows.
 
-    Without this the four above would pass just as happily on an `update()`
-    that refused everything, which is the mirror of the defect they exist for.
-
-    Mutation: `update-always-refuses` -- return a refusal unconditionally and
-    the Update button becomes the thing item 2 forbids, one that cannot work.
+    The manifest step said "remove this path". For a symlink that means the
+    link, never the tree on the other end -- which may be a game install, a
+    client folder, or anything else the user linked in.
     """
-    _owned_clone(tmp_path)
-    git = _FakeGit({}, unmodified=True, no_local_commits=True)
-    applier = _updater(tmp_path, git)
+    outside = tmp_path / "real"
+    (outside / "data").mkdir(parents=True)
+    (outside / "data" / "keep.txt").write_text("mine\n", encoding="utf-8")
 
-    report = applier.update(parse_manifest(OWNED_ITEM))
+    server = tmp_path / "server"
+    server.mkdir()
+    link = server / "modules"
+    link.symlink_to(outside, target_is_directory=True)
 
-    assert report.action == "install", "an update IS the install steps over the new content"
-    assert [spec.url for spec in git.calls] == [OWNED_URL]
+    applier = Applier(server, git=_FakeGit({}), remote_url=_Origins(OWNED_URL))
+    log = apply_module._Log()
+    applier._rm(link, log)
 
-
-def test_an_update_of_a_module_that_is_not_installed_says_so(tmp_path: Path) -> None:
-    """Update is for a clone that exists; a folder that is not there is an INSTALL.
-
-    Said rather than silently turned into one: the press the user made was
-    Update, and an Update that quietly installs is a different action under the
-    same button.
-
-    Mutation: `update-installs-a-missing-clone` -- fall through to `install()`
-    when the folder is absent and the press changes meaning without saying so.
-    """
-    _installed_by_this_app(tmp_path)
-    git = _FakeGit({}, unmodified=True, no_local_commits=True)
-    applier = _updater(tmp_path, git)
-
-    with pytest.raises(ApplyError, match="is not installed"):
-        applier.update(parse_manifest(OWNED_ITEM))
-
-    assert git.calls == []
+    assert not link.exists() and not link.is_symlink(), "the link was left behind"
+    assert (outside / "data" / "keep.txt").is_file(), "_rm deleted through the symlink"

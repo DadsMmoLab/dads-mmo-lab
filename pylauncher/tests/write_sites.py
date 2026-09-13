@@ -65,6 +65,12 @@ _QUALIFIED = {
     ("os", "chmod"),
     ("os", "truncate"),
     ("shutil", "rmtree"),
+    # T49: the delete moved behind `yulon.rmtree.remove_tree()` so the read-only
+    # retry could be shared. Listed here so the five callers stay VISIBLE in the
+    # ledger -- an indirection that hid the most destructive call in the package
+    # from its own audit would be the failure `guards-that-prove-declarations`
+    # is about, not a refactor.
+    ("rmtree", "remove_tree"),
     ("shutil", "copy"),
     ("shutil", "copy2"),
     ("shutil", "copyfile"),
