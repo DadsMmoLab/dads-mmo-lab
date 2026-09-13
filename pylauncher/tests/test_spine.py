@@ -2439,7 +2439,7 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "it must not give is a confident zero for a path it could not resolve, which is why a "
         "`{key}` in the path answers `files=None` instead of globbing the literal braces"
     ),
-    ("docker.py", "allowed_modules"): (
+    ("docker.py", "_module_dir_names"): (
         "lists `<server>/modules` to name the modules the database importer may apply SQL for; "
         "decides no write to that folder and never touches it. Its `except OSError` logs and "
         "answers `all`, which is upstream's own default (the modules COMPILED into the image), "
@@ -2448,7 +2448,19 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "2026-09-07, an empty value means `Loading modules: none` and switches module updates "
         "off, so 'nothing readable' and 'nothing to allow' must not collapse into one string. "
         "Nothing is written on the strength of it either way -- the answer travels in argv "
-        "to a container that then decides file by file"
+        "to a container that then decides file by file. T41 moved the listing itself here out "
+        "of `allowed_modules()` so `installed_module_names()` could share it without inheriting "
+        'its `all`/`""` rule: this function answers `None` for unreadable and `[]` for empty, '
+        "and each caller decides what those two mean to it. Neither caller writes anything"
+    ),
+    ("docker.py", "clone_names"): (
+        "lists one manifest family's clone directory so the Modules tab can mark which of its "
+        "rows are installed (T41); decides no write and never touches the folder. Its "
+        "`except OSError` logs and answers the EMPTY set, which is the opposite of "
+        "`allowed_modules()` on the same folder -- there an unreadable answer must be `all` "
+        "so the importer keeps upstream's default, here it must mark nothing rather than "
+        "claim every module is missing. Takes the folder and not the server directory because "
+        "`apply.CLONE_DIRS` gives each family its own"
     ),
     ("docker.py", "_first_populated_ancestor"): (
         "walks up a path looking for a directory that HAS something in it, to tell a real "

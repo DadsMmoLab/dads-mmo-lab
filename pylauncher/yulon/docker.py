@@ -1847,17 +1847,62 @@ def allowed_modules(server_dir: Path) -> str:
     `UpdateFetcher` skips them — and only one of them is safe when the folder
     could not be read.
     """
+    names = _module_dir_names(server_dir)
+    if names is None:
+        return ALL_MODULES
+    return ",".join(names) if names else ALL_MODULES
+
+
+def _module_dir_names(server_dir: Path) -> list[str] | None:
+    """The module folder names in this install, sorted. `None` means unreadable.
+
+    The listing `allowed_modules()` and `installed_module_names()` share. They
+    do NOT share the empty case: an unreadable folder and an empty one are the
+    same answer to the list on screen (nothing to mark) and two different
+    answers to the importer, where `ALL_MODULES` is upstream's default and `""`
+    would switch module updates off. Hence `None` rather than `[]` here, so
+    each caller decides for itself.
+    """
     modules = server_dir / MODULES_DIR_NAME
     try:
-        names = sorted(
+        return sorted(
             entry.name
             for entry in modules.iterdir()
             if entry.is_dir() and not entry.name.startswith(".")
         )
     except OSError as exc:
-        logger.warning(f"could not list {modules}, so the importer keeps upstream's default: {exc}")
-        return ALL_MODULES
-    return ",".join(names) if names else ALL_MODULES
+        logger.warning(f"could not list {modules}: {exc}")
+        return None
+
+
+def clone_names(folder: Path) -> frozenset[str]:
+    """The directory names directly inside `folder`, as a set. Unreadable is empty (T41).
+
+    What the Modules tab marks its rows with, one family's clone directory at a
+    time. Cheap on purpose — directory names, no git, no daemon — because it
+    runs on every `reload_modules()`, where `module_updates()` costs a `git
+    fetch` per checkout and is a button.
+
+    An unreadable or missing folder answers the empty set: the list then marks
+    nothing, which is what it did before this existed, rather than claiming
+    every module is missing. That is the opposite of `allowed_modules()`, which
+    must answer `all` for the same folder — see `_module_dir_names()`.
+
+    Takes the folder rather than the server directory because the four manifest
+    families do NOT share one: `apply.CLONE_DIRS` puts a module in `modules/`,
+    an ale and a keg in `ale_scripts/` and a mod in `sql_scripts/clones/`.
+    Reading `modules/` for all four marked an ale installed because a module of
+    the same id was, and never marked a real ale at all (review, 2026-09-12).
+    """
+    try:
+        return frozenset(
+            entry.name
+            for entry in folder.iterdir()
+            if entry.is_dir() and not entry.name.startswith(".")
+        )
+    except OSError as exc:
+        logger.info(f"could not list {folder}, so nothing there is marked installed: {exc}")
+        return frozenset()
 
 
 def run_one_shot(
@@ -3123,15 +3168,134 @@ and not enough to push the rest of the tab off screen.
 """
 
 
+_BUILDKIT_FENCE = "------"
+"""The rule BuildKit draws around the failing step's own output.
+
+Exactly six hyphens, and distinct from the twenty it draws around the
+Dockerfile context below it — which is part of what makes the block findable.
+"""
+
+_BUILDKIT_STEP_HEADER = re.compile(r"^> \[[^\]]+\]")
+"""BuildKit's ` > [3/3] RUN …:` header, stripped of its leading space.
+
+The bracketed step number is required, not just a leading `>`: `last_words()`
+is shared with imports, clones and extractors, and any of them may print a
+line starting with `>`. Two rules and a `>` alone was enough to make an
+unrelated tool's output be read as a build (review, 2026-09-12).
+"""
+
+_ERROR_KEEP = 70
+"""How much of each end of BuildKit's `ERROR:` line survives the elision.
+
+The middle of that line is the whole `RUN` command; the ends are "ERROR: failed
+to solve: process" and the exit code, which is the half that says something.
+"""
+
+
+def _elided(line: str) -> str:
+    """A long `ERROR:` line with its embedded command removed, both ends kept."""
+    if len(line) <= 2 * _ERROR_KEEP:
+        return line
+    return f"{line[:_ERROR_KEEP]}…{line[-_ERROR_KEEP:]}"
+
+
+def _buildkit_failure(said: list[str]) -> tuple[list[str], str]:
+    """A failed `docker build` split into (the step's own output, its `ERROR:` line).
+
+    A failed build ends in a fixed shape (captured on m910q, Docker 29.7.2,
+    `pyplan/gates/t38-build-failure-reports-the-command-2026-09-12/`)::
+
+        ------
+         > [3/3] RUN sh -c "…":
+        0.213 mod_transmog/src/Transmog.cpp:212:9: error: no member named GetGUID
+        0.213 1 error generated.
+        ------
+        Dockerfile:3
+        --------------------
+           3 | >>> RUN sh -c "…"
+        --------------------
+        ERROR: failed to build: failed to solve: process "/bin/sh -c …" did not complete…
+
+    The last five lines of that are the Dockerfile context and the `ERROR:`
+    line, and that line embeds the entire `RUN` command — so it alone overruns
+    the character cap and arrives truncated from the left. A user adding a
+    module was shown the middle of a cmake invocation and nothing else (T38,
+    Lac, 2026-09-12). The compiler's words are between the fences, and were
+    never missing from the buffer: `KEEP_OUTPUT_LINES` keeps 200.
+
+    **Both halves are returned, because either alone can be the whole story.**
+    The step block carries a compiler diagnostic; the `ERROR:` line carries the
+    exit code, and for a build the kernel killed — `exited with code: 137`, an
+    out-of-memory linker on a machine whose Docker VM is too small, which this
+    project warns about before it ever starts — the step block's last line is a
+    cheerful `[95%] Linking CXX executable worldserver` and the 137 is the only
+    sign anything went wrong. Returning the block alone hid it (review,
+    2026-09-12).
+
+    Fences are paired structurally rather than by taking the last two: the
+    opening one is the last that carries a `_BUILDKIT_STEP_HEADER`, and the
+    closing one is the first fence after it. An odd count, a stray rule in some
+    tool's output, or a `------` inside the step's own lines then costs at most
+    a short block instead of silently choosing two unrelated rules.
+
+    An empty block with a non-empty `ERROR:` line, or both empty, tells the
+    caller to fall back — a silent failing step must not come out worse than
+    it did before.
+    """
+    error_at: int | None = None
+    for index in range(len(said) - 1, -1, -1):
+        if said[index].startswith("ERROR:"):
+            error_at = index
+            break
+    if error_at is None:
+        # No BuildKit failure marker: not a failed build. An import, a clone or
+        # a map extractor reaches here too, and none of them is parsed.
+        return [], ""
+    error_line = said[error_at]
+
+    opened: int | None = None
+    for index in range(error_at - 1, 0, -1):
+        if said[index - 1] == _BUILDKIT_FENCE and _BUILDKIT_STEP_HEADER.match(said[index]):
+            opened = index - 1
+            break
+    if opened is None:
+        return [], error_line
+    closed: int | None = None
+    for index in range(opened + 2, error_at):
+        if said[index] == _BUILDKIT_FENCE:
+            closed = index
+            break
+    if closed is None:
+        return [], error_line
+    # `opened + 2` drops the header: naming the command is what this ticket
+    # exists to stop doing.
+    return said[opened + 2 : closed], error_line
+
+
 def last_words(tail: tuple[str, ...]) -> str:
     """The end of a command's output, short enough to put inside a sentence.
 
     Blank lines are dropped before the count, because a shell script's spacing
     is exactly what a five-line window cannot afford to spend itself on.
+
+    For a failed `docker build` the last lines are Docker's own epilogue rather
+    than anything that went wrong, so the failing step's output is preferred
+    and the `ERROR:` line is kept beside it with its command elided — see
+    `_buildkit_failure()`.
     """
     said = [line.strip() for line in tail if line.strip()]
     if not said:
         return "it printed nothing at all"
+    block, error_line = _buildkit_failure(said)
+    if block:
+        text = " / ".join(block[-_LAST_WORDS_LINES:])
+        if len(text) > _LAST_WORDS_CHARS:
+            # From the HEAD here, the opposite of the fallback below: a compiler
+            # puts `file:line:column: error:` at the front of its diagnostic,
+            # and keeping the tail of a long one throws away the only part that
+            # says where to look (review, 2026-09-12).
+            text = text[:_LAST_WORDS_CHARS] + "…"
+        return f"{text} / {_elided(error_line)}" if error_line else text
     text = " / ".join(said[-_LAST_WORDS_LINES:])
     return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
 
