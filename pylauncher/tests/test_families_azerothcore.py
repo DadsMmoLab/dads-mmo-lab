@@ -1936,9 +1936,7 @@ def test_both_clone_seams_still_open_the_way_this_double_does(tmp_path: Path) ->
         # T49 moved the spelling from `shutil.rmtree` to the leaf that retries
         # after clearing read-only flags. The assertion still pins ONE statement,
         # because "empties the destination" is what the three tests below rest on.
-        assert [ast.unparse(stmt) for stmt in emptying.body] == [
-            "rmtree.remove_tree(spec.dest)"
-        ], (
+        assert [ast.unparse(stmt) for stmt in emptying.body] == ["rmtree.remove_tree(spec.dest)"], (
             f"{name}.clone() does something other than `rmtree.remove_tree(spec.dest)` to a "
             "destination it does not recognise"
         )
