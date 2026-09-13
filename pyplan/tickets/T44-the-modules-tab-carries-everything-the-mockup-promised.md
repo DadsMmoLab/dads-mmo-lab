@@ -1,6 +1,6 @@
 # T44 — the Modules and Tuning tabs carry everything the mockups promised, and look like them
 
-**Status:** FILED — spec ready; the hand starts next
+**Status:** CLOSED 2026-09-13 by the lead — two rounds, the cap, gate verified on the branch by the lead. Four findings left OPEN for the owner below, deliberately not in the diff.
 **Filed:** 2026-09-13 by the lead, from the owner after the live press on `yulon-win11`: "I want all the info that was on this one" (the approved mockup) "and same look", then "same with tuning".
 **Mockups:** Modules https://claude.ai/code/artifact/a2e50955-de56-4ffe-99fb-aa9eb5f82419 (the owner's own, approved before T42) · Tuning https://claude.ai/code/artifact/21ebf51e-a3f5-4f6b-90c9-dbac665c9bdf (painted in `theme.py`'s own constants)
 **Hand:** Opus 5. Worktree `.claude/worktrees/t44`, branch `hand-t44` **from `feat/modules-and-tuning-tabs`** (the PR 153 branch, which is T42 + T43 cut onto `upstream/Yulon`). Reviewer: Codex adversarial, two-round cap; a third round is the owner's to grant.
@@ -642,3 +642,76 @@ was evidence.
 
 **Status:** all five REJECT findings addressed on `hand-t44` (nothing pushed),
 four items recorded above as open for the owner.
+
+
+## Closed (lead, 2026-09-13)
+
+Two rounds, the cap reached, no third asked for — the owner's standing rule is to ask, and he
+is asleep; nothing left open is mechanical enough to fix by hand without his call.
+
+**The lead's own gate on `hand-t44`**, run on the branch rather than read off the report:
+`4648 passed, 31 skipped`; black 217 files unchanged, ruff clean, mypy clean on 105 files.
+Round 1's `4628 passed` was re-run and matched too. The mutation evidence is files, not prose:
+76 patches, a runner, per-patch logs and `RESULTS.txt` under
+`pyplan/gates/t44-modules-gap-2026-09-13/mutations/`. 76 run, 76 killed.
+
+### The review was right about the dangerous one, and so was the ticket
+
+Codex found that Update `reset --hard`s an app-owned clone without asking whether it is clean
+— which this ticket had required in so many words ("a dirty clone is not fast-forwarded").
+`Applier.install()` accepts an owned claim without inspecting the checkout, and
+`RunnerGit.clone()` on an existing folder runs an unconditional `reset --hard FETCH_HEAD`.
+
+Worse, and not something this ticket thought to ask: the update never consulted
+`CloneSpec.url`. It fetched whatever `origin` the folder already had, so an app claim
+authorised resetting a **different repository** and applying this manifest's SQL and conf over
+it. `Applier.update()` now asks repository, then working tree, then HEAD — in that order,
+because only the last needs a fetch.
+
+The hand corrected the lead's framing while fixing it, and was right to: three of the four
+inputs named in the brief (local commits, a rewound remote, a detached HEAD with unique
+commits) are one question — `FETCH_HEAD..HEAD` non-empty — not three guards.
+
+### The finding that had to be measured rather than reasoned
+
+The shadow warning (item 16) was shown on every editable conf and named a remedy that does not
+work: recreating containers re-applies the same generated `AC_*` value, so the raw edit still
+does nothing. Fixing it needed the real key transform, and the hand's instinct —
+uppercase plus dots-to-underscores — gives `AC_AIPLAYERBOT_MINRANDOMBOTS` and would have found
+nothing shadowed anywhere. The true rule (`AC_` + upper_snake) was already written down in
+`pyplan/phase8-reads/azerothcore.md` citing `Config.cpp:435-438`. Reading beat guessing, again
+([[a-confident-reason-with-nothing-behind-it]]).
+
+### Two process failures, both disclosed by the hand
+
+A throwaway patch generator ran `git checkout -- pylauncher` and destroyed about forty minutes
+of uncommitted work; and its teardown left a bare `pytest -q` running with no
+`-m 'not integration'`, which would have reached Docker **on the laptop** — the shape of the
+2026-09-01 crash. The lead confirmed no daemon started (`docker info` answered nothing, memory
+at 1 GB) and killed the strays. Written up as [[a-helper-script-can-destroy-the-work-it-serves]].
+The shipped runner cannot do either by construction: apply/reverse-apply, and a scratch mirror.
+
+### The measurement
+
+The version line made the tab FASTER, because the reload now reads nothing and the fills follow
+the paint one event-loop turn at a time. Median of 5, `reload-times.txt`:
+
+| installed | before (inline `git log`) | after, first paint | later reload |
+|---|---|---|---|
+| 2 | 73.1 ms | 68.2 ms | 68.4 ms |
+| 20 | 100.0 ms | **68.1 ms** | 68.9 ms |
+
+## Open for the owner — NOT fixed, and each says why
+
+1. **`Not for this game` is deleted.** `ManifestStore._load_at()` raises on a foreign-game
+   manifest and `_load_manifests()` catches it at family scope, so nothing on disk can produce
+   the row. Making it real means changing that contract — and its raise currently also takes
+   down 20 shipped rows when one user manifest is bad, which is its own defect. Own ticket.
+2. **The custom-module install route can still reset an app-owned clone unasked.**
+   Pre-existing, unreachable from the row button, and now asymmetric with `update()`. It should
+   ask the same three questions.
+3. **`ApplyReport` carries no family**, so a report cannot be attributed to one of two
+   same-named rows. The session facts are keyed by `(family, id)` now; the report is not.
+4. **The two `yulon-win11` screenshots** this ticket owes — of each finished tab beside its
+   mockup. The lead has the before pair from the live press; the after pair wants T44 deployed
+   to the box.
