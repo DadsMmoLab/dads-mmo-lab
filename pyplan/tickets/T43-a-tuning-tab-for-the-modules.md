@@ -701,3 +701,105 @@ asked for.
   and the before/after of one key with its backup beside it.
 - A CHANGELOG line.
 - T42 is still unreviewed, and this branch is stacked on it.
+
+## Rebase onto T42 round 2 (2026-09-13)
+
+`git rebase hand-t42` onto `21fe373b`. Head is now **`c3883142`**; the gate's
+last line is
+
+```
+4559 passed, 8 skipped, 23 deselected, 2 warnings in 152.40s (0:02:32)
+```
+
+above T43's own 4537 and T42's 4423, as expected — nothing was dropped.
+
+### What conflicted, and how each was resolved
+
+**1. `controller_view.py`, `reload_modules()` / `_load_manifests()`.** T43 round
+1 factored this method's two readings out into `_installed_clones()` and
+`_load_manifests()`; T42 round 2 changed two lines inside the very loop that
+moved. Resolved by keeping T43's extraction and taking T42's substance into it:
+
+* `self._manifests[(manifest.type, manifest.id)] = manifest` — T42's key shape,
+  written in the extracted helper;
+* the `_forget_what_is_no_longer_installed(installed)` call put back in
+  `reload_modules()`, where it belongs: it needs `installed` and it needs to
+  know whether the seam ANSWERED.
+
+That second point forced one honest change to T43's own helper.
+`_installed_clones()` returned `{}` for "no reader", which would have collapsed
+T42's distinction and reconciled the session sets against an empty reading on
+every game without the seam — throwing away everything the session had learned.
+It now returns `Mapping | None`: `None` is "no reader", `{}` is "the reader
+answered nothing", and a reader that RAISED still answers `{}` exactly as it did
+before the extraction. `reload_modules()` reconciles only when the answer is not
+`None`; `reload_tuning()` reads `self._installed_clones() or {}`.
+T42's `test_a_game_with_no_installed_reader_keeps_what_this_session_learned`
+passes unchanged, which is the point.
+
+**2. `controller_view.py`, `save_tuning()`.** T43 round 2's card-wide validation
+(`specs = {...}`) landed on top of a line the resolution above had already
+changed. Kept both: the spec map is built once per card and now takes the family.
+
+**3. `tests/test_controller_view.py`.** Both branches appended a block at the
+end of the file. Both kept, in order: T42's round-2 block, then T43's Tuning-tab
+block. The only edits were to three `_tuning_spec` lambdas, which gained the
+`family` parameter.
+
+### What T42 round 2 changed that T43 reads
+
+`ControllerView._manifests` is the only one of the two re-keyed private dicts
+T43 touches. T43's three readers are now:
+
+* `_load_manifests()` writes `(manifest.type, manifest.id)`;
+* `_tuning_spec(family, module_id, file)` reads `(family, module_id)`, with the
+  family handed in rather than resolved — every caller has the `TuningCard`, and
+  `TuningRow.family` is where `tuning.rows_for()` put the manifest's own `type`;
+* `_module_done()`'s old `self._manifests.get(result.item_id)` is gone: T42
+  round 2 replaced it with `self._acting_on`, which is the manifest the press was
+  really about. T43 inherits that unchanged.
+
+`ModulesPanel._rows` is not read by T43. Of T42's new names, `drawn_rows()`,
+`selected_row()`, `laid_out_rows()`, `_module_menu()` and `WHY_UNCATALOGUED` are
+Modules-tab-only. `_forget_what_is_no_longer_installed()` reconciles
+`_rebuild_owed`/`_sql_owed`/`_behind`, none of which the Tuning tab reads — its
+cards come from `tuning.rows_for()`, which reads the conf files themselves, so
+there is nothing there to go stale against the disk.
+
+### One behaviour change, and it is T43's subject
+
+**Said loudly, as asked.** T42 round 2's finding — that nothing makes a manifest
+id unique across families — is true of the Tuning tab's own code, and it was
+worse there because it ends in a WRITE. `build_tuning_cards()` grouped by the
+bare id, so an `ale` and a `keg` sharing `bmah` became ONE card titled with the
+first family's name and holding both families' rows; `save_tuning()` then read
+that card's declarations out of the FIRST family's manifest and type-checked one
+module's values against another's before writing them to the other one's file.
+
+Fixed the same way rather than a second way: `build_tuning_cards()` groups by
+`(family, id)`, `TuningPanel._cards` is keyed by it, and `card()` still takes a
+bare id and resolves it in `FAMILY_FILES` order in one place — `_key_for()`, the
+same rule and the same name as `ModulesPanel._key_for()`. Where a caller HAS the
+family it never guesses: `CardWidget.save_pressed`/`revert_pressed` now carry
+`(family, module_id)`, which is the analogue of T42's "a click carries its
+widget", and `_tuning_spec()` takes the family as its first argument.
+
+This is a deliberate extension of T43's scope, taken because leaving it would
+have meant knowingly shipping next door's bug in code this ticket wrote. It is
+in its own commit, `c3883142`.
+
+| test | mutation |
+| --- | --- |
+| `test_an_id_in_two_families_gets_two_cards_not_one_merged_card` | group by the bare id again |
+| `test_the_panel_addresses_both_families_of_a_shared_id` | key `_cards` by the bare id |
+| `test_a_cards_save_carries_its_family_so_the_view_never_guesses` | the press emits a fixed family instead of the card's |
+| `test_a_saved_card_of_a_shared_id_writes_that_familys_file_and_no_other` (view) | (M106) the view resolves a bare id instead of addressing `(family, id)` — the wrong family's file is written; (M107) the spec is read from the first family — the wrong declarations refuse a valid value |
+
+M107 needed two attempts to bite, and the reason is worth recording: a
+wrong-family spec is only OBSERVABLE where both families name the same conf file
+AND declare the same key differently. With one file each, the wrong lookup
+returns an empty spec and no check runs, so the test passed under the mutation.
+The twins now also share a key in `worldserver.conf`, one typed `bool` and one
+`int`.
+
+Nothing else changed behaviour in either ticket's subject.
