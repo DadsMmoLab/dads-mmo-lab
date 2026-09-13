@@ -1,0 +1,54 @@
+yt: Python 3.13.15 in /home/perzi/wt-t56/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t56/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollected 152 items / 146 deselected / 6 selected                              [0m
+
+tests/test_preflight.py [32m.[0m[32m.[0m[32m.[0m[32m                                              [ 50%][0m
+tests/test_platform.py [32m.[0m[31mF[0m[32m.[0m[31m                                               [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m____________ test_compose_ready_is_false_when_the_plugin_is_missing ____________[0m
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x71a3d04f69c0>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_compose_ready_is_false_when_the_plugin_is_missing[39;49;00m(monkeypatch: pytest.MonkeyPatch) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""A Docker engine without the Compose v2 plugin (T56).[39;49;00m
+    [33m[39;49;00m
+    [33m    Reported from a Steam Deck on 0.8.65-Public. The user installed Docker by[39;49;00m
+    [33m    hand, so the daemon answered and preflight passed — and the install then[39;49;00m
+    [33m    died on step 4 of 9 with:[39;49;00m
+    [33m[39;49;00m
+    [33m        the build failed (exit 125). Its last words were:[39;49;00m
+    [33m        unknown shorthand flag: 'f' in -f / Usage: docker [OPTIONS] COMMAND[39;49;00m
+    [33m[39;49;00m
+    [33m    Yu'lon builds with `docker compose -f <file> build`. With no plugin the[39;49;00m
+    [33m    word `compose` is not a command, so `-f` falls through to `docker` itself[39;49;00m
+    [33m    and it prints its TOP-LEVEL usage — which is why the message names neither[39;49;00m
+    [33m    Compose nor the file it was given.[39;49;00m
+    [33m[39;49;00m
+    [33m    `docker info` cannot see this: the daemon is fine. The plugin is a separate[39;49;00m
+    [33m    thing and has to be asked about separately.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        monkeypatch.setattr(platform, [33m"[39;49;00m[33mdocker_programs[39;49;00m[33m"[39;49;00m, [94mlambda[39;49;00m: [[33m"[39;49;00m[33mdocker[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+        seen: [96mlist[39;49;00m[[96mlist[39;49;00m[[96mstr[39;49;00m]] = [][90m[39;49;00m
+    [90m[39;49;00m
+        [94mdef[39;49;00m[90m [39;49;00m[92mfake_run[39;49;00m(argv: [96mlist[39;49;00m[[96mstr[39;49;00m], **kwargs: [96mobject[39;49;00m) -> subprocess.CompletedProcess[[96mstr[39;49;00m]:[90m[39;49;00m
+            seen.append(argv)[90m[39;49;00m
+            [94mreturn[39;49;00m _completed(returncode=[94m125[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        monkeypatch.setattr(platform.runner, [33m"[39;49;00m[33mrun[39;49;00m[33m"[39;49;00m, fake_run)[90m[39;49;00m
+        [94massert[39;49;00m platform.compose_ready() [95mis[39;49;00m [94mFalse[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m seen [95mand[39;49;00m seen[[94m0[39;49;00m][[94m1[39;49;00m:] == [[33m"[39;49;00m[33mcompose[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mversion[39;49;00m[33m"[39;49;00m], seen[90m[39;49;00m
+[1m[31mE       AssertionError: [['docker', 'info']][0m
+[1m[31mE       assert ([['docker', 'info']] and ['info'] == ['compose', 'version'][0m
+[1m[31mE         [0m
+[1m[31mE         At index 0 diff: [0m[33m'[39;49;00m[33minfo[39;49;00m[33m'[39;49;00m[90m[39;49;00m != [0m[33m'[39;49;00m[33mcompose[39;49;00m[33m'[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         Right contains one more item: [0m[33m'[39;49;00m[33mversion[39;49;00m[33m'[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         Use -v to get more diff)[0m
+
+[1m[31mtests/test_platform.py[0m:1135: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_platform.py::[1mtest_compose_ready_is_false_when_the_plugin_is_missing[0m - AssertionError: [['docker', 'info']]
+[31m================= [31m[1m1 failed[0m, [32m5 passed[0m, [33m146 deselected[0m[31m in 0.27s[0m[31m ==================[0m

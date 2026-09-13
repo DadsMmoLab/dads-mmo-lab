@@ -1,0 +1,11 @@
+--- /tmp/m.orig	2026-09-13 23:09:08.766779584 +0200
++++ pylauncher/yulon/platform.py	2026-09-13 23:09:08.782581349 +0200
+@@ -1357,7 +1357,7 @@
+             logger.debug(f"{timeout}s of compose probe spent before {program} was tried")
+             return False
+         try:
+-            if _bounded(do, left)([program, "compose", "version"]).returncode == 0:
++            if _bounded(do, left)([program, "info"]).returncode == 0:  # M1
+                 return True
+         except OSError as exc:
+             logger.debug(f"could not start {program}: {exc}")

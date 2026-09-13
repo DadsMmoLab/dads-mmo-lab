@@ -1,0 +1,41 @@
+yt: Python 3.13.15 in /home/perzi/wt-t56/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t56/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollected 152 items / 146 deselected / 6 selected                              [0m
+
+tests/test_preflight.py [31mF[0m[32m.[0m[32m.[0m[31m                                              [ 50%][0m
+tests/test_platform.py [32m.[0m[32m.[0m[32m.[0m[31m                                               [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m_ test_a_machine_with_docker_but_no_compose_is_refused_before_the_install_starts _[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_machine_with_docker_but_no_compose_is_refused_before_the_install_starts[39;49;00m() -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The Steam Deck case, refused at the gate instead of at step 4 of 9 (T56).[39;49;00m
+    [33m[39;49;00m
+    [33m    `docker info` cannot see this. The daemon is fine; the plugin is a separate[39;49;00m
+    [33m    thing. The user installed Docker by hand from a guide, passed the Docker[39;49;00m
+    [33m    row, and lost the install four steps in to:[39;49;00m
+    [33m[39;49;00m
+    [33m        the build failed (exit 125). Its last words were:[39;49;00m
+    [33m        unknown shorthand flag: 'f' in -f / Usage: docker [OPTIONS] COMMAND[39;49;00m
+    [33m[39;49;00m
+    [33m    The remedy must name the package for THIS machine. "Install the Compose[39;49;00m
+    [33m    plugin" is not an instruction anyone can act on, and pointing a Steam Deck[39;49;00m
+    [33m    at Docker Desktop is the mistake T40 exists for.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        facts = preflight.Facts(platform_id=[33m"[39;49;00m[33mlinux[39;49;00m[33m"[39;49;00m, docker_ready=[94mTrue[39;49;00m, compose_ready=[94mFalse[39;49;00m)[90m[39;49;00m
+        check = preflight._compose_check(facts)[90m[39;49;00m
+    [90m[39;49;00m
+        [94massert[39;49;00m check.name == preflight.COMPOSE_CHECK[90m[39;49;00m
+>       [94massert[39;49;00m check.verdict == [33m"[39;49;00m[33mrefuse[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: assert 'warn' == 'refuse'[0m
+[1m[31mE         [0m
+[1m[31mE         [0m[91m- refuse[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         [92m+ warn[39;49;00m[90m[39;49;00m[0m
+
+[1m[31mtests/test_preflight.py[0m:1240: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_preflight.py::[1mtest_a_machine_with_docker_but_no_compose_is_refused_before_the_install_starts[0m - AssertionError: assert 'warn' == 'refuse'
+[31m================= [31m[1m1 failed[0m, [32m5 passed[0m, [33m146 deselected[0m[31m in 0.27s[0m[31m ==================[0m
