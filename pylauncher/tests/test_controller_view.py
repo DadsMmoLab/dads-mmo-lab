@@ -129,8 +129,32 @@ class _Ps:
 
 
 class _FakeApplier(Applier):
-    def __init__(self) -> None:
-        super().__init__(Path("/srv"), git=None)  # type: ignore[arg-type]
+    """Records what the tab asked for instead of cloning — but NOT `update()`.
+
+    `update()` is deliberately NOT overridden (round 2). It is the method that
+    decides whether a `git reset --hard` may go near a folder, and a fake that
+    answered for it would let the Modules tab's Update press be tested against
+    a refusal path that never runs — which is exactly what the first version of
+    `test_the_update_press…` did. So the real `Applier.update()` executes here,
+    over a real `server_dir`, and only the `install()` it delegates to is
+    faked.
+    """
+
+    def __init__(
+        self,
+        server_dir: Path | None = None,
+        *,
+        unmodified: bool | None = True,
+        no_local_commits: bool | None = True,
+        origin: str | None = None,
+    ) -> None:
+        super().__init__(
+            server_dir or Path("/srv"),
+            git=None,  # type: ignore[arg-type]
+            unmodified=lambda _dest, _path: unmodified,
+            no_local_commits=lambda _dest, _branch: no_local_commits,
+            remote_url=lambda _dest: origin,
+        )
         self.installed: list[str] = []
         # What the tab handed down as the `values` argument, per call. Recorded
         # because for two of the 41 shipped manifests that argument WAS the
@@ -8468,37 +8492,110 @@ def test_refresh_forgets_every_version_and_a_report_forgets_one(
     assert len(read) == 5, "Refresh re-reads every installed clone"
 
 
-def test_the_update_press_runs_the_install_route_over_the_clone_that_is_there(
-    qapp: object, ps: _Ps, tmp_path: Path
-) -> None:
-    """T44 item 2: Update is a real pull, and it is the install seam that does it.
+def _update_view(ps: _Ps, tmp_path: Path, **seams: object) -> ControllerView:
+    """A view whose applier is rooted at `tmp_path`, with a real clone on disk.
 
-    `Applier.install()` over an existing clone IS the pull: `RunnerGit.clone()`
-    on a folder that already has a `.git` runs `fetch` + `reset --hard
-    FETCH_HEAD` and then re-applies the pin. Routing Update anywhere else would
-    be a second clone path with a second copy of `_require_own_clone()`'s
-    refusals to keep in step.
-
-    Mutation: route the press to `applier.remove` (or to nothing at all) and
-    the module the user asked to update is uninstalled, or the button is the
-    thing item 2 forbids -- one that looks like an update and is not.
+    The clone is real because `Applier.update()`'s first question is whether
+    the folder is a checkout at all, and a fixture that skipped it would test
+    a refusal the press never reaches.
     """
-    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
+    clone = tmp_path / "modules" / "mod-solocraft"
+    (clone / ".git").mkdir(parents=True)
+    (clone / "mine.cpp").write_text("// three evenings\n", encoding="utf-8")
+    applier = _FakeApplier(tmp_path, **seams)  # type: ignore[arg-type]
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "applier", applier)
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+    )
     view._behind = {("module", "mod-solocraft"): 3}
     view.reload_modules()
+    return view
+
+
+def _press_update(view: ControllerView) -> None:
     row = view.modules_panel.row("mod-solocraft")
     chip = next(b for b in row.chip_buttons if "Update available" in b.text())
-
     chip.click()
     assert row.detail_button is not None
     assert row.detail_button.text() == "Update"
     row.detail_button.click()
     pump_until(lambda: not view._busy, "the update never finished")
 
+
+def test_the_update_press_runs_the_real_pull_over_a_clean_checkout(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T44 item 2, tested through `Applier.update()` rather than past it (round 2).
+
+    The first version of this test used a fake applier that overrode
+    `update()`, so it asserted only that the tab SELECTED the right method --
+    and would have passed just as happily while the real path reset a user's
+    work. The fake now overrides `install()` alone, so every refusal
+    `update()` carries really runs here.
+
+    Mutation: `update-press-routes-to-remove` -- route the press to
+    `applier.remove` and the module the user asked to update is uninstalled.
+    """
+    solocraft = "https://github.com/azerothcore/mod-solocraft.git"
+    view = _update_view(ps, tmp_path, origin=solocraft)
+
+    _press_update(view)
+
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier)
     assert applier.installed[-1] == "mod-solocraft"
     assert applier.removed == []
+
+
+def test_the_update_press_refuses_a_checkout_with_work_in_it_and_says_why(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The whole of round 2's finding 1, at the control the user actually presses.
+
+    The refusal is the applier's own sentence, in the report box every other
+    answer on this tab is read in, and the file is still there.
+
+    Mutation: `update-press-routes-to-install` -- send the press to
+    `applier.install` again (round 1's routing) and the press resets the
+    folder: `installed` grows and no refusal is shown.
+    """
+    solocraft = "https://github.com/azerothcore/mod-solocraft.git"
+    view = _update_view(ps, tmp_path, origin=solocraft, unmodified=False)
+
+    _press_update(view)
+
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == [], "the pull ran over uncommitted work"
+    assert "has changes in it" in view.module_report.toPlainText()
+    assert (tmp_path / "modules" / "mod-solocraft" / "mine.cpp").exists()
+
+
+def test_the_update_press_refuses_a_checkout_of_another_repository(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2's finding 2, at the control: an app claim is not a repository check.
+
+    Mutation: `update-skips-the-origin-check` -- drop the `same_repo()` arm
+    from `_update_refusal()` and the press fast-forwards somebody else's
+    repository and then deploys this module over it.
+    """
+    view = _update_view(ps, tmp_path, origin="https://github.com/someone/else.git")
+
+    _press_update(view)
+
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == []
+    said = view.module_report.toPlainText()
+    assert "someone/else" in said and "mod-solocraft" in said
 
 
 def test_a_finished_update_drops_the_commits_behind_it_just_pulled(
@@ -8754,3 +8851,42 @@ def test_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_wh
     assert view.tuning_restart_button.isEnabled() is True, "a restart is still owed"
     assert view.tuning_recreate_button.isEnabled() is False, "nothing owes a recreate"
     assert view.tuning_reload_button.isEnabled() is True
+
+
+def test_a_failed_install_forgets_the_version_the_clone_may_no_longer_be_at(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2. A failure is not "nothing happened" — the clone may already have moved.
+
+    `Applier.install()` fetches and resets the checkout FIRST and then runs
+    deploy, patches, SQL, conf and the client copy. Any of those can raise, and
+    by then the folder is at a different commit than the one this tab read. The
+    success path drops the cached version through `_note_session_facts()`; the
+    failure path left it, so the row went on showing a sha the clone had moved
+    off — which is a wrong sha, and worse than no sha at all (T44 item 1's own
+    rule).
+
+    Mutation: `failed-install-keeps-the-version` -- drop the `forget()` from
+    `_module_failed()` and the row keeps the old sha until something else
+    invalidates it.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    object.__setattr__(
+        services,
+        "module_version",
+        lambda path: (read.append(path), f"aaaaaa{len(read)} · 2026-09-01")[1],
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    pump_until(lambda: not view._filling_versions, "the first fill never finished")
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == "aaaaaa1 · 2026-09-01"
+
+    view._acting_on = view._manifests[("module", "mod-solocraft")]
+    view._module_failed(RuntimeError("the SQL step blew up after the reset"))
+    view.reload_modules()
+    pump_until(lambda: not view._filling_versions, "the fill after the failure never finished")
+
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == "aaaaaa2 · 2026-09-01"

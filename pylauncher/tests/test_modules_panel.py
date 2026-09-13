@@ -1270,17 +1270,24 @@ def test_set_version_on_a_row_that_is_gone_is_ignored(qapp: object) -> None:
 # ------------------------------------------------------- the Update press (T44)
 
 
-def test_the_update_chip_offers_the_pull_and_says_what_it_costs() -> None:
+def test_the_update_chip_offers_the_pull_and_names_the_press() -> None:
     """T44 item 2: the chip stops saying Yu'lon cannot do this, because it can.
 
     T42's sentence was "Yu'lon has no per-module pull yet, so updating it is a
-    job for git in the clone folder". The pull is `install()` over an existing
-    clone -- `git.RunnerGit.clone()` fetches and resets a checkout that is
-    already there -- so the chip now names the press and, because that press
-    is a `reset --hard`, says what it throws away.
+    job for git in the clone folder". `Applier.update()` is that pull, so the
+    chip names the press instead.
 
-    Mutation: drop the `action` and the subpanel shows a sentence with no
-    button, which is the tab exactly as T42 shipped it.
+    Round 1 also asserted `"discard" in chip.detail` -- a promise about what
+    the press does to the user's work, checked by looking for one word that a
+    sentence saying the OPPOSITE contains just as happily. The behaviour is now
+    asserted where it lives: `test_apply.py`'s four refusal tests prove
+    `update()` refuses rather than resets, and
+    `test_controller_view.py::test_the_update_press_refuses_a_checkout_with_
+    work_in_it_and_says_why` proves the press reaches them. A word in a string
+    is not evidence.
+
+    Mutation: `update-chip-has-no-action` -- drop the `action` and the subpanel
+    shows a sentence with no button, which is the tab as T42 shipped it.
     """
     session = mp.SessionState(behind={("module", "mod-a"): 3})
     rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
@@ -1289,7 +1296,6 @@ def test_the_update_chip_offers_the_pull_and_says_what_it_costs() -> None:
     assert chip.label == mp.chip_update_label(3)
     assert chip.action == "update"
     assert "no per-module pull" not in chip.detail
-    assert "discard" in chip.detail, "a reset --hard has to say what it destroys"
 
 
 def test_one_familys_pending_sql_does_not_badge_another_familys_row() -> None:

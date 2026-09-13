@@ -417,11 +417,11 @@ def _chips_for(
                 "owed",
                 chip_update_label(behind),
                 f"{item_id}: its upstream has {behind} commit(s) this checkout does not. "
-                "Update runs the same steps an install does over the folder that is already "
-                "there: it fetches and RESETS the clone to the upstream tip, then re-deploys "
-                "and re-applies everything the manifest declares. It will discard anything "
-                "changed inside the clone folder, and it may ask this module's install "
-                "questions again.",
+                "Update fetches and RESETS the clone to the upstream tip, then re-deploys "
+                "and re-applies everything the manifest declares — and it may ask this "
+                "module's install questions again. It REFUSES rather than reset if the "
+                "folder is a different repository, has uncommitted changes in it, or "
+                "carries commits the upstream does not, and says which.",
                 "update",
             )
         )

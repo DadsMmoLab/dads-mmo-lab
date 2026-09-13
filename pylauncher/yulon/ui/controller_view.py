@@ -2358,6 +2358,21 @@ TUNING_FILE_FAILED = "{file} was NOT written: {exc}"
 
 TUNING_LINT_CONFIRM_TITLE = "Save this file anyway?"
 
+MODULE_ACTION_STEPS: dict[str, When] = {
+    "install": "install",
+    "remove": "remove",
+    "update": "install",
+}
+"""Which of a manifest's STEPS each press on the Modules tab runs.
+
+Three presses, three routes on the applier, but only three kinds of step exist
+(`When`) -- an update re-runs the INSTALL-time ones, because over a clone that
+has moved that is exactly what it is. Spelled here rather than cast at the call
+site: `When` is the manifest schema's own word and `"update"` is not one of
+them, so a `cast()` would have been this view telling the type checker
+something the schema does not say.
+"""
+
 TUNING_RELOAD_LABEL = "Reload from disk"
 TUNING_REVERT_ALL_LABEL = "Revert all changes"
 TUNING_RECREATE_LABEL = "Recreate containers…"
@@ -6103,22 +6118,13 @@ class ControllerView(QWidget):
         elif action == "sql":
             self.apply_module_sql()
         elif action == "update":
-            # T44 item 2. The INSTALL route, because over a clone that is
-            # already on disk that route IS the pull: `RunnerGit.clone()` on a
-            # folder with a `.git` in it fetches, resets to `FETCH_HEAD` and
-            # re-applies the pin, and everything after it -- deploy, patches,
-            # SQL, conf, client files -- is what has to be redone once the
-            # source has moved. It therefore carries `_require_own_clone()`'s
-            # refusals unchanged, and reports the module's rebuild and SQL
-            # consequences exactly as an install reports them, because it is
-            # one. A second route would be a second copy of that guard.
-            #
-            # What it does NOT add is a refusal of its own: a clone this app's
-            # own claim vouches for is reset without asking `unmodified`, which
-            # is true of the Install button today as well. The chip's own
-            # sentence, which the subpanel shows directly above this button,
-            # says so before the press.
-            self._module_action("install", called="update")
+            # T44 item 2, and round 2's finding 1. `Applier.update()` runs the
+            # install steps over the clone that is already there -- which IS
+            # the pull -- after asking the three questions `install()` skips
+            # for a folder its own claim vouches for: the repository, the
+            # working tree, and what HEAD carries. A `reset --hard` over work
+            # nobody looked at is what the ticket forbids in so many words.
+            self._module_action("update")
 
     def _selected_row_is_uncatalogued(self) -> bool:
         """Is the selected row one of T41's "installed here, not in the catalog" rows?"""
@@ -6142,13 +6148,14 @@ class ControllerView(QWidget):
             return None
         return self._manifests.get((row.data.family, row.data.id))
 
-    def _module_action(self, action: str, *, called: str | None = None) -> None:
-        """Run `action` on the selected row, saying `called` if that is a better word.
+    def _module_action(self, action: str) -> None:
+        """Run `action` on the selected row: `install`, `remove` or `update`.
 
-        `called` changes the SENTENCE and never the route. T44's Update press
-        runs `install`, because over an existing clone that is what a pull is,
-        and a user who pressed a button marked Update must not read
-        "install mod-x…" back from it.
+        Three words and three routes since round 2. `update` was a second word
+        for the install ROUTE until the review found what that route does to a
+        clone this app's claim vouches for; it now runs `Applier.update()`,
+        which asks the repository, the working tree and HEAD before it lets a
+        `reset --hard` near the folder.
         """
         manifest = self.selected_manifest()
         applier = self.services.applier
@@ -6162,22 +6169,27 @@ class ControllerView(QWidget):
             return
         if manifest is None or applier is None:
             return
-        go_ahead, values = self._module_values(manifest, action)
-        word = called or action
+        # An update re-runs the INSTALL-time steps -- it is the install over
+        # content that has moved -- so it answers the install's prompts.
+        go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action])
         if not go_ahead:
             self._module_pending = None
             self.module_report.setPlainText(
-                f"{word} {manifest.id}: cancelled — nothing on this machine was changed."
+                f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
             )
             return
-        run = applier.install if action == "install" else applier.remove
+        run = {
+            "install": applier.install,
+            "remove": applier.remove,
+            "update": applier.update,
+        }[action]
         self._acting_on = manifest
-        self._module_pending = f"{word} {manifest.id}"
+        self._module_pending = f"{action} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
         self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
 
     def _module_values(
-        self, manifest: Manifest, action: str
+        self, manifest: Manifest, action: When
     ) -> tuple[bool, Mapping[str, str] | None]:
         """Whether to go ahead, and the answers to hand the applier.
 
@@ -6197,7 +6209,7 @@ class ControllerView(QWidget):
         the 41 manifests get no new window and the applier gets `None` rather
         than `{}` — the call it has always been given.
         """
-        needed = required_prompts(manifest, cast(When, action))
+        needed = required_prompts(manifest, action)
         if not any(prompt.default is None for prompt in needed):
             return True, None
         answers = self._prompt_asker(self, manifest, needed)
@@ -6370,8 +6382,18 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _module_failed(self, exc: object) -> None:
-        what, self._module_pending = self._module_pending or "module action", None
+        what, acted_on = self._module_pending or "module action", self._acting_on
+        self._module_pending = None
         self._acting_on = None
+        if acted_on is not None:
+            # A failure is not "nothing happened" (round 2). `install()` fetches
+            # and RESETS the checkout first and then runs deploy, patches, SQL,
+            # conf and the client copy; any of those can raise with the folder
+            # already at a different commit. The success path drops the cached
+            # version through `_note_session_facts()`, and leaving it here left
+            # the row showing a sha the clone had moved off -- a wrong sha,
+            # which item 1 says is worse than none.
+            self._versions.forget(acted_on.id)
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
         self.action_failed.emit(str(exc))
 
