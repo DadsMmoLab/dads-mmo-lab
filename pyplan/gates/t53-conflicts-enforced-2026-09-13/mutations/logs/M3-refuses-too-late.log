@@ -1,0 +1,89 @@
+yt: Python 3.13.15 in /home/perzi/wt-t52/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t52/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollected 139 items / 136 deselected / 3 selected                              [0m
+
+tests/test_apply.py [31mF[0m[32m.[0m[31mF[0m[31m                                                  [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m______ test_install_refuses_a_module_that_conflicts_with_one_already_here ______[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-898/test_install_refuses_a_module_0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_install_refuses_a_module_that_conflicts_with_one_already_here[39;49;00m(tmp_path: Path) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""`conflicts_with` is enforced, not merely parsed (T53).[39;49;00m
+    [33m[39;49;00m
+    [33m    The catalog has recorded for a long time that `mod-ah-bot` and[39;49;00m
+    [33m    `mod-ah-bot-plus` are alternatives -- each names the other in[39;49;00m
+    [33m    `conflicts_with`, the schema parses it, and `test_manifest.py` asserts it[39;49;00m
+    [33m    round-trips. Nothing ever read it at install time. So Yu'lon installed both,[39;49;00m
+    [33m    and the user found out 21 minutes later when the LINKER stopped:[39;49;00m
+    [33m[39;49;00m
+    [33m        mod-ah-bot-plus/src/ah_bot_loader.cpp:18: multiple definition of[39;49;00m
+    [33m        `Addmod_ah_botScripts()'; mod-ah-bot/src/ah_bot_loader.cpp:12: first[39;49;00m
+    [33m        defined here[39;49;00m
+    [33m[39;49;00m
+    [33m    A declaration nothing acts on is the shape this repository has paid for[39;49;00m
+    [33m    before. The refusal is raised BEFORE anything is written, next to the "one[39;49;00m
+    [33m    source, not two" check, so a refused install leaves the tree exactly as it[39;49;00m
+    [33m    was.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        git = _FakeGit({[33m"[39;49;00m[33mREADME.md[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mupstream[39;49;00m[33m\n[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+        applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))[90m[39;49;00m
+    [90m[39;49;00m
+        first = parse_manifest({**OWNED_ITEM, [33m"[39;49;00m[33mid[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmod-ah-bot[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mconflicts_with[39;49;00m[33m"[39;49;00m: [[33m"[39;49;00m[33mmod-ah-bot-plus[39;49;00m[33m"[39;49;00m]})[90m[39;49;00m
+        second = parse_manifest([90m[39;49;00m
+            {**OWNED_ITEM, [33m"[39;49;00m[33mid[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmod-ah-bot-plus[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mconflicts_with[39;49;00m[33m"[39;49;00m: [[33m"[39;49;00m[33mmod-ah-bot[39;49;00m[33m"[39;49;00m]}[90m[39;49;00m
+        )[90m[39;49;00m
+    [90m[39;49;00m
+        applier.install(first)[90m[39;49;00m
+        [94massert[39;49;00m applier.clone_dir(first).is_dir()[90m[39;49;00m
+    [90m[39;49;00m
+>       [94mwith[39;49;00m pytest.raises(ApplyError) [94mas[39;49;00m caught:[90m[39;49;00m
+             ^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31mE       Failed: DID NOT RAISE ApplyError[0m
+
+[1m[31mtests/test_apply.py[0m:3720: Failed
+----------------------------- Captured stderr call -----------------------------
+2026-09-13 22:11:29 INFO [yulon.apply] install mod-ah-bot: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+2026-09-13 22:11:29 INFO [yulon.apply] install mod-ah-bot-plus: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+------------------------------ Captured log call -------------------------------
+[32mINFO    [0m yulon.apply:apply.py:2299 install mod-ah-bot: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+[32mINFO    [0m yulon.apply:apply.py:2299 install mod-ah-bot-plus: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+[31m[1m___________ test_a_conflict_is_found_in_another_familys_clone_folder ___________[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-898/test_a_conflict_is_found_in_an0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_conflict_is_found_in_another_familys_clone_folder[39;49;00m(tmp_path: Path) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The search is over every family's folder, not this manifest's own (T53).[39;49;00m
+    [33m[39;49;00m
+    [33m    Asserted because `_conflict_refusal()` says so in its docstring, and a[39;49;00m
+    [33m    docstring is not a guard. Families live in different directories --[39;49;00m
+    [33m    `CLONE_DIRS` maps module to `modules/`, ale and keg to `ale_scripts/`, mod[39;49;00m
+    [33m    to `sql_scripts/clones/` -- so a check that looked only where the manifest[39;49;00m
+    [33m    being installed would land is one line away, reads correctly, and silently[39;49;00m
+    [33m    misses a conflict that reaches across families.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        git = _FakeGit({[33m"[39;49;00m[33mREADME.md[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mupstream[39;49;00m[33m\n[39;49;00m[33m"[39;49;00m})[90m[39;49;00m
+        applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))[90m[39;49;00m
+        [90m# An ALE script is already on disk, in ale_scripts/ -- NOT in modules/.[39;49;00m[90m[39;49;00m
+        (tmp_path / [33m"[39;49;00m[33male_scripts[39;49;00m[33m"[39;49;00m / [33m"[39;49;00m[33msome-ale-script[39;49;00m[33m"[39;49;00m / [33m"[39;49;00m[33m.git[39;49;00m[33m"[39;49;00m).mkdir(parents=[94mTrue[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        module = parse_manifest([90m[39;49;00m
+            {**OWNED_ITEM, [33m"[39;49;00m[33mid[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmod-thing[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mconflicts_with[39;49;00m[33m"[39;49;00m: [[33m"[39;49;00m[33msome-ale-script[39;49;00m[33m"[39;49;00m]}[90m[39;49;00m
+        )[90m[39;49;00m
+>       [94mwith[39;49;00m pytest.raises(ApplyError) [94mas[39;49;00m caught:[90m[39;49;00m
+             ^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31mE       Failed: DID NOT RAISE ApplyError[0m
+
+[1m[31mtests/test_apply.py[0m:3767: Failed
+----------------------------- Captured stderr call -----------------------------
+2026-09-13 22:11:29 INFO [yulon.apply] install mod-thing: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+------------------------------ Captured log call -------------------------------
+[32mINFO    [0m yulon.apply:apply.py:2299 install mod-thing: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_apply.py::[1mtest_install_refuses_a_module_that_conflicts_with_one_already_here[0m - Failed: DID NOT RAISE ApplyError
+[31mFAILED[0m tests/test_apply.py::[1mtest_a_conflict_is_found_in_another_familys_clone_folder[0m - Failed: DID NOT RAISE ApplyError
+[31m================= [31m[1m2 failed[0m, [32m1 passed[0m, [33m136 deselected[0m[31m in 0.31s[0m[31m ==================[0m
