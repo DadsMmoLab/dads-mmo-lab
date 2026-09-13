@@ -9,6 +9,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -7345,6 +7346,32 @@ def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another
 # --------------------------------------------------- T42: the session's own facts
 
 
+def _deliver_report(view: ControllerView, report: ApplyReport, family: str = "module") -> None:
+    """Deliver an `ApplyReport` the way a real press does -- with the manifest set.
+
+    `_module_done()` reads `_acting_on` to key this session's chips by
+    `(family, id)` (round 2): nothing makes an id unique across families and an
+    `ApplyReport` carries no family. Both live routes set `_acting_on`
+    immediately before their `_run()`, so a test that called `_module_done()`
+    bare was exercising a path no press reaches.
+
+    The manifest comes out of the view's own `_manifests` where the shipped
+    catalog has one, so these tests keep using the ids they always used; a
+    stand-in is built only for an id it does not carry.
+    """
+    manifest = view._manifests.get((family, report.item_id))
+    if manifest is None:
+        manifest = Manifest(
+            id=report.item_id,
+            name=report.item_id,
+            type=cast(ManifestType, family),
+            game="wow-wotlk",
+            description="x",
+        )
+    view._acting_on = manifest
+    view._module_done(report)
+
+
 def _wotlk_modules_view(ps: _Ps, tmp_path: Path, **families: frozenset[str]) -> ControllerView:
     services = _services(ps, tmp_path, [])
     object.__setattr__(services, "installed_modules", lambda: dict(families))
@@ -7371,7 +7398,7 @@ def test_an_install_that_needs_a_rebuild_raises_the_banner_and_the_chip(
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
     assert view.rebuild_banner.isHidden() is True
 
-    view._module_done(ApplyReport("install", "mod-solocraft", rebuild_required=True))
+    _deliver_report(view, ApplyReport("install", "mod-solocraft", rebuild_required=True))
 
     assert view.rebuild_banner.isHidden() is False
     assert "mod-solocraft" in view.rebuild_banner_label.text()
@@ -7388,7 +7415,7 @@ def _owing_a_rebuild(
         services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
     )
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    view._module_done(ApplyReport("install", "mod-solocraft", rebuild_required=True))
+    _deliver_report(view, ApplyReport("install", "mod-solocraft", rebuild_required=True))
     assert view.rebuild_banner.isHidden() is False, "the ground for every assertion below"
     return view
 
@@ -7481,14 +7508,15 @@ def test_a_report_with_pending_sql_puts_the_files_on_the_chip(
     tells the reader nothing they could not see on the chip.
     """
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
-    view._module_done(
+    _deliver_report(
+        view,
         ApplyReport(
             "install",
             "mod-transmog",
             pending_sql=(
                 apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
             ),
-        )
+        ),
     )
 
     chips = {b.text(): b for b in view.modules_panel.row("mod-transmog").chip_buttons}
@@ -7506,14 +7534,15 @@ def test_the_importer_finishing_clears_every_sql_chip(
     after the very press it asks for.
     """
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
-    view._module_done(
+    _deliver_report(
+        view,
         ApplyReport(
             "install",
             "mod-transmog",
             pending_sql=(
                 apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
             ),
-        )
+        ),
     )
     assert view.modules_panel.row("mod-transmog").chip_buttons
 
@@ -7705,7 +7734,8 @@ def test_a_successful_removal_forgets_everything_owed_about_that_module(
     branch and that one assertion fails.
     """
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
-    view._module_done(
+    _deliver_report(
+        view,
         ApplyReport(
             "install",
             "mod-transmog",
@@ -7713,12 +7743,12 @@ def test_a_successful_removal_forgets_everything_owed_about_that_module(
             pending_sql=(
                 apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
             ),
-        )
+        ),
     )
     view._module_updates_done((apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 2),))
     assert view._rebuild_owed and view._sql_owed and view._behind
 
-    view._module_done(ApplyReport("remove", "mod-transmog"))
+    _deliver_report(view, ApplyReport("remove", "mod-transmog"))
 
     assert view._rebuild_owed == set()
     assert view._sql_owed == {}
@@ -7744,7 +7774,7 @@ def test_a_clone_deleted_outside_the_app_takes_its_chips_and_the_banner_with_it(
     services = _services(ps, tmp_path, [])
     object.__setattr__(services, "installed_modules", lambda: dict(on_disk))
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    view._module_done(ApplyReport("install", "mod-transmog", rebuild_required=True))
+    _deliver_report(view, ApplyReport("install", "mod-transmog", rebuild_required=True))
     assert view.rebuild_banner.isHidden() is False
 
     on_disk["module"] = frozenset()  # somebody deleted modules/mod-transmog
@@ -7771,7 +7801,7 @@ def test_a_game_with_no_installed_reader_keeps_what_this_session_learned(
     object.__setattr__(services, "installed_modules", None)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
 
-    view._module_done(ApplyReport("install", "mod-transmog", rebuild_required=True))
+    _deliver_report(view, ApplyReport("install", "mod-transmog", rebuild_required=True))
 
     assert view.rebuild_banner.isHidden() is False
     assert "mod-transmog" in view.rebuild_banner_label.text()
@@ -8428,7 +8458,7 @@ def test_refresh_forgets_every_version_and_a_report_forgets_one(
     pump_until(lambda: not view._filling_versions, "the first fill never finished")
     assert len(read) == 2
 
-    view._module_done(ApplyReport("install", "mod-solocraft"))
+    _deliver_report(view, ApplyReport("install", "mod-solocraft"))
     pump_until(lambda: not view._filling_versions, "the fill after the report never finished")
     assert read[2:] == [tmp_path / "modules" / "mod-solocraft"], "one module, not both"
 
@@ -8454,7 +8484,7 @@ def test_the_update_press_runs_the_install_route_over_the_clone_that_is_there(
     thing item 2 forbids -- one that looks like an update and is not.
     """
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
-    view._behind = {"mod-solocraft": 3}
+    view._behind = {("module", "mod-solocraft"): 3}
     view.reload_modules()
     row = view.modules_panel.row("mod-solocraft")
     chip = next(b for b in row.chip_buttons if "Update available" in b.text())
@@ -8481,13 +8511,13 @@ def test_a_finished_update_drops_the_commits_behind_it_just_pulled(
     the tip, forever, until the user presses Check for updates again.
     """
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
-    view._behind = {"mod-solocraft": 3}
+    view._behind = {("module", "mod-solocraft"): 3}
     view.reload_modules()
     assert any(
         "Update available" in b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons
     )
 
-    view._module_done(ApplyReport("install", "mod-solocraft"))
+    _deliver_report(view, ApplyReport("install", "mod-solocraft"))
 
     assert view._behind == {}
     assert not [

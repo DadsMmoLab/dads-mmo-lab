@@ -2665,11 +2665,16 @@ class ControllerView(QWidget):
         # starts empty. The report box has always forgotten them too -- what
         # changed is only that they are now shown on the rows that own them.
         #
-        # `_rebuild_owed`: ids whose install said `rebuild_required`, cleared by
-        # a rebuild that SUCCEEDS. `_sql_owed`: ids to the files a report left to
-        # the importer, cleared when the importer finishes. `_behind`: what the
-        # last update check counted, per id, zeroes and "could not ask" left out.
-        self._rebuild_owed: set[str] = set()
+        # `_rebuild_owed`: modules whose install said `rebuild_required`,
+        # cleared by a rebuild that SUCCEEDS. `_sql_owed`: the files a report
+        # left to the importer, cleared when the importer finishes. `_behind`:
+        # what the last update check counted, zeroes and "could not ask" left
+        # out.
+        #
+        # All three keyed by `(FAMILY, id)` since round 2, for `SessionState`'s
+        # reason: nothing makes an id unique across families, and these were
+        # the last three surfaces T42 round 2 left on a bare id.
+        self._rebuild_owed: set[tuple[str, str]] = set()
         # Whether the run in `rebuild_log` is a COMPILE. Three actions share
         # that panel -- the rebuild, the database updates and the adopt -- and
         # all three arrive at `_rebuild_finished`, so "the panel finished and
@@ -2677,8 +2682,8 @@ class ControllerView(QWidget):
         # the panel's success alone would tell a user their module was live
         # because an unrelated SQL run went through.
         self._rebuild_is_compile = False
-        self._sql_owed: dict[str, tuple[str, ...]] = {}
-        self._behind: dict[str, int] = {}
+        self._sql_owed: dict[tuple[str, str], tuple[str, ...]] = {}
+        self._behind: dict[tuple[str, str], int] = {}
         self._repair_armed = False
         # The last answer the database gave about its own import, and whether it
         # has been asked since the database came up. Remembered because the
@@ -5926,11 +5931,6 @@ class ControllerView(QWidget):
                 # T44 -- the reads happen afterwards, one event-loop turn at a
                 # time, in `_fill_versions()`.
                 versions=self._known_versions(installed),
-                # The STORE's game, which is the game this controller is
-                # looking at. A manifest that names another one is drawn greyed
-                # rather than dropped (T44 item 5), so a row this install
-                # cannot use never carries an Install button.
-                game=self.services.store.game,
             )
         )
         if broken:
@@ -6031,13 +6031,11 @@ class ControllerView(QWidget):
         and treating that as evidence would throw away every fact this session
         has learned.
 
-        Matched by bare id across every family, because that is what an
-        `ApplyReport.item_id` and an update check's `key` are: ids, with no
-        family on them.
+        Matched by `(family, id)` since round 2: the three sets are keyed that
+        way now, so this is an exact comparison rather than a bare-id match
+        that also forgot an `ale` because a `module` of the same name had gone.
         """
-        here: set[str] = set()
-        for names in installed.values():
-            here |= set(names)
+        here = {(family, name) for family, names in installed.items() for name in names}
         self._rebuild_owed &= here
         self._sql_owed = {key: value for key, value in self._sql_owed.items() if key in here}
         self._behind = {key: value for key, value in self._behind.items() if key in here}
@@ -6051,7 +6049,10 @@ class ControllerView(QWidget):
         by hand?) and T42 deliberately leaves it out rather than ship one that
         can be wrong.
         """
-        owed = sorted(self._rebuild_owed)
+        # The ids, not the pairs: the banner names modules to a person, and
+        # `('module', 'mod-transmog')` is the key's spelling, not a name. A
+        # `set` first, so an id two families owe is named once.
+        owed = sorted({item_id for _family, item_id in self._rebuild_owed})
         self.rebuild_banner.setVisible(bool(owed))
         self.rebuild_banner_label.setText(REBUILD_BANNER.format(names=", ".join(owed)))
 
@@ -6295,7 +6296,7 @@ class ControllerView(QWidget):
         if not isinstance(result, ApplyReport):
             return
         self.module_report.setPlainText(_format_report(result))
-        self._note_session_facts(result)
+        self._note_session_facts(result, acted_on)
         # The record is dropped AFTER the report is on screen and after the
         # remove returned -- a forget before the remove would drop the record of
         # a remove that then failed, leaving a folder on disk with no row in the
@@ -6320,7 +6321,7 @@ class ControllerView(QWidget):
         # install HAS changed with this report (T43).
         self.reload_tuning()
 
-    def _note_session_facts(self, result: ApplyReport) -> None:
+    def _note_session_facts(self, result: ApplyReport, acted_on: Manifest | None) -> None:
         """Record what this report says is still owed, for the chips and the banner.
 
         A remove drops the id from all three: the module is gone, so an "update
@@ -6333,10 +6334,24 @@ class ControllerView(QWidget):
         # it. Dropped before `reload_modules()` runs, so the redraw does not
         # hand the row the sha it had before the action (T44 item 1).
         self._versions.forget(item_id)
+        if acted_on is None or acted_on.id != item_id:
+            # Unreachable through both live routes -- `_module_action()` and
+            # `_install_custom_module()` each set `_acting_on` immediately
+            # before their `_run()`, and an `ApplyReport` carries the id of the
+            # manifest it was handed. Said rather than guessed, because the
+            # only alternative is resolving a bare id to a family, which is the
+            # ambiguity T42 round 2 removed from four other surfaces. A chip
+            # missing is a gap; a chip on the wrong family's row is a lie.
+            logger.warning(
+                f"no manifest recorded for the {result.action} of {item_id}; "
+                "its chips cannot be keyed to a family and are not recorded"
+            )
+            return
+        key = (acted_on.type, item_id)
         if result.action == "remove":
-            self._rebuild_owed.discard(item_id)
-            self._sql_owed.pop(item_id, None)
-            self._behind.pop(item_id, None)
+            self._rebuild_owed.discard(key)
+            self._sql_owed.pop(key, None)
+            self._behind.pop(key, None)
             return
         # The clone has just been fetched and reset to its upstream tip -- that
         # is what `install()` does over a folder that is already there -- so
@@ -6344,14 +6359,14 @@ class ControllerView(QWidget):
         # commit the checkout has moved off. Dropped rather than recounted: a
         # recount costs a network round trip, and a stale number is a wrong one
         # (T44 item 2).
-        self._behind.pop(item_id, None)
+        self._behind.pop(key, None)
         if result.rebuild_required:
-            self._rebuild_owed.add(item_id)
+            self._rebuild_owed.add(key)
         owed = _pending_sql_names(result)
         if owed:
-            self._sql_owed[item_id] = owed
+            self._sql_owed[key] = owed
         else:
-            self._sql_owed.pop(item_id, None)
+            self._sql_owed.pop(key, None)
 
     @Slot(object)
     def _module_failed(self, exc: object) -> None:
@@ -6396,7 +6411,11 @@ class ControllerView(QWidget):
         # chip, and `None` ("could not ask") is deliberately not a zero: a
         # checkout git could not answer for gets no chip rather than a
         # confident "up to date".
-        self._behind = {row.key: row.behind for row in result if (row.behind or 0) > 0}
+        # Keyed `("module", key)`: `apply.module_updates()` enumerates ONE clone
+        # directory -- `CLONE_DIRS["module"]`, which is `modules/` -- so every
+        # key it returns is in that family by construction, and inventing a
+        # family here would be a guess where this is the answer.
+        self._behind = {("module", row.key): row.behind for row in result if (row.behind or 0) > 0}
         self.reload_modules()
 
     @Slot(object)

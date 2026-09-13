@@ -242,7 +242,7 @@ def test_one_uncatalogued_clone_in_a_shared_folder_gets_one_row_not_two() -> Non
 def test_the_rebuild_pending_chip_is_on_exactly_the_owed_module() -> None:
     """Mutation: ignore `session.rebuild_owed` and no row carries the chip."""
     catalog = [_m("mod-a"), _m("mod-b")]
-    owed = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    owed = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
     rows = _rows(catalog, {"module": frozenset({"mod-a", "mod-b"})}, owed)
 
     assert mp.CHIP_REBUILD_PENDING in _labels(_row(rows, "mod-a"))
@@ -256,7 +256,7 @@ def test_the_sql_pending_chip_names_the_files_it_is_waiting_on() -> None:
 
     Mutation: set the detail to the label and the file name is gone from it.
     """
-    session = mp.SessionState(sql_owed={"mod-a": ("data/sql/db-world/one.sql",)})
+    session = mp.SessionState(sql_owed={("module", "mod-a"): ("data/sql/db-world/one.sql",)})
     rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
 
     chip = next(c for c in _row(rows, "mod-a").chips if c.label == mp.CHIP_SQL_PENDING)
@@ -270,7 +270,7 @@ def test_the_update_chip_counts_and_is_absent_at_zero() -> None:
     Mutation: use `>= 0` instead of `> 0` and the up-to-date module grows a
     "0 behind" chip.
     """
-    session = mp.SessionState(behind={"mod-a": 3, "mod-b": 0})
+    session = mp.SessionState(behind={("module", "mod-a"): 3, ("module", "mod-b"): 0})
     rows = _rows([_m("mod-a"), _m("mod-b")], {"module": frozenset({"mod-a", "mod-b"})}, session)
 
     assert mp.chip_update_label(3) in _labels(_row(rows, "mod-a"))
@@ -383,7 +383,7 @@ def test_an_uncatalogued_row_still_takes_the_owed_chips() -> None:
     Mutation: build uncatalogued rows with `chips=()` and a hand-cloned module
     that owes a rebuild says nothing about it.
     """
-    session = mp.SessionState(rebuild_owed=frozenset({"mod-homemade"}))
+    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-homemade")}))
     rows = _rows([], {"module": frozenset({"mod-homemade"})}, session)
 
     assert mp.CHIP_REBUILD_PENDING in _labels(_row(rows, "mod-homemade"))
@@ -585,7 +585,7 @@ def test_an_owed_chip_press_names_its_row_and_its_label(qapp: object) -> None:
     Mutation: emit only the id and the view cannot tell which of a row's three
     owed chips was pressed.
     """
-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
     pressed: list[tuple[str, str]] = []
     panel.chip_pressed.connect(lambda mid, label: pressed.append((mid, label)))
@@ -743,7 +743,7 @@ def test_the_sql_chip_is_absent_when_the_report_listed_no_files() -> None:
     Mutation: `if item_id in session.sql_owed:` instead of reading the value and
     the empty entry grows a chip whose detail names nothing.
     """
-    session = mp.SessionState(sql_owed={"mod-a": ()})
+    session = mp.SessionState(sql_owed={("module", "mod-a"): ()})
     rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
 
     assert _labels(_row(rows, "mod-a")) == []
@@ -811,7 +811,7 @@ def test_a_chip_press_selects_its_row_too(qapp: object) -> None:
     Mutation: drop the `select` from the chip's handler and `selected_id()`
     stays `None` after the press.
     """
-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
 
     panel.row("mod-a").chip_buttons[0].click()
@@ -923,77 +923,14 @@ def test_a_family_card_draws_its_hint_beside_the_installed_header(qapp: object) 
 
 
 # ------------------------------------------------------------------ badges (T44)
+def test_an_uncatalogued_clone_is_badged_installed() -> None:
+    """T41's own rows have no manifest, and are installed by definition.
 
-
-def test_an_installed_module_whose_sql_is_waiting_says_so_in_its_badge() -> None:
-    """`Cloned, SQL not applied` is a real state, and `Installed` hides it (T44 item 5).
-
-    It is the state T43's probe produced on a real install: the folder is there,
-    the worldserver will compile it, and the rows it needs are NOT in the
-    database. A badge reading `Installed` over that is the reading T41 was
-    reported for, one step further along.
-
-    Mutation: drop the `sql_owed` clause from `_badge_for()` and the row goes
-    back to `Installed` while the SQL chip beside it still says otherwise.
+    Mutation: badge them `BADGE_NOT_INSTALLED` and a clone the user made by
+    hand reads as absent on the one tab that exists to show it.
     """
-    session = mp.SessionState(sql_owed={"mod-a": ("a.sql",)})
-    rows = _rows([_m("mod-a"), _m("mod-b")], {"module": frozenset({"mod-a", "mod-b"})}, session)
+    rows = mp.build_module_rows([], {"module": frozenset({"mod-hand"})}, mp.SessionState(), None)
 
-    assert _row(rows, "mod-a").badge == mp.BADGE_SQL_NOT_APPLIED
-    assert _row(rows, "mod-b").badge == mp.BADGE_INSTALLED
-
-
-def test_a_manifest_for_another_game_is_drawn_greyed_and_offers_no_install() -> None:
-    """A row this install cannot use is SHOWN, and shown as unusable (T44 item 5).
-
-    `Not installed` on it would be an invitation: the button beside it would
-    clone somebody else's game's module into this server directory.
-
-    Mutation: ignore the `game` argument and the row comes back `Not installed`
-    with `for_this_game` True, which is what puts an Install button on it.
-    """
-    mine = _m("mod-a")
-    theirs = Manifest(
-        id="mod-tbc",
-        name="Mod Tbc",
-        type="module",
-        game="wow-tbc",
-        description="another game's module",
-        source=Source(repo="acme/mod-tbc"),
-    )
-    rows = mp.build_module_rows([mine, theirs], {}, mp.SessionState(), None, game="wow-wotlk")
-
-    assert _row(rows, "mod-tbc").badge == mp.BADGE_NOT_FOR_THIS_GAME
-    assert _row(rows, "mod-tbc").for_this_game is False
-    assert _row(rows, "mod-a").for_this_game is True
-
-
-def test_no_game_given_means_every_manifest_belongs_here() -> None:
-    """The argument is optional, and absent must never mean "none of them fit".
-
-    Every existing caller and every T42 test builds rows without it, and a
-    default that answered `Not for this game` would grey the whole catalog.
-
-    Mutation: default `game` to `""` and compare with `==` and every row in
-    this file's other 40-odd tests turns grey.
-    """
-    rows = _rows([_m("mod-a")])
-
-    assert _row(rows, "mod-a").for_this_game is True
-    assert _row(rows, "mod-a").badge == mp.BADGE_NOT_INSTALLED
-
-
-def test_an_uncatalogued_clone_is_installed_and_belongs_here() -> None:
-    """T41's own rows have no manifest, so they have no `game` to disagree with.
-
-    Mutation: build them with `for_this_game=False` and a module the user
-    cloned by hand is greyed as another game's.
-    """
-    rows = mp.build_module_rows(
-        [], {"module": frozenset({"mod-hand"})}, mp.SessionState(), None, game="wow-wotlk"
-    )
-
-    assert _row(rows, "mod-hand").for_this_game is True
     assert _row(rows, "mod-hand").badge == mp.BADGE_INSTALLED
 
 
@@ -1004,37 +941,10 @@ def test_the_row_widget_draws_the_badge_the_builder_decided(qapp: object) -> Non
     BADGE_NOT_INSTALLED` in `RowWidget` and both new badges vanish from the
     screen while the builder's tests stay green.
     """
-    session = mp.SessionState(sql_owed={"mod-a": ("a.sql",)})
+    session = mp.SessionState(sql_owed={("module", "mod-a"): ("a.sql",)})
     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
 
     assert panel.row("mod-a").badge_label.text() == mp.BADGE_SQL_NOT_APPLIED
-
-
-def test_a_row_for_another_game_gets_no_install_button(qapp: object) -> None:
-    """The greying is not cosmetic: there must be nothing to press.
-
-    Mutation: keep `if data.catalogued and not data.installed` alone and the
-    row offers an Install that clones another game's module into this server.
-    """
-    theirs = Manifest(
-        id="mod-tbc",
-        name="Mod Tbc",
-        type="module",
-        game="wow-tbc",
-        description="another game's module",
-        source=Source(repo="acme/mod-tbc"),
-    )
-    rows = mp.build_module_rows(
-        [_m("mod-a"), theirs], {}, mp.SessionState(), None, game="wow-wotlk"
-    )
-    panel = _panel(rows)
-
-    assert panel.row("mod-a").install_button is not None
-    assert panel.row("mod-tbc").install_button is None
-    assert panel.row("mod-tbc").remove_button is None
-
-
-# ---------------------------------------------------------- the subpanel (T44)
 
 
 def test_each_owed_chip_names_the_action_that_answers_it_and_a_fact_names_none() -> None:
@@ -1052,8 +962,8 @@ def test_each_owed_chip_names_the_action_that_answers_it_and_a_fact_names_none()
         patches=(Patch(file="x.conf", find="a", replace="{g}"),),
     )
     session = mp.SessionState(
-        rebuild_owed=frozenset({"mod-a"}),
-        sql_owed={"mod-a": ("a.sql",)},
+        rebuild_owed=frozenset({("module", "mod-a")}),
+        sql_owed={("module", "mod-a"): ("a.sql",)},
     )
     rows = _rows([_m("mod-a"), asks], {"module": frozenset({"mod-a"})}, session)
 
@@ -1075,7 +985,7 @@ def test_an_owed_chip_press_opens_a_subpanel_under_its_own_row(qapp: object) -> 
     Mutation: keep only the report line and `detail_visible()` stays False --
     which is the tab as T42 shipped it.
     """
-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
     row = panel.row("mod-a")
     row.show()
@@ -1095,7 +1005,7 @@ def test_a_second_press_on_the_same_chip_closes_the_subpanel(qapp: object) -> No
 
     Mutation: always `setVisible(True)` and the subpanel never shuts again.
     """
-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
     row = panel.row("mod-a")
     row.show()
@@ -1113,7 +1023,7 @@ def test_a_chip_press_still_writes_the_report_line(qapp: object) -> None:
     Mutation: replace the `pressed_chip` emit with the expansion and the one
     copyable surface on this tab goes silent.
     """
-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
+    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
     pressed: list[tuple[str, str]] = []
     panel.chip_pressed.connect(lambda mid, label: pressed.append((mid, label)))
@@ -1129,7 +1039,7 @@ def test_the_subpanels_button_emits_the_rows_id_and_the_action_key(qapp: object)
     Mutation: emit the button's TEXT instead of the key and the view's mapping
     misses every action the day one of these labels is reworded.
     """
-    session = mp.SessionState(sql_owed={"mod-a": ("a.sql",)})
+    session = mp.SessionState(sql_owed={("module", "mod-a"): ("a.sql",)})
     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
     acted: list[tuple[str, str]] = []
     panel.chip_action_pressed.connect(lambda mid, key: acted.append((mid, key)))
@@ -1372,7 +1282,7 @@ def test_the_update_chip_offers_the_pull_and_says_what_it_costs() -> None:
     Mutation: drop the `action` and the subpanel shows a sentence with no
     button, which is the tab exactly as T42 shipped it.
     """
-    session = mp.SessionState(behind={"mod-a": 3})
+    session = mp.SessionState(behind={("module", "mod-a"): 3})
     rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
 
     chip = next(c for c in _row(rows, "mod-a").chips if c.kind == "owed")
@@ -1380,3 +1290,61 @@ def test_the_update_chip_offers_the_pull_and_says_what_it_costs() -> None:
     assert chip.action == "update"
     assert "no per-module pull" not in chip.detail
     assert "discard" in chip.detail, "a reset --hard has to say what it destroys"
+
+
+def test_one_familys_pending_sql_does_not_badge_another_familys_row() -> None:
+    """Round 2. `sql_owed` is keyed by (family, id), not by a bare id.
+
+    Nothing makes a manifest id unique across families -- the store loads
+    `manifests/<game>/<family>/` one directory at a time and no invariant spans
+    them -- and T42 round 2 keyed the row dict, the manifest dict, the panel
+    and T43's tuning cards by the pair for exactly that reason. On a bare id an
+    `ale` whose SQL was left to the importer badges a `module` of the same name
+    `Cloned, SQL not applied` over a module with no SQL at all, which is a
+    worse lie than the `Installed` the badge replaced.
+
+    Mutation: `sql-badge-keyed-by-bare-id` -- look the badge up with
+    `session.sql_owed.get(manifest.id)` and the `module` row reads
+    `Cloned, SQL not applied`.
+    """
+    session = mp.SessionState(sql_owed={("ale", "bmah"): ("a.sql",)})
+    rows = _rows(
+        [_m("bmah"), _m("bmah", "ale")],
+        {"module": frozenset({"bmah"}), "ale": frozenset({"bmah"})},
+        session,
+    )
+
+    module_row = next(r for r in rows if r.family == "module" and r.id == "bmah")
+    ale_row = next(r for r in rows if r.family == "ale" and r.id == "bmah")
+    assert module_row.badge == mp.BADGE_INSTALLED
+    assert ale_row.badge == mp.BADGE_SQL_NOT_APPLIED
+
+
+def test_the_chips_are_keyed_by_family_too_and_all_three_facts_move_together() -> None:
+    """The chips were on a bare id as well, and it is the same collision.
+
+    All three session facts move together: one pair-keyed and two id-keyed
+    would be two rules for one ambiguity, which is what T42 round 2 found four
+    places along.
+
+    Mutation: `chips-keyed-by-bare-id` -- look all three up by `item_id` and
+    the `module` row grows the `ale`'s SQL chip while the `ale` row grows the
+    module's rebuild and update chips.
+    """
+    session = mp.SessionState(
+        rebuild_owed=frozenset({("module", "bmah")}),
+        sql_owed={("ale", "bmah"): ("a.sql",)},
+        behind={("module", "bmah"): 2},
+    )
+    rows = _rows(
+        [_m("bmah"), _m("bmah", "ale")],
+        {"module": frozenset({"bmah"}), "ale": frozenset({"bmah"})},
+        session,
+    )
+
+    module_chips = [c.label for c in next(r for r in rows if r.family == "module").chips]
+    ale_chips = [c.label for c in next(r for r in rows if r.family == "ale").chips]
+    assert mp.CHIP_REBUILD_PENDING in module_chips
+    assert mp.CHIP_SQL_PENDING not in module_chips
+    assert mp.chip_update_label(2) in module_chips
+    assert ale_chips == [mp.CHIP_SQL_PENDING]

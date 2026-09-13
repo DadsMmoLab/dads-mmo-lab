@@ -123,24 +123,25 @@ T43's probe produced on a real install, and it is the half-installed reading
 T41 was reported for -- a module that is "there" and does nothing.
 """
 
-BADGE_NOT_FOR_THIS_GAME = "Not for this game"
-"""A manifest whose `game` is not the one this controller is looking at.
+# There is deliberately NO `Not for this game` badge, and T44's item 5 asked
+# for one (round 2). It would have been unreachable code:
+# `ManifestStore._load_at()` RAISES on a manifest whose `game` is not the
+# store's, `_load_manifests()` catches that at family scope and reports the
+# whole family as broken, so no foreign-game manifest can reach this builder.
+# Round 1 shipped the badge with tests that injected such a manifest straight
+# into `build_module_rows()` -- coverage of a row nothing on disk can produce,
+# which READS as a guarantee and is not one. Making it real means changing the
+# store's validation, which is a guard in its own right; it is on the ticket as
+# an open finding for the owner rather than in this diff.
 
-Drawn greyed and with NOTHING TO PRESS, which is the whole of why it is shown
-at all: `Not installed` on such a row is an invitation, and the button beside
-it would clone another game's module into this server directory.
-"""
 
-
-def _badge_for(installed: bool, for_this_game: bool, sql_owed: bool) -> str:
+def _badge_for(installed: bool, sql_owed: bool) -> str:
     """The one word the badge column says, decided here and never in a widget.
 
-    Order matters and it is the order of what stops a user first: a row this
-    install cannot use says so whatever else is true of it; an installed module
-    whose SQL has not run is not simply `Installed`.
+    An installed module whose SQL has not run is not simply `Installed`: the
+    clone is on disk and the worldserver will compile it, and the rows it needs
+    are not in the database.
     """
-    if not for_this_game:
-        return BADGE_NOT_FOR_THIS_GAME
     if installed and sql_owed:
         return BADGE_SQL_NOT_APPLIED
     return BADGE_INSTALLED if installed else BADGE_NOT_INSTALLED
@@ -233,14 +234,6 @@ class ModuleRow:
     chips: tuple[Chip, ...]
     removable: bool
     remove_reason: str | None
-    for_this_game: bool = True
-    """Whether this manifest's `game` is the one this controller is looking at.
-
-    Defaulted True so every caller that does not name a game -- and every T42
-    test -- keeps the answer it had: absent must never mean "none of them fit",
-    which would grey the whole catalog.
-    """
-
     badge: str = BADGE_NOT_INSTALLED
     """The badge column's one word, from `_badge_for()`. Decided here so the
     widget renders a decision rather than taking one (T42's split)."""
@@ -268,9 +261,25 @@ class SessionState:
     T42 deliberately does not open (see the ticket's "Not in scope").
     """
 
-    rebuild_owed: frozenset[str] = frozenset()
-    sql_owed: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    behind: Mapping[str, int] = field(default_factory=dict)
+    rebuild_owed: frozenset[tuple[str, str]] = frozenset()
+    sql_owed: Mapping[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+    behind: Mapping[tuple[str, str], int] = field(default_factory=dict)
+    """All three keyed by `(family, id)` and NOT by a bare id (round 2).
+
+    Nothing makes a manifest id unique across families: the store loads
+    `manifests/<game>/<family>/` one directory at a time and no invariant spans
+    them. T42 round 2 keyed the row dict, the manifest dict, the panel's widget
+    dict and T43's tuning cards by the pair for exactly that reason and left
+    these three on a bare id -- the ONE surface where the collision was
+    invisible, until T44's `Cloned, SQL not applied` badge made an `ale`'s
+    pending SQL appear on a `module` of the same name, over a module with no
+    SQL at all.
+
+    Both fillers know the family: `_note_session_facts()` is handed the
+    manifest the press was about, and `apply.module_updates()` enumerates ONE
+    clone directory, so every key it returns is in the `module` family by
+    construction.
+    """
 
 
 def _clone_dir_of(kind: str) -> str:
@@ -361,6 +370,7 @@ class VersionCache:
 
 def _chips_for(
     manifest: Manifest | None,
+    family: str,
     item_id: str,
     installed: bool,
     session: SessionState,
@@ -377,7 +387,8 @@ def _chips_for(
     fetches.
     """
     chips: list[Chip] = []
-    if item_id in session.rebuild_owed:
+    key = (family, item_id)
+    if key in session.rebuild_owed:
         chips.append(
             Chip(
                 "owed",
@@ -387,7 +398,7 @@ def _chips_for(
                 "rebuild",
             )
         )
-    owed_sql = session.sql_owed.get(item_id)
+    owed_sql = session.sql_owed.get(key)
     if owed_sql:
         chips.append(
             Chip(
@@ -399,7 +410,7 @@ def _chips_for(
                 "sql",
             )
         )
-    behind = session.behind.get(item_id, 0)
+    behind = session.behind.get(key, 0)
     if behind > 0:
         chips.append(
             Chip(
@@ -455,7 +466,6 @@ def build_module_rows(
     installed: Mapping[str, frozenset[str]],
     session: SessionState,
     client_dir: Path | None,
-    game: str | None = None,
     versions: Mapping[tuple[str, str], str] | None = None,
 ) -> tuple[ModuleRow, ...]:
     """Every row the Modules tab draws, in the order it draws them.
@@ -508,10 +518,6 @@ def build_module_rows(
     def _row(manifest: Manifest) -> ModuleRow:
         here = (manifest.type, manifest.id) in installed_keys
         needed_by = dependants.get(manifest.id, [])
-        # `game is None` is "nobody said", not "no game matches": every caller
-        # before T44 omitted it and the whole catalog would grey on a `==`
-        # against an empty string.
-        mine = game is None or manifest.game == game
         return ModuleRow(
             id=manifest.id,
             family=manifest.type,
@@ -521,15 +527,16 @@ def build_module_rows(
             installed=here,
             catalogued=True,
             paths=tuple(conf.file for conf in manifest.conf),
-            chips=_chips_for(manifest, manifest.id, here, session, client_dir, needed_by),
+            chips=_chips_for(
+                manifest, manifest.type, manifest.id, here, session, client_dir, needed_by
+            ),
             removable=not (here and needed_by),
             remove_reason=(
                 f"{', '.join(needed_by)} require this — remove them first."
                 if here and needed_by
                 else None
             ),
-            for_this_game=mine,
-            badge=_badge_for(here, mine, bool(session.sql_owed.get(manifest.id))),
+            badge=_badge_for(here, bool(session.sql_owed.get((manifest.type, manifest.id)))),
             # Installed rows only. A catalog row that is not on disk has no
             # clone to read, and looking one up for all 41 would be 20 reads
             # of folders that are not there.
@@ -565,15 +572,11 @@ def build_module_rows(
                     catalogued=False,
                     paths=(),
                     chips=_chips_for(
-                        None, name, True, session, client_dir, dependants.get(name, [])
+                        None, kind, name, True, session, client_dir, dependants.get(name, [])
                     ),
                     removable=False,
                     remove_reason=None,
-                    # A clone with no manifest has no `game` to disagree with
-                    # this one: it is installed HERE, which is the only fact
-                    # about it anybody has (T41).
-                    for_this_game=True,
-                    badge=_badge_for(True, True, bool(session.sql_owed.get(name))),
+                    badge=_badge_for(True, bool(session.sql_owed.get((kind, name)))),
                     version=seen_versions.get((kind, name)),
                 )
             )
@@ -689,7 +692,7 @@ class RowWidget(QFrame):
         # muted for the two that ask nothing.
         if data.badge == BADGE_SQL_NOT_APPLIED:
             badge_colour = COLOR_TEXT_WARNING
-        elif data.installed and data.for_this_game:
+        elif data.installed:
             badge_colour = COLOR_UNCOMMON
         else:
             badge_colour = COLOR_TEXT_MUTED
@@ -727,14 +730,11 @@ class RowWidget(QFrame):
         self.install_button: QPushButton | None = None
         self.remove_button: QPushButton | None = None
         column = QVBoxLayout()
-        if data.catalogued and not data.installed and data.for_this_game:
-            # `for_this_game` is part of the condition and not a `setEnabled`
-            # afterwards: a greyed button is still a control, and the thing
-            # this row must not offer is the control itself.
+        if data.catalogued and not data.installed:
             self.install_button = QPushButton("Install", self)
             self.install_button.clicked.connect(lambda: self.pressed_install.emit(self.data.id))
             column.addWidget(self.install_button)
-        elif data.catalogued and data.for_this_game:
+        elif data.catalogued:
             self.remove_button = QPushButton("Remove", self)
             self.remove_button.clicked.connect(lambda: self.pressed_remove.emit(self.data.id))
             if not data.removable:

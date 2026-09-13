@@ -1,0 +1,849 @@
+# gate: tests/test_modules_panel.py -q
+diff --git a/pylauncher/tests/test_controller_view.py b/pylauncher/tests/test_controller_view.py
+index 216943f8..63fca1db 100644
+--- a/pylauncher/tests/test_controller_view.py
++++ b/pylauncher/tests/test_controller_view.py
+@@ -9,6 +9,7 @@ import subprocess
+ import threading
+ from collections.abc import Callable, Iterator, Sequence
+ from pathlib import Path
++from typing import cast
+ 
+ import pytest
+ 
+@@ -7345,6 +7346,32 @@ def test_a_clone_matched_in_one_family_is_not_listed_again_as_unknown_in_another
+ # --------------------------------------------------- T42: the session's own facts
+ 
+ 
++def _deliver_report(view: ControllerView, report: ApplyReport, family: str = "module") -> None:
++    """Deliver an `ApplyReport` the way a real press does — with the manifest set.
++
++    `_module_done()` reads `_acting_on` to key this session's chips by
++    `(family, id)` (T44 round 2): nothing makes an id unique across families,
++    and an `ApplyReport` carries no family. Both live routes set `_acting_on`
++    immediately before their `_run()`, so a test that calls `_module_done()`
++    bare is exercising a path no press reaches.
++
++    The manifest is looked up out of the view's own `_manifests` where the
++    catalog has one, so these tests keep using the ids the shipped store
++    carries; a synthetic stand-in is built only for an id it does not.
++    """
++    manifest = view._manifests.get((family, report.item_id))
++    if manifest is None:
++        manifest = Manifest(
++            id=report.item_id,
++            name=report.item_id,
++            type=cast(ManifestType, family),
++            game="wow-wotlk",
++            description="x",
++        )
++    view._acting_on = manifest
++    view._module_done(report)
++
++
+ def _wotlk_modules_view(ps: _Ps, tmp_path: Path, **families: frozenset[str]) -> ControllerView:
+     services = _services(ps, tmp_path, [])
+     object.__setattr__(services, "installed_modules", lambda: dict(families))
+@@ -7371,7 +7398,7 @@ def test_an_install_that_needs_a_rebuild_raises_the_banner_and_the_chip(
+     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
+     assert view.rebuild_banner.isHidden() is True
+ 
+-    view._module_done(ApplyReport("install", "mod-solocraft", rebuild_required=True))
++    _deliver_report(view, ApplyReport("install", "mod-solocraft", rebuild_required=True))
+ 
+     assert view.rebuild_banner.isHidden() is False
+     assert "mod-solocraft" in view.rebuild_banner_label.text()
+@@ -7388,7 +7415,7 @@ def _owing_a_rebuild(
+         services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+     )
+     view = ControllerView(WOTLK, services, status_poll_ms=0)
+-    view._module_done(ApplyReport("install", "mod-solocraft", rebuild_required=True))
++    _deliver_report(view, ApplyReport("install", "mod-solocraft", rebuild_required=True))
+     assert view.rebuild_banner.isHidden() is False, "the ground for every assertion below"
+     return view
+ 
+@@ -7481,14 +7508,15 @@ def test_a_report_with_pending_sql_puts_the_files_on_the_chip(
+     tells the reader nothing they could not see on the chip.
+     """
+     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+-    view._module_done(
++    _deliver_report(
++        view,
+         ApplyReport(
+             "install",
+             "mod-transmog",
+             pending_sql=(
+                 apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
+             ),
+-        )
++        ),
+     )
+ 
+     chips = {b.text(): b for b in view.modules_panel.row("mod-transmog").chip_buttons}
+@@ -7506,14 +7534,15 @@ def test_the_importer_finishing_clears_every_sql_chip(
+     after the very press it asks for.
+     """
+     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+-    view._module_done(
++    _deliver_report(
++        view,
+         ApplyReport(
+             "install",
+             "mod-transmog",
+             pending_sql=(
+                 apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
+             ),
+-        )
++        ),
+     )
+     assert view.modules_panel.row("mod-transmog").chip_buttons
+ 
+@@ -7705,7 +7734,8 @@ def test_a_successful_removal_forgets_everything_owed_about_that_module(
+     branch and that one assertion fails.
+     """
+     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
+-    view._module_done(
++    _deliver_report(
++        view,
+         ApplyReport(
+             "install",
+             "mod-transmog",
+@@ -7713,12 +7743,12 @@ def test_a_successful_removal_forgets_everything_owed_about_that_module(
+             pending_sql=(
+                 apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
+             ),
+-        )
++        ),
+     )
+     view._module_updates_done((apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 2),))
+     assert view._rebuild_owed and view._sql_owed and view._behind
+ 
+-    view._module_done(ApplyReport("remove", "mod-transmog"))
++    _deliver_report(view, ApplyReport("remove", "mod-transmog"))
+ 
+     assert view._rebuild_owed == set()
+     assert view._sql_owed == {}
+@@ -7744,7 +7774,7 @@ def test_a_clone_deleted_outside_the_app_takes_its_chips_and_the_banner_with_it(
+     services = _services(ps, tmp_path, [])
+     object.__setattr__(services, "installed_modules", lambda: dict(on_disk))
+     view = ControllerView(WOTLK, services, status_poll_ms=0)
+-    view._module_done(ApplyReport("install", "mod-transmog", rebuild_required=True))
++    _deliver_report(view, ApplyReport("install", "mod-transmog", rebuild_required=True))
+     assert view.rebuild_banner.isHidden() is False
+ 
+     on_disk["module"] = frozenset()  # somebody deleted modules/mod-transmog
+@@ -7771,7 +7801,7 @@ def test_a_game_with_no_installed_reader_keeps_what_this_session_learned(
+     object.__setattr__(services, "installed_modules", None)
+     view = ControllerView(WOTLK, services, status_poll_ms=0)
+ 
+-    view._module_done(ApplyReport("install", "mod-transmog", rebuild_required=True))
++    _deliver_report(view, ApplyReport("install", "mod-transmog", rebuild_required=True))
+ 
+     assert view.rebuild_banner.isHidden() is False
+     assert "mod-transmog" in view.rebuild_banner_label.text()
+@@ -8428,7 +8458,7 @@ def test_refresh_forgets_every_version_and_a_report_forgets_one(
+     pump_until(lambda: not view._filling_versions, "the first fill never finished")
+     assert len(read) == 2
+ 
+-    view._module_done(ApplyReport("install", "mod-solocraft"))
++    _deliver_report(view, ApplyReport("install", "mod-solocraft"))
+     pump_until(lambda: not view._filling_versions, "the fill after the report never finished")
+     assert read[2:] == [tmp_path / "modules" / "mod-solocraft"], "one module, not both"
+ 
+@@ -8454,7 +8484,7 @@ def test_the_update_press_runs_the_install_route_over_the_clone_that_is_there(
+     thing item 2 forbids -- one that looks like an update and is not.
+     """
+     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
+-    view._behind = {"mod-solocraft": 3}
++    view._behind = {("module", "mod-solocraft"): 3}
+     view.reload_modules()
+     row = view.modules_panel.row("mod-solocraft")
+     chip = next(b for b in row.chip_buttons if "Update available" in b.text())
+@@ -8481,13 +8511,13 @@ def test_a_finished_update_drops_the_commits_behind_it_just_pulled(
+     the tip, forever, until the user presses Check for updates again.
+     """
+     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
+-    view._behind = {"mod-solocraft": 3}
++    view._behind = {("module", "mod-solocraft"): 3}
+     view.reload_modules()
+     assert any(
+         "Update available" in b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons
+     )
+ 
+-    view._module_done(ApplyReport("install", "mod-solocraft"))
++    _deliver_report(view, ApplyReport("install", "mod-solocraft"))
+ 
+     assert view._behind == {}
+     assert not [
+diff --git a/pylauncher/tests/test_modules_panel.py b/pylauncher/tests/test_modules_panel.py
+index 9ee059ae..29d91d2a 100644
+--- a/pylauncher/tests/test_modules_panel.py
++++ b/pylauncher/tests/test_modules_panel.py
+@@ -242,7 +242,7 @@ def test_one_uncatalogued_clone_in_a_shared_folder_gets_one_row_not_two() -> Non
+ def test_the_rebuild_pending_chip_is_on_exactly_the_owed_module() -> None:
+     """Mutation: ignore `session.rebuild_owed` and no row carries the chip."""
+     catalog = [_m("mod-a"), _m("mod-b")]
+-    owed = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
++    owed = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
+     rows = _rows(catalog, {"module": frozenset({"mod-a", "mod-b"})}, owed)
+ 
+     assert mp.CHIP_REBUILD_PENDING in _labels(_row(rows, "mod-a"))
+@@ -256,7 +256,7 @@ def test_the_sql_pending_chip_names_the_files_it_is_waiting_on() -> None:
+ 
+     Mutation: set the detail to the label and the file name is gone from it.
+     """
+-    session = mp.SessionState(sql_owed={"mod-a": ("data/sql/db-world/one.sql",)})
++    session = mp.SessionState(sql_owed={("module", "mod-a"): ("data/sql/db-world/one.sql",)})
+     rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
+ 
+     chip = next(c for c in _row(rows, "mod-a").chips if c.label == mp.CHIP_SQL_PENDING)
+@@ -270,7 +270,7 @@ def test_the_update_chip_counts_and_is_absent_at_zero() -> None:
+     Mutation: use `>= 0` instead of `> 0` and the up-to-date module grows a
+     "0 behind" chip.
+     """
+-    session = mp.SessionState(behind={"mod-a": 3, "mod-b": 0})
++    session = mp.SessionState(behind={("module", "mod-a"): 3, ("module", "mod-b"): 0})
+     rows = _rows([_m("mod-a"), _m("mod-b")], {"module": frozenset({"mod-a", "mod-b"})}, session)
+ 
+     assert mp.chip_update_label(3) in _labels(_row(rows, "mod-a"))
+@@ -383,7 +383,7 @@ def test_an_uncatalogued_row_still_takes_the_owed_chips() -> None:
+     Mutation: build uncatalogued rows with `chips=()` and a hand-cloned module
+     that owes a rebuild says nothing about it.
+     """
+-    session = mp.SessionState(rebuild_owed=frozenset({"mod-homemade"}))
++    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-homemade")}))
+     rows = _rows([], {"module": frozenset({"mod-homemade"})}, session)
+ 
+     assert mp.CHIP_REBUILD_PENDING in _labels(_row(rows, "mod-homemade"))
+@@ -585,7 +585,7 @@ def test_an_owed_chip_press_names_its_row_and_its_label(qapp: object) -> None:
+     Mutation: emit only the id and the view cannot tell which of a row's three
+     owed chips was pressed.
+     """
+-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
++    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
+     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+     pressed: list[tuple[str, str]] = []
+     panel.chip_pressed.connect(lambda mid, label: pressed.append((mid, label)))
+@@ -743,7 +743,7 @@ def test_the_sql_chip_is_absent_when_the_report_listed_no_files() -> None:
+     Mutation: `if item_id in session.sql_owed:` instead of reading the value and
+     the empty entry grows a chip whose detail names nothing.
+     """
+-    session = mp.SessionState(sql_owed={"mod-a": ()})
++    session = mp.SessionState(sql_owed={("module", "mod-a"): ()})
+     rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
+ 
+     assert _labels(_row(rows, "mod-a")) == []
+@@ -811,7 +811,7 @@ def test_a_chip_press_selects_its_row_too(qapp: object) -> None:
+     Mutation: drop the `select` from the chip's handler and `selected_id()`
+     stays `None` after the press.
+     """
+-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
++    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
+     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+ 
+     panel.row("mod-a").chip_buttons[0].click()
+@@ -925,75 +925,14 @@ def test_a_family_card_draws_its_hint_beside_the_installed_header(qapp: object)
+ # ------------------------------------------------------------------ badges (T44)
+ 
+ 
+-def test_an_installed_module_whose_sql_is_waiting_says_so_in_its_badge() -> None:
+-    """`Cloned, SQL not applied` is a real state, and `Installed` hides it (T44 item 5).
++def test_an_uncatalogued_clone_is_badged_installed() -> None:
++    """T41's own rows have no manifest, and are installed by definition.
+ 
+-    It is the state T43's probe produced on a real install: the folder is there,
+-    the worldserver will compile it, and the rows it needs are NOT in the
+-    database. A badge reading `Installed` over that is the reading T41 was
+-    reported for, one step further along.
+-
+-    Mutation: drop the `sql_owed` clause from `_badge_for()` and the row goes
+-    back to `Installed` while the SQL chip beside it still says otherwise.
+-    """
+-    session = mp.SessionState(sql_owed={"mod-a": ("a.sql",)})
+-    rows = _rows([_m("mod-a"), _m("mod-b")], {"module": frozenset({"mod-a", "mod-b"})}, session)
+-
+-    assert _row(rows, "mod-a").badge == mp.BADGE_SQL_NOT_APPLIED
+-    assert _row(rows, "mod-b").badge == mp.BADGE_INSTALLED
+-
+-
+-def test_a_manifest_for_another_game_is_drawn_greyed_and_offers_no_install() -> None:
+-    """A row this install cannot use is SHOWN, and shown as unusable (T44 item 5).
+-
+-    `Not installed` on it would be an invitation: the button beside it would
+-    clone somebody else's game's module into this server directory.
+-
+-    Mutation: ignore the `game` argument and the row comes back `Not installed`
+-    with `for_this_game` True, which is what puts an Install button on it.
+-    """
+-    mine = _m("mod-a")
+-    theirs = Manifest(
+-        id="mod-tbc",
+-        name="Mod Tbc",
+-        type="module",
+-        game="wow-tbc",
+-        description="another game's module",
+-        source=Source(repo="acme/mod-tbc"),
+-    )
+-    rows = mp.build_module_rows([mine, theirs], {}, mp.SessionState(), None, game="wow-wotlk")
+-
+-    assert _row(rows, "mod-tbc").badge == mp.BADGE_NOT_FOR_THIS_GAME
+-    assert _row(rows, "mod-tbc").for_this_game is False
+-    assert _row(rows, "mod-a").for_this_game is True
+-
+-
+-def test_no_game_given_means_every_manifest_belongs_here() -> None:
+-    """The argument is optional, and absent must never mean "none of them fit".
+-
+-    Every existing caller and every T42 test builds rows without it, and a
+-    default that answered `Not for this game` would grey the whole catalog.
+-
+-    Mutation: default `game` to `""` and compare with `==` and every row in
+-    this file's other 40-odd tests turns grey.
++    Mutation: badge them `BADGE_NOT_INSTALLED` and a clone the user made by
++    hand reads as absent on the tab that exists to show it.
+     """
+-    rows = _rows([_m("mod-a")])
+-
+-    assert _row(rows, "mod-a").for_this_game is True
+-    assert _row(rows, "mod-a").badge == mp.BADGE_NOT_INSTALLED
+-
++    rows = mp.build_module_rows([], {"module": frozenset({"mod-hand"})}, mp.SessionState(), None)
+ 
+-def test_an_uncatalogued_clone_is_installed_and_belongs_here() -> None:
+-    """T41's own rows have no manifest, so they have no `game` to disagree with.
+-
+-    Mutation: build them with `for_this_game=False` and a module the user
+-    cloned by hand is greyed as another game's.
+-    """
+-    rows = mp.build_module_rows(
+-        [], {"module": frozenset({"mod-hand"})}, mp.SessionState(), None, game="wow-wotlk"
+-    )
+-
+-    assert _row(rows, "mod-hand").for_this_game is True
+     assert _row(rows, "mod-hand").badge == mp.BADGE_INSTALLED
+ 
+ 
+@@ -1004,39 +943,12 @@ def test_the_row_widget_draws_the_badge_the_builder_decided(qapp: object) -> Non
+     BADGE_NOT_INSTALLED` in `RowWidget` and both new badges vanish from the
+     screen while the builder's tests stay green.
+     """
+-    session = mp.SessionState(sql_owed={"mod-a": ("a.sql",)})
++    session = mp.SessionState(sql_owed={("module", "mod-a"): ("a.sql",)})
+     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+ 
+     assert panel.row("mod-a").badge_label.text() == mp.BADGE_SQL_NOT_APPLIED
+ 
+ 
+-def test_a_row_for_another_game_gets_no_install_button(qapp: object) -> None:
+-    """The greying is not cosmetic: there must be nothing to press.
+-
+-    Mutation: keep `if data.catalogued and not data.installed` alone and the
+-    row offers an Install that clones another game's module into this server.
+-    """
+-    theirs = Manifest(
+-        id="mod-tbc",
+-        name="Mod Tbc",
+-        type="module",
+-        game="wow-tbc",
+-        description="another game's module",
+-        source=Source(repo="acme/mod-tbc"),
+-    )
+-    rows = mp.build_module_rows(
+-        [_m("mod-a"), theirs], {}, mp.SessionState(), None, game="wow-wotlk"
+-    )
+-    panel = _panel(rows)
+-
+-    assert panel.row("mod-a").install_button is not None
+-    assert panel.row("mod-tbc").install_button is None
+-    assert panel.row("mod-tbc").remove_button is None
+-
+-
+-# ---------------------------------------------------------- the subpanel (T44)
+-
+-
+ def test_each_owed_chip_names_the_action_that_answers_it_and_a_fact_names_none() -> None:
+     """An owed chip is a job, and the job has one button (T44 item 4).
+ 
+@@ -1052,8 +964,8 @@ def test_each_owed_chip_names_the_action_that_answers_it_and_a_fact_names_none()
+         patches=(Patch(file="x.conf", find="a", replace="{g}"),),
+     )
+     session = mp.SessionState(
+-        rebuild_owed=frozenset({"mod-a"}),
+-        sql_owed={"mod-a": ("a.sql",)},
++        rebuild_owed=frozenset({("module", "mod-a")}),
++        sql_owed={("module", "mod-a"): ("a.sql",)},
+     )
+     rows = _rows([_m("mod-a"), asks], {"module": frozenset({"mod-a"})}, session)
+ 
+@@ -1075,7 +987,7 @@ def test_an_owed_chip_press_opens_a_subpanel_under_its_own_row(qapp: object) ->
+     Mutation: keep only the report line and `detail_visible()` stays False --
+     which is the tab as T42 shipped it.
+     """
+-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
++    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
+     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+     row = panel.row("mod-a")
+     row.show()
+@@ -1095,7 +1007,7 @@ def test_a_second_press_on_the_same_chip_closes_the_subpanel(qapp: object) -> No
+ 
+     Mutation: always `setVisible(True)` and the subpanel never shuts again.
+     """
+-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
++    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
+     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+     row = panel.row("mod-a")
+     row.show()
+@@ -1113,7 +1025,7 @@ def test_a_chip_press_still_writes_the_report_line(qapp: object) -> None:
+     Mutation: replace the `pressed_chip` emit with the expansion and the one
+     copyable surface on this tab goes silent.
+     """
+-    session = mp.SessionState(rebuild_owed=frozenset({"mod-a"}))
++    session = mp.SessionState(rebuild_owed=frozenset({("module", "mod-a")}))
+     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+     pressed: list[tuple[str, str]] = []
+     panel.chip_pressed.connect(lambda mid, label: pressed.append((mid, label)))
+@@ -1129,7 +1041,7 @@ def test_the_subpanels_button_emits_the_rows_id_and_the_action_key(qapp: object)
+     Mutation: emit the button's TEXT instead of the key and the view's mapping
+     misses every action the day one of these labels is reworded.
+     """
+-    session = mp.SessionState(sql_owed={"mod-a": ("a.sql",)})
++    session = mp.SessionState(sql_owed={("module", "mod-a"): ("a.sql",)})
+     panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}, session=session))
+     acted: list[tuple[str, str]] = []
+     panel.chip_action_pressed.connect(lambda mid, key: acted.append((mid, key)))
+@@ -1372,7 +1284,7 @@ def test_the_update_chip_offers_the_pull_and_says_what_it_costs() -> None:
+     Mutation: drop the `action` and the subpanel shows a sentence with no
+     button, which is the tab exactly as T42 shipped it.
+     """
+-    session = mp.SessionState(behind={"mod-a": 3})
++    session = mp.SessionState(behind={("module", "mod-a"): 3})
+     rows = _rows([_m("mod-a")], {"module": frozenset({"mod-a"})}, session)
+ 
+     chip = next(c for c in _row(rows, "mod-a").chips if c.kind == "owed")
+@@ -1380,3 +1292,60 @@ def test_the_update_chip_offers_the_pull_and_says_what_it_costs() -> None:
+     assert chip.action == "update"
+     assert "no per-module pull" not in chip.detail
+     assert "discard" in chip.detail, "a reset --hard has to say what it destroys"
++
++
++def test_one_familys_pending_sql_does_not_badge_another_familys_row() -> None:
++    """T44 round 2. `sql_owed` is keyed by (family, id), not by a bare id.
++
++    Nothing makes a manifest id unique across families -- the store loads
++    `manifests/<game>/<family>/` one directory at a time and no invariant spans
++    them -- and T42 round 2 keyed the row dict, the manifest dict, the panel
++    and the tuning cards by the pair for exactly that reason. Keyed by a bare
++    id, an `ale` whose SQL was left to the importer badges a `module` of the
++    same name `Cloned, SQL not applied` over a module with no SQL at all,
++    which is a worse lie than the `Installed` it replaced.
++
++    Mutation: key `sql_owed` by the bare id again (and look it up with
++    `session.sql_owed.get(manifest.id)`) and the `module` row reads
++    `Cloned, SQL not applied`.
++    """
++    session = mp.SessionState(sql_owed={("ale", "bmah"): ("a.sql",)})
++    rows = _rows(
++        [_m("bmah"), _m("bmah", "ale")],
++        {"module": frozenset({"bmah"}), "ale": frozenset({"bmah"})},
++        session,
++    )
++
++    module_row = next(r for r in rows if r.family == "module" and r.id == "bmah")
++    ale_row = next(r for r in rows if r.family == "ale" and r.id == "bmah")
++    assert module_row.badge == mp.BADGE_INSTALLED
++    assert ale_row.badge == mp.BADGE_SQL_NOT_APPLIED
++
++
++def test_the_sql_chip_is_keyed_by_family_too_and_so_are_the_other_two() -> None:
++    """The chips were keyed by a bare id as well, and it is the same collision.
++
++    All three session facts move together: keeping one pair-keyed and two
++    id-keyed would be two rules for one ambiguity, which is what T42 round 2
++    found four places along.
++
++    Mutation: look any of the three up by `manifest.id` and the wrong family's
++    row grows the chip.
++    """
++    session = mp.SessionState(
++        rebuild_owed=frozenset({("module", "bmah")}),
++        sql_owed={("ale", "bmah"): ("a.sql",)},
++        behind={("module", "bmah"): 2},
++    )
++    rows = _rows(
++        [_m("bmah"), _m("bmah", "ale")],
++        {"module": frozenset({"bmah"}), "ale": frozenset({"bmah"})},
++        session,
++    )
++
++    module_chips = [c.label for c in next(r for r in rows if r.family == "module").chips]
++    ale_chips = [c.label for c in next(r for r in rows if r.family == "ale").chips]
++    assert mp.CHIP_REBUILD_PENDING in module_chips
++    assert mp.CHIP_SQL_PENDING not in module_chips
++    assert mp.chip_update_label(2) in module_chips
++    assert ale_chips == [mp.CHIP_SQL_PENDING]
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index b57ccd4a..140b1d44 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -2665,11 +2665,16 @@ class ControllerView(QWidget):
+         # starts empty. The report box has always forgotten them too -- what
+         # changed is only that they are now shown on the rows that own them.
+         #
+-        # `_rebuild_owed`: ids whose install said `rebuild_required`, cleared by
+-        # a rebuild that SUCCEEDS. `_sql_owed`: ids to the files a report left to
+-        # the importer, cleared when the importer finishes. `_behind`: what the
+-        # last update check counted, per id, zeroes and "could not ask" left out.
+-        self._rebuild_owed: set[str] = set()
++        # `_rebuild_owed`: modules whose install said `rebuild_required`,
++        # cleared by a rebuild that SUCCEEDS. `_sql_owed`: the files a report
++        # left to the importer, cleared when the importer finishes. `_behind`:
++        # what the last update check counted, zeroes and "could not ask" left
++        # out.
++        #
++        # All three keyed by `(FAMILY, id)` since T44 round 2, for
++        # `SessionState`'s reason: nothing makes an id unique across families,
++        # and these were the last three surfaces T42 round 2 left on a bare id.
++        self._rebuild_owed: set[tuple[str, str]] = set()
+         # Whether the run in `rebuild_log` is a COMPILE. Three actions share
+         # that panel -- the rebuild, the database updates and the adopt -- and
+         # all three arrive at `_rebuild_finished`, so "the panel finished and
+@@ -2677,8 +2682,8 @@ class ControllerView(QWidget):
+         # the panel's success alone would tell a user their module was live
+         # because an unrelated SQL run went through.
+         self._rebuild_is_compile = False
+-        self._sql_owed: dict[str, tuple[str, ...]] = {}
+-        self._behind: dict[str, int] = {}
++        self._sql_owed: dict[tuple[str, str], tuple[str, ...]] = {}
++        self._behind: dict[tuple[str, str], int] = {}
+         self._repair_armed = False
+         # The last answer the database gave about its own import, and whether it
+         # has been asked since the database came up. Remembered because the
+@@ -5926,11 +5931,6 @@ class ControllerView(QWidget):
+                 # T44 -- the reads happen afterwards, one event-loop turn at a
+                 # time, in `_fill_versions()`.
+                 versions=self._known_versions(installed),
+-                # The STORE's game, which is the game this controller is
+-                # looking at. A manifest that names another one is drawn greyed
+-                # rather than dropped (T44 item 5), so a row this install
+-                # cannot use never carries an Install button.
+-                game=self.services.store.game,
+             )
+         )
+         if broken:
+@@ -6031,13 +6031,12 @@ class ControllerView(QWidget):
+         and treating that as evidence would throw away every fact this session
+         has learned.
+ 
+-        Matched by bare id across every family, because that is what an
+-        `ApplyReport.item_id` and an update check's `key` are: ids, with no
+-        family on them.
++        Matched by `(family, id)` since T44 round 2: the three sets are keyed
++        that way now, so this is an exact comparison rather than a bare-id
++        match that also forgot an `ale` because a `module` of the same name had
++        gone.
+         """
+-        here: set[str] = set()
+-        for names in installed.values():
+-            here |= set(names)
++        here = {(family, name) for family, names in installed.items() for name in names}
+         self._rebuild_owed &= here
+         self._sql_owed = {key: value for key, value in self._sql_owed.items() if key in here}
+         self._behind = {key: value for key, value in self._behind.items() if key in here}
+@@ -6051,7 +6050,10 @@ class ControllerView(QWidget):
+         by hand?) and T42 deliberately leaves it out rather than ship one that
+         can be wrong.
+         """
+-        owed = sorted(self._rebuild_owed)
++        # The ids, not the pairs: the banner names modules to a person, and
++        # `('module', 'mod-transmog')` is the key's spelling and not a name.
++        # Sorted and de-duplicated, so an id in two families is named once.
++        owed = sorted({item_id for _family, item_id in self._rebuild_owed})
+         self.rebuild_banner.setVisible(bool(owed))
+         self.rebuild_banner_label.setText(REBUILD_BANNER.format(names=", ".join(owed)))
+ 
+@@ -6295,7 +6297,7 @@ class ControllerView(QWidget):
+         if not isinstance(result, ApplyReport):
+             return
+         self.module_report.setPlainText(_format_report(result))
+-        self._note_session_facts(result)
++        self._note_session_facts(result, acted_on)
+         # The record is dropped AFTER the report is on screen and after the
+         # remove returned -- a forget before the remove would drop the record of
+         # a remove that then failed, leaving a folder on disk with no row in the
+@@ -6320,7 +6322,7 @@ class ControllerView(QWidget):
+         # install HAS changed with this report (T43).
+         self.reload_tuning()
+ 
+-    def _note_session_facts(self, result: ApplyReport) -> None:
++    def _note_session_facts(self, result: ApplyReport, acted_on: Manifest | None) -> None:
+         """Record what this report says is still owed, for the chips and the banner.
+ 
+         A remove drops the id from all three: the module is gone, so an "update
+@@ -6333,10 +6335,24 @@ class ControllerView(QWidget):
+         # it. Dropped before `reload_modules()` runs, so the redraw does not
+         # hand the row the sha it had before the action (T44 item 1).
+         self._versions.forget(item_id)
++        if acted_on is None or acted_on.id != item_id:
++            # Unreachable through both live routes -- `_module_action()` and
++            # `_install_custom_module()` each set `_acting_on` immediately
++            # before their `_run()`, and an `ApplyReport` carries the id of the
++            # manifest it was handed. Said rather than guessed because the only
++            # alternative is resolving a bare id to a family, which is the
++            # ambiguity T42 round 2 removed from four other surfaces. A chip
++            # missing is a gap; a chip on the wrong family's row is a lie.
++            logger.warning(
++                f"no manifest recorded for the {result.action} of {item_id}; "
++                "its chips cannot be keyed to a family and are not recorded"
++            )
++            return
++        key = (acted_on.type, item_id)
+         if result.action == "remove":
+-            self._rebuild_owed.discard(item_id)
+-            self._sql_owed.pop(item_id, None)
+-            self._behind.pop(item_id, None)
++            self._rebuild_owed.discard(key)
++            self._sql_owed.pop(key, None)
++            self._behind.pop(key, None)
+             return
+         # The clone has just been fetched and reset to its upstream tip -- that
+         # is what `install()` does over a folder that is already there -- so
+@@ -6344,14 +6360,14 @@ class ControllerView(QWidget):
+         # commit the checkout has moved off. Dropped rather than recounted: a
+         # recount costs a network round trip, and a stale number is a wrong one
+         # (T44 item 2).
+-        self._behind.pop(item_id, None)
++        self._behind.pop(key, None)
+         if result.rebuild_required:
+-            self._rebuild_owed.add(item_id)
++            self._rebuild_owed.add(key)
+         owed = _pending_sql_names(result)
+         if owed:
+-            self._sql_owed[item_id] = owed
++            self._sql_owed[key] = owed
+         else:
+-            self._sql_owed.pop(item_id, None)
++            self._sql_owed.pop(key, None)
+ 
+     @Slot(object)
+     def _module_failed(self, exc: object) -> None:
+@@ -6396,7 +6412,11 @@ class ControllerView(QWidget):
+         # chip, and `None` ("could not ask") is deliberately not a zero: a
+         # checkout git could not answer for gets no chip rather than a
+         # confident "up to date".
+-        self._behind = {row.key: row.behind for row in result if (row.behind or 0) > 0}
++        # Keyed `("module", key)`: `apply.module_updates()` enumerates ONE
++        # clone directory -- `CLONE_DIRS["module"]`, which is `modules/` -- so
++        # every key it returns is in that family by construction, and inventing
++        # a family for it would be a guess where this is the answer.
++        self._behind = {("module", row.key): row.behind for row in result if (row.behind or 0) > 0}
+         self.reload_modules()
+ 
+     @Slot(object)
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 483ca226..f6e4ed15 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -123,24 +123,25 @@ T43's probe produced on a real install, and it is the half-installed reading
+ T41 was reported for -- a module that is "there" and does nothing.
+ """
+ 
+-BADGE_NOT_FOR_THIS_GAME = "Not for this game"
+-"""A manifest whose `game` is not the one this controller is looking at.
+-
+-Drawn greyed and with NOTHING TO PRESS, which is the whole of why it is shown
+-at all: `Not installed` on such a row is an invitation, and the button beside
+-it would clone another game's module into this server directory.
+-"""
+-
+-
+-def _badge_for(installed: bool, for_this_game: bool, sql_owed: bool) -> str:
++# There is deliberately NO `Not for this game` badge, and the ticket's item 5
++# asked for one (T44 round 2). It would have been unreachable code:
++# `ManifestStore._load_at()` RAISES on a manifest whose `game` is not the
++# store's, `_load_manifests()` catches that at family scope and reports the
++# whole family as broken, so no foreign-game manifest can reach this builder.
++# The first attempt shipped the badge with tests that injected such a manifest
++# straight into `build_module_rows()` -- coverage of a row nothing on disk can
++# produce, which reads as a guarantee and is not one. Making it real means
++# changing the store's validation, which is a guard in its own right; it is on
++# the ticket as an open finding for the owner rather than in this diff.
++
++
++def _badge_for(installed: bool, sql_owed: bool) -> str:
+     """The one word the badge column says, decided here and never in a widget.
+ 
+-    Order matters and it is the order of what stops a user first: a row this
+-    install cannot use says so whatever else is true of it; an installed module
+-    whose SQL has not run is not simply `Installed`.
++    An installed module whose SQL has not run is not simply `Installed`: the
++    clone is on disk and the worldserver will compile it, and the rows it needs
++    are not in the database.
+     """
+-    if not for_this_game:
+-        return BADGE_NOT_FOR_THIS_GAME
+     if installed and sql_owed:
+         return BADGE_SQL_NOT_APPLIED
+     return BADGE_INSTALLED if installed else BADGE_NOT_INSTALLED
+@@ -233,14 +234,6 @@ class ModuleRow:
+     chips: tuple[Chip, ...]
+     removable: bool
+     remove_reason: str | None
+-    for_this_game: bool = True
+-    """Whether this manifest's `game` is the one this controller is looking at.
+-
+-    Defaulted True so every caller that does not name a game -- and every T42
+-    test -- keeps the answer it had: absent must never mean "none of them fit",
+-    which would grey the whole catalog.
+-    """
+-
+     badge: str = BADGE_NOT_INSTALLED
+     """The badge column's one word, from `_badge_for()`. Decided here so the
+     widget renders a decision rather than taking one (T42's split)."""
+@@ -268,9 +261,25 @@ class SessionState:
+     T42 deliberately does not open (see the ticket's "Not in scope").
+     """
+ 
+-    rebuild_owed: frozenset[str] = frozenset()
+-    sql_owed: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+-    behind: Mapping[str, int] = field(default_factory=dict)
++    rebuild_owed: frozenset[tuple[str, str]] = frozenset()
++    sql_owed: Mapping[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
++    behind: Mapping[tuple[str, str], int] = field(default_factory=dict)
++    """All three keyed by `(family, id)` and NOT by a bare id (T44 round 2).
++
++    Nothing makes a manifest id unique across families: the store loads
++    `manifests/<game>/<family>/` one directory at a time and no invariant spans
++    them. T42 round 2 keyed the row dict, the manifest dict, the panel's widget
++    dict and T43's tuning cards by the pair for exactly that reason and left
++    these three behind, which was the ONE surface where the collision was
++    invisible -- until T44's `Cloned, SQL not applied` badge made an `ale`'s
++    pending SQL show up on a `module` of the same name, over a module with no
++    SQL at all.
++
++    The two places that fill them both know the family: `_note_session_facts()`
++    is handed the manifest the press was about, and `module_updates()`
++    enumerates ONE clone directory (`modules/`), so every key it returns is in
++    the `module` family by construction.
++    """
+ 
+ 
+ def _clone_dir_of(kind: str) -> str:
+@@ -361,6 +370,7 @@ class VersionCache:
+ 
+ def _chips_for(
+     manifest: Manifest | None,
++    family: str,
+     item_id: str,
+     installed: bool,
+     session: SessionState,
+@@ -377,7 +387,8 @@ def _chips_for(
+     fetches.
+     """
+     chips: list[Chip] = []
+-    if item_id in session.rebuild_owed:
++    key = (family, item_id)
++    if key in session.rebuild_owed:
+         chips.append(
+             Chip(
+                 "owed",
+@@ -387,7 +398,7 @@ def _chips_for(
+                 "rebuild",
+             )
+         )
+-    owed_sql = session.sql_owed.get(item_id)
++    owed_sql = session.sql_owed.get(key)
+     if owed_sql:
+         chips.append(
+             Chip(
+@@ -399,7 +410,7 @@ def _chips_for(
+                 "sql",
+             )
+         )
+-    behind = session.behind.get(item_id, 0)
++    behind = session.behind.get(key, 0)
+     if behind > 0:
+         chips.append(
+             Chip(
+@@ -455,7 +466,6 @@ def build_module_rows(
+     installed: Mapping[str, frozenset[str]],
+     session: SessionState,
+     client_dir: Path | None,
+-    game: str | None = None,
+     versions: Mapping[tuple[str, str], str] | None = None,
+ ) -> tuple[ModuleRow, ...]:
+     """Every row the Modules tab draws, in the order it draws them.
+@@ -508,10 +518,6 @@ def build_module_rows(
+     def _row(manifest: Manifest) -> ModuleRow:
+         here = (manifest.type, manifest.id) in installed_keys
+         needed_by = dependants.get(manifest.id, [])
+-        # `game is None` is "nobody said", not "no game matches": every caller
+-        # before T44 omitted it and the whole catalog would grey on a `==`
+-        # against an empty string.
+-        mine = game is None or manifest.game == game
+         return ModuleRow(
+             id=manifest.id,
+             family=manifest.type,
+@@ -521,15 +527,16 @@ def build_module_rows(
+             installed=here,
+             catalogued=True,
+             paths=tuple(conf.file for conf in manifest.conf),
+-            chips=_chips_for(manifest, manifest.id, here, session, client_dir, needed_by),
++            chips=_chips_for(
++                manifest, manifest.type, manifest.id, here, session, client_dir, needed_by
++            ),
+             removable=not (here and needed_by),
+             remove_reason=(
+                 f"{', '.join(needed_by)} require this — remove them first."
+                 if here and needed_by
+                 else None
+             ),
+-            for_this_game=mine,
+-            badge=_badge_for(here, mine, bool(session.sql_owed.get(manifest.id))),
++            badge=_badge_for(here, bool(session.sql_owed.get(manifest.id))),  # type: ignore[arg-type]
+             # Installed rows only. A catalog row that is not on disk has no
+             # clone to read, and looking one up for all 41 would be 20 reads
+             # of folders that are not there.
+@@ -565,15 +572,11 @@ def build_module_rows(
+                     catalogued=False,
+                     paths=(),
+                     chips=_chips_for(
+-                        None, name, True, session, client_dir, dependants.get(name, [])
++                        None, kind, name, True, session, client_dir, dependants.get(name, [])
+                     ),
+                     removable=False,
+                     remove_reason=None,
+-                    # A clone with no manifest has no `game` to disagree with
+-                    # this one: it is installed HERE, which is the only fact
+-                    # about it anybody has (T41).
+-                    for_this_game=True,
+-                    badge=_badge_for(True, True, bool(session.sql_owed.get(name))),
++                    badge=_badge_for(True, bool(session.sql_owed.get((kind, name)))),
+                     version=seen_versions.get((kind, name)),
+                 )
+             )
+@@ -689,7 +692,7 @@ class RowWidget(QFrame):
+         # muted for the two that ask nothing.
+         if data.badge == BADGE_SQL_NOT_APPLIED:
+             badge_colour = COLOR_TEXT_WARNING
+-        elif data.installed and data.for_this_game:
++        elif data.installed:
+             badge_colour = COLOR_UNCOMMON
+         else:
+             badge_colour = COLOR_TEXT_MUTED
+@@ -727,14 +730,11 @@ class RowWidget(QFrame):
+         self.install_button: QPushButton | None = None
+         self.remove_button: QPushButton | None = None
+         column = QVBoxLayout()
+-        if data.catalogued and not data.installed and data.for_this_game:
+-            # `for_this_game` is part of the condition and not a `setEnabled`
+-            # afterwards: a greyed button is still a control, and the thing
+-            # this row must not offer is the control itself.
++        if data.catalogued and not data.installed:
+             self.install_button = QPushButton("Install", self)
+             self.install_button.clicked.connect(lambda: self.pressed_install.emit(self.data.id))
+             column.addWidget(self.install_button)
+-        elif data.catalogued and data.for_this_game:
++        elif data.catalogued:
+             self.remove_button = QPushButton("Remove", self)
+             self.remove_button.clicked.connect(lambda: self.pressed_remove.emit(self.data.id))
+             if not data.removable:
