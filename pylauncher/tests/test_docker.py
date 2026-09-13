@@ -6345,7 +6345,7 @@ def test_a_missing_modules_folder_marks_nothing_rather_than_claiming_anything(
 _DOCKER_DESKTOP_TAIL = (
     '#24 [wow-wotlk builder 5/7] RUN sh -c "cmake ../ -DCMAKE_INSTALL_PREFIX=/azeroth-server"',
     "",
-    'ERROR: failed to solve: process "/bin/sh -c cmake ../ '
+    'process "/bin/sh -c cmake ../ '
     '-DCMAKE_INSTALL_PREFIX=/azeroth-server -DCMAKE_CXX_COMPILER_LAUNCHER=\\"ccache\\" '
     '-DCMAKE_C_COMPILER_LAUNCHER=\\"ccache\\" -DBoost_USE_STATIC_LIBS=\\"ON\\" '
     '&& cmake --build . --config \\"$CTYPE\\" -j $(($(nproc) + 1)) '
@@ -6398,3 +6398,35 @@ def test_the_linux_shape_is_untouched_by_the_docker_desktop_branch() -> None:
     said = docker.last_words(_FAILED_BUILD_TAIL)
     assert "Transmog.cpp:212:9: error: no member named GetGUID" in said
     assert "docker-desktop://" not in said
+
+
+def test_the_exit_code_survives_when_no_line_says_ERROR(tmp_path: Path) -> None:
+    """T50 round 2, from the reporter's screenshot of the build carrying T50 itself.
+
+    The message reached him without the exit code:
+
+        Its last words were: Docker Desktop kept this build's log instead of
+        printing it: docker-desktop://dashboard/build/default/default/xbeswh...
+
+    `_exit_code(error_line or said[-1])` looked in two places and the number is
+    in neither. `error_line` is empty because `_buildkit_failure()` recognises
+    only a line beginning `ERROR:`, and his stream has none; `said[-1]` is the
+    `View build details:` line. The clause sits on an EARLIER line.
+
+    This is the same mistake this ticket was filed about, made once more in the
+    fixture: the first version of `_DOCKER_DESKTOP_TAIL` carried an
+    `ERROR: failed to solve:` prefix that I WROTE, because the screenshot showed
+    that line left-truncated and the code expected the prefix. Reconstructing a
+    fixture from what the code wants is how a test passes against the bug it is
+    meant to catch -- and the exit code is the half that matters most, since
+    `137` is an out-of-memory kill and `docker build` still returns 1 for it.
+    """
+    tail = (
+        'process "/bin/sh -c cmake --build ." did not complete successfully: exit code: 137',
+        "",
+        "View build details: docker-desktop://dashboard/build/default/default/abc123",
+        "",
+    )
+    said = docker.last_words(tail)
+    assert "137" in said, said
+    assert "docker-desktop://dashboard/build/default/default/abc123" in said

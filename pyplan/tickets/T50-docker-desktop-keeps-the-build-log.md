@@ -112,3 +112,44 @@ The fixture's provenance is beside the gate: `the-fixture-and-where-it-came-from
 A press against a real Docker Desktop failure. The fixture is a faithful transcription, but it
 is still a transcription — only a real failed build on Windows proves the URL is matched as it
 is actually printed.
+
+## Round 2 — the field refuted the fixture, 2026-09-13
+
+The reporter ran `v0.8.67-fixtest`, which carries round 1, and sent a screenshot. The fix
+worked — the cmake line is gone and he has a link:
+
+```
+FAILED: InstallerError: the build failed (exit 1). Its last words were: Docker Desktop
+kept this build's log instead of printing it:
+docker-desktop://dashboard/build/default/default/xbeswht6sps99pdrz6sck5st7
+```
+
+**And the exit code is missing** — the half this ticket called load-bearing, because
+`docker build` returns 1 even when the step inside it was OOM-killed with 137.
+
+`_exit_code(error_line or said[-1])` looked in two places and his stream has it in neither:
+`error_line` is empty because `_buildkit_failure()` recognises only a line beginning `ERROR:`
+and his output has none, and `said[-1]` is the `View build details:` URL. The clause sits on
+an earlier line.
+
+**Why round 1's test did not catch it.** `_DOCKER_DESKTOP_TAIL` carried an
+`ERROR: failed to solve:` prefix **that the lead wrote**. The screenshot showed that line
+left-truncated (`...MPILER_LAUNCHER=`), and the prefix was reconstructed from what the code
+expected rather than from what was on screen. That is the exact failure this ticket's own
+provenance note warns about, committed in the same commit as the warning:
+
+> an invented one would have had the fences this one is missing
+
+The fences were right. The `ERROR:` prefix was not, and one invented token was enough to make
+the test agree with the bug.
+
+**Fixed:** the whole tail is searched for the clause, last match wins. Verified against his
+real output and against the 137 case:
+
+```
+exit code: 1 — Docker Desktop kept this build's log instead of printing it: …xbeswht6sps…
+exit code: 137 — Docker Desktop kept this build's log instead of printing it: …abc
+```
+
+Fixture corrected to what he actually has. Gate `4370 passed`; M4 (restore the two-place
+lookup) killed.

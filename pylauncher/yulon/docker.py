@@ -3299,16 +3299,24 @@ def _build_log_elsewhere(said: list[str]) -> str:
     return ""
 
 
-def _exit_code(line: str) -> str:
-    """`"exit code: 137 — "` from a line that carries one, else `""`.
+def _exit_code(said: list[str]) -> str:
+    """`"exit code: 137 — "` from the LAST line that carries one, else `""`.
+
+    The whole tail is searched, not the `ERROR:` line and not the final line.
+    Round 1 looked in exactly those two and the reporter's own stream has it in
+    neither: Docker Desktop prints the clause on a line with no `ERROR:` prefix,
+    and the last line is the `View build details:` URL.
 
     Kept even though the caller already has the process's own return code,
     because this is the code of the step INSIDE the build rather than of
     `docker build` itself, and 137 is an out-of-memory kill that nothing else
     in a Docker Desktop stream says out loud.
     """
-    found = _EXIT_CODE.search(line)
-    return f"exit code: {found.group(1)} — " if found else ""
+    for line in reversed(said):
+        found = _EXIT_CODE.search(line)
+        if found:
+            return f"exit code: {found.group(1)} — "
+    return ""
 
 
 def last_words(tail: tuple[str, ...]) -> str:
@@ -3340,7 +3348,7 @@ def last_words(tail: tuple[str, ...]) -> str:
         # T50. The step output is not in the buffer to be selected from, so the
         # honest answer is where it IS -- not the left-truncated command echo
         # below, which is the one thing already known to tell a reader nothing.
-        code = _exit_code(error_line or said[-1])
+        code = _exit_code(said)
         return f"{code}Docker Desktop kept this build's log instead of printing it: {kept}"
     text = " / ".join(said[-_LAST_WORDS_LINES:])
     return text if len(text) <= _LAST_WORDS_CHARS else "…" + text[-_LAST_WORDS_CHARS:]
