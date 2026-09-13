@@ -29,7 +29,7 @@ the decorations modules: upstream `Yulon` carries Baerthe's passes on those and
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -244,6 +244,15 @@ class ModuleRow:
     """The badge column's one word, from `_badge_for()`. Decided here so the
     widget renders a decision rather than taking one (T42's split)."""
 
+    version: str | None = None
+    """What this clone is at (`7c02b1d · 2026-09-01`), or `None` for not-yet-read.
+
+    `None` renders as NOTHING, never as a placeholder: a sha is the one string
+    on this row somebody may paste into an issue, and `unknown` or `—` where
+    one goes reads as something git said. A row that fills in late is fine
+    (T44 item 1); a row that shows a guess is not.
+    """
+
 
 @dataclass(frozen=True)
 class SessionState:
@@ -276,6 +285,77 @@ def _clone_dir_of(kind: str) -> str:
         if family == kind:
             return folder
     return kind
+
+
+class VersionCache:
+    """What each installed clone is AT, read once per clone and then remembered.
+
+    T44 item 1's whole price, in one object. A `git log -1` per installed row
+    on every `reload_modules()` is what T41 refused and T42 restated: reloads
+    happen after every install, every remove, every update check and every
+    Refresh, and 20 modules would pay 20 subprocesses each time.
+
+    So the reads are LAZY and CACHED, and the cache is keyed by
+    `(server_dir, family, item_id)`:
+
+    * `server_dir`, because two installs of the same catalog have different
+      clones and one entry would show one install's sha on the other's row;
+    * `family`, because nothing makes an id unique across families -- a `bmah`
+      module lives in `modules/` and a `bmah` keg in `ale_scripts/` (T42 round
+      2's collision, which cost this codebase four defects in one review).
+
+    `None` is cached exactly like a string, and that is not an oversight: a
+    `modules/` folder also holds `CMakeLists.txt` and a user can copy a module
+    in with no `.git` (`apply.ModuleUpdate.is_checkout`). Such a row answers
+    nothing forever and must cost ONE read, not one per paint -- which is why
+    "has it been read?" is `has()` and not `known() is not None`.
+
+    It holds no Qt and reads no disk itself: the reader is handed in, which is
+    what lets the tests count the reads.
+    """
+
+    def __init__(self, read: Callable[[Path], str | None]) -> None:
+        self._read = read
+        self._known: dict[tuple[Path, str, str], str | None] = {}
+
+    def path_of(self, server_dir: Path, family: str, item_id: str) -> Path:
+        """Where this family's clone of `item_id` lives, by `apply.CLONE_DIRS`."""
+        return server_dir / _clone_dir_of(family) / item_id
+
+    def has(self, server_dir: Path, family: str, item_id: str) -> bool:
+        """Whether this clone has been read at all -- which "the answer was None" is not."""
+        return (server_dir, family, item_id) in self._known
+
+    def known(self, server_dir: Path, family: str, item_id: str) -> str | None:
+        """The cached answer, WITHOUT reading anything.
+
+        This is what the row builder is called with, and it is why the first
+        paint cannot block: a row whose clone has not been read yet carries
+        `None` and simply shows nothing where the version goes.
+        """
+        return self._known.get((server_dir, family, item_id))
+
+    def fill(self, server_dir: Path, family: str, item_id: str) -> str | None:
+        """The answer, reading the clone once if it has not been read yet."""
+        key = (server_dir, family, item_id)
+        if key not in self._known:
+            self._known[key] = self._read(self.path_of(server_dir, family, item_id))
+        return self._known[key]
+
+    def forget(self, item_id: str) -> None:
+        """Drop this module's entry in every family and every install.
+
+        By BARE ID, because that is what the events that invalidate it carry:
+        an `ApplyReport.item_id` and an update check's `key` are ids with no
+        family on them (the rule
+        `_forget_what_is_no_longer_installed()` already follows).
+        """
+        for key in [k for k in self._known if k[2] == item_id]:
+            del self._known[key]
+
+    def clear(self) -> None:
+        """Forget everything -- what the Refresh press means."""
+        self._known.clear()
 
 
 def _chips_for(
@@ -371,6 +451,7 @@ def build_module_rows(
     session: SessionState,
     client_dir: Path | None,
     game: str | None = None,
+    versions: Mapping[tuple[str, str], str] | None = None,
 ) -> tuple[ModuleRow, ...]:
     """Every row the Modules tab draws, in the order it draws them.
 
@@ -385,6 +466,10 @@ def build_module_rows(
     each card and sees what he has.
     """
     catalog: list[Manifest] = list(manifests)
+    # What is ALREADY known, keyed the way the rows are. Handed in rather than
+    # read here: this function is pure and stays pure, and the reading is the
+    # one part of the version line that costs a subprocess (`VersionCache`).
+    seen_versions = versions or {}
     # Keyed by (FAMILY, id) and collected as a LIST, and both halves are the
     # round-2 fix. Nothing makes a manifest id unique across families -- the
     # store loads `manifests/<game>/<family>/` one directory at a time and no
@@ -440,6 +525,10 @@ def build_module_rows(
             ),
             for_this_game=mine,
             badge=_badge_for(here, mine, bool(session.sql_owed.get(manifest.id))),
+            # Installed rows only. A catalog row that is not on disk has no
+            # clone to read, and looking one up for all 41 would be 20 reads
+            # of folders that are not there.
+            version=seen_versions.get((manifest.type, manifest.id)) if here else None,
         )
 
     # T41's per-FOLDER accounting, moved here from `reload_modules()`. `ale` and
@@ -480,6 +569,7 @@ def build_module_rows(
                     # about it anybody has (T41).
                     for_this_game=True,
                     badge=_badge_for(True, True, bool(session.sql_owed.get(name))),
+                    version=seen_versions.get((kind, name)),
                 )
             )
     return tuple(rows)
@@ -561,6 +651,13 @@ class RowWidget(QFrame):
             title_row.addWidget(self.link_label)
         else:
             self.link_label = None
+        # The version, beside the name. Empty until the clone has been read --
+        # `set_version()` fills it in place, so a late answer never costs the
+        # user their selection or their open sections (T44 item 1).
+        self.version_label = QLabel(data.version or "", self)
+        self.version_label.setFont(QFont("monospace"))
+        self.version_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        title_row.addWidget(self.version_label)
         title_row.addStretch(1)
         left.addLayout(title_row)
 
@@ -697,6 +794,10 @@ class RowWidget(QFrame):
             self.detail_button.setEnabled(
                 enabled and self._open_chip is not None and self._open_chip.action is not None
             )
+
+    def set_version(self, version: str | None) -> None:
+        """Show what this clone is at, or nothing. Never a placeholder."""
+        self.version_label.setText(version or "")
 
     def set_selected(self, selected: bool) -> None:
         """Highlight, through the theme's own constants (T42 forbids touching `theme.py`)."""
@@ -1058,6 +1159,22 @@ class ModulesPanel(QWidget):
             if card is not None:
                 out += card.laid_out_rows()
         return tuple(out)
+
+    def set_version(self, family: str, item_id: str, version: str | None) -> None:
+        """Fill one row's version line IN PLACE, without redrawing anything else.
+
+        In place and not through `set_rows()`, because the fill is
+        asynchronous and happens once per installed module: a reload per
+        module would take the user's selection and their open sections away
+        from them up to twenty times in a row.
+
+        A row that is no longer here is ignored rather than raised on: the
+        read and the write are separated by an event-loop turn, and a remove
+        can land between them.
+        """
+        widget = self._rows.get((family, item_id))
+        if widget is not None:
+            widget.set_version(version)
 
     def selected_row(self) -> RowWidget | None:
         """The selected row itself, family included -- what `selected_id()` cannot say."""

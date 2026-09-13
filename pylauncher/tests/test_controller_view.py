@@ -8305,3 +8305,121 @@ def test_a_saved_card_of_a_shared_id_writes_that_familys_file_and_no_other(
     assert (tmp_path / mine).read_text(encoding="utf-8") == "[worldserver]\nK = 1\n"
     assert (tmp_path / shared).read_text(encoding="utf-8") == "[worldserver]\nS = 9\n"
     assert "wrote" in view.tuning_report.toPlainText()
+
+
+# ---------------------------------------------------- the version line (T44 item 1)
+
+
+def test_the_first_paint_of_the_modules_tab_reads_no_clone_at_all(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Item 1's hard rule: building the tab must not cost a `git log` per module.
+
+    A `git log -1` per installed row on every reload is what T41 refused and
+    T42 restated, and `reload_modules()` runs after every install, every
+    remove, every update check and every Refresh.
+
+    Mutation: have `_known_versions()` call `VersionCache.fill()` instead of
+    `known()` and the reader is asked once per installed module while the tab
+    is still being laid out -- and every other test in this file stays green.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    object.__setattr__(
+        services, "module_version", lambda path: (read.append(path), "7c02b1d · 2026-09-01")[1]
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert read == [], "the tab was built by reading clones"
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == ""
+
+
+def test_the_version_fills_in_after_the_tab_is_up_and_only_for_installed_rows(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A row that renders late is fine; a tab that takes a second per module is not.
+
+    Mutation: drop the `_start_filling_versions()` call from `reload_modules()`
+    and the line never arrives -- the tab looks exactly as it did before T44
+    and the first test above still passes.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    object.__setattr__(
+        services, "module_version", lambda path: (read.append(path), "7c02b1d · 2026-09-01")[1]
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    pump_until(lambda: not view._filling_versions, "the version fill never finished")
+
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == "7c02b1d · 2026-09-01"
+    assert read == [tmp_path / "modules" / "mod-solocraft"], "one read, and only the installed row"
+    assert view.modules_panel.row("mod-transmog").version_label.text() == ""
+
+
+def test_a_reload_after_the_fill_reads_nothing_again(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The cache is the point: the second reload costs no subprocess at all.
+
+    Mutation: drop the `_known` write in `VersionCache.fill()` and every
+    reload pays the reads again -- which is the cost item 1 exists to remove.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
+    )
+    object.__setattr__(
+        services, "module_version", lambda path: (read.append(path), "7c02b1d · 2026-09-01")[1]
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    pump_until(lambda: not view._filling_versions, "the first fill never finished")
+    before = len(read)
+
+    view.reload_modules()
+    pump_until(lambda: not view._filling_versions, "the second fill never finished")
+
+    assert len(read) == before
+    assert view.modules_panel.row("mod-solocraft").version_label.text() == "7c02b1d · 2026-09-01"
+
+
+def test_refresh_forgets_every_version_and_a_report_forgets_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The two invalidations, and they are different sizes on purpose.
+
+    Refresh means "read the disk again" -- a clone can change under this app,
+    through a `git pull` in a terminal. A report is about ONE module, and
+    dropping the whole cache for it would re-read every other clone for
+    nothing.
+
+    Mutation: bind Refresh back to `reload_modules` and a module pulled in a
+    terminal keeps showing the sha it had when the tab opened, forever.
+    """
+    read: list[Path] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "installed_modules",
+        lambda: {"module": frozenset({"mod-solocraft", "mod-transmog"})},
+    )
+    object.__setattr__(
+        services, "module_version", lambda path: (read.append(path), "7c02b1d · 2026-09-01")[1]
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    pump_until(lambda: not view._filling_versions, "the first fill never finished")
+    assert len(read) == 2
+
+    view._module_done(ApplyReport("install", "mod-solocraft"))
+    pump_until(lambda: not view._filling_versions, "the fill after the report never finished")
+    assert read[2:] == [tmp_path / "modules" / "mod-solocraft"], "one module, not both"
+
+    view.refresh_modules_button.click()
+    pump_until(lambda: not view._filling_versions, "the fill after Refresh never finished")
+
+    assert len(read) == 5, "Refresh re-reads every installed clone"

@@ -102,6 +102,7 @@ from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
+from yulon.git import RunnerGit
 from yulon.log import get_logger
 from yulon.manifest import ConfKey, Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
@@ -120,7 +121,12 @@ from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
-from yulon.ui.widgets.modules_panel import ModulesPanel, SessionState, build_module_rows
+from yulon.ui.widgets.modules_panel import (
+    ModulesPanel,
+    SessionState,
+    VersionCache,
+    build_module_rows,
+)
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
@@ -588,6 +594,21 @@ class ControllerServices:
     It costs one `git fetch` per installed checkout, which is why it is a button
     and not part of the status poll.
     """
+    module_version: Callable[[Path], str | None] | None = None
+    """What one clone is AT, as `7c02b1d · 2026-09-01`, or None for a game with no clones.
+
+    The THIRD seam about installed modules, and the third cost: `module_updates`
+    fetches (a network round trip per module, so a button), `installed_modules`
+    lists directory names (free, so every reload), and this one runs a local
+    `git log -1` in ONE clone (cheap, but not free — so it is read lazily, once
+    per clone, and cached by `modules_panel.VersionCache`). Splitting it out is
+    what keeps T41's refusal honest: a version line folded into either of the
+    other two would be paid either per reload or never.
+
+    Takes the clone's PATH rather than an id, because the id-to-folder rule is
+    `apply.CLONE_DIRS`'s and the cache already applies it. `None` from the seam
+    is "could not say", which draws nothing.
+    """
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None
     """What is installed here per manifest family, or None for a game with no modules.
 
@@ -944,6 +965,7 @@ def _assemble(
     module_sql: ModuleSqlRoute | None = None,
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
+    module_version: Callable[[Path], str | None] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
     module_install_custom: CustomModuleInstall | None = None,
@@ -997,6 +1019,9 @@ def _assemble(
         # T41's cheap twin of the line above, and conditional on the same
         # flag: a game with no `modules/` folder has nothing to mark.
         installed_modules=installed_modules,
+        # T44's version line, on the same flag again: it reads a clone's own
+        # `.git`, and a game with no clones has none to read.
+        module_version=module_version,
         # Defaulted for the same reason again: the four seams behind "Install
         # from link…" and "Install from folder…" belong to the one game whose
         # modules are checkouts under `modules/`, and that factory passes them.
@@ -1354,6 +1379,12 @@ def _for_wotlk(
         installed_modules=(
             (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
         ),
+        # T44 item 1. `RunnerGit` and not the containerized git: this is a
+        # local read of a folder the user can see, it runs once per clone, and
+        # a `docker run` per module to print a sha would cost more than the
+        # line is worth. A machine with no host git answers `None` and the rows
+        # simply show nothing, which is the documented outcome.
+        module_version=(RunnerGit().head_version if entry.has_manifests else None),
         # A module from a link or a folder (design page, lane C's four seams),
         # wired once lanes A and B were on the branch (2026-09-08). Lane C
         # left this as a comment naming the four lines because the objects
@@ -5522,9 +5553,15 @@ class ControllerView(QWidget):
         # hand, a folder deleted outside the app -- used to need a restart
         # before the tab noticed.
         self.refresh_modules_button = QPushButton("Refresh", tab)
-        self.refresh_modules_button.clicked.connect(self.reload_modules)
+        # `refresh_modules()` and not `reload_modules()`: Refresh is the press
+        # that means "read the disk again", so it is the one that throws the
+        # version cache away. Every OTHER caller of `reload_modules()` is a
+        # redraw after something this app did, and those invalidate the one
+        # clone they changed (T44 item 1).
+        self.refresh_modules_button.clicked.connect(self.refresh_modules)
         self.refresh_modules_button.setToolTip(
-            "Read this install's module folders again. Cheap: directory names, no network."
+            "Read this install's module folders again. Cheap: directory names and one "
+            "`git log -1` per module, no network."
         )
         # The two whose subject is not in the catalog at all: a module this app
         # does not ship, named by the user.
@@ -5676,6 +5713,12 @@ class ControllerView(QWidget):
         # write to different widgets. See `LineRelay`.
         self._module_sql_relay = LineRelay(self)
         self._module_sql_relay.line.connect(self._module_sql_line)
+        # T44 item 1. A game with no `module_version` seam gets a cache whose
+        # reader always answers `None`, rather than a `None` cache every caller
+        # would have to branch on: the rows then show nothing where the version
+        # goes, which is the same thing a machine with no git shows.
+        self._versions = VersionCache(self.services.module_version or (lambda _path: None))
+        self._filling_versions = False
         self.reload_modules()
         # The gate that used to grey two toolbar buttons now greys every row's
         # own press: there is no other control left for it to act on.
@@ -5813,6 +5856,11 @@ class ControllerView(QWidget):
                 installed,
                 self._session_state(),
                 self.services.client_dir,
+                # Only what the cache ALREADY knows. Nothing is read here, so
+                # the first paint of the tab costs exactly what it did before
+                # T44 -- the reads happen afterwards, one event-loop turn at a
+                # time, in `_fill_versions()`.
+                versions=self._known_versions(installed),
                 # The STORE's game, which is the game this controller is
                 # looking at. A manifest that names another one is drawn greyed
                 # rather than dropped (T44 item 5), so a row this install
@@ -5826,6 +5874,77 @@ class ControllerView(QWidget):
             # take the report of the action the user just pressed with it.
             self.module_report.appendPlainText("\n".join(broken))
         self._refresh_rebuild_banner()
+        self._start_filling_versions()
+
+    @Slot()
+    def refresh_modules(self) -> None:
+        """The Refresh press: forget what every clone was at, then reload.
+
+        The one invalidation that is not about a single module. A clone can
+        change under this app -- a `git pull` in a terminal, a folder swapped
+        by hand -- and Refresh is the press that says "read the disk again".
+        """
+        self._versions.clear()
+        self.reload_modules()
+
+    def _known_versions(
+        self, installed: Mapping[str, frozenset[str]]
+    ) -> dict[tuple[str, str], str]:
+        """The version of every installed clone the cache has ALREADY read.
+
+        Reads nothing. `VersionCache.known()` is the no-read accessor for
+        exactly this call site: a version lookup that read here would put a
+        `git log` per installed module back on every reload, which is the cost
+        T41 refused and T42 restated.
+        """
+        server_dir = self.services.controller.server_dir
+        found: dict[tuple[str, str], str] = {}
+        for family, ids in installed.items():
+            for item_id in ids:
+                version = self._versions.known(server_dir, family, item_id)
+                if version is not None:
+                    found[(family, item_id)] = version
+        return found
+
+    def _start_filling_versions(self) -> None:
+        """Read the clones this tab has not read yet, AFTER the tab is on screen.
+
+        One module per event-loop turn, through `QTimer.singleShot(0, ...)`:
+        the reads are subprocesses, and twenty of them in a row on the GUI
+        thread is the second of a frozen tab that item 1 forbids. A row that
+        fills in late is fine.
+
+        `_filling_versions` keeps one walk running at a time. `reload_modules()`
+        is called after every install, every remove and every update check, and
+        a second walk started by a reload that happened mid-walk would read the
+        same clones twice.
+        """
+        if self._filling_versions or self.services.module_version is None:
+            return
+        self._filling_versions = True
+        QTimer.singleShot(0, self._fill_next_version)
+
+    @Slot()
+    def _fill_next_version(self) -> None:
+        """Read ONE unread clone, draw it, and come back for the next.
+
+        Every refusal this can meet is already inside the seam
+        (`git.RunnerGit.head_version` answers `None` for a folder with no
+        `.git`, a git that refused and a git that is not there), so there is
+        nothing to catch here and nothing that can turn a reload into a
+        failure.
+        """
+        server_dir = self.services.controller.server_dir
+        for widget in self.modules_panel.rows():
+            row = widget.data
+            if not row.installed or self._versions.has(server_dir, row.family, row.id):
+                continue
+            self.modules_panel.set_version(
+                row.family, row.id, self._versions.fill(server_dir, row.family, row.id)
+            )
+            QTimer.singleShot(0, self._fill_next_version)
+            return
+        self._filling_versions = False
 
     def _forget_what_is_no_longer_installed(self, installed: Mapping[str, frozenset[str]]) -> None:
         """Drop every owed fact about a module that is no longer on disk (round 2).
@@ -6119,6 +6238,11 @@ class ControllerView(QWidget):
         pending-SQL list names files nothing will read.
         """
         item_id = result.item_id
+        # Whatever the action was, this module's clone may be at a different
+        # commit now: an install clones or fast-forwards it, a remove deletes
+        # it. Dropped before `reload_modules()` runs, so the redraw does not
+        # hand the row the sha it had before the action (T44 item 1).
+        self._versions.forget(item_id)
         if result.action == "remove":
             self._rebuild_owed.discard(item_id)
             self._sql_owed.pop(item_id, None)

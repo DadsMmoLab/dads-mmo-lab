@@ -1158,3 +1158,200 @@ def test_a_fact_chip_opens_nothing(qapp: object) -> None:
 
     assert row.detail_visible() is False
     row.hide()
+
+
+# ------------------------------------------------------- the version line (T44)
+
+
+class _Reader:
+    """A `head_version` seam that counts how many times each path was asked."""
+
+    def __init__(self, answers: dict[str, str | None] | None = None) -> None:
+        self.answers = answers or {}
+        self.asked: list[Path] = []
+
+    def __call__(self, path: Path) -> str | None:
+        self.asked.append(path)
+        return self.answers.get(path.name)
+
+
+def test_a_version_is_read_once_and_then_remembered() -> None:
+    """The whole point of item 1: a `git log` per row per reload is what T41 refused.
+
+    Mutation: drop the `_known` write in `fill()` and the reader is asked again
+    on every paint, which is the cost this class exists to remove.
+    """
+    reader = _Reader({"mod-a": "7c02b1d · 2026-09-01"})
+    cache = mp.VersionCache(reader)
+    root = Path("/srv")
+
+    assert cache.fill(root, "module", "mod-a") == "7c02b1d · 2026-09-01"
+    assert cache.fill(root, "module", "mod-a") == "7c02b1d · 2026-09-01"
+
+    assert reader.asked == [root / "modules" / "mod-a"]
+
+
+def test_a_clone_that_cannot_say_is_remembered_as_not_saying() -> None:
+    """`None` is cached too, or every paint retries a subprocess for every such row.
+
+    A `modules/` folder also holds `CMakeLists.txt` and friends, and a user can
+    copy a module in with no `.git` in it (`apply.ModuleUpdate.is_checkout`).
+    Those rows answer `None` forever and must cost one read, not one per paint.
+
+    Mutation: cache only truthy answers and the reader is asked twice.
+    """
+    reader = _Reader({})
+    cache = mp.VersionCache(reader)
+    root = Path("/srv")
+
+    assert cache.fill(root, "module", "mod-hand") is None
+    assert cache.fill(root, "module", "mod-hand") is None
+
+    assert len(reader.asked) == 1
+    assert cache.has(root, "module", "mod-hand") is True, "read-and-said-nothing is not unread"
+
+
+def test_known_never_reads_so_the_first_paint_cannot_block() -> None:
+    """The rule the builder is called under: draw what is known, read nothing.
+
+    Mutation: make `known()` call `fill()` and `build_module_rows()` pays a
+    subprocess per installed row on every reload -- the exact thing item 1
+    forbids, and it would still be GREEN on every other test in this file.
+    """
+    reader = _Reader({"mod-a": "7c02b1d · 2026-09-01"})
+    cache = mp.VersionCache(reader)
+    root = Path("/srv")
+
+    assert cache.known(root, "module", "mod-a") is None
+    assert reader.asked == []
+
+    cache.fill(root, "module", "mod-a")
+    assert cache.known(root, "module", "mod-a") == "7c02b1d · 2026-09-01"
+
+
+def test_forget_drops_one_module_in_every_family_and_clear_drops_all() -> None:
+    """Invalidation: an install, a remove or an update changes exactly one clone.
+
+    `forget()` matches by BARE ID across every family, because that is what an
+    `ApplyReport.item_id` is -- there is no family on it (T42 round 2's rule,
+    and `_forget_what_is_no_longer_installed()`'s).
+
+    Mutation: make `forget()` a no-op and a module updated in place goes on
+    showing the sha it had before the pull, which is a wrong sha rather than
+    no sha.
+    """
+    reader = _Reader({"bmah": "aaaaaaa · 2026-01-01"})
+    cache = mp.VersionCache(reader)
+    root = Path("/srv")
+    cache.fill(root, "module", "bmah")
+    cache.fill(root, "keg", "bmah")
+    cache.fill(root, "module", "mod-a")
+    asked = len(reader.asked)
+
+    cache.forget("bmah")
+
+    assert cache.has(root, "module", "bmah") is False
+    assert cache.has(root, "keg", "bmah") is False
+    assert cache.has(root, "module", "mod-a") is True, "a neighbour's entry is not dropped"
+    cache.fill(root, "module", "bmah")
+    assert len(reader.asked) == asked + 1
+
+    cache.clear()
+    assert cache.has(root, "module", "bmah") is False
+    assert cache.has(root, "module", "mod-a") is False
+
+
+def test_two_families_that_share_an_id_are_two_clones_and_two_entries() -> None:
+    """T42 round 2's collision, one surface further along.
+
+    `ale` and `keg` share `ale_scripts/`, but `module` and `keg` do not: a
+    `bmah` module and a `bmah` keg are different folders with different shas,
+    and one cache entry would show one folder's sha on the other's row.
+
+    Mutation: key on `(server_dir, item_id)` and the keg row reads the
+    module's sha.
+    """
+    reader = _Reader({"bmah": "aaaaaaa · 2026-01-01"})
+    cache = mp.VersionCache(reader)
+    root = Path("/srv")
+
+    cache.fill(root, "module", "bmah")
+    cache.fill(root, "keg", "bmah")
+
+    assert reader.asked == [root / "modules" / "bmah", root / "ale_scripts" / "bmah"]
+
+
+def test_a_different_server_dir_is_a_different_entry() -> None:
+    """The key the ticket names, and it is not decoration: two installs, two shas.
+
+    Mutation: drop `server_dir` from the key and switching installs shows the
+    other one's version until something invalidates the cache.
+    """
+    reader = _Reader({"mod-a": "7c02b1d · 2026-09-01"})
+    cache = mp.VersionCache(reader)
+
+    cache.fill(Path("/srv/one"), "module", "mod-a")
+
+    assert cache.known(Path("/srv/two"), "module", "mod-a") is None
+
+
+def test_the_builder_carries_the_version_it_was_handed_and_nothing_else() -> None:
+    """Only INSTALLED rows, and only what is already known (item 1's two rules).
+
+    Mutation: call the version lookup for every row and a catalog of 41 rows
+    reads 41 clone folders, 20 of which are not there.
+    """
+    rows = mp.build_module_rows(
+        [_m("mod-a"), _m("mod-b")],
+        {"module": frozenset({"mod-a"})},
+        mp.SessionState(),
+        None,
+        # `mod-b` is NOT installed and a version is offered for it anyway --
+        # which is the shape a stale cache entry has after a remove. An
+        # uninstalled row has no clone, so it must show nothing.
+        versions={
+            ("module", "mod-a"): "7c02b1d · 2026-09-01",
+            ("module", "mod-b"): "ffffff0 · 2020-01-01",
+        },
+    )
+
+    assert _row(rows, "mod-a").version == "7c02b1d · 2026-09-01"
+    assert _row(rows, "mod-b").version is None, "an uninstalled row has no clone to be AT"
+
+
+def test_a_row_with_no_version_yet_shows_nothing_where_the_version_goes(qapp: object) -> None:
+    """A row that renders late is fine; a placeholder that is not a sha is not.
+
+    Mutation: show `"—"` (or the id, or "unknown") and a user reads it as
+    something git said.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+
+    assert panel.row("mod-a").version_label.text() == ""
+
+
+def test_set_version_fills_the_row_in_place_without_rebuilding_it(qapp: object) -> None:
+    """The late fill must not be a reload: a reload loses the selection and the toggles.
+
+    Mutation: have `set_version()` call `set_rows()` again and the identity
+    assertion fails -- which is the version line taking the user's place in the
+    list away from them once per module.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+    before = panel.row("mod-a")
+
+    panel.set_version("module", "mod-a", "7c02b1d · 2026-09-01")
+
+    assert panel.row("mod-a") is before
+    assert before.version_label.text() == "7c02b1d · 2026-09-01"
+
+
+def test_set_version_on_a_row_that_is_gone_is_ignored(qapp: object) -> None:
+    """The fill is asynchronous, so a row can be removed between the read and the write.
+
+    Mutation: index `self._rows[key]` directly and a remove during a fill
+    raises a KeyError out of a timer callback.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+
+    panel.set_version("module", "mod-gone", "7c02b1d · 2026-09-01")  # must not raise
