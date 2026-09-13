@@ -75,3 +75,33 @@ Three of the user's screenshots, read on the owner's instruction: the removal re
 `1972 → 1922` objects after removing an unrelated module (which refuted the lead's first,
 wrong diagnosis), and the Error tab naming `ChallengeModes.cpp:448`. See
 `pyplan/gates/t52-challenge-modes-2026-09-13/`.
+
+## Done — the entry is dropped (owner's call, 2026-09-13)
+
+Option 1. `manifests/wow-wotlk/modules/mod-challenge-modes.json` deleted and the id removed
+from `manifests/wow-wotlk/modules.json`. The catalog goes 21 modules → 20.
+
+**Nobody loses what they already installed.** T41's `NOT_IN_CATALOG` row means a clone still on
+disk renders as `installed here — not in this game's catalog`, with the report line explaining
+why it has no actions — so it stays visible and removable rather than silently disappearing.
+Dropping the entry stops Yu'lon OFFERING the module; it does not hide one already there.
+
+**No new test, and the reason is worth writing down.** The obvious candidate — asserting this
+id is absent — would be a test that forbids ever re-adding a fixed version, which is the wrong
+thing to pin. What actually failed here cannot be caught without compiling the module, and the
+real guard is the pinning work below. The existing
+`test_bundled_store_loads_every_family_typed` still covers the shape of what remains.
+
+**One thing this change left on a knife edge:** that test asserts `total >= 40` across the
+WotLK families, and the drop takes the total from 41 to exactly 40. It passes, and the next
+legitimate removal trips it. Deliberately NOT adjusted here — lowering an arbitrary floor to
+accommodate a change is how a smoke test stops smoking. It wants a real census test instead,
+which belongs with the pinning work.
+
+## Still open, and it is the bigger half
+
+**No manifest pins anything.** Every `source` in every family is `{"repo": "..."}`. This ticket
+removed the one entry that has already bitten a user; the mechanism that produced it is
+untouched, and the next module to change its hooks upstream will do this again. That work wants
+its own ticket: a `rev` (or at least a `branch`) per entry, and something in CI that notices
+when a pinned revision stops matching what the catalog claims.
