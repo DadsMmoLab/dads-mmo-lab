@@ -1354,3 +1354,51 @@ def test_the_chips_are_keyed_by_family_too_and_all_three_facts_move_together() -
     assert mp.CHIP_SQL_PENDING not in module_chips
     assert mp.chip_update_label(2) in module_chips
     assert ale_chips == [mp.CHIP_SQL_PENDING]
+
+
+def test_a_row_whose_conflict_is_installed_cannot_be_installed_from_the_tab() -> None:
+    """The tab must not offer what the applier will refuse (T55).
+
+    T53 made `install()` refuse a module whose declared conflict is already on
+    disk, which is right and is where the safety lives. It left the tab
+    offering it: a user still pressed Install to be told no. That is the same
+    row the catalog already knows is unavailable.
+
+    The decision is `apply.conflicting_installed()`, shared with the applier's
+    refusal, so the two cannot answer differently — a tab with its own copy of
+    this rule is how it comes to offer what the applier declines.
+
+    Mutation: have the row read `manifest.conflicts_with` instead of asking
+    what is installed, and `mod-ah-bot-plus` goes uninstallable on a machine
+    that has neither.
+    """
+    catalog = [
+        _m("mod-ah-bot", conflicts_with=("mod-ah-bot-plus",)),
+        _m("mod-ah-bot-plus", conflicts_with=("mod-ah-bot",)),
+    ]
+    rows = _rows(catalog, {"module": frozenset({"mod-ah-bot"})})
+
+    blocked = _row(rows, "mod-ah-bot-plus")
+    assert not blocked.installable
+    assert blocked.install_reason is not None
+    assert "mod-ah-bot" in blocked.install_reason
+
+    # The one that IS installed is untouched: it offers Remove, not Install.
+    assert _row(rows, "mod-ah-bot").installed
+
+
+def test_a_declared_conflict_that_is_not_installed_blocks_nothing() -> None:
+    """Declaring a conflict says nothing about whether the other thing is here.
+
+    Four mods name each other (buff/xbuff/nerf/baby-mobs). A row that read the
+    declaration rather than the disk would render all four permanently
+    uninstallable on a machine with none of them.
+    """
+    catalog = [
+        _m("buff-mobs", conflicts_with=("nerf-mobs", "baby-mobs")),
+        _m("nerf-mobs", conflicts_with=("buff-mobs", "baby-mobs")),
+    ]
+    rows = _rows(catalog, {})
+    for item in ("buff-mobs", "nerf-mobs"):
+        assert _row(rows, item).installable, item
+        assert _row(rows, item).install_reason is None
