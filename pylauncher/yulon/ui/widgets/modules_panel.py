@@ -23,8 +23,8 @@ FOLDER. Reading it per family listed `bmah` twice on the owner's own install
 
 Nothing in this module imports `yulon.ui.controller_view`, and nothing imports
 the decorations modules: upstream `Yulon` carries Baerthe's passes on those and
-`dadcraft_decorations.py` there (T42; upstream has since renamed it from `warcraft_`). Colours come from the
-`COLOR_*` constants `theme.py` exports.
+`dadcraft_decorations.py` there (T42; upstream has since renamed it from
+`warcraft_`). Colours come from the `COLOR_*` constants `theme.py` exports.
 """
 
 from __future__ import annotations
@@ -79,6 +79,27 @@ card. The two are kept in step by `test_every_family_has_a_title`.
 The order rows are drawn in is `FAMILY_FILES`'s, not this mapping's -- the store
 owns the order, and a second ordering here would be a second place for it to
 drift.
+"""
+
+FAMILY_HINTS: dict[ManifestType, str] = {
+    "module": "compiled into the worldserver — a rebuild is owed before one of these runs",
+    "ale": "no rebuild — the world reloads them on restart",
+    "keg": "Dad's MMO Lab bundles: server side plus a client addon",
+    "mod": "SQL and conf only — no compile; the importer applies the SQL",
+}
+"""The sentence under each card's title, saying what that family COSTS (T44 item 3).
+
+Beside `FAMILY_TITLES` and kept in step with it by
+`test_every_family_has_a_hint_that_says_what_that_family_costs`, for the same
+reason the titles are here rather than in `manifest_store.py`: these are copy,
+and the store has no business knowing how a tab words a card.
+
+The four differ in exactly one thing a user has to know before pressing
+Install — whether what they install reaches the running server by itself. A
+`module` is C++ and is compiled into the worldserver, so it does not; an `ale`
+script is read again at the next world start; a `mod` is SQL and conf files; a
+`keg` also copies files into the game CLIENT, which is the one family that
+touches a folder outside the server directory at all.
 """
 
 NOT_IN_CATALOG = "installed here — not in this game's catalog"
@@ -576,11 +597,20 @@ class RowWidget(QFrame):
 class _FamilyCard(QGroupBox):
     """One family's card: the installed half, then the rest behind a toggle."""
 
-    def __init__(self, family: str, title: str, parent: QWidget | None = None) -> None:
+    def __init__(self, family: str, title: str, hint: str, parent: QWidget | None = None) -> None:
         super().__init__(title, parent)
         self.family = family
+        self.setObjectName("moduleFamilyCard")
         box = QVBoxLayout(self)
         box.setSpacing(4)
+        # Above the header rather than beside it: the count answers "how many do
+        # I have?" and the hint answers "what does having one cost?", and a
+        # single line carrying both put the second half off the right edge of
+        # the narrow card the mockup draws.
+        self.hint_label = QLabel(hint, self)
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED}; font-style: italic;")
+        box.addWidget(self.hint_label)
         self.installed_header = QLabel("Installed (0)", self)
         self.installed_header.setStyleSheet(f"color: {COLOR_TEXT_PRIMARY}; font-weight: bold;")
         box.addWidget(self.installed_header)
@@ -614,6 +644,21 @@ class _FamilyCard(QGroupBox):
             self._box.addWidget(self.available_box)
         else:
             self.available_box.setVisible(False)
+
+    def laid_out_hint(self) -> QLabel | None:
+        """The hint label only if this card really LAYS IT OUT, else `None`.
+
+        Read off the layout for `laid_out_rows()`'s reason, and the reason is
+        not theoretical here: a `QLabel` parented to this card but added to no
+        layout is still `isVisibleTo()` the panel and still carries its text,
+        so the first version of this test passed with the `addWidget` call
+        deleted (measured, T44).
+        """
+        for index in range(self._box.count()):
+            item = self._box.itemAt(index)
+            if item is not None and item.widget() is self.hint_label:
+                return self.hint_label
+        return None
 
     def laid_out_rows(self) -> list[RowWidget]:
         """The rows as this card really lays them out: the installed box, then the other.
@@ -724,7 +769,7 @@ class ModulesPanel(QWidget):
                 # The rule, applied once per family and never again: a family
                 # you have something in opens on what you HAVE.
                 self._open[kind] = not any(row.installed for row in family)
-            card = _FamilyCard(kind, FAMILY_TITLES[kind], self._content)
+            card = _FamilyCard(kind, FAMILY_TITLES[kind], FAMILY_HINTS[kind], self._content)
             # Built in the order they were HANDED to us and only then split into
             # the two halves, so `rows()` reports the order the tab draws in
             # rather than the order the cards happen to be filled in. Building
@@ -834,6 +879,15 @@ class ModulesPanel(QWidget):
     def installed_header(self, family: str) -> QLabel | None:
         card = self._cards.get(family)
         return None if card is None else card.installed_header
+
+    def family_hint(self, family: str) -> QLabel | None:
+        """The card's own "what this family costs" line, as the card really lays it out.
+
+        `None` for a family with no card AND for a card that built the label
+        without putting it anywhere -- see `_FamilyCard.laid_out_hint()`.
+        """
+        card = self._cards.get(family)
+        return None if card is None else card.laid_out_hint()
 
     # ------------------------------------------------------------------ acting
 

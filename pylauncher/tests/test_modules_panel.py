@@ -880,3 +880,43 @@ def test_a_family_that_gains_its_first_installed_row_stays_open(qapp: object) ->
     panel.set_rows(_catalog_rows({"module": frozenset({"mod-a"})}))
 
     assert panel.available_open("module") is True
+
+
+# ------------------------------------------------------------- section hints (T44)
+
+
+def test_every_family_has_a_hint_that_says_what_that_family_costs() -> None:
+    """The mockup's copy beside `Installed (N)`, per family (T44 item 3).
+
+    Not decoration: the four families differ in exactly one thing a user has to
+    know before pressing Install -- whether the change reaches the running
+    server by itself. A C++ module does not (it is compiled in), an ALE script
+    does at the next restart, a mod is SQL and conf, a keg also touches the
+    game client. The assertion is on that word, not on the prose around it.
+
+    Mutation: drop the `keg` key and `set(FAMILY_HINTS) == set(FAMILY_FILES)`
+    fails; drop "compil" from the `module` hint and the one family that owes a
+    rebuild stops saying so.
+    """
+    assert set(mp.FAMILY_HINTS) == set(mp.FAMILY_FILES)
+    assert "compil" in mp.FAMILY_HINTS["module"]
+    assert "no rebuild" in mp.FAMILY_HINTS["ale"]
+    assert "client" in mp.FAMILY_HINTS["keg"]
+    assert "SQL" in mp.FAMILY_HINTS["mod"]
+
+
+def test_a_family_card_draws_its_hint_beside_the_installed_header(qapp: object) -> None:
+    """A mapping nothing renders is a mapping that is not on the tab.
+
+    Mutation: build the label and never add it to the card's layout ->
+    `family_hint()` answers `None`. The first version of this test asserted
+    `isVisibleTo()` alone and SURVIVED that mutation (measured): a QLabel
+    parented to the card but laid out nowhere is still visible-to it and still
+    carries its text, so the reading has to come off the layout.
+    """
+    panel = _panel(_catalog_rows({"module": frozenset({"mod-a"})}))
+
+    hint = panel.family_hint("module")
+    assert hint is not None
+    assert hint.text() == mp.FAMILY_HINTS["module"]
+    assert hint.isVisibleTo(panel)
