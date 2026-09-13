@@ -437,7 +437,16 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # same fact asked cheaply: which folders are under `modules/`. A game
         # with no such folder has nothing to read and nothing to mark, so its
         # absence there is the module surface and not a gap.
-        uncounted = set() if counted else {"module_updates", "installed_modules"} | custom
+        #
+        # T44's `module_version` rides with them for the third size of the same
+        # fact: what ONE of those folders is at, by a local `git log -1` in its
+        # `.git`. A game with no `modules/` folder has no clone to read, so its
+        # absence is the module surface too -- and a day when it is offered
+        # without the two above would be a game reading a version out of
+        # folders it has just said it cannot list.
+        uncounted = (
+            set() if counted else {"module_updates", "installed_modules", "module_version"} | custom
+        )
         # 8.6's My Party, and the one seam whose absence is decided by the
         # ENGINE rather than by a measurement. The route is `mod-ale`, an
         # AzerothCore Lua module hooking AzerothCore's command table, and the

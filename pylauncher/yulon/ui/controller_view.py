@@ -6799,7 +6799,6 @@ class ControllerView(QWidget):
         self.tuning_panel.file_save_pressed.connect(self.save_tuning_file)
         self.tuning_panel.file_reload_pressed.connect(self.reload_tuning_file)
         self.tuning_panel.file_revert_pressed.connect(self.revert_tuning_file)
-        self.tuning_panel.edited.connect(self._set_tuning_revert_all)
         # The one control on this tab that is not a save: it re-reads the conf
         # files off disk. It exists because the values here are read ONCE per
         # reload and a server, an editor or another Yu'lon window can change a
@@ -6821,6 +6820,13 @@ class ControllerView(QWidget):
             "Put every control on this tab back to what its file says. Writes nothing."
         )
         self.tuning_revert_all_button.setEnabled(False)
+        # Connected HERE and not up with the panel's other signals: this slot
+        # reads the button above, so the connect must not exist before the
+        # button does. Nothing can emit `edited` in between today -- the row
+        # controls are given their value before their signals are connected --
+        # but an ordering that is only provably safe is an ordering the next
+        # edit breaks silently.
+        self.tuning_panel.edited.connect(self._set_tuning_revert_all)
         # The two that cost something. They are on THIS tab because this is
         # the tab that prices a change -- `tuning.apply_sentence()` has been
         # naming a restart and a recreate since T43 while the app had no

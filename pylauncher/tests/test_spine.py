@@ -2340,6 +2340,18 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "that lists as empty falls back to the conventional name in the folder the user "
         "named, which is a path they can see and correct"
     ),
+    ("ui/gamepad.py", "_iter_focusable"): (
+        "NOT a folder listing. `walk` is one of the eight spellings this audit reads, and "
+        "here it is a LOCAL generator over Qt's `QWidget.children()` that `_iter_focusable` "
+        "calls on the widget tree -- no path, no filesystem, and nothing written anywhere. "
+        "Kept in the map rather than special-cased out of `_LISTING_CALLS`: the audit is an "
+        "equality, and narrowing the set it matches on to dodge one false positive is how it "
+        "stops seeing the class it enumerates (see `_LISTING_CALLS`'s own record of that "
+        "happening twice)"
+    ),
+    ("ui/gamepad.py", "walk"): (
+        "the same generator calling itself on each child widget, for the reason above"
+    ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"
