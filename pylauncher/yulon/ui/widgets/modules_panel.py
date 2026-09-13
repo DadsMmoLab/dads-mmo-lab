@@ -62,6 +62,7 @@ from yulon.ui.theme import (
     COLOR_TEXT_WARNING,
     COLOR_UNCOMMON,
 )
+from yulon.ui.widgets.panel_style import panel_qss
 
 FAMILY_TITLES: dict[ManifestType, str] = {
     "module": "C++ modules",
@@ -1034,6 +1035,10 @@ class ModulesPanel(QWidget):
         self._open: dict[str, bool] = {}
         self._selected: tuple[str, str] | None = None
         self._actions_enabled = True
+        # The shared look (T44 item 6), set on the PANEL so every card and
+        # every button inside it inherits it. Nothing here invents a colour --
+        # see `panel_style`.
+        self.setStyleSheet(panel_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self._area = QScrollArea(self)

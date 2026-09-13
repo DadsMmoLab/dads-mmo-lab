@@ -52,6 +52,7 @@ from yulon.ui.theme import (
     COLOR_TEXT_WARNING,
     COLOR_UNCOMMON,
 )
+from yulon.ui.widgets.panel_style import panel_qss
 
 ControlKind = Literal["switch", "spinner", "box", "none"]
 
@@ -581,6 +582,8 @@ class CardWidget(QGroupBox):
     def __init__(self, card: TuningCard, parent: QWidget | None = None) -> None:
         super().__init__(card.module_name, parent)
         self.card = card
+        # What `panel_style.panel_qss()` selects to notch the title centre-top.
+        self.setObjectName("tuningCard")
         box = QVBoxLayout(self)
         box.setSpacing(4)
 
@@ -683,6 +686,7 @@ class TuningPanel(QWidget):
         self._cards: dict[tuple[str, str], CardWidget] = {}
         self._order: list[tuple[str, str]] = []
         self._actions_enabled = True
+        self.setStyleSheet(panel_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.split = QSplitter(Qt.Orientation.Horizontal, self)
