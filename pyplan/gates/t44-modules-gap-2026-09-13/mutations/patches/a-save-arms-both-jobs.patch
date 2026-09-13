@@ -1,0 +1,15 @@
+# gate: tests/test_controller_view.py -q -k 'arms_exactly or outside_every_bind'
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..3b5929d2 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -6993,8 +6993,7 @@ class ControllerView(QWidget):
+         start and a restart is enough; one outside every bind is a copy baked
+         into the image, and only a recreate picks the new one up.
+         """
+-        rule = tuning.file_rule(file)
+-        if rule in TUNING_JOB_WORDS:
++        for rule in TUNING_JOB_WORDS:
+             self._tuning_owed.setdefault(rule, set()).add(file)
+         self._refresh_tuning_owed()
+ 

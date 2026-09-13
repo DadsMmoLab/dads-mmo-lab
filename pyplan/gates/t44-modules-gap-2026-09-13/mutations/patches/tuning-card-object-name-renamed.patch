@@ -1,0 +1,14 @@
+# gate: tests/test_panel_style.py -q
+diff --git a/pylauncher/yulon/ui/widgets/tuning_panel.py b/pylauncher/yulon/ui/widgets/tuning_panel.py
+index fe8ef679..cfc327d8 100644
+--- a/pylauncher/yulon/ui/widgets/tuning_panel.py
++++ b/pylauncher/yulon/ui/widgets/tuning_panel.py
+@@ -596,7 +596,7 @@ class CardWidget(QGroupBox):
+         super().__init__(card.module_name, parent)
+         self.card = card
+         # What `panel_style.panel_qss()` selects to notch the title centre-top.
+-        self.setObjectName("tuningCard")
++        self.setObjectName("moduleCard")
+         box = QVBoxLayout(self)
+         box.setSpacing(4)
+ 

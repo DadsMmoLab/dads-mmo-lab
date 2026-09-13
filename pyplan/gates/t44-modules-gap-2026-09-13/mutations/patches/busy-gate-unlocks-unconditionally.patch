@@ -1,0 +1,17 @@
+# gate: tests/test_controller_view.py -q -k tuning_bar_goes_dead
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..54c917d8 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -3559,8 +3559,9 @@ class ControllerView(QWidget):
+             # that rule lives, so it is what unlocks them.
+             self.tuning_reload_button.setEnabled(True)
+             self.tuning_banner_button.setEnabled(True)
+-            self._set_tuning_revert_all()
+-            self._refresh_tuning_owed()
++            self.tuning_revert_all_button.setEnabled(True)
++            self.tuning_recreate_button.setEnabled(True)
++            self.tuning_restart_button.setEnabled(True)
+             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
+             # visible at all, and an invisible button being enabled is harmless.
+             self.remove_button.setEnabled(True)

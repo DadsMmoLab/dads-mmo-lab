@@ -1,0 +1,37 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[31m      [100%][0m
+=================================== FAILURES ===================================
+[31m[1m___________ test_the_update_chip_offers_the_pull_and_names_the_press ___________[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_the_update_chip_offers_the_pull_and_names_the_press[39;49;00m() -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""T44 item 2: the chip stops saying Yu'lon cannot do this, because it can.[39;49;00m
+    [33m[39;49;00m
+    [33m    T42's sentence was "Yu'lon has no per-module pull yet, so updating it is a[39;49;00m
+    [33m    job for git in the clone folder". `Applier.update()` is that pull, so the[39;49;00m
+    [33m    chip names the press instead.[39;49;00m
+    [33m[39;49;00m
+    [33m    Round 1 also asserted `"discard" in chip.detail` -- a promise about what[39;49;00m
+    [33m    the press does to the user's work, checked by looking for one word that a[39;49;00m
+    [33m    sentence saying the OPPOSITE contains just as happily. The behaviour is now[39;49;00m
+    [33m    asserted where it lives: `test_apply.py`'s four refusal tests prove[39;49;00m
+    [33m    `update()` refuses rather than resets, and[39;49;00m
+    [33m    `test_controller_view.py::test_the_update_press_refuses_a_checkout_with_[39;49;00m
+    [33m    work_in_it_and_says_why` proves the press reaches them. A word in a string[39;49;00m
+    [33m    is not evidence.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: `update-chip-has-no-action` -- drop the `action` and the subpanel[39;49;00m
+    [33m    shows a sentence with no button, which is the tab as T42 shipped it.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        session = mp.SessionState(behind={([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m): [94m3[39;49;00m})[90m[39;49;00m
+        rows = _rows([_m([33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m)], {[33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m: [96mfrozenset[39;49;00m({[33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m})}, session)[90m[39;49;00m
+    [90m[39;49;00m
+        chip = [96mnext[39;49;00m(c [94mfor[39;49;00m c [95min[39;49;00m _row(rows, [33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m).chips [94mif[39;49;00m c.kind == [33m"[39;49;00m[33mowed[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        [94massert[39;49;00m chip.label == mp.chip_update_label([94m3[39;49;00m)[90m[39;49;00m
+>       [94massert[39;49;00m chip.action == [33m"[39;49;00m[33mupdate[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE       assert None == 'update'[0m
+[1m[31mE        +  where None = Chip(kind='owed', label='Update available — 3 commits behind', detail="mod-a: its upstream has 3 commit(s) this checko...ent repository, has uncommitted changes in it, or carries commits the upstream does not, and says which.", action=None).action[0m
+
+[1m[31mtests/test_modules_panel.py[0m:1297: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_modules_panel.py::[1mtest_the_update_chip_offers_the_pull_and_names_the_press[0m - assert None == 'update'
+[31m[31m[1m1 failed[0m, [32m66 passed[0m[31m in 0.53s[0m[0m

@@ -74,13 +74,11 @@ discovered afterwards.
 from __future__ import annotations
 
 import os
-import shutil
-import stat
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from yulon import dbsecret, docker, logsnap, platform
+from yulon import dbsecret, docker, logsnap, platform, rmtree
 from yulon.catalog import composegen
 from yulon.log import get_logger
 from yulon.ownership import Ownership
@@ -639,89 +637,32 @@ def folder_bytes(path: Path) -> int:
 def remove_tree(path: Path) -> None:
     """Delete a directory tree, or say why it could not be. Never silently partial.
 
-    The plain `shutil.rmtree` first, because on Linux that is the whole story
-    and a pre-emptive `chmod` pass over an AzerothCore checkout is a walk of
-    every inode in a 1.3 GB `.git` for nothing.
+    The mechanism is `rmtree.remove_tree()` -- the read-only retry moved to a
+    leaf module in T49 so `apply`, `git` and `module_source` could reach it too;
+    `purge` transitively imports `apply` and `git`, so they could not import
+    this file. What stays here is `_undeletable()`, which is an UNINSTALL's
+    sentence: it tells the user the containers, volumes and images are already
+    gone, which is true at this point in `run()` and false everywhere else.
 
-    The retry is for Windows, where git writes packs and loose objects
-    read-only: `shutil.rmtree` stops on the first of them and leaves a
-    half-deleted checkout, which is worse than an undeleted one — the
-    `.yulon-install.json` may already be gone, so the NEXT purge answers
-    UNCLAIMED and refuses forever. `_clear_read_only()` clears the bit and the
-    delete is tried again.
-
-    And if it still cannot finish, it RAISES. The Rust prior art's
-    `remove_title_fs()` is `let _ = std::fs::remove_dir_all(...)` on every
-    branch, and Rust's `remove_dir_all` does not clear
-    `FILE_ATTRIBUTE_READONLY` — so on Windows that launcher reports a
-    successful uninstall having deleted nothing. That is the failure this
-    function exists to make impossible: the message names the path and says
-    what to look at.
-
-    The Windows half is unproven from Linux. The retry is exercised here through
-    the POSIX shape of the same stop (a directory with its write bit cleared),
-    and the Windows spelling is owed a press on the gate box.
+    The Rust prior art's `remove_title_fs()` is
+    `let _ = std::fs::remove_dir_all(...)` on every branch, and Rust's
+    `remove_dir_all` does not clear `FILE_ATTRIBUTE_READONLY` -- so on Windows
+    that launcher reports a successful uninstall having deleted nothing. That
+    is the failure this raise exists to make impossible.
     """
     try:
-        shutil.rmtree(path)
-    except OSError:
-        logger.info(f"{path} would not delete; clearing read-only flags and retrying")
-        _clear_read_only(path)
-        _remove_unenterable(path)
-        try:
-            shutil.rmtree(path)
-        except OSError as exc:
-            raise PurgeError(_undeletable(path, exc)) from exc
-    if path.exists():
-        raise PurgeError(_undeletable(path, "it is still there afterwards"))
+        rmtree.remove_tree(path)
+    except rmtree.TreeRemovalError as exc:
+        raise PurgeError(_undeletable(path, _cause(exc))) from exc
 
 
-def _remove_unenterable(path: Path) -> None:
-    """`os.rmdir` every directory entry under `path` that a walk cannot enter.
+def _cause(exc: rmtree.TreeRemovalError) -> object:
+    """What the leaf was given, so `_undeletable()` reads as it always did.
 
-    The second stop the Windows press found, after the read-only one -- measured
-    on `yulon-win11` 2026-09-08 on a real WotLK install
-    (`pyplan/gates/8.9a-wotlk-yulon-win11-2026-09-08/`): AzerothCore's clone
-    stage runs git inside a Linux container with the server dir bind-mounted,
-    so every symlink in the repository lands on NTFS as an
-    `IO_REPARSE_TAG_LX_SYMLINK` reparse point (`0xa000001d`). Python does not
-    know that tag: `entry.is_symlink()` answers False and
-    `entry.is_dir(follow_symlinks=False)` answers True, so `shutil.rmtree`
-    recurses into it and dies with `[WinError 1920] The file cannot be accessed
-    by the system` -- on both presses, with the containers, volumes and images
-    already gone and the folder stuck at 12,405 entries. `_clear_read_only()`
-    cannot help; the entry is not read-only, it is unreadable.
-
-    What the box answered when asked (`probe_lxsymlink.py`): `os.rmdir` removes
-    the reparse point itself, and with it gone `rmtree` walks the rest. The
-    POSIX shape of the same stop is a directory whose mode refuses `scandir`,
-    which `os.rmdir` also takes when it is empty; a non-empty one it cannot
-    take is left for the retry to name. Never follows anything: `rmdir` on a
-    link removes the link, and that is the property that makes this safe to
-    run over a checkout that may point outside itself.
+    The leaf has already wrapped the original in a sentence of its own; the
+    purge sentence wants the bare cause, not that sentence nested inside it.
     """
-    stack = [path]
-    while stack:
-        current = stack.pop()
-        try:
-            with os.scandir(current) as entries:
-                children = list(entries)
-        except OSError:
-            if current == path:
-                return
-            try:
-                os.rmdir(current)
-                logger.info(f"removed an entry the walk could not enter: {current}")
-            except OSError as exc:
-                logger.info(f"could not remove {current}, leaving it for the retry: {exc}")
-            continue
-        for entry in children:
-            try:
-                is_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                is_dir = False
-            if is_dir:
-                stack.append(Path(entry.path))
+    return exc.__cause__ if exc.__cause__ is not None else "it is still there afterwards"
 
 
 def _undeletable(path: Path, problem: object) -> str:
@@ -747,25 +688,3 @@ def _undeletable(path: Path, problem: object) -> str:
         f"partly deleted. This install is still recorded, so the uninstall can be run "
         f"again once the folder can be removed; it will not put back what is gone."
     )
-
-
-def _clear_read_only(path: Path) -> None:
-    """Add the write bit back to everything under `path`, top down.
-
-    Directories first and then their contents, because on POSIX it is the
-    DIRECTORY's write bit that refuses the unlink, and on Windows it is the
-    FILE's read-only attribute that refuses the delete. Clearing both is one
-    walk, and a failure on any single entry is left for the retry to report
-    against the tree rather than raised against one file.
-    """
-    for root, dirs, files in os.walk(path):
-        for name in (*dirs, *files):
-            target = Path(root) / name
-            try:
-                os.chmod(target, target.lstat().st_mode | stat.S_IWRITE)
-            except OSError:
-                continue
-    try:
-        os.chmod(path, path.lstat().st_mode | stat.S_IWRITE)
-    except OSError:
-        pass

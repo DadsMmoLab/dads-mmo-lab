@@ -29,20 +29,32 @@
         {
           "key": "AuctionHouseBot.Account",
           "default": "{bot_account}",
-          "note": "account id owning the bot character"
+          "note": "account id owning the bot character",
+          "label": "Bot account id",
+          "explain": "The account number (in realmd->account table) of the player you want to run as the auction bot.",
+          "type": "int"
         },
         {
           "key": "AuctionHouseBot.GUID",
           "default": "{bot_guid}",
-          "note": "singular on the original module"
+          "note": "singular on the original module",
+          "label": "Bot character GUID",
+          "explain": "The GUID (in characters->characters table) of the player you want to run as the auction bot.",
+          "type": "int"
         },
         {
           "key": "AuctionHouseBot.EnableSeller",
-          "default": "1"
+          "default": "1",
+          "label": "Sell items",
+          "explain": "Enable/Disable the part of AHBot that puts items up for auction.",
+          "type": "bool"
         },
         {
           "key": "AuctionHouseBot.EnableBuyer",
-          "default": "1"
+          "default": "1",
+          "label": "Buy items",
+          "explain": "Enable/Disable the part of AHBot that buys items from players.",
+          "type": "bool"
         }
       ],
       "template": "conf/mod_ahbot.conf.dist"

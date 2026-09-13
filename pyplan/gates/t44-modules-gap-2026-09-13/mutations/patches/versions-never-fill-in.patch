@@ -1,0 +1,13 @@
+# gate: tests/test_controller_view.py -q -k 'version_fills or reload_after_the_fill or refresh_forgets'
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..251fe7b7 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -5954,7 +5954,6 @@ class ControllerView(QWidget):
+             # take the report of the action the user just pressed with it.
+             self.module_report.appendPlainText("\n".join(broken))
+         self._refresh_rebuild_banner()
+-        self._start_filling_versions()
+ 
+     @Slot()
+     def refresh_modules(self) -> None:

@@ -1,0 +1,14 @@
+# gate: tests/test_controller_view.py -q -k 'raw_revert or puts_the_conf_back'
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..40e373e3 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -7314,7 +7314,7 @@ class ControllerView(QWidget):
+             self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
+             return
+         try:
+-            tuning.restore(backups[-1], path)
++            pass
+         except OSError as exc:
+             self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
+             self.action_failed.emit(str(exc))

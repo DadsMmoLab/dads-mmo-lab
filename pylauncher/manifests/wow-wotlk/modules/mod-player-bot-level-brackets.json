@@ -26,19 +26,34 @@
       "file": "env/dist/etc/modules/mod_player_bot_level_brackets.conf",
       "keys": [
         {
-          "key": "BotLevelBrackets.Enabled"
+          "key": "BotLevelBrackets.Enabled",
+          "label": "Enable level brackets",
+          "explain": "Enables the module.",
+          "type": "bool"
         },
         {
-          "key": "BotLevelBrackets.CheckFrequency"
+          "key": "BotLevelBrackets.CheckFrequency",
+          "label": "Check every (seconds)",
+          "explain": "The frequency (in seconds) at which the bot level distribution check is performed.",
+          "type": "int"
         },
         {
-          "key": "BotLevelBrackets.CheckFlaggedFrequency"
+          "key": "BotLevelBrackets.CheckFlaggedFrequency",
+          "label": "Re-check flagged bots every (seconds)",
+          "explain": "The frequency (in seconds) at which the bot level reset is performed for processing safe bots and checking flagged bots that failed safety checks initially.",
+          "type": "int"
         },
         {
-          "key": "BotLevelBrackets.IgnoreGuildBotsWithRealPlayers"
+          "key": "BotLevelBrackets.IgnoreGuildBotsWithRealPlayers",
+          "label": "Leave guilded bots alone",
+          "explain": "When enabled, bots that are in a guild with at least one real (non-bot) player are excluded from bot bracket calculations and will not be level changed or flagged.",
+          "type": "bool"
         },
         {
-          "key": "BotLevelBrackets.IgnoreArenaTeamBots"
+          "key": "BotLevelBrackets.IgnoreArenaTeamBots",
+          "label": "Leave arena-team bots alone",
+          "explain": "When enabled, bots that are members of arena teams are excluded from bot bracket calculations and will not be level changed or flagged. This prevents bots in arena teams from being changed, which would break team compositions.",
+          "type": "bool"
         }
       ],
       "template": "conf/mod_player_bot_level_brackets.conf.dist"

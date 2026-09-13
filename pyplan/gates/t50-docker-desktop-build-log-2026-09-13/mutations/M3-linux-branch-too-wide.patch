@@ -1,0 +1,11 @@
+--- /tmp/d.orig	2026-09-13 19:51:05.225787338 +0200
++++ pylauncher/yulon/docker.py	2026-09-13 19:51:05.243277504 +0200
+@@ -3326,7 +3326,7 @@
+     if not said:
+         return "it printed nothing at all"
+     block, error_line = _buildkit_failure(said)
+-    if block:
++    if block or True:  # M3: the Linux branch swallows every case
+         text = " / ".join(block[-_LAST_WORDS_LINES:])
+         if len(text) > _LAST_WORDS_CHARS:
+             # From the HEAD here, the opposite of the fallback below: a compiler

@@ -1,0 +1,26 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[31m                                                                    [100%][0m
+=================================== FAILURES ===================================
+[31m[1m____________________ test_both_panels_wear_the_shared_sheet ____________________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x6c00940) at 0x748651026ec0>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_both_panels_wear_the_shared_sheet[39;49;00m(qapp: [96mobject[39;49;00m) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""One surface, one sheet. Mutation: set it on one panel and the two tabs differ."""[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m mp.ModulesPanel().styleSheet() == panel_style.panel_qss()[90m[39;49;00m
+>       [94massert[39;49;00m tp.TuningPanel().styleSheet() == panel_style.panel_qss()[90m[39;49;00m
+[1m[31mE       AssertionError: assert '' == '\nQGroupBox#...#8A6510;\n}\n'[0m
+[1m[31mE         [0m
+[1m[31mE         [0m[91m- [39;49;00m[90m[39;49;00m[0m
+[1m[31mE         [91m- QGroupBox#moduleFamilyCard::title { subcontrol-position: top center; left: 0px; }[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         [91m- QGroupBox#tuningCard::title { subcontrol-position: top center; left: 0px; }[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         [91m- QPushButton {[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         [91m-     border-top: 1px solid #8A6510;[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         [91m-     border-left: 1px solid #8A6510;[39;49;00m[90m[39;49;00m...[0m
+[1m[31mE         [0m
+[1m[31mE         ...Full output truncated (9 lines hidden), use '-vv' to show[0m
+
+[1m[31mtests/test_panel_style.py[0m:84: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_panel_style.py::[1mtest_both_panels_wear_the_shared_sheet[0m - AssertionError: assert '' == '\nQGroupBox#...#8A6510;\n}\n'
+[31m[31m[1m1 failed[0m, [32m4 passed[0m[31m in 0.14s[0m[0m

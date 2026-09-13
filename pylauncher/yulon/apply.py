@@ -34,7 +34,7 @@ from pathlib import Path
 from string import Formatter
 from typing import IO, Literal, Protocol
 
-from yulon import docker, platform, runner
+from yulon import docker, platform, rmtree, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -1256,6 +1256,121 @@ class Applier:
         self._dbc(manifest, clone, log)
         return self._report("install", manifest, log)
 
+    def update(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
+        """Fast-forward this module's clone and re-apply it — refusing anything a reset destroys.
+
+        `install()` over a folder that is already a checkout IS the pull: the
+        clone seam runs `git fetch` then `git reset --hard FETCH_HEAD` and
+        re-applies the pin, and everything after it — deploy, patches, SQL,
+        conf, client files — is what has to be redone once the source has
+        moved. So this runs `install()` and does not reimplement any of it.
+
+        **What it adds is the three questions `install()` does not ask, and it
+        adds them here rather than inside `_require_own_clone()` on purpose.**
+        That guard returns the moment this app's own claim reads `OWNED` —
+        before `origin`, before `is_unmodified()` and before
+        `no_local_commits()` — and for a FIRST install into a folder this app
+        made that is right: there is nothing there to lose, and asking would
+        cost a network round trip on every install. For an update the same
+        silence is a `reset --hard` over work nobody looked at, which is the
+        one thing T44's ticket says must not happen: "a dirty clone is not
+        fast-forwarded".
+
+        The three, in the order of what costs least and is most certain:
+
+        1. **The repository.** The update never consults `CloneSpec.url`: the
+           clone seam fetches whatever `origin` the checkout already has. So an
+           app claim — a JSON file under a path this app can write — would
+           otherwise authorise resetting a folder that is a DIFFERENT
+           repository and then deploying this manifest's files, patching them
+           and running its SQL over the result. A local read (`git remote
+           get-url`), so it is asked first and both names go in the refusal.
+        2. **The working tree.** `reset --hard` destroys precisely what `git
+           status` reports. Also a local read.
+        3. **HEAD.** `status` compares the tree and the index against HEAD and
+           says nothing about what HEAD itself carries, so a user who
+           COMMITTED their work passes 1 and 2. `no_local_commits()` counts
+           `FETCH_HEAD..HEAD` after running the update's own fetch, which is
+           why it is asked LAST — it is the one that costs a round trip — and
+           why it also refuses a remote that has REWOUND and a detached HEAD
+           with commits of its own: all three are "HEAD carries something the
+           new tip does not", counted the same way whoever put it there.
+
+        `is True` throughout and never truthiness: `None` is "git could not be
+        asked", which fails closed and says so in its own words. Telling an
+        offline user that they have uncommitted changes is telling them
+        something nobody established (`Ownership`'s three outcomes).
+
+        A folder that is not there at all is refused rather than quietly
+        installed: the press the user made was Update, and an Update that
+        silently installs is a different action wearing the same button.
+        """
+        refusal = self._update_refusal(manifest)
+        if refusal is not None:
+            raise ApplyError(refusal)
+        return self.install(manifest, values)
+
+    def _update_refusal(self, manifest: Manifest) -> str | None:
+        """Why this clone must not be fast-forwarded, in the user's words, or `None`.
+
+        A sentence rather than an enum, unlike `_adoption_refusal()`: every one
+        of these is raised by exactly one caller and read by exactly one
+        person, where an adoption refusal is a fact three branches of
+        `_require_own_clone()` share.
+        """
+        clone = self.clone_dir(manifest)
+        rel = _rel(self.server_dir, clone)
+        if manifest.source is None:
+            return (
+                f"{manifest.id} is not cloned from anywhere, so there is nothing to update. "
+                f"Nothing was changed."
+            )
+        if not (clone / ".git").is_dir():
+            return (
+                f"{manifest.id} is not installed here as a git checkout ({rel}), so there is "
+                f"nothing to update. Install it first. Nothing was changed."
+            )
+        url = manifest.source.url
+        remote = self.remote_url(clone)
+        if remote is None:
+            return (
+                f"{rel} is a git checkout, but git would not say what it is a checkout of, so "
+                f"{manifest.id} was not updated and nothing was changed."
+            )
+        if not same_repo(remote, url):
+            return (
+                f"{rel} is a checkout of {remote}, not of {url}. Updating {manifest.id} would "
+                f"reset that folder to {url} and then deploy this module over it. Nothing was "
+                f"changed."
+            )
+        clean = self.unmodified(clone, ".")
+        if clean is not True:
+            if clean is False:
+                return (
+                    f"{rel} has changes in it that are not committed. Updating {manifest.id} "
+                    f"runs `git reset --hard`, which would delete them. Commit them, stash "
+                    f"them, or copy them somewhere else first. Nothing was changed."
+                )
+            return (
+                f"git could not say whether {rel} has uncommitted changes in it, and updating "
+                f"{manifest.id} would run `git reset --hard` over whatever is there. Nothing "
+                f"was changed."
+            )
+        nothing_of_theirs = self.no_local_commits(clone, manifest.source.branch)
+        if nothing_of_theirs is not True:
+            if nothing_of_theirs is False:
+                return (
+                    f"{rel} carries commits of its own that {url} does not have. Updating "
+                    f"{manifest.id} runs `git reset --hard`, which would move off them and "
+                    f"leave them reachable only through git's reflog. Nothing was changed."
+                )
+            return (
+                f"Yu'lon could not reach {url} to see what updating {manifest.id} would bring "
+                f"in, so it did not touch {rel}. Check this machine's connection and try "
+                f"again. Nothing was changed."
+            )
+        return None
+
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         """Re-apply the value-bearing steps: configure-time patches/SQL and conf keys.
 
@@ -1302,7 +1417,11 @@ class Applier:
         for step in manifest.deploy:
             self._undeploy(step, clone, log)
         if clone.exists():
-            shutil.rmtree(clone)
+            # T49: not `shutil.rmtree`. Git writes packs read-only on Windows and
+            # a bare rmtree stops at the first one, having already deleted an
+            # unknown part of the checkout. Reported from a real install:
+            # `remove sod FAILED: [WinError 5] Access is denied: ...\\pack-2623....idx`.
+            rmtree.remove_tree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
         return self._report("remove", manifest, log)
 
@@ -1865,10 +1984,18 @@ class Applier:
             )
 
     def _rm(self, path: Path, log: _Log) -> None:
-        if path.is_dir():
-            shutil.rmtree(path)
+        # `is_symlink()` FIRST, because `is_dir()` follows the link: a symlink to
+        # a directory used to take the tree branch and, since T49 gave that
+        # branch a retry that walks, would have been followed into somebody
+        # else's files (review, 2026-09-13). A manifest that says "remove this
+        # path" means the link, never what it points at.
+        if path.is_symlink():
+            path.unlink()
+            log.done.append(f"rm {_rel(self.server_dir, path)}")
+        elif path.is_dir():
+            rmtree.remove_tree(path)  # T49: may be a checkout, so read-only packs
             log.done.append(f"rm -r {_rel(self.server_dir, path)}")
-        elif path.is_file() or path.is_symlink():
+        elif path.is_file():
             path.unlink()
             log.done.append(f"rm {_rel(self.server_dir, path)}")
 

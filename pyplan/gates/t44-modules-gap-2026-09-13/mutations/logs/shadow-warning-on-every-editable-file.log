@@ -1,0 +1,34 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m             [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_____ test_the_shadow_warning_is_shown_only_where_a_key_is_really_shadowed _____[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x4126e580) at 0x7fd470ac9c40>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_the_shadow_warning_is_shown_only_where_a_key_is_really_shadowed[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m,[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Round 2's finding 3. Round 1 showed this on EVERY editable conf.[39;49;00m
+    [33m[39;49;00m
+    [33m    A false "you must recreate" is cheap noise; a missing one is a user editing[39;49;00m
+    [33m    a value that silently never applies, which is the T41/T43 defect class[39;49;00m
+    [33m    again. So it is driven by the pairs the view computes[39;49;00m
+    [33m    (`composegen.shadowed_by_env`) and not by "is this file writable".[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: `shadow-warning-on-every-editable-file` -- show it on[39;49;00m
+    [33m    `not read_only` again and a module conf with no env row behind it warns[39;49;00m
+    [33m    about a recreate that has nothing to do with it.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        panel = tp.TuningPanel()[90m[39;49;00m
+    [90m[39;49;00m
+        panel.set_file_text([33m"[39;49;00m[33mA = 1[39;49;00m[33m\n[39;49;00m[33m"[39;49;00m, read_only=[94mFalse[39;49;00m, note=[94mNone[39;49;00m, shadowed=())[90m[39;49;00m
+>       [94massert[39;49;00m [95mnot[39;49;00m panel.shadow_warning.isVisibleTo(panel)[90m[39;49;00m
+[1m[31mE       assert not True[0m
+[1m[31mE        +  where True = <built-in method isVisibleTo of PySide6.QtWidgets.QLabel object at 0x7fd470a37540>(<yulon.ui.widgets.tuning_panel.TuningPanel(0x41e66a90) at 0x7fd470a37100>)[0m
+[1m[31mE        +    where <built-in method isVisibleTo of PySide6.QtWidgets.QLabel object at 0x7fd470a37540> = <PySide6.QtWidgets.QLabel(0x41e8f400) at 0x7fd470a37540>.isVisibleTo[0m
+[1m[31mE        +      where <PySide6.QtWidgets.QLabel(0x41e8f400) at 0x7fd470a37540> = <yulon.ui.widgets.tuning_panel.TuningPanel(0x41e66a90) at 0x7fd470a37100>.shadow_warning[0m
+
+[1m[31mtests/test_tuning_panel.py[0m:681: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_tuning_panel.py::[1mtest_the_shadow_warning_is_shown_only_where_a_key_is_really_shadowed[0m - assert not True
+[31m[31m[1m1 failed[0m, [32m59 passed[0m[31m in 0.29s[0m[0m

@@ -69,6 +69,7 @@ from yulon import (
     platform,
     purge,
     resources,
+    tuning,
     useraccounts,
 )
 from yulon import channel as channel_module
@@ -101,20 +102,33 @@ from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
+from yulon.git import RunnerGit
 from yulon.log import get_logger
-from yulon.manifest import Manifest, Prompt, When
+from yulon.manifest import ConfKey, Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker
 from yulon.ui.icons import dadcraft_icon, get_tab_icon
-from yulon.ui.theme import COLOR_GOLD_LIGHT, COLOR_TEXT_GOLD
+from yulon.ui.theme import (
+    COLOR_BG_PARCHMENT,
+    COLOR_GOLD_LIGHT,
+    COLOR_TEXT_GOLD,
+    COLOR_TEXT_WARNING,
+)
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
+from yulon.ui.widgets.modules_panel import (
+    ModulesPanel,
+    SessionState,
+    VersionCache,
+    build_module_rows,
+)
 from yulon.ui.widgets.party_panel import PartyPanel
+from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
 logger = get_logger(__name__)
 
@@ -580,6 +594,21 @@ class ControllerServices:
     It costs one `git fetch` per installed checkout, which is why it is a button
     and not part of the status poll.
     """
+    module_version: Callable[[Path], str | None] | None = None
+    """What one clone is AT, as `7c02b1d · 2026-09-01`, or None for a game with no clones.
+
+    The THIRD seam about installed modules, and the third cost: `module_updates`
+    fetches (a network round trip per module, so a button), `installed_modules`
+    lists directory names (free, so every reload), and this one runs a local
+    `git log -1` in ONE clone (cheap, but not free — so it is read lazily, once
+    per clone, and cached by `modules_panel.VersionCache`). Splitting it out is
+    what keeps T41's refusal honest: a version line folded into either of the
+    other two would be paid either per reload or never.
+
+    Takes the clone's PATH rather than an id, because the id-to-folder rule is
+    `apply.CLONE_DIRS`'s and the cache already applies it. `None` from the seam
+    is "could not say", which draws nothing.
+    """
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None
     """What is installed here per manifest family, or None for a game with no modules.
 
@@ -936,6 +965,7 @@ def _assemble(
     module_sql: ModuleSqlRoute | None = None,
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
+    module_version: Callable[[Path], str | None] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
     module_install_custom: CustomModuleInstall | None = None,
@@ -989,6 +1019,9 @@ def _assemble(
         # T41's cheap twin of the line above, and conditional on the same
         # flag: a game with no `modules/` folder has nothing to mark.
         installed_modules=installed_modules,
+        # T44's version line, on the same flag again: it reads a clone's own
+        # `.git`, and a game with no clones has none to read.
+        module_version=module_version,
         # Defaulted for the same reason again: the four seams behind "Install
         # from link…" and "Install from folder…" belong to the one game whose
         # modules are checkouts under `modules/`, and that factory passes them.
@@ -1346,6 +1379,12 @@ def _for_wotlk(
         installed_modules=(
             (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
         ),
+        # T44 item 1. `RunnerGit` and not the containerized git: this is a
+        # local read of a folder the user can see, it runs once per clone, and
+        # a `docker run` per module to print a sha would cost more than the
+        # line is worth. A machine with no host git answers `None` and the rows
+        # simply show nothing, which is the documented outcome.
+        module_version=(RunnerGit().head_version if entry.has_manifests else None),
         # A module from a link or a folder (design page, lane C's four seams),
         # wired once lanes A and B were on the branch (2026-09-08). Lane C
         # left this as a comment naming the four lines because the objects
@@ -2200,38 +2239,24 @@ cancel to offer. Abandoning a `compose up` means terminating it, which stops
 """
 
 _IMPORT_TAIL_LINES = 2
-INSTALLED_MARK = "✓"
-"""What marks a row as installed in this server's modules folder (T41).
-
-A leading glyph rather than a trailing "(installed)", so the installed rows line
-up down the left edge of a list 41 entries long and can be found without reading
-a word. The tests import this rather than spelling it, so the mark can change
-without a test being edited into agreement with whatever the view happens to do.
-"""
-
-NOT_IN_CATALOG = "installed here — not in this game's catalog"
-"""The description for a module folder the manifest store has never heard of.
-
-It is installed whatever the catalog thinks, and `apply_module.module_updates()`
-already takes that position for its own rows. A list that silently omitted a
-hand-cloned module would be the same "None of modules detected" in a smaller
-place.
-"""
 
 
-def _clone_dir_of(kind: str) -> str:
-    """Which directory this manifest family's clones land in, by its plain name.
+def _pending_sql_names(report: ApplyReport) -> tuple[str, ...]:
+    """What a report says is still waiting for the importer, named file by file.
 
-    `apply.CLONE_DIRS` is keyed by the `ManifestType` literal; the view carries
-    families around as plain strings (they arrive from `FAMILY_FILES` and from
-    `manifest.type`). Looked up defensively rather than cast: a family with no
-    clone directory gets its own bucket under its own name, which keeps its
-    rows separate instead of merging them into somebody else's folder.
+    `PendingSql.files` is the glob RESOLVED against the clone, and it has three
+    answers. A tuple of paths is what is really on disk; `()` means the glob
+    matched nothing THIS app could count (the layout is per-repository and
+    upstream's own `UpdateFetcher` walks `data/sql` itself); `None` means the
+    path carried an unresolved `{key}`. The last two are named by their glob
+    rather than dropped, because "this module owes SQL and Yu'lon cannot list
+    it" is a different thing from "this module owes nothing" -- collapsing them
+    is the fault `PendingSql`'s own docstring exists to record.
     """
-    for family, folder in apply_module.CLONE_DIRS.items():
-        if family == kind:
-            return folder
-    return kind
+    names: list[str] = []
+    for pending in report.pending_sql:
+        names += list(pending.files) if pending.files else [pending.path]
+    return tuple(names)
 
 
 UNCATALOGUED_PRESS = (
@@ -2241,9 +2266,41 @@ UNCATALOGUED_PRESS = (
 )
 """What a press on one of T41's uncatalogued rows says.
 
-The rows exist so somebody can SEE what is installed; the buttons above them
-cannot act on a module with no manifest. Saying so is the difference between a
-control that is inert and one that looks broken.
+The rows exist so somebody can SEE what is installed; Yu'lon cannot act on a
+module with no manifest. Saying so is the difference between a control that is
+inert and one that looks broken. Since T42 the row carries no Install or Remove
+button at all and this sentence is reached through its context menu, which is
+the only press such a row still answers.
+"""
+
+WHY_UNCATALOGUED = "Why is there no Install or Remove?"
+"""The one entry an uncatalogued row's context menu offers, beside Copy Module ID.
+
+Round 2: the menu offered "Install Selected Module" and "Remove Selected Module"
+on a row with no manifest. Both ended at `UNCATALOGUED_PRESS`, so nothing was
+done to the machine -- but two entries that name an action and then explain that
+the action does not exist are two controls that look live and are not, which is
+the reading this whole ticket exists to remove. One entry, and it names what it
+really does.
+"""
+
+REBUILD_BANNER = (
+    "A rebuild is owed: {names}. The module is on disk, but the running worldserver was "
+    "compiled before it arrived, so nothing it does is live yet."
+)
+"""The amber banner above the family cards, shown only while something owes a rebuild.
+
+It names the modules rather than saying "a module", because the sentence is
+read after several installs and "which one?" is the next question. Session state
+only -- see `ControllerView._rebuild_owed`.
+"""
+
+MODULE_LOAD_FAILED = "!! could not load {kind}s: {exc}"
+"""A family whose manifests will not parse, said in the report box.
+
+It used to be a row in the list. There is no list any more, and a card titled
+with an error would be a fifth family; the report is where every other refusal
+on this tab is read.
 """
 
 MODULE_SQL_RUNNING = "Running the importer over the modules installed here. What it prints:"
@@ -2266,6 +2323,120 @@ No count and no "N modules applied". This tab cannot know that number: the
 importer works a FILE at a time and names each one itself, so a total invented
 here would be the same defect 8.7a's other half was opened for — a module
 reported as done while nothing ran.
+"""
+
+TUNING_SAVED = (
+    "{module}: wrote {keys} in {file}. A backup of the file as it was is beside it at "
+    "{backup}.\n{rule}"
+)
+"""What a guided save reports: what moved, where, and what it costs to apply.
+
+The backup's path is named rather than implied, because Revert is one press and
+the file is one a person may also want to look at by hand.
+"""
+
+TUNING_NOTHING_CHANGED = "{module}: nothing on this card was changed, so nothing was written."
+
+TUNING_REFUSED = "{module}: nothing was written — {why}"
+"""A refusal that names the key, in the box every other answer on this tab is read in.
+
+`tuning.write()` checks every value before it touches the file, so this really
+does mean nothing was written, and saying so is the difference between a user
+who fixes one field and a user who wonders what state their conf is in.
+"""
+
+TUNING_REVERTED = "{module}: put {file} back from {backup}.\n{rule}"
+
+TUNING_NO_BACKUP = (
+    "{module}: there is no backup of {file} to revert to. Yu'lon takes one every time it "
+    "saves, so the first save is what creates it."
+)
+
+TUNING_FILE_SAVED = "Wrote {file}. A backup of it as it was is beside it at {backup}.\n{rule}"
+
+TUNING_FILE_FAILED = "{file} was NOT written: {exc}"
+
+TUNING_LINT_CONFIRM_TITLE = "Save this file anyway?"
+
+MODULE_ACTION_STEPS: dict[str, When] = {
+    "install": "install",
+    "remove": "remove",
+    "update": "install",
+}
+"""Which of a manifest's STEPS each press on the Modules tab runs.
+
+Three presses, three routes on the applier, but only three kinds of step exist
+(`When`) -- an update re-runs the INSTALL-time ones, because over a clone that
+has moved that is exactly what it is. Spelled here rather than cast at the call
+site: `When` is the manifest schema's own word and `"update"` is not one of
+them, so a `cast()` would have been this view telling the type checker
+something the schema does not say.
+"""
+
+TUNING_RELOAD_LABEL = "Reload from disk"
+TUNING_REVERT_ALL_LABEL = "Revert all changes"
+TUNING_RECREATE_LABEL = "Recreate containers…"
+TUNING_RESTART_LABEL = "Restart server…"
+"""The Tuning tab's action bar (T44 item 7). Both ellipses are this app's own
+convention for "this opens a dialog first", and both of these take the server
+down."""
+
+TUNING_RECREATE_TIP = (
+    "Stop and DELETE this install's containers, then start them again from the current "
+    "configuration. Your characters are not affected — the database lives in a Docker volume, "
+    "which is kept. Needed for a setting the running containers do not read from your disk."
+)
+
+TUNING_RESTART_TIP = (
+    "Stop the server and start it again, so the world re-reads the conf files on your disk. "
+    "Everybody online is disconnected."
+)
+
+TUNING_RESTART_CONFIRM = (
+    "Restart the server now?\n\nThe world stops and starts again, so it re-reads the conf "
+    "files on your disk. Anybody playing is disconnected. Waiting on a restart:\n{files}"
+)
+
+TUNING_RECREATE_CONFIRM = (
+    "Recreate the containers now?\n\nThis install's containers are DELETED and created again "
+    "from the current configuration. Your characters are not affected — the database lives in "
+    "a Docker volume, which is kept — but the server goes down and comes back up, which takes "
+    "longer than a restart. Waiting on a recreate:\n{files}"
+)
+
+TUNING_BANNER = "Waiting on a {job}: {files}"
+"""The Tuning tab's banner (T44 item 8), naming the DEAREST job owed and its files."""
+
+TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
+
+TUNING_REVERTED_FILE = "Put {file} back from {backup}.\n{rule}"
+
+TUNING_ALL_REVERTED = (
+    "Every control on this tab is back to what its file says. Nothing was written — this is "
+    "the undo for what you typed here, not for what you saved."
+)
+
+TUNING_NO_FILE_BACKUP = (
+    "There is no backup of {file} to revert to. Yu'lon takes one every time it saves, so the "
+    "first save on this tab is what creates it."
+)
+
+TUNING_CORE_FILE = (
+    "This is the server's own configuration, not a module's. Yu'lon shows it read-only in "
+    "this version: who owns core configuration is a bigger question than one module's conf."
+)
+"""Why `worldserver.conf` is listed but not editable here (T43's own follow-up)."""
+
+TUNING_CORE_FILES: tuple[str, ...] = (
+    "env/dist/etc/worldserver.conf",
+    "env/dist/etc/authserver.conf",
+    "env/dist/etc/modules/playerbots.conf",
+)
+"""The install's own conf files, listed read-only beside the module ones.
+
+Named here and not discovered by a glob of `env/dist/etc`: a glob would also
+list every module conf a second time, and the point of the list is that these
+three are the ones this tab deliberately will not write.
 """
 
 MODULE_SQL_BUTTON_LABEL = "Apply module SQL"
@@ -2478,14 +2649,6 @@ class ControllerView(QWidget):
         self._status_pending = False
         self._verdict_pending = False
         self._module_pending: str | None = None
-        # Whether the module job in flight is a CUSTOM install. A flag rather
-        # than a reading of `_module_pending`'s text, and rather than
-        # re-listing after every module action: `reload_modules()` clears the
-        # list's selection, and a user who has just pressed "Install selected"
-        # would find the row they chose deselected under them. The rust page
-        # refreshed after every action (`ModuleManager.svelte:439`) because it
-        # had no selection to lose.
-        self._custom_install_pending = False
         self._console_pending = False
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
@@ -2512,6 +2675,30 @@ class ControllerView(QWidget):
         # decides whether the repair offer is hidden and whether Refresh is
         # locked -- overloading it would change the Server tab from here.
         self._module_sql_running = False
+        # T42's three session facts, and the word "session" is the whole of
+        # their contract: nothing on disk records any of them, and a restart
+        # starts empty. The report box has always forgotten them too -- what
+        # changed is only that they are now shown on the rows that own them.
+        #
+        # `_rebuild_owed`: modules whose install said `rebuild_required`,
+        # cleared by a rebuild that SUCCEEDS. `_sql_owed`: the files a report
+        # left to the importer, cleared when the importer finishes. `_behind`:
+        # what the last update check counted, zeroes and "could not ask" left
+        # out.
+        #
+        # All three keyed by `(FAMILY, id)` since round 2, for `SessionState`'s
+        # reason: nothing makes an id unique across families, and these were
+        # the last three surfaces T42 round 2 left on a bare id.
+        self._rebuild_owed: set[tuple[str, str]] = set()
+        # Whether the run in `rebuild_log` is a COMPILE. Three actions share
+        # that panel -- the rebuild, the database updates and the adopt -- and
+        # all three arrive at `_rebuild_finished`, so "the panel finished and
+        # said ok" is not "the server was compiled". Clearing `_rebuild_owed` on
+        # the panel's success alone would tell a user their module was live
+        # because an unrelated SQL run went through.
+        self._rebuild_is_compile = False
+        self._sql_owed: dict[tuple[str, str], tuple[str, ...]] = {}
+        self._behind: dict[tuple[str, str], int] = {}
         self._repair_armed = False
         # The last answer the database gave about its own import, and whether it
         # has been asked since the database came up. Remembered because the
@@ -2540,6 +2727,7 @@ class ControllerView(QWidget):
         self._build_bots_tab()
         self._build_maintenance_tab()
         self._build_modules_tab()
+        self._build_tuning_tab()
         self._build_networking_tab()
 
         # What the channel says needs no daemon, no database and no network:
@@ -3340,6 +3528,23 @@ class ControllerView(QWidget):
             # a module into the image that no report claims is in it.
             self.module_link_button.setEnabled(False)
             self.module_folder_button.setEnabled(False)
+            # And every row's own Install/Remove, which is where the two greyed
+            # toolbar buttons went (T42). Same rule as the two above it: a clone
+            # landing half-way through a build puts a module into the image no
+            # report claims is in it.
+            self.modules_panel.set_enabled_actions(False)
+            # And the Tuning tab's saves: they write conf files an install,
+            # a rebuild or an importer run is reading at the same moment.
+            self.tuning_panel.set_enabled_actions(False)
+            # And its action bar (T44 item 7). The two expensive ones stop and
+            # start the very containers an install, a rebuild or an importer
+            # run is using; the two cheap ones redraw the cards under a save
+            # that is still in flight.
+            self.tuning_reload_button.setEnabled(False)
+            self.tuning_revert_all_button.setEnabled(False)
+            self.tuning_recreate_button.setEnabled(False)
+            self.tuning_restart_button.setEnabled(False)
+            self.tuning_banner_button.setEnabled(False)
         else:
             self.refresh_button.setEnabled(True)
             self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -3352,6 +3557,20 @@ class ControllerView(QWidget):
             # would hand the three CMaNGOS games a live button the moment any
             # action of theirs finished.
             self.module_sql_button.setEnabled(self.services.module_sql is not None)
+            # Back to what this install can do, never unconditionally: a game
+            # with no store or no applier must not be handed live row buttons by
+            # a job of its own finishing, and neither must a row the ROW itself
+            # forbids -- `RowWidget.set_enabled_actions` keeps `removable`.
+            self.modules_panel.set_enabled_actions(self._module_actions_allowed())
+            self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
+            # Back to what is OWED, never unconditionally: a job of its own
+            # finishing must not hand this tab a live "Restart server…" over a
+            # change nobody made. `_refresh_tuning_owed()` is the one place
+            # that rule lives, so it is what unlocks them.
+            self.tuning_reload_button.setEnabled(True)
+            self.tuning_banner_button.setEnabled(True)
+            self._set_tuning_revert_all()
+            self._refresh_tuning_owed()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
@@ -5397,35 +5616,54 @@ class ControllerView(QWidget):
     def _build_modules_tab(self) -> None:
         tab = QWidget(self)
         box = QVBoxLayout(tab)
-        self.module_list = QListWidget(tab)
-        self.module_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.module_list.customContextMenuRequested.connect(self._show_module_context_menu)
+        # T42: a panel of family cards, not a `QListWidget`. The list showed 41
+        # identical lines in catalog order and said nothing about which of them
+        # this install HAD -- the reading two players sent in as "None of
+        # modules detected" (T41) and "I can't get any modules to work".
+        self.modules_panel = ModulesPanel(tab)
+        self.modules_panel.install_pressed.connect(self._row_install)
+        self.modules_panel.remove_pressed.connect(self._row_remove)
+        self.modules_panel.chip_pressed.connect(self._chip_pressed)
+        self.modules_panel.chip_action_pressed.connect(self._chip_action_pressed)
+        self.modules_panel.context_menu_requested.connect(self._show_module_context_menu)
         self.module_report = QPlainTextEdit(tab)
         self.module_report.setReadOnly(True)
-        self.install_module_button = QPushButton("Install selected", tab)
-        self.remove_module_button = QPushButton("Remove selected", tab)
+        # The two buttons that used to act on "the selection" are gone: every
+        # row carries its own Install or Remove, so there is no second place for
+        # the tab and the user to disagree about what is selected.
+        #
         # The third button on this tab, and the only one that is not about one
-        # selected manifest: it applies the pending SQL of everything installed
-        # here, because that is the granularity the importer has — it is handed
-        # the module folder list and ledgers what it applies in `updates`.
+        # module: it applies the pending SQL of everything installed here,
+        # because that is the granularity the importer has -- it is handed the
+        # module folder list and ledgers what it applies in `updates`.
         self.module_sql_button = QPushButton(MODULE_SQL_BUTTON_LABEL, tab)
-        # The fourth, and the only read-only one: it fetches and counts and
-        # writes nothing outside each clone's `.git`. It is a button rather than
-        # part of the status poll because it costs one network round trip per
-        # installed module, and a poll would pay that every few seconds.
+        # The only read-only one: it fetches and counts and writes nothing
+        # outside each clone's `.git`. It is a button rather than part of the
+        # status poll because it costs one network round trip per installed
+        # module, and a poll would pay that every few seconds.
         self.module_updates_button = QPushButton(MODULE_UPDATES_BUTTON_LABEL, tab)
-        # The fifth and sixth, and the only two whose subject is not already in
-        # the list above them: a module this app does not ship, named by the
-        # user. They sit after "Remove selected" and before the module-SQL
-        # button because that is the order the tab is read in — the two that
-        # act on the selection, then the two that add to it, then the two that
-        # act on everything installed.
+        # New with T42 and the cheapest control on the tab: `reload_modules()`
+        # re-reads the clone directories and nothing else. It exists because
+        # every OTHER thing that changes what is installed -- a clone made by
+        # hand, a folder deleted outside the app -- used to need a restart
+        # before the tab noticed.
+        self.refresh_modules_button = QPushButton("Refresh", tab)
+        # `refresh_modules()` and not `reload_modules()`: Refresh is the press
+        # that means "read the disk again", so it is the one that throws the
+        # version cache away. Every OTHER caller of `reload_modules()` is a
+        # redraw after something this app did, and those invalidate the one
+        # clone they changed (T44 item 1).
+        self.refresh_modules_button.clicked.connect(self.refresh_modules)
+        self.refresh_modules_button.setToolTip(
+            "Read this install's module folders again. Cheap: directory names and one "
+            "`git log -1` per module, no network."
+        )
+        # The two whose subject is not in the catalog at all: a module this app
+        # does not ship, named by the user.
         self.module_link_button = QPushButton(MODULE_LINK_BUTTON_LABEL, tab)
         self.module_folder_button = QPushButton(MODULE_FOLDER_BUTTON_LABEL, tab)
         self.module_link_button.clicked.connect(self.install_module_from_link)
         self.module_folder_button.clicked.connect(self.install_module_from_folder)
-        self.install_module_button.clicked.connect(lambda: self._module_action("install"))
-        self.remove_module_button.clicked.connect(lambda: self._module_action("remove"))
         self.module_sql_button.clicked.connect(self.apply_module_sql)
         self.module_updates_button.clicked.connect(self.check_module_updates)
         # The action `_format_report` has always named. It sits on THIS tab
@@ -5494,59 +5732,92 @@ class ControllerView(QWidget):
         # before.
         self.rebuild_log.run_started.connect(self._rebuild_started)
         self.rebuild_log.run_finished.connect(self._rebuild_finished)
-        # Two toolbars rather than one, because nine buttons side by side ask
-        # for ~1400px where the tab has under a thousand — and a single row
-        # clipped each button's text mid-word and let their borders run
-        # together. The split follows the order the tab is read in: the four
-        # that act on the selection (or add to it) on the first row, the five
-        # that act on the whole install on the second.
-        selection_row = QHBoxLayout()
-        selection_row.addWidget(self.install_module_button)
-        selection_row.addWidget(self.remove_module_button)
-        selection_row.addWidget(self.module_link_button)
-        selection_row.addWidget(self.module_folder_button)
-        selection_row.addStretch(1)
+        # ONE action bar, where there used to be two toolbars of nine buttons:
+        # the two that acted on "the selection" have moved onto the rows
+        # themselves and the two custom-module presses have moved into their own
+        # card, which leaves six and room for them. Read left to right: the two
+        # that only READ this install, then the four that change it.
+        actions = QHBoxLayout()
+        actions.addWidget(self.module_updates_button)
+        actions.addWidget(self.refresh_modules_button)
+        actions.addStretch(1)
+        actions.addWidget(self.adopt_button)
+        actions.addWidget(self.updates_button)
+        actions.addWidget(self.module_sql_button)
+        actions.addWidget(self.rebuild_button)
+        # The banner, hidden until something owes a rebuild. It is above the
+        # cards rather than on each owing row because the ACTION is one action
+        # for all of them -- one compile covers every module installed since the
+        # last one -- while the chip on each row says which ones it covers.
+        self.rebuild_banner = QWidget(tab)
+        banner_box = QHBoxLayout(self.rebuild_banner)
+        banner_box.setContentsMargins(8, 6, 8, 6)
+        self.rebuild_banner_label = QLabel("", self.rebuild_banner)
+        self.rebuild_banner_label.setWordWrap(True)
+        self.rebuild_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.rebuild_banner_button = QPushButton(REBUILD_BUTTON_LABEL, self.rebuild_banner)
+        # The SAME slot as the toolbar's, not a copy: the dialog, the refusals
+        # and the busy gate are `rebuild_server()`'s, and a second caller that
+        # skipped any of them would be a second rebuild route to keep in step.
+        self.rebuild_banner_button.clicked.connect(self.rebuild_server)
+        banner_box.addWidget(self.rebuild_banner_label, 1)
+        banner_box.addWidget(self.rebuild_banner_button)
+        self.rebuild_banner.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.rebuild_banner.setVisible(False)
+        # The custom-module card: the one place on this tab whose subject is not
+        # in the catalog and not on disk yet. Its own box with a sentence,
+        # because a link the user pastes is the only control here that can fail
+        # before anything runs.
+        custom = QGroupBox("A module this app does not ship", tab)
+        custom_box = QVBoxLayout(custom)
+        custom_note = QLabel(
+            "Paste a repository link, or point at a folder on this computer. Yu'lon derives "
+            "a manifest from it and installs it the same way as any row above.",
+            custom,
+        )
+        custom_note.setWordWrap(True)
+        custom_box.addWidget(custom_note)
+        custom_row = QHBoxLayout()
+        custom_row.addWidget(self.module_link_button)
+        custom_row.addWidget(self.module_folder_button)
+        custom_row.addStretch(1)
+        custom_box.addLayout(custom_row)
 
-        install_row = QHBoxLayout()
-        install_row.addWidget(self.module_sql_button)
-        install_row.addWidget(self.module_updates_button)
-        install_row.addStretch(1)
-        install_row.addWidget(self.adopt_button)
-        install_row.addWidget(self.updates_button)
-        install_row.addWidget(self.rebuild_button)
-        # Two panels below the toolbars: the module list on the left (the thing
-        # you select from), the result and long-job output on the right.
-        modules = QGroupBox("Modules", tab)
-        self.module_list.setParent(modules)
-        modules_box = QVBoxLayout(modules)
-        modules_box.addWidget(self.module_list, 1)
-
-        output = QWidget(tab)
-        self.module_report.setParent(output)
-        self.rebuild_log.setParent(output)
-        output_box = QVBoxLayout(output)
-        output_box.addWidget(self.module_report, 1)
-        output_box.addWidget(self.rebuild_log, 2)
-
-        box.addLayout(selection_row)
-        box.addLayout(install_row)
-        columns = QHBoxLayout()
-        columns.setSpacing(12)
-        columns.addWidget(modules, 3)
-        columns.addWidget(output, 2)
-        box.addLayout(columns)
+        box.addLayout(actions)
+        box.addWidget(self.rebuild_banner)
+        box.addWidget(self.modules_panel, 3)
+        box.addWidget(custom)
+        box.addWidget(self.module_report, 1)
+        box.addWidget(self.rebuild_log, 2)
         self._add_panel_tab(tab, "modules", "Modules")
-        self._manifests: dict[str, Manifest] = {}
+        # Keyed by (FAMILY, id) since round 2, for `modules_panel._rows`'s
+        # reason: nothing makes an id unique across families, and an id-keyed
+        # dict handed `selected_manifest()` the other family's manifest --
+        # which is the object the applier is then told to install.
+        self._manifests: dict[tuple[str, str], Manifest] = {}
+        # The manifest the module job now in flight is really about. Remembered
+        # rather than looked up again when the report comes back: an
+        # `ApplyReport` carries an id and no family, so a second lookup by id is
+        # a guess where this is the answer (round 2).
+        self._acting_on: Manifest | None = None
         # The importer talks from a worker thread for however long it runs, and
         # this is what carries its lines to the GUI one. Same mechanism as the
         # repair's `_import_relay`, and a separate object because the two runs
         # write to different widgets. See `LineRelay`.
         self._module_sql_relay = LineRelay(self)
         self._module_sql_relay.line.connect(self._module_sql_line)
+        # T44 item 1. A game with no `module_version` seam gets a cache whose
+        # reader always answers `None`, rather than a `None` cache every caller
+        # would have to branch on: the rows then show nothing where the version
+        # goes, which is the same thing a machine with no git shows.
+        self._versions = VersionCache(self.services.module_version or (lambda _path: None))
+        self._filling_versions = False
         self.reload_modules()
-        enabled = self.services.store is not None and self.services.applier is not None
-        self.install_module_button.setEnabled(enabled)
-        self.remove_module_button.setEnabled(enabled)
+        # The gate that used to grey two toolbar buttons now greys every row's
+        # own press: there is no other control left for it to act on.
+        self.modules_panel.set_enabled_actions(self._module_actions_allowed())
         self.module_sql_button.setEnabled(self.services.module_sql is not None)
         self.module_sql_button.setToolTip(
             MODULE_SQL_TIP if self.services.module_sql is not None else MODULE_SQL_NO_IMPORTER
@@ -5558,13 +5829,14 @@ class ControllerView(QWidget):
             else MODULE_UPDATES_NO_MODULES
         )
         self._set_custom_module_buttons()
-        # A separate gate from the two above, and it must stay separate: the
+        # A separate gate from the one above, and it must stay separate: the
         # three CMaNGOS games have no manifest store at all, and their
         # worldservers are still compiled from a checkout somebody may have
         # patched. Tying the rebuild to `store` would have taken the control
         # away from three of the four games for a reason that is about
         # manifests.
         self.rebuild_button.setEnabled(self.services.rebuild is not None)
+        self.rebuild_banner_button.setEnabled(self.services.rebuild is not None)
         # A third gate, separate again and for the mirror reason: this one is
         # about the install PLAN, not about the store and not about the
         # checkout. It is live for the one game whose plan declares a phase to
@@ -5577,78 +5849,324 @@ class ControllerView(QWidget):
         # every later moment cannot disagree about the rule.
         self._set_adopt_button()
 
-    def reload_modules(self) -> None:
-        """Fill the list from the store (every family), newest store contents first."""
-        self.module_list.clear()
+    def _session_state(self) -> SessionState:
+        """What this session has learned, bundled for the row builder.
+
+        Three plain containers on the view rather than one object, because each
+        is filled and cleared by a different slot and a shared mutable object
+        would make "who emptied this?" a question. Built into the frozen bundle
+        here, at the one place that reads all three.
+        """
+        return SessionState(
+            rebuild_owed=frozenset(self._rebuild_owed),
+            sql_owed=dict(self._sql_owed),
+            behind=dict(self._behind),
+        )
+
+    def _module_actions_allowed(self) -> bool:
+        """Whether a row's Install/Remove may be pressed at all.
+
+        The old two-button gate, unchanged in substance: a game with no manifest
+        store or no applier has nothing to run, and nothing on this tab may
+        re-arm the rows while another action of ours is in flight.
+        """
+        return (
+            self.services.store is not None and self.services.applier is not None and not self._busy
+        )
+
+    def _installed_clones(self) -> Mapping[str, frozenset[str]] | None:
+        """What is in this install's clone folders per family, or `None` for no reader.
+
+        Cheap enough for every reload (directory names, no git), which is why it
+        is its own seam and not part of `module_updates` — see
+        `ControllerServices`. Shared by the Modules tab and the Tuning tab
+        rather than read twice: two readings a moment apart could disagree, and
+        a module listed as installed on one tab and not on the other is the
+        confusion T41 was reported for.
+
+        `None` and `{}` are DIFFERENT answers, and T42 round 2 turns on the
+        difference: `{}` is a seam that answered "nothing installed", which is
+        evidence a clone has gone and the facts owed about it may be forgotten;
+        `None` is a game with no reader at all, and treating that as evidence
+        would throw away everything this session has learned on the first reload
+        after an install. A reader that RAISED answers `{}`, exactly as it did
+        before this loop was factored out of `reload_modules()`.
+        """
+        reader = self.services.installed_modules
+        if reader is None:
+            return None
+        try:
+            return reader()
+        except Exception as exc:  # boundary: an unreadable folder must not kill the UI
+            logger.warning(f"could not read which modules are installed: {exc}")
+            return {}
+
+    def _load_manifests(self) -> tuple[list[Manifest], list[str]]:
+        """This game's catalog in the store's own order, and what would not parse.
+
+        Fills `self._manifests` on the way through, which is the lookup both
+        tabs use to get from an id back to its steps and its conf keys.
+        """
         self._manifests.clear()
         store = self.services.store
+        manifests: list[Manifest] = []
+        broken: list[str] = []
         if store is None:
-            self.module_list.addItem("(this game has no manifests yet)")
-            return
-        # What is actually in this install's modules folder. Cheap enough for
-        # every reload (directory names, no git), which is why it is its own
-        # seam and not part of `module_updates` — see `ControllerServices`.
-        installed: Mapping[str, frozenset[str]] = {}
-        reader = self.services.installed_modules
-        if reader is not None:
-            try:
-                installed = reader()
-            except Exception as exc:  # boundary: an unreadable folder must not kill the UI
-                logger.warning(f"could not read which modules are installed: {exc}")
-        seen: set[tuple[str, str]] = set()
+            return manifests, broken
         for kind in FAMILY_FILES:
             try:
                 items = list(store.load_all(kind))
             except Exception as exc:  # boundary: a broken manifest tree must not kill the UI
-                self.module_list.addItem(f"!! could not load {kind}s: {exc}")
+                broken.append(MODULE_LOAD_FAILED.format(kind=kind, exc=exc))
                 continue
+            manifests += items
             for manifest in items:
-                here = manifest.id in installed.get(manifest.type, frozenset())
-                mark = f"{INSTALLED_MARK} " if here else ""
-                item = QListWidgetItem(
-                    f"{mark}[{manifest.type}] {manifest.name} — {manifest.description}"
-                )
-                item.setData(256, manifest.id)  # Qt.UserRole
-                self.module_list.addItem(item)
-                self._manifests[manifest.id] = manifest
-                seen.add((manifest.type, manifest.id))
-        # A module on disk the catalog has never heard of is still installed.
-        # No manifest is invented for it: it gets a row and no entry in
-        # `_manifests`, so the install/remove buttons stay inert on it rather
-        # than acting on a manifest this app made up.
-        # Accounted for per FOLDER, because that is the unit clones share:
-        # `apply.CLONE_DIRS` puts ale and keg in one directory, so a keg's clone
-        # is read into both families' sets and the keg manifest that matched it
-        # left the ale copy looking unknown — `bmah` matched the shipped keg and
-        # then appeared a second time as an uncatalogued ale, measured on the
-        # live install (2026-09-12). Accounting by bare name instead would have
-        # fixed that and swallowed the opposite case: a clone in `ale_scripts/`
-        # whose name happens to match a MODULE manifest that is not installed.
-        accounted: dict[str, set[str]] = {}
-        for kind_seen, id_seen in seen:
-            accounted.setdefault(_clone_dir_of(kind_seen), set()).add(id_seen)
-        for kind in FAMILY_FILES:
-            known = accounted.setdefault(_clone_dir_of(kind), set())
-            for name in sorted(installed.get(kind, frozenset())):
-                if name in known:
-                    continue
-                known.add(name)
-                self.module_list.addItem(
-                    QListWidgetItem(f"{INSTALLED_MARK} [{kind}] {name} — {NOT_IN_CATALOG}")
-                )
+                # T42 round 2's key shape, threaded through T43's extraction of
+                # this loop: an id two families share is two manifests, and the
+                # object this dict hands out goes straight to the applier.
+                self._manifests[(manifest.type, manifest.id)] = manifest
+        return manifests, broken
+
+    def reload_modules(self) -> None:
+        """Re-read the catalog and the clone folders, and redraw the cards.
+
+        Cheap on purpose and called after everything that changes what is
+        installed: `store.load_all()` reads files this app shipped, and
+        `installed_modules` reads directory names. No git, no network -- that is
+        `check_module_updates()`, which is a button for exactly that reason.
+        """
+        if self.services.store is None:
+            self._manifests.clear()
+            self.modules_panel.set_rows(())
+            self._refresh_rebuild_banner()
+            return
+        answered = self._installed_clones()
+        installed = answered if answered is not None else {}
+        manifests, broken = self._load_manifests()
+        if answered is not None:
+            self._forget_what_is_no_longer_installed(installed)
+        self.modules_panel.set_rows(
+            build_module_rows(
+                manifests,
+                installed,
+                self._session_state(),
+                self.services.client_dir,
+                # Only what the cache ALREADY knows. Nothing is read here, so
+                # the first paint of the tab costs exactly what it did before
+                # T44 -- the reads happen afterwards, one event-loop turn at a
+                # time, in `_fill_versions()`.
+                versions=self._known_versions(installed),
+            )
+        )
+        if broken:
+            # Appended, never `setPlainText`: this runs after an install has put
+            # its report on screen, and a family that will not parse must not
+            # take the report of the action the user just pressed with it.
+            self.module_report.appendPlainText("\n".join(broken))
+        self._refresh_rebuild_banner()
+        self._start_filling_versions()
+
+    @Slot()
+    def refresh_modules(self) -> None:
+        """The Refresh press: forget what every clone was at, then reload.
+
+        The one invalidation that is not about a single module. A clone can
+        change under this app -- a `git pull` in a terminal, a folder swapped
+        by hand -- and Refresh is the press that says "read the disk again".
+        """
+        self._versions.clear()
+        self.reload_modules()
+
+    def _known_versions(
+        self, installed: Mapping[str, frozenset[str]]
+    ) -> dict[tuple[str, str], str]:
+        """The version of every installed clone the cache has ALREADY read.
+
+        Reads nothing. `VersionCache.known()` is the no-read accessor for
+        exactly this call site: a version lookup that read here would put a
+        `git log` per installed module back on every reload, which is the cost
+        T41 refused and T42 restated.
+        """
+        server_dir = self.services.controller.server_dir
+        found: dict[tuple[str, str], str] = {}
+        for family, ids in installed.items():
+            for item_id in ids:
+                version = self._versions.known(server_dir, family, item_id)
+                if version is not None:
+                    found[(family, item_id)] = version
+        return found
+
+    def _start_filling_versions(self) -> None:
+        """Read the clones this tab has not read yet, AFTER the tab is on screen.
+
+        One module per event-loop turn, through `QTimer.singleShot(0, ...)`:
+        the reads are subprocesses, and twenty of them in a row on the GUI
+        thread is the second of a frozen tab that item 1 forbids. A row that
+        fills in late is fine.
+
+        `_filling_versions` keeps one walk running at a time. `reload_modules()`
+        is called after every install, every remove and every update check, and
+        a second walk started by a reload that happened mid-walk would read the
+        same clones twice.
+        """
+        if self._filling_versions or self.services.module_version is None:
+            return
+        self._filling_versions = True
+        QTimer.singleShot(0, self._fill_next_version)
+
+    @Slot()
+    def _fill_next_version(self) -> None:
+        """Read ONE unread clone, draw it, and come back for the next.
+
+        Every refusal this can meet is already inside the seam
+        (`git.RunnerGit.head_version` answers `None` for a folder with no
+        `.git`, a git that refused and a git that is not there), so there is
+        nothing to catch here and nothing that can turn a reload into a
+        failure.
+        """
+        server_dir = self.services.controller.server_dir
+        for widget in self.modules_panel.rows():
+            row = widget.data
+            if not row.installed or self._versions.has(server_dir, row.family, row.id):
+                continue
+            self.modules_panel.set_version(
+                row.family, row.id, self._versions.fill(server_dir, row.family, row.id)
+            )
+            QTimer.singleShot(0, self._fill_next_version)
+            return
+        self._filling_versions = False
+
+    def _forget_what_is_no_longer_installed(self, installed: Mapping[str, frozenset[str]]) -> None:
+        """Drop every owed fact about a module that is no longer on disk (round 2).
+
+        A clone can leave without this app pressing anything -- a folder deleted
+        in Explorer, a server directory restored from a backup, a module removed
+        by a script. Until this ran, the catalog row came back reading "Not
+        installed" with a `Rebuild pending` chip on it and the module still
+        named in the banner.
+
+        Reconciled HERE, in one place, rather than by gating the chips in
+        `build_module_rows()`: the chips are built from the rows and the banner
+        is built from `_rebuild_owed` directly, so gating only the chips would
+        leave the banner claiming a module that is gone. Reconciling the sets
+        makes the two agree by construction.
+
+        Only ever called where the seam ANSWERED. A game with no
+        `installed_modules` reader reads as "nothing is installed anywhere",
+        and treating that as evidence would throw away every fact this session
+        has learned.
+
+        Matched by `(family, id)` since round 2: the three sets are keyed that
+        way now, so this is an exact comparison rather than a bare-id match
+        that also forgot an `ale` because a `module` of the same name had gone.
+        """
+        here = {(family, name) for family, names in installed.items() for name in names}
+        self._rebuild_owed &= here
+        self._sql_owed = {key: value for key, value in self._sql_owed.items() if key in here}
+        self._behind = {key: value for key, value in self._behind.items() if key in here}
+
+    def _refresh_rebuild_banner(self) -> None:
+        """Show the amber banner iff something owes a rebuild, and name what.
+
+        Session state only. A restart forgets it, exactly as the report box
+        always has -- a persisted marker is a file with its own invalidation
+        rules (whose rebuild? which modules? still true after a folder was moved
+        by hand?) and T42 deliberately leaves it out rather than ship one that
+        can be wrong.
+        """
+        # The ids, not the pairs: the banner names modules to a person, and
+        # `('module', 'mod-transmog')` is the key's spelling, not a name. A
+        # `set` first, so an id two families owe is named once.
+        owed = sorted({item_id for _family, item_id in self._rebuild_owed})
+        self.rebuild_banner.setVisible(bool(owed))
+        self.rebuild_banner_label.setText(REBUILD_BANNER.format(names=", ".join(owed)))
+
+    @Slot(str)
+    def _row_install(self, module_id: str) -> None:
+        """A row's own Install. Selects it first, then the one shared handler."""
+        self.modules_panel.select(module_id)
+        self._module_action("install")
+
+    @Slot(str)
+    def _row_remove(self, module_id: str) -> None:
+        self.modules_panel.select(module_id)
+        self._module_action("remove")
+
+    @Slot(str, str)
+    def _chip_pressed(self, module_id: str, label: str) -> None:
+        """An owed chip's press: its own sentence, in the box every answer is read in.
+
+        The chip carries the detail rather than the view rebuilding it, so the
+        words a press shows are the words the row was built with -- there is no
+        second formatter to drift.
+        """
+        try:
+            row = self.modules_panel.row(module_id)
+        except KeyError:
+            return
+        for chip in row.data.chips:
+            if chip.label == label:
+                self.module_report.setPlainText(chip.detail)
+                return
+
+    @Slot(str, str)
+    def _chip_action_pressed(self, module_id: str, action: str) -> None:
+        """The subpanel's own press: run the job that chip names (T44 item 4).
+
+        Routed to the SAME slots the action bar's buttons are bound to, not to
+        copies of them: those carry the confirm dialog, the busy gate and the
+        refusals, and a second caller that skipped any of them would be a
+        second route to keep in step.
+
+        The row is selected first for `_row_install()`'s reason -- a child
+        button consumes its own click, and a job started from a row the tab has
+        not selected writes its report against the wrong subject.
+        """
+        self.modules_panel.select(module_id)
+        if action == "rebuild":
+            self.rebuild_server()
+        elif action == "sql":
+            self.apply_module_sql()
+        elif action == "update":
+            # T44 item 2, and round 2's finding 1. `Applier.update()` runs the
+            # install steps over the clone that is already there -- which IS
+            # the pull -- after asking the three questions `install()` skips
+            # for a folder its own claim vouches for: the repository, the
+            # working tree, and what HEAD carries. A `reset --hard` over work
+            # nobody looked at is what the ticket forbids in so many words.
+            self._module_action("update")
 
     def _selected_row_is_uncatalogued(self) -> bool:
         """Is the selected row one of T41's "installed here, not in the catalog" rows?"""
-        item = self.module_list.currentItem()
-        return item is not None and NOT_IN_CATALOG in item.text()
+        item_id = self.modules_panel.selected_id()
+        if item_id is None:
+            return False
+        try:
+            return not self.modules_panel.row(item_id).data.catalogued
+        except KeyError:
+            return False
 
     def selected_manifest(self) -> Manifest | None:
-        item = self.module_list.currentItem()
-        if item is None:
+        """The manifest of the selected row, by its FAMILY as well as its id.
+
+        The family comes off the row rather than from a bare-id lookup, because
+        the answer is handed straight to the applier: on an id that two families
+        share, the id alone would install the other one's steps (round 2).
+        """
+        row = self.modules_panel.selected_row()
+        if row is None or not row.data.catalogued:
             return None
-        return self._manifests.get(str(item.data(256)))
+        return self._manifests.get((row.data.family, row.data.id))
 
     def _module_action(self, action: str) -> None:
+        """Run `action` on the selected row: `install`, `remove` or `update`.
+
+        Three words and three routes since round 2. `update` was a second word
+        for the install ROUTE until the review found what that route does to a
+        clone this app's claim vouches for; it now runs `Applier.update()`,
+        which asks the repository, the working tree and HEAD before it lets a
+        `reset --hard` near the folder.
+        """
         manifest = self.selected_manifest()
         applier = self.services.applier
         if manifest is None and self._selected_row_is_uncatalogued():
@@ -5661,20 +6179,27 @@ class ControllerView(QWidget):
             return
         if manifest is None or applier is None:
             return
-        go_ahead, values = self._module_values(manifest, action)
+        # An update re-runs the INSTALL-time steps -- it is the install over
+        # content that has moved -- so it answers the install's prompts.
+        go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action])
         if not go_ahead:
             self._module_pending = None
             self.module_report.setPlainText(
                 f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
             )
             return
-        run = applier.install if action == "install" else applier.remove
+        run = {
+            "install": applier.install,
+            "remove": applier.remove,
+            "update": applier.update,
+        }[action]
+        self._acting_on = manifest
         self._module_pending = f"{action} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
         self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
 
     def _module_values(
-        self, manifest: Manifest, action: str
+        self, manifest: Manifest, action: When
     ) -> tuple[bool, Mapping[str, str] | None]:
         """Whether to go ahead, and the answers to hand the applier.
 
@@ -5694,7 +6219,7 @@ class ControllerView(QWidget):
         the 41 manifests get no new window and the applier gets `None` rather
         than `{}` — the call it has always been given.
         """
-        needed = required_prompts(manifest, cast(When, action))
+        needed = required_prompts(manifest, action)
         if not any(prompt.default is None for prompt in needed):
             return True, None
         answers = self._prompt_asker(self, manifest, needed)
@@ -5777,41 +6302,108 @@ class ControllerView(QWidget):
             # line would put this view's vocabulary in front of a sentence
             # written to be read on its own.
             self._module_pending = None
-            self._custom_install_pending = False
+            self._acting_on = None
             self.module_report.setPlainText(str(exc))
             self.action_failed.emit(str(exc))
             return
+        self._acting_on = manifest
         self._module_pending = f"{what} {manifest.id}"
-        self._custom_install_pending = True
         self.module_report.setPlainText(f"{self._module_pending}…")
         self._run(lambda: route(manifest, folder), self._module_done, self._module_failed)
 
     @Slot(object)
     def _module_done(self, result: object) -> None:
         self._module_pending = None
-        custom, self._custom_install_pending = self._custom_install_pending, False
+        acted_on, self._acting_on = self._acting_on, None
         if not isinstance(result, ApplyReport):
             return
         self.module_report.setPlainText(_format_report(result))
-        # The list is re-read for exactly two outcomes, both of which changed
-        # what is in it: a custom module was just added, or a record was just
-        # dropped. Asked AFTER the report is on screen and after the remove
-        # returned -- a forget before the remove would drop the record of a
-        # remove that then failed, leaving a folder on disk with no row in the
-        # list to try again with (`purge.py`'s ordering, phase8-decisions).
-        forgotten = False
+        self._note_session_facts(result, acted_on)
+        # The record is dropped AFTER the report is on screen and after the
+        # remove returned -- a forget before the remove would drop the record of
+        # a remove that then failed, leaving a folder on disk with no row in the
+        # tab to try again with (`purge.py`'s ordering, phase8-decisions).
         forget = self.services.module_forget
         if result.action == "remove" and forget is not None:
-            manifest = self._manifests.get(result.item_id)
-            if manifest is not None:
-                forgotten = forget(manifest)
-        if custom or forgotten:
-            self.reload_modules()
+            # The manifest the press was really about, not one looked up by the
+            # report's id: the report carries no family, and the record being
+            # dropped is a file on disk named after this manifest (round 2).
+            if acted_on is not None and acted_on.id == result.item_id:
+                forget(acted_on)
+        # Re-read after EVERY report, where it used to happen for the two
+        # outcomes that changed what was in the list (a custom module added, a
+        # record dropped). Since T42 a report also changes what the rows SAY --
+        # the rebuild chip, the SQL chip and the banner all come from the report
+        # that was just filed -- and the reason the old rule was narrow is gone:
+        # `reload_modules()` no longer takes the selection with it, because
+        # `ModulesPanel.set_rows()` keeps it wherever the id still exists.
+        self.reload_modules()
+        # And the Tuning tab, for the same reason one size along: an install
+        # deploys a conf and a remove takes one away, so the settings this
+        # install HAS changed with this report (T43).
+        self.reload_tuning()
+
+    def _note_session_facts(self, result: ApplyReport, acted_on: Manifest | None) -> None:
+        """Record what this report says is still owed, for the chips and the banner.
+
+        A remove drops the id from all three: the module is gone, so an "update
+        available" for it is about a checkout that no longer exists and a
+        pending-SQL list names files nothing will read.
+        """
+        item_id = result.item_id
+        # Whatever the action was, this module's clone may be at a different
+        # commit now: an install clones or fast-forwards it, a remove deletes
+        # it. Dropped before `reload_modules()` runs, so the redraw does not
+        # hand the row the sha it had before the action (T44 item 1).
+        self._versions.forget(item_id)
+        if acted_on is None or acted_on.id != item_id:
+            # Unreachable through both live routes -- `_module_action()` and
+            # `_install_custom_module()` each set `_acting_on` immediately
+            # before their `_run()`, and an `ApplyReport` carries the id of the
+            # manifest it was handed. Said rather than guessed, because the
+            # only alternative is resolving a bare id to a family, which is the
+            # ambiguity T42 round 2 removed from four other surfaces. A chip
+            # missing is a gap; a chip on the wrong family's row is a lie.
+            logger.warning(
+                f"no manifest recorded for the {result.action} of {item_id}; "
+                "its chips cannot be keyed to a family and are not recorded"
+            )
+            return
+        key = (acted_on.type, item_id)
+        if result.action == "remove":
+            self._rebuild_owed.discard(key)
+            self._sql_owed.pop(key, None)
+            self._behind.pop(key, None)
+            return
+        # The clone has just been fetched and reset to its upstream tip -- that
+        # is what `install()` does over a folder that is already there -- so
+        # any "N commits behind" this session counted is now a figure about a
+        # commit the checkout has moved off. Dropped rather than recounted: a
+        # recount costs a network round trip, and a stale number is a wrong one
+        # (T44 item 2).
+        self._behind.pop(key, None)
+        if result.rebuild_required:
+            self._rebuild_owed.add(key)
+        owed = _pending_sql_names(result)
+        if owed:
+            self._sql_owed[key] = owed
+        else:
+            self._sql_owed.pop(key, None)
 
     @Slot(object)
     def _module_failed(self, exc: object) -> None:
-        what, self._module_pending = self._module_pending or "module action", None
-        self._custom_install_pending = False
+        what, acted_on = self._module_pending or "module action", self._acting_on
+        self._module_pending = None
+        self._acting_on = None
+        if acted_on is not None:
+            # A failure is not "nothing happened" (round 2). `install()` fetches
+            # and RESETS the checkout first and then runs deploy, patches, SQL,
+            # conf and the client copy; any of those can raise with the folder
+            # already at a different commit. The success path drops the cached
+            # version through `_note_session_facts()`, and leaving it here left
+            # the row showing a sha the clone had moved off -- a wrong sha,
+            # which item 1 says is worse than none.
+            self._versions.forget(acted_on.id)
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
         self.action_failed.emit(str(exc))
 
@@ -5846,6 +6438,17 @@ class ControllerView(QWidget):
             return
         rows = [row.line for row in result]
         self.module_report.setPlainText("\n".join(rows) if rows else MODULE_UPDATES_NONE)
+        # The figure stays the seam's own -- `ModuleUpdate.line` is still what
+        # the report prints. What is kept here is only the COUNT, for the row's
+        # chip, and `None` ("could not ask") is deliberately not a zero: a
+        # checkout git could not answer for gets no chip rather than a
+        # confident "up to date".
+        # Keyed `("module", key)`: `apply.module_updates()` enumerates ONE clone
+        # directory -- `CLONE_DIRS["module"]`, which is `modules/` -- so every
+        # key it returns is in that family by construction, and inventing a
+        # family here would be a guess where this is the answer.
+        self._behind = {("module", row.key): row.behind for row in result if (row.behind or 0) > 0}
+        self.reload_modules()
 
     @Slot(object)
     def _module_updates_failed(self, exc: object) -> None:
@@ -5924,6 +6527,12 @@ class ControllerView(QWidget):
         # — the one 8.7a's other half was fixed for.
         if isinstance(result, docker.AttachedRun):
             self.module_report.appendPlainText(MODULE_SQL_FINISHED)
+        # The importer was handed every module folder on this install, so the
+        # pending-SQL chips are all answered by the one run -- there is no
+        # per-module outcome to keep, and `_module_sql_done` deliberately does
+        # not claim a number (see the comment above).
+        self._sql_owed.clear()
+        self.reload_modules()
         # The run starts this install's database if it was down and leaves it
         # up, so the Server tab's line is stale — and `_set_busy(False)` does
         # not bring Start and Stop back; only a status read does.
@@ -6009,6 +6618,7 @@ class ControllerView(QWidget):
         # a build that is blocked between lines rather than only stopping the
         # reader of them.
         cancel = threading.Event()
+        self._rebuild_is_compile = True
         return self.rebuild_log.run(
             lambda: source(cancel),
             title=f"Rebuilding {self.entry.name}",
@@ -6079,6 +6689,7 @@ class ControllerView(QWidget):
             logger.info(f"database updates for {self.entry.id} declined at the confirmation")
             return False
         cancel = threading.Event()
+        self._rebuild_is_compile = False
         return self.rebuild_log.run(
             lambda: route.press(cancel),
             title=f"Applying database updates to {self.entry.name}",
@@ -6145,6 +6756,7 @@ class ControllerView(QWidget):
             logger.info(f"adopting {self.entry.id} declined at the confirmation")
             return False
         cancel = threading.Event()
+        self._rebuild_is_compile = False
         return self.rebuild_log.run(
             lambda: route.press(cancel),
             title=f"Adopting {self.entry.name}'s databases as a finished import",
@@ -6176,6 +6788,30 @@ class ControllerView(QWidget):
         # has written the row it exists to write.
         self._import_asked = False
         self._forget_the_adopt_reading()
+        compiled, self._rebuild_is_compile = self._rebuild_is_compile, False
+        # THREE questions, not one, and every one of them has bitten this clause.
+        #
+        # `ok` alone is not "the server was compiled": `LogPanel` reports a
+        # STOPPED job as `ok=True, message="stopped"` on purpose (its worker's
+        # `except` branch — a terminated child exits non-zero and reporting that
+        # as a failure would put a refusal on screen for a button the user
+        # pressed), so a Stop pressed half-way through a compile arrived here
+        # indistinguishable from a finished one. `LogPanel.cancelled` is the
+        # property that exists for exactly this and `catalog_view.
+        # _on_run_finished()` already reads it; the message is deliberately NOT
+        # read, because grepping the word "stopped" would be this same defect in
+        # a new place (round 2, Codex).
+        #
+        # `compiled` is not implied either: three actions share this panel — the
+        # rebuild, the database updates and the adopt — and the last two change
+        # no binary at all.
+        if ok and compiled and not self.rebuild_log.cancelled:
+            # The compile that just finished covers every module installed
+            # before it started, which is exactly what the set holds. A failed,
+            # stopped or non-compile run leaves the owing intact, because
+            # nothing about the running server changed.
+            self._rebuild_owed.clear()
+            self.reload_modules()
         if not ok:
             self.action_failed.emit(message)
 
@@ -6193,6 +6829,562 @@ class ControllerView(QWidget):
         return (self.console_log, self.rebuild_log)
 
     # -------------------------------------------------------- networking tab
+
+    # ------------------------------------------------------------ tuning tab
+
+    def _build_tuning_tab(self) -> None:
+        """Every setting the modules on this install declare, and the file behind it.
+
+        Its own tab beside Modules (T43 decision 1) rather than a section inside
+        it: the Modules tab is about what this install HAS, and this one is
+        about what those things are set to. They share two readings and nothing
+        else -- `_load_manifests()` and `_installed_clones()`, so the two tabs
+        cannot disagree about which modules are here.
+        """
+        tab = QWidget(self)
+        box = QVBoxLayout(tab)
+        self.tuning_panel = TuningPanel(tab)
+        self.tuning_panel.save_pressed.connect(self.save_tuning)
+        self.tuning_panel.revert_pressed.connect(self.revert_tuning)
+        self.tuning_panel.file_selected.connect(self.open_tuning_file)
+        self.tuning_panel.file_save_pressed.connect(self.save_tuning_file)
+        self.tuning_panel.file_reload_pressed.connect(self.reload_tuning_file)
+        self.tuning_panel.file_revert_pressed.connect(self.revert_tuning_file)
+        # The one control on this tab that is not a save: it re-reads the conf
+        # files off disk. It exists because the values here are read ONCE per
+        # reload and a server, an editor or another Yu'lon window can change a
+        # conf underneath this tab at any time. Named for what it does since
+        # T44 -- "Refresh" said nothing about where the values come from.
+        self.tuning_reload_button = QPushButton(TUNING_RELOAD_LABEL, tab)
+        self.tuning_reload_button.clicked.connect(self.reload_tuning)
+        self.tuning_reload_button.setToolTip(
+            "Read this install's conf files again. Cheap: the files themselves, no network. "
+            "Anything you have typed here and not saved is dropped."
+        )
+        # The undo for the FORM, and the one control on this bar that cannot
+        # destroy anything: the cards are rebuilt from the rows already read,
+        # so nothing is written and nothing is re-read. The per-card Revert is
+        # the one that restores a file from its backup (T44 item 7).
+        self.tuning_revert_all_button = QPushButton(TUNING_REVERT_ALL_LABEL, tab)
+        self.tuning_revert_all_button.clicked.connect(self.revert_all_tuning_edits)
+        self.tuning_revert_all_button.setToolTip(
+            "Put every control on this tab back to what its file says. Writes nothing."
+        )
+        self.tuning_revert_all_button.setEnabled(False)
+        # Connected HERE and not up with the panel's other signals: this slot
+        # reads the button above, so the connect must not exist before the
+        # button does. Nothing can emit `edited` in between today -- the row
+        # controls are given their value before their signals are connected --
+        # but an ordering that is only provably safe is an ordering the next
+        # edit breaks silently.
+        self.tuning_panel.edited.connect(self._set_tuning_revert_all)
+        # The two that cost something. They are on THIS tab because this is
+        # the tab that prices a change -- `tuning.apply_sentence()` has been
+        # naming a restart and a recreate since T43 while the app had no
+        # control for either. Both ask first: they take the server down.
+        self.tuning_recreate_button = QPushButton(TUNING_RECREATE_LABEL, tab)
+        self.tuning_recreate_button.clicked.connect(self.recreate_containers)
+        self.tuning_recreate_button.setToolTip(TUNING_RECREATE_TIP)
+        self.tuning_recreate_button.setEnabled(False)
+        self.tuning_restart_button = QPushButton(TUNING_RESTART_LABEL, tab)
+        self.tuning_restart_button.clicked.connect(self.restart_server)
+        self.tuning_restart_button.setToolTip(TUNING_RESTART_TIP)
+        self.tuning_restart_button.setEnabled(False)
+        actions = QHBoxLayout()
+        actions.addWidget(self.tuning_reload_button)
+        actions.addWidget(self.tuning_revert_all_button)
+        actions.addStretch(1)
+        actions.addWidget(self.tuning_recreate_button)
+        actions.addWidget(self.tuning_restart_button)
+        # The banner, hidden until something is waiting. Above the cards for
+        # `rebuild_banner`'s reason: the ACTION is one action for every file
+        # that owes it, and its button is the one that answers the DEAREST job
+        # owed -- a user who changed two files must not be offered the cheaper
+        # of the two (T44 item 8).
+        self.tuning_banner = QWidget(tab)
+        tuning_banner_box = QHBoxLayout(self.tuning_banner)
+        tuning_banner_box.setContentsMargins(8, 6, 8, 6)
+        self.tuning_banner_label = QLabel("", self.tuning_banner)
+        self.tuning_banner_label.setWordWrap(True)
+        self.tuning_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.tuning_banner_button = QPushButton("", self.tuning_banner)
+        self.tuning_banner_button.clicked.connect(self._tuning_banner_pressed)
+        tuning_banner_box.addWidget(self.tuning_banner_label, 1)
+        tuning_banner_box.addWidget(self.tuning_banner_button)
+        self.tuning_banner.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.tuning_banner.setVisible(False)
+        self.tuning_report = QPlainTextEdit(tab)
+        self.tuning_report.setReadOnly(True)
+        box.addLayout(actions)
+        box.addWidget(self.tuning_banner)
+        box.addWidget(self.tuning_panel, 4)
+        box.addWidget(self.tuning_report, 1)
+        # "modules", because `icons.py` is a file T43 must not edit and it has
+        # no `tuning` key: the fallback is the SERVER icon, which would collide
+        # with the Server tab. Sharing the Modules puzzle is the smaller
+        # collision and the truer one -- this tab is the modules' settings.
+        self._add_panel_tab(tab, "modules", "Tuning")
+        self._tuning_rows: tuple[tuning.TuningRow, ...] = ()
+        self._tuning_newline = "\n"
+        # What this session has written that the running server has not picked
+        # up, by the job it owes. Session state exactly like `_rebuild_owed`,
+        # and forgotten on restart for the same reason: a persisted marker is
+        # a file with its own invalidation rules (T42's "Not in scope").
+        self._tuning_owed: dict[str, set[str]] = {}
+        self.reload_tuning()
+        self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
+
+    def reload_tuning(self) -> None:
+        """Re-read every installed module's conf and redraw the cards.
+
+        Reads files and nothing else -- no git, no docker, no database -- so it
+        is cheap enough to run after every install and every save.
+        """
+        manifests, _broken = self._load_manifests()
+        rows = tuning.rows_for(
+            manifests,
+            self._installed_clones() or {},
+            self.services.controller.server_dir,
+        )
+        self._tuning_rows = rows
+        self.tuning_panel.set_cards(build_tuning_cards(rows))
+        # WHICH files are read-only is this module's list and not the panel's:
+        # `TUNING_CORE_FILES` is a decision about who owns core configuration,
+        # and a second copy of it inside a widget is a second place for it to
+        # drift (T44 item 13).
+        self.tuning_panel.set_files(self._tuning_files(), read_only=TUNING_CORE_FILES)
+        self._set_tuning_revert_all()
+
+    @Slot()
+    def _set_tuning_revert_all(self) -> None:
+        """Arm "Revert all changes" iff there is an unsaved edit to drop."""
+        self.tuning_revert_all_button.setEnabled(
+            self._module_actions_allowed() and self.tuning_panel.has_edits()
+        )
+
+    @Slot()
+    def revert_all_tuning_edits(self) -> None:
+        """Drop every unsaved edit on this tab, writing nothing (T44 item 7).
+
+        The cards are rebuilt from `self._tuning_rows` -- the rows this tab
+        has already read -- rather than by calling `reload_tuning()`: a reload
+        also re-reads the files, which would pick up a change somebody ELSE
+        made, and that is not what a person pressing "revert my changes"
+        asked for.
+        """
+        self.tuning_panel.set_cards(build_tuning_cards(self._tuning_rows))
+        self._set_tuning_revert_all()
+        self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
+
+    def _confirm(self, title: str, question: str) -> bool:
+        """One Yes/No dialog, defaulting to No, read through `said_yes()`.
+
+        `said_yes()` and never `== StandardButton.Yes` by hand: PySide6's
+        static `question()` returns a plain int on some builds, which is T33's
+        closed bug, and one helper is the one place that can be got right.
+        """
+        return said_yes(
+            QMessageBox.question(
+                self,
+                title,
+                question,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        )
+
+    def _note_tuning_owed(self, file: str) -> None:
+        """Record that `file` has been written and the server has not picked it up.
+
+        The job is `tuning.file_rule()`'s, never a guess: a conf inside a
+        directory the compose binds is read off the user's own disk at world
+        start and a restart is enough; one outside every bind is a copy baked
+        into the image, and only a recreate picks the new one up.
+        """
+        rule = tuning.file_rule(file)
+        if rule in TUNING_JOB_WORDS:
+            self._tuning_owed.setdefault(rule, set()).add(file)
+        self._refresh_tuning_owed()
+
+    def _refresh_tuning_owed(self) -> None:
+        """Arm the two expensive buttons and draw the banner for what is owed.
+
+        The banner's button answers the DEAREST job owed, not the last one
+        noted: a user who changed one file needing a restart and another
+        needing the containers replaced must not be offered the cheaper of the
+        two and told that is enough.
+        """
+        recreate = sorted(self._tuning_owed.get("recreate", ()))
+        restart = sorted(self._tuning_owed.get("restart", ()))
+        self.tuning_recreate_button.setEnabled(bool(recreate) and not self._busy)
+        self.tuning_restart_button.setEnabled(bool(restart or recreate) and not self._busy)
+        job = "recreate" if recreate else ("restart" if restart else None)
+        if job is None:
+            self.tuning_banner.setVisible(False)
+            return
+        files = recreate if job == "recreate" else restart
+        self.tuning_banner_label.setText(
+            TUNING_BANNER.format(job=TUNING_JOB_WORDS[job], files=", ".join(files))
+        )
+        self.tuning_banner_button.setText(
+            TUNING_RECREATE_LABEL if job == "recreate" else TUNING_RESTART_LABEL
+        )
+        self.tuning_banner.setVisible(True)
+
+    @Slot()
+    def _tuning_banner_pressed(self) -> None:
+        """The banner's own press: the SAME slot the bar's button is bound to."""
+        if self.tuning_banner_button.text() == TUNING_RECREATE_LABEL:
+            self.recreate_containers()
+        else:
+            self.restart_server()
+
+    @Slot()
+    def restart_server(self) -> None:
+        """Stop the world and start it again, so it re-reads the confs on disk.
+
+        Asks first, and names what is waiting: everybody playing is
+        disconnected. One job on the worker rather than two presses, because a
+        stop the user then has to follow with a start is a server left down by
+        a control that promised a restart.
+        """
+        if self._busy:
+            return
+        owed = sorted(self._tuning_owed.get("restart", ())) or ["(nothing recorded)"]
+        if not self._confirm(
+            TUNING_RESTART_LABEL, TUNING_RESTART_CONFIRM.format(files="\n".join(owed))
+        ):
+            return
+        self._set_busy(True)
+        self.tuning_report.setPlainText("restarting the server…")
+        self._run(self._do_restart, self._tuning_job_done("restart"), self._tuning_job_failed)
+
+    @Slot()
+    def recreate_containers(self) -> None:
+        """Delete this install's containers and start them again from the current config.
+
+        `controller.remove()` then `controller.start()`: `remove` deletes the
+        containers and KEEPS the volumes, and the next start creates them
+        again -- which is exactly the Server tab's own sentence for the same
+        pair of calls.
+        """
+        if self._busy:
+            return
+        owed = sorted(self._tuning_owed.get("recreate", ())) or ["(nothing recorded)"]
+        if not self._confirm(
+            TUNING_RECREATE_LABEL, TUNING_RECREATE_CONFIRM.format(files="\n".join(owed))
+        ):
+            return
+        self._set_busy(True)
+        self.tuning_report.setPlainText("recreating the containers…")
+        self._run(self._do_recreate, self._tuning_job_done("recreate"), self._tuning_job_failed)
+
+    def _do_restart(self) -> bool:
+        """Stop, then start. ONE worker job: a stop the user then has to follow with a
+        start by hand is a server left down by a control that promised a restart."""
+        controller = self.services.controller
+        stopped = controller.stop()
+        controller.start()
+        return stopped
+
+    def _do_recreate(self) -> bool:
+        """Delete the containers, then start. `remove()` keeps the volumes, so the
+        characters are not touched and the next start creates the containers again --
+        the Server tab's own sentence for the same pair of calls."""
+        controller = self.services.controller
+        removed = controller.remove()
+        controller.start()
+        return removed
+
+    def _tuning_job_done(self, job: str) -> Callable[[object], None]:
+        """The handler for a finished restart or recreate: forget what it covered.
+
+        A recreate covers a restart as well -- the containers are new, so they
+        have both the current environment and the current conf files -- which
+        is why it clears both and a restart clears only its own.
+        """
+
+        def done(_result: object) -> None:
+            self._set_busy(False)
+            self._tuning_owed.pop("restart", None)
+            if job == "recreate":
+                self._tuning_owed.pop("recreate", None)
+            self._refresh_tuning_owed()
+            self.tuning_report.setPlainText(f"{job}: done.")
+            self.refresh_status()
+
+        return done
+
+    @Slot(object)
+    def _tuning_job_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        self._refresh_tuning_owed()
+        self.tuning_report.setPlainText(f"FAILED: {exc}")
+        self.action_failed.emit(str(exc))
+
+    def _tuning_files(self) -> tuple[str, ...]:
+        """What the raw editor offers: this install's module confs, then its own.
+
+        Only files that are ON DISK. A conf a manifest names but nothing has
+        deployed would open as an empty editor, and saving that empty editor
+        would create the file -- which is an install step, not a tuning one.
+        """
+        server_dir = self.services.controller.server_dir
+        found: list[str] = []
+        for row in self._tuning_rows:
+            if row.editable and row.file not in found and (server_dir / row.file).is_file():
+                found.append(row.file)
+        for name in TUNING_CORE_FILES:
+            if name not in found and (server_dir / name).is_file():
+                found.append(name)
+        return tuple(found)
+
+    def _tuning_spec(self, family: str, module_id: str, file: str) -> dict[str, ConfKey]:
+        """This module's declared keys for one file, so a value can be type-checked.
+
+        From the MANIFEST and not from the row, because the row carries the
+        declaration flattened for drawing and `tuning.check()` wants the
+        declaration itself -- one object, so a field added to `ConfKey` reaches
+        the refusal without a third place to copy it into.
+
+        By FAMILY as well as id (T42 round 2's key shape), and the family is
+        handed in rather than resolved: every caller has the `TuningCard` the
+        rows came from, and `TuningRow.family` is where `tuning.rows_for()` put
+        the manifest's own `type`. Resolving a bare id here would be a second
+        rule for an ambiguity `_key_for()` already settles once, in the one
+        place that has to guess.
+        """
+        manifest = self._manifests.get((family, module_id))
+        if manifest is None:
+            return {}
+        return {key.key: key for conf in manifest.conf if conf.file == file for key in conf.keys}
+
+    @Slot(str, str)
+    def save_tuning(self, family: str, module_id: str) -> None:
+        """Write this card's changed keys, grouped by the file each one lives in.
+
+        Per card and not per file (T43's definition of done), because a card is
+        what the user installed: NPC Beastmaster declares four keys in its own
+        conf and one in the core's `worldserver.conf`, and asking somebody to
+        press Save twice for one module would be the tab's file layout leaking
+        into their hands.
+        """
+        try:
+            card = self.tuning_panel.card((family, module_id))
+        except KeyError:
+            return
+        edits = card.edits()
+        if not edits:
+            self.tuning_report.setPlainText(TUNING_NOTHING_CHANGED.format(module=module_id))
+            return
+        per_file: dict[str, dict[str, str]] = {}
+        for row in card.card.rows:
+            if row.key in edits:
+                per_file.setdefault(row.file, {})[row.key] = edits[row.key]
+        said: list[str] = []
+        server_dir = self.services.controller.server_dir
+        # Every file's values FIRST, across the whole card, before any of them is
+        # opened. `tuning.write()` makes the same promise per file, which is not
+        # the same promise: a card spanning two files (NPC Beastmaster has its
+        # own conf and one key in the core's `worldserver.conf`) landed the
+        # first file's change and only then refused the second, which is exactly
+        # the half-applied state the guarantee exists to prevent.
+        specs = {file: self._tuning_spec(family, module_id, file) for file in per_file}
+        for file, values in per_file.items():
+            for key, value in values.items():
+                try:
+                    tuning.check(specs[file].get(key), value)
+                except tuning.TuningError as exc:
+                    self.tuning_report.setPlainText(
+                        TUNING_REFUSED.format(module=module_id, why=exc)
+                    )
+                    self.action_failed.emit(str(exc))
+                    return
+        for file, values in per_file.items():
+            try:
+                made = tuning.write(server_dir / file, values, spec=specs[file])
+            except tuning.TuningError as exc:
+                # Unreachable through the loop above, which has already checked
+                # every value on the card. Kept because `tuning.write()` is a
+                # public seam with its own refusals and a caller that assumed
+                # otherwise would be the next half-applied save.
+                self.tuning_report.setPlainText(TUNING_REFUSED.format(module=module_id, why=exc))
+                self.action_failed.emit(str(exc))
+                return
+            except OSError as exc:
+                self.tuning_report.setPlainText(
+                    TUNING_REFUSED.format(
+                        module=module_id, why=f"{file} could not be written: {exc}"
+                    )
+                )
+                self.action_failed.emit(str(exc))
+                return
+            self._note_tuning_owed(file)
+            said.append(
+                TUNING_SAVED.format(
+                    module=module_id,
+                    keys=", ".join(values),
+                    file=file,
+                    backup=made.name,
+                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+                )
+            )
+        self.tuning_report.setPlainText("\n".join(said))
+        self.reload_tuning()
+
+    @Slot(str, str)
+    def revert_tuning(self, family: str, module_id: str) -> None:
+        """Put this card's files back from the newest backup Yu'lon took of each."""
+        try:
+            card = self.tuning_panel.card((family, module_id))
+        except KeyError:
+            return
+        server_dir = self.services.controller.server_dir
+        said: list[str] = []
+        for file in card.card.files:
+            path = server_dir / file
+            backups = tuning.backups_of(path)
+            if not backups:
+                said.append(TUNING_NO_BACKUP.format(module=module_id, file=file))
+                continue
+            try:
+                tuning.restore(backups[-1], path)
+            except OSError as exc:
+                said.append(TUNING_REFUSED.format(module=module_id, why=f"{file}: {exc}"))
+                continue
+            self._note_tuning_owed(file)
+            said.append(
+                TUNING_REVERTED.format(
+                    module=module_id,
+                    file=file,
+                    backup=backups[-1].name,
+                    rule=tuning.apply_sentence(tuning.file_rule(file)),
+                )
+            )
+        self.tuning_report.setPlainText("\n".join(said))
+        self.reload_tuning()
+
+    @Slot(str)
+    def open_tuning_file(self, file: str) -> None:
+        """Show one conf in the raw editor, read-only when it is the server's own."""
+        path = self.services.controller.server_dir / file
+        core = file in TUNING_CORE_FILES
+        try:
+            with open(path, encoding="utf-8", newline="") as handle:
+                raw = handle.read()
+        except OSError as exc:
+            self.tuning_panel.set_file_text("", read_only=True, note=f"{file}: {exc}")
+            return
+        except UnicodeDecodeError as exc:
+            # Shown empty and READ-ONLY rather than with replacement characters
+            # in it: an editor holding U+FFFD where a byte used to be is one
+            # Save away from writing that corruption to disk, and the Save
+            # button is the one control that must not be live here.
+            self.tuning_panel.set_file_text(
+                "", read_only=True, note=tuning.NOT_UTF8.format(file=file, why=exc)
+            )
+            return
+        # Remembered at load and re-applied at save: `QPlainTextEdit` hands back
+        # "\n" whatever it was given, so a raw save of a CRLF conf would convert
+        # the whole file -- the same defect `tuning.write()` reads around.
+        self._tuning_newline = "\r\n" if "\r\n" in raw else "\n"
+        note = TUNING_CORE_FILE if core else tuning.apply_sentence(tuning.file_rule(file))
+        self.tuning_panel.set_file_text(
+            raw.replace("\r\n", "\n"),
+            read_only=core,
+            note=note,
+            # Which of THIS file's keys the running containers override (T44
+            # item 16, round 2). Asked of `composegen`, which is the module
+            # that writes those rows, so the tab warns about the environment
+            # this install really has rather than about every editable conf.
+            shadowed=composegen.shadowed_by_env(raw, composegen.world_env(self.entry)),
+        )
+
+    @Slot()
+    def reload_tuning_file(self) -> None:
+        self.open_tuning_file(self.tuning_panel.current_file())
+
+    @Slot()
+    def revert_tuning_file(self) -> None:
+        """Put the open file back FROM ITS BACKUP, and say which one (T44 item 15).
+
+        From the backup and never by re-reading the form: the editor holds
+        what was last saved, so a "revert" that re-read it would put back the
+        very change the user is trying to undo. `tuning.restore()` copies
+        rather than moves, so a second Revert still has something to restore.
+        """
+        file = self.tuning_panel.current_file()
+        if not file or file in TUNING_CORE_FILES:
+            return
+        path = self.services.controller.server_dir / file
+        backups = tuning.backups_of(path)
+        if not backups:
+            self.tuning_report.setPlainText(TUNING_NO_FILE_BACKUP.format(file=file))
+            return
+        try:
+            tuning.restore(backups[-1], path)
+        except OSError as exc:
+            self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
+            self.action_failed.emit(str(exc))
+            return
+        self.tuning_report.setPlainText(
+            TUNING_REVERTED_FILE.format(
+                file=file,
+                backup=backups[-1].name,
+                rule=tuning.apply_sentence(tuning.file_rule(file)),
+            )
+        )
+        self._note_tuning_owed(file)
+        self.open_tuning_file(file)
+        self.reload_tuning()
+
+    @Slot(str)
+    def save_tuning_file(self, text: str) -> None:
+        """Write the raw editor's text back, after one confirm if it stopped looking like a conf.
+
+        The guard warns and never blocks (T43 point 4): it is a cheap pass, not
+        a parser, and a refusal between a person and their own configuration
+        over a rule this shallow would be worse than the typo it caught.
+        """
+        file = self.tuning_panel.current_file()
+        if not file or file in TUNING_CORE_FILES:
+            return
+        said = tuning.lint_sentence(tuning.lint(text))
+        if said is not None:
+            answer = QMessageBox.question(
+                self,
+                TUNING_LINT_CONFIRM_TITLE,
+                said,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            # `==` and an int, not `is`: PySide6's static `question()` returns a
+            # plain int, so `is StandardButton.Yes` is always False (T33).
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        path = self.services.controller.server_dir / file
+        try:
+            made = tuning.backup(path)
+            with open(path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(text.replace("\n", self._tuning_newline))
+        except OSError as exc:
+            self.tuning_report.setPlainText(TUNING_FILE_FAILED.format(file=file, exc=exc))
+            self.action_failed.emit(str(exc))
+            return
+        self.tuning_report.setPlainText(
+            TUNING_FILE_SAVED.format(
+                file=file,
+                backup=made.name,
+                rule=tuning.apply_sentence(tuning.file_rule(file)),
+            )
+        )
+        # The backup's name on the tab and not only in the report, because it
+        # is what arms Revert beside Save file (T44 item 15).
+        self.tuning_panel.set_backup(made.name)
+        self._note_tuning_owed(file)
+        self.reload_tuning()
 
     def _build_networking_tab(self) -> None:
         tab = QWidget(self)
@@ -6363,22 +7555,46 @@ class ControllerView(QWidget):
         copy_act.triggered.connect(lambda: self._copy_to_clipboard(path.name))
         menu.exec(self.backup_list.mapToGlobal(pos))
 
-    def _show_module_context_menu(self, pos: QPoint) -> None:
-        item = self.module_list.itemAt(pos)
-        if item is None:
-            return
-        mid = str(item.data(Qt.ItemDataRole.UserRole) or "")
+    @Slot(str, QPoint)
+    def _show_module_context_menu(self, module_id: str, pos: QPoint) -> None:
+        """Select the row that was right-clicked, then pop its menu up where it was.
+
+        By id since T42, because the row it is about is the row that was
+        right-clicked and not whatever happened to be highlighted -- and because
+        this is the only press an UNCATALOGUED row still answers: those rows
+        carry no buttons, so the menu is where `UNCATALOGUED_PRESS` is reached.
+
+        The menu is BUILT by `_module_menu()` and only shown here. That split is
+        a test's doing and the code is better for it: `QMenu.exec` is a Shiboken
+        slot that enters a nested event loop, and it cannot be replaced from
+        Python -- measured in round 2, `QMenu.exec = <lambda>` assigns without
+        error and the real one still runs -- so a test of the whole method sat
+        on a real popup until it was killed. What the branches decide is now
+        askable without showing anything.
+        """
+        self.modules_panel.select(module_id)
+        self._module_menu(module_id).exec(pos)
+
+    def _module_menu(self, module_id: str) -> QMenu:
+        """The menu for the SELECTED row: what it offers, and what each entry does."""
         menu = QMenu(self)
-        if self.install_module_button.isEnabled():
+        if self._selected_row_is_uncatalogued():
+            # An uncatalogued row has no manifest, so there are no steps to run
+            # and the menu must not offer two that do nothing. It offers the
+            # ANSWER instead, which is what those two entries were reduced to
+            # before round 2: one action, whose whole result is the sentence.
+            why_act = menu.addAction(WHY_UNCATALOGUED)
+            why_act.triggered.connect(lambda: self.module_report.setPlainText(UNCATALOGUED_PRESS))
+            menu.addSeparator()
+        elif self._module_actions_allowed():
             inst_act = menu.addAction("Install Selected Module")
             inst_act.triggered.connect(lambda: self._module_action("install"))
-        if self.remove_module_button.isEnabled():
             rem_act = menu.addAction("Remove Selected Module")
             rem_act.triggered.connect(lambda: self._module_action("remove"))
-        menu.addSeparator()
+            menu.addSeparator()
         copy_act = menu.addAction("Copy Module ID")
-        copy_act.triggered.connect(lambda: self._copy_to_clipboard(mid))
-        menu.exec(self.module_list.mapToGlobal(pos))
+        copy_act.triggered.connect(lambda: self._copy_to_clipboard(module_id))
+        return menu
 
 
 # ------------------------------------------------------------- formatting

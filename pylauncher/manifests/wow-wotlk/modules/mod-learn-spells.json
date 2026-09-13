@@ -24,19 +24,33 @@
       "keys": [
         {
           "key": "LearnSpells.Enable",
-          "default": "1"
+          "default": "1",
+          "label": "Enable auto-learn",
+          "explain": "Master switch: characters learn their class spells automatically on level-up, no trainer visits.",
+          "type": "bool"
         },
         {
           "key": "LearnSpells.Announce",
-          "default": "1"
+          "default": "1",
+          "label": "Announce at login",
+          "explain": "Show a short message at login telling the player auto-learn is active.",
+          "type": "bool"
         },
         {
           "key": "LearnSpells.OnFirstLogin",
-          "default": "0"
+          "default": "0",
+          "label": "Grant all spells on first login",
+          "explain": "Give a brand-new character every spell up to its level at once. Handy for instant-level servers.",
+          "type": "bool"
         },
         {
           "key": "LearnSpells.MaxLevel",
-          "default": "80"
+          "default": "80",
+          "label": "Learn up to level",
+          "explain": "Stop auto-learning spells past this level.",
+          "type": "int",
+          "min": 1,
+          "max": 80
         }
       ],
       "template": "conf/mod_learnspells.conf.dist"

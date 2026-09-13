@@ -43,6 +43,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
+from yulon import rmtree
 from yulon.log import get_logger
 from yulon.manifest import (
     ALLOWED_REPO_HOSTS,
@@ -382,9 +383,13 @@ def _refuse_shipped(item_id: str, shipped_ids: Container[str]) -> None:
     can be the one that forgets it.
     """
     if item_id in shipped_ids:
+        # The control it names is read off the tab, not remembered: the Modules
+        # tab had one "Install selected" button above a list until T42 and now
+        # has an Install button on each row, and a refusal that still sent the
+        # reader hunting for the old one would be FACT 4 in a smaller place.
         raise DeriveError(
-            f"{item_id} is a module this app already ships — select it in the list "
-            f"and press Install selected. {_NOTHING_CHANGED}"
+            f"{item_id} is a module this app already ships — find it on the Modules "
+            f"tab and press Install on its row. {_NOTHING_CHANGED}"
         )
 
 
@@ -517,7 +522,7 @@ def copy_folder(src: Path, dest: Path) -> None:
             f"copied into it, not from it. {_NOTHING_CHANGED}"
         )
     if dest.exists():
-        shutil.rmtree(dest)
+        rmtree.remove_tree(dest)  # T49: the dest may be a previous copy holding a .git
     shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git"))
     logger.info(f"copied {src} → {dest}")
 
