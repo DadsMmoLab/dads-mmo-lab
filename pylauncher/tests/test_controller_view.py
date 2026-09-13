@@ -7406,6 +7406,24 @@ def test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker
     # The failure is still reported — this must not paper over Docker being gone.
     assert "Docker not reachable" in view.status_label.text()
 
+
+def test_the_drawn_row_for_a_keg_clone_is_marked_installed_and_appears_once(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The widget half of the test above: what the ROW shows, not what the data says.
+
+    These four assertions lost their own `def` line in a merge and were fused
+    onto the end of an unrelated T54 test, whose view has no `bmah` at all --
+    so they asserted `Installed` against a row that was `Not installed` and
+    broke the suite for everyone. Upstream CI could not see it, because `black`
+    runs before `pytest` and was failing on a blank line.
+
+    Restored here with the fixture they were written for: ale and keg share
+    `ale_scripts/`, so a keg's clone is read into both families' sets, and the
+    row must be drawn once, as the keg, marked installed.
+    """
+    view = _installed_view(ps, tmp_path, ale=frozenset({"bmah"}), keg=frozenset({"bmah"}))
+
     assert _panel_ids(view).count("bmah") == 1
     row = view.modules_panel.row("bmah")
     assert row.badge_label.text() == BADGE_INSTALLED
