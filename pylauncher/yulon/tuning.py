@@ -225,6 +225,34 @@ def conf_value(text: str, key: str) -> str | None:
     return None
 
 
+def conf_keys(text: str) -> tuple[str, ...]:
+    """Every key this conf actively assigns, in the file's order, once each.
+
+    `conf_value()`'s rule applied to the whole file rather than to one name: a
+    trimmed line that is empty, `#` or `[` says nothing (`Config.cpp:310-314`),
+    and the key is everything before the first `=`. A commented-out default is
+    the SHIPPED shape of most `.conf.dist` lines, so reading one as a key the
+    file carries would be wrong about almost every file in the install.
+
+    Its caller is `composegen.shadowed_by_env()`, which asks which of a file's
+    keys the running containers override. Here and not there because this
+    module owns how an AzerothCore conf is read, and a second parser in the
+    compose generator is a second place for that rule to drift.
+    """
+    found: list[str] = []
+    for raw in text.split("\n"):
+        line = raw.rstrip("\r").strip()
+        if _is_conf_comment(line):
+            continue
+        cut = line.find("=")
+        if cut <= 0:
+            continue
+        key = line[:cut].strip()
+        if key and key not in found:
+            found.append(key)
+    return tuple(found)
+
+
 def lua_value(text: str, key: str) -> str | None:
     """The LAST assignment of `key` in a deployed Lua script, or `None`.
 

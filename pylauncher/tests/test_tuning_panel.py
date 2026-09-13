@@ -661,30 +661,78 @@ def test_pressing_a_file_button_selects_it_and_says_which(qapp: object) -> None:
     assert panel.current_file() == core
 
 
-def test_the_editable_file_carries_the_recreate_warning_and_a_read_only_one_does_not(
+def test_the_shadow_warning_is_shown_only_where_a_key_is_really_shadowed(
     qapp: object,
 ) -> None:
-    """Item 16, and it is a safety message rather than decoration.
+    """Round 2's finding 3. Round 1 showed this on EVERY editable conf.
 
-    This install's compose sets `AC_*` environment keys on the worldserver
-    (`catalog/composegen.py`'s `DEFAULT_WORLD_ENV` plus `catalog.json`'s
-    `world_env`), and an `AC_*` key SHADOWS the matching line in the conf. A
-    container keeps the environment it was created with, so a raw rewrite that
-    changed a shadowed key looks as though it did nothing until the containers
-    are RECREATED -- which is the promise `ModuleFiles.svelte:124-128` on
-    `rust-main` says cannot be kept.
+    A false "you must recreate" is cheap noise; a missing one is a user editing
+    a value that silently never applies, which is the T41/T43 defect class
+    again. So it is driven by the pairs the view computes
+    (`composegen.shadowed_by_env`) and not by "is this file writable".
 
-    Mutation: show it for read-only files too and `worldserver.conf`, which
-    this tab will not write at all, warns about a rewrite nobody can make.
+    Mutation: `shadow-warning-on-every-editable-file` -- show it on
+    `not read_only` again and a module conf with no env row behind it warns
+    about a recreate that has nothing to do with it.
     """
     panel = tp.TuningPanel()
-    panel.set_file_text("A = 1\n", read_only=False, note=None)
-    assert panel.recreate_warning.isVisibleTo(panel)
-    assert "AC_" in panel.recreate_warning.text()
-    assert "RECREATED" in panel.recreate_warning.text()
 
-    panel.set_file_text("A = 1\n", read_only=True, note=None)
-    assert not panel.recreate_warning.isVisibleTo(panel)
+    panel.set_file_text("A = 1\n", read_only=False, note=None, shadowed=())
+    assert not panel.shadow_warning.isVisibleTo(panel)
+
+    panel.set_file_text(
+        "AiPlayerbot.MinRandomBots = 500\n",
+        read_only=False,
+        note=None,
+        shadowed=(("AiPlayerbot.MinRandomBots", "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"),),
+    )
+    assert panel.shadow_warning.isVisibleTo(panel)
+
+
+def test_the_shadow_warning_names_the_keys_and_the_remedy_that_works(qapp: object) -> None:
+    """The remedy round 1 gave was wrong, and the review is right about why.
+
+    A recreate re-reads `docker-compose.override.yml`, which is regenerated
+    from the same data, so it re-applies the SAME `AC_*` value and the raw edit
+    still does nothing. The env row has to change or go first.
+
+    Mutation: `shadow-warning-says-recreate-is-enough` -- put the round-1
+    sentence back and the tab tells a user to take their server down for a
+    remedy that cannot work.
+    """
+    panel = tp.TuningPanel()
+
+    panel.set_file_text(
+        "AiPlayerbot.MinRandomBots = 500\n",
+        read_only=False,
+        note=None,
+        shadowed=(("AiPlayerbot.MinRandomBots", "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"),),
+    )
+
+    said = panel.shadow_warning.text()
+    assert "AiPlayerbot.MinRandomBots" in said, "it has to name the key"
+    assert "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" in said, "and the row that beats it"
+    assert tp.COMPOSE_OVERRIDE in said, "and where that row lives"
+    assert "recreating the containers is not enough" in said
+
+
+def test_a_read_only_file_gets_no_shadow_warning_whatever_it_carries(qapp: object) -> None:
+    """Nothing can be typed into it, so no edit of it can silently fail to apply.
+
+    Mutation: drop the `read_only` arm and `worldserver.conf` -- 700 lines this
+    app will not write, several of them shadowed -- warns about an edit nobody
+    can make.
+    """
+    panel = tp.TuningPanel()
+
+    panel.set_file_text(
+        "AiPlayerbot.MinRandomBots = 500\n",
+        read_only=True,
+        note=None,
+        shadowed=(("AiPlayerbot.MinRandomBots", "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"),),
+    )
+
+    assert not panel.shadow_warning.isVisibleTo(panel)
 
 
 def test_the_backup_name_is_shown_after_a_save_and_cleared_on_the_next_file(

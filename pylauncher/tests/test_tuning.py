@@ -770,3 +770,44 @@ def test_a_conf_file_can_never_be_a_clone_file_so_the_rebuild_branch_has_no_call
 
     assert "in_clone" not in ConfFile.model_fields
     assert "in_clone" in Patch.model_fields
+
+
+# -- which of a conf's keys are shadowed by the compose environment (T44 r2) --
+
+
+def test_conf_keys_lists_the_assignments_and_nothing_else() -> None:
+    """Every key an active line assigns, in the file's own order.
+
+    The same rule `conf_value()` reads one key by (`Config.cpp:310-314`): a
+    trimmed line that is empty, `#` or `[` says nothing, and after the first
+    `=` everything is value -- AzerothCore has no trailing-comment syntax.
+
+    Mutation: `conf-keys-reads-comments` -- drop the comment arm and
+    `#Transmog.Enable = 1`, which is the SHIPPED shape of a commented-out
+    default, is reported as a key the file carries.
+    """
+    text = (
+        "[worldserver]\n"
+        "\n"
+        "# a comment\n"
+        "#AiPlayerbot.MinRandomBots = 40\n"
+        "AiPlayerbot.MinRandomBots = 500\n"
+        "AiPlayerbot.RandomBotAutologin=1\n"
+        "not a setting\n"
+        '  Spaced.Key = "x = y"\n'
+    )
+
+    assert tuning.conf_keys(text) == (
+        "AiPlayerbot.MinRandomBots",
+        "AiPlayerbot.RandomBotAutologin",
+        "Spaced.Key",
+    )
+
+
+def test_a_key_named_twice_is_listed_once() -> None:
+    """A conf may assign a key more than once; the tab asks about it once.
+
+    Mutation: return a list with duplicates and the shadow warning names the
+    same key twice.
+    """
+    assert tuning.conf_keys("A = 1\nA = 2\n") == ("A",)

@@ -8890,3 +8890,58 @@ def test_a_failed_install_forgets_the_version_the_clone_may_no_longer_be_at(
     pump_until(lambda: not view._filling_versions, "the fill after the failure never finished")
 
     assert view.modules_panel.row("mod-solocraft").version_label.text() == "aaaaaa2 · 2026-09-01"
+
+
+def test_the_tuning_tab_warns_about_the_keys_this_installs_compose_really_beats(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 2's finding 3, end to end: the warning follows the environment, not the file mode.
+
+    The WotLK entry's `world_env` pins `AiPlayerbot.MinRandomBots`, so a conf
+    carrying that key is shadowed and a conf carrying only a module's own key
+    is not — and until round 2 both got the same warning because both were
+    writable.
+
+    Mutation: `tuning-view-passes-no-shadowed` -- drop the `shadowed=` argument
+    and the warning is never shown at all, which is the mirror failure: a user
+    edits the bot population and nothing tells them the world will ignore it.
+    """
+    conf = tmp_path / "env" / "dist" / "etc" / "modules" / "mod_npc_beastmaster.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text("BeastMaster.Enable = 1\n", encoding="utf-8")
+    view = _tuning_view(ps, tmp_path)
+
+    # Same file, same permissions: only the CONTENT decides.
+    view.open_tuning_file("env/dist/etc/modules/mod_npc_beastmaster.conf")
+    assert not view.tuning_panel.shadow_warning.isVisibleTo(view.tuning_panel)
+
+    conf.write_text("BeastMaster.Enable = 1\nAiPlayerbot.MinRandomBots = 500\n", encoding="utf-8")
+    view.open_tuning_file("env/dist/etc/modules/mod_npc_beastmaster.conf")
+
+    assert view.tuning_panel.shadow_warning.isVisibleTo(view.tuning_panel)
+    said = view.tuning_panel.shadow_warning.text()
+    assert "AiPlayerbot.MinRandomBots" in said
+    assert "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" in said
+    assert "BeastMaster.Enable" not in said, "only the shadowed key is named"
+
+
+def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A fact worth pinning: `playerbots.conf` is where the shadowed keys really live.
+
+    Every `AC_*` row this app writes is an `AiPlayerbot.*` or `Playerbots.*`
+    key, and those live in `env/dist/etc/modules/playerbots.conf` -- which is
+    in `TUNING_CORE_FILES` and so is shown READ-ONLY (T43's own follow-up). So
+    on a shipped install the warning is mostly a statement about a file nobody
+    can edit here anyway, and the honest place to change those values is the
+    override itself.
+
+    Recorded rather than assumed: if that file ever becomes writable on this
+    tab, the warning is what stands between a user and an edit the world
+    ignores, and this test is where somebody will find that out.
+
+    Mutation: drop `playerbots.conf` from `TUNING_CORE_FILES` and this fails,
+    which is the review this change would owe.
+    """
+    assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES

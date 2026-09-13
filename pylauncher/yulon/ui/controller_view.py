@@ -7281,7 +7281,16 @@ class ControllerView(QWidget):
         # the whole file -- the same defect `tuning.write()` reads around.
         self._tuning_newline = "\r\n" if "\r\n" in raw else "\n"
         note = TUNING_CORE_FILE if core else tuning.apply_sentence(tuning.file_rule(file))
-        self.tuning_panel.set_file_text(raw.replace("\r\n", "\n"), read_only=core, note=note)
+        self.tuning_panel.set_file_text(
+            raw.replace("\r\n", "\n"),
+            read_only=core,
+            note=note,
+            # Which of THIS file's keys the running containers override (T44
+            # item 16, round 2). Asked of `composegen`, which is the module
+            # that writes those rows, so the tab warns about the environment
+            # this install really has rather than about every editable conf.
+            shadowed=composegen.shadowed_by_env(raw, composegen.world_env(self.entry)),
+        )
 
     @Slot()
     def reload_tuning_file(self) -> None:

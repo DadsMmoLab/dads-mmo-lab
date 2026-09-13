@@ -126,30 +126,43 @@ the first time the key has ever been written.
 READ_ONLY_SUFFIX = " · read-only"
 """What a file button says about a file this tab will not write (T44 item 13)."""
 
-RAW_REWRITE_NEEDS_RECREATE = (
-    "A raw rewrite changes this FILE and nothing else. This install's compose sets AC_* "
-    "environment keys on the worldserver, and an AC_* key SHADOWS the matching line in the "
-    "conf — a container keeps the environment it was created with, so those keys change only "
-    "when the containers are RECREATED, not when the world restarts. If the key you edit here "
-    "is one of them, restarting the server will look as though your edit did nothing."
-)
-"""The warning under the raw editor, and it is a safety message (T44 item 16).
+COMPOSE_OVERRIDE = "docker-compose.override.yml"
+"""Where the `AC_*` rows that beat a conf key live, named so a user can go there."""
 
-Measured in THIS tree rather than inherited: `catalog/composegen.py` writes a
-`docker-compose.override.yml` carrying `DEFAULT_WORLD_ENV` plus
-`catalog.json`'s `install.native.azerothcore.world_env`, and its own comment
-(composegen.py, "an env key SHADOWS the matching row in playerbots.conf")
-records that a settings surface editing that file "will appear to do nothing
-until this key is removed", and that a running container keeps what it started
-with until it is RECREATED.
 
-The guided save has the same exposure and says the same thing through
-`tuning.apply_sentence()`; this sentence exists because the RAW route has no
-row, no declaration and no rule to price -- it is a person rewriting a whole
-file, and `ModuleFiles.svelte:124-128` on `rust-main` is the prior art:
-promising the fast world-only restart there "would be a promise we cannot
-keep".
-"""
+def shadow_warning(shadowed: Sequence[tuple[str, str]]) -> str:
+    """What to say about the keys of this file the container environment beats.
+
+    T44 item 16, rewritten in round 2 on two counts the review was right about.
+
+    **Where it is shown.** Round 1 put it on every editable conf, which is
+    noise on the ones nothing shadows and says nothing at all about WHICH key
+    is affected. The pairs come from `composegen.shadowed_by_env()`, which
+    matches this file's own keys against the env rows this install's override
+    really carries, through AzerothCore's measured `AC_ + upper_snake`
+    transform (`Config.cpp:435-438`).
+
+    **What it tells the user to do.** Round 1 said to recreate the containers.
+    That does not work: the override is regenerated from the same data, so a
+    recreate re-applies the same `AC_*` value and the edit still does nothing.
+    The row has to change or go FIRST -- and only then does the recreate the
+    new environment needs make any difference. A remedy that cannot work is
+    worse than none, because the user spends a server outage finding that out.
+
+    The keys are named, all of them, rather than counted: the question a person
+    has in front of this warning is whether the line they are about to edit is
+    one of them.
+    """
+    pairs = ", ".join(f"{key} (set by {name})" for key, name in shadowed)
+    return (
+        f"Editing this file will NOT change {pairs}. This install's "
+        f"{COMPOSE_OVERRIDE} sets that environment row on the worldserver, and AzerothCore "
+        f"reads the environment in preference to the conf file and to its own default — so "
+        f"recreating the containers is not enough either, because they are recreated from "
+        f"the same {COMPOSE_OVERRIDE}. Change or remove the row there first, then recreate. "
+        f"Every other key in this file is read from the file."
+    )
+
 
 LINT_OK = "✓ every line reads as Key = Value"
 """The verdict when `tuning.lint()` finds nothing (T44 item 14).
@@ -722,12 +735,13 @@ class TuningPanel(QWidget):
         self.file_note.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         right_box.addWidget(self.file_note)
         # Item 16. Under the note and above the box a person types into,
-        # because it is about what typing into it will and will not do.
-        self.recreate_warning = QLabel(RAW_REWRITE_NEEDS_RECREATE, right)
-        self.recreate_warning.setWordWrap(True)
-        self.recreate_warning.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
-        self.recreate_warning.setVisible(False)
-        right_box.addWidget(self.recreate_warning)
+        # because it is about what typing into it will and will not do -- and
+        # shown only for a file that really has a shadowed key in it.
+        self.shadow_warning = QLabel("", right)
+        self.shadow_warning.setWordWrap(True)
+        self.shadow_warning.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.shadow_warning.setVisible(False)
+        right_box.addWidget(self.shadow_warning)
         self.editor = QPlainTextEdit(right)
         self.editor.setFont(QFont("monospace"))
         self.editor.setStyleSheet(
@@ -894,16 +908,32 @@ class TuningPanel(QWidget):
         for button in self._file_buttons:
             button.setChecked(button.toolTip() == file)
 
-    def set_file_text(self, text: str, *, read_only: bool, note: str | None) -> None:
+    def set_file_text(
+        self,
+        text: str,
+        *,
+        read_only: bool,
+        note: str | None,
+        shadowed: Sequence[tuple[str, str]] = (),
+    ) -> None:
+        """Show one file. `shadowed` is the `(key, AC_* row)` pairs the environment beats.
+
+        Handed in rather than computed: which rows this install's compose
+        carries is `composegen`'s answer and the view's to fetch, and a widget
+        that imported the compose generator to find out would be a second place
+        for that question to be asked.
+        """
         blocked = self.editor.blockSignals(True)
         self.editor.setPlainText(text)
         self.editor.blockSignals(blocked)
         self.editor.setReadOnly(read_only)
         self.file_note.setText(note or "")
         self.file_note.setVisible(bool(note))
-        # Only on a file this tab will actually write: a warning about a
-        # rewrite nobody can make is noise over `worldserver.conf` (item 16).
-        self.recreate_warning.setVisible(not read_only)
+        # Only where a key really IS shadowed, and only on a file this tab will
+        # write: nothing can be typed into a read-only one, so no edit of it
+        # can silently fail to apply (item 16, round 2).
+        self.shadow_warning.setText(shadow_warning(shadowed) if shadowed else "")
+        self.shadow_warning.setVisible(bool(shadowed) and not read_only)
         self.file_save_button.setEnabled(self._actions_enabled and not read_only)
         # A backup of the file you were looking at a moment ago is not a
         # backup of this one, so the name goes with the text it described.
