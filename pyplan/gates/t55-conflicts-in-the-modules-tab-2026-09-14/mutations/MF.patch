@@ -1,0 +1,13 @@
+diff --git a/pylauncher/yulon/apply.py b/pylauncher/yulon/apply.py
+index e308140c..593f7021 100644
+--- a/pylauncher/yulon/apply.py
++++ b/pylauncher/yulon/apply.py
+@@ -113,7 +113,7 @@ def conflicting_installed(
+         (other, kind)
+         for other in manifest.conflicts_with
+         for kind in CLONE_DIRS
+-        if other in installed.get(str(kind), frozenset())
++        if True
+     )
+ 
+ 

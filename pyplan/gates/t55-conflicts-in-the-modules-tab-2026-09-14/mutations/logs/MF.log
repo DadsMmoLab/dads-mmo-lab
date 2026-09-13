@@ -1,0 +1,366 @@
+yt: Python 3.13.15 in /home/perzi/wt-t55/pylauncher
+.F.FFFFF...                                                              [100%]
+=================================== FAILURES ===================================
+________ test_a_declared_conflict_that_is_not_installed_blocks_nothing _________
+
+    def test_a_declared_conflict_that_is_not_installed_blocks_nothing() -> None:
+        """Declaring a conflict says nothing about whether the other thing is here.
+    
+        Four mods name each other (buff/xbuff/nerf/baby-mobs). A row that read the
+        declaration rather than the disk would render all four permanently
+        uninstallable on a machine with none of them.
+        """
+        catalog = [
+            _m("buff-mobs", conflicts_with=("nerf-mobs", "baby-mobs")),
+            _m("nerf-mobs", conflicts_with=("buff-mobs", "baby-mobs")),
+        ]
+        rows = _rows(catalog, {})
+        for item in ("buff-mobs", "nerf-mobs"):
+>           assert _row(rows, item).installable, item
+E           AssertionError: buff-mobs
+E           assert False
+E            +  where False = ModuleRow(id='buff-mobs', family='module', name='Buff Mobs', description='buff-mobs does a thing', url='https://github...nstalled here, and the catalog records the two as alternatives that cannot both be installed. Remove Nerf Mobs first.').installable
+E            +    where ModuleRow(id='buff-mobs', family='module', name='Buff Mobs', description='buff-mobs does a thing', url='https://github...nstalled here, and the catalog records the two as alternatives that cannot both be installed. Remove Nerf Mobs first.') = _row((ModuleRow(id='buff-mobs', family='module', name='Buff Mobs', description='buff-mobs does a thing', url='https://githu...stalled here, and the catalog records the two as alternatives that cannot both be installed. Remove Buff Mobs first.')), 'buff-mobs')
+
+tests/test_modules_panel.py:1404: AssertionError
+____ test_an_empty_leftover_greys_the_row_while_the_applier_would_allow_it _____
+
+tmp_path = PosixPath('<tmp>/test_an_empty_leftover_greys_t0')
+
+    def test_an_empty_leftover_greys_the_row_while_the_applier_would_allow_it(
+        tmp_path: Path,
+    ) -> None:
+        """The one direction the tab and the applier may differ in, pinned (T55, T59).
+    
+        An empty `modules/mod-ah-bot` is listed by `installed_clones()`, so the tab
+        greys `mod-ah-bot-plus`; the applier looks inside and lets it through. The
+        tab is stricter, never looser -- and the row it points at is drawn installed,
+        with a Remove, so the way out is on screen.
+    
+        If this ever flips -- the applier refusing what the tab offers -- that is the
+        defect T55 exists for. If the tab is taught to open folders so both allow,
+        this test should be rewritten to say so, not deleted.
+        """
+        from yulon.apply import Applier, installed_clones
+    
+        (tmp_path / "modules" / "mod-ah-bot").mkdir(parents=True)
+        plus = _m("mod-ah-bot-plus", conflicts_with=("mod-ah-bot",))
+        catalog = [_m("mod-ah-bot", conflicts_with=("mod-ah-bot-plus",)), plus]
+        rows = _rows(catalog, installed_clones(tmp_path))
+    
+        assert _row(rows, "mod-ah-bot").installed
+        assert not _row(rows, "mod-ah-bot-plus").installable
+>       assert Applier(tmp_path)._conflict_refusal(plus) is None
+E       AssertionError: assert 'mod-ah-bot-plus and mod-ah-bot cannot both be installed: they are alternatives to each other, and the catalog records...ready here, at ale_scripts/mod-ah-bot. Remove it first, or keep it and leave mod-ah-bot-plus out. Nothing was changed.' is None
+E        +  where 'mod-ah-bot-plus and mod-ah-bot cannot both be installed: they are alternatives to each other, and the catalog records...ready here, at ale_scripts/mod-ah-bot. Remove it first, or keep it and leave mod-ah-bot-plus out. Nothing was changed.' = _conflict_refusal(Manifest(schema_version=1, id='mod-ah-bot-plus', name='Mod Ah Bot Plus', type='module', game='wow-wotlk', description=..._with=('mod-ah-bot',), sql=(), conf=(), deploy=(), patches=(), client=(), server_dbc=(), npcs=(), prompts=(), notes=()))
+E        +    where _conflict_refusal = <yulon.apply.Applier object at 0x789a1f421d30>._conflict_refusal
+E        +      where <yulon.apply.Applier object at 0x789a1f421d30> = <class 'yulon.apply.Applier'>(PosixPath('<tmp>/test_an_empty_leftover_greys_t0'))
+
+tests/test_modules_panel.py:1461: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_an_empty_leftover_greys_t0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_an_empty_leftover_greys_t0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_an_empty_leftover_greys_t0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/sql_scripts/clones'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_an_empty_leftover_greys_t0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_an_empty_leftover_greys_t0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_an_empty_leftover_greys_t0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/sql_scripts/clones'
+------------------------------ Captured log call -------------------------------
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_an_empty_leftover_greys_t0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_an_empty_leftover_greys_t0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_an_empty_leftover_greys_t0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/sql_scripts/clones'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_an_empty_leftover_greys_t0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_an_empty_leftover_greys_t0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_an_empty_leftover_greys_t0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_greys_t0/sql_scripts/clones'
+______ test_install_refuses_a_module_that_conflicts_with_one_already_here ______
+
+tmp_path = PosixPath('<tmp>/test_install_refuses_a_module_0')
+
+    def test_install_refuses_a_module_that_conflicts_with_one_already_here(tmp_path: Path) -> None:
+        """`conflicts_with` is enforced, not merely parsed (T53).
+    
+        The catalog has recorded for a long time that `mod-ah-bot` and
+        `mod-ah-bot-plus` are alternatives -- each names the other in
+        `conflicts_with`, the schema parses it, and `test_manifest.py` asserts it
+        round-trips. Nothing ever read it at install time. So Yu'lon installed both,
+        and the user found out 21 minutes later when the LINKER stopped:
+    
+            mod-ah-bot-plus/src/ah_bot_loader.cpp:18: multiple definition of
+            `Addmod_ah_botScripts()'; mod-ah-bot/src/ah_bot_loader.cpp:12: first
+            defined here
+    
+        A declaration nothing acts on is the shape this repository has paid for
+        before. The refusal is raised BEFORE anything is written, next to the "one
+        source, not two" check, so a refused install leaves the tree exactly as it
+        was.
+        """
+        git = _FakeGit({"README.md": "upstream\n"})
+        applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    
+        first = parse_manifest(
+            {**OWNED_ITEM, "id": "mod-ah-bot", "conflicts_with": ["mod-ah-bot-plus"]}
+        )
+        second = parse_manifest(
+            {**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]}
+        )
+    
+>       applier.install(first)
+
+tests/test_apply.py:3719: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <yulon.apply.Applier object at 0x789a1f43bed0>
+manifest = Manifest(schema_version=1, id='mod-ah-bot', name='AH Bot', type='module', game='wow-wotlk', description='', source=Sou...=('mod-ah-bot-plus',), sql=(), conf=(), deploy=(), patches=(), client=(), server_dbc=(), npcs=(), prompts=(), notes=())
+values = None, folder = None, complete = None
+
+    def install(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        folder: FolderSource | None = None,
+        complete: Completer | None = None,
+    ) -> ApplyReport:
+        """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
+    
+        `folder` is the second way to fill `modules/<id>`: the bytes come from a
+        directory on the user's own disk through `FolderSource.copier` instead
+        of from a repository through `Git.clone`. It is the ONLY thing that
+        changes — the claim, `include.sh` and every step after them are the
+        same statements, over whatever is now at the clone path. A manifest that
+        also carries a `source` is a caller contradiction and is refused before
+        either route runs.
+    
+        `complete` finishes a DERIVED manifest from the content that has just
+        landed; see `Completer`. It runs after the clone or the copy, and
+        everything from `_deploy()` onwards reads what it returned.
+    
+        `_check_values()` is NOT re-run against the completed manifest: it is
+        the caller's answers that are being checked, and the fields a completer
+        fills (conf files to activate, SQL to report) carry no prompts to
+        answer. Named here because it is the one step the completed manifest
+        does not reach.
+        """
+        vals = self._values(manifest, values)
+        log = _Log()
+        self._check_values(manifest, "install", vals, log)
+        clash = self._conflict_refusal(manifest)
+        if clash:
+>           raise ApplyError(clash)
+E           yulon.apply.ApplyError: mod-ah-bot and mod-ah-bot-plus cannot both be installed: they are alternatives to each other, and the catalog records the conflict. mod-ah-bot-plus is already here, at modules/mod-ah-bot-plus. Remove it first, or keep it and leave mod-ah-bot out. Nothing was changed.
+
+yulon/apply.py:1226: ApplyError
+----------------------------- Captured stderr call -----------------------------
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_install_refuses_a_module_0/modules, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_refuses_a_module_0/modules'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_install_refuses_a_module_0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_refuses_a_module_0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_install_refuses_a_module_0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_refuses_a_module_0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_install_refuses_a_module_0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_refuses_a_module_0/sql_scripts/clones'
+------------------------------ Captured log call -------------------------------
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_install_refuses_a_module_0/modules, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_refuses_a_module_0/modules'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_install_refuses_a_module_0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_refuses_a_module_0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_install_refuses_a_module_0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_refuses_a_module_0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_install_refuses_a_module_0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_refuses_a_module_0/sql_scripts/clones'
+___ test_install_is_unaffected_when_the_conflicting_module_is_not_installed ____
+
+tmp_path = PosixPath('<tmp>/test_install_is_unaffected_whe0')
+
+    def test_install_is_unaffected_when_the_conflicting_module_is_not_installed(tmp_path: Path) -> None:
+        """The guard must not refuse the ordinary case, which is the easy mistake here.
+    
+        Declaring a conflict says nothing about whether the other thing is present.
+        A catalog where four mods all name each other (buff/xbuff/nerf/baby-mobs)
+        would be uninstallable if the check read the declaration rather than the
+        disk.
+        """
+        git = _FakeGit({"README.md": "upstream\n"})
+        applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+        lonely = parse_manifest(
+            {**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]}
+        )
+>       report = applier.install(lonely)
+                 ^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_apply.py:3746: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <yulon.apply.Applier object at 0x789a1f884b90>
+manifest = Manifest(schema_version=1, id='mod-ah-bot-plus', name='AH Bot', type='module', game='wow-wotlk', description='', sourc..._with=('mod-ah-bot',), sql=(), conf=(), deploy=(), patches=(), client=(), server_dbc=(), npcs=(), prompts=(), notes=())
+values = None, folder = None, complete = None
+
+    def install(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        folder: FolderSource | None = None,
+        complete: Completer | None = None,
+    ) -> ApplyReport:
+        """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
+    
+        `folder` is the second way to fill `modules/<id>`: the bytes come from a
+        directory on the user's own disk through `FolderSource.copier` instead
+        of from a repository through `Git.clone`. It is the ONLY thing that
+        changes — the claim, `include.sh` and every step after them are the
+        same statements, over whatever is now at the clone path. A manifest that
+        also carries a `source` is a caller contradiction and is refused before
+        either route runs.
+    
+        `complete` finishes a DERIVED manifest from the content that has just
+        landed; see `Completer`. It runs after the clone or the copy, and
+        everything from `_deploy()` onwards reads what it returned.
+    
+        `_check_values()` is NOT re-run against the completed manifest: it is
+        the caller's answers that are being checked, and the fields a completer
+        fills (conf files to activate, SQL to report) carry no prompts to
+        answer. Named here because it is the one step the completed manifest
+        does not reach.
+        """
+        vals = self._values(manifest, values)
+        log = _Log()
+        self._check_values(manifest, "install", vals, log)
+        clash = self._conflict_refusal(manifest)
+        if clash:
+>           raise ApplyError(clash)
+E           yulon.apply.ApplyError: mod-ah-bot-plus and mod-ah-bot cannot both be installed: they are alternatives to each other, and the catalog records the conflict. mod-ah-bot is already here, at modules/mod-ah-bot. Remove it first, or keep it and leave mod-ah-bot-plus out. Nothing was changed.
+
+yulon/apply.py:1226: ApplyError
+----------------------------- Captured stderr call -----------------------------
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_install_is_unaffected_whe0/modules, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_is_unaffected_whe0/modules'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_install_is_unaffected_whe0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_is_unaffected_whe0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_install_is_unaffected_whe0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_is_unaffected_whe0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_install_is_unaffected_whe0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_is_unaffected_whe0/sql_scripts/clones'
+------------------------------ Captured log call -------------------------------
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_install_is_unaffected_whe0/modules, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_is_unaffected_whe0/modules'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_install_is_unaffected_whe0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_is_unaffected_whe0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_install_is_unaffected_whe0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_is_unaffected_whe0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_install_is_unaffected_whe0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_install_is_unaffected_whe0/sql_scripts/clones'
+___________ test_a_conflict_is_found_in_another_familys_clone_folder ___________
+
+tmp_path = PosixPath('<tmp>/test_a_conflict_is_found_in_an0')
+
+    def test_a_conflict_is_found_in_another_familys_clone_folder(tmp_path: Path) -> None:
+        """The search is over every family's folder, not this manifest's own (T53).
+    
+        Asserted because `_conflict_refusal()` says so in its docstring, and a
+        docstring is not a guard. Families live in different directories --
+        `CLONE_DIRS` maps module to `modules/`, ale and keg to `ale_scripts/`, mod
+        to `sql_scripts/clones/` -- so a check that looked only where the manifest
+        being installed would land is one line away, reads correctly, and silently
+        misses a conflict that reaches across families.
+        """
+        git = _FakeGit({"README.md": "upstream\n"})
+        applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+        # An ALE script is already on disk, in ale_scripts/ -- NOT in modules/.
+        (tmp_path / "ale_scripts" / "some-ale-script" / ".git").mkdir(parents=True)
+    
+        module = parse_manifest(
+            {**OWNED_ITEM, "id": "mod-thing", "conflicts_with": ["some-ale-script"]}
+        )
+        with pytest.raises(ApplyError) as caught:
+            applier.install(module)
+        assert "some-ale-script" in str(caught.value)
+>       assert "ale_scripts" in str(caught.value), str(caught.value)
+E       AssertionError: mod-thing and some-ale-script cannot both be installed: they are alternatives to each other, and the catalog records the conflict. some-ale-script is already here, at modules/some-ale-script. Remove it first, or keep it and leave mod-thing out. Nothing was changed.
+E       assert 'ale_scripts' in 'mod-thing and some-ale-script cannot both be installed: they are alternatives to each other, and the catalog records ...is already here, at modules/some-ale-script. Remove it first, or keep it and leave mod-thing out. Nothing was changed.'
+E        +  where 'mod-thing and some-ale-script cannot both be installed: they are alternatives to each other, and the catalog records ...is already here, at modules/some-ale-script. Remove it first, or keep it and leave mod-thing out. Nothing was changed.' = str(ApplyError('mod-thing and some-ale-script cannot both be installed: they are alternatives to each other, and the catal...s already here, at modules/some-ale-script. Remove it first, or keep it and leave mod-thing out. Nothing was changed.'))
+E        +    where ApplyError('mod-thing and some-ale-script cannot both be installed: they are alternatives to each other, and the catal...s already here, at modules/some-ale-script. Remove it first, or keep it and leave mod-thing out. Nothing was changed.') = <ExceptionInfo ApplyError('mod-thing and some-ale-script cannot both be installed: they are alternatives to each other... here, at modules/some-ale-script. Remove it first, or keep it and leave mod-thing out. Nothing was changed.') tblen=2>.value
+
+tests/test_apply.py:3772: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_a_conflict_is_found_in_an0/modules, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_a_conflict_is_found_in_an0/modules'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_a_conflict_is_found_in_an0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_a_conflict_is_found_in_an0/sql_scripts/clones'
+------------------------------ Captured log call -------------------------------
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_a_conflict_is_found_in_an0/modules, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_a_conflict_is_found_in_an0/modules'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_a_conflict_is_found_in_an0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_a_conflict_is_found_in_an0/sql_scripts/clones'
+____ test_an_empty_leftover_directory_does_not_block_a_conflicting_install _____
+
+tmp_path = PosixPath('<tmp>/test_an_empty_leftover_directo0')
+
+    def test_an_empty_leftover_directory_does_not_block_a_conflicting_install(tmp_path: Path) -> None:
+        """An empty folder is not an installed module (T53 review).
+    
+        `clone_names()` answers with every non-hidden directory name: no `.git`
+        required, no claim, no content. `_conflict_refusal()` read that as
+        "installed", so an abandoned or empty `modules/mod-ah-bot` -- left by a
+        failed install, or made by hand -- permanently blocked `mod-ah-bot-plus`
+        with a refusal naming a module that is not really there. Searching every
+        family's folder multiplied the exposure.
+    
+        `_require_own_clone()` already draws this line for the destructive paths:
+        a directory with no `.git` is "refused if it holds anything, allowed if it
+        is an empty folder somebody made -- there is nothing there to lose". The
+        same rule belongs here.
+    
+        Deliberately NOT narrowed to git checkouts or to app-owned claims: a module
+        copied in from a folder is a real install with neither, and refusing to see
+        it would trade a false refusal for a false pass on the case that actually
+        breaks the linker.
+        """
+        git = _FakeGit({"README.md": "upstream\n"})
+        applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+        # The leftover: a directory with the conflicting id and nothing in it.
+        (tmp_path / "modules" / "mod-ah-bot").mkdir(parents=True)
+    
+        plus = parse_manifest({**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]})
+>       report = applier.install(plus)
+                 ^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_apply.py:3802: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <yulon.apply.Applier object at 0x789a1f4a6190>
+manifest = Manifest(schema_version=1, id='mod-ah-bot-plus', name='AH Bot', type='module', game='wow-wotlk', description='', sourc..._with=('mod-ah-bot',), sql=(), conf=(), deploy=(), patches=(), client=(), server_dbc=(), npcs=(), prompts=(), notes=())
+values = None, folder = None, complete = None
+
+    def install(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        folder: FolderSource | None = None,
+        complete: Completer | None = None,
+    ) -> ApplyReport:
+        """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
+    
+        `folder` is the second way to fill `modules/<id>`: the bytes come from a
+        directory on the user's own disk through `FolderSource.copier` instead
+        of from a repository through `Git.clone`. It is the ONLY thing that
+        changes — the claim, `include.sh` and every step after them are the
+        same statements, over whatever is now at the clone path. A manifest that
+        also carries a `source` is a caller contradiction and is refused before
+        either route runs.
+    
+        `complete` finishes a DERIVED manifest from the content that has just
+        landed; see `Completer`. It runs after the clone or the copy, and
+        everything from `_deploy()` onwards reads what it returned.
+    
+        `_check_values()` is NOT re-run against the completed manifest: it is
+        the caller's answers that are being checked, and the fields a completer
+        fills (conf files to activate, SQL to report) carry no prompts to
+        answer. Named here because it is the one step the completed manifest
+        does not reach.
+        """
+        vals = self._values(manifest, values)
+        log = _Log()
+        self._check_values(manifest, "install", vals, log)
+        clash = self._conflict_refusal(manifest)
+        if clash:
+>           raise ApplyError(clash)
+E           yulon.apply.ApplyError: mod-ah-bot-plus and mod-ah-bot cannot both be installed: they are alternatives to each other, and the catalog records the conflict. mod-ah-bot is already here, at ale_scripts/mod-ah-bot. Remove it first, or keep it and leave mod-ah-bot-plus out. Nothing was changed.
+
+yulon/apply.py:1226: ApplyError
+----------------------------- Captured stderr call -----------------------------
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_an_empty_leftover_directo0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_directo0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_an_empty_leftover_directo0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_directo0/ale_scripts'
+2026-09-14 01:56:08 INFO [yulon.docker] could not list <tmp>/test_an_empty_leftover_directo0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_directo0/sql_scripts/clones'
+------------------------------ Captured log call -------------------------------
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_an_empty_leftover_directo0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_directo0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_an_empty_leftover_directo0/ale_scripts, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_directo0/ale_scripts'
+INFO     yulon.docker:docker.py:1904 could not list <tmp>/test_an_empty_leftover_directo0/sql_scripts/clones, so nothing there is marked installed: [Errno 2] No such file or directory: '<tmp>/test_an_empty_leftover_directo0/sql_scripts/clones'
+=========================== short test summary info ============================
+FAILED tests/test_modules_panel.py::test_a_declared_conflict_that_is_not_installed_blocks_nothing
+FAILED tests/test_modules_panel.py::test_an_empty_leftover_greys_the_row_while_the_applier_would_allow_it
+FAILED tests/test_apply.py::test_install_refuses_a_module_that_conflicts_with_one_already_here
+FAILED tests/test_apply.py::test_install_is_unaffected_when_the_conflicting_module_is_not_installed
+FAILED tests/test_apply.py::test_a_conflict_is_found_in_another_familys_clone_folder
+FAILED tests/test_apply.py::test_an_empty_leftover_directory_does_not_block_a_conflicting_install
+6 failed, 5 passed, 524 deselected in 1.13s
