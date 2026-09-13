@@ -1,0 +1,64 @@
+yt: Python 3.13.15 in /home/perzi/wt-t54/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t54/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollecting 265 items                                                           [0m[1mcollected 265 items / 252 deselected / 13 selected                             [0m
+
+tests/test_controller_view.py [32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[31m                              [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m_ test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker _[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x328493d0) at 0x70197b6d4680>
+ps = <tests.test_controller_view._Ps object at 0x70197ce0f950>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-906/test_the_forget_button_appears0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The button's whole case is an install that is gone — Docker usually with it (T54).[39;49;00m
+    [33m[39;49;00m
+    [33m    Reported on 0.8.65-Public. A user deleted `E:\\Games\\Yulon Wotlk` by hand and[39;49;00m
+    [33m    uninstalled Docker Desktop. Uninstall refused and told them exactly what to[39;49;00m
+    [33m    do next:[39;49;00m
+    [33m[39;49;00m
+    [33m        ... If the folder is gone for good, "Forget this install…" drops this tab.[39;49;00m
+    [33m[39;49;00m
+    [33m    and they answered: *"Where is 'Forget this install' — Cannot find that at[39;49;00m
+    [33m    all within Yulon"*.[39;49;00m
+    [33m[39;49;00m
+    [33m    They could not find it because it cannot be shown to them.[39;49;00m
+    [33m    `_update_forget_visibility()` had ONE caller, on the success path of the[39;49;00m
+    [33m    Docker status poll; with Docker gone every poll takes `_status_failed()`,[39;49;00m
+    [33m    which sets a label and returns. The control built for "everything is gone"[39;49;00m
+    [33m    was reachable only while enough was still there to answer.[39;49;00m
+    [33m[39;49;00m
+    [33m    The reveal needs nothing from Docker: `_forget_is_eligible()` asks[39;49;00m
+    [33m    `wsl_distro` and `folder_is_gone()`, both local.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        fake = _FakeUninstall(tmp_path)[90m[39;49;00m
+        view = _uninstall_view(ps, tmp_path, fake)[90m[39;49;00m
+    [90m[39;49;00m
+        [94mdef[39;49;00m[90m [39;49;00m[92mno_docker[39;49;00m() -> InstallStatus:[90m[39;49;00m
+            [94mraise[39;49;00m [96mRuntimeError[39;49;00m([33m"[39;49;00m[33mCannot connect to the Docker daemon[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        view.services.controller.status = no_docker  [90m# type: ignore[method-assign][39;49;00m[90m[39;49;00m
+        shutil.rmtree(tmp_path)[90m[39;49;00m
+    [90m[39;49;00m
+        view.refresh_status()[90m[39;49;00m
+    [90m[39;49;00m
+        [94massert[39;49;00m view.forget_install_button [95mis[39;49;00m [95mnot[39;49;00m [94mNone[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m [95mnot[39;49;00m view.forget_install_button.isHidden(), ([90m[39;49;00m
+            [33m"[39;49;00m[33mthe poll failed, so the user is told to press a button they cannot see[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        )[90m[39;49;00m
+[1m[31mE       AssertionError: the poll failed, so the user is told to press a button they cannot see[0m
+[1m[31mE       assert not True[0m
+[1m[31mE        +  where True = <built-in method isHidden of PySide6.QtWidgets.QPushButton object at 0x70197c3605c0>()[0m
+[1m[31mE        +    where <built-in method isHidden of PySide6.QtWidgets.QPushButton object at 0x70197c3605c0> = <PySide6.QtWidgets.QPushButton(0x34108630) at 0x70197c3605c0>.isHidden[0m
+[1m[31mE        +      where <PySide6.QtWidgets.QPushButton(0x34108630) at 0x70197c3605c0> = <yulon.ui.controller_view.ControllerView(0x340e09a0) at 0x70197c5dbc00>.forget_install_button[0m
+
+[1m[31mtests/test_controller_view.py[0m:7330: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker[0m - AssertionError: the poll failed, so the user is told to press a button they...
+[31m================= [31m[1m1 failed[0m, [32m12 passed[0m, [33m252 deselected[0m[31m in 2.12s[0m[31m =================[0m
