@@ -1,0 +1,51 @@
+yt: Python 3.13.15 in /home/perzi/wt-t50/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t50/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollected 265 items / 263 deselected / 2 selected                              [0m
+
+tests/test_docker.py [31mF[0m[32m.[0m[31m                                                  [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m_______ test_when_docker_desktop_keeps_the_build_log_we_say_where_it_is ________[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-868/test_when_docker_desktop_keeps0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_when_docker_desktop_keeps_the_build_log_we_say_where_it_is[39;49;00m(tmp_path: Path) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""T50: the compiler's words are not in the stream, so stop pretending they are.[39;49;00m
+    [33m[39;49;00m
+    [33m    T38 fixed the SELECTION when the step output is present. It was measured on[39;49;00m
+    [33m    Docker CE on Linux and its docstring states the premise it inherited from[39;49;00m
+    [33m    that measurement -- "the compiler's words are between the fences, and were[39;49;00m
+    [33m    never missing from the buffer". On Docker Desktop for Windows that is false:[39;49;00m
+    [33m    there are no fences, no step output, and a `View build details:` URL[39;49;00m
+    [33m    instead. The extractor found nothing, and the fallback showed the user the[39;49;00m
+    [33m    middle of a cmake invocation -- the exact complaint T38 was filed for, from[39;49;00m
+    [33m    the build that was supposed to have fixed it.[39;49;00m
+    [33m[39;49;00m
+    [33m    Two things must survive, in this order:[39;49;00m
+    [33m[39;49;00m
+    [33m    1. the EXIT CODE, which is load-bearing alone -- `137` is an out-of-memory[39;49;00m
+    [33m       kill and nothing else in the output says so;[39;49;00m
+    [33m    2. WHERE THE LOG IS, verbatim, so it can be pasted into a browser.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        said = docker.last_words(_DOCKER_DESKTOP_TAIL)[90m[39;49;00m
+    [90m[39;49;00m
+        [90m# Where to actually read the error, unmangled -- this is the whole point.[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m [33m"[39;49;00m[33mdocker-desktop://dashboard/build/default/default/c6g4h689yvm5emfs0xe29iae7[39;49;00m[33m"[39;49;00m [95min[39;49;00m said[90m[39;49;00m
+        [90m# And the exit code, which is the only diagnosis available from the stream.[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m [33m"[39;49;00m[33mexit code: 1[39;49;00m[33m"[39;49;00m [95min[39;49;00m said[90m[39;49;00m
+        [90m# NOT the middle of the command. That is what the user was shown twice.[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m [33m"[39;49;00m[33m-DBoost_USE_STATIC_LIBS[39;49;00m[33m"[39;49;00m [95mnot[39;49;00m [95min[39;49;00m said, said[90m[39;49;00m
+[1m[31mE       AssertionError: …ake ../ -DCMAKE_INSTALL_PREFIX=/azeroth-server -DCMAKE_CXX_COMPILER_LAUNCHER=\"ccache\" -DCMAKE_C_COMPILER_LAUNCHER=\"ccache\" -DBoost_USE_STATIC_LIBS=\"ON\" && cmake --build . --config \"$CTYPE\" -j $(($(nproc) + 1)) && cmake --install . --config \"$CTYPE\"" did not complete successfully: exit code: 1 / View build details: docker-desktop://dashboard/build/default/default/c6g4h689yvm5emfs0xe29iae7[0m
+[1m[31mE       assert '-DBoost_USE_STATIC_LIBS' not in '…ake ../ -D...mfs0xe29iae7'[0m
+[1m[31mE         [0m
+[1m[31mE         '-DBoost_USE_STATIC_LIBS' is contained here:[0m
+[1m[31mE           "ccache\" -DBoost_USE_STATIC_LIBS=\"ON\" && cmake --build . --config \"$CTYPE\" -j $(($(nproc) + 1)) && cmake --install . --config \"$CTYPE\"" did not complete successfully: exit code: 1 / View build details: docker-desktop://dashboard/build/default/default/c6g4h689yvm5emfs0xe29iae7[0m
+[1m[31mE         ?           +++++++++++++++++++++++[0m
+
+[1m[31mtests/test_docker.py[0m:6385: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_docker.py::[1mtest_when_docker_desktop_keeps_the_build_log_we_say_where_it_is[0m - AssertionError: …ake ../ -DCMAKE_INSTALL_PREFIX=/azeroth-server -DCMAKE_CXX...
+[31m================= [31m[1m1 failed[0m, [32m1 passed[0m, [33m263 deselected[0m[31m in 0.46s[0m[31m ==================[0m
