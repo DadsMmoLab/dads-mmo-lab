@@ -39,7 +39,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from yulon import platform
+from yulon import platform, tuning
 from yulon.catalog.catalog import CatalogEntry, NativeInstall
 from yulon.log import get_logger
 
@@ -117,6 +117,94 @@ The environment differences the compose diff turned up and this deliberately doe
 too. The image's `entrypoint.sh` reads none of them: it uses `CONF_DIR`, `LOGS_DIR` and
 `ACORE_COMPONENT`, and the image sets `ACORE_COMPONENT` itself. Checked in the image, not assumed.
 """
+
+
+def env_name_for(ini_key: str) -> str:
+    """The environment variable AzerothCore reads a given ini key from.
+
+    `"AC_" + upper_snake(key)`, and the transform is MEASURED rather than
+    guessed: `Config.cpp:435-438` builds the name, `:370-374` documents the
+    case rule with three examples (`SomeConfig => SOME_CONFIG`,
+    `myNestedConfig.opt1 => MY_NESTED_CONFIG_OPT_1`,
+    `LogDB.Opt.ClearTime => LOG_DB_OPT_CLEAR_TIME`) and `:391-394` is the
+    separator rule -- `.`, `-` and a space each become `_`. The whole read is
+    `pyplan/phase8-reads/azerothcore.md`.
+
+    It matters that this is the REAL rule and not a plausible one. The obvious
+    guess -- uppercase and turn dots into underscores -- gives
+    `AC_AIPLAYERBOT_MINRANDOMBOTS`, which is neither what this app writes into
+    the override nor what the server looks for, and a settings surface built on
+    it would find no shadowed key anywhere and warn about none.
+
+    Generic rather than per-key, which is the point: the catalog has relied on
+    it for `AiPlayerbot.MinRandomBots` since the bot population moved into
+    `catalog.json`, and `test_the_transform_agrees_with_every_env_name_this_
+    app_actually_writes` pins all four names this app really writes against it.
+    """
+    out: list[str] = []
+    previous = ""
+    for char in ini_key:
+        if char in " .-":
+            out.append("_")
+            previous = ""
+            continue
+        boundary = previous and (
+            (previous.islower() and char.isupper())
+            or (previous.isalpha() and char.isdigit())
+            or (previous.isdigit() and char.isalpha())
+        )
+        if boundary:
+            out.append("_")
+        out.append(char.upper())
+        previous = char
+    return "AC_" + "".join(out)
+
+
+def world_env(entry: CatalogEntry, override: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The runtime environment this install's generated override carries.
+
+    One function for the question, asked by the generator when it WRITES the
+    file and by the Tuning tab when it warns that a key is shadowed (T44 round
+    2). Two spellings of it would be two answers, and the tab's whole job there
+    is to say what the file says.
+
+    The `else {}` for a family with no `azerothcore` block is the honest
+    default: a CMaNGOS server is configured through its `.conf` files and not
+    through container environment.
+    """
+    native_install = entry.install.native
+    entry_env = (
+        native_install.azerothcore.world_env
+        if native_install is not None and native_install.azerothcore is not None
+        else {}
+    )
+    if override is not None:
+        return dict(override)
+    return {**DEFAULT_WORLD_ENV, **entry_env}
+
+
+_world_env = world_env
+"""A private alias, so the generator can call this while its own parameter of
+that name is in scope. One function, two spellings of the reference."""
+
+
+def shadowed_by_env(text: str, env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """Which of this conf's keys the container environment overrides, and by what.
+
+    `(ini key, environment variable)` per shadowed key, in the file's own
+    order. `Config.cpp:540-552`: the environment wins over both the file value
+    and the compiled default, so a key with an env row behind it can be edited
+    in the conf all day and the world will go on reading the row.
+
+    The remedy for such a key is NOT a container recreate on its own: the
+    override is regenerated from the same data, so a recreate re-applies the
+    same value. The env row has to change or go first. That sentence is the
+    Tuning tab's, and this function is what tells it which files it applies to.
+    """
+    return tuple(
+        (key, name) for key in tuning.conf_keys(text) if (name := env_name_for(key)) in env
+    )
+
 
 # Characters that cannot be spliced into the templates safely, whatever the
 # escaping. A scalar here lands in TWO contexts at once — a bare YAML value
@@ -370,8 +458,7 @@ def render(
     # the `cmangos` family — which carries no `world_env`, because a CMaNGOS
     # server is configured through its `.conf` files and not through container
     # environment.
-    entry_env = native.azerothcore.world_env if native.azerothcore is not None else {}
-    env = dict(world_env) if world_env is not None else {**DEFAULT_WORLD_ENV, **entry_env}
+    env = _world_env(entry, world_env)
     base = fill(
         texts["base.yml.tmpl"],
         {

@@ -4562,7 +4562,7 @@ class StagedInstaller:
             cancel=ctx.cancel,
             stage="build",
         )
-        self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE)
+        self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE, from_build=True)
         yield "The build finished."
 
     def stage_start_db(self, ctx: StageContext) -> Iterator[str]:
@@ -5244,6 +5244,8 @@ class StagedInstaller:
         what: str,
         cancel: threading.Event | None,
         note: str,
+        *,
+        from_build: bool = False,
     ) -> None:
         """`note` is what a Stop costs FOR THIS STAGE, and only this stage.
 
@@ -5257,7 +5259,7 @@ class StagedInstaller:
         if run.returncode != 0:
             raise InstallerError(
                 f"{what} failed (exit {run.returncode}). Its last words were: "
-                f"{docker.last_words(run.tail)}"
+                f"{docker.last_words(run.tail, from_build=from_build)}"
             )
         self._check_cancel(cancel)
 

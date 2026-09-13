@@ -24,11 +24,17 @@
       "keys": [
         {
           "key": "QuestParty.Enable",
-          "note": "true/false, default true"
+          "note": "true/false, default true",
+          "label": "Enable Quest Loot Party",
+          "explain": "Enable or Disable the Quest Loot Party Module. Options: true or false.",
+          "type": "bool"
         },
         {
           "key": "QuestParty.Message",
-          "note": "true/false, default true"
+          "note": "true/false, default true",
+          "label": "Announce it in chat",
+          "explain": "Enable or Disable the Quest Loot Party Message. Options: true or false.",
+          "type": "bool"
         }
       ],
       "template": "conf/mod-quest-loot-party.conf.dist"

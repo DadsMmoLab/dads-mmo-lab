@@ -1,0 +1,52 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[31mF[0m[31m                                                                        [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_________ test_refresh_forgets_every_version_and_a_report_forgets_one __________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x31fcdf90) at 0x7ef3bbe083c0>
+ps = <tests.test_controller_view._Ps object at 0x7ef3beab7620>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-792/test_refresh_forgets_every_ver0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_refresh_forgets_every_version_and_a_report_forgets_one[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The two invalidations, and they are different sizes on purpose.[39;49;00m
+    [33m[39;49;00m
+    [33m    Refresh means "read the disk again" -- a clone can change under this app,[39;49;00m
+    [33m    through a `git pull` in a terminal. A report is about ONE module, and[39;49;00m
+    [33m    dropping the whole cache for it would re-read every other clone for[39;49;00m
+    [33m    nothing.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: bind Refresh back to `reload_modules` and a module pulled in a[39;49;00m
+    [33m    terminal keeps showing the sha it had when the tab opened, forever.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        read: [96mlist[39;49;00m[Path] = [][90m[39;49;00m
+        services = _services(ps, tmp_path, [])[90m[39;49;00m
+        [96mobject[39;49;00m.[92m__setattr__[39;49;00m([90m[39;49;00m
+            services,[90m[39;49;00m
+            [33m"[39;49;00m[33minstalled_modules[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+            [94mlambda[39;49;00m: {[33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m: [96mfrozenset[39;49;00m({[33m"[39;49;00m[33mmod-solocraft[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-transmog[39;49;00m[33m"[39;49;00m})},[90m[39;49;00m
+        )[90m[39;49;00m
+        [96mobject[39;49;00m.[92m__setattr__[39;49;00m([90m[39;49;00m
+            services, [33m"[39;49;00m[33mmodule_version[39;49;00m[33m"[39;49;00m, [94mlambda[39;49;00m path: (read.append(path), [33m"[39;49;00m[33m7c02b1d · 2026-09-01[39;49;00m[33m"[39;49;00m)[[94m1[39;49;00m][90m[39;49;00m
+        )[90m[39;49;00m
+        view = ControllerView(WOTLK, services, status_poll_ms=[94m0[39;49;00m)[90m[39;49;00m
+        pump_until([94mlambda[39;49;00m: [95mnot[39;49;00m view._filling_versions, [33m"[39;49;00m[33mthe first fill never finished[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        [94massert[39;49;00m [96mlen[39;49;00m(read) == [94m2[39;49;00m[90m[39;49;00m
+    [90m[39;49;00m
+        _deliver_report(view, ApplyReport([33m"[39;49;00m[33minstall[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-solocraft[39;49;00m[33m"[39;49;00m))[90m[39;49;00m
+        pump_until([94mlambda[39;49;00m: [95mnot[39;49;00m view._filling_versions, [33m"[39;49;00m[33mthe fill after the report never finished[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        [94massert[39;49;00m read[[94m2[39;49;00m:] == [tmp_path / [33m"[39;49;00m[33mmodules[39;49;00m[33m"[39;49;00m / [33m"[39;49;00m[33mmod-solocraft[39;49;00m[33m"[39;49;00m], [33m"[39;49;00m[33mone module, not both[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+    [90m[39;49;00m
+        view.refresh_modules_button.click()[90m[39;49;00m
+        pump_until([94mlambda[39;49;00m: [95mnot[39;49;00m view._filling_versions, [33m"[39;49;00m[33mthe fill after Refresh never finished[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+>       [94massert[39;49;00m [96mlen[39;49;00m(read) == [94m5[39;49;00m, [33m"[39;49;00m[33mRefresh re-reads every installed clone[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: Refresh re-reads every installed clone[0m
+[1m[31mE       assert 3 == 5[0m
+[1m[31mE        +  where 3 = len([PosixPath('/tmp/pytest-of-perzi/pytest-792/test_refresh_forgets_every_ver0/modules/mod-solocraft'), PosixPath('/tmp/p...les/mod-transmog'), PosixPath('/tmp/pytest-of-perzi/pytest-792/test_refresh_forgets_every_ver0/modules/mod-solocraft')])[0m
+
+[1m[31mtests/test_controller_view.py[0m:8492: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_refresh_forgets_every_version_and_a_report_forgets_one[0m - AssertionError: Refresh re-reads every installed clone
+[31m[31m[1m1 failed[0m, [33m319 deselected[0m[31m in 1.13s[0m[0m

@@ -4,9 +4,10 @@
   "name": "Sit Means Rest",
   "type": "ale",
   "game": "wow-wotlk",
-  "description": "Regen buff while sitting (/sit); stripped on movement.",
+  "description": "Regen buff while sitting (/sit or the X key); stripped on movement or standing up.",
   "source": {
-    "repo": "Brytenwally/SitMeansRest"
+    "repo": "pjerra/SitMeansRest",
+    "rev": "efe08c3fbec2101fee4123a68b3a248259233a45"
   },
   "requires": [
     "mod-ale"
@@ -24,12 +25,22 @@
         {
           "key": "DURATION",
           "default": "{duration}",
-          "note": "seconds"
+          "note": "seconds",
+          "label": "Rest duration (seconds)",
+          "explain": "How long the sit-to-rest regen buff lasts.",
+          "type": "int",
+          "min": 1,
+          "max": 86400
         },
         {
           "key": "REGEN_AURA",
           "default": "{regen_aura}",
-          "note": "spell id"
+          "note": "spell id",
+          "label": "Regen spell id",
+          "explain": "The spell applied while resting. 25990 restores health and mana at any level.",
+          "type": "int",
+          "min": 1,
+          "max": 999999
         }
       ]
     }

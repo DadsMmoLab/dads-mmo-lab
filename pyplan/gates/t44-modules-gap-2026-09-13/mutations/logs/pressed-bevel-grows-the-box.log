@@ -1,0 +1,34 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[31m                                                                    [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_______________ test_a_pressed_button_keeps_the_same_box_it_had ________________[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_pressed_button_keeps_the_same_box_it_had[39;49;00m() -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The bevel moves the content, never the box.[39;49;00m
+    [33m[39;49;00m
+    [33m    `theme.py`'s own comment on `QPushButton:pressed` records that a padding[39;49;00m
+    [33m    shift there once stopped a pressed button lining up with its neighbours[39;49;00m
+    [33m    down a row, so the total border has to weigh the same in both states.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: make the pressed top border 3px and a pressed button in a row of[39;49;00m
+    [33m    them grows by a pixel and nudges the rest.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        qss = panel_style.panel_qss()[90m[39;49;00m
+        rules = qss.split([33m"[39;49;00m[33mQPushButton:pressed[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        normal, pressed = rules[[94m0[39;49;00m], rules[[94m1[39;49;00m][90m[39;49;00m
+    [90m[39;49;00m
+        [94mdef[39;49;00m[90m [39;49;00m[92mweight[39;49;00m(block: [96mstr[39;49;00m, edge: [96mstr[39;49;00m) -> [96mint[39;49;00m:[90m[39;49;00m
+            found = re.search([33mrf[39;49;00m[33m"[39;49;00m[33mborder-[39;49;00m[33m{[39;49;00medge[33m}[39;49;00m[33m: ([39;49;00m[33m\[39;49;00m[33md+)px[39;49;00m[33m"[39;49;00m, block)[90m[39;49;00m
+            [94massert[39;49;00m found [95mis[39;49;00m [95mnot[39;49;00m [94mNone[39;49;00m, (edge, block)[90m[39;49;00m
+            [94mreturn[39;49;00m [96mint[39;49;00m(found.group([94m1[39;49;00m))[90m[39;49;00m
+    [90m[39;49;00m
+        [94massert[39;49;00m weight(normal, [33m"[39;49;00m[33mtop[39;49;00m[33m"[39;49;00m) + weight(normal, [33m"[39;49;00m[33mbottom[39;49;00m[33m"[39;49;00m) == [94m3[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m weight(pressed, [33m"[39;49;00m[33mtop[39;49;00m[33m"[39;49;00m) + weight(pressed, [33m"[39;49;00m[33mbottom[39;49;00m[33m"[39;49;00m) == [94m3[39;49;00m[90m[39;49;00m
+[1m[31mE       AssertionError: assert (3 + 1) == 3[0m
+[1m[31mE        +  where 3 = <function test_a_pressed_button_keeps_the_same_box_it_had.<locals>.weight at 0x7d31cdfb2e80>(' {\n    border-top: 3px solid #262218;\n    border-left: 1px solid #262218;\n    border-right: 1px solid #8A6510;\n    border-bottom: 1px solid #8A6510;\n}\n', 'top')[0m
+[1m[31mE        +  and   1 = <function test_a_pressed_button_keeps_the_same_box_it_had.<locals>.weight at 0x7d31cdfb2e80>(' {\n    border-top: 3px solid #262218;\n    border-left: 1px solid #262218;\n    border-right: 1px solid #8A6510;\n    border-bottom: 1px solid #8A6510;\n}\n', 'bottom')[0m
+
+[1m[31mtests/test_panel_style.py[0m:77: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_panel_style.py::[1mtest_a_pressed_button_keeps_the_same_box_it_had[0m - AssertionError: assert (3 + 1) == 3
+[31m[31m[1m1 failed[0m, [32m4 passed[0m[31m in 0.13s[0m[0m

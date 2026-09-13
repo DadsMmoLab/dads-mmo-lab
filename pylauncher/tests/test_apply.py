@@ -3688,6 +3688,91 @@ def test_the_wotlk_factory_hands_over_the_database_start_as_well(tmp_path: Path)
     assert sql.files == [("world", "up.sql")]
 
 
+def test_install_refuses_a_module_that_conflicts_with_one_already_here(tmp_path: Path) -> None:
+    """`conflicts_with` is enforced, not merely parsed (T53).
+
+    The catalog has recorded for a long time that `mod-ah-bot` and
+    `mod-ah-bot-plus` are alternatives -- each names the other in
+    `conflicts_with`, the schema parses it, and `test_manifest.py` asserts it
+    round-trips. Nothing ever read it at install time. So Yu'lon installed both,
+    and the user found out 21 minutes later when the LINKER stopped:
+
+        mod-ah-bot-plus/src/ah_bot_loader.cpp:18: multiple definition of
+        `Addmod_ah_botScripts()'; mod-ah-bot/src/ah_bot_loader.cpp:12: first
+        defined here
+
+    A declaration nothing acts on is the shape this repository has paid for
+    before. The refusal is raised BEFORE anything is written, next to the "one
+    source, not two" check, so a refused install leaves the tree exactly as it
+    was.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+
+    first = parse_manifest(
+        {**OWNED_ITEM, "id": "mod-ah-bot", "conflicts_with": ["mod-ah-bot-plus"]}
+    )
+    second = parse_manifest(
+        {**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]}
+    )
+
+    applier.install(first)
+    assert applier.clone_dir(first).is_dir()
+
+    with pytest.raises(ApplyError) as caught:
+        applier.install(second)
+
+    said = str(caught.value)
+    assert "mod-ah-bot" in said and "mod-ah-bot-plus" in said, said
+    assert "Nothing was changed" in said, said
+    # And it really changed nothing: no second clone, and the first is untouched.
+    assert not applier.clone_dir(second).exists(), "the refused install still cloned"
+    assert (applier.clone_dir(first) / "README.md").read_text(encoding="utf-8") == "upstream\n"
+
+
+def test_install_is_unaffected_when_the_conflicting_module_is_not_installed(tmp_path: Path) -> None:
+    """The guard must not refuse the ordinary case, which is the easy mistake here.
+
+    Declaring a conflict says nothing about whether the other thing is present.
+    A catalog where four mods all name each other (buff/xbuff/nerf/baby-mobs)
+    would be uninstallable if the check read the declaration rather than the
+    disk.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    lonely = parse_manifest(
+        {**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]}
+    )
+    report = applier.install(lonely)
+    assert applier.clone_dir(lonely).is_dir()
+    assert report.item_id == "mod-ah-bot-plus"
+
+
+def test_a_conflict_is_found_in_another_familys_clone_folder(tmp_path: Path) -> None:
+    """The search is over every family's folder, not this manifest's own (T53).
+
+    Asserted because `_conflict_refusal()` says so in its docstring, and a
+    docstring is not a guard. Families live in different directories --
+    `CLONE_DIRS` maps module to `modules/`, ale and keg to `ale_scripts/`, mod
+    to `sql_scripts/clones/` -- so a check that looked only where the manifest
+    being installed would land is one line away, reads correctly, and silently
+    misses a conflict that reaches across families.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    # An ALE script is already on disk, in ale_scripts/ -- NOT in modules/.
+    (tmp_path / "ale_scripts" / "some-ale-script" / ".git").mkdir(parents=True)
+
+    module = parse_manifest(
+        {**OWNED_ITEM, "id": "mod-thing", "conflicts_with": ["some-ale-script"]}
+    )
+    with pytest.raises(ApplyError) as caught:
+        applier.install(module)
+    assert "some-ale-script" in str(caught.value)
+    assert "ale_scripts" in str(caught.value), str(caught.value)
+    assert not applier.clone_dir(module).exists()
+
+
 def test_a_module_installs_on_a_machine_with_no_host_git(tmp_path: Path, monkeypatch) -> None:
     """The server install never needed host git, so the module install must not (T58).
 

@@ -1,0 +1,14 @@
+# gate: tests/test_modules_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..621bbe60 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -142,8 +142,6 @@ def _badge_for(installed: bool, sql_owed: bool) -> str:
+     clone is on disk and the worldserver will compile it, and the rows it needs
+     are not in the database.
+     """
+-    if installed and sql_owed:
+-        return BADGE_SQL_NOT_APPLIED
+     return BADGE_INSTALLED if installed else BADGE_NOT_INSTALLED
+ 
+ 

@@ -1,0 +1,25 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m             [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_____________ test_a_row_that_cannot_be_written_says_so_in_a_chip ______________[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_row_that_cannot_be_written_says_so_in_a_chip[39;49;00m() -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Item 9's third chip, out of a fact `TuningRow` has carried since T43.[39;49;00m
+    [33m[39;49;00m
+    [33m    `read_only_reason` is already drawn as a SENTENCE under the row; the chip[39;49;00m
+    [33m    is the same fact at a glance, so a person scanning a card of twelve[39;49;00m
+    [33m    settings can see which of them are not theirs to change.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: return `()` for a read-only row and the only mark left is a[39;49;00m
+    [33m    paragraph of prose halfway down the row.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m tp.row_chips(_row(file=LUA)) == (tp.CHIP_READ_ONLY,)[90m[39;49;00m
+[1m[31mE       AssertionError: assert () == ('read-only in this version',)[0m
+[1m[31mE         [0m
+[1m[31mE         Right contains one more item: [0m[33m'[39;49;00m[33mread-only in this version[39;49;00m[33m'[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         Use -v to get more diff[0m
+
+[1m[31mtests/test_tuning_panel.py[0m:471: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_tuning_panel.py::[1mtest_a_row_that_cannot_be_written_says_so_in_a_chip[0m - AssertionError: assert () == ('read-only in this version',)
+[31m[31m[1m1 failed[0m, [32m59 passed[0m[31m in 0.29s[0m[0m

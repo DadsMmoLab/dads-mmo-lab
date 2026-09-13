@@ -1,0 +1,11 @@
+--- /tmp/cv.orig	2026-09-13 22:36:00.984303175 +0200
++++ pylauncher/yulon/ui/controller_view.py	2026-09-13 22:36:01.009043798 +0200
+@@ -3093,7 +3093,7 @@
+         if self.services.uninstall is None:
+             return False
+         controller = self.services.controller
+-        return controller.wsl_distro is None and platform.folder_is_gone(controller.server_dir)
++        return controller.wsl_distro is None  # M2
+ 
+     def _update_forget_visibility(self) -> None:
+         """Show "Forget this install…" exactly while `server_dir` is gone (T34).

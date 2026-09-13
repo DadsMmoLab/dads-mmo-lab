@@ -1,0 +1,14 @@
+# gate: tests/test_modules_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..53302735 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -536,7 +536,7 @@ def build_module_rows(
+                 if here and needed_by
+                 else None
+             ),
+-            badge=_badge_for(here, bool(session.sql_owed.get((manifest.type, manifest.id)))),
++            badge=_badge_for(here, bool(session.sql_owed.get(manifest.id))),  # type: ignore[arg-type]
+             # Installed rows only. A catalog row that is not on disk has no
+             # clone to read, and looking one up for all 41 would be 20 reads
+             # of folders that are not there.

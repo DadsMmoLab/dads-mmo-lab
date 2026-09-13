@@ -1,0 +1,17 @@
+# gate: tests/test_modules_panel.py -q -k 'remembered or cannot_say'
+diff --git a/pylauncher/yulon/ui/widgets/modules_panel.py b/pylauncher/yulon/ui/widgets/modules_panel.py
+index 4bd0e2dc..791fae13 100644
+--- a/pylauncher/yulon/ui/widgets/modules_panel.py
++++ b/pylauncher/yulon/ui/widgets/modules_panel.py
+@@ -347,10 +347,7 @@ class VersionCache:
+ 
+     def fill(self, server_dir: Path, family: str, item_id: str) -> str | None:
+         """The answer, reading the clone once if it has not been read yet."""
+-        key = (server_dir, family, item_id)
+-        if key not in self._known:
+-            self._known[key] = self._read(self.path_of(server_dir, family, item_id))
+-        return self._known[key]
++        return self._read(self.path_of(server_dir, family, item_id))
+ 
+     def forget(self, item_id: str) -> None:
+         """Drop this module's entry in every family and every install.

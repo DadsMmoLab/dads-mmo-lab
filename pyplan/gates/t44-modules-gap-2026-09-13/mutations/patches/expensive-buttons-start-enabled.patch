@@ -1,0 +1,14 @@
+# gate: tests/test_controller_view.py -q -k tuning_action_bar
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..64dc36ff 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -6875,7 +6875,7 @@ class ControllerView(QWidget):
+         self.tuning_recreate_button = QPushButton(TUNING_RECREATE_LABEL, tab)
+         self.tuning_recreate_button.clicked.connect(self.recreate_containers)
+         self.tuning_recreate_button.setToolTip(TUNING_RECREATE_TIP)
+-        self.tuning_recreate_button.setEnabled(False)
++        self.tuning_recreate_button.setEnabled(True)
+         self.tuning_restart_button = QPushButton(TUNING_RESTART_LABEL, tab)
+         self.tuning_restart_button.clicked.connect(self.restart_server)
+         self.tuning_restart_button.setToolTip(TUNING_RESTART_TIP)

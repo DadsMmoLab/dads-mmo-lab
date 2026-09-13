@@ -1,0 +1,11 @@
+--- /tmp/m.orig	2026-09-13 23:09:09.372193706 +0200
++++ pylauncher/yulon/catalog/preflight.py	2026-09-13 23:09:09.384829154 +0200
+@@ -496,7 +496,7 @@
+         return Check(COMPOSE_CHECK, "pass", "`docker compose` answered")
+     return Check(
+         COMPOSE_CHECK,
+-        "refuse",
++        "warn",  # M2
+         "Docker is running, but the Docker Compose plugin is missing",
+         _compose_remedy(facts.platform_id),
+     )

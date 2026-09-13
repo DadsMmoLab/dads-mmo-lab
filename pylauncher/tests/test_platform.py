@@ -1103,3 +1103,103 @@ def test_container_user_args_leaves_evidence_when_it_cannot_ask_for_a_uid(
     with caplog.at_level("WARNING"):
         assert platform.container_user_args(platform_id=lambda: "windows") == []
     assert caplog.text == "", "Docker Desktop having no getuid is normal, not a warning"
+
+
+def test_compose_ready_is_false_when_the_plugin_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Docker engine without the Compose v2 plugin (T56).
+
+    Reported from a Steam Deck on 0.8.65-Public. The user installed Docker by
+    hand, so the daemon answered and preflight passed — and the install then
+    died on step 4 of 9 with:
+
+        the build failed (exit 125). Its last words were:
+        unknown shorthand flag: 'f' in -f / Usage: docker [OPTIONS] COMMAND
+
+    Yu'lon builds with `docker compose -f <file> build`. With no plugin the
+    word `compose` is not a command, so `-f` falls through to `docker` itself
+    and it prints its TOP-LEVEL usage — which is why the message names neither
+    Compose nor the file it was given.
+
+    `docker info` cannot see this: the daemon is fine. The plugin is a separate
+    thing and has to be asked about separately.
+    """
+    monkeypatch.setattr(platform, "docker_programs", lambda: ["docker"])
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _completed(returncode=125)
+
+    monkeypatch.setattr(platform.runner, "run", fake_run)
+    assert platform.compose_ready() is False
+    assert seen and seen[0][1:] == ["compose", "version"], seen
+    # Bounded like every other probe: an unbounded one hangs the preflight.
+    assert platform.compose_ready(timeout=1.0) is False
+
+
+def test_compose_ready_is_true_when_the_plugin_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """And the ordinary machine is unaffected."""
+    monkeypatch.setattr(platform, "docker_programs", lambda: ["docker"])
+    monkeypatch.setattr(
+        platform.runner,
+        "run",
+        lambda argv, **kw: _completed(returncode=0),
+    )
+    assert platform.compose_ready() is True
+
+
+def test_the_compose_probe_actually_bounds_the_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default path must carry the deadline to the child (T56 review).
+
+    `_bounded()` bounds a runner of OURS and returns anything else unchanged:
+
+        return do.bounded(seconds) if isinstance(do, _DefaultRunner) else do
+
+    so `runner.run` passed straight through and the advertised 10 seconds never
+    reached the subprocess. The probe's own docstring claimed it was "shaped
+    exactly like docker_ready()" while differing in that one line. A hung Docker
+    CLI would have stalled the whole preflight.
+
+    Asserted against the DEFAULT runner rather than an injected fake, because an
+    injected fake is exactly what the original tests used and exactly why they
+    could not see this.
+    """
+    monkeypatch.setattr(platform, "docker_programs", lambda: ["docker"])
+    seen: list[object] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(kwargs.get("timeout"))
+        return _completed(returncode=1)
+
+    monkeypatch.setattr(platform.runner, "run", fake_run)
+    platform.compose_ready(timeout=7.0)
+    assert seen, "the probe never ran the subprocess"
+    assert all(isinstance(bound, float) for bound in seen), f"unbounded probe: {seen}"
+def test_a_folder_on_a_drive_that_is_not_there_is_not_confirmed_gone(tmp_path: Path) -> None:
+    """An absent VOLUME is not an absent folder (T54 review).
+
+    `os.stat()` raises `FileNotFoundError` for `E:\\Games\\Yulon Wotlk` both when
+    the folder was deleted and when the whole of `E:` is unplugged, asleep, or a
+    disconnected network share. The two are indistinguishable at the leaf.
+
+    That mattered the moment T54 made the Forget control appear while Docker is
+    unreachable: an offline drive takes Docker's daemon with it often enough
+    (VM on that disk, machine just woken), and the user is then told the folder
+    "no longer exists" and offered a button that drops the only record of a
+    LIVE install, with its containers and volumes still on the machine.
+
+    Before T54 this was prevented by accident -- no Docker, no reveal. The fix
+    removed the accident, so the predicate has to mean what it says.
+    """
+    # A path whose PARENT does not exist either: the volume is what is missing.
+    missing_volume = tmp_path / "not-a-mounted-thing" / "server"
+    assert not platform.folder_is_gone(
+        missing_volume
+    ), "a folder under a root that is not there was reported as confirmed gone"
+
+    # The ordinary case is unchanged: the parent is there, the folder is not.
+    assert platform.folder_is_gone(tmp_path / "deleted-server")
+
+    # And a folder that exists is still not gone.
+    (tmp_path / "real").mkdir()
+    assert not platform.folder_is_gone(tmp_path / "real")

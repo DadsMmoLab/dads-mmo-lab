@@ -1,0 +1,30 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[31m                                             [100%][0m
+=================================== FAILURES ===================================
+[31m[1m____________ test_world_env_is_the_same_answer_the_generator_writes ____________[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_world_env_is_the_same_answer_the_generator_writes[39;49;00m() -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""One function for "what env does this install's override carry?".[39;49;00m
+    [33m[39;49;00m
+    [33m    Asked by the generator when it writes the file and by the Tuning tab when[39;49;00m
+    [33m    it warns about a shadowed key. Two spellings of it would be two answers,[39;49;00m
+    [33m    and the tab's job is to say what the FILE says.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: `world-env-forgets-the-entry` -- return `DEFAULT_WORLD_ENV` alone[39;49;00m
+    [33m    and the two keys `catalog.json` adds stop counting as shadows, so the bot[39;49;00m
+    [33m    population -- the one setting a person is most likely to try to change --[39;49;00m
+    [33m    is edited with no warning at all.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        entry = load_catalog().get([33m"[39;49;00m[33mwow-wotlk[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        env = composegen.world_env(entry)[90m[39;49;00m
+    [90m[39;49;00m
+        [94massert[39;49;00m [96mset[39;49;00m(composegen.DEFAULT_WORLD_ENV) <= [96mset[39;49;00m(env)[90m[39;49;00m
+>       [94massert[39;49;00m env[[33m"[39;49;00m[33mAC_AI_PLAYERBOT_MIN_RANDOM_BOTS[39;49;00m[33m"[39;49;00m] == [33m"[39;49;00m[33m500[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31mE       KeyError: 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS'[0m
+
+[1m[31mtests/test_catalog_operations.py[0m:462: KeyError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_catalog_operations.py::[1mtest_world_env_is_the_same_answer_the_generator_writes[0m - KeyError: 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS'
+[31m[31m[1m1 failed[0m, [32m27 passed[0m[31m in 0.15s[0m[0m

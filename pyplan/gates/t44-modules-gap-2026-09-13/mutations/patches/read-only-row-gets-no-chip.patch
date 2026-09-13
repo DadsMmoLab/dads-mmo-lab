@@ -1,0 +1,14 @@
+# gate: tests/test_tuning_panel.py -q
+diff --git a/pylauncher/yulon/ui/widgets/tuning_panel.py b/pylauncher/yulon/ui/widgets/tuning_panel.py
+index fe8ef679..c8bca08e 100644
+--- a/pylauncher/yulon/ui/widgets/tuning_panel.py
++++ b/pylauncher/yulon/ui/widgets/tuning_panel.py
+@@ -329,7 +329,7 @@ def row_chips(row: TuningRow, *, changed: bool = False) -> tuple[str, ...]:
+     this function is on the pure side of the module.
+     """
+     if not row.editable:
+-        return (CHIP_READ_ONLY,)
++        return ()
+     chips: list[str] = []
+     if changed:
+         pending = PENDING_CHIPS.get(tuning.apply_rule(row))

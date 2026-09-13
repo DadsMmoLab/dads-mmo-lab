@@ -1,0 +1,14 @@
+# gate: tests/test_apply.py -q
+diff --git a/pylauncher/yulon/apply.py b/pylauncher/yulon/apply.py
+index 0f6ed549..12191b38 100644
+--- a/pylauncher/yulon/apply.py
++++ b/pylauncher/yulon/apply.py
+@@ -1356,7 +1356,7 @@ class Applier:
+                 f"{manifest.id} would run `git reset --hard` over whatever is there. Nothing "
+                 f"was changed."
+             )
+-        nothing_of_theirs = self.no_local_commits(clone, manifest.source.branch)
++        nothing_of_theirs = True
+         if nothing_of_theirs is not True:
+             if nothing_of_theirs is False:
+                 return (

@@ -1,0 +1,15 @@
+# gate: tests/test_controller_view.py -q -k revert_all_changes
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..d416f3d1 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -6964,8 +6964,7 @@ class ControllerView(QWidget):
+         made, and that is not what a person pressing "revert my changes"
+         asked for.
+         """
+-        self.tuning_panel.set_cards(build_tuning_cards(self._tuning_rows))
+-        self._set_tuning_revert_all()
++        self.reload_tuning()
+         self.tuning_report.setPlainText(TUNING_ALL_REVERTED)
+ 
+     def _confirm(self, title: str, question: str) -> bool:

@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from yulon import platform, runner
+from yulon import platform, rmtree, runner
 from yulon.log import get_logger
 from yulon.ui import lines
 
@@ -398,6 +398,34 @@ class BehindReader(Protocol):
     def commits_behind(self, dest: Path, branch: str | None) -> int | None: ...
 
 
+class VersionReader(Protocol):
+    """ "What is this checkout AT?" — the fifth read-only question, and the cheapest.
+
+    A fifth one-method Protocol for `BehindReader`'s reason: a fake satisfies a
+    Protocol by having the methods, so folding this onto an existing one would
+    silently stop every existing fake from narrowing.
+
+    It is the only one of the five that touches no network at all. The other
+    four fetch, which is why they live behind a button; this reads the
+    checkout's own `.git` and is affordable per row -- once, and then cached by
+    the caller (T44 item 1).
+    """
+
+    def head_version(self, dest: Path) -> str | None: ...
+
+
+VERSION_FORMAT = "%h %cs"
+"""`git log -1`'s format for the version line: the SHORT sha and the commit date.
+
+`%h` and not `%H`, because the line is read on a row and a 40-character sha
+would push everything beside it off the card; `%cs` and not `%cd`, because
+`%cs` is the ISO short date (`2026-09-01`) in every locale and `%cd` is git's
+long default in whatever the machine's is.
+"""
+
+VERSION_SEPARATOR = " · "
+
+
 def _parse_count(raw: str) -> int | None:
     """`git rev-list --count`'s stdout as a number, or `None` if it is not one.
 
@@ -655,6 +683,43 @@ class RunnerGit:
             return None
         return proc.stdout.strip() == "0"
 
+    def head_version(self, dest: Path) -> str | None:
+        """What this checkout is at, as `7c02b1d · 2026-09-01`. `None` = cannot say.
+
+        One LOCAL `git log -1`. It fetches nothing, writes nothing, and asks no
+        remote anything -- which is the whole reason it can be afforded per
+        installed row where `commits_behind()` cannot (T44 item 1).
+
+        It never guesses and it never raises. A folder with no `.git`, a git
+        that refuses, a `git` that is not on PATH at all, and any output that
+        is not a sha and a date all answer `None`, and a row with `None` simply
+        shows nothing where the version goes. Two reasons, and both matter: a
+        sha is the one string on that row somebody may paste into an issue, so
+        an invented one is worse than a blank; and this is called from a
+        reload, where an exception would take the whole tab down over a
+        decoration.
+
+        `OSError` is caught HERE and not at the caller because "there is no git
+        on this machine" is one of this question's ordinary answers, not an
+        error in somebody else's code: `_run_git()` raises `GitError` for a git
+        that ran and refused, and `runner.run()` raises `OSError` for one that
+        could not be started.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", "log", "-1", f"--format={VERSION_FORMAT}"], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read what {dest} is at: {exc}")
+            return None
+        parts = proc.stdout.strip().split()
+        if len(parts) != 2:
+            logger.debug(
+                f"git log -1 in {dest} did not answer with a sha and a date: {proc.stdout!r}"
+            )
+            return None
+        return VERSION_SEPARATOR.join(parts)
+
     def commits_behind(self, dest: Path, branch: str | None) -> int | None:
         """How many commits an update would bring into `dest`. None = cannot ask.
 
@@ -720,7 +785,9 @@ class RunnerGit:
             self._pin(spec)
             return
         if spec.dest.exists():
-            shutil.rmtree(spec.dest)  # a non-git leftover; wow-manage.sh does the same
+            # T49: read-only git objects stop a bare rmtree on Windows, and a
+            # half-deleted destination is then cloned into.
+            rmtree.remove_tree(spec.dest)  # a non-git leftover; wow-manage.sh does the same
         spec.dest.parent.mkdir(parents=True, exist_ok=True)
         if clear_only:
             return
@@ -1142,7 +1209,7 @@ class ContainerGit:
             self._pin(spec)
             return
         if spec.dest.exists():
-            shutil.rmtree(spec.dest)
+            rmtree.remove_tree(spec.dest)  # T49
         spec.dest.mkdir(parents=True, exist_ok=True)
         if clear_only:
             return

@@ -43,7 +43,7 @@ from tests.support_native import (
     engine,
     install,
 )
-from yulon import docker, git, platform, resources, runner
+from yulon import docker, git, platform, resources, rmtree, runner
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog import families as family_registry
 from yulon.catalog import installer as installer_module
@@ -280,9 +280,12 @@ def test_one_patch_of_a_platform_probe_gets_one_answer_out_of_the_whole_install(
         # `docker ps`; and `bind_mount_ok` went furthest, doing a real
         # `docker run` of `alpine/git` over `tmp_path`, which took the whole
         # suite from 50 s to 148 s on m910q (all measured 2026-09-05).
+        # T56 added a fourth: `compose_ready` runs `docker compose version`,
+        # which is the same class of reach as the three below it.
         vm_resources=lambda: None,
         bind_mount_ok=lambda server_dir: True,
         port_conflicts=lambda: [],
+        compose_ready=lambda: True,
     )
 
     # Both consumers, one patch, one answer each.
@@ -1881,7 +1884,9 @@ def as_the_clone_seam_does(dest: Path) -> None:
     if (dest / ".git").is_dir():
         return
     if dest.exists():
-        shutil.rmtree(dest)
+        # T49: the seams no longer call `shutil.rmtree` -- git leaves read-only
+        # packs on Windows and a bare rmtree stops at the first one, half-deleted.
+        rmtree.remove_tree(dest)
 
 
 def test_both_clone_seams_still_open_the_way_this_double_does(tmp_path: Path) -> None:
@@ -1931,8 +1936,11 @@ def test_both_clone_seams_still_open_the_way_this_double_does(tmp_path: Path) ->
             f"{name}.clone() no longer empties the destination, which is the whole of what the "
             "three tests below pin; if it really is gone, they should assert the resume"
         )
-        assert [ast.unparse(stmt) for stmt in emptying.body] == ["shutil.rmtree(spec.dest)"], (
-            f"{name}.clone() does something other than `shutil.rmtree(spec.dest)` to a "
+        # T49 moved the spelling from `shutil.rmtree` to the leaf that retries
+        # after clearing read-only flags. The assertion still pins ONE statement,
+        # because "empties the destination" is what the three tests below rest on.
+        assert [ast.unparse(stmt) for stmt in emptying.body] == ["rmtree.remove_tree(spec.dest)"], (
+            f"{name}.clone() does something other than `rmtree.remove_tree(spec.dest)` to a "
             "destination it does not recognise"
         )
         assert tests["(spec.dest / '.git').is_dir()"].lineno < emptying.lineno, (

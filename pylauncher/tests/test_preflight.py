@@ -38,6 +38,7 @@ def facts(**overrides: object) -> preflight.Facts:
     base = dict(
         platform_id="linux",
         docker_ready=True,
+        compose_ready=lambda: True,
         vm=platform_module.VmResources(memory_bytes=16 * GIB, cpus=4),
         data_root=Path("/var/lib/docker"),
         data_root_free=200 * GIB,
@@ -564,6 +565,7 @@ def test_gather_asks_docker_nothing_when_docker_is_not_there(tmp_path: Path) -> 
         tmp_path,
         platform_id=lambda: "macos",
         docker_ready=lambda: False,
+        compose_ready=lambda: True,
         vm_resources=never,  # type: ignore[arg-type]
         data_root=never,  # type: ignore[arg-type]
         disk_free=lambda _p: 100 * GIB,
@@ -584,6 +586,7 @@ def test_gather_only_calls_a_port_in_use_when_the_connection_completed(tmp_path:
         tmp_path,
         platform_id=lambda: "macos",
         docker_ready=lambda: True,
+        compose_ready=lambda: True,
         vm_resources=lambda: None,
         data_root=lambda: None,
         disk_free=lambda _p: 100 * GIB,
@@ -604,6 +607,7 @@ def _gather(tmp_path: Path) -> preflight.Facts:
         tmp_path,
         platform_id=lambda: "macos",
         docker_ready=lambda: True,
+        compose_ready=lambda: True,
         vm_resources=lambda: None,
         data_root=lambda: None,
         disk_free=lambda _p: 100 * GIB,
@@ -711,6 +715,7 @@ def test_gather_on_macos_assembles_platform_facts(tmp_path: Path) -> None:
         tmp_path / "server",
         platform_id=lambda: "macos",
         docker_ready=lambda: True,
+        compose_ready=lambda: True,
         vm_resources=lambda: platform_module.VmResources(memory_bytes=8 * GIB, cpus=4),
         data_root=lambda: data_root_path,
         disk_free=lambda p: 120 * GIB,
@@ -805,6 +810,7 @@ def test_gather_asks_selinux_only_on_linux_and_accepts_a_client_dir(tmp_path: Pa
 
     common: dict[str, object] = dict(
         docker_ready=lambda: True,
+        compose_ready=lambda: True,
         vm_resources=lambda: None,
         data_root=lambda: None,
         disk_free=lambda _p: 100 * GIB,
@@ -886,6 +892,7 @@ def test_gather_asks_both_linux_seams_the_module_holds_at_call_time(
         tmp_path,
         platform_id=lambda: "linux",
         docker_ready=lambda: True,
+        compose_ready=lambda: True,
         vm_resources=lambda: None,
         data_root=lambda: None,
         disk_free=lambda _p: 100 * GIB,
@@ -946,6 +953,7 @@ def _client_gather(entry: CatalogEntry, server_dir: Path, **overrides: object) -
     seams: dict[str, object] = dict(
         platform_id=lambda: "linux",
         docker_ready=lambda: True,
+        compose_ready=lambda: True,
         vm_resources=lambda: None,
         data_root=lambda: None,
         disk_free=lambda _p: 100 * GIB,
@@ -1107,6 +1115,7 @@ def test_gather_validates_the_client_and_bind_probes_it_only_when_docker_answere
         CLIENT_ENTRY,
         tmp_path / "server",
         docker_ready=lambda: True,
+        compose_ready=lambda: True,
         bind_mount_ok=probe,
         client_dir=client,
         client_validate=validate,
@@ -1121,6 +1130,7 @@ def test_gather_validates_the_client_and_bind_probes_it_only_when_docker_answere
         CLIENT_ENTRY,
         tmp_path / "server",
         docker_ready=lambda: False,
+        compose_ready=lambda: True,
         bind_mount_ok=probe,
         client_dir=client,
         client_validate=validate,
@@ -1207,3 +1217,74 @@ def test_an_entry_that_needs_a_client_and_was_given_none_is_refused_by_the_real_
     report = preflight.evaluate(CLIENT_ENTRY, tmp_path / "server", got)
     assert not report.ok()
     assert clientdir.PICK_THE_CLIENT in report.message()
+
+
+def test_a_machine_with_docker_but_no_compose_is_refused_before_the_install_starts() -> None:
+    """The Steam Deck case, refused at the gate instead of at step 4 of 9 (T56).
+
+    `docker info` cannot see this. The daemon is fine; the plugin is a separate
+    thing. The user installed Docker by hand from a guide, passed the Docker
+    row, and lost the install four steps in to:
+
+        the build failed (exit 125). Its last words were:
+        unknown shorthand flag: 'f' in -f / Usage: docker [OPTIONS] COMMAND
+
+    The remedy must name the package for THIS machine. "Install the Compose
+    plugin" is not an instruction anyone can act on, and pointing a Steam Deck
+    at Docker Desktop is the mistake T40 exists for.
+    """
+    facts = preflight.Facts(platform_id="linux", docker_ready=True, compose_ready=False)
+    check = preflight._compose_check(facts)
+
+    assert check.name == preflight.COMPOSE_CHECK
+    assert check.verdict == "refuse"
+    assert "pacman -S docker-compose" in (check.remedy or "")
+    # The Debian package must be the one Yu'lon's OWN installer uses there.
+    # Recommending `docker-compose-plugin` to a machine on distro packages ends
+    # in "Unable to locate package", immediately after we blocked them.
+    assert "docker-compose-v2" in (check.remedy or "")
+    assert "docker compose version" in (check.remedy or "")
+    # The hyphenated v1 is a different program and is not what Yu'lon runs.
+    assert "hyphen" in (check.remedy or "").lower()
+    # And it must not send a Linux user to Docker Desktop.
+    assert "Docker Desktop" not in (check.remedy or "")
+
+
+def test_the_compose_row_stays_quiet_when_docker_itself_never_answered() -> None:
+    """One refusal, not two, when the daemon is the thing that is wrong.
+
+    `compose_ready` is `None` exactly when `gather()` did not ask, which it
+    does not do without a daemon. A second red row about a plugin nobody could
+    look for would bury the one row the user has to act on.
+    """
+    facts = preflight.Facts(platform_id="linux", docker_ready=False)
+    check = preflight._compose_check(facts)
+    assert check.verdict == "unchecked"
+    assert "no Docker daemon" in check.detail
+
+
+def test_the_compose_remedy_names_docker_desktop_off_linux() -> None:
+    """Where Docker Desktop IS the answer, it is still the answer."""
+    assert "Docker Desktop" in preflight._compose_remedy("windows")
+    assert "Docker Desktop" in preflight._compose_remedy("darwin")
+    assert "pacman" not in preflight._compose_remedy("windows")
+
+
+def test_the_compose_remedy_names_the_package_our_own_installer_uses() -> None:
+    """The refusal and the provisioning must not name different packages (T56 review).
+
+    `platform._ensure_docker_linux()` installs `docker.io docker-compose-v2
+    docker-buildx` on Debian family. The first version of this remedy said
+    `docker-compose-plugin`, which lives in Docker's own apt repository -- so a
+    user on distro packages, which is what we install for them, would hit
+    "Unable to locate package" straight after being blocked.
+
+    Read out of `platform.py` rather than written here, so the two cannot drift:
+    a change to the provisioning list fails this test.
+    """
+    source = Path(platform_module.__file__ or "").read_text(encoding="utf-8")
+    assert "docker-compose-v2" in source, "the provisioning package list changed"
+    remedy = preflight._compose_remedy("linux")
+    assert "docker-compose-v2" in remedy
+    # The upstream-repo alternative is mentioned, not asserted as universal.
+    assert "docker-compose-plugin" in remedy

@@ -1,0 +1,14 @@
+# gate: tests/test_apply.py -q -k update
+diff --git a/pylauncher/yulon/apply.py b/pylauncher/yulon/apply.py
+index 0f6ed549..6201e654 100644
+--- a/pylauncher/yulon/apply.py
++++ b/pylauncher/yulon/apply.py
+@@ -1357,7 +1357,7 @@ class Applier:
+                 f"was changed."
+             )
+         nothing_of_theirs = self.no_local_commits(clone, manifest.source.branch)
+-        if nothing_of_theirs is not True:
++        if nothing_of_theirs is False:
+             if nothing_of_theirs is False:
+                 return (
+                     f"{rel} carries commits of its own that {url} does not have. Updating "

@@ -1,0 +1,14 @@
+--- /tmp/a.orig	2026-09-13 22:11:28.959108307 +0200
++++ pylauncher/yulon/apply.py	2026-09-13 22:11:28.972912832 +0200
+@@ -1185,10 +1185,8 @@
+         vals = self._values(manifest, values)
+         log = _Log()
+         self._check_values(manifest, "install", vals, log)
+-        clash = self._conflict_refusal(manifest)
+-        if clash:
+-            raise ApplyError(clash)
+         clone = self.clone_dir(manifest)
++        clash = None  # M3: nothing is refused at all
+         if folder is not None and manifest.source is not None:
+             raise ApplyError(
+                 f"{manifest.id}: one source, not two — this manifest is cloned from "

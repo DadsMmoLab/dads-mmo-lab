@@ -23,19 +23,34 @@
       "file": "env/dist/etc/modules/1v1arena.conf",
       "keys": [
         {
-          "key": "Arena1v1.Enable"
+          "key": "Arena1v1.Enable",
+          "label": "Enable the 1v1 arena",
+          "explain": "Enable the 1v1 arena.",
+          "type": "bool"
         },
         {
-          "key": "Arena1v1.MinLevel"
+          "key": "Arena1v1.MinLevel",
+          "label": "Minimum level",
+          "explain": "Min level to create an arena team. Default: 80.",
+          "type": "int"
         },
         {
-          "key": "Arena1v1.Costs"
+          "key": "Arena1v1.Costs",
+          "label": "Cost to create a team",
+          "explain": "Costs for create an arena team. Default: 400000 - (40 gold).",
+          "type": "int"
         },
         {
-          "key": "Arena1v1.Announcer"
+          "key": "Arena1v1.Announcer",
+          "label": "Announce the queue",
+          "explain": "Announce 1v1 arena queue status to chat. Arena.QueueAnnouncer.Enable must be enabled.",
+          "type": "bool"
         },
         {
-          "key": "Arena1v1.PreventHealingTalents"
+          "key": "Arena1v1.PreventHealingTalents",
+          "label": "Prevent healing talents",
+          "explain": "If enabled, it prevents people from having healing talents.",
+          "type": "bool"
         }
       ],
       "template": "conf/1v1arena.conf.dist"

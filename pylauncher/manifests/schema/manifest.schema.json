@@ -96,7 +96,7 @@
     },
     "ConfKey": {
       "additionalProperties": false,
-      "description": "A config key the app sets or surfaces, with its default and the why.",
+      "description": "A config key the app sets or surfaces, with its default, the why, and how to edit it.\n\nThe four T43 fields below are what the Tuning tab draws a control from, and\nthey are on the manifest rather than in a second registry on purpose: one\nfile describes a module's install AND its tuning, so the two cannot name\ndifferent keys (T43 decision 2).\n\nEvery one of them is OPTIONAL, and the absence of each is a decision rather\nthan a gap:\n\n* no `label` -> the tab shows the key itself, which is what the module's own\n  documentation calls it;\n* no `explain` -> the tab shows nothing. The author's silence is honest;\n  invented prose about somebody else's module is not;\n* **no `type` -> a text box.** Never a switch, never a spinner. This is the\n  safety rule of the whole feature: a wrong `type` writes a wrong value into\n  somebody's live server, and \"unknown\" has to degrade to the one control\n  that can express anything;\n* no `min`/`max` on an `int` -> no clamping is invented. The module decides\n  what it accepts; a bound this catalog made up would refuse a value the\n  module is happy with.",
       "properties": {
         "default": {
           "anyOf": [
@@ -111,10 +111,62 @@
           "description": "Value written at configure time; template `{prompt_key}` ok.",
           "title": "Default"
         },
+        "explain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The module author's own sentence about this key.",
+          "title": "Explain"
+        },
         "key": {
           "minLength": 1,
           "title": "Key",
           "type": "string"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Short name for the control; the key itself when absent.",
+          "title": "Label"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`int` keys only; no bound is invented.",
+          "title": "Max"
+        },
+        "min": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`int` keys only; no bound is invented.",
+          "title": "Min"
         },
         "note": {
           "anyOf": [
@@ -127,6 +179,25 @@
           ],
           "default": null,
           "title": "Note"
+        },
+        "type": {
+          "anyOf": [
+            {
+              "enum": [
+                "bool",
+                "int",
+                "list",
+                "text"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which control edits this key. Absent means a text box.",
+          "title": "Type"
         }
       },
       "required": [

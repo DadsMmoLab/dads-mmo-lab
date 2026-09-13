@@ -1,0 +1,14 @@
+# gate: tests/test_controller_view.py -q -k first_paint
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 14de9d31..df557b3c 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -5981,7 +5981,7 @@ class ControllerView(QWidget):
+         found: dict[tuple[str, str], str] = {}
+         for family, ids in installed.items():
+             for item_id in ids:
+-                version = self._versions.known(server_dir, family, item_id)
++                version = self._versions.fill(server_dir, family, item_id)
+                 if version is not None:
+                     found[(family, item_id)] = version
+         return found

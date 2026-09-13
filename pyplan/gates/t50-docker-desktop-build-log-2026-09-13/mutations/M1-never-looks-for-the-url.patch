@@ -1,0 +1,11 @@
+--- /tmp/d.orig	2026-09-13 19:51:03.689353293 +0200
++++ pylauncher/yulon/docker.py	2026-09-13 19:51:03.705326961 +0200
+@@ -3335,7 +3335,7 @@
+             # says where to look (review, 2026-09-12).
+             text = text[:_LAST_WORDS_CHARS] + "…"
+         return f"{text} / {_elided(error_line)}" if error_line else text
+-    kept = _build_log_elsewhere(said)
++    kept = ""  # M1: the URL is never looked for
+     if kept:
+         # T50. The step output is not in the buffer to be selected from, so the
+         # honest answer is where it IS -- not the left-truncated command echo

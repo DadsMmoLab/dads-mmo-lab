@@ -133,10 +133,29 @@ def folder_is_gone(path: Path) -> bool:
     try:
         os.stat(path)
     except FileNotFoundError:
-        return True
+        pass
     except OSError:
         return False
-    return False
+    else:
+        return False
+    # The leaf is absent. That is NOT yet an answer: `os.stat()` raises the same
+    # FileNotFoundError for `E:\Games\Yulon Wotlk` when the folder was deleted
+    # and when the whole of `E:` is unplugged, asleep, or a disconnected share.
+    # Telling those apart needs the PARENT: if the folder's container is there,
+    # the folder really is gone; if it is not, the volume is what is missing and
+    # this function must say "cannot tell" (review, 2026-09-13).
+    #
+    # It mattered the moment T54 revealed the Forget control while Docker is
+    # unreachable -- an offline drive takes Docker with it often enough -- and
+    # the button drops the only record of what may be a LIVE install.
+    parent = path.parent
+    if parent == path:
+        return True  # the anchor itself; nothing above it to corroborate with
+    try:
+        os.stat(parent)
+    except OSError:
+        return False
+    return True
 
 
 def in_wsl() -> bool:
@@ -1323,6 +1342,47 @@ def docker_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SE
             return False
         try:
             if _bounded(do, left)([program, "info"]).returncode == 0:
+                return True
+        except OSError as exc:
+            logger.debug(f"could not start {program}: {exc}")
+    return False
+
+
+def compose_ready(run: RunCmd | None = None, *, timeout: float = _DOCKER_PROBE_SECONDS) -> bool:
+    """True if `docker compose version` succeeds — the PLUGIN, not the daemon.
+
+    A separate question from `docker_ready()`, and it has to be, because
+    `docker info` answers happily on a machine that cannot run a single one of
+    this app's builds. Yu'lon drives every build and every start through
+    `docker compose`; without the v2 plugin that word is not a command, the
+    `-f` after it falls through to `docker` itself, and the user is shown
+    Docker's top-level usage text (T56, from a Steam Deck whose owner installed
+    the engine by hand):
+
+        the build failed (exit 125). Its last words were:
+        unknown shorthand flag: 'f' in -f / Usage: docker [OPTIONS] COMMAND
+
+    `docker-compose` with a hyphen is NOT what is asked for. That is Compose v1,
+    a different program, and this app does not invoke it.
+
+    Bounded and shaped exactly like `docker_ready()` above — same candidate
+    list, same shared budget, same "cannot start it at all is not an answer".
+    """
+    # `_DefaultRunner()`, not `runner.run`: `_bounded()` only bounds a runner of
+    # ours (`do.bounded(seconds) if isinstance(do, _DefaultRunner) else do`), so
+    # the plain function passes through UNBOUNDED and the advertised deadline
+    # never reaches the subprocess. This probe claimed to be "shaped exactly like
+    # docker_ready()" while differing in the one line that made it safe, and a
+    # hung Docker CLI would have stalled the whole preflight (review, 2026-09-13).
+    do = run if run is not None else _DefaultRunner()
+    deadline = time.monotonic() + timeout
+    for program in docker_programs():
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            logger.debug(f"{timeout}s of compose probe spent before {program} was tried")
+            return False
+        try:
+            if _bounded(do, left)([program, "compose", "version"]).returncode == 0:
                 return True
         except OSError as exc:
             logger.debug(f"could not start {program}: {exc}")

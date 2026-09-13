@@ -144,13 +144,67 @@ class SqlStep(_Strict):
 
 
 class ConfKey(_Strict):
-    """A config key the app sets or surfaces, with its default and the why."""
+    """A config key the app sets or surfaces, with its default, the why, and how to edit it.
+
+    The four T43 fields below are what the Tuning tab draws a control from, and
+    they are on the manifest rather than in a second registry on purpose: one
+    file describes a module's install AND its tuning, so the two cannot name
+    different keys (T43 decision 2).
+
+    Every one of them is OPTIONAL, and the absence of each is a decision rather
+    than a gap:
+
+    * no `label` -> the tab shows the key itself, which is what the module's own
+      documentation calls it;
+    * no `explain` -> the tab shows nothing. The author's silence is honest;
+      invented prose about somebody else's module is not;
+    * **no `type` -> a text box.** Never a switch, never a spinner. This is the
+      safety rule of the whole feature: a wrong `type` writes a wrong value into
+      somebody's live server, and "unknown" has to degrade to the one control
+      that can express anything;
+    * no `min`/`max` on an `int` -> no clamping is invented. The module decides
+      what it accepts; a bound this catalog made up would refuse a value the
+      module is happy with.
+    """
 
     key: str = Field(min_length=1)
     default: str | None = Field(
         default=None, description="Value written at configure time; template `{prompt_key}` ok."
     )
     note: str | None = None
+    label: str | None = Field(
+        default=None, description="Short name for the control; the key itself when absent."
+    )
+    explain: str | None = Field(
+        default=None, description="The module author's own sentence about this key."
+    )
+    type: Literal["bool", "int", "list", "text"] | None = Field(
+        default=None, description="Which control edits this key. Absent means a text box."
+    )
+    min: int | None = Field(default=None, description="`int` keys only; no bound is invented.")
+    max: int | None = Field(default=None, description="`int` keys only; no bound is invented.")
+
+    @model_validator(mode="after")
+    def _bounds_belong_to_an_int(self) -> ConfKey:
+        """A `min`/`max` anywhere but on an `int` is refused at parse time.
+
+        Not ignored, because a reader who saw `min` on a `bool` would believe
+        it: the field would say the catalog had thought about a range, and the
+        tab would draw a switch that no bound could ever apply to. A key with
+        no `type` at all is included -- it renders as a text box, and a bound on
+        a text box is the same lie.
+
+        The bound is also checked for being satisfiable: `min` above `max` is a
+        range no value meets, and the first thing it would break is the refusal
+        in `tuning.check()`, which would then decline every value the user
+        typed while naming a range that reads reasonable.
+        """
+        if (self.min is not None or self.max is not None) and self.type != "int":
+            named = self.type or "no type"
+            raise ValueError(f"{self.key}: `min`/`max` are for an `int` key; this one is {named}")
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise ValueError(f"{self.key}: min {self.min} is above max {self.max}")
+        return self
 
 
 class ConfFile(_Strict):

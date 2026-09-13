@@ -1,0 +1,11 @@
+--- /tmp/m.orig	2026-09-13 23:09:09.971541471 +0200
++++ pylauncher/yulon/catalog/preflight.py	2026-09-13 23:09:09.984061529 +0200
+@@ -509,7 +509,7 @@
+     instruction anyone can follow, and because pointing a Steam Deck at Docker
+     Desktop is the mistake T40 is about.
+     """
+-    if platform_id == "linux":
++    if False:  # M3
+         return (
+             "Install Docker Compose v2 and try again. On Arch or SteamOS: "
+             "`sudo pacman -S docker-compose`. On Debian or Ubuntu: "

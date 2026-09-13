@@ -1,0 +1,43 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m             [100%][0m
+=================================== FAILURES ===================================
+[31m[1m______________ test_an_editable_file_lints_live_and_never_blocks _______________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x3c62e340) at 0x7e3fd3395300>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_an_editable_file_lints_live_and_never_blocks[39;49;00m(qapp: [96mobject[39;49;00m) -> [94mNone[39;49;00m:[90m[39;49;00m
+        panel = tp.TuningPanel()[90m[39;49;00m
+        panel.set_file_text([33m"[39;49;00m[33mA = 1[39;49;00m[33m\n[39;49;00m[33m"[39;49;00m, read_only=[94mFalse[39;49;00m, note=[94mNone[39;49;00m)[90m[39;49;00m
+        [90m# T44 item 14: a clean file now says so, where T43 left the label empty.[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m panel.lint_label.text() == tp.LINT_OK[90m[39;49;00m
+[1m[31mE       AssertionError: assert '' == '✓ every line...s Key = Value'[0m
+[1m[31mE         [0m
+[1m[31mE         [0m[91m- ✓ every line reads as Key = Value[39;49;00m[90m[39;49;00m[0m
+
+[1m[31mtests/test_tuning_panel.py[0m:294: AssertionError
+[31m[1m____________ test_the_lint_verdict_is_shown_when_the_file_is_clean _____________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x3c62e340) at 0x7e3fd3395300>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_the_lint_verdict_is_shown_when_the_file_is_clean[39;49;00m(qapp: [96mobject[39;49;00m) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""Item 14: `lint()` already answers; T43 drew only the half that complains.[39;49;00m
+    [33m[39;49;00m
+    [33m    A guard that is silent when it passes is a guard a user cannot tell from a[39;49;00m
+    [33m    guard that is not running.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: keep `said or ""` and a clean file shows nothing, which is what[39;49;00m
+    [33m    an unlinted file also shows.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        panel = tp.TuningPanel()[90m[39;49;00m
+        panel.set_file_text([33m"[39;49;00m[33mA = 1[39;49;00m[33m\n[39;49;00m[33m# a comment[39;49;00m[33m\n[39;49;00m[33m"[39;49;00m, read_only=[94mFalse[39;49;00m, note=[94mNone[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+>       [94massert[39;49;00m panel.lint_label.text() == tp.LINT_OK[90m[39;49;00m
+[1m[31mE       AssertionError: assert '' == '✓ every line...s Key = Value'[0m
+[1m[31mE         [0m
+[1m[31mE         [0m[91m- ✓ every line reads as Key = Value[39;49;00m[90m[39;49;00m[0m
+
+[1m[31mtests/test_tuning_panel.py[0m:593: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_tuning_panel.py::[1mtest_an_editable_file_lints_live_and_never_blocks[0m - AssertionError: assert '' == '✓ every line...s Key = Value'
+[31mFAILED[0m tests/test_tuning_panel.py::[1mtest_the_lint_verdict_is_shown_when_the_file_is_clean[0m - AssertionError: assert '' == '✓ every line...s Key = Value'
+[31m[31m[1m2 failed[0m, [32m58 passed[0m[31m in 0.30s[0m[0m

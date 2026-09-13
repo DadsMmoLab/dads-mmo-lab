@@ -1,0 +1,57 @@
+yt: Python 3.13.15 in /home/perzi/dads-mmo-lab/.claude/worktrees/t44/pylauncher
+[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31mF[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[32m.[0m[31m      [100%][0m
+=================================== FAILURES ===================================
+[31m[1m_____________ test_an_owed_chip_press_names_its_row_and_its_label ______________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x23dd6d20) at 0x7e042077d340>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_an_owed_chip_press_names_its_row_and_its_label[39;49;00m(qapp: [96mobject[39;49;00m) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""An owed chip is a press; the view turns the pair into the chip's own detail.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: emit only the id and the view cannot tell which of a row's three[39;49;00m
+    [33m    owed chips was pressed.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        session = mp.SessionState(rebuild_owed=[96mfrozenset[39;49;00m({([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m)}))[90m[39;49;00m
+        panel = _panel(_catalog_rows({[33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m: [96mfrozenset[39;49;00m({[33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m})}, session=session))[90m[39;49;00m
+        pressed: [96mlist[39;49;00m[[96mtuple[39;49;00m[[96mstr[39;49;00m, [96mstr[39;49;00m]] = [][90m[39;49;00m
+        panel.chip_pressed.connect([94mlambda[39;49;00m mid, label: pressed.append((mid, label)))[90m[39;49;00m
+    [90m[39;49;00m
+        chips = panel.row([33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m).chip_buttons[90m[39;49;00m
+        [94massert[39;49;00m [96mlen[39;49;00m(chips) == [94m1[39;49;00m[90m[39;49;00m
+        chips[[94m0[39;49;00m].click()[90m[39;49;00m
+    [90m[39;49;00m
+>       [94massert[39;49;00m pressed == [([33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m, mp.CHIP_REBUILD_PENDING)][90m[39;49;00m
+[1m[31mE       AssertionError: assert [] == [('mod-a', 'Rebuild pending')][0m
+[1m[31mE         [0m
+[1m[31mE         Right contains one more item: [0m([33m'[39;49;00m[33mmod-a[39;49;00m[33m'[39;49;00m, [33m'[39;49;00m[33mRebuild pending[39;49;00m[33m'[39;49;00m)[90m[39;49;00m[0m
+[1m[31mE         Use -v to get more diff[0m
+
+[1m[31mtests/test_modules_panel.py[0m:597: AssertionError
+[31m[1m________________ test_a_chip_press_still_writes_the_report_line ________________[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x23dd6d20) at 0x7e042077d340>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_chip_press_still_writes_the_report_line[39;49;00m(qapp: [96mobject[39;49;00m) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""T44 keeps it: the report is what a user copies into a bug report.[39;49;00m
+    [33m[39;49;00m
+    [33m    Mutation: replace the `pressed_chip` emit with the expansion and the one[39;49;00m
+    [33m    copyable surface on this tab goes silent.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        session = mp.SessionState(rebuild_owed=[96mfrozenset[39;49;00m({([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m)}))[90m[39;49;00m
+        panel = _panel(_catalog_rows({[33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m: [96mfrozenset[39;49;00m({[33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m})}, session=session))[90m[39;49;00m
+        pressed: [96mlist[39;49;00m[[96mtuple[39;49;00m[[96mstr[39;49;00m, [96mstr[39;49;00m]] = [][90m[39;49;00m
+        panel.chip_pressed.connect([94mlambda[39;49;00m mid, label: pressed.append((mid, label)))[90m[39;49;00m
+    [90m[39;49;00m
+        panel.row([33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m).chip_buttons[[94m0[39;49;00m].click()[90m[39;49;00m
+    [90m[39;49;00m
+>       [94massert[39;49;00m pressed == [([33m"[39;49;00m[33mmod-a[39;49;00m[33m"[39;49;00m, mp.CHIP_REBUILD_PENDING)][90m[39;49;00m
+[1m[31mE       AssertionError: assert [] == [('mod-a', 'Rebuild pending')][0m
+[1m[31mE         [0m
+[1m[31mE         Right contains one more item: [0m([33m'[39;49;00m[33mmod-a[39;49;00m[33m'[39;49;00m, [33m'[39;49;00m[33mRebuild pending[39;49;00m[33m'[39;49;00m)[90m[39;49;00m[0m
+[1m[31mE         Use -v to get more diff[0m
+
+[1m[31mtests/test_modules_panel.py[0m:1033: AssertionError
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_modules_panel.py::[1mtest_an_owed_chip_press_names_its_row_and_its_label[0m - AssertionError: assert [] == [('mod-a', 'Rebuild pending')]
+[31mFAILED[0m tests/test_modules_panel.py::[1mtest_a_chip_press_still_writes_the_report_line[0m - AssertionError: assert [] == [('mod-a', 'Rebuild pending')]
+[31m[31m[1m2 failed[0m, [32m65 passed[0m[31m in 0.52s[0m[0m
