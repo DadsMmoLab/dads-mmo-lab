@@ -1175,6 +1175,8 @@ def test_the_compose_probe_actually_bounds_the_subprocess(monkeypatch: pytest.Mo
     platform.compose_ready(timeout=7.0)
     assert seen, "the probe never ran the subprocess"
     assert all(isinstance(bound, float) for bound in seen), f"unbounded probe: {seen}"
+
+
 def test_a_folder_on_a_drive_that_is_not_there_is_not_confirmed_gone(tmp_path: Path) -> None:
     """An absent VOLUME is not an absent folder (T54 review).
 

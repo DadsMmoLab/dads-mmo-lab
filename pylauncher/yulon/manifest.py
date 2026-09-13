@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -230,6 +231,30 @@ class Deploy(_Strict):
         default=(), description="(from, to) basename renames applied after the copy."
     )
 
+    @model_validator(mode="after")
+    def _rename_needs_a_directory(self) -> Deploy:
+        """`rename` is meaningless on a single-file deploy, and corrupted it.
+
+        For a file src, `_deploy_target()` already returns the full destination
+        FILENAME, so the applier's `(target / old).replace(target / new)` builds
+        a path inside the copied file -- `.../LootPet2.lua/LootPet.lua` -- and
+        the install dies with `NotADirectoryError` AFTER the copy. `_undeploy()`
+        applies renames only on its directory branch, so the file then survives
+        Remove as well.
+
+        This shipped: the `lootpet` manifest was merged in exactly that shape and
+        broke every Loot Pet install. Refused here so a wrong manifest does not
+        load at all, rather than failing part way through an install that has
+        already written into the server folder.
+        """
+        if self.rename and not self.src.endswith("/"):
+            raise ValueError(
+                f"deploy src {self.src!r} is a single file, and `rename` only applies to a "
+                f"directory src (one ending in '/'). Name the file correctly at the source "
+                f"instead."
+            )
+        return self
+
 
 class Patch(_Strict):
     """A find/replace applied to a file after deploy/clone (the script's `sed -i`s).
@@ -374,6 +399,13 @@ class Manifest(_Strict):
     sql: tuple[SqlStep, ...] = ()
     conf: tuple[ConfFile, ...] = ()
     deploy: tuple[Deploy, ...] = ()
+    obsolete: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Paths, relative to the server dir, that a PREVIOUS version of THIS manifest "
+            "deployed and this one does not. Removed on install and on remove."
+        ),
+    )
     patches: tuple[Patch, ...] = ()
     client: tuple[ClientFile, ...] = ()
     server_dbc: tuple[ServerDbc, ...] = ()
@@ -382,6 +414,30 @@ class Manifest(_Strict):
     notes: tuple[str, ...] = Field(
         default=(), description="Tacit knowledge worth showing a human; not machine-read."
     )
+
+    @model_validator(mode="after")
+    def _obsolete_paths_stay_inside(self) -> Manifest:
+        """`obsolete` names files under the server dir, and may not leave it.
+
+        The field exists because renaming what a manifest deploys strands the
+        old file: the applier removes what THIS manifest deploys, so a user who
+        installed the previous version keeps the previous filename forever, and
+        for an ALE script that means the engine loads both (T59 review).
+
+        It is a delete list read from data, so it is worth being strict about:
+        relative only, no `..`, no directories. A manifest is not a place from
+        which to reach an arbitrary path on somebody's disk.
+        """
+        for entry in self.obsolete:
+            if not entry or entry.endswith("/"):
+                raise ValueError(f"obsolete entry {entry!r} must be a file path, not a directory")
+            path = PurePosixPath(entry)
+            if path.is_absolute() or ".." in path.parts or entry[1:2] == ":":
+                raise ValueError(
+                    f"obsolete entry {entry!r} must be relative to the server dir and stay "
+                    f"inside it"
+                )
+        return self
 
     @property
     def _copied_from_a_folder(self) -> bool:

@@ -3771,3 +3771,101 @@ def test_a_conflict_is_found_in_another_familys_clone_folder(tmp_path: Path) -> 
     assert "some-ale-script" in str(caught.value)
     assert "ale_scripts" in str(caught.value), str(caught.value)
     assert not applier.clone_dir(module).exists()
+
+
+def test_an_empty_leftover_directory_does_not_block_a_conflicting_install(tmp_path: Path) -> None:
+    """An empty folder is not an installed module (T53 review).
+
+    `clone_names()` answers with every non-hidden directory name: no `.git`
+    required, no claim, no content. `_conflict_refusal()` read that as
+    "installed", so an abandoned or empty `modules/mod-ah-bot` -- left by a
+    failed install, or made by hand -- permanently blocked `mod-ah-bot-plus`
+    with a refusal naming a module that is not really there. Searching every
+    family's folder multiplied the exposure.
+
+    `_require_own_clone()` already draws this line for the destructive paths:
+    a directory with no `.git` is "refused if it holds anything, allowed if it
+    is an empty folder somebody made -- there is nothing there to lose". The
+    same rule belongs here.
+
+    Deliberately NOT narrowed to git checkouts or to app-owned claims: a module
+    copied in from a folder is a real install with neither, and refusing to see
+    it would trade a false refusal for a false pass on the case that actually
+    breaks the linker.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    # The leftover: a directory with the conflicting id and nothing in it.
+    (tmp_path / "modules" / "mod-ah-bot").mkdir(parents=True)
+
+    plus = parse_manifest({**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]})
+    report = applier.install(plus)
+    assert applier.clone_dir(plus).is_dir(), "an empty leftover blocked a legitimate install"
+    assert report.item_id == "mod-ah-bot-plus"
+
+
+def test_a_hand_copied_module_with_no_git_still_blocks_its_conflict(tmp_path: Path) -> None:
+    """Content is the test, not `.git`: a copied module is a real install.
+
+    The pairing for the test above. A module installed from a folder has no
+    `.git` and no claim, and it is exactly as present to the linker as a clone
+    is -- so it must still block the alternative it conflicts with.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    here = tmp_path / "modules" / "mod-ah-bot"
+    here.mkdir(parents=True)
+    (here / "AuctionHouseBot.cpp").write_text("// real\n", encoding="utf-8")
+
+    plus = parse_manifest({**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]})
+    with pytest.raises(ApplyError, match="mod-ah-bot"):
+        applier.install(plus)
+
+
+def test_every_shipped_ale_manifest_deploys_and_undeploys_for_real(tmp_path: Path) -> None:
+    """The catalog's own deploy steps, driven rather than read (T59).
+
+    A manifest with a single-file `src` and a `rename` was merged and broke
+    every Loot Pet install with `NotADirectoryError` -- after copying, so the
+    folder was left holding a file the remove step would not take away either.
+    Nothing caught it: the rename test uses a DIRECTORY src, which is the shape
+    that works, and no test had ever driven a SHIPPED manifest through
+    `install()`.
+
+    This walks the real `manifests/wow-wotlk/ale/` entries with a fake clone
+    holding exactly the files each one says it deploys, and asserts the deploy
+    lands and the remove takes it away. It is a catalog test, not a unit test:
+    the manifests are data, and data that cannot be applied is a broken build.
+    """
+    ale = Path(__file__).resolve().parents[1] / "manifests" / "wow-wotlk" / "ale"
+    checked = 0
+    for path in sorted(ale.glob("*.json")):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        steps = raw.get("deploy") or []
+        if not steps or any(s["src"].endswith("/") for s in steps):
+            continue  # directory deploys need a tree; this test is the file case
+        manifest = parse_manifest(
+            {**raw, "type": "module", "source": {"repo": "azerothcore/mod-x"}}
+        )
+        server = tmp_path / raw["id"]
+        applier = Applier(
+            server,
+            git=_FakeGit({s["src"]: f"-- {s['src']}\n" for s in steps}),
+            remote_url=_Origins(OWNED_URL),
+        )
+        applier.install(manifest)
+        landed = [
+            (
+                server / s["dest"] / Path(s["src"]).name
+                if s["dest"].endswith("/")
+                else server / s["dest"]
+            )
+            for s in steps
+        ]
+        for target in landed:
+            assert target.is_file(), f"{raw['id']}: {target} was not deployed"
+        applier.remove(manifest)
+        for target in landed:
+            assert not target.exists(), f"{raw['id']}: {target} survived remove"
+        checked += 1
+    assert checked >= 1, "no single-file ALE deploy was exercised; this test found nothing"
