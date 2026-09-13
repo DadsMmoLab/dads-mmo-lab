@@ -69,3 +69,37 @@ clear message from fix 2, and the WSL-backed install route wants its own ticket.
 
 The gate's last line, a named mutation per test, and — because the reporters are on Windows and
 this is measured on Linux — a note on which half remains unproven there.
+
+## Review round 1 — three findings, and the first was that there was nothing to review
+
+Adversarial Codex review, 2026-09-14. Run BEFORE opening the PR, which is the order the earlier
+tickets tonight got wrong.
+
+**HIGH — the branch contained only this ticket.** The fix was written, tested green, and never
+committed, so the review read a Markdown file. *"Uncommitted working-tree changes are not part
+of the reviewed branch and would not ship."* Committed, then re-reviewed. **Second time in one
+night** that uncommitted work was treated as done — the other was T53's fixes, reported to the
+owner as pushed when they were not.
+
+**HIGH — the fallback cannot reach the reporter's install.** `ContainerGit` bind-mounts the
+destination and Docker Desktop refuses a `\\wsl.localhost\...` mount source, which this
+repository already knows (`platform._WSL_SHARE_PREFIXES`, `wsl_linux_path()`). Smn.sez's server
+is at `\\wsl.localhost\dml-arch\home\dml\games\Wowbots`. Silently choosing that seam would have
+traded a fast host-git failure for a slow containerised one, after pulling an image, and still
+installed nothing. Now refused precisely, naming WSL and a remedy, using the same
+`wsl_linux_path()` test the rest of the app uses to spot that shape.
+
+**HIGH — the error could lie about data loss.** The first fix caught every `OSError` around the
+WHOLE `clone()` call. Both seams `rmtree()` and `mkdir()` the destination *before* spawning git,
+so a permission error or I/O failure mid-delete would have been reported as *"git could not be
+started … Nothing was changed"* with part of the destination already gone. Narrowed to
+`FileNotFoundError` at the spawn.
+
+**And the gate caught the reviewer's fourth point concretely:** `git_available()` spawned
+`git --version` on every Applier construction, including UI paths that never clone, and three
+controller tests that assert exactly which commands a tab runs went red. The seam is chosen
+lazily now, on the first clone that needs one, and the three reader seams (`remote_url`,
+`unmodified`, `no_local_commits`) bind at call time instead of inspecting the seam's type in
+`__init__`.
+
+Gate after: `4371 passed, 8 skipped`. ruff/black clean, mypy clean on all three.

@@ -3749,3 +3749,49 @@ def test_a_git_that_cannot_be_started_is_reported_as_git(tmp_path: Path) -> None
     assert "git" in said.lower(), said
     assert "WinError" not in said or "git" in said.lower()
     assert "Nothing was changed" in said or "install" in said.lower()
+
+
+def test_a_wsl_backed_install_is_refused_precisely_rather_than_failed_slowly(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The container fallback cannot reach a `\\\\wsl.localhost` path (T58 review).
+
+    `ContainerGit` bind-mounts the destination, and Docker Desktop refuses a
+    `\\\\wsl.localhost\\...` mount source. One of the two reporters has exactly
+    that: his server is at `\\\\wsl.localhost\\dml-arch\\home\\dml\\games\\Wowbots`.
+
+    Falling back there would trade a fast host-git failure for a slow
+    containerised one, after pulling an image, and still not install anything.
+    A refusal that names the reason and a remedy is worth more than a fallback
+    that cannot work.
+    """
+    monkeypatch.setattr(apply_module, "git_available", lambda: False)
+    unc = Path(r"\\wsl.localhost\dml-arch\home\dml\games\Wowbots")
+    monkeypatch.setattr(
+        apply_module.platform, "wsl_linux_path", lambda path: "/home/dml/games/Wowbots"
+    )
+    with pytest.raises(ApplyError) as caught:
+        apply_module._default_git(unc)
+    said = str(caught.value)
+    assert "WSL" in said and "git" in said.lower(), said
+    assert "Nothing was changed" in said
+
+
+def test_building_an_applier_does_not_probe_for_git(tmp_path: Path, monkeypatch) -> None:
+    """The seam is chosen on the first clone, not on construction (T58 review).
+
+    `git_available()` spawns `git --version`. An Applier is built on UI paths
+    that never clone anything, and three controller tests that assert exactly
+    which commands a tab runs went red on the extra call. Probing eagerly also
+    means answering a question the run may never ask.
+    """
+    asked: list[str] = []
+    monkeypatch.setattr(apply_module, "git_available", lambda: asked.append("probe") or True)
+
+    applier = Applier(tmp_path, remote_url=_Origins(OWNED_URL))
+    assert asked == [], "constructing an Applier probed for git"
+
+    # And it is resolved once, on demand, not per access.
+    _ = applier.git
+    _ = applier.git
+    assert asked == ["probe"], asked
