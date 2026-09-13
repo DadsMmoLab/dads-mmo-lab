@@ -812,6 +812,44 @@ def test_the_menu_install_of_a_blocked_row_refuses_before_it_asks_anything(
     assert "Nothing on this machine was changed" in report
 
 
+def test_a_failed_press_redraws_the_conflict_lock_from_the_disk(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A failure can change what is installed, so the locks are re-read on it too (T55 review).
+
+    `Applier.install()` clones before deploy, SQL and conf, and any of those can
+    raise with the clone already on disk; `remove()` deletes deployed files
+    before the rmtree that may fail. The success path re-read the disk; the
+    failure path did not, so the row kept the pre-press lock.
+
+    Driven with the installed-modules seam changing under the failure, both ways.
+
+    Mutation: drop `reload_modules()` from `_module_failed()` and the first
+    assertion after each failure keeps the old answer.
+    """
+    on_disk: dict[str, frozenset[str]] = {"module": frozenset()}
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", lambda: dict(on_disk))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.modules_panel.row("mod-ah-bot-plus").data.installable
+
+    # An install of mod-ah-bot that cloned and then raised.
+    on_disk["module"] = frozenset({"mod-ah-bot"})
+    view._acting_on = view._manifests[("module", "mod-ah-bot")]
+    view._module_pending = "install mod-ah-bot"
+    view._module_failed(RuntimeError("the SQL step raised after the clone"))
+    assert not view.modules_panel.row("mod-ah-bot-plus").data.installable
+    assert "install mod-ah-bot FAILED" in view.module_report.toPlainText()
+
+    # A remove of it that took the clone away and then raised.
+    on_disk["module"] = frozenset()
+    view._acting_on = view._manifests[("module", "mod-ah-bot")]
+    view._module_pending = "remove mod-ah-bot"
+    view._module_failed(RuntimeError("a later step raised after the rmtree"))
+    assert view.modules_panel.row("mod-ah-bot-plus").data.installable
+    assert "remove mod-ah-bot FAILED" in view.module_report.toPlainText()
+
+
 def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """Remove renders no template on either manifest, so it must not interrogate."""
     asked: list[str] = []

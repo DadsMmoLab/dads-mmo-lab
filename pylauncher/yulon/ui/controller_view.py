@@ -6423,6 +6423,15 @@ class ControllerView(QWidget):
             # which item 1 says is worse than none.
             self._versions.forget(acted_on.id)
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
+        # Re-read the disk on failure too (T55 review). The same partial states
+        # the comment above names -- a clone made before the SQL step raised, a
+        # deploy removed before the rmtree did -- change what is installed, and
+        # since T55 a row's Install is locked or opened by what is installed. A
+        # tab that kept the pre-press picture would offer an install the applier
+        # now refuses, or hold one shut that it would allow. Neither reload
+        # writes the report, so the FAILED line above stays what the user reads.
+        self.reload_modules()
+        self.reload_tuning()
         self.action_failed.emit(str(exc))
 
     @Slot()
