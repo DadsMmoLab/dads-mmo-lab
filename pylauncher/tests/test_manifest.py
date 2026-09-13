@@ -323,3 +323,42 @@ def test_origin_is_optional_and_every_shipped_manifest_has_none() -> None:
         item_dir = index_file.with_suffix("")
         for item_file in sorted(item_dir.glob("*.json")) if item_dir.is_dir() else []:
             assert parse_manifest(json.loads(item_file.read_text(encoding="utf-8"))).origin is None
+
+
+def test_a_rename_on_a_single_file_deploy_is_refused_at_load() -> None:
+    """`rename` only means anything for a DIRECTORY deploy (T53 review).
+
+    `_deploy_target()` returns the full filename for a single-file deploy, so
+    `(target / old).replace(target / new)` builds a path INSIDE the copied file:
+    `.../LootPet2.lua/LootPet.lua`. Install raised `NotADirectoryError` after
+    already copying, and `_undeploy()` applies renames only on its directory
+    branch, so remove left the file behind.
+
+    That shipped in a manifest of ours and no test caught it: the existing
+    rename test uses a directory src, which is the shape that works. A runtime
+    `NotADirectoryError` deep in an install is the wrong place to learn this —
+    the manifest is wrong, and a wrong manifest should not load.
+    """
+    base = {
+        "id": "mod-x",
+        "name": "X",
+        "type": "module",
+        "game": "wow-wotlk",
+        "description": "x",
+        "source": {"repo": "acme/mod-x"},
+    }
+    with pytest.raises(ValidationError, match="rename"):
+        parse_manifest(
+            {
+                **base,
+                "deploy": [{"src": "One.lua", "dest": "d/", "rename": [["One.lua", "Two.lua"]]}],
+            }
+        )
+
+    # A directory src is the shape it is for, and stays valid.
+    ok = parse_manifest(
+        {**base, "deploy": [{"src": "tree/", "dest": "d/", "rename": [["a.lua", "b.lua"]]}]}
+    )
+    assert ok.deploy[0].rename == (("a.lua", "b.lua"),)
+    # And a single-file deploy with no rename is the ordinary case.
+    assert parse_manifest({**base, "deploy": [{"src": "One.lua", "dest": "d/"}]}).deploy[0].src

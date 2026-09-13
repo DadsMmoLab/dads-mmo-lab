@@ -1496,7 +1496,28 @@ class Applier:
             for kind, folder in CLONE_DIRS.items():
                 if other not in here.get(str(kind), frozenset()):
                     continue
-                where = _rel(self.server_dir, self.server_dir / folder / other)
+                # An EMPTY directory is not an installed module. `clone_names()`
+                # answers with every non-hidden directory name -- no `.git`, no
+                # claim, no content -- so a leftover from a failed install, or a
+                # folder somebody made by hand, blocked the alternative forever
+                # with a refusal naming something that is not really there
+                # (review, 2026-09-13). `_require_own_clone()` already draws
+                # this line: refused if it holds anything, allowed if it is an
+                # empty folder somebody made.
+                #
+                # CONTENT, not `.git`: a module copied in from a folder has
+                # neither a checkout nor a claim, and is exactly as present to
+                # the linker as a clone is.
+                seat = self.server_dir / folder / other
+                try:
+                    if not any(seat.iterdir()):
+                        continue
+                except OSError:
+                    # Could not tell. Treat it as present: a false refusal costs
+                    # a message, a false pass costs a build that dies at the
+                    # linker an hour in.
+                    pass
+                where = _rel(self.server_dir, seat)
                 return (
                     f"{manifest.id} and {other} cannot both be installed: they are alternatives "
                     f"to each other, and the catalog records the conflict. {other} is already "

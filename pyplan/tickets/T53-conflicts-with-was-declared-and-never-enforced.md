@@ -95,3 +95,46 @@ rather than reused.
 still presses Install to discover it. The panel has the manifests and `installed_clones()`
 already — showing a conflicting row as unavailable, with the reason, is a UI change that
 belongs with the Modules tab rather than with the applier.
+
+## Review round 1 — two findings, both real
+
+Adversarial Codex review, 2026-09-13, on the pushed branch. Verdict **needs-attention**.
+
+**HIGH — the LootPet rename was broken on install AND remove.** The manifest deployed a single
+file with `rename: [["LootPet2.lua", "LootPet.lua"]]`. For a single-file deploy
+`_deploy_target()` already returns the full destination FILENAME, so the applier's
+`(target / old).replace(target / new)` built a path INSIDE the copied file:
+
+```
+NotADirectoryError: '.../lua_scripts/LootPet2.lua/LootPet2.lua'
+                 -> '.../lua_scripts/LootPet2.lua/LootPet.lua'
+```
+
+Install raised after already copying, and never created `LootPet.lua`. Remove was independently
+wrong: `_undeploy()` applies renames only on its directory branch, so the file survived it.
+
+The rename existed to stop ALE loading two scripts. It would have stopped the install instead.
+It was never run end to end; the one existing rename test uses a DIRECTORY src, which is the
+shape that works.
+
+Fixed at the source rather than in the applier: the script is now named `LootPet.lua` in
+`pjerra/LootPet2`, and the manifest has no rename at all. `lootpet` was the only single-file
+rename in the catalog — `activechat`, the other user of `rename`, deploys a directory. Adding a
+half-working feature to core deploy logic for one consumer that does not need it was the wrong
+trade.
+
+**Guarded so it cannot recur:** `Deploy` now refuses a `rename` on a single-file `src` at load.
+A wrong manifest fails to parse instead of failing part way through an install that has already
+written to the server folder.
+
+**MEDIUM — an empty leftover directory caused a false refusal.** `clone_names()` counts every
+non-hidden directory as installed: no `.git`, no claim, no content. So an abandoned or empty
+`modules/mod-ah-bot` blocked `mod-ah-bot-plus` forever, naming a module that is not really
+there. Narrowed to directories that HOLD something — content, not `.git`, because a module
+copied in from a folder has neither a checkout nor a claim and is exactly as present to the
+linker. `_require_own_clone()` already drew this line.
+
+Unreadable answers "occupied": a false refusal costs a message, a false pass costs a build that
+dies at the linker an hour in.
+
+Gate after: `4373 passed, 8 skipped`. ruff/black clean, mypy clean on all three.

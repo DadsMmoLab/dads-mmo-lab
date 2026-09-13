@@ -3771,3 +3771,52 @@ def test_a_conflict_is_found_in_another_familys_clone_folder(tmp_path: Path) -> 
     assert "some-ale-script" in str(caught.value)
     assert "ale_scripts" in str(caught.value), str(caught.value)
     assert not applier.clone_dir(module).exists()
+
+
+def test_an_empty_leftover_directory_does_not_block_a_conflicting_install(tmp_path: Path) -> None:
+    """An empty folder is not an installed module (T53 review).
+
+    `clone_names()` answers with every non-hidden directory name: no `.git`
+    required, no claim, no content. `_conflict_refusal()` read that as
+    "installed", so an abandoned or empty `modules/mod-ah-bot` -- left by a
+    failed install, or made by hand -- permanently blocked `mod-ah-bot-plus`
+    with a refusal naming a module that is not really there. Searching every
+    family's folder multiplied the exposure.
+
+    `_require_own_clone()` already draws this line for the destructive paths:
+    a directory with no `.git` is "refused if it holds anything, allowed if it
+    is an empty folder somebody made -- there is nothing there to lose". The
+    same rule belongs here.
+
+    Deliberately NOT narrowed to git checkouts or to app-owned claims: a module
+    copied in from a folder is a real install with neither, and refusing to see
+    it would trade a false refusal for a false pass on the case that actually
+    breaks the linker.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    # The leftover: a directory with the conflicting id and nothing in it.
+    (tmp_path / "modules" / "mod-ah-bot").mkdir(parents=True)
+
+    plus = parse_manifest({**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]})
+    report = applier.install(plus)
+    assert applier.clone_dir(plus).is_dir(), "an empty leftover blocked a legitimate install"
+    assert report.item_id == "mod-ah-bot-plus"
+
+
+def test_a_hand_copied_module_with_no_git_still_blocks_its_conflict(tmp_path: Path) -> None:
+    """Content is the test, not `.git`: a copied module is a real install.
+
+    The pairing for the test above. A module installed from a folder has no
+    `.git` and no claim, and it is exactly as present to the linker as a clone
+    is -- so it must still block the alternative it conflicts with.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    here = tmp_path / "modules" / "mod-ah-bot"
+    here.mkdir(parents=True)
+    (here / "AuctionHouseBot.cpp").write_text("// real\n", encoding="utf-8")
+
+    plus = parse_manifest({**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]})
+    with pytest.raises(ApplyError, match="mod-ah-bot"):
+        applier.install(plus)

@@ -176,6 +176,28 @@ class Deploy(_Strict):
         default=(), description="(from, to) basename renames applied after the copy."
     )
 
+    @model_validator(mode="after")
+    def _rename_needs_a_directory(self) -> Deploy:
+        """`rename` is meaningless on a single-file deploy, and used to corrupt it.
+
+        For a file src, `_deploy_target()` already returns the full destination
+        FILENAME, so the applier's `(target / old).replace(target / new)` builds
+        a path inside the copied file -- `.../One.lua/Two.lua` -- and the install
+        died with `NotADirectoryError` after the copy had happened. `_undeploy()`
+        applies renames only on its directory branch, so the file then survived
+        Remove as well. One of our own manifests shipped that way (T53 review).
+
+        Refused here so a wrong manifest does not load, rather than failing part
+        way through an install that has already written to the server folder.
+        """
+        if self.rename and not self.src.endswith("/"):
+            raise ValueError(
+                f"deploy src {self.src!r} is a single file, and `rename` only applies to a "
+                f"directory src (one ending in '/'). Name the file correctly at the source "
+                f"instead."
+            )
+        return self
+
 
 class Patch(_Strict):
     """A find/replace applied to a file after deploy/clone (the script's `sed -i`s).
