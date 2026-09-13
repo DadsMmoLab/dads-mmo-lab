@@ -152,14 +152,23 @@ def test_the_tab_text_font_is_on_the_widget_not_the_subcontrol() -> None:
 
 def test_the_theme_scales_font_sizes_with_window_width() -> None:
     # The theme is generated per window width: a narrower window shrinks the
-    # base font sizes and a wider one grows them, so text stays in proportion
-    # to the controls instead of clipping or sprawling. The rendered-pixel floor
-    # (MIN_FONT_PX) means the narrow end no longer collapses into 10px text.
+    # base font sizes so text stays in proportion to the controls instead of
+    # clipping. The rendered-pixel floor (MIN_FONT_PX) means the narrow end no
+    # longer collapses into 10px text.
+    #
+    # T45: it scales DOWN and never up. This line used to read
+    # `scale_for_width(960) < 1.0 < scale_for_width(1600)` and asserted the
+    # opposite — that a wider window grows the text. Every base in this module is
+    # authored at REFERENCE_WIDTH, so growing past it renders a size nobody
+    # chose: a maximised 1920 desktop sat at min(1.4, 1.5) and drew every label,
+    # button, tab and input 40% over its authored size at once.
     from yulon.ui.theme import MIN_FONT_PX, REFERENCE_WIDTH, _build_qss, scale_for_width
 
     assert "font-size: 14px" in _build_qss(1.0)
     assert scale_for_width(REFERENCE_WIDTH) == 1.0
-    assert scale_for_width(960) < 1.0 < scale_for_width(1600)
+    assert scale_for_width(960) < 1.0
+    for wider in (1600, 1920, 2560, 3840):
+        assert scale_for_width(wider) == 1.0, f"{wider}px grew past the authored size"
 
     # No generated font-size may fall below the legibility floor, at any scale
     # the app can actually be resized to (960 is the window's minimum width).
