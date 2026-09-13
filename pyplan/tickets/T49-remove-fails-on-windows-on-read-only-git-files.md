@@ -71,3 +71,52 @@ So the **mechanism** moves to a leaf module and the **message** stays with each 
 - The POSIX shape of the stop is what CI can exercise (a cleared write bit); the Windows
   spelling is owed a press on `yulon-win11` against a real clone, which is also the only way
   to prove the reported error is gone.
+
+## Done — evidence
+
+**Status:** FIXED 2026-09-13. `yulon/rmtree.py` is the leaf; `purge` delegates and keeps its
+own sentence; all five sites route through it.
+
+**The reported failure, reproduced and then fixed.**
+`tests/test_apply.py::test_remove_deletes_a_clone_whose_git_objects_are_read_only`, driven
+through the real `Applier.remove()` on a clone with a read-only `.idx` inside a `.git/objects/pack`
+whose write bit is cleared — the POSIX shape of `[WinError 5]`:
+
+```
+before   PermissionError: [Errno 13] Permission denied:
+         .../modules/mod-ah-bot/.git/objects/pack/pack-26232faf5a65a80928d1c7f577d0dfe92bb364d9.idx
+after    1 passed
+```
+
+**Gate:** `4369 passed, 8 skipped, 23 deselected`. ruff, black, and mypy clean on
+`linux`, `win32` and `darwin`.
+
+**Mutations** (`pyplan/gates/t49-windows-remove-2026-09-13/mutations/`), 2 run, 2 killed:
+
+| | | |
+|---|---|---|
+| M1 | the retry no longer clears the read-only bit | repro fails |
+| M2 | `remove()` reverts to `shutil.rmtree` | audit fails |
+
+**Three things this repo's own guards caught, each a real defect in the first draft:**
+
+1. **ruff** — `module_source.py` received the call and not the import: a `NameError` waiting
+   on the custom-module folder route.
+2. **`test_write_ledger`** — putting the delete behind an indirection made five destructive
+   sites disappear from the ledger's walk. `("rmtree", "remove_tree")` is now a write callee,
+   so they stay enumerated; the ledger's other direction then proved every direct
+   `shutil.rmtree` is gone from those files.
+3. **The new audit itself** — three call sites the ticket's own grep missed, nested below the
+   glob it used: `catalog/families/conf.py` (twice) and `catalog/families/extract.py`. None
+   can hold a `.git` — two are conf staging dirs and one is extraction output, and one passes
+   `ignore_errors=True`, which `remove_tree()` deliberately does not have. They are
+   allowlisted one by one WITH the reason, not skipped by path prefix.
+
+That third is the argument for the audit: the defect was never a missing fix. It was five
+callers not using one that had been written, with nothing in the tree to say so.
+
+## Still owed
+
+- **The Windows press.** Everything above is the POSIX spelling of the stop. The Windows
+  spelling wants `yulon-win11` against a real clone, which is also the only way to show the
+  user's own error is gone.

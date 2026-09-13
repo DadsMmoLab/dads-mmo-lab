@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -3686,3 +3687,113 @@ def test_the_wotlk_factory_hands_over_the_database_start_as_well(tmp_path: Path)
     assert start.calls == 1
     assert "started the database alone; the world server was left stopped" in report.done
     assert sql.files == [("world", "up.sql")]
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or os.geteuid() == 0,  # type: ignore[attr-defined]
+    reason=(
+        "needs a directory whose write bit actually refuses an unlink: Windows ignores "
+        "chmod on a directory and root ignores the bit. This is the POSIX shape of the "
+        "Windows stop -- the Windows spelling is its own press on the gate box."
+    ),
+)
+def test_remove_deletes_a_clone_whose_git_objects_are_read_only(tmp_path: Path) -> None:
+    """Git writes packs read-only, and removing a module must still finish (T49).
+
+    Reported by a user on Windows, against a real install:
+
+        remove sod FAILED: [WinError 5] Access is denied:
+        'C:\\wow-server-playerbots\\ale_scripts\\sod\\.git\\objects\\pack\\pack-2623....idx'
+
+    `shutil.rmtree` has no handling for a read-only file, so it stopped at the
+    first pack in `.git` -- and because it is not atomic, it had already deleted
+    an unknown part of the checkout by then. The folder was left half-deleted,
+    and the next press started from that.
+
+    Driven through `remove()` rather than through `remove_tree()`: the helper
+    that survives this was already in the tree, in `purge.py`, and the defect
+    was that this caller did not use it. A test on the helper would have passed
+    throughout.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    m = parse_manifest(OWNED_ITEM)
+    applier.install(m)
+    clone = applier.clone_dir(m)
+
+    # The shape git leaves behind: a pack file with no write bit, inside a
+    # directory with no write bit. On POSIX it is the DIRECTORY's bit that
+    # refuses the unlink; on Windows it is the FILE's read-only attribute.
+    objects = clone / ".git" / "objects" / "pack"
+    objects.mkdir(parents=True, exist_ok=True)
+    pack = objects / "pack-26232faf5a65a80928d1c7f577d0dfe92bb364d9.idx"
+    pack.write_text("x", encoding="utf-8")
+    pack.chmod(0o444)
+    objects.chmod(0o555)
+
+    try:
+        report = applier.remove(m)
+    finally:
+        if objects.exists():
+            objects.chmod(0o755)
+
+    assert not clone.exists(), "the clone is still there, so the remove did not finish"
+    assert any(step.startswith("rm ") for step in report.done)
+
+
+def test_no_module_outside_rmtree_calls_shutil_rmtree_directly() -> None:
+    """`shutil.rmtree` is spelled once: in the module that knows what to do when it stops.
+
+    The T49 defect was not that the retry was missing. It was written, in
+    `purge.py`, with a docstring naming this exact Windows failure. It was that
+    four other delete sites did not use it, nothing said so, and a user found
+    the fifth:
+
+        remove sod FAILED: [WinError 5] Access is denied:
+        '...\\ale_scripts\\sod\\.git\\objects\\pack\\pack-2623....idx'
+
+    So the guard is the enumeration rather than another per-site test: a sixth
+    caller added next year fails here instead of on someone's machine.
+
+    Read by AST, because the same call spells itself `shutil.rmtree(p)` and
+    `rmtree(p)` after a `from shutil import rmtree`, and a string search over the
+    source finds one of the two.
+    """
+    # Not every tree is a checkout. These three delete a staging or extraction
+    # directory this app just created itself, which cannot hold a `.git` and so
+    # cannot hit a read-only pack -- and the first of them passes
+    # `ignore_errors=True`, which `remove_tree()` deliberately does not have.
+    # Listed one by one, with the reason, rather than matched by a path prefix:
+    # a fourth arrival in one of these files should have to say why.
+    ALLOWED = {
+        "catalog/families/conf.py": "the conf staging dir this function just made",
+        "catalog/families/extract.py": "the extraction output dir, rebuilt every run",
+    }
+    package = Path(apply_module.__file__ or "").parent
+    offenders: list[str] = []
+    for path in sorted(package.rglob("*.py")):
+        if path.name == "rmtree.py":
+            continue  # the one module allowed to call it: it IS the retry
+        if path.relative_to(package).as_posix() in ALLOWED:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        bare = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "shutil"
+            for alias in node.names
+            if alias.name == "rmtree"
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (isinstance(func, ast.Attribute) and func.attr == "rmtree") or (
+                isinstance(func, ast.Name) and func.id in bare
+            ):
+                offenders.append(f"{path.relative_to(package)}:{node.lineno}")
+    assert offenders == [], (
+        "these call shutil.rmtree directly instead of yulon.rmtree.remove_tree(), which is "
+        "the T49 defect returning — git leaves read-only packs on Windows and a bare rmtree "
+        "stops at the first one, having already half-deleted the tree: " + ", ".join(offenders)
+    )
