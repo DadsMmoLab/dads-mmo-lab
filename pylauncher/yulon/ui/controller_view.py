@@ -6360,20 +6360,21 @@ class ControllerView(QWidget):
         # it. Dropped before `reload_modules()` runs, so the redraw does not
         # hand the row the sha it had before the action (T44 item 1).
         self._versions.forget(item_id)
+        # Keyed by the REPORT, which names its own row since T48. Until then the
+        # family had to come from `_acting_on`, and a report that did not match
+        # the press on record was dropped -- which, once the report could say
+        # which row it was about, threw away a rebuild or an SQL import the
+        # user still owed for no better reason than bookkeeping (T48 review).
+        # A mismatch is still said: both live routes set `_acting_on`
+        # immediately before their `_run()`, so it means something upstream of
+        # this is wrong. Only `forget()` in `_module_done()` stays gated on the
+        # press on record, because it deletes a file.
         if acted_on is None or (acted_on.type, acted_on.id) != (result.family, item_id):
-            # Unreachable through both live routes -- `_module_action()` and
-            # `_install_custom_module()` each set `_acting_on` immediately
-            # before their `_run()`, and an `ApplyReport` carries the id and
-            # the family of the manifest it was handed (T48). Said rather than
-            # guessed, because the
-            # only alternative is resolving a bare id to a family, which is the
-            # ambiguity T42 round 2 removed from four other surfaces. A chip
-            # missing is a gap; a chip on the wrong family's row is a lie.
+            on_record = "none" if acted_on is None else f"{acted_on.type} {acted_on.id}"
             logger.warning(
-                f"no manifest recorded for the {result.action} of {item_id}; "
-                "its chips cannot be keyed to a family and are not recorded"
+                f"the {result.action} report for {result.family} {item_id} does not match the "
+                f"press on record ({on_record}); its facts are filed under the report's own family"
             )
-            return
         key = (result.family, item_id)
         if result.action == "remove":
             self._rebuild_owed.discard(key)

@@ -7483,8 +7483,11 @@ def test_a_report_is_filed_under_its_own_family_when_two_share_an_id(
     about the `mod` twin, delivered while the `module` twin was the press on
     record, filed its facts under the `module` twin -- a chip on the wrong row.
 
-    Mutation: match `_note_session_facts()` on the id alone and the last press
-    below files a rebuild against `("module", "twin")`; match `_module_done()`'s
+    Now the report's own family is the key, whatever is on record; the one thing
+    still gated on the press on record is `forget()`, which deletes a file.
+
+    Mutation: key `_note_session_facts()` by `acted_on.type` and the last press
+    below files its rebuild against `("module", "twin")`; match `_module_done()`'s
     `forget()` on the id alone and the `module` twin's record is dropped.
     """
     # Both on disk: `_module_done()` reloads, and a reload drops every fact about
@@ -7529,11 +7532,17 @@ def test_a_report_is_filed_under_its_own_family_when_two_share_an_id(
     view._module_done(ApplyReport("remove", "twin", family="mod"))
     assert forgotten == [("mod", "twin")]
 
-    # A report whose family is not the press on record is filed under NEITHER.
+    # A report whose family is not the press on record -- or with no press on
+    # record at all -- is filed under ITS OWN family, never the one on record,
+    # and never dropped: a rebuild the user owes must not vanish over bookkeeping.
     view._rebuild_owed.clear()
     view._acting_on = module_twin
     view._module_done(ApplyReport("install", "twin", family="mod", rebuild_required=True))
-    assert view._rebuild_owed == set(), view._rebuild_owed
+    assert view._rebuild_owed == {("mod", "twin")}, view._rebuild_owed
+    view._rebuild_owed.clear()
+    view._acting_on = None
+    view._module_done(ApplyReport("install", "twin", family="module", rebuild_required=True))
+    assert view._rebuild_owed == {("module", "twin")}, view._rebuild_owed
 
 
 def test_an_install_that_needs_a_rebuild_raises_the_banner_and_the_chip(
