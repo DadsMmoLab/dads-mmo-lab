@@ -1920,7 +1920,7 @@
     Not met and not claimed: a client login on native Windows (7.1's clause, not this line's).
   - **Windows Vanilla, started 2026-09-04 04:20** into `C:\gate\vanilla-server` against the 5.14 GB
     1.12.1 client at `C:\gate\client`. Numbers already in hand from setting it up, since 7.7 asks
-    for throughput: the client zip came down from `wow.baerthe.com` at about **13 MB/s** (5.33 GB,
+    for throughput: the client zip came down from the project's client download host at about **13 MB/s** (5.33 GB,
     and its size matches the server's ETag exactly), and unpacking it needed `tar -xf` rather than
     `Expand-Archive` — **91 MB/s against under 1 MB/s**, a 100-fold difference on the same file and
     the same box. Anyone scripting a Windows gate should not use `Expand-Archive` on a client.
@@ -3337,8 +3337,8 @@ that build.
   and `clean-debloated` (the test baseline: ssh-ready, debloated, autologon on, **no Docker, no WSL,
   no real Python** — `python` on PATH is only the stock 0-byte Store alias stub, which is why the
   harness ships a PyInstaller bundle rather than running the repo). Restoring is cheap and
-  repeatable, so the run can be repeated as often as the fixes need. Toolkit on the Hyper-V host at
-  `C:\Users\PK\claude\debloat\`, with a verifier that refuses to let a half-applied debloat become
+  repeatable, so the run can be repeated as often as the fixes need. Toolkit on the Hyper-V host,
+  with a verifier that refuses to let a half-applied debloat become
   the baseline.
 
 - **Run the suite on a second OS and a second Python before believing it (2026-08-23).** CI pinned

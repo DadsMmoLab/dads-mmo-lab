@@ -271,10 +271,10 @@ def test_the_windows_data_root_comes_from_docker_desktops_settings(
     ("path", "expected"),
     [
         (r"\\fileserver\share\wow", "network path"),
-        ("/Users/pk/OneDrive/wow", "cloud-synced"),
-        ("/Users/pk/Library/Mobile Documents/com~apple~CloudDocs/wow", "iCloud Drive"),
-        ("/Users/pk/Dropbox/wow", "cloud-synced"),
-        ("/Users/pk/games/wow", ""),
+        ("/Users/user/OneDrive/wow", "cloud-synced"),
+        ("/Users/user/Library/Mobile Documents/com~apple~CloudDocs/wow", "iCloud Drive"),
+        ("/Users/user/Dropbox/wow", "cloud-synced"),
+        ("/Users/user/games/wow", ""),
         ("/", "root of a filesystem"),
         ("/etc", "system directory"),
         ("/tmp", "system directory"),
@@ -756,7 +756,7 @@ def test_wsl_linux_path_converts_a_unc_path_back_to_the_distro_view() -> None:
 
 def test_wsl_linux_path_is_none_for_a_path_that_is_not_in_wsl() -> None:
     """An ordinary Windows path has no Linux spelling, and guessing one would lie."""
-    assert platform.wsl_linux_path(Path(r"C:\Users\pk\srv")) is None
+    assert platform.wsl_linux_path(Path(r"C:\Users\user\srv")) is None
     assert platform.wsl_linux_path(Path(r"\\nas\share\srv")) is None
 
 

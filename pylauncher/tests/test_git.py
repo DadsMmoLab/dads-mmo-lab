@@ -1123,7 +1123,7 @@ def test_container_git_reports_a_failure_as_a_git_error(
 # `ensure_docker()` put Docker there. Hardcoding `docker` here made that clone
 # the very next thing to fail after provisioning was fixed.
 
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 def test_container_git_runs_the_docker_this_host_can_start(

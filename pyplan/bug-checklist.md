@@ -260,7 +260,7 @@ from the test branch, and every shipping branch still says 1600-2000.
 - [x] **Tortoise, Vanilla and TBC have never been run** — Vanilla now HAS, end to end on Arch; TBC is mid-compile; Tortoise still owed. See section 10. — rounds 2, 3 and 4, in that order.
   See [`hunt-rounds.md`](hunt-rounds.md). Tortoise is WSL-only, so Windows is the only box that
   can host it. The Vanilla and TBC clients are downloading to yulon-arch directly from
-  `wow.baerthe.com`; the copies on m910q are unreachable while that box is offline. **Vanilla's
+  the project's client download host; the copies on m910q are unreachable while that box is offline. **Vanilla's
   script refuses under 20 GB on both the target disk and Docker's root**, so prune between
   installs on the same box.
 
@@ -3545,7 +3545,7 @@ ever produce. Corrected the same day to read the database and the transcript ins
 - [x] `install_wiring` configures file logging the way `main.py` does, or says in its own words why a
       CLI install deliberately does not. — `install_wiring.py` calls `configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)` after `parse_args`, with the argument for the level and for not adding a second reporter written beside it (`lane/headlesslog`, merged `9254b60a`).
 - [x] A test that fails if one entry point writes a log and the other does not. — `tests/test_install_wiring.py::test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind` runs every module the app can be started as and fails on the disagreement; `test_the_harness_puts_the_stage_lines_it_streamed_into_the_log` pins the stage lines.
-- [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `.notes/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
+- [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\user\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `.notes/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
 
 ### 43. `keep_awake()` refuses the headless harness's own thread — 2026-09-05, **CLOSED 2026-09-05 at `0ad9d99a`**
 
@@ -3606,7 +3606,7 @@ sleeps; a laptop running a scripted Windows install is not held awake, and the l
 - [x] The gate: a headless run on `yulon-win11-gate` whose `yulon.log` carries no `not holding
       this machine awake` line. — Met 2026-09-05: the press at `0ad9d99a` (task `dml-b43`,
       `C:\gate\run-b43.cmd`, into the same `C:\gate\tbc-server`) left thirty-four lines in
-      `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with no such line, and with the positive one
+      `C:\Users\user\AppData\Roaming\Yulon\yulon.log` with no such line, and with the positive one
       the absence alone could not prove: `13:30:21 INFO [yulon.platform] holding this machine awake
       for the build: SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` — this project's
       first execution of that API. Across the whole 1673-line file `not holding this machine awake`

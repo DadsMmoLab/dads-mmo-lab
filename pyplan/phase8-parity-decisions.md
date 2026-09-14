@@ -732,8 +732,8 @@ replaced, keeping the reversal visible the way Phase 7's was:
 
 ## Appendix B — the judge panel (2026-09-06)
 
-Three designs, written independently from three angles by `fable` and committed unchanged under
-`.notes/phase8-designs/`; three judges, two on `opus` and the skeptic on `fable`, committed under
+Three designs, written independently from three angles and committed unchanged under
+`.notes/phase8-designs/`; three judges (two, and a skeptic), committed under
 `.notes/archive/phase8-judges/`. Seven criteria each scored 1–5: style-guide fit, DRY and one seam,
 testability, operator safety on a live server, per-family correctness, gate quality, and blast
 radius with incremental delivery. 35 maximum.

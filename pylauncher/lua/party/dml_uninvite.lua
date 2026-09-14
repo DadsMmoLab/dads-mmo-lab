@@ -10,7 +10,7 @@
   Player:RunCommand cannot drive, and there is no SOAP kick command.
   The bot knows its own group; remaining members get the leave packet.
 
-  T13 (Fable, from T5's round-3 Codex review): <playerName> is new.
+  T13 (from T5's round-3 review): <playerName> is new.
   party.py's InstallParty.remove_all re-reads the group table and
   refuses to act unless the fresh guid set is exactly what a person
   confirmed -- but the interval between that read and this command
@@ -24,7 +24,7 @@
   here: before RemoveFromGroup(), verify <botName>'s CURRENT group
   counts <playerName> as a MEMBER.
 
-  Round 1 (cold Opus reviewer, rejected): an earlier version of this
+  Round 1 (cold review, rejected): an earlier version of this
   file tested LEADERSHIP (`g:GetLeaderGUID() == p:GetGUID()`), which
   is a different question from the one party.py's own
   `group_rows_sql` asks (`party.py:907-935`: every bot whose

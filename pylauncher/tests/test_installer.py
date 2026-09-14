@@ -992,7 +992,7 @@ def test_the_gate_sees_a_docker_that_is_only_on_the_registry_path(
     directly since 7.2: it used to be read off a constructor default, and the
     class it was read off is gone.
     """
-    exe = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+    exe = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
     monkeypatch.setattr(platform.sys, "platform", "win32")
     monkeypatch.setattr(platform, "_windows_docker_programs", lambda: (exe,))
     tried: list[str] = []
