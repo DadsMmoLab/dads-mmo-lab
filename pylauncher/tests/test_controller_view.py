@@ -692,7 +692,7 @@ def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
 def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> None:
     """Measured live, yulon-ubuntu 2026-09-07, on the first run of this code.
 
-    The real applier installed `mod-aoe-loot` into `/home/pk/wowserver` and its
+    The real applier installed `mod-aoe-loot` into `/home/user/wowserver` and its
     manifest glob `data/sql/db-world/*.sql` resolved to nothing — while that
     clone carries `data/sql/db-world/base/aoe_loot_module_string.sql`, the file
     FACT 1 had watched the importer apply an hour earlier. The draft said

@@ -7693,7 +7693,7 @@ def _pending_sql_lines(pending: Sequence[PendingSql]) -> list[str]:
     Three shapes because `PendingSql.files` has three answers — but all three
     say NOT applied, and the empty one earned that the hard way. The first live
     run of this code (yulon-ubuntu, 2026-09-07, the real applier against
-    `/home/pk/wowserver`) installed `mod-aoe-loot` and resolved its manifest
+    `/home/user/wowserver`) installed `mod-aoe-loot` and resolved its manifest
     glob `data/sql/db-world/*.sql` to nothing at all. The draft line here read
     "nothing to apply", and it was false: that clone carries
     `data/sql/db-world/base/aoe_loot_module_string.sql`, one directory deeper —

@@ -30,7 +30,7 @@
 # value here is spelled `${VAR:-default}` because something WRITES that
 # variable: the port-conflict remedy appends `DOCKER_DB_EXTERNAL_PORT=13306`
 # to `.env`, a SOAP setup writes the whole SOAP binding. Nothing writes
-# `IMAGE_TAG` — `composegen.py` substitutes `native-056ed20d` at generation time
+# `IMAGE_TAG` — `composegen.py` substitutes `native-28500f30` at generation time
 # and no code path puts that key in `.env`. The wrapper it used to carry was
 # therefore indirection with no writer and exactly one effect: a hand-edited
 # `.env` would retag the build while `built_image_refs()` kept asking the
@@ -46,7 +46,7 @@
 # guide address them by name. The per-install separation lives in `name:`
 # instead, which is also what keys the named volumes.
 # BIND_LABEL: the SELinux relabel suffix, on every ./ host bind below and on no named volume.
-name: yulon-wow-wotlk-056ed20d
+name: yulon-wow-wotlk-28500f30
 
 services:
   ac-database:
@@ -118,7 +118,7 @@ services:
 
   ac-db-import:
     container_name: ac-db-import
-    image: yulon.local/ac-wotlk-db-import:native-056ed20d
+    image: yulon.local/ac-wotlk-db-import:native-28500f30
     networks: [ac-network]
     environment:
       AC_DATA_DIR: "/azerothcore/env/dist/data"
@@ -169,7 +169,7 @@ services:
 
   ac-client-data-init:
     container_name: ac-client-data-init
-    image: yulon.local/ac-wotlk-client-data:native-056ed20d
+    image: yulon.local/ac-wotlk-client-data:native-28500f30
     volumes:
       - client-data:/azerothcore/env/dist/data
     # UPSTREAM'S DOWNLOADER CANNOT RESUME, so a flaky link never finishes:
@@ -231,7 +231,7 @@ services:
 
   ac-authserver:
     container_name: ac-authserver
-    image: yulon.local/ac-wotlk-authserver:native-056ed20d
+    image: yulon.local/ac-wotlk-authserver:native-28500f30
     networks: [ac-network]
     tty: true
     restart: unless-stopped
@@ -255,7 +255,7 @@ services:
 
   ac-worldserver:
     container_name: ac-worldserver
-    image: yulon.local/ac-wotlk-worldserver:native-056ed20d
+    image: yulon.local/ac-wotlk-worldserver:native-28500f30
     networks: [ac-network]
     # stdin + tty keep the worldserver CONSOLE attachable: the Console tab
     # drives it with `docker attach --sig-proxy=false`, and losing either turns

@@ -403,7 +403,7 @@ def test_the_cancel_copy_tells_the_truth_about_resuming(tmp_path: Path) -> None:
     the bash installer found the folder, offered to wipe it, the app declined,
     and it exited 0 having done nothing. 7.2's engine records every finished
     stage in `native.STATE_FILE` and re-checks the disk before skipping one --
-    measured on yulon-ubuntu 2026-09-05, "Using /home/pk/gate72-cycle2
+    measured on yulon-ubuntu 2026-09-05, "Using /home/user/gate72-cycle2
     (resuming)" followed by "Already finished: clone-core, clone-modules,
     generate-compose"
     (`.notes/gates/7.2-ubuntu-2026-09-05/cycle2-pressB.log:26`) -- so the copy
@@ -883,7 +883,7 @@ def test_the_engine_refuses_the_folder_a_cancelled_clone_leaves(tmp_path: Path) 
     the checkout, `preflight()` for the folder with no `.git`.
 
     Driven for real first: `python -m yulon.install_wiring wow-wotlk
-    --server-dir /home/pk/gate72-cancel-install` against the folder the
+    --server-dir /home/user/gate72-cancel-install` against the folder the
     cancelled widget run left, yulon-ubuntu 2026-09-05, exited 1 with "is
     already a git checkout of ... and there is no record here of an install
     this app made"

@@ -998,7 +998,7 @@ def test_the_confirmation_promises_the_re_render_for_exactly_the_games_that_get_
         # BOTH files, because the stage writes both through one
         # `dockerfile.write()`. The clause named only the first and added
         # "nothing else in the folder is rewritten", which was false of a
-        # `.dockerignore` behind its template (Fable, round 1).
+        # `.dockerignore` behind its template (review, round 1).
         assert (dockerfile.DOCKERIGNORE in text) is renders, (entry.id, text)
         assert "Nothing else in the folder" not in text, (entry.id, text)
         # And it may not claim that editing one of them stops the press. What
