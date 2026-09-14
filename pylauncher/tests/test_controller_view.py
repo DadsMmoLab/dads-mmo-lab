@@ -7486,9 +7486,10 @@ def test_a_report_is_filed_under_its_own_family_when_two_share_an_id(
     Now the report's own family is the key, whatever is on record; the one thing
     still gated on the press on record is `forget()`, which deletes a file.
 
-    Mutation: key `_note_session_facts()` by `acted_on.type` and the last press
-    below files its rebuild against `("module", "twin")`; match `_module_done()`'s
-    `forget()` on the id alone and the `module` twin's record is dropped.
+    Mutation: key `_note_session_facts()` by `acted_on.type` and a mismatched
+    press files its rebuild against `("module", "twin")`; match `_module_done()`'s
+    `forget()` on the id alone and the `module` twin's record is dropped; let an
+    unverified report fall through to the clearing path and the seeded facts go.
     """
     # Both on disk: `_module_done()` reloads, and a reload drops every fact about
     # a module that is not installed.
@@ -7543,6 +7544,23 @@ def test_a_report_is_filed_under_its_own_family_when_two_share_an_id(
     view._acting_on = None
     view._module_done(ApplyReport("install", "twin", family="module", rebuild_required=True))
     assert view._rebuild_owed == {("module", "twin")}, view._rebuild_owed
+
+    # But an unverified report never CLEARS (review round 2). Seed every fact on
+    # the `mod` twin, then deliver a `mod` remove and an empty `mod` install while
+    # the `module` twin is on record: all three facts survive both.
+    mod_key = ("mod", "twin")
+    view._rebuild_owed.add(mod_key)
+    view._sql_owed[mod_key] = ("one.sql",)
+    view._behind[mod_key] = 3
+    for report in (
+        ApplyReport("remove", "twin", family="mod"),
+        ApplyReport("install", "twin", family="mod"),
+    ):
+        view._acting_on = module_twin
+        view._module_done(report)
+        assert mod_key in view._rebuild_owed, report
+        assert view._sql_owed.get(mod_key) == ("one.sql",), report
+        assert view._behind.get(mod_key) == 3, report
 
 
 def test_an_install_that_needs_a_rebuild_raises_the_banner_and_the_chip(
