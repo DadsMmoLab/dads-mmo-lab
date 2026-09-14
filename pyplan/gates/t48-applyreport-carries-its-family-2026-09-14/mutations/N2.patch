@@ -1,0 +1,13 @@
+diff --git a/pylauncher/yulon/controller_wow_tortoise/autoupdate.py b/pylauncher/yulon/controller_wow_tortoise/autoupdate.py
+index 4324d61d..51ce9bd7 100644
+--- a/pylauncher/yulon/controller_wow_tortoise/autoupdate.py
++++ b/pylauncher/yulon/controller_wow_tortoise/autoupdate.py
+@@ -522,7 +522,7 @@ def _with_note(report: ApplyReport, note: str) -> ApplyReport:
+     return ApplyReport(
+         action=report.action,
+         item_id=report.item_id,
+-        family=report.family,
++        family="module",
+         done=(*report.done, note),
+         skipped=report.skipped,
+         rebuild_required=report.rebuild_required,

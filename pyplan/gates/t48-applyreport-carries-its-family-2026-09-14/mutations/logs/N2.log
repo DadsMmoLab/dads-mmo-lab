@@ -1,0 +1,46 @@
+yt: Python 3.13.15 in /home/perzi/wt-t48/pylauncher
+........................F............                                    [100%]
+=================================== FAILURES ===================================
+___________ test_the_same_install_is_allowed_once_the_world_is_down ____________
+
+tmp_path = PosixPath('<tmp>/test_the_same_install_is_allow0')
+
+    def test_the_same_install_is_allowed_once_the_world_is_down(tmp_path: Path) -> None:
+        """ "While the world is up" is the clause's own scope, and it is load-bearing.
+    
+        With the world already stopped there is no running world for the updater to
+        cancel; the operator is starting one, and the start's own log is where they
+        find out. Refusing here would block every module install on a stopped
+        server, which is when most of them are done.
+        """
+        server_dir = _server_dir_with_conf(tmp_path)
+        manifest = tortoise_modules.store().load("mod", "perf-report")
+        armed = autoupdate.Arming(
+            enabled=True, outstanding={"auth": (), "characters": (), "world": ("2026_a.sql",)}
+        )
+        applier = tortoise_modules.applier(
+            server_dir, sql=_RecordingSql(), arming=lambda: armed, world_running=lambda: False
+        )
+        report = applier.install(manifest, {"interval": "120"})
+        assert "Perf.ReportInterval = 120" in (server_dir / "etc" / "mangosd.conf").read_text(
+            encoding="utf-8"
+        )
+        assert any(
+            "auto-update" in line.lower() for line in report.done + report.skipped
+        ), "the world being down is why this was allowed; the report has to say so"
+        # T48: the guard rebuilds the report to add its note, and must carry the
+        # family through -- `perf-report` is a `mod`, not the `module` a guess would say.
+>       assert report.family == "mod"
+E       AssertionError: assert 'module' == 'mod'
+E         
+E         - mod
+E         + module
+
+tests/test_tortoise_modules.py:535: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-14 02:06:48 INFO [yulon.apply] install perf-report: 1 step(s), 0 skipped, 0 left unapplied, rebuild=False
+------------------------------ Captured log call -------------------------------
+INFO     yulon.apply:apply.py:2440 install perf-report: 1 step(s), 0 skipped, 0 left unapplied, rebuild=False
+=========================== short test summary info ============================
+FAILED tests/test_tortoise_modules.py::test_the_same_install_is_allowed_once_the_world_is_down
+1 failed, 36 passed in 0.38s

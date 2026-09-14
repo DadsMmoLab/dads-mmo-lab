@@ -530,6 +530,9 @@ def test_the_same_install_is_allowed_once_the_world_is_down(tmp_path: Path) -> N
     assert any(
         "auto-update" in line.lower() for line in report.done + report.skipped
     ), "the world being down is why this was allowed; the report has to say so"
+    # T48: the guard rebuilds the report to add its note, and must carry the
+    # family through -- `perf-report` is a `mod`, not the `module` a guess would say.
+    assert report.family == "mod"
 
 
 def test_an_unreadable_updater_refuses_rather_than_assuming_the_best(tmp_path: Path) -> None:

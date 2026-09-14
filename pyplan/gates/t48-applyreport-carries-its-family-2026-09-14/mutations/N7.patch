@@ -1,0 +1,12 @@
+diff --git a/pylauncher/yulon/ui/controller_view.py b/pylauncher/yulon/ui/controller_view.py
+index 960a6a42..ea1e5340 100644
+--- a/pylauncher/yulon/ui/controller_view.py
++++ b/pylauncher/yulon/ui/controller_view.py
+@@ -6387,7 +6387,6 @@ class ControllerView(QWidget):
+                 owed = _pending_sql_names(result)
+                 if owed:
+                     self._sql_owed[key] = owed
+-            return
+         if result.action == "remove":
+             self._rebuild_owed.discard(key)
+             self._sql_owed.pop(key, None)

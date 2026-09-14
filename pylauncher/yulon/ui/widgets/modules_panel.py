@@ -377,10 +377,10 @@ class VersionCache:
     def forget(self, item_id: str) -> None:
         """Drop this module's entry in every family and every install.
 
-        By BARE ID, because that is what the events that invalidate it carry:
-        an `ApplyReport.item_id` and an update check's `key` are ids with no
-        family on them (the rule
-        `_forget_what_is_no_longer_installed()` already follows).
+        By BARE ID, and kept so after T48 gave `ApplyReport` a family: an update
+        check's `key` still carries none, and forgetting a same-id row in
+        another family costs one re-read, where forgetting too little leaves a
+        sha the clone has moved off on screen.
         """
         for key in [k for k in self._known if k[2] == item_id]:
             del self._known[key]

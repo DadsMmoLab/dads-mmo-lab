@@ -6344,9 +6344,13 @@ class ControllerView(QWidget):
         forget = self.services.module_forget
         if result.action == "remove" and forget is not None:
             # The manifest the press was really about, not one looked up by the
-            # report's id: the report carries no family, and the record being
-            # dropped is a file on disk named after this manifest (round 2).
-            if acted_on is not None and acted_on.id == result.item_id:
+            # report's id: the record being dropped is a file on disk named after
+            # this manifest (round 2). Matched on the family as well since T48,
+            # now that the report carries one.
+            if acted_on is not None and (acted_on.type, acted_on.id) == (
+                result.family,
+                result.item_id,
+            ):
                 forget(acted_on)
         # Re-read after EVERY report, where it used to happen for the two
         # outcomes that changed what was in the list (a custom module added, a
@@ -6374,20 +6378,34 @@ class ControllerView(QWidget):
         # it. Dropped before `reload_modules()` runs, so the redraw does not
         # hand the row the sha it had before the action (T44 item 1).
         self._versions.forget(item_id)
-        if acted_on is None or acted_on.id != item_id:
-            # Unreachable through both live routes -- `_module_action()` and
-            # `_install_custom_module()` each set `_acting_on` immediately
-            # before their `_run()`, and an `ApplyReport` carries the id of the
-            # manifest it was handed. Said rather than guessed, because the
-            # only alternative is resolving a bare id to a family, which is the
-            # ambiguity T42 round 2 removed from four other surfaces. A chip
-            # missing is a gap; a chip on the wrong family's row is a lie.
+        # Keyed by the REPORT, which names its own row since T48. Until then the
+        # family had to come from `_acting_on`, and a report that did not match
+        # the press on record was dropped -- which, once the report could say
+        # which row it was about, threw away a rebuild or an SQL import the
+        # user still owed for no better reason than bookkeeping (T48 review 1).
+        #
+        # But a mismatch means something upstream of this is wrong -- both live
+        # routes set `_acting_on` immediately before their `_run()` -- so an
+        # unverified report may only ADD what it says is owed. It never CLEARS:
+        # a misattributed remove would otherwise wipe another twin's rebuild,
+        # SQL and update facts, and nothing on reload puts them back (T48
+        # review 2). Losing a warning is the one outcome this must not have;
+        # a spare one is corrected by the next verified press or a restart.
+        key = (result.family, item_id)
+        if acted_on is None or (acted_on.type, acted_on.id) != key:
+            on_record = "none" if acted_on is None else f"{acted_on.type} {acted_on.id}"
             logger.warning(
-                f"no manifest recorded for the {result.action} of {item_id}; "
-                "its chips cannot be keyed to a family and are not recorded"
+                f"the {result.action} report for {result.family} {item_id} does not match the "
+                f"press on record ({on_record}); what it says is owed is recorded, nothing is "
+                "cleared"
             )
+            if result.action != "remove":
+                if result.rebuild_required:
+                    self._rebuild_owed.add(key)
+                owed = _pending_sql_names(result)
+                if owed:
+                    self._sql_owed[key] = owed
             return
-        key = (acted_on.type, item_id)
         if result.action == "remove":
             self._rebuild_owed.discard(key)
             self._sql_owed.pop(key, None)
