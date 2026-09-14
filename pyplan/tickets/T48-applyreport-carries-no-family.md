@@ -63,7 +63,8 @@ at the family, and a chip on the wrong family's row is a lie where a missing chi
 
 - `controller_view.py::_module_done` — the record `forget()` now matches `(type, id)`.
 - `controller_view.py::_note_session_facts` — keys the facts by the REPORT's `(family, id)`. A
-  report that does not match the press on record is logged and still filed (review round 1).
+  report that does not match the press on record is logged, and may add facts but never clear
+  them (review rounds 1 and 2).
 - `controller_view.py::_format_report` — displays the id; no match, unchanged.
 - `modules_panel.py::VersionCache.forget` — kept by bare id on purpose: an update check's key
   still carries no family, and forgetting a same-id twin costs one re-read.
@@ -81,3 +82,12 @@ loses a rebuild or SQL import the user still owes. Now the facts are filed under
 key whatever is on record, and the mismatch is logged. `forget()` stays gated on the press on
 record, because it deletes a file. Mutations N4 (key by `acted_on.type`) and N6 (the early return
 put back) are both killed.
+
+## Review round 2 — one MEDIUM, taken; round 3 not run (cap)
+
+*"Mismatched reports can clear another family's outstanding obligations."* Round 1's fix trusted
+an unverified report for clears as well as adds, so a misattributed `remove` would wipe a
+twin's rebuild, SQL and update facts, and a reload does not put them back. Now a report that does
+not match the press on record may only ADD what it says is owed — never clear. A spare warning is
+corrected by the next verified press; a lost one is the outcome this must not have. Mutations N4b,
+N6b, N7 killed. This change has not had a third review: the owner's cap is two rounds, then ask.

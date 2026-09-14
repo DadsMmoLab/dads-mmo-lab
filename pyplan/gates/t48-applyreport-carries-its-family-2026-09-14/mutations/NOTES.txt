@@ -8,3 +8,9 @@ Review round 1 made a mismatched report LOG and still be filed under its own fam
   a warning is logged. Its record stands for the design it was run against.
 - N4 (key by acted_on.type) is the live mutant for the keying, and is killed.
 - N6 (put the early return back) is the live mutant for "never drop the facts", and is killed.
+
+Review round 2 made an unverified report additive-only. Run at e59f64b1:
+- N4b (key by acted_on.type) killed.
+- N6b (unverified report records nothing) killed.
+- N7 (unverified report falls through to the clearing path) killed.
+N4 and N6 above belong to the round-1 design and are superseded by these.
