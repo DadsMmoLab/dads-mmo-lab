@@ -1,0 +1,2 @@
+N2 first run used -k "family or guard or report or auto", which skipped the Tortoise test, and N2 survived. Re-run against all of tests/test_tortoise_modules.py: killed. The log kept is the re-run.
+N4 (key built from acted_on.type instead of result.family) is an equivalent mutant once N3's match is in place, and was not run.

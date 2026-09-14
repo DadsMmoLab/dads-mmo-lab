@@ -1,0 +1,45 @@
+yt: Python 3.13.15 in /home/perzi/wt-t48/pylauncher
+.............F......................                                     [100%]
+=================================== FAILURES ===================================
+____________ test_a_report_names_the_family_of_the_manifest_it_ran _____________
+
+tmp_path = PosixPath('<tmp>/test_a_report_names_the_family0')
+
+    def test_a_report_names_the_family_of_the_manifest_it_ran(tmp_path: Path) -> None:
+        """T48: the report carries `manifest.type`, on install and on remove.
+    
+        Driven with an `ale`, not a `module`: `module` is the family a hard-coded or
+        defaulted value would most likely say, so it could not tell the two apart.
+    
+        Mutation: build the report with `family="module"` and both asserts fail.
+        """
+        ale = parse_manifest(
+            {
+                "id": "some-script",
+                "name": "Some Script",
+                "type": "ale",
+                "game": "wow-wotlk",
+                "description": "x",
+                "source": {"repo": "acme/some-script"},
+                "deploy": [{"src": "Some.lua", "dest": "env/dist/etc/modules/lua_scripts/"}],
+            }
+        )
+        applier = Applier(
+            tmp_path,
+            git=_FakeGit({"Some.lua": "-- x\n"}),
+            remote_url=_Origins("https://github.com/acme/some-script.git"),
+        )
+>       assert applier.install(ale).family == "ale"
+E       AssertionError: assert 'module' == 'ale'
+E         
+E         - ale
+E         + module
+
+tests/test_apply.py:3800: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-14 02:06:27 INFO [yulon.apply] install some-script: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+------------------------------ Captured log call -------------------------------
+INFO     yulon.apply:apply.py:2440 install some-script: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+=========================== short test summary info ============================
+FAILED tests/test_apply.py::test_a_report_names_the_family_of_the_manifest_it_ran
+1 failed, 35 passed, 463 deselected in 2.71s
