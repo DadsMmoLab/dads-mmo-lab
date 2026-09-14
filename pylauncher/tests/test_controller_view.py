@@ -7483,8 +7483,9 @@ def test_a_report_is_filed_under_its_own_family_when_two_share_an_id(
     about the `mod` twin, delivered while the `module` twin was the press on
     record, filed its facts under the `module` twin -- a chip on the wrong row.
 
-    Mutation: match `_note_session_facts()` on the id alone and the third press
-    below files a rebuild against `("module", "twin")`.
+    Mutation: match `_note_session_facts()` on the id alone and the last press
+    below files a rebuild against `("module", "twin")`; match `_module_done()`'s
+    `forget()` on the id alone and the `module` twin's record is dropped.
     """
     # Both on disk: `_module_done()` reloads, and a reload drops every fact about
     # a module that is not installed.
@@ -7512,6 +7513,21 @@ def test_a_report_is_filed_under_its_own_family_when_two_share_an_id(
     view._module_done(ApplyReport("install", "twin", family="mod", pending_sql=pending))
     assert set(view._sql_owed) == {("mod", "twin")}
     assert view._rebuild_owed == {("module", "twin")}
+
+    # And the record `forget()` drops on a remove is matched the same way: a `mod`
+    # report must not drop the `module` twin's record.
+    forgotten: list[tuple[str, str]] = []
+    object.__setattr__(
+        view.services,
+        "module_forget",
+        lambda manifest: forgotten.append((manifest.type, manifest.id)) or True,
+    )
+    view._acting_on = module_twin
+    view._module_done(ApplyReport("remove", "twin", family="mod"))
+    assert forgotten == []
+    view._acting_on = mod_twin
+    view._module_done(ApplyReport("remove", "twin", family="mod"))
+    assert forgotten == [("mod", "twin")]
 
     # A report whose family is not the press on record is filed under NEITHER.
     view._rebuild_owed.clear()
