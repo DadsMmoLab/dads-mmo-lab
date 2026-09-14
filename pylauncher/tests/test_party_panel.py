@@ -1,7 +1,7 @@
 """Tests for `PartyPanel` (8.6): My Party's own surface, offscreen, through a stub seam.
 
 Every press here goes through the SAME `MyPartySeam` the gate script drove
-(`pyplan/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/gate86b.py`), so what the panel
+(`.notes/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/gate86b.py`), so what the panel
 can do is exactly what was proved live on `yulon-ubuntu2`: read the state, add a
 bot of a chosen class, see it in the party, dismiss it.
 

@@ -516,7 +516,7 @@ class SqlPhase(_Strict):
             "every install press, for the life of the install. `wow-tortoise`'s `character "
             "updates` is the case that produced it: an install made before that phase existed "
             "is one honor-maintenance day from a restart loop the app has no button to fix "
-            "(`pyplan/gates/7.9-rerun-m910q-2026-09-09/README.md`, finding 1)."
+            "(`.notes/gates/7.9-rerun-m910q-2026-09-09/README.md`, finding 1)."
         ),
     )
     assert_update_level: bool = Field(
@@ -1258,7 +1258,7 @@ class BotRegistry(_Strict):
     bot characters play**: the module fills it as it goes, so a detector that
     asks it alone reports every bot as a person and its inverse reports zero
     bots — a failure with nothing about it that looks broken (`botid.rs:4-17`,
-    live proof 2026-08-01, recorded in `pyplan/phase8-reads/hypeer.md`).
+    live proof 2026-08-01, recorded in `.notes/phase8-reads/hypeer.md`).
     """
 
     database: Db = Field(description="Which of this entry's databases the table lives in.")

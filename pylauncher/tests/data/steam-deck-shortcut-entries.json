@@ -1,0 +1,57 @@
+{
+  "_note": "two verbatim shortcuts.vdf entries captured from a real Steam Deck at pack time by dmlpack.snapshot_live_shortcuts(), 2026-09-10",
+  "shortcuts": [
+    {
+      "name": "Turtle WoW",
+      "exe": "/home/deck/Games/TurtleWoW/TurtleWoW/WoW.exe",
+      "startdir": "/home/deck/Games/TurtleWoW/TurtleWoW/",
+      "launchopts": "",
+      "vdf": {
+        "appid": -105858796,
+        "AppName": "Turtle WoW",
+        "Exe": "\"/home/deck/Games/TurtleWoW/TurtleWoW/WoW.exe\"",
+        "StartDir": "/home/deck/Games/TurtleWoW/TurtleWoW/",
+        "icon": "",
+        "ShortcutPath": "",
+        "LaunchOptions": "",
+        "IsHidden": 0,
+        "AllowDesktopConfig": 1,
+        "AllowOverlay": 1,
+        "OpenVR": 0,
+        "Devkit": 0,
+        "DevkitGameID": "",
+        "DevkitOverrideAppID": 0,
+        "LastPlayTime": 1786161145,
+        "FlatpakAppID": "",
+        "sortas": "",
+        "tags": {}
+      }
+    },
+    {
+      "name": "Turtle WoW V2 Server",
+      "exe": "/usr/bin/konsole",
+      "startdir": "/home/deck",
+      "launchopts": "--hold -e bash /home/deck/tortoise-wow-v2-launcher.sh",
+      "vdf": {
+        "appid": -966953680,
+        "AppName": "Turtle WoW V2 Server",
+        "Exe": "\"/usr/bin/konsole\"",
+        "StartDir": "\"/home/deck\"",
+        "icon": "",
+        "ShortcutPath": "",
+        "LaunchOptions": "--hold -e bash /home/deck/tortoise-wow-v2-launcher.sh",
+        "IsHidden": 0,
+        "AllowDesktopConfig": 1,
+        "AllowOverlay": 1,
+        "OpenVR": 0,
+        "Devkit": 0,
+        "DevkitGameID": "",
+        "DevkitOverrideAppID": 0,
+        "LastPlayTime": 1786160012,
+        "FlatpakAppID": "",
+        "sortas": "",
+        "tags": {}
+      }
+    }
+  ]
+}

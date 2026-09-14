@@ -1179,7 +1179,7 @@ def test_the_modules_tab_shows_how_far_behind_each_installed_module_is(
 
 # --------------------------------------------- a module from a link or a folder
 #
-# Lane C of `pyplan/phase8-designs/module-from-link-or-folder.md`: the two
+# Lane C of `.notes/phase8-designs/module-from-link-or-folder.md`: the two
 # buttons, the two dialog seams, and what the tab does with what they answer.
 # Every service below is a fake, which is the whole point of the seam -- the
 # real ones are lane A's (`module_source.py`, absent from this branch) and the
@@ -1720,7 +1720,7 @@ def test_the_loopback_plan_in_the_tab_offers_to_open_no_ports(
     Measured on yulon-ubuntu 2026-09-06, before `plan()` had the branch this
     asserts: pressing Apply on a loopback plan added `ufw allow 3724/tcp` and
     `ufw allow 8085/tcp`
-    (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`),
+    (`.notes/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`),
     and in that folder's `widget-loopback.log`, line 57 is the warning saying no
     other machine can reach this server, 58 is blank, 59 is `Applied:` and 60 is
     `✓ ufw allow 3724/tcp`. Asserted through the widget's own text because
@@ -4448,7 +4448,7 @@ def test_my_party_is_on_the_bots_tab_and_a_press_reaches_the_seam(
 ) -> None:
     """The clause this box exists for: not reachable only from a script.
 
-    Every press in `pyplan/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/` went
+    Every press in `.notes/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/` went
     through `gate86b.py`, which is what the exit review calls out
     (`pyplan/phase8-exit-review-2026-09-09.md`, clause 3). This is the same seam
     with a button on it.
@@ -4534,7 +4534,7 @@ def test_a_finished_party_press_re_reads_the_bot_list(
     """A bot that just joined a party is a row the Browse list has not got yet.
 
     The cross-link the users-surface design names
-    (`pyplan/phase8-designs/b-users-surface.md:111`).
+    (`.notes/phase8-designs/b-users-surface.md:111`).
     """
     bots = _StubBots()
     services = _with_bots(ps, tmp_path, bots)
@@ -5491,7 +5491,7 @@ def test_a_real_static_ints_yes_still_starts_the_rebuild(
     The test above answers with the `QMessageBox.StandardButton` member, which
     is exactly the shape that hid the bug: PySide6 6.11.2's static
     `QMessageBox.question()` returns the plain `int` used here instead
-    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
+    (`.notes/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
     """
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
@@ -6069,7 +6069,7 @@ def test_a_real_static_ints_yes_still_starts_the_database_updates(
     Every other test of this confirm answers with the `QMessageBox.StandardButton`
     member, which is exactly the shape that hid the bug: PySide6 6.11.2's static
     `QMessageBox.question()` returns the plain `int` used here instead
-    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
+    (`.notes/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
     """
     monkeypatch.setattr(
         controller_view_module.QMessageBox,
@@ -6410,7 +6410,7 @@ def test_a_real_static_ints_yes_still_starts_the_adopt_press(
     The test above answers with the `QMessageBox.StandardButton` member, which
     is exactly the shape that hid the bug: PySide6 6.11.2's static
     `QMessageBox.question()` returns the plain `int` used here instead
-    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
+    (`.notes/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
     """
     monkeypatch.setattr(
         controller_view_module.QMessageBox,

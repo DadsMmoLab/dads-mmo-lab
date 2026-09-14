@@ -1,4 +1,0 @@
-[09:51:35Z] alive at unrestarted: ['vanilla-mangosd Up 5 minutes', 'vanilla-realmd Up 5 minutes', 'vanilla-db Up 5 minutes (healthy)']
-2026-09-08 11:51:36 INFO [yulon.controller_wow_wotlk.console] console → vanilla-mangosd: ['.server', 'motd']
-[09:51:39Z] without a restart, the server still reports: 'Welcome to the Continued Massive Network Game Object Server.'
-[09:51:39Z] UNRESTARTED PASSED: file says 'Welcome!', server still says 'Welcome to the Continued Massive Network Game Object Server.'

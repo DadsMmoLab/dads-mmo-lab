@@ -1,5 +1,0 @@
-Warning: Permanently added 'yulon-arch' (ED25519) to the list of known hosts.
-0 'Turtle WoW' LastPlayTime= 1789071688 keys= 18
-    ['appid', 'AppName', 'Exe', 'StartDir', 'icon', 'ShortcutPath', 'LaunchOptions', 'IsHidden', 'AllowDesktopConfig', 'AllowOverlay', 'OpenVR', 'Devkit', 'DevkitGameID', 'DevkitOverrideAppID', 'LastPlayTime', 'FlatpakAppID', 'sortas', 'tags']
-1 'Turtle WoW Server' LastPlayTime= 1789071433 keys= 18
-    ['appid', 'AppName', 'Exe', 'StartDir', 'icon', 'ShortcutPath', 'LaunchOptions', 'IsHidden', 'AllowDesktopConfig', 'AllowOverlay', 'OpenVR', 'Devkit', 'DevkitGameID', 'DevkitOverrideAppID', 'LastPlayTime', 'FlatpakAppID', 'sortas', 'tags']

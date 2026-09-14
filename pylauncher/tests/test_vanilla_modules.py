@@ -389,7 +389,7 @@ def test_this_games_applier_refuses_direct_world_sql_while_the_world_runs(tmp_pa
     caller passed one and `Applier._world_running` was `None` on all four games:
     checklist 8.7a's guard returned at its first line, and the Modules tab would
     have written into a live world without a word (T2's press,
-    `pyplan/gates/8.7a-direct-sql-yulon-ubuntu2-2026-09-09/`).
+    `.notes/gates/8.7a-direct-sql-yulon-ubuntu2-2026-09-09/`).
 
     Catches the keyword accepted and then dropped on the way to `Applier(...)`,
     which neither a signature check nor the type checker would see.

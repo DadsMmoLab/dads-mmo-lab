@@ -1,7 +1,0 @@
-﻿[15:23:47Z] ### 8.4a WINDOWS gate driver, stage gear, 2026-09-08T15:23:47.017633+00:00 ###
-[15:23:47Z] ### box: yulon-win11, Windows-10-10.0.26200-SP0, tree: C:\gate\src84a ###
-[15:23:47Z] ANNOUNCE: 8.4a Windows: Alanda's gear set, against the number the button promises
-[15:23:48Z] ===== GROUND: Alanda wears 19 pieces, has 4 mails, and the button promises 2 mails =====
-[15:23:49Z] send gear : done=True '19 items sent to Alanda in 2 mails.'
-[15:23:49Z]             mails that arrived: 2
-[15:23:49Z] PASSED: 19 pieces, 2 mails promised, 2 arrived

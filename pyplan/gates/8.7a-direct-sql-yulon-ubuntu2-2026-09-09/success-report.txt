@@ -1,6 +1,0 @@
-install mod-arac:
-  ✓ clone https://github.com/heyitsbench/mod-arac.git → modules/mod-arac
-  ✓ sql data/sql/db-world/arac.sql → world
-  – skipped: client Patch-A.MPQ: no client dir configured
-  – skipped: server_dbc patch-contents/DBFilesContent: no DBC copier configured
-  ⚠ Press Stop and then Start on the Server tab to apply this.

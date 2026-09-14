@@ -1,3 +1,0 @@
-﻿[15:37:44Z] the row reads level 60 after 1s of NOT asking
-[15:40:41Z] the row reads level 61 after 178s of NOT asking
-[15:40:41Z] CAUGHT UP: 178s, and no saveall was sent

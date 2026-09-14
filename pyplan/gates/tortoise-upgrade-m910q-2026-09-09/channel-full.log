@@ -1,28 +1,0 @@
-2026-09-09 10:55:20 INFO [yulon.channel_setup] no usable credential at /home/pk/.local/share/yulon/credentials/wow-tortoise-58c6fd1c.json: FileNotFoundError
-before prove (world down): state=Idle account=(none)
-2026-09-09 10:55:20 INFO [yulon.controller_wow_wotlk.accounts] creating account YULON_58C6FD1C
-2026-09-09 10:55:20 INFO [yulon.controller_wow_wotlk.accounts] granting GM level 4 to account 114
-2026-09-09 10:55:20 INFO [yulon.channel_setup] the command channel for wow-tortoise did not answer yet; not saving anything
-after prove (world down): state=Pending account=YULON_58C6FD1C
---- starting the stack; the rank is read here (watching from 2026-09-09T08:55:20Z) ---
-world: up and running
-2026-09-09 10:56:26 INFO [yulon.channel_setup] saved the command-channel credential for wow-tortoise to /home/pk/.local/share/yulon/credentials/wow-tortoise-58c6fd1c.json
-after prove (world up): state=Verified account=YULON_58C6FD1C
---- server info -> outcome=yes ---
-Core revision: unknown / 1970-01-01 00:00:00 +0000 / Linux_x64 (little-endian)
-Players online: 0. Max online: 0.
-Server uptime: 1 Minute 1 Second.
-Server Time: Wed, 09.09.2026 08:56:26
---- server motd -> outcome=no ---
-There is no such subcommand
-Command  have subcommands:
-
-    corpses
-    exit
-    idlerestart ...
-    idleshutdown ...
-    info
-    resetallraids
-    restart ...
-    shutdown ...
-EXIT=0

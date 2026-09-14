@@ -202,7 +202,7 @@ def end_streams_started_on(ident: int) -> int:
     read again until a line arrives, and a `docker logs -f` on a world that has
     gone quiet never sends one. Measured on `yulon-ubuntu2` 2026-09-08 through
     the panel's real Stop button
-    (`pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/log-panel-stop-probe.txt`): 120
+    (`.notes/gates/7.10-rerun-ubuntu2-2026-09-08/log-panel-stop-probe.txt`): 120
     seconds of `running=True cancelled=True worker._stop=True lines=210`, then
     `panel.wait(10000) -> False`, then `QThread: Destroyed while thread '' is
     still running` and exit 134. The same probe's synthetic source — one line

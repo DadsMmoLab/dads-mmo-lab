@@ -238,7 +238,7 @@ jobs:
           # Still true on 2026-09-04: the release AppImage sha256 `cb7c1b7e75…`
           # was refused on `yulon-arch` before the interpreter existed, and the
           # same file with `--appimage-extract-and-run` started and reached the
-          # update check — `pyplan/gates/7.1-arch/71-arch-appimage.log`.
+          # update check — `.notes/gates/7.1-arch/71-arch-appimage.log`.
           #
           # So the honest answer is a second artifact rather than a cleverer
           # first one: untar it and run ./yulon. `pylauncher/README.md` tells the

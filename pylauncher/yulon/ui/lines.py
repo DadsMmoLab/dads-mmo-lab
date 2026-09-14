@@ -142,7 +142,7 @@ longest stage an install has.
 **Both spellings, because the stage's name is optional.** A multi-stage
 Dockerfile prints `#10 [builder 5/8]` and a single-stage one prints `#5 [2/4]`.
 Every template this app generates today is multi-stage, so every step line in
-`pyplan/gates/` carries a name — but requiring the space that follows one made
+`.notes/gates/` carries a name — but requiring the space that follows one made
 the other shape unreadable for no reason at all, and a template that grew a
 single-stage variant would have gone silently unread (review, 2026-09-12).
 """
@@ -160,7 +160,7 @@ _MMAP_MAP = re.compile(r"\[Map (\d+)\]")
 """The mmap generator's tile counter, per map.
 
 `[Map 000] Building tile [22,52] (01 / 741)` — 8005 of them in
-`pyplan/gates/7.7-win11-tortoise/tortoise77.log`, and 97 minutes of them in the
+`.notes/gates/7.7-win11-tortoise/tortoise77.log`, and 97 minutes of them in the
 T30 install this ticket was filed from. The percentage is within the MAP,
 because that is what the two numbers in the line are; the generator never says
 how many maps there are.

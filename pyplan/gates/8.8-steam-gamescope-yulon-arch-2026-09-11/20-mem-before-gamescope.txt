@@ -1,5 +1,0 @@
-# Memory on the box immediately before gamescope was first started
-stamp: 2026-09-10T22:55:21+00:00 (the reading was taken by the same command that ran pacman)
-
-               total        used        free      shared  buff/cache   available
-Mem:           19990         995       12458          22        6922       18994

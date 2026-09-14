@@ -1,6 +1,0 @@
-=== DEPLOY the five bridge scripts ===
-ground: scripts already there = []
-2026-09-08 22:27:11 INFO [yulon.party] deployed 5 bridge scripts to /home/pk/wowserver/env/dist/etc/modules/lua_scripts (changed=True)
-deploy: changed=True names=['dml_addclass.lua', 'dml_bridge_ping.lua', 'dml_login.lua', 'dml_uninvite.lua', 'dml_whisper.lua']
-after: scripts on disk = ['dml_addclass.lua', 'dml_bridge_ping.lua', 'dml_login.lua', 'dml_uninvite.lua', 'dml_whisper.lua']
-world: running pid=33073 restarts=0 started=2026-09-08T20:24:29.539274367Z image=sha256:703ea652143119bdc1f35f7aa8cfd1b5d5bf83c4d8c7a09b4f4c2a837d692785

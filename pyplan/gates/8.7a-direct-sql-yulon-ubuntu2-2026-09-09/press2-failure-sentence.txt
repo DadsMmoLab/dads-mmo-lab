@@ -1,1 +1,0 @@
-SQL failed (arac.sql → acore_world): Error response from daemon: container 3c922e8e7c78d62c2ab93177595b2cd99d168cd738e392ca1b1e80d6e83e1b5f is not running

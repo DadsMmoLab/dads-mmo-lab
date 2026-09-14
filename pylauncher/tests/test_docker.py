@@ -6033,7 +6033,7 @@ def test_start_database_says_whether_it_had_to_start_the_container(
 # The real epilogue a failed `docker build` prints, captured on m910q (Docker
 # 29.7.2, 2026-09-12) from a busybox stand-in that fails in three seconds --
 # the tool's behaviour is the question, so the payload is not a 40-minute
-# compile (`pyplan/gates/t38-build-failure-reports-the-command-2026-09-12/`).
+# compile (`.notes/gates/t38-build-failure-reports-the-command-2026-09-12/`).
 _FAILED_BUILD_TAIL = (
     '#6 ERROR: process "/bin/sh -c sh -c \\"echo ...\\"" did not complete '
     "successfully: exit code: 1",

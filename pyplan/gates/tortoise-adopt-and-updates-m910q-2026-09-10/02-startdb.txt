@@ -1,6 +1,0 @@
-2026-09-10 21:44:10 INFO [yulon.docker] start_database(): starting tortoise-db alone
-=== startdb ===  2026-09-10 21:44:10 CEST
-world_running before: False
-start_database had to start it: True
-world_running after: False
-=== done ===  2026-09-10 21:44:17 CEST

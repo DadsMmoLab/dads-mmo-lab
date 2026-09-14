@@ -128,7 +128,7 @@ def env_name_for(ini_key: str) -> str:
     `myNestedConfig.opt1 => MY_NESTED_CONFIG_OPT_1`,
     `LogDB.Opt.ClearTime => LOG_DB_OPT_CLEAR_TIME`) and `:391-394` is the
     separator rule -- `.`, `-` and a space each become `_`. The whole read is
-    `pyplan/phase8-reads/azerothcore.md`.
+    `.notes/phase8-reads/azerothcore.md`.
 
     It matters that this is the REAL rule and not a plausible one. The obvious
     guess -- uppercase and turn dots into underscores -- gives

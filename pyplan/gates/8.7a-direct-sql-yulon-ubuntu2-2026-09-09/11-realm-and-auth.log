@@ -1,9 +1,0 @@
-=== the realm row, and the authserver restart that makes it live ===
-before:
-1	Yulon ubuntu2	100.99.204.5	100.99.204.5	255.255.255.255	8085
-after:
-1	Yulon ubuntu2	100.99.204.5	100.99.204.5	255.255.255.0	8085
-docker restart ac-authserver: rc=0 'ac-authserver' ''
-auth: running pid=455691 restarts=0 started=2026-09-09T08:37:06.225973143Z
-world: running pid=409560 restarts=0 started=2026-09-09T08:08:24.962353715Z
-containers up: ac-authserver Up Less than a second, ac-database Up 31 minutes (healthy), ac-worldserver Up 28 minutes

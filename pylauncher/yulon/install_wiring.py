@@ -342,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         # neither — which on a password-sudo box is the hang above.
         for line in engine.run(options, cancel=cancel, ask=_terminal_prompter):
             # STRIPPED OF T35's MARKERS, and this is the site the ticket names.
-            # The gate transcripts in `pyplan/gates/` are this stream and this
+            # The gate transcripts in `.notes/gates/` are this stream and this
             # log file, and a control character in front of every relayed line
             # would put `\x1etool ` into every one of them — greppable by
             # nothing that greps them today. `lines.parse()` hands back the

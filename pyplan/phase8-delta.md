@@ -1,10 +1,10 @@
 # Phase 8 — the feature delta against what Yu'lon ships
 
-> Step 2 of `pyplan/phase8-kickoff.md`: one row per candidate feature from The Lab and the Rust
+> Step 2 of `.notes/archive/phase8-kickoff.md`: one row per candidate feature from The Lab and the Rust
 > "Hypeer Launcher", what Yu'lon already has for it at the pinned Phase 7 tip, and the mechanism
 > each emulator tree offers — measured per tree, never inherited. Written 2026-09-06 from five
 > read-only source reads whose full reports are committed beside this page under
-> `pyplan/phase8-reads/`. Nothing here is a decision; the decisions page is
+> `.notes/phase8-reads/`. Nothing here is a decision; the decisions page is
 > `pyplan/phase8-parity-decisions.md`. The roadmap-step column carries the owner's cut of
 > 2026-09-06 (kickoff questions 2–8), recorded verbatim on that page.
 
@@ -85,7 +85,7 @@ Columns: feature · source · what Yu'lon ships today (at 7bc5ebd3) · the delta
 | **Single-instance guard** | Hypeer §7 | `docker.port_conflicts()` calls itself the README §12 guard and is a global port scan (`docker.py:2233-2244`); nothing stops a second `yulon.exe` | one running app | bind a fixed loopback port with a handshake, three outcomes never two (`RUST single_instance.rs:19-40`; the retry is load-bearing `:53-69`). Family-neutral. | RUST code and notes | Phase 9 (owner Q8iv) |
 | **Autostart with the OS** | Hypeer §7 | nothing | start the launcher at login | `reg.exe add HKCU\…\Run` with a quoted path (`RUST autostart.rs:13-14`, `:60-65`); Linux/macOS equivalents unwritten. | RUST code | later (owner Q8iv) |
 | **Realmlist check / fix in the client folder** | Hypeer §7 | `networking.write_client_realmlist()` exists and **nothing calls it** (`networking.py:3711-3737`; callers only in tests); the Networking tab prints "Players set realmlist to:" (`ui/controller_view.py:1909`); `Config.wtf` is never read | read both files, offer the fix | client files only: `Data/<locale>/realmlist.wtf` written, `WTF/Config.wtf` read as the fallback the 3.3.5 client actually uses (`RUST realmlist.rs:3-11`, `:194-245`, `:299`). Per family the client differs (2.4.3, 1.12.1, 1.18.1 layouts not recorded). | Yu'lon code; RUST notes (WotLK client); **other clients UNVERIFIED** | the fix is refused (owner Q5: no client-folder writes); a read-only check is Phase 9 |
-| **LAN / internet play** | Hypeer | **shipped**: Networking tab, `networking.plan()`/`apply()` (`networking.py:3134`, `:3516`), three modes incl. loopback (bug §41 closed), realmlist `UPDATE`, firewall, intent file | none | — | Yu'lon code; gates `pyplan/gates/bug39-lan-press-2026-09-05/`, `bug41-loopback-2026-09-05/` | none |
+| **LAN / internet play** | Hypeer | **shipped**: Networking tab, `networking.plan()`/`apply()` (`networking.py:3134`, `:3516`), three modes incl. loopback (bug §41 closed), realmlist `UPDATE`, firewall, intent file | none | — | Yu'lon code; gates `.notes/gates/bug39-lan-press-2026-09-05/`, `bug41-loopback-2026-09-05/` | none |
 | **Play Together** (Tailscale + alembic.gg) | Lab | nothing | — | a third-party hosted service with its own auth and a character-snapshot merge (memory record 2026-07-14) | MEM 2026-07-14 (observed) | **refused**: depends on a service this project does not run |
 | **Detect and migrate an existing DML / Lab install** | Lab | `state.json` remembers installs the app made; "Existing install found" fires on a directory that is not one (bug line 616) | adopt a server folder the app did not create | reading a foreign folder's compose files and volumes; the Rust `migrate.rs` path is recorded as not worth porting (`pyplan/rust-prior-art.md:203-204`) | Yu'lon code | later (owner Q8iv) |
 
@@ -144,7 +144,7 @@ Listed so section 4 of the kickoff can pick from them; none is settled here.
    to the container's own loopback. It does not, and it does not refuse either: Docker accepts and
    relays nothing, so the misconfiguration answers with silence and a connect probe passes on it.
    Run with busybox stand-ins on the test box, no server touched;
-   `pyplan/gates/8-spikes/published-port-vs-container-loopback/`.
+   `.notes/gates/8-spikes/published-port-vs-container-loopback/`.
 8c. **CLOSED 2026-09-06 by an exhaustive read** — whether Tortoise has any console route to setting
    a character's level. It has none to an arbitrary level; the only console-legal level command
    resets a live character to the configured starting level.

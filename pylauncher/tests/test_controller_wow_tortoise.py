@@ -208,7 +208,7 @@ def test_the_reset_writes_this_cores_one_column_and_never_azerothcores() -> None
     writer accepted it, branched on `mangos_srp6` alone, and treated every other
     scheme as AzerothCore. So the Repair press on the m910q's Tortoise install
     reached a table with no such column
-    (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`):
+    (`.notes/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`):
 
         ERROR 1054 (42S22) at line 1: Unknown column 'salt' in 'SET'
 

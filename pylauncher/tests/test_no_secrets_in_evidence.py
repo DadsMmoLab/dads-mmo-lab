@@ -24,11 +24,10 @@ worth more than one that recognises everything badly.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-SEARCHED = ("pyplan", "pylauncher")
-SUFFIXES = {".md", ".log", ".txt", ".json", ".py", ".yml", ".yaml", ".sh", ".cmd", ".tmpl"}
 
 _GENERATED_PASSWORD = re.compile(r"\b([a-z]+)-([0-9a-f]{16})\b")
 
@@ -45,23 +44,38 @@ ILLUSTRATIONS = {
 }
 
 
-def _candidates() -> list[tuple[Path, int, str]]:
+def _committable(repo: Path = REPO) -> list[Path]:
+    """Every file git would publish: tracked, staged, or new and not ignored.
+
+    Asked of git rather than walked from a list of folders. Until 2026-09-14 this
+    searched `pyplan/` and `pylauncher/` only, and that was the whole tree the
+    evidence lived in; then the gate captures moved to the gitignored `.notes/`,
+    and a `git add -f` of one of them would have been committed unseen. Git's
+    own list follows a file wherever it is added from, force-added ones included.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+    ).stdout.decode("utf-8")
+    return sorted({repo / name for name in listed.split("\0") if name})
+
+
+def _candidates(repo: Path = REPO) -> list[tuple[Path, int, str]]:
     found: list[tuple[Path, int, str]] = []
-    for root in SEARCHED:
-        for path in sorted((REPO / root).rglob("*")):
-            if not path.is_file() or path.suffix not in SUFFIXES:
-                continue
-            if ".git" in path.parts or "__pycache__" in path.parts:
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            for number, line in enumerate(text.splitlines(), start=1):
-                for match in _GENERATED_PASSWORD.finditer(line):
-                    if match.group(2) in ILLUSTRATIONS:
-                        continue
-                    found.append((path.relative_to(REPO), number, match.group(0)))
+    for path in _committable(repo):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            for match in _GENERATED_PASSWORD.finditer(line):
+                if match.group(2) in ILLUSTRATIONS:
+                    continue
+                found.append((path.relative_to(repo), number, match.group(0)))
     return found
 
 
@@ -113,10 +127,35 @@ def test_the_allow_list_is_not_a_place_to_put_a_real_one() -> None:
     """
     haystack = "\n".join(
         path.read_text(encoding="utf-8", errors="ignore")
-        for root in SEARCHED
-        for path in (REPO / root).rglob("*")
-        if path.is_file() and path.suffix in SUFFIXES and "__pycache__" not in path.parts
+        for path in _committable()
+        if path.is_file()
     )
     unused = [value for value in ILLUSTRATIONS if value not in haystack]
 
     assert not unused, f"these are allowed but appear nowhere: {unused}"
+
+
+def test_the_scan_reaches_every_part_of_the_tree_git_would_publish() -> None:
+    """Not vacuous: the listing covers both halves of the project and more than a handful."""
+    listed = {path.relative_to(REPO).parts[0] for path in _committable()}
+    assert {"pyplan", "pylauncher", ".github"} <= listed, sorted(listed)
+    assert len(_committable()) > 300, len(_committable())
+
+
+def test_a_force_added_file_under_an_ignored_folder_is_scanned(tmp_path: Path) -> None:
+    """The route the 2026-09-14 move opened: `.notes/` is ignored, `git add -f` still commits."""
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=tmp_path, capture_output=True, check=True)
+
+    git("init", "-q")
+    (tmp_path / ".gitignore").write_text(".notes/\n", encoding="utf-8")
+    capture = tmp_path / ".notes" / "gates" / "press.log"
+    capture.parent.mkdir(parents=True)
+    value = "tbc-" + "faf2e5c4" + "5f363783"
+    capture.write_text(f"tbc-db;3306;mangos;{value};mangos\n", encoding="utf-8")
+    (tmp_path / ".notes" / "unadded.log").write_text(f"{value}\n", encoding="utf-8")
+
+    assert _candidates(tmp_path) == [], "an ignored, unadded file is not publishable"
+    git("add", "-f", ".notes/gates/press.log")
+    assert _candidates(tmp_path) == [(Path(".notes/gates/press.log"), 1, value)]

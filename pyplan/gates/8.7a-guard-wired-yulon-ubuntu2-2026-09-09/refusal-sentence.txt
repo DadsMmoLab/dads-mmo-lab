@@ -1,1 +1,0 @@
-mod-arac: the world server is running, and it holds world in memory and writes back over whatever it finds there. No SQL was run and no rows were written: sql data/sql/db-world/arac.sql → world. Press Stop, then install again — the steps this run already took repeat, and the SQL follows them.

@@ -1,96 +1,0 @@
-T44 mutation sweep, 2026-09-13T02:25:58Z
-box: WSL2 Ubuntu-24.04 on the laptop, native ext4, Python 3.13.15, offscreen Qt
-re-run with: ./run-mutation.sh --all   (one patch at a time: ./run-mutation.sh <name>)
-
-A mutation is KILLED when the gate named in its own patch header goes red.
-A patch whose gate stays green is reported SURVIVED and the runner exits 1.
-
-killed    a-save-arms-both-jobs  (1 failed, 1 passed, 318 deselected in 1.03s)
-killed    backup-name-survives-the-next-file  (1 failed, 59 passed in 0.29s)
-killed    banner-names-the-cheaper-job  (1 failed, 319 deselected in 0.94s)
-killed    behind-survives-the-pull  (1 failed, 319 deselected in 1.08s)
-killed    bounds-shown-for-one-bound-int  (1 failed, 59 passed in 0.29s)
-killed    busy-gate-skips-the-tuning-bar  (1 failed, 319 deselected in 0.93s)
-killed    busy-gate-unlocks-unconditionally  (1 failed, 319 deselected in 0.92s)
-killed    card-hint-keyed-off-the-family  (1 failed, 59 passed in 0.29s)
-killed    changed-line-drops-the-key  (1 failed, 59 passed in 0.29s)
-killed    chip-action-label-missing  (2 failed, 65 passed in 0.53s)
-killed    chips-keyed-by-bare-id  (13 failed, 54 passed in 0.61s)
-killed    conf-keys-reads-comments  (1 failed, 64 passed in 0.25s)
-killed    env-name-drops-the-digit-rule  (1 failed, 27 passed in 0.15s)
-killed    env-name-ignores-case-boundaries  (3 failed, 25 passed in 0.17s)
-killed    every-chip-expands  (2 failed, 65 passed in 0.54s)
-killed    every-text-box-is-free-text  (1 failed, 59 passed in 0.29s)
-killed    expensive-buttons-start-enabled  (1 failed, 319 deselected in 0.95s)
-killed    fact-chip-gets-an-action  ()
-killed    failed-install-keeps-the-version  (1 failed, 319 deselected in 1.04s)
-killed    first-paint-reads-every-clone  (1 failed, 319 deselected in 0.93s)
-killed    head-version-guesses-a-partial-answer  (1 failed, 60 passed in 2.40s)
-killed    head-version-lets-oserror-out  (1 failed, 60 passed in 2.39s)
-killed    hint-drops-the-keg-family  (1 failed, 66 passed in 0.51s)
-killed    hint-is-built-but-never-laid-out  (1 failed, 66 passed in 0.52s)
-killed    no-confirm-on-restart  (1 failed, 319 deselected in 0.93s)
-killed    no-verdict-on-a-clean-file  (2 failed, 58 passed in 0.30s)
-killed    notch-selector-unscoped  (1 failed, 4 passed in 0.13s)
-killed    panel-qss-invents-a-colour  (1 failed, 4 passed in 0.13s)
-killed    pending-chip-hardcoded-to-restart  (1 failed, 59 passed in 0.30s)
-killed    picker-gets-no-read-only-list  (2 failed, 318 deselected in 1.08s)
-killed    picker-uses-colliding-basenames  (1 failed, 59 passed in 0.29s)
-killed    picker-uses-full-paths  (1 failed, 59 passed in 0.29s)
-killed    pressed-bevel-grows-the-box  (1 failed, 4 passed in 0.13s)
-killed    rail-set-once-in-init  (1 failed, 59 passed in 0.29s)
-killed    raw-revert-armed-with-no-backup  (1 failed, 59 passed in 0.29s)
-killed    raw-revert-does-not-restore  (1 failed, 1 passed, 318 deselected in 1.09s)
-killed    read-only-files-linted-too  (1 failed, 59 passed in 0.31s)
-killed    read-only-row-gets-no-chip  (1 failed, 59 passed in 0.29s)
-killed    refresh-keeps-the-version-cache  (1 failed, 319 deselected in 1.13s)
-killed    report-keeps-the-version-cache  (1 failed, 319 deselected in 1.04s)
-killed    revert-all-re-reads-the-disk  (1 failed, 319 deselected in 0.93s)
-killed    set-version-raises-on-a-row-that-went  (1 failed, 66 passed in 0.55s)
-killed    settings-counts-files  (1 failed, 59 passed in 0.31s)
-killed    shadow-match-is-case-blind  (1 failed, 27 passed in 0.17s)
-killed    shadow-match-returns-every-key  (2 failed, 26 passed in 0.17s)
-killed    shadow-warning-on-every-editable-file  (1 failed, 59 passed in 0.29s)
-killed    shadow-warning-says-recreate-is-enough  (1 failed, 59 passed in 0.29s)
-killed    sql-badge-dropped  (2 failed, 65 passed in 0.52s)
-killed    sql-badge-keyed-by-bare-id  (2 failed, 65 passed in 0.55s)
-killed    subpanel-button-emits-its-text  (1 failed, 66 passed in 0.50s)
-killed    subpanel-never-opens  (2 failed, 65 passed in 0.54s)
-killed    subpanel-never-shuts  (1 failed, 66 passed in 0.51s)
-killed    subpanel-replaces-the-report-line  (2 failed, 65 passed in 0.52s)
-killed    tuning-card-object-name-renamed  (1 failed, 4 passed in 0.14s)
-killed    tuning-panel-wears-no-sheet  (1 failed, 4 passed in 0.14s)
-killed    tuning-view-passes-no-shadowed  (1 failed, 319 deselected in 0.93s)
-killed    uncatalogued-row-badged-not-installed  (1 failed, 66 passed in 0.53s)
-killed    update-always-refuses  (1 failed, 143 passed in 1.94s)
-killed    update-chip-has-no-action  (1 failed, 66 passed in 0.53s)
-killed    update-fetches-before-it-looks  (1 failed, 143 passed in 1.83s)
-killed    update-installs-a-missing-clone  (1 failed, 143 passed in 1.96s)
-killed    update-press-routes-to-install  (2 failed, 1 passed, 317 deselected in 1.69s)
-killed    update-press-routes-to-remove  (3 failed, 317 deselected in 1.94s)
-killed    update-skips-the-history-check  (2 failed, 142 passed in 1.88s)
-killed    update-skips-the-origin-check  (1 failed, 144 deselected in 0.93s)
-killed    update-skips-the-tree-check  (2 failed, 142 passed in 1.84s)
-killed    version-cache-forget-is-a-noop  (1 failed, 66 deselected in 0.18s)
-killed    version-cache-known-reads  (1 failed, 2 passed, 64 deselected in 0.20s)
-killed    version-cache-never-caches  (2 failed, 65 deselected in 0.22s)
-killed    version-cache-path-drops-the-family  (1 failed, 66 passed in 0.54s)
-killed    version-shown-for-uninstalled-rows  (1 failed, 66 passed in 0.52s)
-killed    versions-never-fill-in  (3 failed, 317 deselected in 1.33s)
-killed    widget-decides-the-badge-itself  (1 failed, 66 passed in 0.53s)
-killed    world-env-forgets-the-entry  (1 failed, 27 passed in 0.15s)
-killed    update-treats-unknown-as-clean  (1 failed, 13 passed, 130 deselected in 0.33s)
-killed    update-treats-an-unreachable-remote-as-clean  (1 failed, 13 passed, 130 deselected in 0.33s)
-
-Two things this sweep found that the round-1 prose could not have:
-
-* `update-treats-unknown-as-clean` SURVIVED on its first spelling. The patch
-  was `if clean is not True:` -> `if not clean:`, which for a `bool | None`
-  seam is the SAME expression -- an equivalent mutant, not a hole in the
-  tests. It was replaced with the real thing (drop the `None` arm so an
-  unanswered `is_unmodified()` falls through) and killed, and
-  `update-treats-an-unreachable-remote-as-clean` was added beside it for the
-  other seam.
-* Two round-1 mutations could not be regenerated at all: their anchors no
-  longer exist in the code they were quoted against. Prose about a mutation
-  cannot notice that; a file can.

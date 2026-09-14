@@ -2157,7 +2157,7 @@ _THING_MODULE: dict[str, Any] = {
 def test_a_conf_write_recommends_a_restart_the_world_reads_it_at_its_next_start(
     tmp_path: Path,
 ) -> None:
-    """T27 (`pyplan/tickets/T27-...md`, evidence in `pyplan/gates/8.6-spec-takes-effect-
+    """T27 (`.notes/tickets/T27-...md`, evidence in `.notes/gates/8.6-spec-takes-effect-
     yulon-ubuntu2-2026-09-10/`): activating `mod-playerbots`' conf through the app's own
     seam reported `restart_recommended = False` (`03-activate.log:38`) while the running
     world went on reading its OLD config until the restart of step 04 ("Config::LoadFile:
@@ -3100,7 +3100,7 @@ def test_remove_time_sql_is_refused_and_the_clone_survives_to_be_undone(tmp_path
 # ------------------------------- the seam, wired, and the way back from Stop (T7)
 #
 # T2 pressed the guard above against a real running worldserver and it held
-# (`pyplan/gates/8.7a-direct-sql-yulon-ubuntu2-2026-09-09/`). It also found the
+# (`.notes/gates/8.7a-direct-sql-yulon-ubuntu2-2026-09-09/`). It also found the
 # two things this section is about, and neither is a defect in the guard:
 #
 # 1. Nothing shipped passed `world_running`, so `_world_running` was `None` on

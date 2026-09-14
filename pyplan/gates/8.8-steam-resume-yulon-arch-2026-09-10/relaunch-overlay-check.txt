@@ -1,7 +1,0 @@
-# 2026-09-10T21:55:37+00:00 yulon-arch: the server entry launched from Steam once more, to record whether Steam starts gameoverlayui for it
-yulon pid=24486
-gameoverlayrenderer mappings in /proc/24486/maps: 4
-gameoverlayui processes: 0
-window 71303175 name=[Yu'lon — Dad's MMO Lab launcher 0.6.59] STEAM_GAME:  not found. _NET_WM_PID(CARDINAL) = 24486 WM_CLASS(STRING) = "main.py", "main.py" 
-active window: Yu'lon — Dad's MMO Lab launcher 0.6.59
-closed; yulon procs: 0

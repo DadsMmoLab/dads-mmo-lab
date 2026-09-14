@@ -1,4 +1,0 @@
-1	11	Grirmirn	0	0	0
-1	12	Zarraden	0	0	0
-3	1	Jurnaar	0	0	0
-3	4	Dalio	0	0	0

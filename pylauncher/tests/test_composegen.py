@@ -1948,7 +1948,7 @@ def test_the_tortoise_image_makes_their_self_colliding_migration_idempotent() ->
     """One file, named, with the reason -- not the 173 the owner refused to patch.
 
     Measured on m910q 2026-09-08 on a byte copy of the live volume
-    (`pyplan/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/`): with
+    (`.notes/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/`): with
     `tw_world` imported from their `sql/base` at head, their updater applied 157
     world migrations and cancelled the server on `20260903063722_world` --
     `Duplicate entry '44070' for key 'PRIMARY'` in `spell_proc_event`, a row

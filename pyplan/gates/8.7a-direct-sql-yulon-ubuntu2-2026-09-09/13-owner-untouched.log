@@ -1,7 +1,0 @@
-=== the owner's things on this box (read only) ===
-  /home/pk/LootPet.lua 31216 bytes mtime=2026-09-08 22:17:42.286251327 +0200
-  account PERZI (id, username, last_login, joindate, and the LENGTH of its verifier):
-    102	PERZI	2026-09-08 23:24:16	2026-09-08 20:28:14	32	32
-  characters on that account:
-    1001	Pakka	6	2	1	0	1788910611
-world: running pid=409560 restarts=0 started=2026-09-09T08:08:24.962353715Z   containers up: ac-authserver Up About a minute, ac-database Up 32 minutes (healthy), ac-worldserver Up 29 minutes

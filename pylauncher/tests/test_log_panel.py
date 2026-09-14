@@ -180,7 +180,7 @@ def test_stop_ends_a_source_blocked_inside_a_quiet_child(qapp: object) -> None:
     """7.10's one FAIL, in a unit test: Stop must reach a source that is not between lines.
 
     Measured on `yulon-ubuntu2` 2026-09-08
-    (`pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/log-panel-stop-probe.txt`), with
+    (`.notes/gates/7.10-rerun-ubuntu2-2026-09-08/log-panel-stop-probe.txt`), with
     the panel's Stop clicked by `QTest.mouseClick` on the real
     `ControllerServices.logs_source`: 120 seconds of
     `running=True cancelled=True worker._stop=True lines=210`, then

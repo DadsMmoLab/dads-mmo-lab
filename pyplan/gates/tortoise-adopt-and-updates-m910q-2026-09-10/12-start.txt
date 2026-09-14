@@ -1,8 +1,0 @@
-2026-09-10 21:46:16 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tortoise-db tortoise-realmd tortoise-mangosd` in /home/pk/tortoise-server
-=== control start ===  2026-09-10 21:46:16 CEST
-status before: InstallStatus(db=True, auth=False, world=False)
-world_running before: False
-controller.start() returned
-status after: InstallStatus(db=True, auth=True, world=True)
-world_running after: True
-=== done ===  2026-09-10 21:46:17 CEST

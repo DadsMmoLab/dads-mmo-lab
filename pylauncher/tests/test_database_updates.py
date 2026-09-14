@@ -24,7 +24,7 @@ to a named list of files must reach neither, so `ctx.updates_only` is read befor
 route rather than guarded on it.
 
 What is unit-tested only: no press was run on a box for this change. The live
-half is `pyplan/gates/tortoise-updates-button-m910q-2026-09-09/`, and until it
+half is `.notes/gates/tortoise-updates-button-m910q-2026-09-09/`, and until it
 exists the m910q evidence for this route is T11's, through the CLI harness.
 """
 

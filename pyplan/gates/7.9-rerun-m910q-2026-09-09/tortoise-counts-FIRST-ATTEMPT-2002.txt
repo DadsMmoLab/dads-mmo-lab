@@ -1,7 +1,0 @@
-=== tortoise-counts before-the-run  2026-09-09T05:46:40+02:00  (UTC 2026-09-09T03:46:40+00:00) ===
-tortoise-db was already running before this probe: false
-SELECT COUNT(*) FROM tw_char.characters          ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)
-SELECT COUNT(*) FROM tw_logon.account            ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)
-SELECT COUNT(*) FROM tw_world.migrations         ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)
-SELECT COUNT(*) FROM tw_char.migrations          ERROR 2002 (HY000): Can't connect to local server through socket '/run/mysqld/mysqld.sock' (2)
-tortoise-db stopped again (it was not running when this probe started)

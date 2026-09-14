@@ -1,4 +1,0 @@
-﻿[15:26:27Z] ===== GROUND: Amvezuan (guid 916) is on account 92, level 55, at_login 0 =====
-[15:26:28Z] characters on registry accounts before the move: 1000
-[15:26:28Z] Amvezuan's account column: 92 -> 102 (the gate account is 102)
-[15:26:28Z] THE CLIENT HALF: log in as GATE84W / gate84w-p@ss and play Amvezuan

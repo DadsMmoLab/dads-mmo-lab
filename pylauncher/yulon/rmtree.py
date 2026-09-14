@@ -96,7 +96,7 @@ def _remove_unenterable(path: Path) -> None:
 
     The second stop the Windows press found, after the read-only one -- measured
     on `yulon-win11` 2026-09-08 on a real WotLK install
-    (`pyplan/gates/8.9a-wotlk-yulon-win11-2026-09-08/`): AzerothCore's clone
+    (`.notes/gates/8.9a-wotlk-yulon-win11-2026-09-08/`): AzerothCore's clone
     stage runs git inside a Linux container with the server dir bind-mounted,
     so every symlink in the repository lands on NTFS as an
     `IO_REPARSE_TAG_LX_SYMLINK` reparse point (`0xa000001d`). Python does not

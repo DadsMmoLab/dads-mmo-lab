@@ -1,9 +1,0 @@
-=== the database alone, through docker.start_database() ===
-ground: containers up = 
-ground: database = exited pid=0 restarts=0 started=2026-09-09T02:17:39.714383429Z
-2026-09-09 10:05:42 INFO [yulon.docker] start_database(): starting ac-database alone
-[08:05:49Z] start_database() returned in 6.6s
-after: containers up = ac-database Up 6 seconds (healthy)
-after: database = running pid=403938 restarts=0 started=2026-09-09T08:05:42.732676577Z
-after: world = exited pid=0 restarts=0 started=2026-09-09T03:06:45.852973725Z
-after: the seam says world_running() = False

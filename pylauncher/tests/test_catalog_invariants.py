@@ -1035,7 +1035,7 @@ def test_the_import_reader_answers_every_spelling_of_the_controller() -> None:
 # enumerated it, and "measured" lived only in the model docstrings -- which are
 # written per FIELD while the values are per field per GAME, so no single value
 # could be asked where it came from. `tests/catalog_provenance.py` holds the
-# table and the vocabulary; `pyplan/phase8-designs/d-catalog-provenance.md`
+# table and the vocabulary; `.notes/phase8-designs/d-catalog-provenance.md`
 # holds the design and the questions left open.
 #
 # The ground before these five landed, recorded because a guard that was already
@@ -1131,24 +1131,30 @@ def test_the_provenance_debts_are_exactly_these_four() -> None:
         assert len(reason) > 80, f"{key}: a debt with no reason is a debt nobody can discharge"
 
 
-def test_a_measured_provenance_cites_a_page_that_is_really_there() -> None:
-    """The citation resolves, or it is not a citation.
+def test_a_measured_provenance_cites_a_gate_write_up_by_its_full_name() -> None:
+    """The shape half of a citation this suite can no longer open.
 
-    `dcc64543` widened the docs guard to gate folders and its first catch was
-    `tests/test_srp6.py` in 8.3c's README -- a file never written under that
-    name. A provenance table is the same shape of claim and would rot the same
-    way: a gate folder renamed or a README moved leaves a row pointing at
-    nothing, and a row pointing at nothing reads exactly like a measurement.
+    Until 2026-09-14 a test here opened every `measured-on` page and failed on
+    one that was not there. The gate write-ups then moved to the maintainers'
+    gitignored `.notes/`, and that check moved with them. What a public checkout
+    can still hold a row to is the form: a gate folder named by step, game, box
+    and date, and the README inside it -- not prose, not a bare folder, not a
+    path that climbs out of the notes.
     """
-    pyplan = Path(__file__).resolve().parents[2] / "pyplan"
-    assert pyplan.is_dir(), pyplan
-    seen = 0
-    for key, mark in catalog_provenance.PROVENANCE.items():
-        if mark.kind != "measured-on":
-            continue
-        assert (pyplan / mark.cite).is_file(), f"{key} cites {mark.cite}, which is not there"
-        seen += 1
-    assert seen == 34, seen
+    shape = re.compile(r"gates/\d+\.\d+[a-z]?-[a-z0-9-]+-\d{4}-\d{2}-\d{2}/README\.md")
+    measured = {
+        key: mark.cite
+        for key, mark in catalog_provenance.PROVENANCE.items()
+        if mark.kind == "measured-on"
+    }
+    wrong = {key: cite for key, cite in measured.items() if not shape.fullmatch(cite)}
+
+    assert not wrong, f"these measured-on rows do not name a gate write-up: {wrong}"
+    assert len(measured) == 34, len(measured)
+    assert not shape.fullmatch("measured on m910q, 2026-09-08"), "the shape admits prose"
+    assert not shape.fullmatch(
+        "gates/8.4a-wotlk-yulon-ubuntu-2026-09-07/"
+    ), "a folder is not a page"
 
 
 def test_a_read_from_source_provenance_cites_a_line_and_not_a_sentence() -> None:

@@ -1,5 +1,0 @@
-﻿[15:23:59Z] ### 8.4a WINDOWS gate driver, stage withheld, 2026-09-08T15:23:59.244719+00:00 ###
-[15:23:59Z] ### box: yulon-win11, Windows-10-10.0.26200-SP0, tree: C:\gate\src84a ###
-[15:23:59Z] ANNOUNCE: 8.4a Windows: the Revive button withheld for an offline character
-[15:24:02Z] the offline character Aiza: revive enabled=False label='Aiza has to be logged in to be revived'
-[15:24:02Z] PASSED: the button is withheld and the sentence says why

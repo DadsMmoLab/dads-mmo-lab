@@ -402,7 +402,7 @@ def empty_out_dirs(produces: Iterable[str], data_dir: Path) -> None:
     right property for the bug it was written for and is the wrong one for a
     second attempt at a tool that already wrote into the folder.
 
-    Measured on m910q, 2026-09-04 (`pyplan/gates/7.5-m910q/vmap75-full.log`, and
+    Measured on m910q, 2026-09-04 (`.notes/gates/7.5-m910q/vmap75-full.log`, and
     the 7.5 entry in `pyplan/checklist.md`): a forced crash matched
     `wow-vanilla`'s recipe, `vmap extract` was re-run exactly as the recipe
     promises, and the re-run died on its first breath --
@@ -1346,7 +1346,7 @@ vmapexport.cpp:465-486` goes from `processArgv` straight to `mkdir`, and a
 grep for "polluted" and "empty directory" over that file at that rev counts 0.
 Refusing a Tortoise press would cost a user an extraction over a rule their
 tool does not have -- see
-`pyplan/gates/doodad-2026-09-05/extractor-dirty-output.txt` §4.
+`.notes/gates/doodad-2026-09-05/extractor-dirty-output.txt` §4.
 """
 
 
@@ -1446,7 +1446,7 @@ def blocked_message(tool: ExtractTool, folder: Path) -> str:
     compose files, `.env`, `.yulon-install.json`, and `.db_password` -- the
     fixture carries none, so the press mints one; an earlier count said 11 and
     omitted it); the modern one left 1 (`.yulon-install.json`). Re-measured by
-    the round-10 review (`pyplan/gates/doodad-2026-09-05/round10-press-probe.txt`).
+    the round-10 review (`.notes/gates/doodad-2026-09-05/round10-press-probe.txt`).
     Neither launched an extraction container and
     neither changed a byte under `data/`, which is what the narrower sentence
     claims and what

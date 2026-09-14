@@ -1,7 +1,0 @@
-2026-09-09 14:22:28 INFO [yulon.logsnap] saved tortoise-mangosd's log to /home/pk/.local/share/yulon/logs/wow-tortoise-58c6fd1c-20260909T122228Z.log
-2026-09-09 14:22:29 INFO [yulon.docker] stop_staged(): stopped; containers kept for a fast restart
-status before: InstallStatus(db=True, auth=False, world=False)
-world_running before: False
-controller.stop() -> True
-status after: InstallStatus(db=False, auth=False, world=False)
-world_running after: False

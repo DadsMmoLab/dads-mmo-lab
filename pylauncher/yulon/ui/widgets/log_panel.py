@@ -361,7 +361,7 @@ class _StreamWorker(QObject):
         line — measured through the panel's real Stop button on `yulon-ubuntu2`
         2026-09-08: `worker._stop=True` for 120 seconds with the panel still
         running, against 0.02 s for a synthetic source that kept yielding
-        (`pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/log-panel-stop-probe.txt`).
+        (`.notes/gates/7.10-rerun-ubuntu2-2026-09-08/log-panel-stop-probe.txt`).
 
         So the flag is set AND every `runner.stream()` child this thread started
         is ended. Keyed on the thread rather than on a cancel token because the

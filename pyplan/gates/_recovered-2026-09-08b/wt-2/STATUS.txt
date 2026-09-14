@@ -1,4 +1,0 @@
-a5690ff7 The online rename moves the row at the press, not at the logout
-7e9d04a6 Tortoise's Revive button comes back: the press that proved it was already on disk
-9a69c121 A ticked purge keeps the client data too, on the owner's decision
-

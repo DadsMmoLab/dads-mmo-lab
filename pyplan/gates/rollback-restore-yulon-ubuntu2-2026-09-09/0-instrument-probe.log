@@ -1,9 +1,0 @@
-=== INSTRUMENT PROBE: does this daemon report image tag/untag events? ===
-ground: yulon-gate-events-probe:1 on the daemon = False
-
-tagged: yulon-gate-events-probe:1 on the daemon = True
-Untagged: yulon-gate-events-probe:1
-removed: yulon-gate-events-probe:1 on the daemon = False
---- the event stream for those two acts ---
-1788919144 tag yulon-gate-events-probe:1
-1788919144 untag yulon-gate-events-probe:1

@@ -773,7 +773,7 @@ was found by reading code; each is a line in a resolved compose document from a 
   It runs when SELinux is enforcing on a filesystem that cannot hold labels; the Fedora VM
   (`yulon-fedora`) this capture came from is confirmed enforcing (§3 and §9 above), but the same
   VM's `stat -f -c %T ~` is recorded elsewhere as `xfs`/`btrfs`
-  (`pyplan/phase7-plans/7.1-spine-azerothcore-linux.md`, the E.4 Fedora gate setup step), which
+  (`.notes/phase7-plans/7.1-spine-azerothcore-linux.md`, the E.4 Fedora gate setup step), which
   `selinux_labels_supported()` treats as label-capable — so the drop path is not obviously why
   this particular box produced this shape, and this list cannot pin the mechanism down further
   from a capture and a script reading alone.
@@ -806,7 +806,7 @@ was found by reading code; each is a line in a resolved compose document from a 
   `SCRIPT_INSTALL_DIVERGENCES` in `tests/test_compose_fixture.py` pins the difference so it cannot
   silently disappear from a future re-capture.
   *Recorded, not fixed:* whether the right fix is an override patch or simply deletion is the
-  owner's call, not this list's — 7.2 (`pyplan/phase7-plans/7.2-retire-bash.md`) deletes all three
+  owner's call, not this list's — 7.2 (`.notes/phase7-plans/7.2-retire-bash.md`) deletes all three
   scripts outright, so the fix may turn out to be "the file is gone" rather than a patch to it.
   Until then, these three scripts are what a user running `install-wow-wotlk*.sh` today actually
   gets.
@@ -2240,7 +2240,7 @@ from `catalog.json`, the stage tuple is pinned, and a working-looking wrong answ
 (`FAMILIES["cmangos"] = AzerothCoreInstaller`) is killed by test.
 
 **What has NOT happened is a live install.** Gates 7.4a/b/c (TBC through `build`; extract + mmaps with
-the 2.4.3 client; conf + import + ready) are unticked, and `pyplan/gates/` does not exist yet. The 7.3
+the 2.4.3 client; conf + import + ready) are unticked, and `.notes/gates/` does not exist yet. The 7.3
 primitives gate is written and ready but was deliberately not run — it starts containers and pulls
 images, and the standing rule is that the owner starts a run himself.
 
@@ -2651,7 +2651,7 @@ rather than what is observable — that no valid Yu'lon ownership record exists.
 
 Found by 7.1's own gate, the hard way: the lane that pressed it lost its ssh session and had to
 recover by driving the guest's GNOME desktop through the Hyper-V synthetic keyboard. Evidence and
-the whole recovery are in `pyplan/gates/7.1-ubuntu-2026-09-04/ufw-lockout.txt`.
+the whole recovery are in `.notes/gates/7.1-ubuntu-2026-09-04/ufw-lockout.txt`.
 
 **What it does.** `networking.apply()` on a Linux box with `ufw` emits three commands and runs all
 three:
@@ -2738,7 +2738,7 @@ enable` with only 3724 and 8085 allowed, and the same four empty reports this se
 pid 1** — `users:(("systemd",pid=1,fd=150))` — and `'"sshd'` does not match that, so even a probe
 running as **root** reads the box as having no sshd: `ports = ()` with `listeners_readable = True`,
 which is the same silent-enable branch. The shape is visible in this night's own gate capture,
-`pyplan/gates/7.1-ubuntu-2026-09-04-clean/gate71-realm-and-account.log`, where `sudo ss -lntp` on
+`.notes/gates/7.1-ubuntu-2026-09-04-clean/gate71-realm-and-account.log`, where `sudo ss -lntp` on
 `yulon-ubuntu` prints `users:(("sshd",pid=17501,fd=3),("systemd",pid=1,fd=150))` — sshd there had
 already been triggered, so both halves appear; on a box where it has not been, only the systemd
 half is there.
@@ -2750,13 +2750,13 @@ what makes this a latent defect rather than a second outage, and it is also why 
 could all pass while the guard was wrong: the tests are the only caller that drives it.
 
 **One claim filed with the fix is false, and was corrected beside the artifact.**
-`pyplan/gates/bug39-ssh-lockout/README.txt` and `ss-format-live.txt` both end with "if that token
+`.notes/gates/bug39-ssh-lockout/README.txt` and `ss-format-live.txt` both end with "if that token
 is ever wrong the probe finds no port, which lands on the REFUSE branch, not on a silent enable."
 It does not: the REFUSE branch is reached only when `listeners_readable` is False or
 `SSH_CONNECTION` is set. A wrong owner token with a readable table and no `SSH_CONNECTION` lands on
 the enable. `ss-format-live.txt`'s other generalisation — "as a normal user there is NO
 `users:((` column at all" — was measured on `dml-arch`, a WSL2 Arch box that happens to have zero
-user-owned listeners; `m910q` refutes it. See `pyplan/gates/bug39-ssh-lockout/CORRECTION-2026-09-04.md`.
+user-owned listeners; `m910q` refutes it. See `.notes/gates/bug39-ssh-lockout/CORRECTION-2026-09-04.md`.
 
 **What this section still wants**, stated as what was found rather than as a promise: a readability
 test that asks whether a **root-owned** socket was visible to this probe (an owner column on a
@@ -2769,7 +2769,7 @@ while this was written, and by morning they will point at something else.
 shape they claimed. Still OPEN.** Round 6 (`9b0eb089`) closed the DefaultZone blocker and was
 reviewed as needing another pass. Four findings; all four hold, all four were re-derived on `m910q`
 against the committed round-6 module BEFORE anything was changed, and none of them is a new lockout.
-The evidence, command by command, is in `pyplan/gates/bug39-ssh-lockout/round7-2026-09-05.md`, whose
+The evidence, command by command, is in `.notes/gates/bug39-ssh-lockout/round7-2026-09-05.md`, whose
 head now carries the correction. Round 7's own review measured the two repairs below on real boxes
 and found them unproven; the word **Fixed** has been taken back from both, and what actually holds
 of each is recorded here and in the round-8 entry.
@@ -2832,7 +2832,7 @@ two headline repairs on real hardware and found neither proved. Everything below
 on 2026-09-05: on **yulon-fedora** (Fedora 44, firewalld 2.4.0, Docker 29.7.2 build 1.fc44, started
 read-only for this and stopped afterwards) and on **m910q**. No firewall command was applied
 anywhere — every run is a read, a `plan()`, a `decide_lockout()` or a probe. Evidence, command by
-command, in `pyplan/gates/bug39-ssh-lockout/round8-2026-09-05.md`.
+command, in `.notes/gates/bug39-ssh-lockout/round8-2026-09-05.md`.
 
 * **The zone-breadth gate was inert on a real Docker box.** Real Docker binds its bridges at
   RUNTIME only. On yulon-fedora: `firewall-cmd --get-zone-of-interface=docker0` -> `docker`,
@@ -2899,7 +2899,7 @@ text. The lane was rebased onto `c6b28547` (`ee361035` -> `ef022b3a` -> `cd827c0
 conflicts) and everything below was measured by me on 2026-09-05: namespaces on **m910q**, firewalld
 listings read-only on **yulon-fedora** (Fedora 44, already Running when I arrived; left Running).
 No firewall command was applied anywhere. Evidence, command by command, in
-`pyplan/gates/bug39-ssh-lockout/round9-2026-09-05.md`.
+`.notes/gates/bug39-ssh-lockout/round9-2026-09-05.md`.
 
 * **`other-pid-namespace` claimed `/proc/1` was the namespace's own init, and half the time it is
   this machine's `systemd`.** Both spellings on m910q, one minute apart, `/proc/1/comm` read in
@@ -2986,7 +2986,7 @@ the behaviour measured-correct in both pid shapes and blocked the merge on prose
 was measured by me on 2026-09-05 on **m910q** (namespaces, mutations, `sudo` environment) and on
 **yulon-fedora** (`journalctl`, read-only); no firewall command was applied anywhere, no VM was
 started or stopped, nothing ran on the laptop. Evidence, command by command, in
-`pyplan/gates/bug39-ssh-lockout/round10-2026-09-05.md`.
+`.notes/gates/bug39-ssh-lockout/round10-2026-09-05.md`.
 
 * **"the two signatures differ in every `/proc/1` answer" was false in the fixture and on the box.**
   `_namespaced()` hard-codes `"/proc/1/ns/net": _HOST_NET_NS`, so no parameter can vary it. Driving
@@ -3031,7 +3031,7 @@ started or stopped, nothing ran on the laptop. Evidence, command by command, in
   stock range back. The box now reads `1025-65535/tcp 1025-65535/udp` permanent and runtime, no
   ports in `docker`, no `b39-failsafe*` units left. Those writes close three minutes before round 6's own
   commit `ee361035` (`2026-09-05T08:10:40+02:00` = 06:10:40 UTC), which is what dates them. Full journal and current state in
-  `pyplan/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md`.
+  `.notes/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md`.
 * **The one inherited causal claim in the (5c) repair is now measured.** "`connected` follows
   `SSH_CONNECTION`, which `sudo` strips" was carried from round 8's write-up and re-derived by
   nobody. On m910q: `env | grep -cE '^SSH_(CONNECTION|CLIENT|TTY)='` is **2** as the ssh user, **0**
@@ -3042,7 +3042,7 @@ started or stopped, nothing ran on the laptop. Evidence, command by command, in
 10 did not change — and one half of it still holds while the other does not.
 Still true: `enable_firewall` occurs in exactly two files of code — `pylauncher/yulon/networking.py`
 and `pylauncher/tests/test_networking.py` — and otherwise only in this checklist and four records
-under `pyplan/gates/bug39-ssh-lockout/` (`grep -rln enable_firewall . --exclude-dir=.git`, run at
+under `.notes/gates/bug39-ssh-lockout/` (`grep -rln enable_firewall . --exclude-dir=.git`, run at
 `4fb61ea9`, seven files, no view, no service, no controller; re-run at `cfb4c04f` on 2026-09-05 it
 answered the same seven paths, two of them code, with 14 occurrences in the module). So nothing the
 GUI owns can ask for the enable.
@@ -3060,12 +3060,12 @@ scoping of the neighbouring claim is restored here, because round 9 dropped it: 
 was applied on any box reached over ssh in those rounds, and the only `firewall-cmd` writes that
 executed were **inside a container** — container `b39r7` on m910q, whose `docker` zone round 7 bound
 by hand with `firewall-cmd --permanent --zone=docker --add-interface=docker0`
-(`pyplan/gates/bug39-ssh-lockout/round7-2026-09-05.md:8-9` and `:29-31`). Rounds 8, 9 and 10 ran
+(`.notes/gates/bug39-ssh-lockout/round7-2026-09-05.md:8-9` and `:29-31`). Rounds 8, 9 and 10 ran
 listings and probes only. Earlier than that the lane did apply, on a real box, twice: round 6's
 clean run wrote 39 firewall commands to **yulon-fedora** at 06:00-06:08 UTC on 2026-09-05 and put
 the box back, and an unrecorded run the night before (boot `-5`, 2026-09-04 23:32-23:35 UTC, 24
 writes, no failsafe) did the same — both recorded, with the journal, in
-`pyplan/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md` and its addendum.
+`.notes/gates/bug39-ssh-lockout/yulon-fedora-round6-applied-2026-09-05.md` and its addendum.
 
 **Stopped at round 10 by owner decision, 2026-09-05 ("stop at 10"), and merged.** What is
 measured-closed at `e9d2e1a0`: the guard ALLOWs on the production path with the ssh route preserved
@@ -3120,7 +3120,7 @@ lane's later record-keeping from the boxes' own activity logs; its stamps run to
 those two figures had an artifact behind it — on
 **`yulon-ubuntu`**, the live 7.2 install at `/home/pk/wowserver`, against the committed tree at
 `cfb4c04f` (`git rev-parse HEAD` in `/home/pk/p7/checkout`, `git status --short` empty). Command by
-command, with every readback, in `pyplan/gates/bug39-lan-press-2026-09-05/README.md`.
+command, with every readback, in `.notes/gates/bug39-lan-press-2026-09-05/README.md`.
 
 * **The way back in was proved BEFORE the firewall was touched, with the tools the 7.1 recovery
   needed.** `vmshot.ps1`, then `vmkeys.ps1 -OpenTerminal` and
@@ -3259,7 +3259,7 @@ that point.
 Found by 7.10's sweep. A `logs_source()` generator that is dropped without being closed makes the
 interpreter abort at shutdown — SIGABRT, exit 134 — from inside `runner.stream()`'s `finally`.
 Pre-existing and not Phase 7's doing: both functions are byte-identical to their 6.x versions.
-Evidence in `pyplan/gates/7.10-ubuntu-2026-09-04/`.
+Evidence in `.notes/gates/7.10-ubuntu-2026-09-04/`.
 
 It matters because the Server tab's log panel is exactly a caller that starts a stream and may stop
 caring about it, and an abort at exit is the kind of thing that looks like "the app crashed on
@@ -3296,7 +3296,7 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       `b481be54`), read by `network_mode()` (`controller_view.py:1835` at `b481be54`). Driven by
       `QTest.mouseClick` on the real radio, not by `setChecked()`, in
       `test_controller_view.py::test_the_networking_tab_offers_the_loopback_and_a_real_click_selects_it`
-      and on the live install in `pyplan/gates/bug41-loopback-2026-09-05/widget-driver-output.txt`.
+      and on the live install in `.notes/gates/bug41-loopback-2026-09-05/widget-driver-output.txt`.
 - [x] Intent persisted where a resume can read it, and `ready` reading it before it decides. —
       `.yulon-network.json` (`networking.INTENT_FILE`, `networking.py:220` at `b481be54`) beside
       the server dir's `.yulon-install.json` and deliberately not inside it: `native.write_state()` rebuilds its whole
@@ -3314,21 +3314,21 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       only after the `address is None` early return, each left both lists empty and the whole
       416-test file green — that run's transcript, taken at `9f0c2fa2` before the round-3 tests
       existed, is committed at
-      `pyplan/gates/bug41-loopback-2026-09-05/mutations-round2-meta.txt`, where `416 passed` stands
+      `.notes/gates/bug41-loopback-2026-09-05/mutations-round2-meta.txt`, where `416 passed` stands
       at lines 25, 43, 54 and 66 (baseline, M5, M6, restore) — and the second printed
       `REALM_ADDRESS_UNKNOWN` instead of the §41
       sentence on a machine with no LAN address — the machine this mode exists for. The order is
       held by that test's call-counting `lan_ip` seam (`asked == []`) and by
       `test_spine.py::test_the_machine_this_mode_is_for_has_no_lan_address_at_all`, both added in
       round 3 and both shown red under those mutations in
-      `pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.
+      `.notes/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.
 - [x] The loopback mode asks the firewall for nothing. — Not a box the entry had on 2026-09-05;
       added in round 3, from a review finding. `plan()` built its firewall commands from the
       backend and the ports before it looked at `mode`, so a loopback plan carried
       `ufw allow 3724/tcp` and `ufw allow 8085/tcp` under its own warning that no other machine can
       reach this server. It happened on a real box: the loopback Apply on yulon-ubuntu on
       2026-09-06 left both rules in `ufw show added`
-      (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`, taken
+      (`.notes/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`, taken
       04:43:23, right after that Apply). `widget-loopback.log` has the shape of it: line 51
       `Firewall commands:` with the two `ufw allow` lines, line 57 the warning that no other
       machine can reach this server, line 58 blank, line 59 `Applied:` and line 60
@@ -3345,7 +3345,7 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       `ccfe7f97` out in the same throwaway clone and ran the three lane test files there with
       `if wants_firewall and backend == "firewalld"` cut back to `if backend == "firewalld"` (MR1)
       and with the same edit to the `"alf"` branch (MR3) — `419 passed` both times, at lines 160
-      and 169 of `pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`, against a baseline
+      and 169 of `.notes/gates/bug41-loopback-2026-09-05/mutations-round4.txt`, against a baseline
       of `419 passed` at line 151. One third of the branch was held: the same edit to the `none`
       branch (MR2) is red at line 132 of that transcript. Two were silent. The mutations are not
       harmless:
@@ -3401,7 +3401,7 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       the install line from `loopback_chosen_on_purpose()` — are kept as they stand, with the
       reading recorded in each one's docstring, because both are quoted verbatim in committed
       records of the presses that closed this entry and the second is asserted literally by
-      `pyplan/gates/bug41-loopback-2026-09-05/closing_step_driver_b41.py:121`; rewording them would
+      `.notes/gates/bug41-loopback-2026-09-05/closing_step_driver_b41.py:121`; rewording them would
       make this entry quote sentences the tree no longer prints, and no code reads either string to
       decide anything.
       Named here so it is not read as decided: the loopback-binding warning ("ports […] are
@@ -3413,7 +3413,7 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       yulon-ubuntu 2026-09-06**, against the finished AzerothCore WotLK install at
       `/home/pk/wowserver` (`install_id 243c46e3`, six recorded stages completed, `ac-*` containers
       up, 50 GB free), from a checkout of `lane/b41` at `b206ad0c` and, for the second half,
-      `96251d57`. Whole record: `pyplan/gates/bug41-loopback-2026-09-05/README.md` §"Round 2", with
+      `96251d57`. Whole record: `.notes/gates/bug41-loopback-2026-09-05/README.md` §"Round 2", with
       the files in `yulon-ubuntu-press/`.
       **The choice, through the app:** `QTest.mouseClick` on the real radio, `Show plan`, `Apply`, on
       the real `ControllerServices.for_entry()` wiring offscreen — 17/17 checks
@@ -3484,7 +3484,7 @@ not move under themselves: commit A (`cdd5eba2`) changed only `pylauncher/`, com
 txt. Two sentences were corrected as well: the `plan()` docstring pinned its loopback reading to
 `2586b913` while the transcript it cites says `commit: 92cacc44`, and the "only ACTIONS a
 `NetworkPlan` carries" list left out `client_realmlist` and the `.yulon-network.json` write this
-branch added. `pyplan/gates/bug41-loopback-2026-09-05/checks-green-round5.txt` is `--checks` at
+branch added. `.notes/gates/bug41-loopback-2026-09-05/checks-green-round5.txt` is `--checks` at
 commit A with `git rev-parse HEAD` and an empty `git status --porcelain` in the same capture:
 `2805 passed, 4 skipped in 20.34s`, three mypy successes, ruff and black clean,
 `=== --checks: ALL GREEN ===`.
@@ -3497,7 +3497,7 @@ correct at `cfb4c04f` — §39's measured-closed paragraph above (`networking.py
 (`native.py:335` printed a bare `"""`); they now read `3145`, `3156` and `406` at `b481be54`. The
 §39 pair had never been pinned to the three commits its own sentence names: at `9b0eb089`,
 `e72bc758` and `ee361035` the parameter is at 2310. The list was bounded by a scan committed with
-the gate — `pyplan/gates/bug41-loopback-2026-09-05/citation-scan-round6.sh` and its output
+the gate — `.notes/gates/bug41-loopback-2026-09-05/citation-scan-round6.sh` and its output
 `citation-scan-round6.txt`, 79 pairs — which prints every `networking.py:N` / `native.py:N` /
 `controller_view.py:N` citation in `pyplan/**/*.md` whose line CONTENT differs between `cfb4c04f`
 and the lane tip; each was then read against the sentence citing it, and outside §41 the only two
@@ -3511,7 +3511,7 @@ citations that were correct but carried no SHA — `controller_view.py:607`, `:1
 whose absence made the three above silent. The `wants_firewall` comment's enumeration of the
 plan's "output fields" was retired rather than corrected a third time: the dataclass has 18 fields
 and both earlier lists were short, so the comment (and its twin above) now says what `apply()`
-runs, shows and writes. `pyplan/gates/bug41-loopback-2026-09-05/checks-green-round6.txt` is
+runs, shows and writes. `.notes/gates/bug41-loopback-2026-09-05/checks-green-round6.txt` is
 `--checks` at round 6's commit A with `git rev-parse HEAD` and an empty `git status --porcelain` in
 the same capture: `2805 passed, 4 skipped in 20.41s`, three mypy successes, ruff and black clean,
 `=== --checks: ALL GREEN ===`.
@@ -3545,7 +3545,7 @@ ever produce. Corrected the same day to read the database and the transcript ins
 - [x] `install_wiring` configures file logging the way `main.py` does, or says in its own words why a
       CLI install deliberately does not. — `install_wiring.py` calls `configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)` after `parse_args`, with the argument for the level and for not adding a second reporter written beside it (`lane/headlesslog`, merged `9254b60a`).
 - [x] A test that fails if one entry point writes a log and the other does not. — `tests/test_install_wiring.py::test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind` runs every module the app can be started as and fails on the disagreement; `test_the_harness_puts_the_stage_lines_it_streamed_into_the_log` pins the stage lines.
-- [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `pyplan/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
+- [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `.notes/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
 
 ### 43. `keep_awake()` refuses the headless harness's own thread — 2026-09-05, **CLOSED 2026-09-05 at `0ad9d99a`**
 
@@ -3594,9 +3594,9 @@ sleeps; a laptop running a scripted Windows install is not held awake, and the l
       missing in silence. Four mutations, 4/4 killed on `yulon-fedora` from a `git clone --shared`
       at `0ad9d99a` — including the original rule restored — plus the seam-default mutation above,
       killed at `aa6ab59e` and shown surviving at `547b4c02`, the tip before the assert existed.
-      The reds are in `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutations-yulon-fedora.txt`
-      (M2/M3/M4), `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutation-m1-yulon-fedora.txt`
-      (M1) and `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutation-seam-default-suite-yulon-fedora.txt`
+      The reds are in `.notes/gates/bug43-keepawake-win11-2026-09-05/mutations-yulon-fedora.txt`
+      (M2/M3/M4), `.notes/gates/bug43-keepawake-win11-2026-09-05/mutation-m1-yulon-fedora.txt`
+      (M1) and `.notes/gates/bug43-keepawake-win11-2026-09-05/mutation-seam-default-suite-yulon-fedora.txt`
       (the seam default; the single-test run of it is `mutation-seam-default-yulon-fedora.txt`
       beside it). Read the first two with the README's caveat:
       `mutations-yulon-fedora.txt`'s own M1 block handed pytest two test ids as one
@@ -3614,15 +3614,15 @@ sleeps; a laptop running a scripted Windows install is not held awake, and the l
       then stopped at `Step 2 of 13: patch-sources` with exit 1 on `lane/doodad`'s deliberate
       refusal (the folder was built before the doodad patch), so it never reached `ready` and no
       `The server is up.` belongs to this gate; it did not compile.
-      `pyplan/gates/bug43-keepawake-win11-2026-09-05/README.md`.
+      `.notes/gates/bug43-keepawake-win11-2026-09-05/README.md`.
 
 ### 44. Four defects in the module manifest layer, found while gating 8.7a — 2026-09-08, OPEN; **a fifth added and `a`'s silence half fixed 2026-09-09**
 
 Found on `yulon-ubuntu` by pressing the Modules tab against the live AzerothCore install; the
-readings are in `pyplan/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/`. All four are about what a
+readings are in `.notes/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/`. All four are about what a
 manifest DECLARES versus what the install does, which is the same shape as the defect 8.7a's own
 text was opened for. **`e` was added on 2026-09-09** from the fifth clause's press on
-`yulon-ubuntu2` (`pyplan/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/`), and is the same shape one
+`yulon-ubuntu2` (`.notes/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/`), and is the same shape one
 layer along: a fact the manifest never stated, so the report told a user nothing was owed.
 
 - [ ] **a. A conf key declared with no value is never written.** *(the SILENCE half fixed
@@ -3713,7 +3713,7 @@ rebuild, per module.
 ### 45. The Modules tab can never ask for a value that has a default — 2026-09-08, OPEN
 
 Found by pressing the button rather than calling the applier, during the 8.7b live gate on
-`m910q` (`pyplan/gates/8.7b-tbc-m910q-2026-09-08/`, `04-install-tab-press.txt`).
+`m910q` (`.notes/gates/8.7b-tbc-m910q-2026-09-08/`, `04-install-tab-press.txt`).
 
 `ControllerView._module_values()` opens the prompt dialog only when *some* required prompt has no
 default:
@@ -3785,7 +3785,7 @@ So on TBC the compliant sequence for `all-stackables`, whose three statements al
 schema, is: press **Stop** on the Server tab, press **Install selected**, press **Start**.
 
 **That sequence does not exist.** Measured on `m910q` against the live `~/tbc-7.4c` install,
-2026-09-08 09:07Z (`pyplan/gates/8.7b-tbc-m910q-2026-09-08/14-sql-mod-world-stopped.txt`,
+2026-09-08 09:07Z (`.notes/gates/8.7b-tbc-m910q-2026-09-08/14-sql-mod-world-stopped.txt`,
 `14-sql-mod-with-the-world-stopped.png`):
 
 ```
@@ -3845,7 +3845,7 @@ good news in the entry.
   and `all-stackables` (200) are the same shape. **Not a Vanilla defect** — the same three
   manifests exist on `wow-tbc` and equivalents on `wow-wotlk`, so it lands on every game with
   manifests. Found by 8.7c's gate, whose driver replaced `_prompt_asker` and watched it never
-  be called (`pyplan/gates/8.7c-vanilla-m910q-2026-09-08/README.md`, finding 1). The clause was
+  be called (`.notes/gates/8.7c-vanilla-m910q-2026-09-08/README.md`, finding 1). The clause was
   still met with the manifest's own default, because that value differs from the line the
   server was running. The fix is a decision, not a patch: either a manifest says which of its
   prompts must be asked even when it has a default, or the tab always asks when a manifest has
@@ -3861,10 +3861,10 @@ good news in the entry.
   reference "yulon.local/cmangos-vanilla-server:native-e9e233c0": dial tcp: lookup yulon.local:
   no such host` — and hangs whatever is waiting for the server. Nothing here is wrong; what is
   missing is that the sentence a user reads ("Kept … — reinstall to the same folder to find
-  those characters again") says nothing about the price. This is `pyplan/8.9b-gate-plan.md`
+  those characters again") says nothing about the price. This is `.notes/8.9b-gate-plan.md`
   open question 2 with a measured shape, and the answer is the owner's: either the ticked path
   keeps `./data` and `src/` too and the dialog says so, or the dialog names the recompile.
-  `pyplan/gates/8.9b-vanilla-m910q-2026-09-08/README.md`, finding 1.
+  `.notes/gates/8.9b-vanilla-m910q-2026-09-08/README.md`, finding 1.
 - [x] **LOW — Every purge plan logged a warning that the install came from a newer Yu'lon.**
   `purge._default_reason()` and `apply.server_dir_claim()` both call
   `native.read_claim(server_dir, valid=())` and both say in their own docstrings that the stage
@@ -3881,14 +3881,14 @@ good news in the entry.
   `test_uninstall_second_family.py::test_planning_a_purge_does_not_warn_that_this_installs_stages_are_unknown`,
   which also requires the warning to still fire for a caller that did supply a list.
 - [ ] **LOW — The Server tab's caption keeps saying "stopped" above a status line that says
-  everything is up.** `pyplan/gates/8.7b-tbc-m910q-2026-09-08/7-server-tab-started.png`: the
+  everything is up.** `.notes/gates/8.7b-tbc-m910q-2026-09-08/7-server-tab-started.png`: the
   caption reads "stopped" while the line under it reads "status: db up, auth up, world up". The
   entry above (`:552`) covers only the first-poll "unknown"; this is the caption not following a
   later poll after a Start pressed from the Modules tab's advice. Found by the retrospective
   audit's read of every frame in the range, 2026-09-08; not pressed again, so the trigger is not
   narrowed beyond "Start after Stop, watched from the Server tab".
 - [ ] **LOW — A purge refusal that names three running containers sits beside "status: unknown".**
-  `pyplan/gates/8.9b-vanilla-m910q-2026-09-08/3-refused-server-running.png` and every other frame
+  `.notes/gates/8.9b-vanilla-m910q-2026-09-08/3-refused-server-running.png` and every other frame
   of that gate: the refusal says `vanilla-mangosd, vanilla-realmd, vanilla-db: still running` and
   the status label two lines up still says unknown. Same family as `:552` (the label is only
   written by the poll handler), seen here on a tab that was opened and pressed within its first
@@ -3914,7 +3914,7 @@ good news in the entry.
   same marker) and by `test_spine.py`'s rewritten A3/A5 test, which still requires the WORLD marker
   to be a literal. The seam that hid it took the `ReadySpec` and threw it away; `Recorder` keeps
   every spec now. Re-pressed on the fix: `REBUILD RETURNED CLEANLY in 63.4s`. Evidence:
-  `pyplan/gates/rebuild-live-yulon-ubuntu2-2026-09-09/`.
+  `.notes/gates/rebuild-live-yulon-ubuntu2-2026-09-09/`.
 
 ---
 

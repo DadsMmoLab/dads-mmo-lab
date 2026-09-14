@@ -1,6 +1,0 @@
-=== ufw after the loopback Apply, 2026-09-06T04:43:23+02:00
-Status: inactive
---- show added
-Added user rules (see 'ufw status' for running firewall):
-ufw allow 3724/tcp
-ufw allow 8085/tcp

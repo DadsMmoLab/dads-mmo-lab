@@ -37,140 +37,6 @@ def test_the_style_guide_rows_describe_the_post_7_2_modules() -> None:
     assert "contract as `Installer`" not in native
 
 
-def _plans_whose_phase_the_checklist_ticks(pyplan: Path = PYPLAN) -> list[Path]:
-    """The `phase7-plans/` pages whose phase line in `checklist.md` is `- [x]`.
-
-    The phase number is the plan filename's own prefix (`7.2-retire-bash.md` ->
-    `7.2`), matched against the ticked top-level lines of the checklist. Reading
-    the checklist rather than keeping a list here is deliberate: a list would be
-    a second place to remember, and this guard exists because a second place to
-    remember is what let the dead citations accumulate.
-
-    `pyplan` is a parameter so the rule itself can be driven against a fixture
-    that ticks a box — see the test below. Without that, "the guard widens when a
-    phase closes" is a sentence in a docstring and nothing more, because on this
-    branch 7.1, 7.2 and 7.3 are all unticked and the widened set is empty.
-    """
-    checklist = (pyplan / "checklist.md").read_text(encoding="utf-8")
-    ticked = set(re.findall(r"^- \[x\] (\d+\.\d+[a-z]?) ", checklist, re.M))
-    plans = sorted((pyplan / "phase7-plans").glob("*.md"))
-    return [p for p in plans if p.name.split("-")[0] in ticked]
-
-
-def test_the_citation_guard_widens_to_a_plan_the_moment_its_phase_is_ticked(tmp_path: Path) -> None:
-    """The scoping RULE, driven, because against the real tree it selected nothing.
-
-    Measured 2026-09-02 at `f6ed1b9a`: every phase-7 box was `- [ ]`, so
-    `_plans_whose_phase_the_checklist_ticks()` answered `[]` and the guard above
-    was scoped exactly as it had been. That is correct and it is also
-    unobservable — a rule that answers empty says nothing about what it would
-    answer otherwise, which is the standing "assert the value ARRIVES" rule. So
-    the same function is run here over a fixture with one box ticked and one not.
-    """
-    (tmp_path / "phase7-plans").mkdir()
-    for name in ("7.2-retire-bash.md", "7.3-cmangos-family.md"):
-        (tmp_path / "phase7-plans" / name).write_text("x\n", encoding="utf-8")
-    (tmp_path / "checklist.md").write_text(
-        "- [x] 7.2 Delete the bash lineage — done\n- [ ] 7.3 CMaNGOS data model — open\n",
-        encoding="utf-8",
-    )
-    assert [p.name for p in _plans_whose_phase_the_checklist_ticks(tmp_path)] == [
-        "7.2-retire-bash.md"
-    ]
-
-
-PHASE_8_GATES = "8."
-"""Which gate folders the widening below takes in, and why it is not all of them.
-
-Phase 8's, and deliberately only Phase 8's. Run against every ticked phase's gate
-folders the widening also selects `gates/7.1-tick-2026-09-06/README.md`, which is
-**itself the audit of this guard** — a table whose left column lists names in
-order to say that they do not resolve and why (`test_native`, "`git mv`'d to
-`tests/test_families_azerothcore.py`"; `test_declining_does_not_promise`, "never
-a citation — a truncated `grep` argument"; `test_the_fixed_password_`, "the same
-shape"). Every one of those rows is correct, and `GONE` has no spelling for any
-of them: it knows "deleted" and "never written", not "renamed", "never a
-citation", or a row that explains itself by pointing at the row above.
-
-So the phase-7 gate folders stay out, named here rather than quietly dropped, and
-what it would take to bring them in is a decision about `GONE` and not about this
-function. That is the same disposition `test_every_test_these_pages_name_by_hand_actually_exists`
-already records for `checklist.md`, `bug-checklist.md` and `phase7-decisions.md`:
-left out until someone decides which rule they are under, not because they are clean.
-"""
-
-
-def _gate_folders_whose_phase_the_checklist_ticks(pyplan: Path = PYPLAN) -> list[Path]:
-    """The `pyplan/gates/` pages whose phase line in `checklist.md` is `- [x]`.
-
-    Phase 7 wrote its intent in `phase7-plans/` and its evidence in `gates/`.
-    Phase 8 has no plans directory at all: **every one of its ticked entries
-    cites a gate folder** and nothing else, so the guard above — hard-wired to
-    `phase7-plans/` since 2026-09-02 — selected exactly nothing for twenty-six
-    ticked `8.x` boxes. Measured at `c0513d6d` on 2026-09-08:
-    `_plans_whose_phase_the_checklist_ticks()` returns `[]`, because no phase-7
-    box is ticked either, so the entire citation guard was running on
-    `contribution.md` and `style-guide.md` alone while a phase closed around it.
-
-    Scoped by the FOLDER NAME's own phase prefix (`8.1a-wotlk-yulon-ubuntu-…` ->
-    `8.1a`), which is the same rule the plans use, rather than by reading the
-    paths the checklist spells. Reading the paths was tried first and is wrong
-    here: several entries cite a TEMPLATE
-    (`pyplan/gates/8.1d-tortoise-m910q-<date>/`) beside the real folder, and a
-    citation that resolves to no directory would either be silently dropped —
-    which is the scoping bug this function exists to fix — or reported as an
-    error against a page that is correct. The prefix rule also picks up 8.3a's
-    TWO folders, `-yulon-ubuntu-` and `-yulon-win11-gate-`, which one path match
-    would have had to know to look for.
-
-    `pyplan` is a parameter for the same reason it is one above: so the rule can
-    be driven against a fixture rather than asserted about.
-    """
-    checklist = (pyplan / "checklist.md").read_text(encoding="utf-8")
-    ticked = set(re.findall(r"^- \[x\] (\d+\.\d+[a-z]?) ", checklist, re.M))
-    gates = pyplan / "gates"
-    if not gates.is_dir():
-        return []
-    pages: list[Path] = []
-    for folder in sorted(p for p in gates.iterdir() if p.is_dir()):
-        phase = folder.name.split("-")[0]
-        if phase in ticked and phase.startswith(PHASE_8_GATES):
-            pages += sorted(folder.rglob("*.md"))
-    return pages
-
-
-def test_the_citation_guard_widens_to_a_gate_folder_the_moment_its_phase_is_ticked(
-    tmp_path: Path,
-) -> None:
-    """The Phase 8 half of the scoping rule, driven — and against the real tree too.
-
-    Two assertions, because each answers a question the other cannot. The fixture
-    proves the RULE selects on the tick and not on the folder existing; the real
-    tree proves the rule ARRIVES at something, which is the standing lesson from
-    `guards-that-prove-declarations` — a scoping function that answers empty says
-    nothing about what it would answer otherwise, and the phase-7 version of this
-    has answered empty since the day it was written.
-    """
-    (tmp_path / "gates" / "8.1a-wotlk-yulon-ubuntu-2026-09-06").mkdir(parents=True)
-    (tmp_path / "gates" / "8.1a-wotlk-yulon-ubuntu-2026-09-06" / "README.md").write_text(
-        "x\n", encoding="utf-8"
-    )
-    (tmp_path / "gates" / "8.6-wotlk-yulon-ubuntu-2026-09-08").mkdir(parents=True)
-    (tmp_path / "gates" / "8.6-wotlk-yulon-ubuntu-2026-09-08" / "README.md").write_text(
-        "x\n", encoding="utf-8"
-    )
-    (tmp_path / "checklist.md").write_text(
-        "- [x] 8.1a Observability — done\n- [ ] 8.6 My Party — open\n", encoding="utf-8"
-    )
-    assert [p.parent.name for p in _gate_folders_whose_phase_the_checklist_ticks(tmp_path)] == [
-        "8.1a-wotlk-yulon-ubuntu-2026-09-06"
-    ]
-
-    real = _gate_folders_whose_phase_the_checklist_ticks()
-    assert real, "no ticked phase names a gate folder; the Phase 8 widening is vacuous"
-    assert any(p.parent.name.startswith("8.") for p in real), sorted(p.name for p in real)
-
-
 GONE = re.compile(r"\bdeletes?\b|\bdeleted\b|never written", re.I)
 """How a page says that a name it spells is not supposed to resolve."""
 
@@ -246,11 +112,9 @@ def test_every_test_these_pages_name_by_hand_actually_exists() -> None:
     is untested, and a reader who follows a renamed one lands somewhere else
     entirely.
 
-    Scoped to the pages 7.2 owns, PLUS every phase plan whose checklist box is
-    ticked — read off `checklist.md` here rather than listed, so nobody has to
-    remember to add one. A plan cites tests it intends a future task to WRITE, so
-    a dead citation there is a forward reference while the phase is open and a
-    claim about the tree once it closes. The tick is what flips it.
+    Scoped to the pages 7.2 owns. The same guard over ticked phase plans and gate
+    write-ups moved with those pages into the maintainers' local notes on
+    2026-09-14, and runs there.
 
     Measured 2026-09-02 at `f6ed1b9a`, when 7.1, 7.2 and 7.3 were all still
     unticked and so all still out of scope: `7.1-spine-azerothcore-linux.md` had
@@ -267,15 +131,6 @@ def test_every_test_these_pages_name_by_hand_actually_exists() -> None:
     are under, not because they are clean.
     """
     pages = [PYPLAN / "contribution.md", PYPLAN / "style-guide.md"]
-    pages += _plans_whose_phase_the_checklist_ticks()
-    # Phase 8's ticked entries cite gate folders, not plans, so the line above
-    # selected nothing for twenty-six closed boxes (audit, 2026-09-08). A gate
-    # README is under exactly the rule this guard is about: it is written AFTER
-    # the press, about a tree that exists, so every test it names is a claim and
-    # never a forward reference. Cost of the widening, measured before it landed:
-    # 23 names cited across 8 folders, 22 of which resolved, and one that never
-    # could -- `tests/test_srp6.py`, which has never existed under that name.
-    pages += _gate_folders_whose_phase_the_checklist_ticks()
     named: dict[str, set[str]] = {}
     for path in pages:
         found = _cited_as_live(path.read_text(encoding="utf-8"))

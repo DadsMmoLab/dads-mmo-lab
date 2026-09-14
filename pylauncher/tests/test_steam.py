@@ -1,9 +1,9 @@
 """Tests for `yulon.steam` (roadmap 8.8, the two Steam library entries).
 
 The captured entries these round-trip against are not hand-typed: they are the
-two `shortcuts.vdf` entries `dmlpack` packed off a real Steam Deck, committed to
-this repository at `pyplan/gates/8.8-steam-read-yulon-arch-2026-09-10/`. A codec
-tested against a hand-written fixture tests the fixture.
+two `shortcuts.vdf` entries `dmlpack` packed off a real Steam Deck on 2026-09-10,
+committed at `tests/data/steam-deck-shortcut-entries.json`. A codec tested against
+a hand-written fixture tests the fixture.
 """
 
 from __future__ import annotations
@@ -19,14 +19,7 @@ import pytest
 
 from yulon import steam
 
-REPO = Path(__file__).resolve().parents[2]
-CAPTURE = (
-    REPO
-    / "pyplan"
-    / "gates"
-    / "8.8-steam-read-yulon-arch-2026-09-10"
-    / "live-shortcut-entries.json"
-)
+CAPTURE = Path(__file__).resolve().parent / "data" / "steam-deck-shortcut-entries.json"
 
 FIXED = datetime(2026, 9, 10, 20, 5, 0)
 

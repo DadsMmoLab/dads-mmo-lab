@@ -466,7 +466,7 @@ def new_entry(
     """One `shortcuts.vdf` entry, with the eighteen fields a live one has.
 
     The field set and their order are copied from the two entries captured off a
-    real Steam Deck (`pyplan/gates/8.8-steam-read-yulon-arch-2026-09-10/`), not
+    real Steam Deck (`.notes/gates/8.8-steam-read-yulon-arch-2026-09-10/`), not
     from a wiki page: the codec writes a dict in insertion order, so the order
     here is the order in the file.
     """
@@ -663,7 +663,7 @@ Measured on `yulon-arch`, 2026-09-10: with a `_logo.png` present Steam draws it
 INSTEAD of the entry's name on the game page, so an entry whose logo is a mark
 with no wordmark in it loses its title altogether — and these two entries differ
 by exactly one word (`… Server`). The frame is
-`pyplan/gates/8.8-steam-shortcuts-yulon-arch-2026-09-10/1-logo-slot-hid-the-name.png`:
+`.notes/gates/8.8-steam-shortcuts-yulon-arch-2026-09-10/1-logo-slot-hid-the-name.png`:
 a page with a Play button,
 a jade Y and nothing to say which of the two it is. Leaving the slot empty makes
 Steam fall back to the name, which is the whole point of writing them.

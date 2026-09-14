@@ -1,7 +1,0 @@
-﻿[15:10:11Z] ### 8.5a WINDOWS gate driver, stage refuse, 2026-09-08T15:10:11.478139+00:00 ###
-[15:10:11Z] ### box: yulon-win11, Windows-10-10.0.26200-SP0, tree: C:\gate\src84a ###
-[15:10:11Z] ANNOUNCE: 8.5a Windows: an unreadable marker, and one that matches nothing
-[15:10:11Z] a marker that could not be read: total=None problem="this install's bot marker could not be read, and an empty marker would match every account on the server"
-[15:10:12Z] a marker matching nothing: total=1000 by_registry=1000 by_prefix=0 warning=''
-[15:10:12Z] what the registry alone identifies, asked of the server: 1000
-[15:10:12Z] clause 3 PASSED: an unreadable marker refuses; a marker matching nothing on a tree with a second signal is answered by that signal, and says so in the split

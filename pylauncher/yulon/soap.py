@@ -10,7 +10,7 @@ Not derived: ported from prior art that runs. The Rust launcher's client
 (`rust-main:crates/dml-wow/src/soap.rs`, itself a port of `cli/src/20-soap.sh`)
 posts exactly this shape to `http://127.0.0.1:7878/`, and the worldserver's own
 symbol is `int ns1__executeCommand(soap*, char* command, char** result)`
-(`pyplan/phase8-reads/cmangos.md:122` names the same symbol on the CMaNGOS
+(`.notes/phase8-reads/cmangos.md:122` names the same symbol on the CMaNGOS
 family). The namespace is `urn:AC`.
 
 **Fault before result.** The prior art checks `<faultstring>` first and
@@ -89,7 +89,7 @@ The command runs on the world thread and this call blocks until it finishes
 (`ACSoap.cpp:120-130`), so a busy world can be slow — but the failure this
 protects against is not slowness. A listener bound to the container's own
 loopback leaves Docker accepting the connection and relaying nothing
-(`pyplan/gates/8-spikes/published-port-vs-container-loopback/`), so a client
+(`.notes/gates/8-spikes/published-port-vs-container-loopback/`), so a client
 without a timeout waits forever against a server that is running perfectly.
 """
 

@@ -1,5 +1,0 @@
-﻿[15:22:56Z] ### 8.4a WINDOWS gate driver, stage pick, 2026-09-08T15:22:56.420980+00:00 ###
-[15:22:56Z] ### box: yulon-win11, Windows-10-10.0.26200-SP0, tree: C:\gate\src84a ###
-[15:22:57Z] offline: Aiza wearing 12 pieces
-[15:22:57Z] online : (none yet -- the client half names it)
-[15:22:58Z] the offline character's account is RNDBOT54 (id 55)

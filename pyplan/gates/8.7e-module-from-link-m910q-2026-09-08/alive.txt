@@ -1,6 +1,0 @@
-2026-09-08T22:56:27+0200 pid=2434674 alive 2-modules-tab-buttons-dead.png 1100x760 shipped for_entry wiring; no custom-module route
-2026-09-08T22:56:28+0200 pid=2434674 alive 4-link-dialog.png 212x92 the real QInputDialog.getText, photographed mid-modal
-2026-09-08T22:56:28+0200 pid=2434674 alive 5-buttons-live-when-wired.png 1100x760 the same two buttons with a route wired
-2026-09-08T22:56:28+0200 pid=2434674 alive 6-link-report-and-custom-row.png 1100x760 FAKE route: nothing was cloned
-2026-09-08T22:56:28+0200 pid=2434674 alive 7-folder-report-and-custom-row.png 1100x760 FAKE route: nothing was copied
-2026-09-08T22:56:28+0200 pid=2434674 alive 8-refused-not-mod.png 1100x760 FAKE route: the refusal sentence, nothing queued

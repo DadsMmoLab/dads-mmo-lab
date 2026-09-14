@@ -3203,7 +3203,7 @@ def _buildkit_failure(said: list[str]) -> tuple[list[str], str]:
     """A failed `docker build` split into (the step's own output, its `ERROR:` line).
 
     A failed build ends in a fixed shape (captured on m910q, Docker 29.7.2,
-    `pyplan/gates/t38-build-failure-reports-the-command-2026-09-12/`)::
+    `.notes/gates/t38-build-failure-reports-the-command-2026-09-12/`)::
 
         ------
          > [3/3] RUN sh -c "…":

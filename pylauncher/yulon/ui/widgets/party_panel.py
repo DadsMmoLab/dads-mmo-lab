@@ -1,7 +1,7 @@
 """My Party's own surface (8.6): the seam the gate script drove, with buttons on it.
 
 `PartyPanel` is the whole of My Party in the app. It does what
-`pyplan/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/gate86b.py` did on the live
+`.notes/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/gate86b.py` did on the live
 server -- read the state, add a bot of a chosen class, see it in the party,
 dismiss it -- through the same `MyPartySeam` object, because that gate's own
 "What was NOT proved here" is *"The Qt widget for My Party does not exist"* and
@@ -306,7 +306,7 @@ class PartyPanel(QWidget):
 
     `party_changed` is emitted after every press that REACHED the seam, so
     whatever else is showing the bots can re-read them (the users-surface
-    design's own cross-link, `pyplan/phase8-designs/b-users-surface.md:111`).
+    design's own cross-link, `.notes/phase8-designs/b-users-surface.md:111`).
     Including the presses that came back refused, because a refusal is the
     seam's answer and not the panel's guess -- a `blocker` means nothing was
     sent, but a `joined=False` means the command WAS sent and the bot may still

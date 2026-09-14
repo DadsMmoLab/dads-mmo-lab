@@ -877,7 +877,7 @@ def test_the_reset_writes_sha_pass_hash_on_a_mangos_sha_tree() -> None:
 
         ERROR 1054 (42S22) at line 1: Unknown column 'salt' in 'SET'
 
-    (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`; the only
+    (`.notes/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`; the only
     way to a working channel that night was to delete the app's account.)
 
     The statement is asserted whole rather than by keyword, because what was

@@ -1023,7 +1023,7 @@ def test_the_harness_writes_the_display_text_so_a_gate_transcript_keeps_its_shap
 ) -> None:
     """T35's markers come off HERE, at the one site that writes the transcripts.
 
-    `pyplan/gates/` captures are this stream and the rotating log file beside
+    `.notes/gates/` captures are this stream and the rotating log file beside
     it, and the gate scripts, the log captures and the interrupted-import
     watchers all grep them. A `\\x1e` in front of every relayed line would be
     greppable by nothing that greps them today — and a control character in a

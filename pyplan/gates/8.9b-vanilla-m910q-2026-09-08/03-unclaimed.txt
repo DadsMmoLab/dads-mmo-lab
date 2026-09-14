@@ -1,7 +1,0 @@
-[10:02:17Z] alive at unclaimed: ['vanilla-mangosd Up 3 minutes', 'vanilla-realmd Up 3 minutes', 'vanilla-db Up 3 minutes (healthy)']
-[10:02:17Z] ground: /home/pk/gate89b/scratch looks like a server and has no .yulon-install.json
-2026-09-08 12:02:17 WARNING [yulon.ui.controller_view] wow-vanilla: cannot read .db_password in /home/pk/gate89b/scratch, so the database password is unknown - accounts, backup and restore will fail until that file is restored
-2026-09-08 12:02:17 INFO [yulon.channel_setup] no usable credential at /home/pk/.local/share/yulon/credentials/wow-vanilla-4dbab351.json: FileNotFoundError
-[10:02:17Z] the tab says: Nothing here says Yu'lon installed it: there is no install record in /home/pk/gate89b/scratch, so this folder is not Yu'lon's to delete. Nothing was removed.
-[10:02:17Z] alive at 2-refused-no-record.png: ['vanilla-mangosd Up 3 minutes', 'vanilla-realmd Up 3 minutes', 'vanilla-db Up 3 minutes (healthy)']
-[10:02:17Z] UNCLAIMED PASSED: refused, and the folder is still there
