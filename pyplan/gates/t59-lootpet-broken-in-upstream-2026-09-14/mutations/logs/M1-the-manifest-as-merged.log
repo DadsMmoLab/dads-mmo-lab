@@ -1,0 +1,23 @@
+yt: Python 3.13.15 in /home/perzi/wt-t59/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t59/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollected 142 items / 1 error / 141 deselected / 1 selected                    [0m
+
+==================================== ERRORS ====================================
+[31m[1m___________________ ERROR collecting tests/test_manifest.py ____________________[0m
+[1m[31mtests/test_manifest.py[0m:410: in <module>
+    [0m[94mfor[39;49;00m conf [95min[39;49;00m manifest.parse_manifest(json.loads(path.read_text(encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m))).conf[90m[39;49;00m
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31myulon/manifest.py[0m:447: in parse_manifest
+    [0m[94mreturn[39;49;00m Manifest.model_validate(data)[90m[39;49;00m
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31mE   pydantic_core._pydantic_core.ValidationError: 1 validation error for Manifest[0m
+[1m[31mE   deploy.0[0m
+[1m[31mE     Value error, deploy src 'LootPet2.lua' is a single file, and `rename` only applies to a directory src (one ending in '/'). Name the file correctly at the source instead. [type=value_error, input_value={'src': 'LootPet2.lua', '...2.lua', 'LootPet.lua']]}, input_type=dict][0m
+[1m[31mE       For further information visit https://errors.pydantic.dev/2.13/v/value_error[0m
+[36m[1m=========================== short test summary info ============================[0m
+[31mERROR[0m tests/test_manifest.py - pydantic_core._pydantic_core.ValidationError: 1 validation error for Manifest
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+[31m======================= [33m141 deselected[0m, [31m[1m1 error[0m[31m in 0.28s[0m[31m =======================[0m

@@ -230,6 +230,30 @@ class Deploy(_Strict):
         default=(), description="(from, to) basename renames applied after the copy."
     )
 
+    @model_validator(mode="after")
+    def _rename_needs_a_directory(self) -> Deploy:
+        """`rename` is meaningless on a single-file deploy, and corrupted it.
+
+        For a file src, `_deploy_target()` already returns the full destination
+        FILENAME, so the applier's `(target / old).replace(target / new)` builds
+        a path inside the copied file -- `.../LootPet2.lua/LootPet.lua` -- and
+        the install dies with `NotADirectoryError` AFTER the copy, leaving the
+        file in place under its old name.
+
+        The `lootpet` manifest was merged to `Yulon` in exactly that shape
+        (#160) and every Loot Pet install from that tree failed; measured on
+        936beda5, 2026-09-14. Refused here so a wrong manifest does not
+        load at all, rather than failing part way through an install that has
+        already written into the server folder.
+        """
+        if self.rename and not self.src.endswith("/"):
+            raise ValueError(
+                f"deploy src {self.src!r} is a single file, and `rename` only applies to a "
+                f"directory src (one ending in '/'). Name the file correctly at the source "
+                f"instead."
+            )
+        return self
+
 
 class Patch(_Strict):
     """A find/replace applied to a file after deploy/clone (the script's `sed -i`s).
