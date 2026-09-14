@@ -62,8 +62,8 @@ at the family, and a chip on the wrong family's row is a lie where a missing chi
 **Consumers that match a report to a row** (`grep -rn "\.item_id" yulon`):
 
 - `controller_view.py::_module_done` — the record `forget()` now matches `(type, id)`.
-- `controller_view.py::_note_session_facts` — refuses a report whose `(family, id)` is not the
-  press on record, and keys the facts by the REPORT's family.
+- `controller_view.py::_note_session_facts` — keys the facts by the REPORT's `(family, id)`. A
+  report that does not match the press on record is logged and still filed (review round 1).
 - `controller_view.py::_format_report` — displays the id; no match, unchanged.
 - `modules_panel.py::VersionCache.forget` — kept by bare id on purpose: an update check's key
   still carries no family, and forgetting a same-id twin costs one re-read.
@@ -71,3 +71,13 @@ at the family, and a chip on the wrong family's row is a lie where a missing chi
 **Tests.** A view test with two `twin` manifests (`module` and `mod`) whose third press delivers
 a `mod` report while the `module` twin is on record; an applier test driven with an `ale`; the
 Tortoise guard test asserts `family == "mod"` through `_with_note`.
+
+## Review round 1 — one MEDIUM, taken
+
+Codex adversarial. *"Mismatched press state silently drops required rebuild and SQL obligations."*
+The first version kept the old refusal: a report whose `(family, id)` did not match `_acting_on`
+was logged and discarded. Once the report names its own row that refusal protects nothing and
+loses a rebuild or SQL import the user still owes. Now the facts are filed under the report's own
+key whatever is on record, and the mismatch is logged. `forget()` stays gated on the press on
+record, because it deletes a file. Mutations N4 (key by `acted_on.type`) and N6 (the early return
+put back) are both killed.

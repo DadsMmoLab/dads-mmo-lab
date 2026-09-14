@@ -1,2 +1,10 @@
-N2 first run used -k "family or guard or report or auto", which skipped the Tortoise test, and N2 survived. Re-run against all of tests/test_tortoise_modules.py: killed. The log kept is the re-run.
-N4 (key built from acted_on.type instead of result.family) is an equivalent mutant once N3's match is in place, and was not run.
+N1, N2, N3, N5 were run at b0b7f3d1; N4 and N6 at e27fd2f6, after review round 1 changed the design.
+
+N2 first run used -k "family or guard or report or auto", which skipped the Tortoise test, and N2
+survived. Re-run against all of tests/test_tortoise_modules.py: killed. The log kept is the re-run.
+
+Review round 1 made a mismatched report LOG and still be filed under its own family, so:
+- N3 (match on the id alone) is now equivalent in behaviour -- the comparison only chooses whether
+  a warning is logged. Its record stands for the design it was run against.
+- N4 (key by acted_on.type) is the live mutant for the keying, and is killed.
+- N6 (put the early return back) is the live mutant for "never drop the facts", and is killed.
