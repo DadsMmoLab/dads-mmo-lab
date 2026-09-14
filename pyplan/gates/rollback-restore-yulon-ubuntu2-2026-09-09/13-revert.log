@@ -1,9 +1,0 @@
-=== REVERT the sabotage from the owner's checkout ===
-  ground: main_cpp_carries_the_marker = True
-  ground: running_world_prints_the_marker = False
-  ground: git_status = 'M src/server/apps/worldserver/Main.cpp'
-
-  after: main_cpp_carries_the_marker = False
-  after: running_world_prints_the_marker = False
-  after: git_status = ''
-world: running id=cd68db8cd6b7 pid=278886 restarts=0 started=2026-09-09T02:17:45.442756934Z image=cad2566406d2 exit=0

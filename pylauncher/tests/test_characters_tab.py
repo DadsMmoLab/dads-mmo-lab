@@ -649,7 +649,7 @@ def test_the_at_login_rename_is_withheld_offline_where_it_would_destroy_the_name
     # In two lengths, like the Ambiguous refusal twenty lines below it in the
     # view, and for the same reason: 8.4c put a 180-character sentence on one of
     # these labels and it ran off the end of the window
-    # (`pyplan/gates/8.4c-vanilla-m910q-2026-09-07/4-two-of-one-name.png`). This
+    # (`.notes/gates/8.4c-vanilla-m910q-2026-09-07/4-two-of-one-name.png`). This
     # refusal is ~200 characters. The bound is the one that box's own test
     # already uses, so a label that overflows fails here rather than in a
     # screenshot somebody takes later.

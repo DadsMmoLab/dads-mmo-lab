@@ -71,9 +71,9 @@ Announced on `yulon-fedora` first. That reading is what clause 5 rests on.
 Three boxes are unticked at `pyplan/checklist.md:2500` (8.6), `:2501` (8.7a) and `:2505` (8.8).
 
 * **8.6** and **8.7a** now have a press for every clause they were missing, on the local branch.
-  8.6's four questions are answered in `pyplan/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/part-1-rebuild.md`
+  8.6's four questions are answered in `.notes/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/part-1-rebuild.md`
   and `part-2-party.md`; 8.7a's fifth clause in
-  `pyplan/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/README.md`. Ticking them is the owner's
+  `.notes/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/README.md`. Ticking them is the owner's
   session's job and this review does not do it. Whoever does must know that **the evidence is not
   on `origin/yulon-phase8b`** — a tick citing those folders on the pushed branch cites nothing.
 * **8.8** has no evidence and no box that can produce it. Its own line already says why: the gate is
@@ -91,9 +91,9 @@ Three boxes are unticked at `pyplan/checklist.md:2500` (8.6), `:2501` (8.7a) and
 ### 2. "no definition of done satisfied by a skip, an absent capture, a stale marker or an exit code" — **MET WITH A NAMED GAP** (three gaps)
 
 The audit rule this clause exists for held up well tonight: every lane read its ground first, and two
-of them refused a step whose result was its start state. `pyplan/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/README.md`
+of them refused a step whose result was its start state. `.notes/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/README.md`
 lists "WHICH ASSERTIONS ARE ALREADY TRUE HERE (so that pressing them would prove nothing)" and then
-made the value **wrong** before pressing it. `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/README.md`
+made the value **wrong** before pressing it. `.notes/gates/7.10-rerun-ubuntu2-2026-09-08/README.md`
 reports `network_apply('lan')`'s realmlist half as *"what the app said it did and not as evidence
 that the row was written"*, because the row already held the value. Both are the rule applied, not
 recited.
@@ -102,7 +102,7 @@ The three gaps:
 
 **(a) One of the two SQL routes owner answer 7 is about is guarded by a sentence, not a press.**
 8.7a's clause *"a module whose SQL targets the world database is refused while the server runs"*
-passed on 2026-09-08 (`pyplan/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/11-cycle2-up.log:41-56`,
+passed on 2026-09-08 (`.notes/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/11-cycle2-up.log:41-56`,
 `3-refused-world-up.png`) — and the refusal it caught reads *"Running the importer over the modules
 installed here… ac-worldserver, ac-authserver are running"*. That is the `applied_by: "db-import"`
 route. The other route is `applied_by: "direct"`, which reaches `Applier._run_sql`
@@ -120,7 +120,7 @@ the ticked clause is a rebuilt server drawing those characters on a real login s
 proved is the volume, its password and the rows"*; `:2507` repeats it). Honestly recorded on the
 boxes and **not carried by the exit line**, which is what makes it a gap here rather than there.
 
-**(c) The rollback's RESTORE arm has never been pressed.** `pyplan/gates/rebuild-live-yulon-ubuntu2-2026-09-09/README.md`
+**(c) The rollback's RESTORE arm has never been pressed.** `.notes/gates/rebuild-live-yulon-ubuntu2-2026-09-09/README.md`
 says so plainly: *"The rollback's **restore** path was not pressed: nothing this lane did produced a
 build that failed to come up."* `_keep_rollback` and `_let_go` were pressed live, three times, and
 read by a second process from outside (`press2-rollback-watch.log`, absent → 4 during the compile →
@@ -130,7 +130,7 @@ that feature nothing has demonstrated.
 
 ### 3. "no capability reachable only from a command line or a script" — **NOT MET**
 
-**My Party has no widget.** `pyplan/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/part-2-party.md` names
+**My Party has no widget.** `.notes/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/part-2-party.md` names
 it under *"What was NOT proved here"*: *"**The Qt widget for My Party does not exist.** What was
 built is the seam: `party.InstallParty`, the `MyPartySeam` protocol, and `ControllerServices.my_party`
 wired in `_for_wotlk` … Drawing the tab is not in this lane and is not claimed."*
@@ -147,7 +147,7 @@ the one box whose whole subject is a new capability.
 The lesser sibling, named so it is not confused with the blocker: the **Rebuild** button exists and
 is wired (`controller_view.py:1587` `REBUILD_BUTTON_LABEL`, `:4220-4221` `clicked.connect(self.rebuild_server)`),
 and 8.7a's UI half clicked a real button for the module-SQL route
-(`pyplan/gates/8.7a-ui-yulon-ubuntu-2026-09-08/README.md`) — but the three live rebuilds were driven
+(`.notes/gates/8.7a-ui-yulon-ubuntu-2026-09-08/README.md`) — but the three live rebuilds were driven
 at the seam by `rebuild_gate.py`, not by the button. The capability is reachable from the surface;
 this run did not press it there.
 
@@ -156,7 +156,7 @@ this run did not press it there.
 Three findings, and they need to be read in order.
 
 **The marker this clause names does not exist and never did.**
-`pyplan/phase8-designs/d-catalog-provenance.md:32-36`, measured at `dcc64543`: *"the string
+`.notes/phase8-designs/d-catalog-provenance.md:32-36`, measured at `dcc64543`: *"the string
 `unverified` appears **nowhere** in `yulon/catalog/` — not in the data, not in a model, not in a
 description. So the exit line's 'still marked unverified' names a marker **that does not exist**, and
 the set it asks to be enumerated could not be computed by anything."* Re-checked here at `d8ad7275`:
@@ -183,7 +183,7 @@ between them, so all four blocks is **103** against tonight's 39.
 pins them by name: `wow-wotlk:play.mail_item_cap`, `wow-wotlk:accounts.level.max_level`,
 `wow-tbc:accounts.level.max_level`, `wow-tortoise:accounts.scheme`. Each row says what would settle
 it, and none of the four is settled. Three are ceilings nothing asked the tree to refuse; the fourth
-is a real 2026-08-26 measurement whose reading predates `pyplan/gates/` and so cannot be cited.
+is a real 2026-08-26 measurement whose reading predates `.notes/gates/` and so cannot be cited.
 
 **The gap, stated as one sentence:** the clause asks for a set that its own marker could not produce,
 and what exists in its place enumerates a *different* set of blocks with four debts open. Which of
@@ -212,7 +212,7 @@ is green because the ledger is honest about them.
 
 ### 6. "Phase 7's controller-surface gate and cross-server regression pass re-run green on the merged tip" — **NOT MET**, and the failure is not a Phase 8 regression
 
-**The controller-surface half is MET.** `pyplan/gates/7.9-rerun-m910q-2026-09-08/README.md`:
+**The controller-surface half is MET.** `.notes/gates/7.9-rerun-m910q-2026-09-08/README.md`:
 `gate-79-controller-surface.py` at `96a129dc`, run unmodified against all three CMaNGOS games on
 `m910q` — **33 checks, 33 OK, 0 FAIL**, plus 18 more from the photograph pass. The ground was read
 before the first game was touched (`ground-start.txt`: every game container `Exited`, none of
@@ -222,7 +222,7 @@ the state the run began in. It also found something the gate cannot see:
 and `79-tbc-stop-abort.log` separates it from the 2026-09-04 mechanism by timestamp (`tbc-db`
 finished 0.3 s *after* the worldserver, so the database was not taken away).
 
-**The regression half is NOT MET.** `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/README.md`: 53
+**The regression half is NOT MET.** `.notes/gates/7.10-rerun-ubuntu2-2026-09-08/README.md`: 53
 checks, **52 OK, 1 FAIL**, exit 134.
 
 #### I must correct the orchestrator's framing before weighing it
@@ -268,7 +268,7 @@ one line**, and a tick that promises one would be wrong.
 
 **Corroboration the lane did not have, found while judging.** The same abort is already on the
 record, inside a *ticked-clause* gate log, unremarked: the last two lines of
-`pyplan/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/11-cycle2-up.log` are
+`.notes/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/11-cycle2-up.log` are
 `QThread: Destroyed while thread '' is still running` and `timeout: the monitored command dumped
 core`. So the defect has been photographed twice before tonight and named once.
 
@@ -314,19 +314,19 @@ and its checkpoints went with the disk.
 **Correction:** the WotLK box is **`yulon-ubuntu2`** (12 vCPU, 16 GB), carrying a fresh AzerothCore
 WotLK install made through the app's own engine on 2026-09-08 and rebuilt with `mod-ale` compiled in.
 `yulon-ubuntu` is `OffCritical` and was not touched. **Its replacement kept the hostname
-`yulon-ubuntu`**, which has already misled one artefact: `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/run.log`
+`yulon-ubuntu`**, which has already misled one artefact: `.notes/gates/7.10-rerun-ubuntu2-2026-09-08/run.log`
 reads `box : yulon-ubuntu` and its README has to warn about it. Anything reading a hostname to
 identify the box will get this wrong.
 
 **2. `checklist.md:2500` and `:2501` — the gate boxes and folder names for 8.6 and 8.7a.**
-*"**Gate:** `yulon-ubuntu` … evidence `pyplan/gates/8.6-wotlk-yulon-ubuntu-<date>/`"* and
-*"**Gate:** `yulon-ubuntu`; evidence `pyplan/gates/8.7a-wotlk-yulon-ubuntu-<date>/`"*.
+*"**Gate:** `yulon-ubuntu` … evidence `.notes/gates/8.6-wotlk-yulon-ubuntu-<date>/`"* and
+*"**Gate:** `yulon-ubuntu`; evidence `.notes/gates/8.7a-wotlk-yulon-ubuntu-<date>/`"*.
 **Unfillable as written.**
 **Correction:** the presses ran on `yulon-ubuntu2`, and the folders are
-`pyplan/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/`,
-`pyplan/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/` and
-`pyplan/gates/rebuild-live-yulon-ubuntu2-2026-09-09/`. 8.7a's first four clauses keep their original
-folder, `pyplan/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/`, on the box that no longer exists.
+`.notes/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/`,
+`.notes/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/` and
+`.notes/gates/rebuild-live-yulon-ubuntu2-2026-09-09/`. 8.7a's first four clauses keep their original
+folder, `.notes/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/`, on the box that no longer exists.
 
 **3. `checklist.md:2500` — My Party's route.** *"**This route has never been recorded working**:
 the one live note about it records it failing on 2026-08-20."*
@@ -368,7 +368,7 @@ one-shot ones.
 the entry declares the attach console and the tab says so instead of offering a set-up button."*
 **False on both halves, and this is the largest of the corrections.**
 **Correction:** the fork re-added SOAP on 2026-09-07 — `src/mangosd/MaNGOSsoap.cpp`, `src/mangosd/soap/`,
-commit `3f9a062` (`pyplan/archive/tortoise-upstream-switch.md`). **Tortoise's catalog pin then moved to
+commit `3f9a062` (`.notes/archive/tortoise-upstream-switch.md`). **Tortoise's catalog pin then moved to
 `3a8472e` on 2026-09-08** (`2da4c516`, *"Tortoise's pin moves to 3a8472e: the SOAP interface and the
 account-lockout fix"*), and the entry became a SOAP entry the same day (`c7e577c7`):
 `wow-tortoise.operations.channel = "soap"`, port 7878, rank 4, `SOAP.Enabled = 1`. The consequences
@@ -394,7 +394,7 @@ be re-run without changing a line of this app."*
 **The condition has been satisfied**, so the sentence has stopped being a forecast and become an owed
 action.
 **Correction:** the account-lockout fix landed and **the catalog pin moved onto it** — `3a8472e` is
-that fix (`2da4c516`; `pyplan/archive/tortoise-upstream-switch.md` names it *"the account-lockout fix
+that fix (`2da4c516`; `.notes/archive/tortoise-upstream-switch.md` names it *"the account-lockout fix
 (`3a8472e`)"*). 8.3d's password clause is now owed a re-run against an install built at the new pin,
 by the box's own words. Two further sentences in the same line go with it:
 * *"correctly NEVER CREATED on a core whose channel is its console"* — that reason is gone; the
@@ -409,9 +409,9 @@ by the box's own words. Two further sentences in the same line go with it:
   those measurements again, and this line is where that decision has to be written down rather than
   discovered on a four-hour install"* — and its message lists which measurements were re-taken at
   `3a8472e`: the ready banner, the migrations path, the SQL globs and the harmless bot-log line on a
-  copy of `m910q`'s install (`pyplan/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/`), and the
+  copy of `m910q`'s install (`.notes/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/`), and the
   exit status and bot conf on a fresh install on `yulon-arch`
-  (`pyplan/gates/tortoise-fresh-yulon-arch-2026-09-08/`). Those are **boot** facts. The six ticked
+  (`.notes/gates/tortoise-fresh-yulon-arch-2026-09-08/`). Those are **boot** facts. The six ticked
   `8.x` boxes' facts — the account list and its marker, the level ceiling and rank column, the mail
   cap, the rename refusal, the module set — were **not** re-measured, and the guard that would ask
   cannot: `GATE_PINS` (`pylauncher/tests/test_catalog.py:220-235`) names three games and
@@ -423,7 +423,7 @@ by the box's own words. Two further sentences in the same line go with it:
 re-press … it ran on 2026-09-08 — on `m910q`'s TBC tree, not on this box."*
 **Now discharged**, and the line should say so.
 **Correction:** the WotLK press ran on 2026-09-09 on `yulon-ubuntu2` —
-`pyplan/gates/8.1a-wotlk-yulon-ubuntu-2026-09-06/2026-09-09-wotlk-three-strike-press/`. One strike
+`.notes/gates/8.1a-wotlk-yulon-ubuntu-2026-09-06/2026-09-09-wotlk-three-strike-press/`. One strike
 reads `up`, three read `restart loop — 3 restarts` on the **first** probe after the third kill (zero
 polls later, inside the "within two polls" bound), and `stage_d2`'s own recipe — the database taken
 away, six polls at ten seconds — crossed at poll 1. The two frames are the same tab, the same
@@ -514,7 +514,7 @@ Ordered so that each item is a thing somebody can do, with what settles it:
    (`runner.py:256`) cannot honour one — so the fix has to reach the source, not just the call site.
    Then re-run 7.10 on the merged tip.
 4. **`gate-79`'s ready wait cannot answer for an AzerothCore install.** *(clause 6)* Read the pair
-   from `acore_auth.realmlist` instead of typing it; `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/ready_marker_probe.py`
+   from `acore_auth.realmlist` instead of typing it; `.notes/gates/7.10-rerun-ubuntu2-2026-09-08/ready_marker_probe.py`
    is that query already written. 7.9's own re-run is green **because** its three CMaNGOS rows take
    no realm arguments — the `wow-wotlk` row has never been exercised.
 5. **8.6 and 8.7a are unticked, and their new evidence is not on `origin/yulon-phase8b`.**
@@ -557,7 +557,7 @@ cannot rot:
 > enumerated by name in `pylauncher/tests/catalog_provenance.py` and guarded by five tests in
 > `test_catalog_invariants.py` — over `play` and `accounts`, which is **not** the `operations` block
 > this line originally named, because the `unverified` marker it named never existed (owner answer
-> ____, and `pyplan/phase8-designs/d-catalog-provenance.md`); `OWED` stood at ____ debts on the day.
+> ____, and `.notes/phase8-designs/d-catalog-provenance.md`); `OWED` stood at ____ debts on the day.
 > The write-ledger test was green with all ____ write sites in `pyplan/write-ledger.md`, both
 > directions asserted. Phase 7's controller-surface gate re-ran 33 of 33 on all three CMaNGOS games
 > (`7.9-rerun-m910q-2026-09-08/`) and the cross-server regression pass re-ran ____ of ____
@@ -593,6 +593,6 @@ this whole round exists to prevent.
 
 ## Errata (lead, 2026-09-09 10:35)
 
-* **Correction 3 carried a wrong date.** It says the bridge "answered on 2026-09-09". The folder it rests on says otherwise: `pyplan/gates/rebuild-live-yulon-ubuntu2-2026-09-09/7-ping.log` is `DML-BRIDGE-READY` against a world started `2026-09-08T20:39:08Z`, and `8-ping-after-press2.log` against `2026-09-08T21:15:35Z` — 22:42 and 23:18 on **2026-09-08** in +0200. The folder is dated 09-09 because it was written after midnight. Found by the cold reviewer on ticket T1's third round, after two hands and one lead had copied the sentence forward. A folder's name is not a timestamp.
-* **Correction 3 also said the cause was measured "both times".** The 2026-08-20 attempt's only record (`pyplan/phase8-reads/hypeer.md:619-623`) attributes it to a relative `ALE.ScriptPath` and measured nothing; the engine's absence was measured once, on 2026-09-08 (`8.6-wotlk-yulon-ubuntu-2026-09-08/README.md:40-52`).
+* **Correction 3 carried a wrong date.** It says the bridge "answered on 2026-09-09". The folder it rests on says otherwise: `.notes/gates/rebuild-live-yulon-ubuntu2-2026-09-09/7-ping.log` is `DML-BRIDGE-READY` against a world started `2026-09-08T20:39:08Z`, and `8-ping-after-press2.log` against `2026-09-08T21:15:35Z` — 22:42 and 23:18 on **2026-09-08** in +0200. The folder is dated 09-09 because it was written after midnight. Found by the cold reviewer on ticket T1's third round, after two hands and one lead had copied the sentence forward. A folder's name is not a timestamp.
+* **Correction 3 also said the cause was measured "both times".** The 2026-08-20 attempt's only record (`.notes/phase8-reads/hypeer.md:619-623`) attributes it to a relative `ALE.ScriptPath` and measured nothing; the engine's absence was measured once, on 2026-09-08 (`8.6-wotlk-yulon-ubuntu-2026-09-08/README.md:40-52`).
 * **Correction 4's line numbers** (`controller_view.py:1587`, `:4220-4221`) did not resolve on the tree they were written against; the control is `REBUILD_BUTTON_LABEL` at `:1648`, the button at `:4320-4321`.

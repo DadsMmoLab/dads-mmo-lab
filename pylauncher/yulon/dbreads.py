@@ -9,7 +9,7 @@ module that talks to those databases is the one that only ever asks questions.
 ## Identifying a bot
 
 Two arms, always both, because each alone has failed in production and the
-failures are recorded (`pyplan/phase8-reads/hypeer.md`, from `botid.rs`):
+failures are recorded (`.notes/phase8-reads/hypeer.md`, from `botid.rs`):
 
 * **The registry alone fails open.** `playerbots_account_type` is filled in by
   the bot module as it goes, and on a freshly built install it can hold zero
@@ -32,7 +32,7 @@ rule is generic rather than per-key: every ini key `X` is looked up as
 `Config.cpp:435-438` for the name, `:370-374` and `:391-394` for the transform,
 `:540-552` for env winning at read time — and the proof the rule is generic is
 that the catalog already relies on it for `AiPlayerbot.MinRandomBots`. It is all
-recorded in `pyplan/phase8-reads/azerothcore.md:119-124`.
+recorded in `.notes/phase8-reads/azerothcore.md:119-124`.
 
 **This module does not read that layer yet**, and that is a real gap rather than
 an unknown one. It was written here as "unmeasured" until 2026-09-06, which was

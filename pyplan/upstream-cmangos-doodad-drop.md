@@ -4,7 +4,7 @@ Written 2026-09-04 by lane D of the Phase 7 gate work. The first nine sections a
 CMaNGOS maintainer and assume no knowledge of this project. §10 is ours: whether Yu'lon should work
 around the defect while it is open, and it is a recommendation, not a decision.
 
-Evidence: `pyplan/gates/7.7-win11-gate/buildings-shortfall-measurements.txt` and the file lists
+Evidence: `.notes/gates/7.7-win11-gate/buildings-shortfall-measurements.txt` and the file lists
 beside it. Recorded in `pyplan/checklist.md` under 7.7.
 
 ---
@@ -341,7 +341,7 @@ report from the first Linux run instead of a two-day cross-platform diff.
   (`contrib/mmap/src/TerrainBuilder.cpp:561`). In practice the extractor's own "Your output
   directory seems to be polluted" refusal makes extracting on top unavailable anyway.
 * **Measured price of that:** `vmap_extractor` alone took **83 minutes** on our Windows gate box
-  (19:32:18 → 20:55:57, `pyplan/gates/7.7-win11-gate/vanilla77.log`) for the 1.12.1 client.
+  (19:32:18 → 20:55:57, `.notes/gates/7.7-win11-gate/vanilla77.log`) for the 1.12.1 client.
   Assemble and mmaps are on top of that. We have no equivalent figure for the Linux box.
 * **And the payoff is invisible in a file listing.** After the fix a Linux `Buildings/` gets
   *smaller* (no duplicate spellings) while `dir_bin` gets *larger*. Anyone checking the fix by
@@ -358,7 +358,7 @@ Everything a maintainer needs is above. If more is wanted, the raw artefacts are
 `collision-pairs.txt` (the 1,163 twin mappings), `pair-compare.txt` (md5+size of every pair),
 `win-dirbin-names.txt` / `linux-dirbin-names.txt`, `dirbin-win-only-names.txt` (the 367) and
 `dirbin-win-only-capsonly.txt` (the 296 — 295 lines, the file has no trailing newline). All under
-`pyplan/gates/7.7-win11-gate/`.
+`.notes/gates/7.7-win11-gate/`.
 
 ---
 
@@ -471,7 +471,7 @@ extractor was built from `7c0fb278` and run against the Turtle client (86 s, exi
 in `Buildings/`), and `extract.doodad_placements()` over the output answers
 `DoodadCheck(extracted=4041, placed=2675, unplaced=1366, misspelt=0)`: no all-caps `.M2`, no name
 with a space, not one file spelled a way the placement index would not ask for
-(`pyplan/gates/doodad-2026-09-05/tortoise-doodadcheck.txt`).
+(`.notes/gates/doodad-2026-09-05/tortoise-doodadcheck.txt`).
 
 **Verified by running, on `m910q`, 2026-09-05, 1.12.1 client, extractor built from `8ec338a1` in
 an `ubuntu:22.04` container with the Vanilla Dockerfile's apt list.** Full extraction, not a
@@ -520,7 +520,7 @@ over a defect only a rebuild mends; what the line is for is the day the patch si
 applying.
 
 **Three defects the lane's own review found before it merged, and what they cost to fix**
-(`pyplan/gates/doodad-2026-09-05/`):
+(`.notes/gates/doodad-2026-09-05/`):
 
 1. *The report shipped a patch that does not apply.* The fenced ```` ```diff ```` in the issue
    text was an earlier revision of the patch file beside it — `vmapexport.cpp` anchored at
@@ -627,7 +627,7 @@ with no check at all — read at `Shyalya/tortoise-wow` **7c0fb278**, the rev `c
 (fetched `--depth 1` for the reading; the clone on the box stood at 7f2957e0), where a grep for
 "polluted" and "empty directory" over that file counts 0. So the refusal is keyed on the BINARY
 as well as the folder rather than claimed for a lineage nobody has watched refuse. Every read in
-this paragraph is in `pyplan/gates/doodad-2026-09-05/extractor-dirty-output.txt`, which is the
+this paragraph is in `.notes/gates/doodad-2026-09-05/extractor-dirty-output.txt`, which is the
 output of the script beside it.
 
 **The engine now says the folder's name instead of the tool saying nothing.** `run_plan()` asks

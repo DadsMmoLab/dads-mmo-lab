@@ -1,133 +1,0 @@
-==============================================================
-T16 step 04 -- the second press -- 23:42:25 CEST -- yulon-ubuntu
-==============================================================
-
----- the tree this is pressed from -- 23:42:25 CEST ----
-PRESS = /home/pk/dads-mmo-lab/pylauncher/.venv/bin/python /home/pk/t16-live/pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/t16press.py
-698:SAVE_COMMAND = "saveall"
-720:LEVEL_TRIES = 30
-721:LEVEL_SLEEP = 1.0
-1322:def _level_step(
-fca7d004a700164ff6374b187ce93d16  /home/pk/t16-live/pylauncher/yulon/party.py
-log window opens at 2026-09-10T21:42:25Z
-t16_stage lines in that window BEFORE the press: 0
-
----- the master's ground -- 23:42:25 CEST ----
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-pinfo Jurnaar: level=50
-    raw: | Player  Jurnaar (guid: GUID Full: 0x0000000000000001 Type: Player Low: 1) | | Account: RNDBOT0 (ID: 1), |  |  GMLevel: 0 | | AccountFlags: | | Last Login:  (Failed Logins: 0) | | OS:  - Latency: 0 ms | | Registration Email:  - Email:  | | Last IP: 127.0.0.1 (Locked: No) | | Level: 50 (0/120900 XP (120900 XP left)) | | Race: Male Draenei, Warrior | | Alive ?: Yes | | Phase: 1 | | Money: 562g95s29c | | Map: Kalimdor, Zone: Feralas, Area: Feathermoon Stronghold | | Played time: 1d4h43m40s | | Online for: 36m46s | | Mails: 0 Read/5 Total | 
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-()
-
----- PRESS A -- a bot at whatever level the module gave it, asked for 42 -- 23:42:27 CEST ----
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-== SECOND PRESS  master=Jurnaar candidates=['Olena', 'Sandelio', 'Edirix', 'Tinte', 'Elaneya', 'Wahjaijo'] level=42
-23:42:28.398  candidate Olena: live=8 characters.level=8
-23:42:28.646  COMMAND (1): dml_t16_stage invite Jurnaar Olena
-23:42:28.734  outcome=yes text='stage invite Jurnaar -> Olena ok=true err=nil\r\n'
-23:42:38.119  GROUP ROW APPEARED: Olena guid=45 characters.level=8
-23:42:38.205  before the press: live=8 characters.level=8
-23:42:41.532  party._level_step -> LevelStep(after=42, problem='', resent=False, saved=True)   (took 3.2s)
-23:42:41.532  the panel's own sentence: ' characters.level read 8 before the press and 42 after.'
-23:42:41.591  10 s later:
-23:42:51.776  live=42 characters.level=42
-23:42:51.950  saveall -> yes 'All players saved.\r\n'
-23:43:02.146  after .saveall: live=42 characters.level=42
-PRESS bot=Olena guid=45 before=8 asked=42 step.after=42 step.resent=False step.saved=True took=3.2s live_right_after=42 live@10s=42 row@10s=42 live_after_saveall=42 row_after_saveall=42
-
----- PRESS A2 -- the SAME bot, asked for the level it is now at: the 'already' arm -- 23:43:02 CEST ----
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-== SECOND PRESS  master=Jurnaar candidates=['Olena'] level=42
-23:43:02.981  candidate Olena: live=42 characters.level=42
-23:43:03.329  COMMAND (1): dml_t16_stage invite Jurnaar Olena
-23:43:03.338  outcome=yes text='stage invite Jurnaar -> Olena ok=true err=nil\r\n'
-23:43:03.577  GROUP ROW APPEARED: Olena guid=45 characters.level=42
-23:43:03.584  before the press: live=42 characters.level=42
-23:43:04.071  party._level_step -> LevelStep(after=42, problem='', resent=False, saved=False)   (took 0.4s)
-23:43:04.071  the panel's own sentence: ' characters.level already read 42 before the press, so nothing about the level changed and this says nothing about whether it would have.'
-23:43:04.191  10 s later:
-23:43:14.389  live=42 characters.level=42
-23:43:14.461  saveall -> yes 'All players saved.\r\n'
-23:43:24.626  after .saveall: live=42 characters.level=42
-PRESS bot=Olena guid=45 before=42 asked=42 step.after=42 step.resent=False step.saved=False took=0.4s live_right_after=42 live@10s=42 row@10s=42 live_after_saveall=42 row_after_saveall=42
-
----- handing Olena back to the module's own randomiser -- 23:43:24 CEST ----
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-COMMAND: playerbots rndbot init Olena
-outcome=yes reason=''
-text=''
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-characters.level Olena = 65
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-COMMAND: dml_t16_stage disband Jurnaar
-outcome=yes reason=''
-text='stage disband: Jurnaar has no group\r\n'
-
----- PRESS B -- a second bot, a second level, so the claim is not one press -- 23:43:36 CEST ----
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-== SECOND PRESS  master=Jurnaar candidates=['Chari', 'Zylen', 'Ryshar', 'Fidelian', 'Shaldrico', 'Ayariale'] level=55
-23:43:37.439  candidate Chari: live=27 characters.level=27
-23:43:37.673  COMMAND (1): dml_t16_stage invite Jurnaar Chari
-23:43:37.735  outcome=yes text='stage invite Jurnaar -> Chari ok=true err=nil\r\n'
-23:43:49.923  COMMAND (2): dml_t16_stage invite Jurnaar Chari
-23:43:50.016  outcome=yes text='stage invite Jurnaar -> Chari ok=true err=nil\r\n'
-23:44:02.212  COMMAND (3): dml_t16_stage invite Jurnaar Chari
-23:44:02.248  outcome=yes text='stage invite Jurnaar -> Chari ok=true err=nil\r\n'
-23:44:14.451  candidate Zylen: live=29 characters.level=29
-23:44:14.648  COMMAND (1): dml_t16_stage invite Jurnaar Zylen
-23:44:14.693  outcome=yes text='stage invite Jurnaar -> Zylen ok=true err=nil\r\n'
-23:44:26.877  COMMAND (2): dml_t16_stage invite Jurnaar Zylen
-23:44:26.964  outcome=yes text='stage invite Jurnaar -> Zylen ok=true err=nil\r\n'
-23:44:39.126  COMMAND (3): dml_t16_stage invite Jurnaar Zylen
-23:44:39.180  outcome=yes text='stage invite Jurnaar -> Zylen ok=true err=nil\r\n'
-23:44:51.447  candidate Ryshar: live=5 characters.level=5
-23:44:51.613  COMMAND (1): dml_t16_stage invite Jurnaar Ryshar
-23:44:51.667  outcome=yes text='stage invite Jurnaar -> Ryshar ok=true err=nil\r\n'
-23:44:59.019  GROUP ROW APPEARED: Ryshar guid=73 characters.level=5
-23:44:59.086  before the press: live=5 characters.level=5
-23:45:03.644  party._level_step -> LevelStep(after=55, problem='', resent=False, saved=True)   (took 4.4s)
-23:45:03.644  the panel's own sentence: ' characters.level read 5 before the press and 55 after.'
-23:45:03.667  10 s later:
-23:45:13.804  live=55 characters.level=55
-23:45:13.848  saveall -> yes 'All players saved.\r\n'
-23:45:24.051  after .saveall: live=55 characters.level=55
-PRESS bot=Ryshar guid=73 before=5 asked=55 step.after=55 step.resent=False step.saved=True took=4.4s live_right_after=55 live@10s=55 row@10s=55 live_after_saveall=55 row_after_saveall=55
-
----- handing Ryshar back to the module's own randomiser -- 23:45:24 CEST ----
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-COMMAND: playerbots rndbot init Ryshar
-outcome=yes reason=''
-text=''
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-characters.level Ryshar = 56
-
----- the party disbanded -- 23:45:32 CEST ----
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-COMMAND: dml_t16_stage show Jurnaar
-outcome=yes reason=''
-text='stage show: Jurnaar is in no group\r\n'
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-COMMAND: dml_t16_stage disband Jurnaar
-outcome=yes reason=''
-text='stage disband: Jurnaar has no group\r\n'
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-()
-worldserver running started=2026-09-10T21:04:59.914868403Z restarts=0
-0
-
----- the world's own log for this step -- 23:45:36 CEST ----
-[0m[t16_stage] stage invite Jurnaar -> Olena ok=true err=nil
-[t16_stage] stage invite Jurnaar -> Olena ok=true err=nil
-[0m[t16_stage] stage disband: Jurnaar has no group
-[t16_stage] stage invite Jurnaar -> Chari ok=true err=nil
-[t16_stage] stage invite Jurnaar -> Chari ok=true err=nil
-[t16_stage] stage invite Jurnaar -> Chari ok=true err=nil
-[t16_stage] stage invite Jurnaar -> Zylen ok=true err=nil
-[t16_stage] stage invite Jurnaar -> Zylen ok=true err=nil
-[t16_stage] stage invite Jurnaar -> Zylen ok=true err=nil
-[t16_stage] stage invite Jurnaar -> Ryshar ok=true err=nil
-[0m[t16_stage] stage show: Jurnaar is in no group
-[t16_stage] stage disband: Jurnaar has no group
-
----- done -- 23:45:36 CEST ----
-step 04 finished 23:45:36 CEST

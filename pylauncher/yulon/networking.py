@@ -272,7 +272,7 @@ clause of this sentence is the whole mechanism, and it is what the reader is
 given. The sentence was
 kept as it stands rather than reworded to "play on" because it is quoted, live,
 in two committed records of the presses that closed §41
-(`pyplan/gates/bug41-loopback-2026-09-05/widget-driver-output.txt` lines 31 and
+(`.notes/gates/bug41-loopback-2026-09-05/widget-driver-output.txt` lines 31 and
 52, and the same folder's `README.md:51`), and because the reason a firewall
 hole is not opened for this mode does NOT rest on this sentence: that reason is
 written where the decision is made (`plan()`, at `wants_firewall`), and it was
@@ -3176,7 +3176,7 @@ def plan(
 
     A `loopback` plan reaches none of that. Measured on m910q 2026-09-06 at
     `92cacc44` from a fresh `git clone --shared`, with seams that record every
-    call (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`, the
+    call (`.notes/gates/bug41-loopback-2026-09-05/mutations-round4.txt`, the
     UNMUTATED block, lines 30-38):
 
         UNMUTATED firewalld loopback: seams=[] fw=[] manual=[] warnings=1
@@ -3283,7 +3283,7 @@ def plan(
     # What it cost before this branch existed, measured on yulon-ubuntu
     # 2026-09-06: an Apply of the loopback plan through the Networking tab left
     # `ufw allow 3724/tcp` and `ufw allow 8085/tcp` behind — see
-    # `pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`
+    # `.notes/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`
     # (taken 04:43:23, right after that Apply) and the same folder's
     # `widget-loopback.log`, whose line 57 is the `ONLY_THIS_COMPUTER` warning,
     # 58 is blank, 59 is `Applied:` and 60 is `✓ ufw allow 3724/tcp`.

@@ -1,7 +1,0 @@
-=== worldlog: before the Start (the window must be empty) ===  2026-09-10 21:46:14 CEST
-container: tortoise-mangosd
---since (epoch seconds): 1789069574
-ready.world pattern (from the catalog entry): World server is up and running|World initialized|MaNGOS.*started up successfully|Ready to login
-lines in the window: 0
-ready-marker matches in the window: 0
-last 12 lines in the window:

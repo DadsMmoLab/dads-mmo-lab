@@ -1,8 +1,0 @@
-=== START, through the app's own control (Controller.start) ===
-ground: containers up = ac-database Up 2 minutes (healthy)
-ground: status() = InstallStatus(db=True, auth=False, world=False)
-[08:08:24Z] --- svc.controller.start() ---
-2026-09-09 10:08:24 INFO [yulon.docker] start_staged(): `compose up -d --no-deps ac-database ac-authserver ac-worldserver` in /home/pk/wowserver
-[08:08:25Z] start() returned in 1.2s
-after: containers up = ac-authserver Up Less than a second, ac-database Up 2 minutes (healthy), ac-worldserver Up Less than a second
-after: world = running pid=409560 restarts=0 started=2026-09-09T08:08:24.962353715Z

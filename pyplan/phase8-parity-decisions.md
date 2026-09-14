@@ -2,19 +2,19 @@
 
 > Scoped 2026-09-06 on branch `yulon-phase8`, before Phase 7 exits, on the owner's decision of
 > 2026-09-04 that Phase 8 is scoped now and its code waits for this scoping to be reviewed
-> (memory record `phase8-kickoff-prompt.md`; the brief is `pyplan/archive/phase8-kickoff.md`). Companion to
+> (memory record `phase8-kickoff-prompt.md`; the brief is `.notes/archive/phase8-kickoff.md`). Companion to
 > `pyplan/roadmap.md` §8, which is not edited; Appendix A holds the proposed §8 text. Sibling of
 > `pyplan/phase8-decisions.md`, the uninstall/purge page of 2026-08-31, whose two owner answers are
 > copied verbatim below as group (g) and which this page does not reopen.
 >
 > Method, the one `phase7-decisions.md` used: five read-only source reads produced
 > `pyplan/phase8-delta.md` (one row per feature, mechanism measured per emulator tree at the
-> catalog's pinned revisions; reports in `pyplan/phase8-reads/`); the owner answered the eight
+> catalog's pinned revisions; reports in `.notes/phase8-reads/`); the owner answered the eight
 > questions 1 to 8 below before any design existed; questions 9 and 10 were raised by the design
 > round and answered on 2026-09-06 after the judges reported — answer 10 narrowed the winning
 > design's channel list after it had won, and where the page still named the third channel is
 > recorded under "Review findings". Three designs were written independently from
-> three angles (`pyplan/phase8-designs/`) and scored by three judges (`pyplan/archive/phase8-judges/`).
+> three angles (`.notes/phase8-designs/`) and scored by three judges (`.notes/archive/phase8-judges/`).
 > Every source read, design and verdict is committed beside this page, so what was rejected can be
 > read rather than summarised.
 
@@ -150,7 +150,7 @@ that "connects and blocks". The first version of this paragraph answered that th
 (`AC Main.cpp:315`, `:337-339`; `TBC/VAN Master.cpp:126`, `:248`). Those citations are right and the
 inference was not. Measured 2026-09-06 with a container up, its port published and nothing listening
 inside: the connection **succeeds and returns nothing**
-(`pyplan/gates/8-spikes/published-port-vs-container-loopback/`). B's description was closer to the
+(`.notes/gates/8-spikes/published-port-vs-container-loopback/`). B's description was closer to the
 truth than the rebuttal. What is true, and is why B is still not the shape, is that a connection
 tells you nothing here at all — a misconfigured bind, a world still loading and a healthy-but-slow
 server are one observation, and only the container's ready marker separates them — so a channel
@@ -158,7 +158,7 @@ model that derives "starting" from the connection cannot work, whichever way the
 loopback, which a published port does not serve — measured on 2026-09-06, and the failure is worse
 than "cannot reach": Docker accepts the connection and relays nothing, so the misconfiguration
 answers with silence rather than a refusal
-(`pyplan/gates/8-spikes/published-port-vs-container-loopback/`); and it puts a GM-3 credential in the server folder, which is the folder the uninstall
+(`.notes/gates/8-spikes/published-port-vs-container-loopback/`); and it puts a GM-3 credential in the server folder, which is the folder the uninstall
 deletes, the folder users copy, and on Windows may live inside a WSL distro where a host-side
 0600 is not the host's to set.
 
@@ -208,7 +208,7 @@ preference.
 ### Facts settled by reading after the panel reported, which the designs had booked as spikes
 
 Recorded because each removes work, and because a spike a read can answer is a spike this project
-does not run. **The reads themselves are committed at `pyplan/archive/phase8-judges/panel-reads.md`** — with
+does not run. **The reads themselves are committed at `.notes/archive/phase8-judges/panel-reads.md`** — with
 the command and the lines as they came back — because the first version of this table asserted six
 facts that no committed reader had produced, and one of the six was wrong. That is the failure this
 table exists to prevent, committed by the page enforcing the rule; the artefact is the remedy.
@@ -386,7 +386,7 @@ a claim.
   deadline expires first the command still runs. No write is ever retried automatically, every
   write has a verify read, and the app says the command may still arrive rather than that it failed.
 - **The listener's bind address inside the container is measured**, on a busybox stand-in rather
-  than a server (`pyplan/gates/8-spikes/published-port-vs-container-loopback/`, 2026-09-06). A
+  than a server (`.notes/gates/8-spikes/published-port-vs-container-loopback/`, 2026-09-06). A
   listener on the container's own loopback does not serve a published port — and it does not refuse
   either: Docker accepts the connection on the host side and relays nothing, so a connect probe
   **passes on the broken configuration**, and only a round-trip that receives a reply tells the
@@ -545,7 +545,7 @@ row.**
 Hedges restored to their sources: Tortoise's missing set-level command is now "no console route
 found", because the read searched two handler names and not that tree's whole table; the reads
 behind the six "settled by reading" facts were committed rather than summarised
-(`pyplan/archive/phase8-judges/panel-reads.md`).
+(`.notes/archive/phase8-judges/panel-reads.md`).
 
 Citation and record fixes: four citations off by a line or a range — claimed in the first round and
 actually made in the second, recorded here rather than smoothed over; the delta's declared path
@@ -709,7 +709,7 @@ matching edit, given below it.
    purge leaves nothing of the project; an install whose ownership cannot be proved is refused.
 
 **Phase 8 exit criteria:** every step above passes its live gate on the families and platforms its
-line names, with the evidence committed under `pyplan/gates/8.x-*`; no definition of done is
+line names, with the evidence committed under `.notes/gates/8.x-*`; no definition of done is
 satisfied by a skip, an absent capture, a stale marker or an exit code; no capability is reachable
 only from a command line; and Phase 7's controller-surface and cross-server regression gates are
 re-run green on the merged tip. **One carve-out, named rather than hidden:** the
@@ -733,8 +733,8 @@ replaced, keeping the reversal visible the way Phase 7's was:
 ## Appendix B — the judge panel (2026-09-06)
 
 Three designs, written independently from three angles by `fable` and committed unchanged under
-`pyplan/phase8-designs/`; three judges, two on `opus` and the skeptic on `fable`, committed under
-`pyplan/archive/phase8-judges/`. Seven criteria each scored 1–5: style-guide fit, DRY and one seam,
+`.notes/phase8-designs/`; three judges, two on `opus` and the skeptic on `fable`, committed under
+`.notes/archive/phase8-judges/`. Seven criteria each scored 1–5: style-guide fit, DRY and one seam,
 testability, operator safety on a live server, per-family correctness, gate quality, and blast
 radius with incremental delivery. 35 maximum.
 

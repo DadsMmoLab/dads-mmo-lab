@@ -242,7 +242,7 @@ def equipped(sql: SqlReader, entry: CatalogEntry, character: str) -> tuple[int, 
 
     * the flat shape on AzerothCore names a column that install has not got
       (`character_inventory` there is `guid, bag, slot, item` --
-      `pyplan/phase8-reads/azerothcore.md:432-441`), so it is an `Unknown
+      `.notes/phase8-reads/azerothcore.md:432-441`), so it is an `Unknown
       column` error and loud;
     * the joined shape on a CMaNGOS tree answers the SAME ids the flat one
       does, because `character_inventory.item` is `item_instance.guid` and

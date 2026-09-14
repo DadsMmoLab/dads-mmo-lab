@@ -195,7 +195,7 @@ def test_the_ready_budget_also_covers_the_windows_first_boot_measured_over_9p() 
     """3702 seconds from `up` to `finished` on native Windows, against a budget of 3600.
 
     The Linux floor above is not the largest one this entry has been measured to
-    need. On `yulon-win11-gate` (2026-09-05, `pyplan/gates/7.7-win11-tortoise/`)
+    need. On `yulon-win11-gate` (2026-09-05, `.notes/gates/7.7-win11-tortoise/`)
     the same first boot -- same 500 bots, same equip cache -- read its world over
     Docker Desktop's 9p share instead of a native disk, and the worldserver printed
 
@@ -355,7 +355,7 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
         "measurement in this file was taken again against it on `yulon-arch` 2026-09-11: the "
         "ready banner, the migrations path, the conf keys, the SQL layout, the cmake flags, "
         "the harmless bot-log line and the module's own startup lines "
-        "(pyplan/gates/t30-measure-yulon-arch-2026-09-11/). Moving it again means taking them "
+        "(.notes/gates/t30-measure-yulon-arch-2026-09-11/). Moving it again means taking them "
         "again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
@@ -450,7 +450,7 @@ GONE = (
 """The three directories the plan globbed that the Penqle core does not have.
 
 Listed on `yulon-arch` 2026-09-11 against a real clone at the pinned rev
-(`pyplan/gates/t30-measure-yulon-arch-2026-09-11/06-sql-layout.txt`, "the old
+(`.notes/gates/t30-measure-yulon-arch-2026-09-11/06-sql-layout.txt`, "the old
 fork paths the plan reads that do not exist on this tree"). The first was an
 `on_error: fail` phase, so it is the one that would have stopped every fresh
 install; the other two were `warn`, which is worse in the other direction --

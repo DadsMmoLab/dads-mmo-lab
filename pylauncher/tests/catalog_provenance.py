@@ -3,8 +3,7 @@
 Test support, not shipped code — it sits beside `write_sites.py` for the same
 reason and by the same precedent: `write_sites.py` holds the ledger's RULES
 while `pyplan/write-ledger.md` holds the table a person reads, and this module
-is the other half of that pairing for the catalog. The design and its open
-questions live in `pyplan/phase8-designs/d-catalog-provenance.md`.
+is the other half of that pairing for the catalog.
 
 **The problem this exists for.** Phase 8's exit line asks that "every value
 still marked unverified in the catalog's operations block [be] replaced by a
@@ -37,9 +36,8 @@ made uniform.
 
 * `measured-on` — this tree's own running install was ASKED and this is its
   answer. Console, SOAP or SQL: what makes it a measurement is the live server,
-  not the transport. The citation is a page under `pyplan/` and it must
-  resolve; a citation that resolves to nothing is how `8.3c`'s README came to
-  name `tests/test_srp6.py`, a file never written under that name (`dcc64543`).
+  not the transport. The citation names a gate write-up in the maintainers'
+  local notes (`.notes/`, not published); those notes check that it resolves.
 * `read-from-source` — read off this tree's own source at a named `path:line`.
   A prediction. Honest, useful, and not the same thing as an answer. Not
   resolvable from here: we do not vendor the emulator trees, so the shape is
@@ -87,7 +85,7 @@ class Provenance:
 
     kind: Kind
     cite: str
-    """A path under `pyplan/` for `measured-on`, a `path:line` for
+    """A path under the local `.notes/` for `measured-on`, a `path:line` for
     `read-from-source`, and the game id it was copied from for `inherited`."""
     note: str = ""
     """What the citation does not say by itself. Optional, and empty by default
@@ -353,7 +351,7 @@ OWED: dict[str, str] = {
     "wow-tortoise:accounts.scheme": (
         "`Accounts`' docstring records this measured against a live server on 2026-08-26 -- the "
         "core logging its own INSERT and `SHA1(UPPER(user):UPPER(pass))` matching it exactly -- "
-        "and that predates `pyplan/gates/`, so no folder in this tree holds the reading. The "
+        "and that predates `.notes/gates/`, so no folder in this tree holds the reading. The "
         "measurement is not doubted; the CITATION cannot be resolved, and an unresolvable "
         "citation is the shape `dcc64543` caught in 8.3c's README. Settled by committing the "
         "reading, or by re-running it beside 8.3d's transcript."

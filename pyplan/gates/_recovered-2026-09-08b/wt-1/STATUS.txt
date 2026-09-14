@@ -1,6 +1,0 @@
-c0513d6d 8.7a's line records the rebuild rollback and what it does not put back
-235d8b08 The rollback fails closed, undoes a half-done retag, and says what it does not put back
-7808c0d6 A rebuild keeps the build it is about to overwrite, and puts it back by itself
-
- M pylauncher/tests/test_purge.py
-?? pyplan/gates/8.9a-wotlk-yulon-win11-2026-09-08/

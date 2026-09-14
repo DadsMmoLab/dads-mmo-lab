@@ -1,6 +1,6 @@
 """Tests for `yulon.dbreads` — how many players and how many bots (8.1a).
 
-Two incidents recorded in `pyplan/phase8-reads/hypeer.md` decide almost every
+Two incidents recorded in `.notes/phase8-reads/hypeer.md` decide almost every
 rule here, and both are about a detector failing in a direction that looks fine:
 
 * Asking only the playerbots registry fails **open**. On a freshly built install

@@ -1,1 +1,0 @@
-a5690ff7 The online rename moves the row at the press, not at the logout

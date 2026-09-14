@@ -1,5 +1,0 @@
-2026-09-08 10:48:30 INFO [yulon.controller_wow_wotlk.console] console → tbc-mangosd: ['.server', 'motd']
-asked at 2026-09-08T08:48:30.520633Z
-container alive: true
-prompted: True
-lines: ('Current Message of the day:', 'Welcome to the Continued Massive Network Game Object Server.')

@@ -1,9 +1,0 @@
-=== the app's own readiness wait, against the realm this box serves ===
-ground: containers up = ac-authserver Up 30 seconds, ac-database Up 31 minutes (healthy), ac-worldserver Up 29 minutes
-ground: world = running pid=409560 restarts=0 started=2026-09-09T08:08:24.962353715Z
-ground: auth  = running pid=455691 restarts=0 started=2026-09-09T08:37:06.225973143Z
-[08:37:36Z] --- wait_ready_for(spec, azerothcore_ready('100.99.204.5', 8085)) ---
-[08:37:37Z] ready = True after 0.2s
-after: world = running pid=409560 restarts=0 started=2026-09-09T08:08:24.962353715Z
-after: auth  = running pid=455691 restarts=0 started=2026-09-09T08:37:06.225973143Z
-after: status() = InstallStatus(db=True, auth=True, world=True)

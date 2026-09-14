@@ -1,7 +1,7 @@
 """The FUSE-less Linux route: what `release.yml` ships, and what the README promises about it.
 
 Measured on `yulon-arch` (kernel 7.1.8-arch1-3, neither `fuse2` nor `fuse3`
-installed), 2026-09-04 — evidence in `pyplan/gates/7.1-arch/71-arch-appimage.log`.
+installed), 2026-09-04 — evidence in `.notes/gates/7.1-arch/71-arch-appimage.log`.
 The release AppImage, sha256 `cb7c1b7e75…`, is refused by its own runtime before
 the interpreter exists:
 

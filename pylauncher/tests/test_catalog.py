@@ -239,11 +239,11 @@ Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 `dest`), never off a branch tip:
 
 * `wow-wotlk`: `/home/pk/wowserver` on `yulon-ubuntu`, the tree gate 7.1's clean
-  2026-09-04 run installed and logged into (`pyplan/gates/7.1-ubuntu-2026-09-04-clean/`;
+  2026-09-04 run installed and logged into (`.notes/gates/7.1-ubuntu-2026-09-04-clean/`;
   its `gate71-press2.log` prints `AzerothCore revision : 413bea61a85e+` from the
   build and names no commit for the module, so both were read off that box).
 * `wow-tbc`: `/home/pk/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
-  2026-09-04 (`pyplan/gates/7.7-win11-tbc/source-identity.txt`) was on
+  2026-09-04 (`.notes/gates/7.7-win11-tbc/source-identity.txt`) was on
   `0d2ebc3e`, one commit ahead, and the pin is the LINUX one: 7.4c is the gate
   with the full evidence chain (build, extract, import, boot, login) on the
   primary platform, and that note itself establishes the one commit between
@@ -263,7 +263,7 @@ def test_every_shipped_source_is_pinned_to_a_commit() -> None:
     Until 2026-09-05 only `wow-tortoise` carried a `rev`. The other three cloned
     whatever their branch's tip was on the day, which is how the two Vanilla
     gate boxes came to agree on `8ec338a1` by coincidence and the two TBC boxes
-    did not (`pyplan/gates/7.7-win11-tbc/source-identity.txt`). A patch carried
+    did not (`.notes/gates/7.7-win11-tbc/source-identity.txt`). A patch carried
     against upstream source (`patch-sources`) cannot be tolerant of a tip that
     moves under it, so the pins come first — `pyplan/upstream-cmangos-doodad-drop.md`
     §10. Enumerated over the catalog rather than over `GATE_PINS`, so an entry
@@ -810,7 +810,7 @@ Tortoise followed on the same box overnight: install exit 0 at 2026-09-05 00:43 
 after 10 h 24 min, `tortoise-realmd`/`tortoise-mangosd`/`tortoise-db` up with
 `RestartCount=0`, and the worldserver's own banner `World server is up and running!
 Loading time: 59 minutes 18 seconds` (transcript and captures in
-`pyplan/gates/7.7-win11-tortoise/`). That run only finished because the ready budget on
+`.notes/gates/7.7-win11-tortoise/`). That run only finished because the ready budget on
 the box was 10800 s, not the 3600 s the repo carried, which is why the widening and the
 budget moved in one commit -- `test_tortoise_boot_facts.py` holds the measurement.
 

@@ -439,7 +439,7 @@ def test_the_vanilla_tab_gets_an_uninstall_scoped_to_this_install(tmp_path: Path
 def test_the_vanilla_uninstall_removes_this_installs_images_and_not_the_shared_one(
     tmp_path: Path,
 ) -> None:
-    """Defect 2 of `pyplan/8.9b-gate-plan.md`, pinned at the wiring rather than in the engine.
+    """Defect 2 of `.notes/8.9b-gate-plan.md`, pinned at the wiring rather than in the engine.
 
     `wow-vanilla` and `wow-tbc` both pull `mariadb:11`; `wow-wotlk` pulls
     `mysql:8.4` and nothing else does, so 8.9a's gate could not see this. What

@@ -1,3 +1,0 @@
-2026-09-08 11:47:15 INFO [yulon.controller_wow_wotlk.console] console → vanilla-mangosd: ['.server', 'motd']
-prompted: True
-| Current Message of the day: Welcome to the Continued Massive Network Game Object Server.

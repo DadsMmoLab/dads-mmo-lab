@@ -14,7 +14,7 @@ than promises. On the day this page was first drafted it was not: the fence held
 revision of the patch, anchored at `@@ -58,6 +58,7 @@ std::set<std::string> gameobjectFiles;`
 against a declaration block that has since moved, and `git apply --check` refused it on BOTH of
 the commits this page names while accepting the shipped file (measured on m910q, 2026-09-05;
-`pyplan/gates/doodad-2026-09-05/apply-check.txt`).
+`.notes/gates/doodad-2026-09-05/apply-check.txt`).
 
 It was refused a second time, for a second reason, until later that day. The equality was
 asserted through `read_text()`, so it went on holding while this file sat on a Windows checkout
@@ -25,7 +25,7 @@ other reads as a mismatch of one object) — and `git apply --check` on the fenc
 extracted from THAT copy exits 1, `error: patch failed:
 contrib/vmap_extractor/vmapextract/gameobject_extract.cpp:24`, on the two pinned commits and on
 both trees' current `origin/master` (`9b682be6`, `46d9a78d`), where the LF form exits 0 on all
-four (`pyplan/gates/doodad-2026-09-05/fence-eol-apply-check.txt`). The committed blob was always
+four (`.notes/gates/doodad-2026-09-05/fence-eol-apply-check.txt`). The committed blob was always
 LF, so what GitHub serves has always applied; the copy on the poster's own disk had not. This
 file is now pinned `text eol=lf` in `.gitattributes`, and the equality is asserted on bytes.
 

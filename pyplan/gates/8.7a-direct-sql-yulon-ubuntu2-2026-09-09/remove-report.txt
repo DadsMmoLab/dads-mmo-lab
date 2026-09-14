@@ -1,3 +1,0 @@
-remove mod-arac:
-  ✓ rm -r modules/mod-arac
-  ⚠ Press Stop and then Start on the Server tab to apply this.

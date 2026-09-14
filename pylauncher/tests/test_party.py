@@ -1,7 +1,7 @@
 """My Party's server-side bridge: the deploy, the preconditions, the proof (8.6).
 
 Every fact asserted here about the WotLK tree was **measured on `yulon-ubuntu`
-on 2026-09-08** and is recorded in `pyplan/gates/8.6-wotlk-yulon-ubuntu-2026-09-08/`.
+on 2026-09-08** and is recorded in `.notes/gates/8.6-wotlk-yulon-ubuntu-2026-09-08/`.
 None of it is inherited from a sibling family: the invalid-command sentence, the
 console filter on `.playerbots bot`, the module's own conf key and its compiled
 default are per-tree facts, and three of the four differ from what the prior art
@@ -1354,7 +1354,7 @@ def test_a_level_below_one_is_refused_before_anything_is_sent() -> None:
 
 def test_the_level_is_set_on_the_bot_and_read_back_out_of_the_group_table() -> None:
     """`characters.level` after the press, which is what the design asks for
-    (`pyplan/phase8-designs/b-users-surface.md:422`) -- not the number the button
+    (`.notes/phase8-designs/b-users-surface.md:422`) -- not the number the button
     sent, and not the level command's own `yes`. The group read already carries
     it (`Member.level` IS `characters.level`), so the readback costs one more
     read of a query this press already makes."""
@@ -1496,7 +1496,7 @@ def test_the_level_is_set_before_the_spec_is_whispered() -> None:
 # -- 8.6, T16: the chosen level holds, and the row is written before it is read
 #
 # MEASURED on `yulon-ubuntu2` 2026-09-10,
-# `pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`. On a bot freshly
+# `.notes/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`. On a bot freshly
 # joined to a master's party the level sent at +0, +5, +10, +20 and +30 seconds
 # after the group row appeared landed every time and STAYED landed: the world's
 # own `.pinfo` read the chosen level within a second and still read it a minute

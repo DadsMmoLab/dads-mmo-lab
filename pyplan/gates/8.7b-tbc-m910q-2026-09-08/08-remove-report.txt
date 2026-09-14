@@ -1,8 +1,0 @@
-2026-09-08 10:54:51 INFO [yulon.apply] remove motd: 1 step(s), 0 skipped, 0 left unapplied, rebuild=False
-Motd BEFORE remove: ['Motd = "Yulon 8.7b gate"']
-
-remove motd:
-  ✓ patch etc/mangosd.conf (changed)
-  ⚠ Press Stop and then Start on the Server tab to apply this.
-
-Motd AFTER remove : ['Motd = "Welcome to the Continued Massive Network Game Object Server."']

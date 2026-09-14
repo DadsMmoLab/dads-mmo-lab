@@ -1,4 +1,0 @@
-[23:02:19Z] === putting the file back exactly as it was found, and removing the decoy ===
-[23:02:19Z] the file now == the file as found: True
-[23:02:19Z] decoy directory removed: True
-[23:02:19Z] world: {"status": "running", "running": "true", "restarts": 0, "started_at": "2026-09-08T23:01:24.172253854Z", "image": "sha256:cad2566406d2"}

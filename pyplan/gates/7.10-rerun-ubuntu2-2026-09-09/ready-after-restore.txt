@@ -1,4 +1,0 @@
-=== wait_ready.py, after sweep_driver3's controller.start() ===
-this replaces the 2026-09-05 runner's blind 'sleep 180'
-wow-wotlk advertises 100.99.204.5:8085 in its realm row; waiting for its own ready marker (2026-09-09T05:06:46+0200)
-ready=True after 36.4s (2026-09-09T05:07:23+0200)

@@ -265,7 +265,7 @@ def test_abandoning_a_stream_without_closing_it_does_not_abort_the_interpreter()
           File ".../yulon/runner.py", line 236 in stream
 
     Same shape as `sweep_driver2.py` in
-    `pyplan/gates/7.10-ubuntu-2026-09-04/`, which is where it was found: take a
+    `.notes/gates/7.10-ubuntu-2026-09-04/`, which is where it was found: take a
     few lines, `break`, never close, let the process exit. `KEEP` is why the
     generator is still alive at shutdown — the driver got that reference for
     free from its own frame; holding it deliberately is what makes the
@@ -395,7 +395,7 @@ def test_end_streams_started_on_ends_the_child_a_worker_thread_is_blocked_readin
     `yulon-ubuntu2` 2026-09-08). A `LogPanel` worker sits in
     `for line in proc.stdout` inside a `stream()` generator; the panel's own
     `_stop` flag is only read between lines, so a source that has gone quiet is
-    never asked again. `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/` recorded 120
+    never asked again. `.notes/gates/7.10-rerun-ubuntu2-2026-09-08/` recorded 120
     seconds of `running=True cancelled=True worker._stop=True lines=210` after
     the click, and then `panel.wait(10000) -> False`.
 

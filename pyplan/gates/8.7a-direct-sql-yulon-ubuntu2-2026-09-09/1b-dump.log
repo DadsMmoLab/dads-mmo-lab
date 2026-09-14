@@ -1,5 +1,0 @@
-=== a restorable copy of the six tables, before anything writes ===
-argv (password is in the environment, not here): ['docker', 'exec', '-i', '-e', 'MYSQL_PWD', 'ac-database', 'mysqldump', '-uroot', '--single-transaction', '--skip-lock-tables', '--no-tablespaces', 'acore_world', 'playercreateinfo', 'playercreateinfo_action', 'playercreateinfo_skills', 'playercreateinfo_spell_custom', 'player_totem_model', 'quest_template']
-wrote /home/pk/arac-gate-out/world-six-tables-before.sql  bytes=7038460  stderr=''
-CREATE TABLE lines in it: 6
-world: running pid=308725 restarts=0 started=2026-09-09T03:06:45.852973725Z

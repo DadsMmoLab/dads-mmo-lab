@@ -1,5 +1,0 @@
-[10:05:13Z] alive at running: ['vanilla-mangosd Up About a minute', 'vanilla-realmd Up About a minute', 'vanilla-db Up About a minute (healthy)']
-[10:05:13Z] ground: ['vanilla-mangosd', 'vanilla-realmd', 'vanilla-db'] are up
-[10:05:13Z] the tab says: vanilla-mangosd, vanilla-realmd, vanilla-db: still running. Stop the server first, then uninstall. Nothing was removed.
-[10:05:13Z] alive at 3-refused-server-running.png: ['vanilla-mangosd Up About a minute', 'vanilla-realmd Up About a minute', 'vanilla-db Up About a minute (healthy)']
-[10:05:14Z] RUNNING PASSED: refused by name, and all three are still up

@@ -757,7 +757,7 @@ def test_a_directory_the_walk_cannot_enter_is_removed_rather_than_walked_into(
     recurses, and dies with `[WinError 1920] The file cannot be accessed by the
     system`. Pressing Uninstall again did exactly the same thing: the folder was
     stuck at 12,405 entries with its containers, volumes and images already gone
-    (`pyplan/gates/8.9a-wotlk-yulon-win11-2026-09-08/logs/retry.log`).
+    (`.notes/gates/8.9a-wotlk-yulon-win11-2026-09-08/logs/retry.log`).
 
     The POSIX specimen is a directory whose mode refuses `scandir` -- the same
     shape, an entry the walk cannot enter -- and it is what makes the fix

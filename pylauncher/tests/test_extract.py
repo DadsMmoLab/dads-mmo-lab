@@ -1081,7 +1081,7 @@ def test_the_refusal_names_the_marker_that_is_actually_on_the_disk(tmp_path: Pat
     is present without ever asking whether the guard fires — so narrowing
     `blocking_output()` to `(folder / DIR_BIN).exists()` survived the whole
     gate set. Measured both ways on yulon-fedora 2026-09-05
-    (`pyplan/gates/doodad-2026-09-05/mutations-round6.txt`, MU3 against MU4):
+    (`.notes/gates/doodad-2026-09-05/mutations-round6.txt`, MU3 against MU4):
     with the line below removed that mutation is 2758 passed / 4 skipped /
     23 deselected and 0 red; with it, 1 red, here. The tool itself stats BOTH
     names and refuses on either — `!stat(sdir.c_str(), &status) ||
@@ -1819,7 +1819,7 @@ def test_the_retry_walks_each_output_folder_once_and_never_the_crashed_attempt(
 # and proved the recipe reachable; the retry then died on its first breath with
 # `Your output directory seems to be polluted, please use an empty directory!`
 # and `data/Buildings` holding the crashed attempt's 5,076 files
-# (`pyplan/gates/7.5-m910q/vmap75-full.log`). So the retry has to empty what it
+# (`.notes/gates/7.5-m910q/vmap75-full.log`). So the retry has to empty what it
 # is about to regenerate — and that is a deletion of somebody's extracted data on
 # a path that fires with no question, which is why three of the four tests below
 # are about what is NOT removed.

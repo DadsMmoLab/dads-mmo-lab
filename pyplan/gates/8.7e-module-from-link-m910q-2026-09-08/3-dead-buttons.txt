@@ -1,6 +1,0 @@
-link button   label='Install from link…'
-link button   enabled=False
-link button   tooltip='Only WoW WotLK takes custom modules — on this game a module is a configuration key or a SQL mod, and those ship as manifests.'
-folder button label='Install from folder…'
-folder button enabled=False
-folder button tooltip='Only WoW WotLK takes custom modules — on this game a module is a configuration key or a SQL mod, and those ship as manifests.'

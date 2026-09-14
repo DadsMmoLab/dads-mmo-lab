@@ -1,7 +1,0 @@
-[10:05:58Z] alive at key: no vanilla-* container is running
-[10:05:58Z] recalled a password for volume 'yulon-wow-vanilla-e9e233c0_db-data'
-[10:05:58Z] starting a database on the KEPT volume with nothing but the recalled password
-[10:06:04Z] the kept volume answered: characters=['901', '108']
-[10:06:04Z] WRONG-PASSWORD CONTROL: the same query with a wrong password
-[10:06:04Z]   exit=1 stderr=ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)
-[10:06:04Z] KEY PASSED: 901 characters, reachable only with the password the purge kept

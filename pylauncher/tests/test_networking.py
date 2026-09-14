@@ -4973,7 +4973,7 @@ def _recording_firewalld_seams(calls: list[str]) -> dict[str, object]:
     an empty `firewall_commands` tuple cannot tell a plan that asked the machine
     nothing from one that asked it twice and then dropped the answers. Measured
     on m910q 2026-09-06 from a fresh `git clone --shared`, mutation MR1 in
-    `pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`: with the
+    `.notes/gates/bug41-loopback-2026-09-05/mutations-round4.txt`: with the
     `wants_firewall` guard cut out of the firewalld branch, that file's line 58
     reads `MUTATED-MR1 firewalld loopback: seams=['detect_firewalld',
     'detect_zones'] fw=[] manual=[] warnings=2`, and the extra warning (line 59)
@@ -5001,7 +5001,7 @@ def test_a_loopback_plan_asks_the_firewall_for_nothing() -> None:
     Measured on yulon-ubuntu 2026-09-06, before this branch existed: applying
     the loopback plan through the real Networking tab left `ufw allow 3724/tcp`
     and `ufw allow 8085/tcp` in `ufw show added`
-    (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`,
+    (`.notes/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`,
     taken 04:43:23, right after that Apply); in the same folder's
     `widget-loopback.log`, line 57 is the warning saying no other machine can
     reach this server, 58 is blank, 59 is `Applied:` and 60 is

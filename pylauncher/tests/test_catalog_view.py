@@ -56,7 +56,7 @@ opens, which is a hang dressed up as a timeout.
 the suite so a modal can never block a run. T33's real-dialog test needs the
 REAL one instead: it is what PySide6 actually returns (a plain `int`, not a
 `QMessageBox.StandardButton` member --
-`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`) that
+`.notes/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`) that
 the bug was measured against. Module import runs before any fixture, so this
 reference is unaffected by fixture ordering.
 """
@@ -716,7 +716,7 @@ def test_a_cancel_during_the_clone_does_not_offer_what_the_engine_will_refuse(
     """The cancel modal, on the folder a real stopped clone leaves. Clicked, not called.
 
     Shaped after the driver that found this,
-    `pyplan/gates/7.2-ubuntu-2026-09-05/widget_cancel_driver.py`: a real
+    `.notes/gates/7.2-ubuntu-2026-09-05/widget_cancel_driver.py`: a real
     `CatalogView` over a real `LogPanel`, Install pressed with
     `QTest.mouseClick` on the tile's own button and Stop pressed the same way
     on the panel's. Everything that run drove for real is real here except the
@@ -1668,7 +1668,7 @@ def test_a_real_static_ints_yes_still_adopts_an_unverified_folder(
     member (`_user_confirms_unverified`, `_adopt_with_identification`), which is
     exactly the shape that hid the bug: PySide6 6.11.2's static
     `QMessageBox.question()` returns the plain `int` used here instead
-    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
+    (`.notes/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
     """
     from PySide6.QtWidgets import QMessageBox
 
@@ -2084,7 +2084,7 @@ def test_a_real_static_ints_yes_still_offers_and_takes_the_restart(
 
     No other test exercises `_offer_a_restart_instead` yet, so this is also its
     first: it drives the exact shape the bug needs, the static call's plain
-    `int` (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`), rather than the
+    `int` (`.notes/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`), rather than the
     `QMessageBox.StandardButton` member every other confirm test in this file
     answers with.
     """
@@ -2108,7 +2108,7 @@ def test_a_real_static_ints_yes_still_offers_and_takes_the_restart(
 _DIALOG_POLL_MS = 20
 """How often the click loop below re-checks for the active modal `QMessageBox`.
 
-Mirrors `pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`'s
+Mirrors `.notes/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`'s
 `QTimer.singleShot(20, ...)`. Not a
 deadline -- see `_REAL_DIALOG_BOUND_MS`.
 """
@@ -2135,7 +2135,7 @@ def _click_active_message_box(
     so the only way to reach it from this same thread is to poll
     `QApplication.activeModalWidget()` from a queued timer while `question()`
     blocks in its own nested event loop -- the technique
-    `pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py` proved the bug with.
+    `.notes/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py` proved the bug with.
     """
     from PySide6.QtCore import QDeadlineTimer, QTimer
     from PySide6.QtWidgets import QApplication
@@ -2200,7 +2200,7 @@ def test_a_real_yes_on_the_suggestion_dialog_reads_as_yes(
     `ask_suggestion` seam with a plain Python fake (`_view()`, above), which is
     exactly why the regression went unnoticed -- the fakes return the enum
     member, and PySide6's real static `question()` does not
-    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`). This clicks the REAL
+    (`.notes/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`). This clicks the REAL
     dialog's REAL Yes
     button, the one path a fake cannot stand in for.
     """

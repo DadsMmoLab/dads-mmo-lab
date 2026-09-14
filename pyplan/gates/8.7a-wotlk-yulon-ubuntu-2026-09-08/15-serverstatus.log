@@ -1,7 +1,0 @@
-This plugin does not support propagateSizeHints()
-=== the Server tab, with the status read settled ===
-status label: 'status: db up, auth up, world up'
-SHOT 6-started.png  ac-worldserver alive at capture: True
-done
-QThread: Destroyed while thread '' is still running
-timeout: the monitored command dumped core

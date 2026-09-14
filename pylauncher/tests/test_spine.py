@@ -3026,7 +3026,7 @@ def test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why(
     under both. What went red was `asked == []` here, and — under M6 only —
     `test_the_machine_this_mode_is_for_has_no_lan_address_at_all` below, which
     is the shape M6 actually broke. Transcript:
-    `pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.
+    `.notes/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.
 
     The line is asserted to name the address, the tab that set it and the way
     back, because "left alone" with no reason is indistinguishable from the
@@ -3071,7 +3071,7 @@ def test_the_machine_this_mode_is_for_has_no_lan_address_at_all(tmp_path: Path) 
     network could not be worked out …" — and the `REALM_ADDRESS_UNKNOWN not in
     said` assertion below is the one that caught it. Every assertion in this
     file that predates round 3 passed under M6.
-    (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.)
+    (`.notes/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.)
     """
     nowhere = tmp_path / "no-lan-at-all"
     nowhere.mkdir()

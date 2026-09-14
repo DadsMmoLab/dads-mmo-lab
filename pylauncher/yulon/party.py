@@ -701,7 +701,7 @@ SAVE_COMMAND = "saveall"
 the level step needs one at all.
 
 **T16, measured on `yulon-ubuntu2` 2026-09-10**
-(`pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`). `.character level`
+(`.notes/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`). `.character level`
 on an ONLINE character calls `Player::GiveLevel` and writes no row at all — the
 row is written only on the offline arm
 (`src/server/scripts/Commands/cs_character.cpp:252-281`, read on the box at
@@ -1078,7 +1078,7 @@ def party_rows_sql(entry: CatalogEntry, *, master_guid: int) -> str:
 
     **The same query as `group_rows_sql` with the bot marker's clause taken
     out**, and it exists because of what the live half measured on
-    `yulon-ubuntu2` on 2026-09-11 (`pyplan/gates/8.6-altbot-live-yulon-ubuntu2-
+    `yulon-ubuntu2` on 2026-09-11 (`.notes/gates/8.6-altbot-live-yulon-ubuntu2-
     2026-09-11/`, §4): `add_named`'s poll could not see the character it had
     just added.
 
@@ -1456,7 +1456,7 @@ def _level_step(
     """Set the level, make `characters.level` answerable, and read it back.
 
     **The measurement this is built on** is
-    `pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`, and it overturns
+    `.notes/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`, and it overturns
     the reading T5 left behind rather than adding to it. On a bot freshly joined
     to a master's party, the level sent at +0, +5, +10, +20 and +30 seconds
     after the group row appeared LANDED every time and stayed landed: the
@@ -1610,10 +1610,10 @@ def _level_note(
     Until 2026-09-10 it said the row "has been seen to stay unwritten for as long
     as this panel watched it" and told the reader to take the level as not set.
     That was true of what
-    `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09` photographed —
+    `.notes/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09` photographed —
     a level of 42 at 13:12 (`panel-8-…png`) and one of 55 at 13:17 (`panel-9-…png`
     with `panel-transcript.log:61-130`), the row reading 1 in both — and it was
-    the wrong conclusion to draw from it. `pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10`
+    the wrong conclusion to draw from it. `.notes/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10`
     measured the same press with the world's own `.pinfo` beside the row: the
     level had landed within a second every time, and the row was simply not
     written yet (`cs_character.cpp:252-281`; see `SAVE_COMMAND`). So the panel
@@ -1904,7 +1904,7 @@ def bots_word(count: int) -> str:
 # <Name>` puts an EXISTING character -- the player's own alt, a guild mate, a
 # friend's character on a linked account -- into the master's group as a bot.
 # Measured on `yulon-ubuntu2` 2026-09-10, the record is
-# `pyplan/gates/8.6-altbot-measure-yulon-ubuntu2-2026-09-10/`:
+# `.notes/gates/8.6-altbot-measure-yulon-ubuntu2-2026-09-10/`:
 #
 # * there is no `.bot add`; the command is `.playerbots bot add <Name>`,
 #   `SEC_PLAYER, Console::No` (`PlayerbotCommandScript.cpp:36`), so SOAP cannot
@@ -2086,7 +2086,7 @@ def add_named(
 # Which of this server's characters the module would accept for THIS master,
 # with the refusal named where it would not. Every rule below is transcribed
 # from `mod-playerbots` at `b949b50b`, read on `yulon-ubuntu2` 2026-09-10; the
-# record is `pyplan/gates/8.6-altbot-measure-yulon-ubuntu2-2026-09-10/`, §2 for
+# record is `.notes/gates/8.6-altbot-measure-yulon-ubuntu2-2026-09-10/`, §2 for
 # the rules and §6 for the columns.
 #
 # The picker exists because none of the module's refusals can be heard from

@@ -380,14 +380,12 @@ def test_every_build_time_the_confirmation_quotes_is_still_recorded_in_pyplan() 
 
     text = rebuild_confirmation(ENTRY, Path("/srv"))
     checklist = (PYPLAN / "checklist.md").read_text(encoding="utf-8")
-    rounds = (PYPLAN / "hunt-rounds.md").read_text(encoding="utf-8")
-    for quoted, source, page in (
-        ("35-72 minutes", rounds.replace("–", "-"), "hunt-rounds.md"),
-        ("68 minutes", checklist, "checklist.md"),
-        ("15 minutes", checklist, "checklist.md"),
-    ):
+    # "35-72 minutes" is the hunt rounds' range; those rounds are kept in the
+    # maintainers' local notes, so only its presence in the sentence is pinned here.
+    assert "35-72 minutes" in text, "the confirmation no longer quotes 35-72 minutes"
+    for quoted in ("68 minutes", "15 minutes"):
         assert quoted in text, f"the confirmation no longer quotes {quoted}"
-        assert quoted in source, f"{quoted} is no longer recorded in pyplan/{page}"
+        assert quoted in checklist, f"{quoted} is no longer recorded in pyplan/checklist.md"
 
 
 def test_the_confirmation_says_what_it_costs_before_it_says_yes(tmp_path: Path) -> None:
@@ -674,7 +672,7 @@ def test_the_failed_name_is_let_go_once_the_containers_holding_it_are_replaced(
     """A `-failed` name docker refused is let go once the restore's own recreate frees it.
 
     **Measured on `yulon-ubuntu2`, 2026-09-09, on the first live press of the
-    restore arm** (`pyplan/gates/rollback-restore-yulon-ubuntu2-2026-09-09/`).
+    restore arm** (`.notes/gates/rollback-restore-yulon-ubuntu2-2026-09-09/`).
     `_let_go(named)` ran while the containers made from the new build were
     still there, so the daemon refused two of the four removals by name:
 
@@ -814,7 +812,7 @@ def test_a_fresh_install_waits_on_the_same_marker_the_rebuild_does(tmp_path: Pat
 # -- the build recipe the compile is handed ------------------------------------
 #
 # T8, filed from T4's live Tortoise upgrade on m910q (2026-09-09,
-# `pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`). The install's Dockerfile is
+# `.notes/gates/tortoise-upgrade-m910q-2026-09-09/`). The install's Dockerfile is
 # rendered ONCE, when the server is installed, and `rebuild_stages()` used to be
 # `(build, recreate, ready)` -- so `docker compose build` compiled whatever that
 # render left behind, and a fix shipped in this app's template could never reach

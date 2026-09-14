@@ -1,8 +1,0 @@
-﻿[15:23:38Z] ### 8.4a WINDOWS gate driver, stage case, 2026-09-08T15:23:38.439514+00:00 ###
-[15:23:38Z] ### box: yulon-win11, Windows-10-10.0.26200-SP0, tree: C:\gate\src84a ###
-[15:23:38Z] ANNOUNCE: 8.4a Windows: three spellings of Aiza
-[15:23:39Z] typed 'aiza': done=True 'You are teleporting Aiza (offline) to Orgrimmar.'
-[15:23:40Z] typed 'AIZA': done=True 'You are teleporting Aiza (offline) to Orgrimmar.'
-[15:23:40Z] typed 'aIZA': done=True 'You are teleporting Aiza (offline) to Orgrimmar.'
-[15:23:41Z] typed a name nobody has: done=False 'there is no character called NoSuchPersonHere on this server'
-[15:23:41Z] PASSED: every case finds the character, and a name nobody has is refused here

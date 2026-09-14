@@ -1,6 +1,0 @@
-The server started but never reported ready: ac-worldserver restarted 5 times while this waited, which is a crash loop and not a slow start. `docker compose logs ac-worldserver` in /home/pk/wowserver has what it printed before each one. The build from before this rebuild was put back and is running again. Before it was replaced, ac-worldserver had printed:
-cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
-cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead
-Starting worldserver...
-YULON-GATE-SABOTAGE: this worldserver build exits immediately (rollback-restore press, 2026-09-09)
-What the new build wrote into the database on its first start, if anything, is NOT put back by this -- the lines above say whether its updater ran -- so the old build is running on the database as the new one left it.

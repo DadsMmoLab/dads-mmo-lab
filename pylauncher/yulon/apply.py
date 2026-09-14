@@ -2505,7 +2505,7 @@ class Applier:
             # of which reach the database or the data volume. The fourth reads
             # what THIS RUN actually did: `log.conf_restart`, set by `_conf()`
             # the moment it writes a byte to a file the running world reads
-            # only at startup (T27; measured live, `pyplan/gates/8.6-spec-
+            # only at startup (T27; measured live, `.notes/gates/8.6-spec-
             # takes-effect-yulon-ubuntu2-2026-09-10/03-activate.log:38` —
             # activating `mod-playerbots`' conf reported `restart_recommended
             # = False` while the world went on running the OLD config until

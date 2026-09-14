@@ -478,7 +478,7 @@ def reset_own_password(
 
     A new password takes effect at the account's NEXT login; the account's
     `rank` would not. Measured on a live tortoise server 2026-09-09
-    (`pyplan/gates/tortoise-soap-yulon-arch-2026-09-09/`, `rank-cache-test3.log`):
+    (`.notes/gates/tortoise-soap-yulon-arch-2026-09-09/`, `rank-cache-test3.log`):
     this tree reads `account.rank` at worldserver startup, so an account granted
     rank 4 while the world runs is still refused by SOAP until a restart. Two
     columns on one table, two different rules -- a repair that rotates the
@@ -496,7 +496,7 @@ def reset_own_password(
             statement that cannot run. Tortoise (`mangos_sha`) is the tree that
             proved it: the Repair press died with `ERROR 1054 Unknown column
             'salt' in 'SET'`
-            (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`),
+            (`.notes/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`),
             and the only way to a working channel that night was to delete the
             app's account and make it again.
     """

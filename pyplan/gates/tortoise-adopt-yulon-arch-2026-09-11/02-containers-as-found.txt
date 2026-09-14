@@ -1,9 +1,0 @@
-=== containers: as found ===  2026-09-10 22:10:43 UTC
-  > tortoise-mangosd|Exited (0) 46 hours ago|yulon.local/cmangos-tortoise-server:native-54fa64f0
-  > tortoise-realmd|Exited (0) 46 hours ago|yulon.local/cmangos-tortoise-server:native-54fa64f0
-  > tortoise-db|Exited (0) 46 hours ago|mariadb:10.6
-  > ac-worldserver|Exited (0) 2 days ago|yulon.local/ac-wotlk-worldserver:native-056ed20d
-  > ac-authserver|Exited (0) 2 days ago|yulon.local/ac-wotlk-authserver:native-056ed20d
-  > ac-db-import|Exited (0) 9 days ago|yulon.local/ac-wotlk-db-import:native-056ed20d
-  > ac-database|Exited (0) 2 days ago|mysql:8.4
-  > ac-client-data-init|Exited (0) 9 days ago|yulon.local/ac-wotlk-client-data:native-056ed20d

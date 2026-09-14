@@ -406,7 +406,7 @@ def test_the_cancel_copy_tells_the_truth_about_resuming(tmp_path: Path) -> None:
     measured on yulon-ubuntu 2026-09-05, "Using /home/pk/gate72-cycle2
     (resuming)" followed by "Already finished: clone-core, clone-modules,
     generate-compose"
-    (`pyplan/gates/7.2-ubuntu-2026-09-05/cycle2-pressB.log:26`) -- so the copy
+    (`.notes/gates/7.2-ubuntu-2026-09-05/cycle2-pressB.log:26`) -- so the copy
     promised the resume from then on.
 
     It promised it on every folder, and that is what this now pins. The record
@@ -464,7 +464,7 @@ def test_the_cancel_copy_does_not_read_upstreams_compose_file_as_its_own(
     a 2.2 GB checkout whose only compose file was upstream's own -- git-tracked
     and unmodified, first line `# docker-compose.yml for AzerothCore.` -- and
     the modal told the user the source was there and to press "Use existing..."
-    (`pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel.log`, with
+    (`.notes/gates/7.2-ubuntu-2026-09-05/widget-cancel.log`, with
     `widget-cancel-folder-after.txt` for the folder). Pressing "Use existing..."
     there adopts a folder holding no server, because `attach_existing()` asks
     that same `compose_file()` question.
@@ -887,7 +887,7 @@ def test_the_engine_refuses_the_folder_a_cancelled_clone_leaves(tmp_path: Path) 
     cancelled widget run left, yulon-ubuntu 2026-09-05, exited 1 with "is
     already a git checkout of ... and there is no record here of an install
     this app made"
-    (`pyplan/gates/7.2-ubuntu-2026-09-05/cycle2-pressA2-refused-existing-checkout.log`).
+    (`.notes/gates/7.2-ubuntu-2026-09-05/cycle2-pressA2-refused-existing-checkout.log`).
     """
     url = "https://github.com/mod-playerbots/azerothcore-wotlk.git"
     checkout = tmp_path / "checkout"

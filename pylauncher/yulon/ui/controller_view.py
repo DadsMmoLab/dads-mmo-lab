@@ -1873,7 +1873,7 @@ def _for_tortoise(
     # onto the Penqle core, which has no SOAP at all: the string does not occur
     # anywhere under its `src/` but in one comment, `mangosd.conf.dist.in` ships
     # no `SOAP.*` key, and no gsoap is vendored (measured on `yulon-arch`
-    # 2026-09-11, `pyplan/gates/t30-measure-yulon-arch-2026-09-11/05-conf-keys.txt`).
+    # 2026-09-11, `.notes/gates/t30-measure-yulon-arch-2026-09-11/05-conf-keys.txt`).
     # So `operations.channel` says `attach` again and this is the transport that
     # goes with it.
     #
@@ -4773,7 +4773,7 @@ class ControllerView(QWidget):
             # for the same measured reason: the reader is a BUTTON. The entry's
             # sentence is ~200 characters, and 8.4c photographed a 180-character
             # one running off the end of the window
-            # (`pyplan/gates/8.4c-vanilla-m910q-2026-09-07/4-two-of-one-name.png`).
+            # (`.notes/gates/8.4c-vanilla-m910q-2026-09-07/4-two-of-one-name.png`).
             # The short half is this view's because it is the same clause on
             # every tree that has such a refusal -- the field's own definition
             # is "what to say to a character who is NOT logged in" -- and it is

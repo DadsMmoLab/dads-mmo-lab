@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import ast
 import math
-import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1053,50 +1052,6 @@ def test_a_measured_duration_that_rounds_to_zero_is_not_reported_as_zero() -> No
 # -- two ceilings, because there are two kinds of wait -----------------------
 
 
-def _tortoise_stage_line() -> re.Match[str]:
-    """The 9p ready-stage wall, re-derived from the gate's own write-up rather than retyped.
-
-    `native.SLOWEST_MEASURED_FIRST_BOOT_SECONDS` is a measurement, and a
-    measurement typed into a source file is a number somebody chose. This reads
-    `pyplan/gates/7.7-win11-tortoise/README.md` -- the evidence copied off
-    `yulon-win11-gate` on 2026-09-05 while the containers were still up -- and
-    checks the stated seconds against the two clock stamps beside them, so the
-    artefact has to be self-consistent before this file will believe it.
-
-    That makes the ceiling constant OWNED by a file on disk: editing the number
-    in `native.py` without the run that justifies it goes red here.
-    """
-    readme = (
-        Path(__file__).resolve().parents[2]
-        / "pyplan"
-        / "gates"
-        / "7.7-win11-tortoise"
-        / "README.md"
-    )
-    assert readme.is_file(), f"{readme} is the evidence the management floor is derived from"
-    found = re.search(
-        r"Ready stage wall: (\d\d):(\d\d):(\d\d)\D+(\d\d):(\d\d):(\d\d) = \*\*(\d+) s\*\*",
-        readme.read_text(encoding="utf-8"),
-    )
-    assert found is not None, (
-        f"{readme} no longer states its ready stage as `Ready stage wall: HH:MM:SS -> "
-        "HH:MM:SS = **N s**`, so this file cannot re-derive the number it bounds waits with"
-    )
-    return found
-
-
-def _tortoise_stage_wall_from_the_gate() -> int:
-    """The seconds that write-up states. Cross-checked against its own stamps by a test.
-
-    Split from the parse so that only ONE test dies if the artefact and its
-    arithmetic disagree. This runs at import time -- `parametrize` needs the
-    number at collection -- and an assertion here takes the whole file down with
-    a collection error, which is the right noise for a MISSING evidence file and
-    much too much for a mistyped one.
-    """
-    return int(_tortoise_stage_line()[7])
-
-
 MEASURED_9P_BOOTS: dict[str, int] = {
     # yulon-win11-gate 2026-09-04, `docker logs -t`, mangosd start -> first `Avg
     # Diff:`. The two stamps are in this file's own header and in
@@ -1104,8 +1059,8 @@ MEASURED_9P_BOOTS: dict[str, int] = {
     "wow-vanilla, 06:12:43Z -> 06:37:22Z": _stamps_apart("06:12:43", "06:37:22"),
     "wow-tbc, 18:59:55Z -> 19:45:58Z": _stamps_apart("18:59:55", "19:45:58"),
     # yulon-win11-gate 2026-09-05, the ready STAGE's wall clock, which is what a
-    # wait actually sits through. Read off the gate's own write-up.
-    "wow-tortoise, ready-stage wall": _tortoise_stage_wall_from_the_gate(),
+    # wait actually sits through. The stamps are in `pyplan/checklist.md`'s 7.7 block.
+    "wow-tortoise, 23:41:37 -> 00:43:19, ready-stage wall": _stamps_apart("23:41:37", "00:43:19"),
 }
 """Every first boot this project has timed on Docker Desktop's 9p share. All healthy.
 
@@ -1115,8 +1070,7 @@ management ceiling shorter than the largest of them is a bug rather than a
 policy: it refuses a server that was about to succeed, which is the 2026-09-04
 verdict this whole file exists to remove.
 
-Not one of the three seconds figures is typed here: two are computed from their
-stamps, the third is read out of the gate's README.
+Not one of the three seconds figures is typed here: each is computed from its stamps.
 """
 
 
@@ -1146,37 +1100,13 @@ def _budgets_in_use() -> dict[str, float]:
 BUDGETS_IN_USE = _budgets_in_use()
 
 
-def test_the_gate_write_up_the_floor_is_read_from_agrees_with_its_own_clock() -> None:
-    """The artefact has to be self-consistent before this file believes a number in it.
-
-    `pyplan/gates/7.7-win11-tortoise/README.md` states the ready stage as
-    `23:41:37 -> 00:43:19 = **3702 s**`, and the arithmetic is what makes that a
-    measurement rather than a figure: the two stamps are copied out of the
-    installer's own transcript. Checked here so that editing the seconds without
-    the run behind them fails HERE, next to the evidence, as well as in
-    `native.py`'s constant.
-
-    An incomplete artefact reads as fact -- so this asks the file, and then asks
-    the file to agree with itself.
-    """
-    found = _tortoise_stage_line()
-    start = int(found[1]) * 3600 + int(found[2]) * 60 + int(found[3])
-    end = int(found[4]) * 3600 + int(found[5]) * 60 + int(found[6])
-    spanned = end - start + (24 * 3600 if end < start else 0)
-
-    assert spanned == int(found[7]), (
-        f"the 7.7 write-up states {found[7]}s of ready stage and its own stamps span "
-        f"{spanned}s; one of the two is wrong and the management floor is read off it"
-    )
-
-
 def test_the_boots_this_file_bounds_waits_with_are_the_difference_between_their_own_stamps() -> (
     None
 ):
     """`native.py`'s three seconds figures, each checked against the citation beside it.
 
-    Two are `docker logs -t` stamps and the third is the 7.7 gate's README. All
-    three are recomputed here rather than compared to a second typed copy --
+    Two are `docker logs -t` stamps and the third is the 7.7 gate's ready-stage
+    stamps. All three are recomputed here rather than compared to a second typed copy --
     until 2026-09-05 `native.py` printed 1476 and 2760 against stamps that span
     1479 and 2763, because somebody multiplied the write-up's rounded minutes
     (24.6, 46.0) back out by 60. Nothing downstream was wrong (the floor takes
@@ -1372,7 +1302,7 @@ def test_a_management_wait_is_bounded_by_the_ceiling_and_shortens_its_last_windo
     earlier version of this line said a Stop/Start BUTTON could block for six
     hours. It could not: `yulon/ui/controller_view.py:998` and `:1006` call
     `controller.start` and `.stop`, neither of which waits. The only code that
-    runs a management wait is `pyplan/gates/gate-79-controller-surface.py`,
+    runs a management wait is `.notes/gates/gate-79-controller-surface.py`,
     three times a run -- see `native.MANAGEMENT_CEILING_WINDOWS`, which had the
     claim removed on 2026-09-05 while this docstring kept it.)
 

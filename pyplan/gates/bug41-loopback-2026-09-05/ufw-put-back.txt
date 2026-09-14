@@ -1,6 +1,0 @@
-ufw show added, after the two rules the Apply press added were deleted:
-Added user rules (see 'ufw status' for running firewall):
-(None)
-
-ufw status:
-Status: inactive

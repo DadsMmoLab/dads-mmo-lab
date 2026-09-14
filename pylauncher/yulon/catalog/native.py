@@ -835,7 +835,7 @@ def loopback_chosen_on_purpose(intent: networking.NetworkIntent) -> str:
     logs in, and is then told the world server is at 127.0.0.1, i.e. on itself,
     so it cannot play. Kept rather than reworded because this exact string is
     what the closing-step gate driver asserts
-    (`pyplan/gates/bug41-loopback-2026-09-05/closing_step_driver_b41.py:121`)
+    (`.notes/gates/bug41-loopback-2026-09-05/closing_step_driver_b41.py:121`)
     and what two committed press records of 2026-09-06 hold verbatim
     (that folder's `closing-step-output.txt:13` and
     `yulon-ubuntu-press/yulon-log-press-chosen.txt:12`); rewording it would make
@@ -1334,7 +1334,7 @@ under both numbers below.
     TBC       2763 s  yulon-win11-gate 2026-09-04, `docker logs -t`,
                       18:59:55Z -> 19:45:58Z
     Tortoise  3702 s  yulon-win11-gate 2026-09-05, ready-stage wall,
-                      `pyplan/gates/7.7-win11-tortoise/README.md`,
+                      `.notes/gates/7.7-win11-tortoise/README.md`,
                       23:41:37 `up` -> 00:43:19 `finished` box-local (the
                       banner's own "59 minutes 18 seconds" is 3558 s of that;
                       the stage wall is what a wait sits through, so the stage
@@ -1467,7 +1467,7 @@ version of this docstring rested the size on them and they do not wait —
 `.stop`, neither of which asks whether the server came up. Measured 2026-09-05
 by grepping the tree: outside `native.py` and `docker.py` every `wait_ready` /
 `wait_server_ready` is a definition or prose, and the only code that RUNS one is
-`pyplan/gates/gate-79-controller-surface.py`, three times per run (lines 219,
+`.notes/gates/gate-79-controller-surface.py`, three times per run (lines 219,
 414, 487). Its worst case — a server that keeps printing and never says ready —
 is therefore three ceilings:
 
@@ -2344,7 +2344,7 @@ class StagedInstaller:
         bytes alone, so the mtime does not move and the layer cache survives)
         and refuses a file this app did not write rather than replacing it. What
         the omission cost was measured on m910q the night of 2026-09-09
-        (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`): that install's
+        (`.notes/gates/tortoise-upgrade-m910q-2026-09-09/`): that install's
         Dockerfile had been rendered 2026-09-07 and the template was fixed
         2026-09-08 (`3a1ed6ee` -- both `FROM` lines to ubuntu:24.04 and the
         `INSERT IGNORE` rewrite one migration needs to apply at all), so the
@@ -4981,7 +4981,7 @@ class StagedInstaller:
         Before, and not after: on 2026-09-06 at `30671d6e` two mutations of this
         order were run on m910q from a fresh `git clone --shared` with
         `__pycache__` purged on both sides
-        (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`). Reading
+        (`.notes/gates/bug41-loopback-2026-09-05/mutations-round3.txt`). Reading
         the intent after `self._detected_lan_ip()` still left the row alone, and
         reading it after the `address is None` return printed
         `REALM_ADDRESS_UNKNOWN` instead of the §41 sentence on a machine with no

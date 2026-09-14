@@ -1,9 +1,0 @@
-[14:22:29] Applying pending database updates for WoW Tortoise in /home/pk/tortoise-server
-[14:22:29] You can stop this at any time. This does two things and nothing else: it starts this install's database on its own if it is down, and it applies the parts of the install plan that are meant to be re-applied to a server that already exists. It does not start the world server, does not compile anything, does not fetch anything, and does not re-run the rest of the install — your databases keep the completion marker they already have and no new one is written. If they do not read as a finished import, this stops and says so rather than importing them.
-[14:22:29] Step 1 of 2 (50%): start-db
-[14:22:29] --- start-db
-[14:22:29] Starting the database, which the import writes into.
-[14:22:36] The database is up.
-[14:22:36] Step 2 of 2 (100%): import
-[14:22:36] --- import
-[14:22:36] Databases left half-written are detected and cleared before the import is run again, so nothing here has to be undone by hand.

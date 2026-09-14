@@ -1,4 +1,0 @@
-=== client realmlist ===  2026-09-10 22:15:19 UTC
-before: b'set realmlist logon.turtle-server-eu.kz\r\n'
-write_client_realmlist wrote: /home/pk/clients/TurtleWoW/realmlist.wtf
-after:  b'set realmlist 127.0.0.1\n'

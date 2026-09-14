@@ -193,7 +193,7 @@ def test_buildkits_step_count_becomes_a_percent() -> None:
     out of a total, per stage of the Dockerfile, and that is what moves.
 
     The sample is a real line, taken from the 7.7 WotLK gate's build transcript
-    (`pyplan/gates/`): every step line there carries its stage's NAME before the
+    (`.notes/gates/`): every step line there carries its stage's NAME before the
     count -- `#10 [builder 3/6]`, `#10 [ac-authserver skeleton 3/4]` -- because
     every Dockerfile this app generates is multi-stage.
 
@@ -213,7 +213,7 @@ def test_a_buildkit_step_with_no_stage_name_is_read_too() -> None:
     """`#5 [2/4]` is what a SINGLE-stage Dockerfile prints, and it must not be missed.
 
     Every Dockerfile this app generates today is multi-stage, so every step line
-    in `pyplan/gates/` carries a name -- but the pattern used to REQUIRE the
+    in `.notes/gates/` carries a name -- but the pattern used to REQUIRE the
     space that follows one, which made the unnamed shape unreadable for no
     reason. A template that grows a single-stage variant, or an upstream
     `docker-compose.yml` with one, would have gone silently unread.
@@ -264,7 +264,7 @@ def test_the_compilers_percent_wins_where_a_line_carries_both() -> None:
 def test_the_mmap_generators_tile_count_becomes_a_percent_and_a_short_sentence() -> None:
     """The 97 minutes of tile lines the T30 install wrote, as one moving field.
 
-    Measured from `pyplan/gates/7.7-win11-tortoise/tortoise77.log`, which holds
+    Measured from `.notes/gates/7.7-win11-tortoise/tortoise77.log`, which holds
     8005 of these: `[Map 000] Building tile [22,52] (01 / 741)`. The percentage
     is within the map, because that is what the numbers in the line are, and the
     text is rewritten short — the tile's own coordinates are noise at one line
@@ -324,7 +324,7 @@ def test_a_relayed_line_that_divides_by_nothing_is_tool_output() -> None:
     """A total of zero is not a percentage, and must not be a crash either.
 
     Defensive rather than observed: no `0/0` appears in any gate transcript in
-    `pyplan/gates/`. It is guarded because the cost of being wrong is not a
+    `.notes/gates/`. It is guarded because the cost of being wrong is not a
     wrong reading — it is a `ZeroDivisionError` on the thread carrying a running
     install's output.
 

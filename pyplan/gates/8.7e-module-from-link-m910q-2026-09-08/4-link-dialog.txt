@@ -1,2 +1,0 @@
-activeModalWidget title: ['Install a module from a link']
-ask_module_link returned: None (rejected dialog == cancel == None)

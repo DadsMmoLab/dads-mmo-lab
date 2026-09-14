@@ -1222,10 +1222,10 @@ run, and nothing was ever installed on Arch, because the AppImage will not launc
    count that has never been captured under either wording). That acceptance is what ticking 7.1
    implies, and it is the whole of the reason; no further justification for it exists and none is
    invented here.
-3. **7.1 ticks**, which costs a citation pass on `pyplan/phase7-plans/7.1-spine-azerothcore-linux.md`
+3. **7.1 ticks**, which costs a citation pass on `.notes/phase7-plans/7.1-spine-azerothcore-linux.md`
    in the same commit, because `tests/test_docs_pins.py` widens to a plan the moment its phase line
    reads `- [x]`. That pass was paid: 141 names presented as live with 13 unresolved before it, 135
-   live with 0 unresolved after, evidence in `pyplan/gates/7.1-tick-2026-09-06/`.
+   live with 0 unresolved after, evidence in `.notes/gates/7.1-tick-2026-09-06/`.
 
 **What it does not change.**
 
@@ -1247,7 +1247,7 @@ run, and nothing was ever installed on Arch, because the AppImage will not launc
 **The cost avoided.** The ~4 h figure is the estimate that was put to the owner in the same
 exchange, not a measurement, and it is recorded as an estimate. What is measured, and is the floor
 under it: the Fedora AppImage install spent **52 min 40 s** between `systemd-inhibit` and
-`install of wow-wotlk finished` (`pyplan/gates/7.1-fedora44-appimage.log:11` and `:19`), and that run
+`install of wow-wotlk finished` (`.notes/gates/7.1-fedora44-appimage.log:11` and `:19`), and that run
 began with Docker already installed and `pk` already in the `docker` group. A cold-checkpoint run
 adds a provisioning press and a re-login before any of it, and the Arch half adds a package install
 and a second full build on a machine that has never compiled AzerothCore.

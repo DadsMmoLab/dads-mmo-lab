@@ -228,7 +228,7 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     # skipped in 26.90s`, exit 0 — the mutation survived. At `aa6ab59e` (this
     # line present) the same mutation printed `1 failed, 2791 passed, 4 skipped`,
     # exit 1. Transcript:
-    # `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutation-seam-default-suite-yulon-fedora.txt`.
+    # `.notes/gates/bug43-keepawake-win11-2026-09-05/mutation-seam-default-suite-yulon-fedora.txt`.
     # Without it, a refactor that swapped the default the app hands the
     # installer would have looked like a no-op while no Windows install ever
     # held the machine awake.

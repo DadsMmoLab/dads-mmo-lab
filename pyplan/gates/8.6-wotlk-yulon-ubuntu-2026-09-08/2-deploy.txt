@@ -1,8 +1,0 @@
-=== DEPLOY  2026-09-08 09:54:34Z ===
-source     : /home/pk/gate86/pylauncher/lua
-dest       : /home/pk/wowserver/env/dist/etc/modules/lua_scripts
-changed    : True
-names      : ['dml_addclass.lua', 'dml_bridge_ping.lua', 'dml_login.lua', 'dml_uninvite.lua', 'dml_whisper.lua']
-
-second press, to show the copy is idempotent:
-changed    : False

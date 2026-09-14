@@ -1,5 +1,0 @@
-﻿[16:02:08Z] ### 8.4a WINDOWS gate driver, stage logout, 2026-09-08T16:02:08.835078+00:00 ###
-[16:02:08Z] ### box: yulon-win11, Windows-10-10.0.26200-SP0, tree: C:\gate\src84a ###
-[16:02:09Z] ===== GROUND: Amvezuan online='0', what the world was given: {'level': '55', 'map': '0', 'where': 'Stormwind'} =====
-[16:02:10Z] the row now: level 55, map 0, at_login 1, health 3179, logout_time 2026-09-08 15:59:57
-[16:02:10Z] PASSED: the row carries every online action, written at the logout

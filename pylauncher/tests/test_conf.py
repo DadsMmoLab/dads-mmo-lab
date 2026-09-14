@@ -621,7 +621,7 @@ def test_materialise_does_not_accept_a_directory_as_a_dist_file(tmp_path: Path) 
 
 # The two shapes the Penqle core forced the field into existence for, read off the
 # built image on `yulon-arch` 2026-09-11
-# (`pyplan/gates/t30-measure-yulon-arch-2026-09-11/12-image-contents.txt`):
+# (`.notes/gates/t30-measure-yulon-arch-2026-09-11/12-image-contents.txt`):
 #
 #   /opt/tortoise/etc/aiplayerbot.conf              <- no `.dist` at all
 #   /opt/tortoise/etc/modules/tortoise_bots.conf.dist  <- a `.dist`, one level down

@@ -1,9 +1,0 @@
-=== probe ===  2026-09-10 21:45:18 CEST
-MARKER_TABLE: yulon_install  marker_db: tw_world
-marker table anywhere on this server: 'tw_world\tyulon_install'
-ctx.updates_only: True
-probe answer: imported | complete: True | detail: tw_world.yulon_install records a finished import
-import_reads_as_finished: True
-adoption_gaps: ()
-adopt_state (the button's reading): ImportState(state='imported', detail='tw_world.yulon_install records a finished import', complete=True)
-marker_row: MarkerRow(schema='tw_world', table='yulon_install', plan_hash='8b60e764371f2293', databases=('tw_world', 'tw_logon', 'tw_char'))

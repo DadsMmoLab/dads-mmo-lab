@@ -401,7 +401,7 @@ def test_the_env_name_is_ac_plus_upper_snake_of_the_ini_key() -> None:
 
     `Config.cpp:370-374` is a doc comment carrying exactly these three, and
     `:391-394` is the separator rule (`.`, `-` and space become `_`); the read
-    is `pyplan/phase8-reads/azerothcore.md`. They are the fixtures BECAUSE they
+    is `.notes/phase8-reads/azerothcore.md`. They are the fixtures BECAUSE they
     are upstream's own: a rule checked against examples this repo invented
     would only prove this repo is self-consistent.
 

@@ -284,7 +284,7 @@ def generated_compose_files(server_dir: Path) -> tuple[str, ...]:
     Measured on yulon-ubuntu 2026-09-05: a WotLK install stopped 20 s into
     `clone-core` left a folder whose only compose file was upstream's own,
     git-tracked and unmodified
-    (`pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`).
+    (`.notes/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`).
     That is one family on one box. Whether the CMaNGOS repositories ship one
     too has not been measured, and nothing here needs it to: the question this
     function answers is about the marker, not about upstream's habits, so a
@@ -313,7 +313,7 @@ MEASURED_BUILD_TIMES = (
 Every number is a citation, and `test_rebuild.py` pins each one to the page it
 came from so a friendlier figure cannot be substituted quietly:
 
-* *35-72 minutes* — `pyplan/hunt-rounds.md`, the range across the boxes the
+* *35-72 minutes* — `.notes/hunt-rounds.md`, the range across the boxes the
   hunt rounds were planned around;
 * *68 minutes* — `pyplan/checklist.md`, the native-Windows gate of 2026-09-04,
   which also records the Docker VM it was given (11.7 GB, 2 jobs) because the
@@ -363,7 +363,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
       rendered on the day the server was installed, so a fix shipped in a later
       version of the app could not reach it — measured on m910q that night,
       where the Tortoise upgrade needed that render run by hand first
-      (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`). It is written again
+      (`.notes/gates/tortoise-upgrade-m910q-2026-09-09/`). It is written again
       now, and this says so before the press rather than in the log, because
       "the same compile as last time" and "the same compile with this version's
       fixes" are different answers to the question being asked. BOTH files are
@@ -459,7 +459,7 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     **The advice below is two independent halves, and each is decided by the
     thing that actually gates it.** They were one split on `compose_file()`
     until the 7.10 widget-cancel run drove the whole path with real clicks
-    (yulon-ubuntu 2026-09-05, `pyplan/gates/7.2-ubuntu-2026-09-05/`): 15 checks
+    (yulon-ubuntu 2026-09-05, `.notes/gates/7.2-ubuntu-2026-09-05/`): 15 checks
     green, and a modal that got both halves wrong on the folder in front of it.
 
     *"Use existing…"* is offered when, and only when, `compose_file()` answers.
@@ -534,7 +534,7 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     the ENGINE can take, and the routes were enumerated rather than waved at.
     The clone itself is one: upstream's `docker-compose.yml` is a git-tracked
     file of `mod-playerbots/azerothcore-wotlk`, read off a real install in
-    `pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`. A
+    `.notes/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`. A
     checkout already in the folder is the other, and
     `refuse_unowned_checkout()` refuses one before any stage records anything
     (`test_the_clone_artefact_reading_is_given_only_where_the_clone_lands_there`).

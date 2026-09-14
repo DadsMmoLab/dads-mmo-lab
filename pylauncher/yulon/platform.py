@@ -4037,7 +4037,7 @@ def _keep_awake_windows() -> Iterator[None]:
     `holding this machine awake for the build: SetThreadExecutionState(
     ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` at 13:30:21 box-local, so the call
     resolved and Windows answered non-zero
-    (`pyplan/gates/bug43-keepawake-win11-2026-09-05/`). What the OS then DOES
+    (`.notes/gates/bug43-keepawake-win11-2026-09-05/`). What the OS then DOES
     with the assertion — that an idle machine really stays awake for hours —
     is still unmeasured; roadmap 6.3's gate owns that half.
 

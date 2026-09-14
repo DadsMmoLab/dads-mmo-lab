@@ -1433,7 +1433,7 @@ class CmangosInstaller(StagedInstaller):
         plan reaches fresh installs only, and on 2026-09-09 the m910q's Tortoise
         world stopped starting for want of a table one such phase's files create
         — honor maintenance fell due for the first time and truncates
-        `character_inventory_copy` (`pyplan/gates/7.9-rerun-m910q-2026-09-09`,
+        `character_inventory_copy` (`.notes/gates/7.9-rerun-m910q-2026-09-09`,
         finding 1). Nothing in the app could put those files on that install.
 
         So the exception is declared per PHASE and by the phase itself, beside
@@ -1734,7 +1734,7 @@ class CmangosInstaller(StagedInstaller):
         finished.", and this function's refusal lands three log lines after
         that (`Step …`, `--- extract`, the stage's cancel note; `run_plan()`'s
         refusal, one yield further on, lands four -- the round-10 review's
-        press probe, `pyplan/gates/doodad-2026-09-05/round10-press-probe.txt`),
+        press probe, `.notes/gates/doodad-2026-09-05/round10-press-probe.txt`),
         so a sentence reading "Nothing was run" would be read directly under
         a line saying the build did.
         `extract.blocked_message()` carries the same scope for the same
