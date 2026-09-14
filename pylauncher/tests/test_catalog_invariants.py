@@ -1131,6 +1131,32 @@ def test_the_provenance_debts_are_exactly_these_four() -> None:
         assert len(reason) > 80, f"{key}: a debt with no reason is a debt nobody can discharge"
 
 
+def test_a_measured_provenance_cites_a_gate_write_up_by_its_full_name() -> None:
+    """The shape half of a citation this suite can no longer open.
+
+    Until 2026-09-14 a test here opened every `measured-on` page and failed on
+    one that was not there. The gate write-ups then moved to the maintainers'
+    gitignored `.notes/`, and that check moved with them. What a public checkout
+    can still hold a row to is the form: a gate folder named by step, game, box
+    and date, and the README inside it -- not prose, not a bare folder, not a
+    path that climbs out of the notes.
+    """
+    shape = re.compile(r"gates/\d+\.\d+[a-z]?-[a-z0-9-]+-\d{4}-\d{2}-\d{2}/README\.md")
+    measured = {
+        key: mark.cite
+        for key, mark in catalog_provenance.PROVENANCE.items()
+        if mark.kind == "measured-on"
+    }
+    wrong = {key: cite for key, cite in measured.items() if not shape.fullmatch(cite)}
+
+    assert not wrong, f"these measured-on rows do not name a gate write-up: {wrong}"
+    assert len(measured) == 34, len(measured)
+    assert not shape.fullmatch("measured on m910q, 2026-09-08"), "the shape admits prose"
+    assert not shape.fullmatch(
+        "gates/8.4a-wotlk-yulon-ubuntu-2026-09-07/"
+    ), "a folder is not a page"
+
+
 def test_a_read_from_source_provenance_cites_a_line_and_not_a_sentence() -> None:
     """A prediction has to say which line it read, and this repo cannot check the line.
 
