@@ -1,0 +1,5 @@
+All checks passed!
+217 files would be left unchanged.
+mypy : Success: no issues found in 106 source files
+mypy --platform win32: Success: no issues found in 106 source files
+mypy --platform darwin: Success: no issues found in 106 source files

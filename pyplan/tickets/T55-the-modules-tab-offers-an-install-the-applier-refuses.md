@@ -1,6 +1,6 @@
 # T55 — the Modules tab offers an Install the applier will refuse
 
-**Status:** IN PROGRESS.
+**Status:** FIXED on the branch; gated, reviewed twice, draft PR stacked on #164.
 **Filed:** 2026-09-14 by the lead. The WIP (93b381f8, kept as `backup/t55-wip-before-restack`)
 predates this file; the rule is ticket first, and this is the catch-up.
 **Branch:** `feat/conflicts-in-the-modules-tab`, stacked on T59's
@@ -45,3 +45,23 @@ screen. Closing the gap means opening every clone folder on each reload and chan
 3. View test: the menu route refuses before any prompt is asked.
 4. A test pinning the one-direction difference.
 5. A named mutation per test; full gate on 3.13 and 3.11; `/adv-review` before the PR.
+
+## Gate — 2026-09-14, at 72224bcb
+
+`1 failed, 4668 passed, 8 skipped, 23 deselected` on 3.13 and 3.11. The failure is
+`test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker`, upstream's own,
+fixed by #162. ruff, black clean; mypy clean on linux, win32, darwin. Nine mutations MA–MI, each
+killed, in `pyplan/gates/t55-conflicts-in-the-modules-tab-2026-09-14/`.
+
+## Review round 1 — one MEDIUM, taken
+
+Codex adversarial, against the T59 base. *"Failed install/remove leaves conflict locks based on
+pre-operation disk state."* True: `_module_done()` re-read the disk and `_module_failed()` did
+not, and an install can clone before a later step raises. `_module_failed()` now reloads modules
+and tuning; `test_a_failed_press_redraws_the_conflict_lock_from_the_disk` drives the installed
+seam changing under a failed install and a failed remove (mutation MI).
+
+## Review round 2 — approve
+
+*"No material findings."* It checked the custom-module, update and keyboard routes converge on the
+same slots, and called the empty-folder asymmetry conservative.
