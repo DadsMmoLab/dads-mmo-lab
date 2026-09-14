@@ -1,0 +1,27 @@
+--- /tmp/lp.orig	2026-09-14 00:38:56.481966301 +0200
++++ pylauncher/manifests/wow-wotlk/ale/lootpet.json	2026-09-14 00:38:56.482413191 +0200
+@@ -7,15 +7,21 @@
+   "description": "Any summoned vanity pet fetches loot from nearby corpses you or your group tapped. Finds them by sweeping for corpses rather than by a kill hook, so grey mobs and max-level kills count too.",
+   "source": {
+     "repo": "pjerra/LootPet2",
+-    "rev": "4b1c3ed4bb2f86986c72c4379ddaef0bc980bdc6"
++    "rev": "56d15536ce065d73651d1b647a772bfa3bb80c73"
+   },
+   "requires": [
+     "mod-ale"
+   ],
+   "deploy": [
+     {
+-      "src": "LootPet.lua",
+-      "dest": "env/dist/etc/modules/lua_scripts/"
++      "src": "LootPet2.lua",
++      "dest": "env/dist/etc/modules/lua_scripts/",
++      "rename": [
++        [
++          "LootPet2.lua",
++          "LootPet.lua"
++        ]
++      ]
+     }
+   ]
+ }

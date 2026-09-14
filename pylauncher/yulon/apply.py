@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from string import Formatter
-from typing import IO, Literal, Protocol
+from typing import IO, Any, Literal, Protocol
 
 from yulon import docker, platform, rmtree, runner
 from yulon.catalog import composegen
@@ -40,12 +40,14 @@ from yulon.dbreads import SqlReader
 from yulon.git import (
     BehindReader,
     CloneSpec,
+    ContainerGit,
     Git,
     GitError,
     HistoryReader,
     RemoteReader,
     RunnerGit,
     TreeReader,
+    git_available,
     same_repo,
 )
 from yulon.log import get_logger
@@ -61,6 +63,45 @@ CLONE_DIRS: dict[ManifestType, str] = {
     "keg": "ale_scripts",
     "mod": "sql_scripts/clones",
 }
+
+
+def _default_git(server_dir: Path) -> Git:
+    """Host git where it can actually run, containerised git otherwise (T58).
+
+    The SERVER install has always cloned through `ContainerGit`, so Docker alone
+    is enough to get a running server and a user never finds out whether they
+    have git. The applier then defaulted to `RunnerGit()`, which meant the
+    Modules tab -- and only the Modules tab -- required a tool the rest of the
+    app had carefully avoided needing. Two users reported the same thing on the
+    same day: a working server, 500 bots, and not one module installable, with
+
+        install mod-aoe-loot FAILED: [WinError 2] The system cannot find the file specified
+
+    `git_available()` is the right question and is careful in a way
+    `shutil.which("git")` is not: on a Mac with no Command Line Tools,
+    `/usr/bin/git` exists as a stub whose only behaviour is to open a modal
+    installer and block a launcher forever.
+
+    Host git is still PREFERRED where it works: it needs no daemon, no image
+    pull and no bind mount, and `ContainerGit` already falls back to it for the
+    same reason.
+    """
+    if git_available():
+        return RunnerGit()
+    # No host git. The containerised seam BIND-MOUNTS the destination, and
+    # Docker Desktop refuses a `\\wsl.localhost\...` mount source -- so for a
+    # WSL-backed install it cannot work either, and picking it would trade one
+    # failure for a slower one after pulling an image (review, 2026-09-14).
+    # Refuse precisely instead; `wsl_linux_path()` is the same test the rest of
+    # the app uses to spot that shape.
+    if platform.wsl_linux_path(server_dir) is not None:
+        raise ApplyError(
+            f"This server lives inside WSL, at {server_dir}. Yu'lon clones modules with git, "
+            f"and this machine has none it can run: the container it would fall back to cannot "
+            f"reach a \\\\wsl.localhost path. Install Git inside the distro (or on Windows) "
+            f"and try again. Nothing was changed."
+        )
+    return ContainerGit()
 
 
 def installed_clones(server_dir: Path) -> dict[str, frozenset[str]]:
@@ -1052,7 +1093,11 @@ class Applier:
         start_database: Callable[[], bool] | None = None,
     ) -> None:
         self.server_dir = server_dir
-        self.git: Git = git if git is not None else RunnerGit()
+        # Not resolved here: `_default_git()` probes for git, and an Applier is
+        # built on UI paths that never clone. Three controller tests that assert
+        # exactly which commands a tab runs went red on the extra
+        # `git --version` (2026-09-14). Resolved on first use instead, once.
+        self._git: Git | None = git
         self.sql = sql
         # "Is this install's worldserver up?" — a seam, because the answer lives
         # in Docker and this module does not touch Docker (module docstring,
@@ -1099,28 +1144,22 @@ class Applier:
         # git must not get a `None` here — `None` is a refusal, and a refusal
         # for the wrong reason is still a wrong answer. A `Git` that only
         # clones falls back to the host CLI, which is what a fake wants.
+        # Through a lambda, not resolved here: reading `self.git` in `__init__`
+        # would resolve the lazy seam and spawn `git --version` on every Applier
+        # built, including the UI ones that never clone (review, 2026-09-14).
         self.remote_url: Callable[[Path], str | None] = (
-            remote_url
-            if remote_url is not None
-            else (
-                self.git.remote_url
-                if isinstance(self.git, RemoteReader)
-                else RunnerGit().remote_url
-            )
+            remote_url if remote_url is not None else self._reader("remote_url", RemoteReader)
         )
         # "Is this path exactly what the checkout's HEAD committed?", narrowed
         # the same way and for the same reasons. Two guards need it: the
         # adoption rule in `_require_own_clone()`, which will not adopt a
         # checkout somebody has edited, and the one defence against an upstream
         # repository that tracks a file at `CLAIM_FILE`'s name.
+        # Through a lambda, not resolved here: reading `self.git` in `__init__`
+        # would resolve the lazy seam and spawn `git --version` on every Applier
+        # built, including the UI ones that never clone (review, 2026-09-14).
         self.unmodified: Callable[[Path, str], bool | None] = (
-            unmodified
-            if unmodified is not None
-            else (
-                self.git.is_unmodified
-                if isinstance(self.git, TreeReader)
-                else RunnerGit().is_unmodified
-            )
+            unmodified if unmodified is not None else self._reader("is_unmodified", TreeReader)
         )
         # "Does HEAD carry commits the update would throw away?", narrowed the
         # same way again. The third question and not a rephrasing of the second:
@@ -1129,14 +1168,13 @@ class Applier:
         # into. Only `_adoption_refusal()` asks this, and it is the fact that
         # keeps adoption from meaning "clean tree, therefore nothing of yours
         # here".
+        # Through a lambda, not resolved here: reading `self.git` in `__init__`
+        # would resolve the lazy seam and spawn `git --version` on every Applier
+        # built, including the UI ones that never clone (review, 2026-09-14).
         self.no_local_commits: Callable[[Path, str | None], bool | None] = (
             no_local_commits
             if no_local_commits is not None
-            else (
-                self.git.no_local_commits
-                if isinstance(self.git, HistoryReader)
-                else RunnerGit().no_local_commits
-            )
+            else self._reader("no_local_commits", HistoryReader)
         )
         # "Did this app create the server directory this clone is under?" — a
         # seam rather than a module-level call, for the reason the two above are
@@ -1149,6 +1187,38 @@ class Applier:
         )
 
     # -- public ------------------------------------------------------------
+
+    def _reader(self, member: str, protocol: type) -> Any:
+        """One of git's read-only questions, bound at CALL time.
+
+        The seam is chosen lazily, so its type is not known while `__init__`
+        runs — and asking would defeat the laziness. This returns a callable
+        that decides on first use: the configured seam if it answers that
+        question, and host git if it does not (a `Git` that only clones still
+        has to be askable about a checkout).
+        """
+
+        def ask(*args: object) -> Any:
+            seam = self.git
+            bound = (
+                getattr(seam, member)
+                if isinstance(seam, protocol)
+                else getattr(RunnerGit(), member)
+            )
+            return bound(*args)
+
+        return ask
+
+    @property
+    def git(self) -> Git:
+        """The git seam, chosen once, on the first clone that actually needs one."""
+        if self._git is None:
+            self._git = _default_git(self.server_dir)
+        return self._git
+
+    @git.setter
+    def git(self, value: Git) -> None:
+        self._git = value
 
     def clone_dir(self, manifest: Manifest) -> Path:
         """Where this item's clone lives (`modules/<id>`, `ale_scripts/<id>`, ...)."""
@@ -1222,6 +1292,20 @@ class Applier:
                         rev=manifest.source.rev,
                     )
                 )
+            except FileNotFoundError as exc:
+                # ONLY a missing executable, and only this exception type. The
+                # first version caught every OSError around the whole clone --
+                # but both seams `rmtree()` and `mkdir()` the destination BEFORE
+                # spawning git, so a permission error mid-delete would have been
+                # reported as "git could not be started ... Nothing was changed"
+                # with part of the destination already gone. That sentence would
+                # have been false about data loss (review, 2026-09-14).
+                raise ApplyError(
+                    f"{manifest.id} could not be installed because git could not be started "
+                    f"({exc}). Yu'lon clones modules with git, and runs it inside a container "
+                    f"when the machine has none -- so this means neither was available. "
+                    f"Install Git, or start Docker, and try again. Nothing was changed."
+                ) from exc
             except GitError as exc:  # one failure vocabulary for the whole applier
                 raise ApplyError(str(exc)) from exc
             log.done.append(f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}")
@@ -1615,7 +1699,20 @@ class Applier:
             for kind, folder in CLONE_DIRS.items():
                 if other not in here.get(str(kind), frozenset()):
                     continue
-                where = _rel(self.server_dir, self.server_dir / folder / other)
+                # An EMPTY directory is not an installed module. `clone_names()`
+                # counts every non-hidden directory name -- no `.git`, no claim,
+                # no content -- so a leftover from a failed install, or a folder
+                # made by hand, blocked the alternative forever with a refusal
+                # naming something that is not really there (review, 2026-09-13).
+                # CONTENT, not `.git`: a module copied in from a folder has
+                # neither and is exactly as present to the linker as a clone.
+                seat = self.server_dir / folder / other
+                try:
+                    if not any(seat.iterdir()):
+                        continue
+                except OSError:
+                    pass  # cannot tell: treat as occupied, a false pass costs an hour
+                where = _rel(self.server_dir, seat)
                 return (
                     f"{manifest.id} and {other} cannot both be installed: they are alternatives "
                     f"to each other, and the catalog records the conflict. {other} is already "

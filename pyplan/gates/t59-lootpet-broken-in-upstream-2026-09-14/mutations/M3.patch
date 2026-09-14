@@ -1,0 +1,13 @@
+diff --git a/pylauncher/yulon/manifest.py b/pylauncher/yulon/manifest.py
+index 1073c29b..19dd36f2 100644
+--- a/pylauncher/yulon/manifest.py
++++ b/pylauncher/yulon/manifest.py
+@@ -246,7 +246,7 @@ class Deploy(_Strict):
+         load at all, rather than failing part way through an install that has
+         already written into the server folder.
+         """
+-        if self.rename and not self.src.endswith("/"):
++        if False:
+             raise ValueError(
+                 f"deploy src {self.src!r} is a single file, and `rename` only applies to a "
+                 f"directory src (one ending in '/'). Name the file correctly at the source "

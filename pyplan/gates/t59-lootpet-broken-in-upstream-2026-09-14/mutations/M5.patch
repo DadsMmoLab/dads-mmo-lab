@@ -1,0 +1,13 @@
+diff --git a/pylauncher/yulon/apply.py b/pylauncher/yulon/apply.py
+index ea58c2d7..9f4cd542 100644
+--- a/pylauncher/yulon/apply.py
++++ b/pylauncher/yulon/apply.py
+@@ -1624,7 +1624,7 @@ class Applier:
+                 # neither and is exactly as present to the linker as a clone.
+                 seat = self.server_dir / folder / other
+                 try:
+-                    if not any(seat.iterdir()):
++                    if True:
+                         continue
+                 except OSError:
+                     pass  # cannot tell: treat as occupied, a false pass costs an hour

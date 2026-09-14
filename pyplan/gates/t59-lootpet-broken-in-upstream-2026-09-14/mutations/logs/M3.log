@@ -1,0 +1,34 @@
+yt: Python 3.13.15 in /home/perzi/wt-t59/pylauncher
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_a_rename_on_a_single_file_deploy_is_refused_at_load ___________
+
+    def test_a_rename_on_a_single_file_deploy_is_refused_at_load() -> None:
+        """`rename` only means anything for a DIRECTORY deploy (T53 review).
+    
+        `_deploy_target()` returns the full filename for a single-file deploy, so
+        `(target / old).replace(target / new)` builds a path INSIDE the copied file:
+        `.../LootPet2.lua/LootPet.lua`. Install raised `NotADirectoryError` after
+        already copying, leaving the file under its old name.
+    
+        That was merged in a manifest of ours (#160) and no test caught it: the existing
+        rename test uses a directory src, which is the shape that works. A runtime
+        `NotADirectoryError` deep in an install is the wrong place to learn this —
+        the manifest is wrong, and a wrong manifest should not load.
+        """
+        base = {
+            "id": "mod-x",
+            "name": "X",
+            "type": "module",
+            "game": "wow-wotlk",
+            "description": "x",
+            "source": {"repo": "acme/mod-x"},
+        }
+>       with pytest.raises(ValidationError, match="rename"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValidationError
+
+tests/test_manifest.py:504: Failed
+=========================== short test summary info ============================
+FAILED tests/test_manifest.py::test_a_rename_on_a_single_file_deploy_is_refused_at_load
+1 failed in 0.08s
