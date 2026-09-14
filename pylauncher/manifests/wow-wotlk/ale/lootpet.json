@@ -7,21 +7,15 @@
   "description": "Any summoned vanity pet fetches loot from nearby corpses you or your group tapped. Finds them by sweeping for corpses rather than by a kill hook, so grey mobs and max-level kills count too.",
   "source": {
     "repo": "pjerra/LootPet2",
-    "rev": "56d15536ce065d73651d1b647a772bfa3bb80c73"
+    "rev": "4b1c3ed4bb2f86986c72c4379ddaef0bc980bdc6"
   },
   "requires": [
     "mod-ale"
   ],
   "deploy": [
     {
-      "src": "LootPet2.lua",
-      "dest": "env/dist/etc/modules/lua_scripts/",
-      "rename": [
-        [
-          "LootPet2.lua",
-          "LootPet.lua"
-        ]
-      ]
+      "src": "LootPet.lua",
+      "dest": "env/dist/etc/modules/lua_scripts/"
     }
   ]
 }

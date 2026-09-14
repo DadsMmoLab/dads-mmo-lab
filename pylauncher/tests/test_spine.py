@@ -2416,6 +2416,16 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "delete has already failed once, and an rmdir it cannot do is left for the retry "
         "to name against the tree"
     ),
+    ("apply.py", "_conflict_refusal"): (
+        "lists the clone directory of a module this manifest DECLARES a conflict with, to "
+        "answer one question about it: does it hold anything. `clone_names()` counts every "
+        "non-hidden directory as installed, so an empty leftover from a failed install, or a "
+        "folder somebody made by hand, blocked the alternative forever with a refusal naming "
+        "something that is not really there (review, 2026-09-13). It reads a folder it will "
+        "never write to, and the refusal it feeds is raised before anything is written at all "
+        "- so an unreadable folder is treated as occupied rather than empty: a false refusal "
+        "costs a message, a false pass costs a build that dies at the linker an hour in"
+    ),
     ("party.py", "deploy"): (
         "lists the app's OWN bundled `lua/` tree to find the bridge families in it, not "
         "anything of the user's, and the folder it goes on to write is created by the same "
