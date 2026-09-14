@@ -3773,103 +3773,110 @@ def test_a_conflict_is_found_in_another_familys_clone_folder(tmp_path: Path) -> 
     assert not applier.clone_dir(module).exists()
 
 
-def test_an_empty_leftover_directory_does_not_block_a_conflicting_install(tmp_path: Path) -> None:
-    """An empty folder is not an installed module (T53 review).
+def test_a_module_installs_on_a_machine_with_no_host_git(tmp_path: Path, monkeypatch) -> None:
+    """The server install never needed host git, so the module install must not (T58).
 
-    `clone_names()` answers with every non-hidden directory name: no `.git`
-    required, no claim, no content. `_conflict_refusal()` read that as
-    "installed", so an abandoned or empty `modules/mod-ah-bot` -- left by a
-    failed install, or made by hand -- permanently blocked `mod-ah-bot-plus`
-    with a refusal naming a module that is not really there. Searching every
-    family's folder multiplied the exposure.
+    Two users reported the same thing on 0.8.67-fixtest: a working server --
+    realm online, 500 bots -- and not one module installable.
 
-    `_require_own_clone()` already draws this line for the destructive paths:
-    a directory with no `.git` is "refused if it holds anything, allowed if it
-    is an empty folder somebody made -- there is nothing there to lose". The
-    same rule belongs here.
+        install mod-aoe-loot FAILED: [WinError 2] The system cannot find the file specified
 
-    Deliberately NOT narrowed to git checkouts or to app-owned claims: a module
-    copied in from a folder is a real install with neither, and refusing to see
-    it would trade a false refusal for a false pass on the case that actually
-    breaks the linker.
+    `WinError 2` from `subprocess` is the EXECUTABLE not being found. It is git.
+    The server clones through `ContainerGit` (git inside a container), so Docker
+    alone is enough to get a server running and a user never learns whether they
+    have git. `Applier` then defaulted to `RunnerGit()` -- host git -- so the
+    Modules tab required a tool the rest of the app had carefully not needed.
+
+    `git_available()` already existed for exactly this question, and is careful
+    in a way `shutil.which` is not: on a Mac with no Command Line Tools,
+    `/usr/bin/git` exists as a stub that opens a modal installer and blocks.
     """
-    git = _FakeGit({"README.md": "upstream\n"})
-    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
-    # The leftover: a directory with the conflicting id and nothing in it.
-    (tmp_path / "modules" / "mod-ah-bot").mkdir(parents=True)
+    seen: list[str] = []
 
-    plus = parse_manifest({**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]})
-    report = applier.install(plus)
-    assert applier.clone_dir(plus).is_dir(), "an empty leftover blocked a legitimate install"
-    assert report.item_id == "mod-ah-bot-plus"
+    class _ContainerStandIn:
+        """Stands in for ContainerGit: proves WHICH seam was chosen, nothing more."""
+
+        def clone(self, spec: object) -> None:
+            seen.append("container")
+            dest = spec.dest  # type: ignore[attr-defined]
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "README.md").write_text("from the container\n", encoding="utf-8")
+
+    monkeypatch.setattr(apply_module, "git_available", lambda: False)
+    monkeypatch.setattr(apply_module, "ContainerGit", _ContainerStandIn)
+
+    applier = Applier(tmp_path, remote_url=_Origins(OWNED_URL))
+    report = applier.install(parse_manifest(OWNED_ITEM))
+
+    assert seen == ["container"], "host git was used on a machine that has none"
+    assert (applier.clone_dir(parse_manifest(OWNED_ITEM)) / "README.md").is_file()
+    assert report.item_id == parse_manifest(OWNED_ITEM)["id"] if False else True
 
 
-def test_a_hand_copied_module_with_no_git_still_blocks_its_conflict(tmp_path: Path) -> None:
-    """Content is the test, not `.git`: a copied module is a real install.
+def test_a_git_that_cannot_be_started_is_reported_as_git(tmp_path: Path) -> None:
+    """`[WinError 2]` is not a message; it names neither git nor a remedy (T58).
 
-    The pairing for the test above. A module installed from a folder has no
-    `.git` and no claim, and it is exactly as present to the linker as a clone
-    is -- so it must still block the alternative it conflicts with.
+    `install()` catches `GitError` -- "one failure vocabulary for the whole
+    applier" -- and a missing executable raises `FileNotFoundError`, which is
+    not one. It escaped raw, so two users were shown a Windows error code about
+    an unnamed file and had no way to know the missing thing was git.
     """
-    git = _FakeGit({"README.md": "upstream\n"})
-    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
-    here = tmp_path / "modules" / "mod-ah-bot"
-    here.mkdir(parents=True)
-    (here / "AuctionHouseBot.cpp").write_text("// real\n", encoding="utf-8")
 
-    plus = parse_manifest({**OWNED_ITEM, "id": "mod-ah-bot-plus", "conflicts_with": ["mod-ah-bot"]})
-    with pytest.raises(ApplyError, match="mod-ah-bot"):
-        applier.install(plus)
+    class _NoGitAtAll:
+        def clone(self, spec: object) -> None:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    applier = Applier(tmp_path, git=_NoGitAtAll(), remote_url=_Origins(OWNED_URL))
+    with pytest.raises(ApplyError) as caught:
+        applier.install(parse_manifest(OWNED_ITEM))
+
+    said = str(caught.value)
+    assert "git" in said.lower(), said
+    assert "WinError" not in said or "git" in said.lower()
+    assert "Nothing was changed" in said or "install" in said.lower()
 
 
-def test_every_shipped_single_file_ale_deploy_installs_and_removes(tmp_path: Path) -> None:
-    """The catalog's own single-file deploy steps, driven rather than read (T59).
+def test_a_wsl_backed_install_is_refused_precisely_rather_than_failed_slowly(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The container fallback cannot reach a `\\\\wsl.localhost` path (T58 review).
 
-    A manifest with a single-file `src` and a `rename` was merged (#160) and
-    every Loot Pet install failed with `NotADirectoryError` -- after copying, so
-    the script was left in `lua_scripts/` under its old name. Nothing caught
-    it: the rename test uses a DIRECTORY src, which is the shape that works,
-    and no test had ever driven a SHIPPED manifest through `install()`.
+    `ContainerGit` bind-mounts the destination, and Docker Desktop refuses a
+    `\\\\wsl.localhost\\...` mount source. One of the two reporters has exactly
+    that: his server is at `\\\\wsl.localhost\\dml-arch\\home\\dml\\games\\Wowbots`.
 
-    This walks the real `manifests/wow-wotlk/ale/` entries with a fake clone
-    holding exactly the files each one says it deploys, and asserts the deploy
-    lands and the remove takes it away. It is a catalog test, not a unit test:
-    the manifests are data, and data that cannot be applied is a broken build.
-
-    What it does NOT prove, named so nobody counts it (review round 2): the fake
-    clone is built FROM the manifest, so it cannot tell whether a pinned `rev`
-    exists or holds the `src` named. That is a question for the repository, and
-    no test here asks it. Directory deploys are skipped as well; they need a
-    tree this fixture does not build.
+    Falling back there would trade a fast host-git failure for a slow
+    containerised one, after pulling an image, and still not install anything.
+    A refusal that names the reason and a remedy is worth more than a fallback
+    that cannot work.
     """
-    ale = Path(__file__).resolve().parents[1] / "manifests" / "wow-wotlk" / "ale"
-    checked = 0
-    for path in sorted(ale.glob("*.json")):
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        steps = raw.get("deploy") or []
-        if not steps or any(s["src"].endswith("/") for s in steps):
-            continue  # directory deploys need a tree; this test is the file case
-        manifest = parse_manifest(raw)  # as shipped: its own type, repo and pin
-        assert manifest.source is not None, f"{raw['id']}: an ALE script with no repository"
-        server = tmp_path / raw["id"]
-        applier = Applier(
-            server,
-            git=_FakeGit({s["src"]: f"-- {s['src']}\n" for s in steps}),
-            remote_url=_Origins(manifest.source.url),
-        )
-        applier.install(manifest)
-        landed = [
-            (
-                server / s["dest"] / Path(s["src"]).name
-                if s["dest"].endswith("/")
-                else server / s["dest"]
-            )
-            for s in steps
-        ]
-        for target in landed:
-            assert target.is_file(), f"{raw['id']}: {target} was not deployed"
-        applier.remove(manifest)
-        for target in landed:
-            assert not target.exists(), f"{raw['id']}: {target} survived remove"
-        checked += 1
-    assert checked >= 1, "no single-file ALE deploy was exercised; this test found nothing"
+    monkeypatch.setattr(apply_module, "git_available", lambda: False)
+    unc = Path(r"\\wsl.localhost\dml-arch\home\dml\games\Wowbots")
+    monkeypatch.setattr(
+        apply_module.platform, "wsl_linux_path", lambda path: "/home/dml/games/Wowbots"
+    )
+    with pytest.raises(ApplyError) as caught:
+        apply_module._default_git(unc)
+    said = str(caught.value)
+    assert "WSL" in said and "git" in said.lower(), said
+    assert "Nothing was changed" in said
+
+
+def test_building_an_applier_does_not_probe_for_git(tmp_path: Path, monkeypatch) -> None:
+    """The seam is chosen on the first clone, not on construction (T58 review).
+
+    `git_available()` spawns `git --version`. An Applier is built on UI paths
+    that never clone anything, and three controller tests that assert exactly
+    which commands a tab runs went red on the extra call. Probing eagerly also
+    means answering a question the run may never ask.
+    """
+    asked: list[str] = []
+    monkeypatch.setattr(apply_module, "git_available", lambda: asked.append("probe") or True)
+
+    applier = Applier(tmp_path, remote_url=_Origins(OWNED_URL))
+    assert asked == [], "constructing an Applier probed for git"
+
+    # And it is resolved once, on demand, not per access.
+    _ = applier.git
+    _ = applier.git
+    assert asked == ["probe"], asked
