@@ -122,6 +122,42 @@ def installed_clones(server_dir: Path) -> dict[str, frozenset[str]]:
     }
 
 
+def conflicting_installed(
+    manifest: Manifest, installed: Mapping[str, frozenset[str]]
+) -> tuple[tuple[str, ManifestType], ...]:
+    """Every `(id, family)` listed as installed that `manifest` cannot sit beside, in order.
+
+    One reading, two readers: the Modules tab greys a row on the first answer,
+    and `Applier._conflict_refusal()` refuses an install on the first answer
+    whose folder holds anything. They were nearly written twice, which is how a
+    tab comes to offer what the applier will refuse (T55).
+
+    **The two can still differ, in one direction only, and on purpose.** An
+    EMPTY leftover folder is listed here -- `installed_clones()` counts every
+    non-hidden directory -- so the tab greys the row, while the applier looks
+    inside and lets the install through (T59). The tab is then stricter than
+    the applier, never looser, and the row it points at shows as installed with
+    a Remove that clears the empty folder. The other direction is the bug this
+    exists to prevent. Opening every folder on each reload to close the gap
+    would change what "installed" means for every badge in the tab.
+
+    Asked of what is INSTALLED, never of the declaration. Four of the mods name
+    each other (buff/xbuff/nerf/baby-mobs), so refusing on the presence of a
+    conflict rather than of the conflicting CLONE would make all four
+    permanently uninstallable.
+
+    Every family is searched, not the manifest's own: ids are unique across the
+    catalog, and a conflict that reaches across families is exactly the one a
+    same-family check would miss.
+    """
+    return tuple(
+        (other, kind)
+        for other in manifest.conflicts_with
+        for kind in CLONE_DIRS
+        if other in installed.get(str(kind), frozenset())
+    )
+
+
 # Manifest `db` → MySQL schema name (AzerothCore defaults; acore_ale is Paragon's).
 DB_NAMES: dict[Db, str] = {
     "auth": "acore_auth",
@@ -1692,33 +1728,27 @@ class Applier:
         """
         if not manifest.conflicts_with:
             return None
-        here = installed_clones(self.server_dir)
-        for other in manifest.conflicts_with:
-            # Over CLONE_DIRS rather than over `here`, so the family key keeps its
-            # Literal type and the folder comes from the one mapping that owns it.
-            for kind, folder in CLONE_DIRS.items():
-                if other not in here.get(str(kind), frozenset()):
+        for other, kind in conflicting_installed(manifest, installed_clones(self.server_dir)):
+            # An EMPTY directory is not an installed module. `clone_names()`
+            # counts every non-hidden directory name -- no `.git`, no claim,
+            # no content -- so a leftover from a failed install, or a folder
+            # made by hand, blocked the alternative forever with a refusal
+            # naming something that is not really there (review, 2026-09-13).
+            # CONTENT, not `.git`: a module copied in from a folder has
+            # neither and is exactly as present to the linker as a clone.
+            seat = self.server_dir / CLONE_DIRS[kind] / other
+            try:
+                if not any(seat.iterdir()):
                     continue
-                # An EMPTY directory is not an installed module. `clone_names()`
-                # counts every non-hidden directory name -- no `.git`, no claim,
-                # no content -- so a leftover from a failed install, or a folder
-                # made by hand, blocked the alternative forever with a refusal
-                # naming something that is not really there (review, 2026-09-13).
-                # CONTENT, not `.git`: a module copied in from a folder has
-                # neither and is exactly as present to the linker as a clone.
-                seat = self.server_dir / folder / other
-                try:
-                    if not any(seat.iterdir()):
-                        continue
-                except OSError:
-                    pass  # cannot tell: treat as occupied, a false pass costs an hour
-                where = _rel(self.server_dir, seat)
-                return (
-                    f"{manifest.id} and {other} cannot both be installed: they are alternatives "
-                    f"to each other, and the catalog records the conflict. {other} is already "
-                    f"here, at {where}. Remove it first, or keep it and leave {manifest.id} "
-                    f"out. Nothing was changed."
-                )
+            except OSError:
+                pass  # cannot tell: treat as occupied, a false pass costs an hour
+            where = _rel(self.server_dir, seat)
+            return (
+                f"{manifest.id} and {other} cannot both be installed: they are alternatives "
+                f"to each other, and the catalog records the conflict. {other} is already "
+                f"here, at {where}. Remove it first, or keep it and leave {manifest.id} "
+                f"out. Nothing was changed."
+            )
         return None
 
     def _require_own_clone(self, manifest: Manifest, clone: Path, action: When) -> None:

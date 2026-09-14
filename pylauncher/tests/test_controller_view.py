@@ -776,6 +776,80 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
     assert all(v is None for v in unasked), "a manifest with no question was given values"
 
 
+def test_the_menu_install_of_a_blocked_row_refuses_before_it_asks_anything(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The context menu reaches `_module_action()` even when the row's button is locked (T55).
+
+    With the shipped catalog: `mod-ah-bot` installed, `mod-ah-bot-plus` pressed.
+    The prompt dialog runs before the applier, and `mod-ah-bot-plus` asks a
+    question with no default -- so without the guard the user answered it and
+    was then refused by `_conflict_refusal()`.
+
+    Mutation: delete the guard in `_module_action()` and the asker is called and
+    the fake applier is handed the install.
+    """
+    asked: list[str] = []
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", lambda: {"module": frozenset({"mod-ah-bot"})})
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: asked.append(manifest.id) or {},
+    )
+    _select_module(view, "mod-ah-bot-plus")
+    row = view.modules_panel.row("mod-ah-bot-plus")
+    assert row.install_button is not None and not row.install_button.isEnabled()
+
+    view._module_action("install")
+
+    assert asked == []
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.installed == []
+    report = view.module_report.toPlainText()
+    assert "not started" in report and "Auction House Bot" in report, report
+    assert "Nothing on this machine was changed" in report
+
+
+def test_a_failed_press_redraws_the_conflict_lock_from_the_disk(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A failure can change what is installed, so the locks are re-read on it too (T55 review).
+
+    `Applier.install()` clones before deploy, SQL and conf, and any of those can
+    raise with the clone already on disk; `remove()` deletes deployed files
+    before the rmtree that may fail. The success path re-read the disk; the
+    failure path did not, so the row kept the pre-press lock.
+
+    Driven with the installed-modules seam changing under the failure, both ways.
+
+    Mutation: drop `reload_modules()` from `_module_failed()` and the first
+    assertion after each failure keeps the old answer.
+    """
+    on_disk: dict[str, frozenset[str]] = {"module": frozenset()}
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "installed_modules", lambda: dict(on_disk))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.modules_panel.row("mod-ah-bot-plus").data.installable
+
+    # An install of mod-ah-bot that cloned and then raised.
+    on_disk["module"] = frozenset({"mod-ah-bot"})
+    view._acting_on = view._manifests[("module", "mod-ah-bot")]
+    view._module_pending = "install mod-ah-bot"
+    view._module_failed(RuntimeError("the SQL step raised after the clone"))
+    assert not view.modules_panel.row("mod-ah-bot-plus").data.installable
+    assert "install mod-ah-bot FAILED" in view.module_report.toPlainText()
+
+    # A remove of it that took the clone away and then raised.
+    on_disk["module"] = frozenset()
+    view._acting_on = view._manifests[("module", "mod-ah-bot")]
+    view._module_pending = "remove mod-ah-bot"
+    view._module_failed(RuntimeError("a later step raised after the rmtree"))
+    assert view.modules_panel.row("mod-ah-bot-plus").data.installable
+    assert "remove mod-ah-bot FAILED" in view.module_report.toPlainText()
+
+
 def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """Remove renders no template on either manifest, so it must not interrogate."""
     asked: list[str] = []

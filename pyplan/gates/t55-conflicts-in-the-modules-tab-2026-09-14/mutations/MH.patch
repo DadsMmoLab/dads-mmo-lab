@@ -1,0 +1,13 @@
+diff --git a/pylauncher/yulon/apply.py b/pylauncher/yulon/apply.py
+index e308140c..caec7060 100644
+--- a/pylauncher/yulon/apply.py
++++ b/pylauncher/yulon/apply.py
+@@ -1655,7 +1655,7 @@ class Applier:
+             seat = self.server_dir / CLONE_DIRS[kind] / other
+             try:
+                 if not any(seat.iterdir()):
+-                    continue
++                    pass
+             except OSError:
+                 pass  # cannot tell: treat as occupied, a false pass costs an hour
+             where = _rel(self.server_dir, seat)

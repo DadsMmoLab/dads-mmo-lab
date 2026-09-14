@@ -1,0 +1,35 @@
+yt: Python 3.13.15 in /home/perzi/wt-t55/pylauncher
+..F........                                                              [100%]
+=================================== FAILURES ===================================
+__________ test_a_blocked_row_carries_the_reason_where_it_can_be_read __________
+
+qapp = <PySide6.QtWidgets.QApplication(0x21cdc750) at 0x75e06b1fb180>
+
+    def test_a_blocked_row_carries_the_reason_where_it_can_be_read(qapp: object) -> None:
+        """Disabled, with the reason as tooltip AND as a chip, and it stays disabled (T55).
+    
+        A tooltip alone is invisible on a gamepad or a touch screen, which is why the
+        chip is there -- the same pair `required by` gives a locked Remove.
+    
+        `set_enabled_actions(True)` is what every finished job calls; a row that
+        re-armed its Install there would offer the refused press again the moment
+        any other install completed.
+    
+        Mutation: drop `and self.data.installable` from `set_enabled_actions()` and
+        the button comes back after the job.
+        """
+        catalog = [
+            _m("mod-ah-bot", name="Auction House Bot", conflicts_with=("mod-ah-bot-plus",)),
+            _m("mod-ah-bot-plus", name="Auction House Bot Plus", conflicts_with=("mod-ah-bot",)),
+        ]
+        row = _row(_rows(catalog, {"module": frozenset({"mod-ah-bot"})}), "mod-ah-bot-plus")
+>       assert mp.chip_conflicts_with_label("Auction House Bot") in _labels(row)
+E       AssertionError: assert 'conflicts with Auction House Bot' in []
+E        +  where 'conflicts with Auction House Bot' = <function chip_conflicts_with_label at 0x75e071dc5760>('Auction House Bot')
+E        +    where <function chip_conflicts_with_label at 0x75e071dc5760> = mp.chip_conflicts_with_label
+E        +  and   [] = _labels(ModuleRow(id='mod-ah-bot-plus', family='module', name='Auction House Bot Plus', description='mod-ah-bot-plus does a th... here, and the catalog records the two as alternatives that cannot both be installed. Remove Auction House Bot first.'))
+
+tests/test_modules_panel.py:1426: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_modules_panel.py::test_a_blocked_row_carries_the_reason_where_it_can_be_read
+1 failed, 10 passed, 524 deselected in 1.02s

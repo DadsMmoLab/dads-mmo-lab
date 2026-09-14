@@ -1,0 +1,40 @@
+yt: Python 3.13.15 in /home/perzi/wt-t55/pylauncher
+..F........                                                              [100%]
+=================================== FAILURES ===================================
+__________ test_a_blocked_row_carries_the_reason_where_it_can_be_read __________
+
+qapp = <PySide6.QtWidgets.QApplication(0x3d7acdc0) at 0x7481133d6b00>
+
+    def test_a_blocked_row_carries_the_reason_where_it_can_be_read(qapp: object) -> None:
+        """Disabled, with the reason as tooltip AND as a chip, and it stays disabled (T55).
+    
+        A tooltip alone is invisible on a gamepad or a touch screen, which is why the
+        chip is there -- the same pair `required by` gives a locked Remove.
+    
+        `set_enabled_actions(True)` is what every finished job calls; a row that
+        re-armed its Install there would offer the refused press again the moment
+        any other install completed.
+    
+        Mutation: drop `and self.data.installable` from `set_enabled_actions()` and
+        the button comes back after the job.
+        """
+        catalog = [
+            _m("mod-ah-bot", name="Auction House Bot", conflicts_with=("mod-ah-bot-plus",)),
+            _m("mod-ah-bot-plus", name="Auction House Bot Plus", conflicts_with=("mod-ah-bot",)),
+        ]
+        row = _row(_rows(catalog, {"module": frozenset({"mod-ah-bot"})}), "mod-ah-bot-plus")
+        assert mp.chip_conflicts_with_label("Auction House Bot") in _labels(row)
+        assert row.install_reason is not None and "Auction House Bot" in row.install_reason
+    
+        widget = mp.RowWidget(row)
+        assert widget.install_button is not None
+        assert not widget.install_button.isEnabled()
+>       assert widget.install_button.toolTip() == row.install_reason
+E       AssertionError: assert '' == 'Auction Hous...se Bot first.'
+E         
+E         - Auction House Bot is installed here, and the catalog records the two as alternatives that cannot both be installed. Remove Auction House Bot first.
+
+tests/test_modules_panel.py:1432: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_modules_panel.py::test_a_blocked_row_carries_the_reason_where_it_can_be_read
+1 failed, 10 passed, 524 deselected in 1.01s

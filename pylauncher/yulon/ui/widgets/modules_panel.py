@@ -191,6 +191,15 @@ def chip_required_by_label(names: Sequence[str]) -> str:
     return f"required by {', '.join(names)}"
 
 
+def chip_conflicts_with_label(name: str) -> str:
+    """The install lock's chip: what is here that this cannot sit beside, by NAME (T55).
+
+    Named for the same reason as `chip_required_by_label()`: the id is what the
+    catalog matched on, the name is what the reader sees on the other row.
+    """
+    return f"conflicts with {name}"
+
+
 @dataclass(frozen=True)
 class Chip:
     """One small thing a row has to say, and the sentence behind it.
@@ -246,6 +255,19 @@ class ModuleRow:
     one goes reads as something git said. A row that fills in late is fine
     (T44 item 1); a row that shows a guess is not.
     """
+
+    installable: bool = True
+    """Whether this row's Install may be pressed (T55). Meaningless on an installed row.
+
+    False when something INSTALLED is a declared alternative to this module --
+    `apply.conflicting_installed()`, the same reading the applier refuses on --
+    so the tab does not offer a press whose only outcome is a refusal. At the
+    end of the dataclass, with a default, because the tests build rows
+    positionally.
+    """
+
+    install_reason: str | None = None
+    """The sentence behind `installable=False`, or `None` when Install is open."""
 
 
 @dataclass(frozen=True)
@@ -376,8 +398,13 @@ def _chips_for(
     session: SessionState,
     client_dir: Path | None,
     dependants: Sequence[str],
+    blocked_by: str | None = None,
 ) -> tuple[Chip, ...]:
-    """The six chips a row may carry, and nothing beyond them.
+    """The seven chips a row may carry, and nothing beyond them.
+
+    `blocked_by` is the NAME of an installed module this row's manifest declares
+    a conflict with, or `None` (T55). It is decided by `build_module_rows()`,
+    which is the one place that holds both the catalog and what is installed.
 
     Owed first and facts after, because the owed ones name work somebody has to
     do and the facts only explain the row. Six and not seven: an "Update" chip
@@ -458,7 +485,23 @@ def _chips_for(
                 "removing it would break them. Remove them first.",
             )
         )
+    if blocked_by is not None and not installed:
+        chips.append(
+            Chip(
+                "fact",
+                chip_conflicts_with_label(blocked_by),
+                conflict_reason(blocked_by),
+            )
+        )
     return tuple(chips)
+
+
+def conflict_reason(blocked_by: str) -> str:
+    """Why Install is locked, in the words the tooltip, the chip and the menu all use (T55)."""
+    return (
+        f"{blocked_by} is installed here, and the catalog records the two as alternatives "
+        f"that cannot both be installed. Remove {blocked_by} first."
+    )
 
 
 def build_module_rows(
@@ -514,10 +557,22 @@ def build_module_rows(
     for manifest in installed_manifests:
         for needed in manifest.requires:
             dependants.setdefault(needed, []).append(manifest.name)
+    names = {(manifest.type, manifest.id): manifest.name for manifest in catalog}
+
+    def _blocked_by(manifest: Manifest) -> str | None:
+        # The applier's own reading (T55), so the tab and the refusal cannot
+        # disagree about WHAT conflicts. Only in the applier's favour can they
+        # differ -- see `conflicting_installed()` on an empty leftover folder.
+        found = apply_module.conflicting_installed(manifest, installed)
+        if not found:
+            return None
+        other, kind = found[0]
+        return names.get((kind, other), other)
 
     def _row(manifest: Manifest) -> ModuleRow:
         here = (manifest.type, manifest.id) in installed_keys
         needed_by = dependants.get(manifest.id, [])
+        blocked_by = None if here else _blocked_by(manifest)
         return ModuleRow(
             id=manifest.id,
             family=manifest.type,
@@ -528,7 +583,14 @@ def build_module_rows(
             catalogued=True,
             paths=tuple(conf.file for conf in manifest.conf),
             chips=_chips_for(
-                manifest, manifest.type, manifest.id, here, session, client_dir, needed_by
+                manifest,
+                manifest.type,
+                manifest.id,
+                here,
+                session,
+                client_dir,
+                needed_by,
+                blocked_by,
             ),
             removable=not (here and needed_by),
             remove_reason=(
@@ -541,6 +603,8 @@ def build_module_rows(
             # clone to read, and looking one up for all 41 would be 20 reads
             # of folders that are not there.
             version=seen_versions.get((manifest.type, manifest.id)) if here else None,
+            installable=blocked_by is None,
+            install_reason=None if blocked_by is None else conflict_reason(blocked_by),
         )
 
     # T41's per-FOLDER accounting, moved here from `reload_modules()`. `ale` and
@@ -733,6 +797,8 @@ class RowWidget(QFrame):
         if data.catalogued and not data.installed:
             self.install_button = QPushButton("Install", self)
             self.install_button.clicked.connect(lambda: self.pressed_install.emit(self.data.id))
+            if not data.installable:
+                self.install_button.setToolTip(data.install_reason or "")
             column.addWidget(self.install_button)
         elif data.catalogued:
             self.remove_button = QPushButton("Remove", self)
@@ -788,7 +854,7 @@ class RowWidget(QFrame):
         """
         self._actions_enabled = enabled
         if self.install_button is not None:
-            self.install_button.setEnabled(enabled)
+            self.install_button.setEnabled(enabled and self.data.installable)
         if self.remove_button is not None:
             self.remove_button.setEnabled(enabled and self.data.removable)
         if self.detail_button is not None:

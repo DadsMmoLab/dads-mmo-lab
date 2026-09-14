@@ -6179,6 +6179,24 @@ class ControllerView(QWidget):
             return
         if manifest is None or applier is None:
             return
+        row = self.modules_panel.selected_row()
+        if (
+            action == "install"
+            and row is not None
+            and not row.data.installed
+            and not row.data.installable
+        ):
+            # T55. The row's own Install is disabled for this, but the context
+            # menu reaches the same handler, and the prompt dialog below is
+            # asked BEFORE the applier: `mod-ah-bot-plus` has a question with no
+            # default, so the user answered it and was then told no. Refused
+            # here, first, in the row's own words.
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"install {manifest.id}: not started — {row.data.install_reason} "
+                f"Nothing on this machine was changed."
+            )
+            return
         # An update re-runs the INSTALL-time steps -- it is the install over
         # content that has moved -- so it answers the install's prompts.
         go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action])
@@ -6405,6 +6423,15 @@ class ControllerView(QWidget):
             # which item 1 says is worse than none.
             self._versions.forget(acted_on.id)
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
+        # Re-read the disk on failure too (T55 review). The same partial states
+        # the comment above names -- a clone made before the SQL step raised, a
+        # deploy removed before the rmtree did -- change what is installed, and
+        # since T55 a row's Install is locked or opened by what is installed. A
+        # tab that kept the pre-press picture would offer an install the applier
+        # now refuses, or hold one shut that it would allow. Neither reload
+        # writes the report, so the FAILED line above stays what the user reads.
+        self.reload_modules()
+        self.reload_tuning()
         self.action_failed.emit(str(exc))
 
     @Slot()
