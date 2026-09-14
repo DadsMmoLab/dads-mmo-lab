@@ -10,8 +10,8 @@ this table is not. To read the current state:
 grep -m1 -H '^\*\*Status:\*\*' pyplan/tickets/T*.md
 ```
 
-Numbers missing here (T31, T45–T48, T51, T55, T58 and later) were filed on branches that had not
-merged into `Yulon` when this index was made.
+Numbers missing here (T31, T45–T48, T51, T55 and any after T59) were filed on branches that had
+not merged into `Yulon` when this index was made.
 
 ## Not closed, by their Status line
 
@@ -32,6 +32,7 @@ merged into `Yulon` when this index was made.
 | [T52](T52-we-ship-a-module-that-cannot-compile.md) | FILED | we ship a module that cannot compile, and we pin nothing |
 | [T54](T54-the-forget-button-is-hidden-when-it-is-needed.md) | FILED | "Forget this install…" is hidden exactly when the user needs it |
 | [T57](T57-steamos-install-fails-and-then-advises-the-wrong-fix.md) | FILED | the SteamOS Docker install fails on the keyring, then advises a fix for the symptom |
+| [T58](T58-module-install-needs-host-git-and-does-not-say-so.md) | FILED | a module install needs host `git`, nothing says so, and the error names neither |
 
 ## Closed, by their Status line
 
@@ -72,3 +73,4 @@ merged into `Yulon` when this index was made.
 | [T44](T44-the-modules-tab-carries-everything-the-mockup-promised.md) | CLOSED 2026 | the Modules and Tuning tabs carry everything the mockups promised, and look like them |
 | [T53](T53-conflicts-with-was-declared-and-never-enforced.md) | FIXED 2026 | `conflicts_with` was declared, parsed, tested, and never enforced |
 | [T56](T56-preflight-never-checks-for-compose.md) | FIXED 2026 | preflight asks whether Docker answers, never whether Compose exists |
+| [T59](T59-lootpet-install-is-broken-in-upstream.md) | FIXED on the branch | the Loot Pet manifest on `Yulon` cannot install |
