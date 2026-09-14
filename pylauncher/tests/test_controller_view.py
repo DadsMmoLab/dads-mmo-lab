@@ -167,13 +167,24 @@ class _FakeApplier(Applier):
         item_id = str(manifest.id)  # type: ignore[attr-defined]
         self.installed.append(item_id)
         self.values.append(values)
-        return ApplyReport("install", item_id, done=("clone",), rebuild_required=True)
+        return ApplyReport(
+            "install",
+            item_id,
+            family=manifest.type,  # type: ignore[attr-defined]
+            done=("clone",),
+            rebuild_required=True,
+        )
 
     def remove(self, manifest: object, values: object = None) -> ApplyReport:  # type: ignore[override]
         item_id = str(manifest.id)  # type: ignore[attr-defined]
         self.removed.append(item_id)
         self.values.append(values)
-        return ApplyReport("remove", item_id, done=("rm -r",))
+        return ApplyReport(
+            "remove",
+            item_id,
+            family=manifest.type,  # type: ignore[attr-defined]
+            done=("rm -r",),
+        )
 
 
 class _FakeMaintenance:
@@ -619,10 +630,10 @@ def test_the_report_says_which_kind_of_module_this_is() -> None:
     in the sentence.
     """
     cpp = controller_view_module._format_report(
-        ApplyReport("install", "mod-solocraft", rebuild_required=True)
+        ApplyReport("install", "mod-solocraft", family="module", rebuild_required=True)
     )
     data_only = controller_view_module._format_report(
-        ApplyReport("install", "sitmeanrest", restart_recommended=True)
+        ApplyReport("install", "sitmeanrest", family="module", restart_recommended=True)
     )
     assert "C++ module" in cpp and "C++ module" not in data_only
     assert "Stop" in data_only and "Server tab" in data_only
@@ -639,7 +650,9 @@ def test_removing_a_cpp_module_is_not_told_it_is_inert_on_disk() -> None:
     would be bad rather than claiming to know which case this is.
     """
     text = controller_view_module._format_report(
-        ApplyReport("remove", "mod-solocraft", done=("rm -r",), rebuild_required=True)
+        ApplyReport(
+            "remove", "mod-solocraft", family="module", done=("rm -r",), rebuild_required=True
+        )
     )
     assert "If mod-solocraft was in the last build it is still in there" in text
     assert "is on disk and inert" not in text
@@ -656,6 +669,7 @@ def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
         ApplyReport(
             "install",
             "mod-aoe-loot",
+            family="module",
             rebuild_required=True,
             pending_sql=(
                 apply_module.PendingSql(
@@ -690,6 +704,7 @@ def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> N
         ApplyReport(
             "install",
             "mod-aoe-loot",
+            family="module",
             rebuild_required=True,
             pending_sql=(
                 apply_module.PendingSql(db="world", path="data/sql/db-world/*.sql", files=()),
@@ -1182,7 +1197,9 @@ class _FakeCustomRoute:
         # Lane A's `complete()` persists inside the install pass, so the row is
         # in the store by the time the report comes back.
         self.store.user[manifest.id] = manifest
-        return ApplyReport("install", manifest.id, done=("clone",), rebuild_required=True)
+        return ApplyReport(
+            "install", manifest.id, family=manifest.type, done=("clone",), rebuild_required=True
+        )
 
     def forget(self, manifest: Manifest) -> bool:
         self.forgotten.append(manifest.id)
@@ -1418,7 +1435,9 @@ def test_the_custom_install_report_is_the_one_install_selected_prints(
     view.install_module_from_link()
 
     expected = controller_view_module._format_report(
-        ApplyReport("install", "mod-my-thing", done=("clone",), rebuild_required=True)
+        ApplyReport(
+            "install", "mod-my-thing", family="module", done=("clone",), rebuild_required=True
+        )
     )
     assert view.module_report.toPlainText() == expected
     assert "worldserver REBUILD required" in expected
@@ -7415,12 +7434,13 @@ def test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker
 # --------------------------------------------------- T42: the session's own facts
 
 
-def _deliver_report(view: ControllerView, report: ApplyReport, family: str = "module") -> None:
+def _deliver_report(view: ControllerView, report: ApplyReport) -> None:
     """Deliver an `ApplyReport` the way a real press does -- with the manifest set.
 
     `_module_done()` reads `_acting_on` to key this session's chips by
-    `(family, id)` (round 2): nothing makes an id unique across families and an
-    `ApplyReport` carries no family. Both live routes set `_acting_on`
+    `(family, id)` (round 2): nothing makes an id unique across families. Since
+    T48 the report carries its family too, and this sets the manifest OF that
+    family, which is what a real press does. Both live routes set `_acting_on`
     immediately before their `_run()`, so a test that called `_module_done()`
     bare was exercising a path no press reaches.
 
@@ -7428,6 +7448,7 @@ def _deliver_report(view: ControllerView, report: ApplyReport, family: str = "mo
     catalog has one, so these tests keep using the ids they always used; a
     stand-in is built only for an id it does not carry.
     """
+    family = report.family
     manifest = view._manifests.get((family, report.item_id))
     if manifest is None:
         manifest = Manifest(
@@ -7452,6 +7473,53 @@ def _wotlk_modules_view(ps: _Ps, tmp_path: Path, **families: frozenset[str]) -> 
     )
 
 
+def test_a_report_is_filed_under_its_own_family_when_two_share_an_id(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T48. Two manifests, one id, two families: each report's facts land on its own key.
+
+    The view keyed its session facts by `(acted_on.type, id)` and checked only
+    the id against the report, because the report carried no family. So a report
+    about the `mod` twin, delivered while the `module` twin was the press on
+    record, filed its facts under the `module` twin -- a chip on the wrong row.
+
+    Mutation: match `_note_session_facts()` on the id alone and the third press
+    below files a rebuild against `("module", "twin")`.
+    """
+    # Both on disk: `_module_done()` reloads, and a reload drops every fact about
+    # a module that is not installed.
+    view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"twin"}), mod=frozenset({"twin"}))
+    module_twin, mod_twin = (
+        parse_manifest(
+            {
+                "id": "twin",
+                "name": "Twin",
+                "type": kind,
+                "game": "wow-wotlk",
+                "description": "x",
+                "source": {"repo": "acme/twin"},
+            }
+        )
+        for kind in ("module", "mod")
+    )
+
+    view._acting_on = module_twin
+    view._module_done(ApplyReport("install", "twin", family="module", rebuild_required=True))
+    assert view._rebuild_owed == {("module", "twin")}
+
+    pending = (apply_module.PendingSql("world", "data/sql/*.sql", ("one.sql",)),)
+    view._acting_on = mod_twin
+    view._module_done(ApplyReport("install", "twin", family="mod", pending_sql=pending))
+    assert set(view._sql_owed) == {("mod", "twin")}
+    assert view._rebuild_owed == {("module", "twin")}
+
+    # A report whose family is not the press on record is filed under NEITHER.
+    view._rebuild_owed.clear()
+    view._acting_on = module_twin
+    view._module_done(ApplyReport("install", "twin", family="mod", rebuild_required=True))
+    assert view._rebuild_owed == set(), view._rebuild_owed
+
+
 def test_an_install_that_needs_a_rebuild_raises_the_banner_and_the_chip(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -7467,7 +7535,9 @@ def test_an_install_that_needs_a_rebuild_raises_the_banner_and_the_chip(
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-solocraft"}))
     assert view.rebuild_banner.isHidden() is True
 
-    _deliver_report(view, ApplyReport("install", "mod-solocraft", rebuild_required=True))
+    _deliver_report(
+        view, ApplyReport("install", "mod-solocraft", family="module", rebuild_required=True)
+    )
 
     assert view.rebuild_banner.isHidden() is False
     assert "mod-solocraft" in view.rebuild_banner_label.text()
@@ -7484,7 +7554,9 @@ def _owing_a_rebuild(
         services, "installed_modules", lambda: {"module": frozenset({"mod-solocraft"})}
     )
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    _deliver_report(view, ApplyReport("install", "mod-solocraft", rebuild_required=True))
+    _deliver_report(
+        view, ApplyReport("install", "mod-solocraft", family="module", rebuild_required=True)
+    )
     assert view.rebuild_banner.isHidden() is False, "the ground for every assertion below"
     return view
 
@@ -7582,6 +7654,7 @@ def test_a_report_with_pending_sql_puts_the_files_on_the_chip(
         ApplyReport(
             "install",
             "mod-transmog",
+            family="module",
             pending_sql=(
                 apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
             ),
@@ -7608,6 +7681,7 @@ def test_the_importer_finishing_clears_every_sql_chip(
         ApplyReport(
             "install",
             "mod-transmog",
+            family="module",
             pending_sql=(
                 apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
             ),
@@ -7808,6 +7882,7 @@ def test_a_successful_removal_forgets_everything_owed_about_that_module(
         ApplyReport(
             "install",
             "mod-transmog",
+            family="module",
             rebuild_required=True,
             pending_sql=(
                 apply_module.PendingSql("world", "data/sql/db-world/*.sql", ("one.sql",)),
@@ -7817,7 +7892,7 @@ def test_a_successful_removal_forgets_everything_owed_about_that_module(
     view._module_updates_done((apply_module.ModuleUpdate("mod-transmog", tmp_path, True, 2),))
     assert view._rebuild_owed and view._sql_owed and view._behind
 
-    _deliver_report(view, ApplyReport("remove", "mod-transmog"))
+    _deliver_report(view, ApplyReport("remove", "mod-transmog", family="module"))
 
     assert view._rebuild_owed == set()
     assert view._sql_owed == {}
@@ -7843,7 +7918,9 @@ def test_a_clone_deleted_outside_the_app_takes_its_chips_and_the_banner_with_it(
     services = _services(ps, tmp_path, [])
     object.__setattr__(services, "installed_modules", lambda: dict(on_disk))
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    _deliver_report(view, ApplyReport("install", "mod-transmog", rebuild_required=True))
+    _deliver_report(
+        view, ApplyReport("install", "mod-transmog", family="module", rebuild_required=True)
+    )
     assert view.rebuild_banner.isHidden() is False
 
     on_disk["module"] = frozenset()  # somebody deleted modules/mod-transmog
@@ -7870,7 +7947,9 @@ def test_a_game_with_no_installed_reader_keeps_what_this_session_learned(
     object.__setattr__(services, "installed_modules", None)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
 
-    _deliver_report(view, ApplyReport("install", "mod-transmog", rebuild_required=True))
+    _deliver_report(
+        view, ApplyReport("install", "mod-transmog", family="module", rebuild_required=True)
+    )
 
     assert view.rebuild_banner.isHidden() is False
     assert "mod-transmog" in view.rebuild_banner_label.text()
@@ -8527,7 +8606,7 @@ def test_refresh_forgets_every_version_and_a_report_forgets_one(
     pump_until(lambda: not view._filling_versions, "the first fill never finished")
     assert len(read) == 2
 
-    _deliver_report(view, ApplyReport("install", "mod-solocraft"))
+    _deliver_report(view, ApplyReport("install", "mod-solocraft", family="module"))
     pump_until(lambda: not view._filling_versions, "the fill after the report never finished")
     assert read[2:] == [tmp_path / "modules" / "mod-solocraft"], "one module, not both"
 
@@ -8659,7 +8738,7 @@ def test_a_finished_update_drops_the_commits_behind_it_just_pulled(
         "Update available" in b.text() for b in view.modules_panel.row("mod-solocraft").chip_buttons
     )
 
-    _deliver_report(view, ApplyReport("install", "mod-solocraft"))
+    _deliver_report(view, ApplyReport("install", "mod-solocraft", family="module"))
 
     assert view._behind == {}
     assert not [

@@ -3771,3 +3771,31 @@ def test_a_conflict_is_found_in_another_familys_clone_folder(tmp_path: Path) -> 
     assert "some-ale-script" in str(caught.value)
     assert "ale_scripts" in str(caught.value), str(caught.value)
     assert not applier.clone_dir(module).exists()
+
+
+def test_a_report_names_the_family_of_the_manifest_it_ran(tmp_path: Path) -> None:
+    """T48: the report carries `manifest.type`, on install and on remove.
+
+    Driven with an `ale`, not a `module`: `module` is the family a hard-coded or
+    defaulted value would most likely say, so it could not tell the two apart.
+
+    Mutation: build the report with `family="module"` and both asserts fail.
+    """
+    ale = parse_manifest(
+        {
+            "id": "some-script",
+            "name": "Some Script",
+            "type": "ale",
+            "game": "wow-wotlk",
+            "description": "x",
+            "source": {"repo": "acme/some-script"},
+            "deploy": [{"src": "Some.lua", "dest": "env/dist/etc/modules/lua_scripts/"}],
+        }
+    )
+    applier = Applier(
+        tmp_path,
+        git=_FakeGit({"Some.lua": "-- x\n"}),
+        remote_url=_Origins("https://github.com/acme/some-script.git"),
+    )
+    assert applier.install(ale).family == "ale"
+    assert applier.remove(ale).family == "ale"

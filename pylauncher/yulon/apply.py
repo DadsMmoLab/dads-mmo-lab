@@ -828,6 +828,15 @@ class ApplyReport:
 
     action: When
     item_id: str
+    family: ManifestType = field(kw_only=True)
+    """Which family `item_id` belongs to (T48). Required, and by keyword.
+
+    An id alone does not name a row: two families can ship the same id, and
+    since T42 round 2 the view keys its manifests, chips and banner by
+    `(family, id)`. The report was the one thing that still forgot. No default,
+    because a default would be a guess at the family -- and a chip on the wrong
+    family's row is a lie, where a chip missing is only a gap.
+    """
     done: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
     rebuild_required: bool = False
@@ -2400,6 +2409,7 @@ class Applier:
         report = ApplyReport(
             action=action,
             item_id=manifest.id,
+            family=manifest.type,
             done=tuple(log.done),
             skipped=tuple(log.skipped),
             rebuild_required=manifest.build.rebuild and action != "configure",

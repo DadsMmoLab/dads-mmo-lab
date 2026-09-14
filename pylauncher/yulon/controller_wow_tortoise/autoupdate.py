@@ -522,6 +522,7 @@ def _with_note(report: ApplyReport, note: str) -> ApplyReport:
     return ApplyReport(
         action=report.action,
         item_id=report.item_id,
+        family=report.family,
         done=(*report.done, note),
         skipped=report.skipped,
         rebuild_required=report.rebuild_required,

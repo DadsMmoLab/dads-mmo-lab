@@ -6326,9 +6326,13 @@ class ControllerView(QWidget):
         forget = self.services.module_forget
         if result.action == "remove" and forget is not None:
             # The manifest the press was really about, not one looked up by the
-            # report's id: the report carries no family, and the record being
-            # dropped is a file on disk named after this manifest (round 2).
-            if acted_on is not None and acted_on.id == result.item_id:
+            # report's id: the record being dropped is a file on disk named after
+            # this manifest (round 2). Matched on the family as well since T48,
+            # now that the report carries one.
+            if acted_on is not None and (acted_on.type, acted_on.id) == (
+                result.family,
+                result.item_id,
+            ):
                 forget(acted_on)
         # Re-read after EVERY report, where it used to happen for the two
         # outcomes that changed what was in the list (a custom module added, a
@@ -6356,11 +6360,12 @@ class ControllerView(QWidget):
         # it. Dropped before `reload_modules()` runs, so the redraw does not
         # hand the row the sha it had before the action (T44 item 1).
         self._versions.forget(item_id)
-        if acted_on is None or acted_on.id != item_id:
+        if acted_on is None or (acted_on.type, acted_on.id) != (result.family, item_id):
             # Unreachable through both live routes -- `_module_action()` and
             # `_install_custom_module()` each set `_acting_on` immediately
-            # before their `_run()`, and an `ApplyReport` carries the id of the
-            # manifest it was handed. Said rather than guessed, because the
+            # before their `_run()`, and an `ApplyReport` carries the id and
+            # the family of the manifest it was handed (T48). Said rather than
+            # guessed, because the
             # only alternative is resolving a bare id to a family, which is the
             # ambiguity T42 round 2 removed from four other surfaces. A chip
             # missing is a gap; a chip on the wrong family's row is a lie.
@@ -6369,7 +6374,7 @@ class ControllerView(QWidget):
                 "its chips cannot be keyed to a family and are not recorded"
             )
             return
-        key = (acted_on.type, item_id)
+        key = (result.family, item_id)
         if result.action == "remove":
             self._rebuild_owed.discard(key)
             self._sql_owed.pop(key, None)
