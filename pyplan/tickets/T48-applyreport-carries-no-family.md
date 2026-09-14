@@ -1,6 +1,6 @@
 # T48 — `ApplyReport` names an id but not the family it belongs to
 
-**Status:** FIXED on the branch; gate and review below.
+**Status:** FIXED on the branch; gated, reviewed twice (round 2 fix not re-reviewed), draft PR.
 **Filed:** 2026-09-13 by the lead.
 **Branch:** `fix/applyreport-carries-its-family`, from `upstream/Yulon` 936beda5. (Filed on
 `fix/t44-open-findings`, which was never pushed; the ticket travels with the fix.)
@@ -91,3 +91,9 @@ twin's rebuild, SQL and update facts, and a reload does not put them back. Now a
 not match the press on record may only ADD what it says is owed — never clear. A spare warning is
 corrected by the next verified press; a lost one is the outcome this must not have. Mutations N4b,
 N6b, N7 killed. This change has not had a third review: the owner's cap is two rounds, then ask.
+
+## Gate — 2026-09-14, at f9a8547c
+
+`1 failed, 4660 passed, 8 skipped, 23 deselected` on 3.13 and 3.11. The failure is
+`test_the_forget_button_appears_even_when_the_status_poll_cannot_reach_docker`, upstream's own,
+fixed by #162. ruff, black clean; mypy clean on linux, win32, darwin.
