@@ -11,7 +11,12 @@ every step that could not run appears in `ApplyReport.skipped`.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
+import os
+import shutil
+import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +25,7 @@ import pytest
 from yulon import apply as apply_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native
-from yulon.git import CloneSpec, RunnerGit
+from yulon.git import CloneSpec, RunnerGit, git_available
 from yulon.manifest import parse_manifest
 from yulon.ownership import Ownership
 
@@ -3908,3 +3913,263 @@ def test_a_report_names_the_family_of_the_manifest_it_ran(tmp_path: Path) -> Non
     )
     assert applier.install(ale).family == "ale"
     assert applier.remove(ale).family == "ale"
+
+
+# --------------------------------------------------------------------------
+# T60: no module manifest pins a revision, so the install path with `rev=None`
+# is the ONLY path a shipped module takes. Driven against real git.
+# --------------------------------------------------------------------------
+
+
+class _LocalOrigin:
+    """`RunnerGit`, with the manifest's https URL answered by a local repository.
+
+    Only the URL is swapped: branch, depth, sparse path and -- the point --
+    `rev` reach the real clone seam exactly as `Applier.install()` built them.
+    `file://` and not a bare path, because git clones a local path by
+    hardlinking and ignores `--depth`, which would quietly test a FULL clone
+    where every real module clone is shallow.
+    """
+
+    def __init__(self, origin: Path) -> None:
+        self.origin = origin
+        self.specs: list[CloneSpec] = []
+
+    def _local(self, spec: CloneSpec) -> CloneSpec:
+        self.specs.append(spec)
+        return dataclasses.replace(spec, url=self.origin.as_uri())
+
+    def clone(self, spec: CloneSpec) -> None:
+        RunnerGit().clone(self._local(spec))
+
+    def clone_lines(self, spec: CloneSpec, *, stage: str = "clone") -> Iterator[str]:
+        return RunnerGit().clone_lines(self._local(spec), stage=stage)
+
+
+def _git(cwd: Path, *argv: str) -> str:
+    author = ["-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    return subprocess.run(
+        ["git", *author, *argv], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _publish(origin: Path, files: dict[str, str], version: str) -> str:
+    """Commit `files` (with `{v}` filled) to `origin`; return the new commit's sha."""
+    for rel, text in files.items():
+        target = origin / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text.replace("{v}", version), encoding="utf-8")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-qm", version)
+    return _git(origin, "rev-parse", "HEAD")
+
+
+_UNPINNED: dict[str, tuple[str, str, dict[str, str], str]] = {
+    # id: (family, game, upstream files, where the content lands under tmp_path)
+    "lootpet": (
+        "ale",
+        "wow-wotlk",
+        {"LootPet.lua": "-- LootPet {v}\n"},
+        f"server/{LUA}/LootPet.lua",
+    ),
+    "mod-ale": (
+        "module",
+        "wow-wotlk",
+        {
+            "conf/mod_ale.conf.dist": 'ALE.ScriptPath = "lua_scripts"\nALE.Enabled = true\n',
+            "src/LuaEngine/ALEConfig.cpp": "// ALE {v}\n",
+        },
+        # A C++ module lands as the clone the rebuild compiles.
+        "server/modules/mod-ale/src/LuaEngine/ALEConfig.cpp",
+    ),
+    "tortoise-bots-manager": (
+        "mod",
+        "wow-tortoise",
+        {
+            "TortoiseBotsManager.toc": "## Interface: 11200\nCore.lua\n",
+            "Core.lua": "-- TBM {v}\n",
+        },
+        "TurtleWoW/Interface/AddOns/TortoiseBotsManager/Core.lua",
+    ),
+}
+
+
+def _unpinned_shipped(item_id: str) -> Any:
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    family, game, _files, _lands = _UNPINNED[item_id]
+    stores = {"wow-wotlk": wotlk_modules.store, "wow-tortoise": tortoise_modules.store}
+    manifest = stores[game]().load(family, item_id)  # type: ignore[arg-type]
+    assert (
+        manifest.source is not None and manifest.source.rev is None
+    ), f"{item_id} is supposed to be unpinned (T60); this test proves nothing about a pin"
+    return manifest
+
+
+def _unpinned_applier(tmp_path: Path, origin: Path) -> tuple[Applier, _LocalOrigin]:
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface" / "AddOns").mkdir(parents=True, exist_ok=True)
+    git = _LocalOrigin(origin)
+    return Applier(tmp_path / "server", git=git, client_dir=client), git
+
+
+_T65 = (
+    "T65, found by T60 and independent of any rev: a `client` step whose `src` is the checkout "
+    "copytrees `.git` into AddOns, and the SECOND copy cannot overwrite git's read-only pack "
+    "files (Errno 13). A pinned reinstall fails identically."
+)
+
+_RECOPY_FAILS = frozenset({"tortoise-bots-manager"})
+"""Items whose second install raises before `_client()` lands anything (T65)."""
+
+
+def _recopy_fails(item_id: str) -> bool:
+    """Will this item's second install die in `_client()` on this machine?
+
+    Root writes straight through a 0444 file, so there the copy succeeds and
+    nothing raises. Everywhere this suite actually runs -- CI's `runner` user,
+    and Windows, where the read-only attribute refuses the open -- it raises.
+    """
+    return item_id in _RECOPY_FAILS and getattr(os, "geteuid", lambda: 1)() != 0
+
+
+def _reinstall(applier: Applier, manifest: Any, item_id: str) -> None:
+    """The second install, with T65's crash caught for the one item that hits it.
+
+    Caught HERE rather than marked on the parameter, because an `xfail` ends
+    the test at the raise: the clone assertions that follow -- the ones this
+    file exists for -- never ran for the addon, and a `reset --hard` removed
+    from `_update()` left that parameter reporting `xfailed` while the other
+    two went red (review round 1). The addon's own landing is asserted by
+    `test_a_client_addon_reinstall_lands_the_new_files`, which is where T65
+    is allowed to fail.
+    """
+    if _recopy_fails(item_id):
+        with pytest.raises(shutil.Error):
+            applier.install(manifest)
+        return
+    applier.install(manifest)
+
+
+_UNPINNED_PARAMS = sorted(_UNPINNED)
+
+
+def _origin(tmp_path: Path) -> Path:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    return origin
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("item_id", _UNPINNED_PARAMS)
+def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
+    item_id: str, tmp_path: Path
+) -> None:
+    """T60's real path: an ale script, a rebuilt C++ module and a client addon, all `rev=None`.
+
+    The owner removed every module pin, so what has to hold is not the schema
+    but the clone: a fresh install checks out the default branch's tip, and
+    the next install over that checkout -- which IS the pull, `fetch origin
+    HEAD` + `reset --hard FETCH_HEAD` -- lands the tip as it is THEN, and the
+    new content reaches where the module is used (the Lua folder, the module
+    tree the rebuild compiles, the client's AddOns).
+
+    The upstream moves between the two installs, so the second answer differs
+    from the first: a seam that cloned once and then did nothing, or that
+    checked out a remembered commit, leaves `v1` where `v2` is asserted.
+
+    Every parameter reaches the clone assertions, the addon included: its
+    second install raises T65 in `_client()`, which `_reinstall()` catches so
+    that what this test is about -- where HEAD ends up -- is still asserted
+    for all three.
+    """
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    first = _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier, git = _unpinned_applier(tmp_path, origin)
+    clone = applier.clone_dir(manifest)
+
+    report = applier.install(manifest)
+
+    assert [spec.rev for spec in git.specs] == [None]
+    assert _git(clone, "rev-parse", "HEAD") == first
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+    assert report.rebuild_required is (item_id == "mod-ale"), report
+
+    second = _publish(origin, files, "v2")
+    _reinstall(applier, manifest, item_id)
+
+    assert _git(clone, "rev-parse", "HEAD") == second, "the reinstall did not follow the tip"
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    if not _recopy_fails(item_id):
+        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    assert (clone / ".git" / "shallow").is_file(), "a module clone stays shallow"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("item_id", _UNPINNED_PARAMS)
+def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_path: Path) -> None:
+    """Somebody installed one of these while it was pinned. The next install unpins it.
+
+    Their checkout is DETACHED at the old revision (`_pin()` checks out
+    `--detach`), a starting state no unpinned clone of this app's produces --
+    and the fixture is the harder of its two shapes: the pin was already behind
+    the tip when it was cloned, so the depth-1 clone holds the tip and the pin
+    as two unconnected shallow commits. The unpinned install must still move
+    HEAD to the tip and the tip's content to where it is used.
+
+    The addon parameter reaches those assertions too; see `_reinstall()`.
+    """
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    old = _publish(origin, files, "v1")
+    tip = _publish(origin, files, "v2")
+    manifest = _unpinned_shipped(item_id)
+    assert manifest.source is not None
+    pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
+    applier, git = _unpinned_applier(tmp_path, origin)
+    clone = applier.clone_dir(manifest)
+
+    applier.install(pinned)
+    assert _git(clone, "rev-parse", "HEAD") == old, "the fixture did not reproduce the old pin"
+    assert _git(clone, "branch", "--show-current") == "", "a pin checks out detached"
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+
+    _reinstall(applier, manifest, item_id)
+
+    assert [spec.rev for spec in git.specs] == [old, None]
+    assert _git(clone, "rev-parse", "HEAD") == tip
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    if not _recopy_fails(item_id):
+        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.xfail(
+    getattr(os, "geteuid", lambda: 1)() != 0, strict=True, raises=shutil.Error, reason=_T65
+)
+def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
+    """The half of the addon's reinstall that T65 breaks, in a test of its own.
+
+    The two tests above assert where the CHECKOUT ends up, which is what
+    removing the pins changed. This asserts what the user gets: the moved
+    upstream's files in their own AddOns folder. It fails today, strictly, so
+    the day T65 is fixed this test says so instead of passing in silence.
+    """
+    item_id = "tortoise-bots-manager"
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier, _git_seam = _unpinned_applier(tmp_path, origin)
+
+    applier.install(manifest)
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+
+    _publish(origin, files, "v2")
+    applier.install(manifest)
+
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")

@@ -325,6 +325,48 @@ def test_origin_is_optional_and_every_shipped_manifest_has_none() -> None:
             assert parse_manifest(json.loads(item_file.read_text(encoding="utf-8"))).origin is None
 
 
+def test_no_shipped_module_manifest_pins_a_revision() -> None:
+    """Every module tracks its repository's latest: the owner's decision, 2026-09-15 (T60).
+
+    Five manifests were pinned (`lootpet`, `sitmeanrest`, `mod-ale`,
+    `tortoise-bots-manager`, `tortoise-gm-manager`), each with a written reason,
+    and the owner removed all five knowing them. So a `rev` in a shipped module
+    manifest is a decision being reversed, and it fails here rather than in
+    review. `rev: null` is refused too: the decision is that the field is not
+    there.
+
+    The files are enumerated from the DISK, every game and every family, and
+    not through the indexes, so an item file an index forgot is still read.
+    `Source.rev` stays in the schema: the catalog's SERVER sources are pinned
+    (`test_catalog.py::GATE_PINS`), and derived user manifests are not shipped.
+    """
+    items = sorted(p for p in MANIFESTS_DIR.glob("*/*/*.json") if p.parent.parent.name != "schema")
+    pinned: list[str] = []
+    cloned: set[str] = set()
+    for path in items:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        source = raw.get("source")
+        if source is None:
+            continue
+        cloned.add(f"{raw['game']}/{raw['id']}")
+        if "rev" in source:
+            pinned.append(f"{path.relative_to(MANIFESTS_DIR)} rev={source['rev']!r}")
+    assert not pinned, (
+        "the owner decided on 2026-09-15 (T60) that no module manifest carries a rev -- every "
+        f"module tracks its repository's latest. Pinned: {pinned}"
+    )
+    # Not vacuous: the glob reached every game, and the five that were pinned.
+    games = {p.name for p in MANIFESTS_DIR.iterdir() if p.is_dir() and p.name != "schema"}
+    assert games == {p.parent.parent.name for p in items}, games
+    assert {
+        "wow-wotlk/lootpet",
+        "wow-wotlk/sitmeanrest",
+        "wow-wotlk/mod-ale",
+        "wow-tortoise/tortoise-bots-manager",
+        "wow-tortoise/tortoise-gm-manager",
+    } <= cloned, sorted(cloned)
+
+
 # -- T43: the tuning fields on a conf key ----------------------------------
 
 
