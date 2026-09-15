@@ -38,6 +38,7 @@ from yulon import docker, platform, rmtree, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
+    CLONE_MARKER,
     BehindReader,
     CloneSpec,
     ContainerGit,
@@ -204,7 +205,7 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
-CLAIM_FILE = ".yulon-clone.json"
+CLAIM_FILE = CLONE_MARKER
 """What this app writes INSIDE a clone it made, so it can recognise it later.
 
 The evidence half of `Ownership`. It is written after a clone succeeds and read
@@ -219,6 +220,10 @@ kind of entry there; `git reset --hard` does not remove untracked files, so the
 claim survives the very update path it authorises; and `remove()` deleting the
 clone deletes the claim with it, with no second place to forget about. It joins
 `include.sh` as the second file this engine writes into a clone.
+
+The name itself is `git.CLONE_MARKER`, because `is_unmodified()` has to know it
+too (T66) and `apply` imports `git`, not the other way round. This is the name
+every OTHER use in the tree reads.
 """
 
 CLAIM_VERSION = 1
@@ -1418,7 +1423,10 @@ class Applier:
            and running its SQL over the result. A local read (`git remote
            get-url`), so it is asked first and both names go in the refusal.
         2. **The working tree.** `reset --hard` destroys precisely what `git
-           status` reports. Also a local read.
+           status` reports, minus this app's own `CLAIM_FILE`, which it wrote
+           and rewrites (T66 — see `git._status_pathspec()`; until it was fixed
+           that one untracked file refused an update on every clone this app
+           had ever made). Also a local read.
         3. **HEAD.** `status` compares the tree and the index against HEAD and
            says nothing about what HEAD itself carries, so a user who
            COMMITTED their work passes 1 and 2. `no_local_commits()` counts
@@ -2084,7 +2092,14 @@ class Applier:
         module clone this app can point at as the one that matters. That also
         means an UNTRACKED file blocks adoption, which is stricter than the harm
         requires — a hard reset does not delete untracked files — and it is the
-        `include.sh` case above. Deliberate, and NOT allowlisted even for that
+        `include.sh` case above. `CLAIM_FILE` is the one name `unmodified()`
+        does not count (T66, `git._status_pathspec()`), and it changes nothing
+        here: this method is reached only for `UNCLAIMED`, and the two ways to
+        be `UNCLAIMED` are no such file at all and one the REPOSITORY tracks —
+        which `status` already reports as unchanged. A claim this app wrote but
+        cannot read as its own is `UNKNOWN`, and `_require_own_clone()` raises
+        on that before ever getting here.
+        Deliberate, and NOT allowlisted even for that
         one generated name: the file this app writes is empty, a user's
         `include.sh` need not be, so an exact-name allowlist would have to
         become a content check to be safe, and a content check is the first step
