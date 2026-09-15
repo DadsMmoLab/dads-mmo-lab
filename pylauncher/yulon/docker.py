@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import IO, BinaryIO, Literal
+from typing import IO, Any, BinaryIO, Literal
 
 from yulon import platform, runner, wsl
 from yulon.log import get_logger
@@ -4294,17 +4294,118 @@ def exec_stdin(
     # something users attach to bug reports.
     logger.debug(f"exec_stdin(): {' '.join(command)}")
     child = platform.wsl_env(dict(env)) if wsl_distro is not None else {**os.environ, **env}
+    return _pumped(command, source, child_env=child, label=container)
+
+
+def compose_run_stdin(
+    server_dir: Path,
+    service: str,
+    entrypoint: str,
+    argv: Sequence[str],
+    source: BinaryIO,
+    *,
+    wsl_distro: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """`docker compose run --rm --no-deps -T --entrypoint <e> <service> <argv…>`, fed `source`.
+
+    The route into a named volume that the running server mounts read-only (T62).
+    A compose service is addressed rather than a volume name or a container name,
+    and each of those alternatives is a guess this one does not have to make:
+
+    * the VOLUME is `<project>_client-data` on an install this engine wrote and
+      `<project>_ac-client-data` on one the bash installer built
+      (`tests/data/wotlk-compose-config*.json`), and the project is whatever
+      compose calls it. Compose resolves the mount from the service definition,
+      so the copy lands in THIS install's volume whichever it is.
+    * a CONTAINER name is global to the daemon (`ac-client-data-init` belongs to
+      whichever install ran last), and `run` makes a fresh one inside this
+      project instead (`run_one_shot()` records `container_name` not stopping it).
+
+    `source` goes in on stdin and never as a bind mount, which is what makes the
+    same argv work on all three daemons: a Windows path, a
+    `\\\\wsl.localhost\\...` path Docker Desktop refuses to mount, and a SELinux
+    host all read a pipe the same way. Through `wsl.exe` the bytes cross exactly
+    as `DockerSql.run_file()`'s do.
+
+    `-T` because there is no terminal and the stream is binary; `--no-deps`
+    because nothing else in the project may start for a file copy. The exit
+    status is returned rather than raised, like `exec_stdin()`: the caller owns
+    the sentence.
+
+    Raises:
+        DockerCliMissingError: no docker CLI here (nor `wsl.exe` for a distro).
+        DockerCommandError: `server_dir` is gone, or a distro install's folder
+            has no Linux spelling to run compose in.
+        SourceUnreadableError: `source` could not be read.
+    """
+    inside: str | None = None
+    if wsl_distro is not None:
+        inside = platform.wsl_linux_path(server_dir)
+        if inside is None:
+            # `_docker()` would run compose in the distro's home directory here,
+            # which is some OTHER project or none. A copy into a volume must not
+            # guess which install it is writing to.
+            raise DockerCommandError(
+                f"{server_dir} is not a path inside the {wsl_distro} distro, so there is no "
+                "folder there to run this install's compose project in. Nothing was copied."
+            )
+    elif _cwd_is_missing(server_dir):
+        raise DockerCommandError(
+            f"The server folder {server_dir} no longer exists, so Docker was not asked."
+        )
+    prefix = platform.docker_prefix(wsl_distro, inside=inside)
+    if prefix is None:
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    command = [
+        *prefix,
+        "compose",
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--entrypoint",
+        entrypoint,
+        service,
+        *argv,
+    ]
+    logger.debug(f"compose_run_stdin(): {' '.join(command)} in {server_dir}")
+    child = platform.wsl_env() if wsl_distro is not None else dict(os.environ)
+    return _pumped(
+        command,
+        source,
+        child_env=child,
+        label=service,
+        cwd=None if wsl_distro is not None else server_dir,
+    )
+
+
+def _pumped(
+    command: list[str],
+    source: BinaryIO,
+    *,
+    child_env: dict[str, str],
+    label: str,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Start `command`, pump `source` into its stdin, and reap it on every way out.
+
+    The body `exec_stdin()` documents, shared with `compose_run_stdin()` so the
+    reaping guarantee is written once. `cwd` is passed to `Popen` only when
+    there is one: a WSL route carries its directory in the argv (`wsl --cd`).
+    """
+    extra: dict[str, Any] = {} if cwd is None else {"cwd": cwd}
     try:
         proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=runner.child_env(child),
+            env=runner.child_env(child_env),
             creationflags=runner.creationflags(),
+            **extra,
         )
     except OSError as exc:
-        logger.warning(f"{prefix[0]} could not be started: {exc}")
+        logger.warning(f"{command[0]} could not be started: {exc}")
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP) from exc
     # All three are pipes because all three were asked for as pipes; the
     # asserts are type narrowing, not a check.
@@ -4321,7 +4422,7 @@ def exec_stdin(
     for reader in readers:
         reader.start()
     try:
-        _pump(source, proc.stdin, container)
+        _pump(source, proc.stdin, label)
     finally:
         # Unconditional, and a `finally` rather than a list of clauses,
         # because the pump can end in a way this module does not get to
