@@ -13,7 +13,6 @@ from __future__ import annotations
 import ast
 import dataclasses
 import json
-import os
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -596,7 +595,6 @@ def test_remove_of_a_shared_dir_deploy_leaves_other_scripts_alone(tmp_path: Path
 
     # Clone already gone: a directory deploy cannot be undone safely → skipped, not guessed.
     applier.install(m)
-    import shutil
 
     shutil.rmtree(applier.clone_dir(m))
     report = applier.remove(m)
@@ -4014,41 +4012,14 @@ def _unpinned_applier(tmp_path: Path, origin: Path) -> tuple[Applier, _LocalOrig
     return Applier(tmp_path / "server", git=git, client_dir=client), git
 
 
-_T65 = (
-    "T65, found by T60 and independent of any rev: a `client` step whose `src` is the checkout "
-    "copytrees `.git` into AddOns, and the SECOND copy cannot overwrite git's read-only pack "
-    "files (Errno 13). A pinned reinstall fails identically."
-)
-
-_RECOPY_FAILS = frozenset({"tortoise-bots-manager"})
-"""Items whose second install raises before `_client()` lands anything (T65)."""
-
-
-def _recopy_fails(item_id: str) -> bool:
-    """Will this item's second install die in `_client()` on this machine?
-
-    Root writes straight through a 0444 file, so there the copy succeeds and
-    nothing raises. Everywhere this suite actually runs -- CI's `runner` user,
-    and Windows, where the read-only attribute refuses the open -- it raises.
-    """
-    return item_id in _RECOPY_FAILS and getattr(os, "geteuid", lambda: 1)() != 0
-
-
 def _reinstall(applier: Applier, manifest: Any, item_id: str) -> None:
-    """The second install, with T65's crash caught for the one item that hits it.
+    """The second install.
 
-    Caught HERE rather than marked on the parameter, because an `xfail` ends
-    the test at the raise: the clone assertions that follow -- the ones this
-    file exists for -- never ran for the addon, and a `reset --hard` removed
-    from `_update()` left that parameter reporting `xfailed` while the other
-    two went red (review round 1). The addon's own landing is asserted by
-    `test_a_client_addon_reinstall_lands_the_new_files`, which is where T65
-    is allowed to fail.
+    A wrapper with nothing left in it, kept only so the three call sites read
+    as one action. It caught a `shutil.Error` for `tortoise-bots-manager`
+    until T65 was fixed: `client: [{src: "."}]` copied the checkout's `.git`
+    into AddOns and the second copy could not overwrite git's 0444 pack files.
     """
-    if _recopy_fails(item_id):
-        with pytest.raises(shutil.Error):
-            applier.install(manifest)
-        return
     applier.install(manifest)
 
 
@@ -4080,10 +4051,7 @@ def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
     from the first: a seam that cloned once and then did nothing, or that
     checked out a remembered commit, leaves `v1` where `v2` is asserted.
 
-    Every parameter reaches the clone assertions, the addon included: its
-    second install raises T65 in `_client()`, which `_reinstall()` catches so
-    that what this test is about -- where HEAD ends up -- is still asserted
-    for all three.
+    Every parameter reaches every assertion, the addon included.
     """
     _family, _game, files, lands = _UNPINNED[item_id]
     origin = _origin(tmp_path)
@@ -4104,8 +4072,7 @@ def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
 
     assert _git(clone, "rev-parse", "HEAD") == second, "the reinstall did not follow the tip"
     assert _git(clone, "show", "-s", "--format=%s") == "v2"
-    if not _recopy_fails(item_id):
-        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
     assert (clone / ".git" / "shallow").is_file(), "a module clone stays shallow"
 
 
@@ -4121,7 +4088,7 @@ def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_
     as two unconnected shallow commits. The unpinned install must still move
     HEAD to the tip and the tip's content to where it is used.
 
-    The addon parameter reaches those assertions too; see `_reinstall()`.
+    The addon parameter reaches those assertions too.
     """
     _family, _game, files, lands = _UNPINNED[item_id]
     origin = _origin(tmp_path)
@@ -4143,21 +4110,24 @@ def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_
     assert [spec.rev for spec in git.specs] == [old, None]
     assert _git(clone, "rev-parse", "HEAD") == tip
     assert _git(clone, "show", "-s", "--format=%s") == "v2"
-    if not _recopy_fails(item_id):
-        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
 
 
 @pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-@pytest.mark.xfail(
-    getattr(os, "geteuid", lambda: 1)() != 0, strict=True, raises=shutil.Error, reason=_T65
-)
 def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
-    """The half of the addon's reinstall that T65 breaks, in a test of its own.
+    """The half of the addon's reinstall that T65 broke, in a test of its own.
 
     The two tests above assert where the CHECKOUT ends up, which is what
     removing the pins changed. This asserts what the user gets: the moved
-    upstream's files in their own AddOns folder. It fails today, strictly, so
-    the day T65 is fixed this test says so instead of passing in silence.
+    upstream's files in their own AddOns folder.
+
+    It also asserts what must NOT be there, and that is the whole of T65: the
+    checkout's `.git` used to be copied in with everything else, and git's
+    0444 pack files cannot be overwritten, so this second install raised a
+    raw `shutil.Error` (Errno 13) having landed nothing. Asserting the absence
+    as well as the landing is what separates the fix from a reinstall that
+    happens to succeed because the user is root, which can overwrite a 0444
+    file and left this passing on a root-run suite either way.
     """
     item_id = "tortoise-bots-manager"
     _family, _game, files, lands = _UNPINNED[item_id]
@@ -4167,12 +4137,21 @@ def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
     applier, _git_seam = _unpinned_applier(tmp_path, origin)
 
     applier.install(manifest)
+    addon = (tmp_path / lands).parent
     assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+    # The FIRST install is where the exclusion has to hold: nothing to
+    # overwrite yet, so a copy that still brought `.git` would land it here in
+    # silence and only fail on the next press.
+    assert not (addon / ".git").exists(), "the checkout's history was copied into the client"
+    assert not (addon / apply_module.CLAIM_FILE).exists(), "so was this app's own claim"
+    assert (addon / "TortoiseBotsManager.toc").is_file(), "and the addon itself did not land"
+    assert (applier.clone_dir(manifest) / ".git").is_dir(), "the history belongs in the clone"
 
     _publish(origin, files, "v2")
     applier.install(manifest)
 
     assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    assert not (addon / ".git").exists()
 
 
 # --------------------------------------------------------------------------

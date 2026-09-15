@@ -226,6 +226,18 @@ too (T66) and `apply` imports `git`, not the other way round. This is the name
 every OTHER use in the tree reads.
 """
 
+_NOT_FOR_THE_CLIENT = shutil.ignore_patterns(".git", CLAIM_FILE)
+"""What a `client` copy leaves in the clone: git's own directory, and the claim.
+
+T65, and `Applier._client()` carries the measurement. Both names are this app's
+or git's bookkeeping, neither is ever read by the game, and `.git`'s 0444 pack
+files are what made the second install of a `src: "."` addon die.
+
+A pattern list rather than a top-level name check, so a nested repository
+inside somebody's addon is left behind too — it has the same read-only packs
+and the same nothing to offer a WoW client.
+"""
+
 CLAIM_VERSION = 1
 """Bumped only for a change this version could not read. A reader that does not
 recognise the version answers `UNKNOWN`, which refuses — never `UNCLAIMED`,
@@ -2511,6 +2523,26 @@ class Applier:
             log.conf_restart = True
 
     def _client(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+        """Copy this manifest's `client` steps into the game client's own folders.
+
+        **Never the checkout's bookkeeping** (T65). Two `wow-tortoise` addons
+        deploy with `src: "."` -- the addon IS the repository root -- so the
+        copy carried `.git` and this app's `CLAIM_FILE` into
+        `Interface/AddOns/<name>`. Git writes its pack and idx files 0444, and
+        `copytree(dirs_exist_ok=True)` cannot open a 0444 destination for
+        writing: the SECOND install of either addon died with a raw
+        `shutil.Error` (Errno 13) before it had landed a single new file, so
+        the addon could be installed once and never updated or reinstalled. A
+        pinned install failed identically, which is why this is not T60's.
+
+        Left out rather than force-overwritten: WoW reads the `.toc` and the
+        files it names, so a copy of somebody's git history in the AddOns
+        folder was never wanted -- it was 20+ MB of what the user's client has
+        to scan, and it is why the manifests' notes claimed the `.git` copy was
+        intended. Those notes are corrected with this change. A user who
+        removes and reinstalls also gets no stale `.git` back, because the
+        clone is where the history lives and it stays there.
+        """
         for step in manifest.client:
             if self.client_dir is None:
                 log.skipped.append(f"client {step.src}: no client dir configured")
@@ -2523,7 +2555,7 @@ class Applier:
             else:
                 target = self.client_dir / "Data"
             if src.is_dir():
-                shutil.copytree(src, target, dirs_exist_ok=True)
+                shutil.copytree(src, target, dirs_exist_ok=True, ignore=_NOT_FOR_THE_CLIENT)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target / src.name)
