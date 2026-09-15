@@ -923,7 +923,7 @@ def test_preflight_refuses_a_reserved_folder_before_it_provisions_anything() -> 
     `gather()` runs after provisioning. Picking the home folder on a clean Linux
     box therefore bought the docker-group consent dialog, a sudo password typed
     into Yu'lon's own dialog and a package install, and only then "Cannot use
-    '/home/pk' as the install location" - measured on Fedora 44, 2026-08-25,
+    '/home/user' as the install location" - measured on Fedora 44, 2026-08-25,
     against the shell installer this engine replaced. The native engine
     inherited that order in 7.1, and F.3 deleted the last test that named it.
 
@@ -1647,9 +1647,9 @@ def test_ready_markers_are_filled_and_escaped_unless_the_catalog_says_regex(
     # The address is open, so the line a FRESH install prints and the line the
     # same install prints after `_advertise_realm()` both match.
     assert re.search(seen[0].auth, filled_auth)
-    assert re.search(seen[0].auth, f"at 100.99.204.5:{ENTRY.ports.world}.")
+    assert re.search(seen[0].auth, f"at 100.64.0.13:{ENTRY.ports.world}.")
     # The port is not: a realm on another port is another realm.
-    assert not re.search(seen[0].auth, f"at 100.99.204.5:{ENTRY.ports.world + 1}.")
+    assert not re.search(seen[0].auth, f"at 100.64.0.13:{ENTRY.ports.world + 1}.")
     # And the WORLD marker is still a literal, dots and all -- A5 unchanged.
     assert not re.search(seen[0].world, markers.world.replace(".", "x"))
     assert seen[0].timeout == float(markers.timeout_s)
@@ -2900,12 +2900,12 @@ def test_the_install_ends_by_advertising_the_address_the_seam_detected(
     statement are asserted over the same run.
     """
     rec = Recorder()
-    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "100.78.24.50")
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "100.64.0.10")
 
-    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.78.24.50", "100.78.24.50")]
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
     assert "127.0.0.1" not in _statements(rec)[0], "the loopback was written as the realm address"
     assert rec.sql_secrets[-1] == "password", "it asked the database with no password"
-    assert [line for line in said if "now advertises 100.78.24.50" in line], said
+    assert [line for line in said if "now advertises 100.64.0.10" in line], said
 
 
 def test_the_line_a_user_reads_names_the_address_they_have_to_type(
@@ -3179,13 +3179,13 @@ def test_an_update_that_fails_says_so_and_leaves_the_install_successful(
     the address that is still owed).
     """
     rec = Recorder(failing_sql="UPDATE")
-    overrides: dict[str, object] = {"lan_ip": lambda: "100.78.24.50"}
+    overrides: dict[str, object] = {"lan_ip": lambda: "100.64.0.10"}
     if how == "unreachable":
         overrides["exec_stdin"] = _no_docker_cli
     said = _advertising(rec, tmp_path / "wow", **overrides)
 
     assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
-    unhappy = [line for line in said if "could not be set to 100.78.24.50" in line]
+    unhappy = [line for line in said if "could not be set to 100.64.0.10" in line]
     assert len(unhappy) == 1, said
     assert "Networking tab" in unhappy[0], unhappy[0]
     recorded = json.loads((tmp_path / "wow" / native.STATE_FILE).read_text(encoding="utf-8"))

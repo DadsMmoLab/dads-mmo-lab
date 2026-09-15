@@ -3,7 +3,7 @@
 8.9a's box gates uninstall on two families rather than four "because the
 mechanism is the compose project and the folder, which are the engine's and not
 the emulator's" (`pyplan/checklist.md`, line 2506). That claim was checked
-against the real Vanilla install at `/home/pk/vanilla-75b` on m910q,
+against the real Vanilla install at `/home/user/vanilla-75b` on m910q,
 2026-09-08, and it holds for the OBJECTS:
 
 * the folder carries the same `.yulon-install.json` claim (`family: cmangos`,

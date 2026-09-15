@@ -85,7 +85,7 @@ def test_a_marker_line_is_a_marker() -> None:
         "error: could not read the manifest",
         "an error happened here: exit 2",
         "[fail] acore_world",
-        "/home/pk is your home folder itself, so the install was refused",
+        "/home/user is your home folder itself, so the install was refused",
     ],
 )
 def test_every_failure_shape_reads_as_a_failure(line: str) -> None:
