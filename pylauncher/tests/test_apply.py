@@ -4014,23 +4014,45 @@ def _unpinned_applier(tmp_path: Path, origin: Path) -> tuple[Applier, _LocalOrig
     return Applier(tmp_path / "server", git=git, client_dir=client), git
 
 
-_ADDON_RECOPY = pytest.mark.xfail(
-    # Root writes through a 0444 file, so there the copy succeeds; everywhere
-    # this suite runs (CI's runner user, a Windows read-only attribute) it fails.
-    getattr(os, "geteuid", lambda: 1)() != 0,
-    strict=True,
-    raises=shutil.Error,
-    reason=(
-        "found by T60, independent of any rev: a `client` step whose src is the checkout "
-        "copytrees `.git` into AddOns, and the second copy cannot overwrite git's read-only "
-        "pack files (Errno 13). A pinned reinstall fails identically."
-    ),
+_T65 = (
+    "T65, found by T60 and independent of any rev: a `client` step whose `src` is the checkout "
+    "copytrees `.git` into AddOns, and the SECOND copy cannot overwrite git's read-only pack "
+    "files (Errno 13). A pinned reinstall fails identically."
 )
-_UNPINNED_PARAMS = [
-    pytest.param("lootpet"),
-    pytest.param("mod-ale"),
-    pytest.param("tortoise-bots-manager", marks=_ADDON_RECOPY),
-]
+
+_RECOPY_FAILS = frozenset({"tortoise-bots-manager"})
+"""Items whose second install raises before `_client()` lands anything (T65)."""
+
+
+def _recopy_fails(item_id: str) -> bool:
+    """Will this item's second install die in `_client()` on this machine?
+
+    Root writes straight through a 0444 file, so there the copy succeeds and
+    nothing raises. Everywhere this suite actually runs -- CI's `runner` user,
+    and Windows, where the read-only attribute refuses the open -- it raises.
+    """
+    return item_id in _RECOPY_FAILS and getattr(os, "geteuid", lambda: 1)() != 0
+
+
+def _reinstall(applier: Applier, manifest: Any, item_id: str) -> None:
+    """The second install, with T65's crash caught for the one item that hits it.
+
+    Caught HERE rather than marked on the parameter, because an `xfail` ends
+    the test at the raise: the clone assertions that follow -- the ones this
+    file exists for -- never ran for the addon, and a `reset --hard` removed
+    from `_update()` left that parameter reporting `xfailed` while the other
+    two went red (review round 1). The addon's own landing is asserted by
+    `test_a_client_addon_reinstall_lands_the_new_files`, which is where T65
+    is allowed to fail.
+    """
+    if _recopy_fails(item_id):
+        with pytest.raises(shutil.Error):
+            applier.install(manifest)
+        return
+    applier.install(manifest)
+
+
+_UNPINNED_PARAMS = sorted(_UNPINNED)
 
 
 def _origin(tmp_path: Path) -> Path:
@@ -4057,6 +4079,11 @@ def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
     The upstream moves between the two installs, so the second answer differs
     from the first: a seam that cloned once and then did nothing, or that
     checked out a remembered commit, leaves `v1` where `v2` is asserted.
+
+    Every parameter reaches the clone assertions, the addon included: its
+    second install raises T65 in `_client()`, which `_reinstall()` catches so
+    that what this test is about -- where HEAD ends up -- is still asserted
+    for all three.
     """
     _family, _game, files, lands = _UNPINNED[item_id]
     origin = _origin(tmp_path)
@@ -4073,10 +4100,12 @@ def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
     assert report.rebuild_required is (item_id == "mod-ale"), report
 
     second = _publish(origin, files, "v2")
-    applier.install(manifest)
+    _reinstall(applier, manifest, item_id)
 
     assert _git(clone, "rev-parse", "HEAD") == second, "the reinstall did not follow the tip"
-    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    if not _recopy_fails(item_id):
+        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
     assert (clone / ".git" / "shallow").is_file(), "a module clone stays shallow"
 
 
@@ -4091,6 +4120,8 @@ def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_
     the tip when it was cloned, so the depth-1 clone holds the tip and the pin
     as two unconnected shallow commits. The unpinned install must still move
     HEAD to the tip and the tip's content to where it is used.
+
+    The addon parameter reaches those assertions too; see `_reinstall()`.
     """
     _family, _game, files, lands = _UNPINNED[item_id]
     origin = _origin(tmp_path)
@@ -4107,8 +4138,38 @@ def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_
     assert _git(clone, "branch", "--show-current") == "", "a pin checks out detached"
     assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
 
-    applier.install(manifest)
+    _reinstall(applier, manifest, item_id)
 
     assert [spec.rev for spec in git.specs] == [old, None]
     assert _git(clone, "rev-parse", "HEAD") == tip
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    if not _recopy_fails(item_id):
+        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.xfail(
+    getattr(os, "geteuid", lambda: 1)() != 0, strict=True, raises=shutil.Error, reason=_T65
+)
+def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
+    """The half of the addon's reinstall that T65 breaks, in a test of its own.
+
+    The two tests above assert where the CHECKOUT ends up, which is what
+    removing the pins changed. This asserts what the user gets: the moved
+    upstream's files in their own AddOns folder. It fails today, strictly, so
+    the day T65 is fixed this test says so instead of passing in silence.
+    """
+    item_id = "tortoise-bots-manager"
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier, _git_seam = _unpinned_applier(tmp_path, origin)
+
+    applier.install(manifest)
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+
+    _publish(origin, files, "v2")
+    applier.install(manifest)
+
     assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
