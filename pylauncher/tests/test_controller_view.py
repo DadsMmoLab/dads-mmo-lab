@@ -777,7 +777,13 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
         asked.append(str(manifest.id))  # type: ignore[attr-defined]
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    services = _services(ps, tmp_path, [])
+    # T62: five of these manifests also write into the game client, and with no
+    # client folder on the install each of them now stops at the client notice
+    # before any question is asked. This test is about the PROMPTS, so the
+    # install is given a folder and every row reaches the applier as before.
+    services.client_dir = tmp_path / "client"
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
     catalogued = [r.data.id for r in view.modules_panel.rows() if r.data.catalogued]
     for item_id in catalogued:
         view.modules_panel.select(item_id)
