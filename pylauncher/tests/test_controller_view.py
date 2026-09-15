@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -1231,8 +1232,13 @@ class _LayeredStore(ManifestStore):
         super().__init__(root, game)
         self.user: dict[str, Manifest] = {}
 
-    def load_all(self, kind: ManifestType) -> Iterator[Manifest]:
-        shipped = list(super().load_all(kind))
+    def load_all(
+        self, kind: ManifestType, *, skipped: list[str] | None = None
+    ) -> Iterator[Manifest]:
+        # T46's keyword is forwarded rather than swallowed: the real store names
+        # a user manifest it could not load through it, and a fake that dropped
+        # it would make the view look like it reports skips when it never sees any.
+        shipped = list(super().load_all(kind, skipped=skipped))
         yield from shipped
         ids = {m.id for m in shipped}
         for manifest in self.user.values():
@@ -9204,3 +9210,184 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     which is the review this change would owe.
     """
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
+
+
+def test_a_broken_custom_manifest_costs_its_own_row_and_the_family_still_draws(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The tab keeps every shipped module and names the one file it could not read (T46).
+
+    Driven through `reload_modules()` against a REAL file on disk rather than a
+    `Manifest` handed to the builder: the defect lived in the store, surfaced in
+    `_load_manifests()`, and was only ever visible at this call site -- a test
+    that injected a broken manifest into the panel would have proved nothing
+    about either.
+
+    Before T46 the `!!` line was the ONLY thing this tab drew for the family:
+    `list(store.load_all(kind))` is forced inside one `try`, so ~21 shipped
+    WotLK modules disappeared behind one file the user's own custom-module route
+    had written.
+    """
+    user = tmp_path / "user-manifests"
+    items = user / modules.GAME / "modules"
+    items.mkdir(parents=True)
+    (user / modules.GAME / "modules.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game": modules.GAME,
+                "type": "module",
+                # Both bad ones sort FIRST, so a store that stopped at the raise
+                # stopped before `mod-kept` -- the user row after the bad one is
+                # the half of the family a family-scoped catch never reached.
+                "items": ["mod-broken", "mod-bad-shape", "mod-kept"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (items / "mod-broken.json").write_text("{not json", encoding="utf-8")
+    # Valid JSON that fails the SCHEMA. It is the realistic bad file -- this app
+    # persisted these itself, so an older build's shape is what ages badly -- and
+    # it does not arrive as `ManifestError`: pydantic raises it, straight through
+    # `load_manifest()`, and the skip has to be wide enough to hold it.
+    (items / "mod-bad-shape.json").write_text(
+        json.dumps(
+            {
+                "id": "mod-bad-shape",
+                "name": 5,
+                "type": "module",
+                "game": modules.GAME,
+                "source": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (items / "mod-kept.json").write_text(
+        json.dumps(
+            {
+                "id": "mod-kept",
+                "name": "Kept",
+                "type": "module",
+                "game": modules.GAME,
+                "source": {"repo": "you/mod-kept"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    services = _services(ps, tmp_path, [])
+    services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    # The report box accumulates: constructing the view already reloaded once.
+    # Cleared so what is counted below is ONE reload's worth, not the session's.
+    view.module_report.clear()
+
+    view.reload_modules()
+
+    # The family is still there. Counted, not sampled: a test that looked for one
+    # known id would pass on a tab that drew only that one.
+    shipped = services.store.load_index("module").items
+    drawn = {r.data.id for r in view.modules_panel.rows()}
+    assert set(shipped) <= drawn
+    assert len(shipped) >= 20
+    # And the USER row that comes after the bad one, which is the half of the
+    # loss `module_updates()` used to take silently: the skip has to continue
+    # the pass, not merely survive the rows already yielded.
+    assert "mod-kept" in drawn
+    assert "mod-broken" not in drawn
+    assert "mod-bad-shape" not in drawn
+
+    # And the file that would not read is named, once, where every other refusal
+    # on this tab is read.
+    report = view.module_report.toPlainText()
+    # Counted by LINE, not by substring: the id appears twice in its own sentence
+    # -- once as the id and once inside the filename -- so `report.count(...)`
+    # measures the sentence's shape rather than how many times it was written.
+    named = [line for line in report.splitlines() if "mod-broken" in line]
+    assert len(named) == 1, report
+    assert "is not valid JSON" in named[0]
+    # The schema failure gets ONE line too, which is the assertion that fails if
+    # the skip is narrowed: a `ValidationError` reaching the report unflattened
+    # is five lines, and reaching `_load_manifests()` uncaught is none of them
+    # and the family-wide line instead.
+    shaped = [line for line in report.splitlines() if "mod-bad-shape" in line]
+    assert len(shaped) == 1, report
+    assert "name" in shaped[0]
+    # Not as the family-wide failure, which is what it used to be.
+    assert "could not load modules" not in report
+
+    # And the skips outlive the one thing on this tab that CLEARS the box rather
+    # than appending to it. `check_module_updates()` `setPlainText`s its result,
+    # which would erase the lines above -- except that `_module_updates_done()`
+    # ends in `reload_modules()`, which re-reads the store and appends them
+    # again. Asserted rather than reasoned, because the order of those two
+    # statements is the whole of it and nothing else pins it.
+    view._module_updates_done(())
+    after = view.module_report.toPlainText()
+    assert "mod-broken" in after and "mod-bad-shape" in after
+
+
+def test_a_foreign_game_manifest_is_a_reported_skip_and_never_a_row(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Why `Not for this game` is declined, as a test rather than as a comment (T46 item 4).
+
+    T44 item 5 asked for the badge and T46 item 4 carried the ask; the owner
+    declined it on 2026-09-15 because every `ManifestStore` path is
+    `<root>/<game>/...` and the game is the store's. The only file this tab can
+    read already lives in THIS game's directory, so one declaring another game is
+    a mis-declared file, not a module that belongs somewhere else -- the badge
+    would have labelled the row with something untrue of it.
+
+    What the file gets instead is the skip T46 built: named, with the path and
+    what it declared, and no row. The assertion is on the ROW SET, not on the
+    absence of a badge string: a test that only checked the badge text would pass
+    on a tab that drew the row with any other badge on it.
+
+    The fixture is a real file written to a real user root. T44's round 1 proved
+    this row by handing `build_module_rows()` a `Manifest` it built in memory --
+    coverage of a row nothing on disk can produce, which is what this replaces.
+    """
+    user = tmp_path / "user-manifests"
+    items = user / modules.GAME / "modules"
+    items.mkdir(parents=True)
+    (user / modules.GAME / "modules.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "game": modules.GAME, "type": "module", "items": ["mod-foreign"]}
+        ),
+        encoding="utf-8",
+    )
+    # Valid JSON and a valid manifest -- the ONE thing wrong with it is the game,
+    # so nothing but the game check can be what refuses it.
+    (items / "mod-foreign.json").write_text(
+        json.dumps(
+            {
+                "id": "mod-foreign",
+                "name": "Foreign",
+                "type": "module",
+                "game": "wow-tbc",
+                "source": {"repo": "you/mod-foreign"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    services = _services(ps, tmp_path, [])
+    services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.module_report.clear()
+
+    view.reload_modules()
+
+    drawn = {r.data.id for r in view.modules_panel.rows()}
+    assert "mod-foreign" not in drawn
+    # The family it would have replaced is drawn, which is the T46 half of this.
+    assert set(services.store.load_index("module").items) <= drawn
+
+    report = view.module_report.toPlainText()
+    named = [line for line in report.splitlines() if "mod-foreign" in line]
+    assert len(named) == 1, report
+    # The sentence says what it declared and what was expected, so a reader can
+    # tell a mis-declared game from an unparseable file without opening either.
+    assert "wow-tbc" in named[0] and modules.GAME in named[0]
+    assert "could not load modules" not in report

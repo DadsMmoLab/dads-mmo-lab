@@ -123,16 +123,25 @@ T43's probe produced on a real install, and it is the half-installed reading
 T41 was reported for -- a module that is "there" and does nothing.
 """
 
-# There is deliberately NO `Not for this game` badge, and T44's item 5 asked
-# for one (round 2). It would have been unreachable code:
-# `ManifestStore._load_at()` RAISES on a manifest whose `game` is not the
-# store's, `_load_manifests()` catches that at family scope and reports the
-# whole family as broken, so no foreign-game manifest can reach this builder.
-# Round 1 shipped the badge with tests that injected such a manifest straight
-# into `build_module_rows()` -- coverage of a row nothing on disk can produce,
-# which READS as a guarantee and is not one. Making it real means changing the
-# store's validation, which is a guard in its own right; it is on the ticket as
-# an open finding for the owner rather than in this diff.
+# There is deliberately NO `Not for this game` badge. T44's item 5 asked for one
+# (round 2) and T46 item 4 carried the ask forward; the owner DECLINED it on
+# 2026-09-15, and the reason is the store's shape rather than the store's
+# strictness. Every path a `ManifestStore` reads is `<root>/<game>/...` and the
+# game comes from the store the tab was handed, so the only file that can ever
+# be read for this tab already lives in this game's directory. A manifest found
+# there declaring another game is a MIS-DECLARED file, not a module belonging to
+# some other game -- the badge would state something that is never true of the
+# row it labelled, and "not for this game" is not the fact on disk.
+#
+# T44's round 1 did ship the badge, with tests that injected such a manifest
+# straight into `build_module_rows()` -- coverage of a row nothing on disk can
+# produce, which READS as a guarantee and is not one. T46 narrowed the store to
+# skip a user item it cannot load (so one bad file costs its own row and not the
+# family's twenty), and a mis-declared game is one of those skips: it is
+# REPORTED, by path and by what it declared, and it draws no row at all.
+# `test_a_foreign_game_manifest_is_a_reported_skip_and_never_a_row` in
+# `tests/test_controller_view.py` is that sentence as a test, so this comment
+# cannot quietly stop being true.
 
 
 def _badge_for(installed: bool, sql_owed: bool) -> str:

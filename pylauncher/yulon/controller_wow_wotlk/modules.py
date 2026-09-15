@@ -258,6 +258,10 @@ def module_updates(
     reader: BehindReader = git if git is not None else RunnerGit()
     branches: dict[str, str | None] = {}
     try:
+        # Since T46 a USER manifest that will not load is skipped by the store
+        # and this loop continues past it, so the entries AFTER a bad custom file
+        # keep their branch. What still reaches the `except` is this app's own
+        # catalog and either index -- the cases that are app bugs, not user data.
         for manifest in store().load_all("module"):
             branches[manifest.id] = manifest.source.branch if manifest.source else None
     except Exception as exc:  # boundary: a broken manifest tree must not stop the count
