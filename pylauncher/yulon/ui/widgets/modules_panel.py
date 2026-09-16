@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Literal
 
 from PySide6.QtCore import QPoint, QSize, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QMouseEvent, QResizeEvent
+from PySide6.QtGui import QFont, QMouseEvent, QPaintEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
@@ -43,6 +43,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QStyle,
+    QStyleOptionButton,
+    QStylePainter,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -153,7 +156,16 @@ CHIP_SQL_PENDING = "SQL pending"
 CHIP_ASKS_A_QUESTION = "asks a question"
 CHIP_NEEDS_CLIENT_FOLDER = "needs the client folder"
 
-ChipKind = Literal["owed", "fact"]
+ChipKind = Literal["owed", "lock", "fact"]
+"""What a chip is FOR, and since T83 the strip's own rule reads off it.
+
+`lock` was carved out of `fact` because "the reason Install cannot be pressed
+survives every width" is a promise about a particular chip, and until T83 the
+only thing that made it true was the chip's POSITION in `_chips_for()`'s list --
+a rule the strip could not see and a reviewer could not check at the widget. A
+lock is still a fact in the sense the row draws (no press behind it, the
+sentence in its tooltip); it is the one fact `_ChipStrip` refuses to hide.
+"""
 
 ChipAction = Literal["rebuild", "sql", "update"]
 """The job an owed chip's subpanel offers one press for (T44 item 4).
@@ -214,11 +226,13 @@ def chip_needs_label(name: str) -> str:
 class Chip:
     """One small thing a row has to say, and the sentence behind it.
 
-    Two kinds, because they are answered differently. An `owed` chip is a job
+    Three kinds, because they are answered differently. An `owed` chip is a job
     somebody still has to run -- a rebuild, the importer, an update -- and
     pressing it writes `detail` into the report, which is where this tab puts
     every other answer. A `fact` chip is a property of the row that no press can
-    change; it carries `detail` as a tooltip and does nothing.
+    change; it carries `detail` as a tooltip and does nothing. A `lock` is the
+    fact that the row's Install cannot be pressed and why -- the same shape as a
+    fact to the reader, and the one chip `_ChipStrip` will not hide (T83).
     """
 
     kind: ChipKind
@@ -227,8 +241,9 @@ class Chip:
     action: ChipAction | None = None
     """The job this chip's subpanel offers, or `None` for a chip that offers none.
 
-    Always `None` on a `fact` chip, and asserted so: a fact names something no
-    press can change, and a button under it would be a control for nothing.
+    Always `None` on a `fact` or a `lock` chip, and asserted so: neither names
+    anything a press can change, and a button under one would be a control for
+    nothing.
     """
 
 
@@ -514,7 +529,7 @@ def _chips_for(
     if blocked_by is not None:
         chips.append(
             Chip(
-                "fact",
+                "lock",
                 chip_conflicts_with_label(blocked_by),
                 conflict_reason(blocked_by),
             )
@@ -522,7 +537,7 @@ def _chips_for(
     if needs is not None:
         chips.append(
             Chip(
-                "fact",
+                "lock",
                 chip_needs_label(needs),
                 apply_module.requirement_refusal(item_id, needs),
             )
@@ -842,15 +857,22 @@ CHIP_OVERFLOW_LABEL = "…"
 
 One character, because it is the only chip whose width is spent on saying that
 there are others: every pixel it takes is a pixel a real chip does not get. What
-it hides is in its tooltip, label and sentence both, and what it hides is always
-the LAST chips -- which is why `_chips_for()`'s order is owed, then locks, then
-the rest: the work somebody still has to do survives the squeeze, then the
-reason Install cannot be pressed at all, and only what merely explains the row
-goes behind the mark.
+it hides is in its tooltip, label and sentence both, and what it hides is the
+chips from the FIRST one that did not fit onwards -- which is why
+`_chips_for()`'s order is owed, then locks, then the rest: the work somebody
+still has to do survives the squeeze, then the reason Install cannot be pressed
+at all, and only what merely explains the row goes behind the mark.
 
 The tooltip is the reason the locks are second rather than last: it is not
 reachable at all on a touch screen, and the Steam Deck is a shipping target
 (`theme.TOUCH_TARGET_PX` exists for the same reason).
+
+And it is the reason the mark is DROPPED rather than the lock, below the width
+that holds both (T83): a tooltip on the mark is no answer on a Steam Deck, and a
+tooltip on the mark that is hiding the lock is no answer anywhere. When the mark
+goes, the lock takes over what it was saying -- so the chips it displaced are
+still findable, on the one chip that is certain to be on screen. `_ChipStrip._plan()`
+owns the order of what goes.
 """
 
 ELIDED_LABEL_MIN_CHARS = 8
@@ -912,6 +934,65 @@ class _ElidedLabel(QLabel):
         )
 
 
+class _ChipButton(QPushButton):
+    """A chip that draws as much of its label as its width holds (T83).
+
+    ELIDED WHEN PAINTED and never when asked, which is the whole reason this is
+    a widget rather than a `setText()` in the strip: `RowWidget.chip_buttons` is
+    published, several tests and the row's own context menu read `text()` off
+    it, and a button whose text became `needs AzerothCore Lua Eng…` at one width
+    and the whole sentence at another would make every one of those readers a
+    question about today's geometry. `sizeHint()` stays honest for the same
+    reason -- it is what `_ChipStrip._plan()` measures against, and a hint that
+    shrank with the elision would let the strip agree with itself about a chip
+    that no longer fits.
+
+    Only ever narrower than its hint when the strip has PINNED it: the strip
+    hides a chip it cannot fit, except for the lock, which it draws in whatever
+    room is left (`_ChipStrip._plan()`).
+    """
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802  (Qt's own name)
+        drawn = self.drawn_text()
+        if drawn == self.text():
+            super().paintEvent(event)
+            return
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = drawn
+        QStylePainter(self).drawControl(QStyle.ControlElement.CE_PushButton, option)
+
+    def drawn_text(self) -> str:
+        """What this width really puts on screen: the label, or an elided one.
+
+        Its own method rather than three lines inside `paintEvent`, so that what
+        is drawn can be ASKED rather than photographed: a test of a paint event
+        either renders the widget and compares images -- which is a test of the
+        style as much as of this -- or it asserts nothing at all, and the
+        assertion wanted here is about the text.
+        """
+        return self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, self.text_room()
+        )
+
+    def text_room(self) -> int:
+        """The pixels this button's width leaves for its label, asked of the STYLE.
+
+        `SE_PushButtonContents` and not `width() - (sizeHint() - advance)`, which
+        was the first version and elided three chips at 3000px where every one of
+        them fitted. A size hint is rounded up off the same font metrics the
+        elision then measures against, so hint-minus-advance comes out one or two
+        pixels MEANER than the real text area and `elidedText()` shortens a label
+        the button was drawing whole (measured: `needs the client folder` had 146
+        of the style's 148). The style knows where it puts the text; nothing
+        here has to guess.
+        """
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        room = self.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, self)
+        return max(0, room.width())
+
+
 class _ChipStrip(QWidget):
     """Every chip a row carries, on ONE line, with an "…" for what did not fit (T75).
 
@@ -923,6 +1004,11 @@ class _ChipStrip(QWidget):
     -- that function's docstring owns the reason), and the rest go
     behind `CHIP_OVERFLOW_LABEL` with their labels and their sentences in its
     tooltip.
+
+    With one exception, and it is T83's: a `lock` chip is never behind the mark.
+    Below the width that holds both, the mark is what goes; below the width that
+    holds the lock at all, the lock is drawn with its label elided. `_plan()`
+    owns that order and the reasons for it.
 
     `buttons` is EVERY chip's button, hidden ones included, because that tuple is
     what `RowWidget.chip_buttons` publishes and a caller asking "does this row
@@ -980,8 +1066,33 @@ class _ChipStrip(QWidget):
         is not on screen, and the question here is what THIS widget has hidden,
         not whether the window is showing. Asked with `isVisible()` a strip on a
         background tab answers that it has hidden everything.
+
+        The CHIP's label and not the button's `text()` since T83: a pinned lock
+        is drawn with its label elided to the room left (`elided_chip_labels()`
+        is the question about that), and a caller asking "is the lock on screen?"
+        is asking about the chip, not about how many characters of it today's
+        width shows.
         """
-        return tuple(b.text() for b in self.buttons if b.isVisibleTo(self))
+        return tuple(
+            chip.label
+            for chip, button in zip(self.chips, self.buttons, strict=True)
+            if button.isVisibleTo(self)
+        )
+
+    def elided_chip_labels(self) -> tuple[str, ...]:
+        """The drawn chips whose label does not fit the width they were given (T83).
+
+        Empty at every width that fits the chips it draws, which is every width
+        except the ones where a lock is wider than the whole strip. Asked of the
+        GEOMETRY and not of `text()`, because `_ChipButton` elides when it paints
+        and keeps its whole label either way -- which is the property that lets
+        every other reader of `chip_buttons` stay a question about the row.
+        """
+        return tuple(
+            chip.label
+            for chip, button in zip(self.chips, self.buttons, strict=True)
+            if button.isVisibleTo(self) and button.width() < button.sizeHint().width()
+        )
 
     def hidden_chips(self) -> tuple[Chip, ...]:
         """The chips the width could not fit, which are the ones in the tooltip."""
@@ -997,23 +1108,114 @@ class _ChipStrip(QWidget):
         available = self.width()
         height = self.height() or self._line_height()
         widths = [b.sizeHint().width() for b in self.buttons]
-        needed = sum(widths) + CHIP_SPACING * (len(widths) - 1)
-        shown = len(self.buttons) if needed <= available else self._how_many_fit(widths, available)
+        placed, mark = self._plan(widths, available)
+        drawn = {index for index, _ in placed}
         x = 0
+        for index, width in placed:
+            self.buttons[index].setGeometry(x, 0, width, height)
+            x += width + CHIP_SPACING
         for index, button in enumerate(self.buttons):
-            if index < shown:
-                button.setGeometry(x, 0, widths[index], height)
-                x += widths[index] + CHIP_SPACING
-            button.setVisible(index < shown)
+            button.setVisible(index in drawn)
+        hidden = self.hidden_chips()
         if self.overflow is not None:
-            hiding = self.buttons[shown:]
-            self.overflow.setVisible(bool(hiding))
-            if hiding:
+            self.overflow.setVisible(mark and bool(hidden))
+            if mark and hidden:
                 self.overflow.setGeometry(x, 0, self.overflow.sizeHint().width(), height)
-                self.overflow.setToolTip(
-                    "Also on this row:\n\n"
-                    + "\n\n".join(f"{chip.label} — {chip.detail}" for chip in self.hidden_chips())
-                )
+                self.overflow.setToolTip(self._also_on_this_row(hidden))
+        # The pinned lock carries what the mark it displaced was saying, and
+        # goes back to its own sentence alone when the width brings the mark
+        # back -- set on every pass rather than only when it changes, because
+        # the pass that must not be skipped is the one UNDOING a narrower one.
+        for index, _ in placed:
+            chip = self.chips[index]
+            extra = "" if mark or not hidden else f"\n\n{self._also_on_this_row(hidden)}"
+            self.buttons[index].setToolTip(f"{chip.detail}{extra}")
+
+    @staticmethod
+    def _also_on_this_row(hidden: Sequence[Chip]) -> str:
+        return "Also on this row:\n\n" + "\n\n".join(
+            f"{chip.label} — {chip.detail}" for chip in hidden
+        )
+
+    def _plan(self, widths: Sequence[int], available: int) -> tuple[list[tuple[int, int]], bool]:
+        """Which chips are drawn, how wide each is, and whether the "…" is drawn.
+
+        Two rules, and the second is T83's. Ordinarily the strip draws what fits
+        beside the mark and the mark says the rest exist -- and the mark's width
+        is reserved first, because a row that has quietly stopped saying it is
+        hiding anything is worse than a short one (`_how_many_fit()`).
+
+        But a LOCK -- the chip that says why this row's Install cannot be pressed
+        -- is not something the mark may stand for. Below about 1000px the row's
+        status column is narrower than a lock chip plus the mark (measured themed
+        at 960: `accountwide`'s strip is 281px against a 316px lock), and T75's
+        answer was to drop the lock, which left the shipped catalog drawing NO
+        chip at all on the one row that most needed one.
+
+        So the order of what may go is: the plain chips after the lock, then the
+        MARK, then -- only if the whole strip is still narrower than the lock --
+        the lock's own last characters. Three steps and not one, because each
+        costs the reader something different and the cheapest is not always
+        enough. A dropped mark hands its "also on this row" to the lock's
+        tooltip; an elided lock still reads `needs AzerothCore Lua Eng…` with the
+        refusal one hover away, which is a row that says why its button is dead.
+        An empty strip is a row that does not.
+        """
+        needed = sum(widths) + CHIP_SPACING * (len(widths) - 1)
+        if needed <= available:
+            return [(index, widths[index]) for index in range(len(widths))], False
+        fits = self._how_many_fit(widths, available)
+        lock = self._last_lock()
+        if lock is None or lock < fits:
+            return [(index, widths[index]) for index in range(fits)], True
+        assert self.overflow is not None
+        beside_the_mark = self._keeping(lock, widths, available, self.overflow.sizeHint().width())
+        if beside_the_mark is not None:
+            return beside_the_mark, True
+        alone = self._keeping(lock, widths, available, None)
+        if alone is not None:
+            return alone, False
+        return [(lock, max(0, available))], False
+
+    def _keeping(
+        self, lock: int, widths: Sequence[int], available: int, mark: int | None
+    ) -> list[tuple[int, int]] | None:
+        """The lock at its full width, with as many chips before it as still fit.
+
+        `None` when the lock does not fit at all under this reservation, which is
+        how the caller learns to try again without the mark and then to elide.
+        `mark` is the overflow chip's width or `None` for "not drawn"; it is
+        reserved BEFORE any ordinary chip for `_how_many_fit()`'s reason and
+        given up only to the lock.
+        """
+        reserved = 0 if mark is None else mark + CHIP_SPACING
+        if widths[lock] + reserved > available:
+            return None
+        kept: list[tuple[int, int]] = []
+        used = 0
+        for index in range(lock):
+            step = widths[index] + (CHIP_SPACING if kept else 0)
+            if used + step + CHIP_SPACING + widths[lock] + reserved > available:
+                break
+            used += step
+            kept.append((index, widths[index]))
+        kept.append((lock, widths[lock]))
+        return kept
+
+    def _last_lock(self) -> int | None:
+        """The index of the last lock chip on this row, or `None` for a row with none.
+
+        The LAST rather than the first: `_chips_for()` can build at most one
+        lock today (a row carries one reason its Install is dead), and the strip
+        is handed whatever it is handed -- `_every_chip()` in the tests carries
+        both. Pinning the last one keeps the rule "the locks are the last chips
+        to go" true whichever of them there are.
+        """
+        found = None
+        for index, chip in enumerate(self.chips):
+            if chip.kind == "lock":
+                found = index
+        return found
 
     def _how_many_fit(self, widths: Sequence[int], available: int) -> int:
         """How many chips fit beside the "…", which is itself always drawn.
@@ -1138,7 +1340,10 @@ class RowWidget(QFrame):
         middle.addWidget(self.badge_label)
         buttons: list[QPushButton] = []
         for chip in data.chips:
-            button = QPushButton(chip.label, self)
+            # `_ChipButton` and not a plain one: the strip may draw a pinned lock
+            # narrower than its label, and that has to be a painting decision
+            # rather than a `setText()` -- see the class.
+            button = _ChipButton(chip.label, self)
             button.setFlat(True)
             button.setToolTip(chip.detail)
             colour = COLOR_TEXT_WARNING if chip.kind == "owed" else COLOR_TEXT_MUTED

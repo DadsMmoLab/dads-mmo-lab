@@ -9770,7 +9770,18 @@ def test_the_modules_tab_fits_at_the_size_the_app_opens_at(
     Then again at 960x600, the smallest the window can be dragged to, where this
     tab has been over-subscribed since long before T73: the assertion there is
     the narrower one that the report box in particular is not the widget being
-    cut.
+    cut, and that the list is never drawn under its OWN minimum.
+
+    That second one said something stronger until T83 -- that the list gets the
+    whole of `MODULE_LIST_MIN_HEIGHT` here, which is above its own 70px -- and
+    that is no longer true at this one size, on purpose. With the action bar
+    wrapped to two lines the tab is four pixels short at 960x600 even with both
+    boxes folded away, and the list's floor is the last thing in `_TabFit`'s
+    order because a list scrolls: four pixels off it is four pixels of a row
+    somebody can still reach, where the same four off the custom-module card is
+    a cut word. The floor is still asserted in full at the size the app opens
+    at, above, and by
+    `test_the_report_box_is_what_gives_after_the_log_and_before_the_list`.
     """
     import main
 
@@ -9788,12 +9799,13 @@ def test_the_modules_tab_fits_at_the_size_the_app_opens_at(
         f"the report is clipped at the smallest window: {report.height()}px against the "
         f"{report.minimumSizeHint().height()} it says it needs"
     )
-    # And the floor is doing something here rather than merely being declared:
-    # the list's own minimum is 70px -- a scrollbar and the top of a card -- and
-    # this is the one size at which what it gets is the floor and nothing else.
-    assert view.modules_panel.height() > view.modules_panel.minimumSizeHint().height(), (
-        f"the list is down to its own bare minimum ({view.modules_panel.height()}px) at the "
-        f"smallest window: the floor under it is not being applied"
+    # And the list is not CUT here, which is the line between giving height up
+    # and being short of it: `_TabFit` may lower the floor to what is left, and
+    # may not lower it under what the widget itself says it needs.
+    assert view.modules_panel.height() >= view.modules_panel.minimumSizeHint().height(), (
+        f"the list is drawn at {view.modules_panel.height()}px against the "
+        f"{view.modules_panel.minimumSizeHint().height()} it says it needs at the smallest "
+        "window: it was cut rather than asked to give"
     )
 
 
@@ -9973,10 +9985,10 @@ def _every_chip() -> tuple[modules_panel.Chip, ...]:
             "owed", modules_panel.chip_update_label(3), "three commits behind", "update"
         ),
         modules_panel.Chip(
-            "fact", modules_panel.chip_conflicts_with_label("AH Bot"), "AH Bot is installed here"
+            "lock", modules_panel.chip_conflicts_with_label("AH Bot"), "AH Bot is installed here"
         ),
         modules_panel.Chip(
-            "fact", modules_panel.chip_needs_label("Playerbots"), "Playerbots is not installed"
+            "lock", modules_panel.chip_needs_label("Playerbots"), "Playerbots is not installed"
         ),
         modules_panel.Chip(
             "fact", modules_panel.CHIP_ASKS_A_QUESTION, "installing opens one dialog first"
@@ -10166,6 +10178,12 @@ def test_the_chips_a_narrow_row_cannot_fit_are_in_the_overflow_chips_tooltip(
     still has to run before the facts that only explain the row, and an overflow
     that dropped from the front would hide `Rebuild pending` behind a mark while
     showing `conflicts with AH Bot`.
+
+    "The first ones" gained one exception in T83 and exactly one: the LOCK is
+    pinned, so it appears in place of the last prefix chip that would otherwise
+    have fitted. The fourth assertion is written as "a prefix, plus the lock" for
+    that reason -- and both halves are asserted, because a strip that simply
+    reordered its chips would satisfy either alone.
     """
     chips = _every_chip()
     _host, row = _a_row_carrying(chips, width=1200)
@@ -10178,9 +10196,20 @@ def test_the_chips_a_narrow_row_cannot_fit_are_in_the_overflow_chips_tooltip(
     assert (
         strip.overflow is not None and strip.overflow.isVisibleTo(strip) is True
     ), f"{len(hidden)} chips are hidden and the '…' that says so is not drawn"
-    assert shown + tuple(chip.label for chip in hidden) == tuple(
-        chip.label for chip in chips
-    ), "the chips on screen are not the FIRST ones, so an owed chip can be the one hidden"
+    # A PREFIX, plus the lock -- which is the whole of T83's change to this
+    # rule. The strip draws the first chips that fit and the mark stands for the
+    # rest, except that the lock is never what the mark stands for: when the
+    # width cannot hold both, the lock takes the place of the last prefix chip
+    # that would have fitted (`_ChipStrip._plan()`). Dropping the lock out of
+    # `shown` here must leave a prefix and nothing else, or the strip is
+    # reordering chips rather than pinning one.
+    lock = modules_panel.chip_needs_label("Playerbots")
+    prefix = tuple(label for label in shown if label != lock)
+    everything = tuple(chip.label for chip in chips)
+    assert (
+        prefix == everything[: len(prefix)]
+    ), f"the chips on screen are not the FIRST ones: {shown}"
+    assert lock in shown, f"the lock is behind the mark at this width: {shown}"
     tooltip = strip.overflow.toolTip()
     missing = [
         chip.label for chip in hidden if chip.label not in tooltip or chip.detail not in tooltip
@@ -10404,10 +10433,11 @@ def test_the_chip_strip_is_handed_every_chip_the_builder_can_make(qapp: object) 
         apply_module.requirement_refusal(client_side.id, "Playerbots"),
     }
     for built in (asking, client, here):
-        first_fact = next(chip for chip in built if chip.kind == "fact")
-        assert (
-            first_fact.detail in locks
-        ), f"the first fact on the row is {first_fact.label}, which is not the lock"
+        first_fact = next(chip for chip in built if chip.kind != "owed")
+        assert first_fact.kind == "lock" and first_fact.detail in locks, (
+            f"the first fact on the row is a {first_fact.kind} reading {first_fact.label}, "
+            "which is not the lock"
+        )
 
 
 def test_a_rows_long_description_and_conf_paths_are_a_hover_away(qapp: object) -> None:
@@ -10716,3 +10746,1161 @@ def test_the_tuning_report_folds_the_same_way_and_the_cards_take_it(
         f"the tuning report folded and the cards did not grow: {view.tuning_panel.height()}px, "
         f"against {open_cards} with it open"
     )
+
+
+# ---------------------------------------------------------------------------
+# T83: the two things the Modules tab does below the handheld width, measured
+# at `main.MINIMUM_WINDOW_SIZE` -- which is a width a user can really drag to
+# and which nothing before round 4's gate had ever been measured at.
+#
+# Both defects are the same shape and it is the silent one: Qt's answer to "this
+# does not fit" is to draw it smaller than it says it needs and cut the text
+# off. There is no ellipsis, no tooltip and no warning. Measured themed at 960
+# before the fix: the toolbar's `Check for updates` was drawn in 114px against
+# the 144 it asked for and read `heck for update`, and `accountwide`'s chip
+# strip was 281px against a 316px lock chip, so the row that says why its
+# Install is dead drew nothing at all.
+
+
+TOOLBAR_WIDTHS = ((960, 600), (1000, 700), (1280, 800))
+"""The three widths the Modules toolbar is measured at, narrowest first.
+
+960x600 is `main.MINIMUM_WINDOW_SIZE` and the hard case. 1000x700 is the window
+gate A2 was taken in, and it is here because it is the one a human reported --
+a test that only covered the extreme would not have failed on the screenshot
+the ticket was filed from. 1280x800 is the shape the app opens at, where the bar
+has always fitted on one line and must go on doing so.
+"""
+
+
+def _module_toolbar_buttons(view: ControllerView) -> list[Any]:
+    """Every button on the Modules action bar, read off the BAR and not listed here.
+
+    Off `view.module_actions`' own layout, because a list written out here would
+    be a second opinion about what is on that bar: a seventh button added to it
+    is exactly where this ticket's defect would come back, and a hand-written
+    list would go on passing about the six it knew.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    bar = view.module_actions.layout()
+    found = [bar.itemAt(i).widget() for i in range(bar.count())]
+    buttons = [w for w in found if isinstance(w, QPushButton)]
+    assert len(buttons) == len(found), f"something on the action bar is not a button: {found}"
+    return buttons
+
+
+def _clipped(button: Any) -> str | None:
+    """Why `button`'s label does not fit its width, or `None` when it does.
+
+    The button's own font metrics against its own geometry, with the chrome
+    taken from the difference between its size hint and the width of its text:
+    the padding is the theme's, the border is the theme's, and a number typed in
+    here would be a third opinion that agrees with itself whatever the theme
+    does.
+    """
+    text = button.text()
+    advance = button.fontMetrics().horizontalAdvance(text)
+    chrome = max(0, button.sizeHint().width() - advance)
+    if button.width() >= advance + chrome:
+        return None
+    return f"{text!r}: {button.width()}px for {advance}px of text plus {chrome}px of chrome"
+
+
+def _bar_holds_every_line(view: ControllerView) -> list[str]:
+    """The buttons drawn outside the action bar they are on, which must be none."""
+    bar = view.module_actions
+    return [
+        f"{b.text()!r} at ({b.x()},{b.y()}) {b.width()}x{b.height()} "
+        f"in a {bar.width()}x{bar.height()} bar"
+        for b in _module_toolbar_buttons(view)
+        if b.y() < 0 or b.y() + b.height() > bar.height() or b.x() + b.width() > bar.width()
+    ]
+
+
+def test_every_modules_toolbar_button_reads_whole_at_every_width(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The defect gate A2 photographed: `Check for updates` drawn as `heck for update`.
+
+    Three assertions at each width, and the second and third are here because a
+    "fix" that met only the first is worse than the bug:
+
+    * every label FITS, which is the complaint;
+    * every button is inside the bar it is on, so the labels cannot be made to
+      fit by letting the bar overflow the tab -- which is what a `QHBoxLayout`
+      given a minimum width would do, moving the clipping one widget out, and it
+      is also what a wrapped bar does the moment `flow_bar()`'s size policy stops
+      declaring `heightForWidth` (the second line is then painted over the module
+      list, and every other assertion here stays green);
+    * and at 1280 the bar is still ONE line, which is what stops the whole thing
+      being "solved" by wrapping at every window shape and spending a row of the
+      list to do it.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+
+    for size in TOOLBAR_WIDTHS:
+        _at(window, size)
+        buttons = _module_toolbar_buttons(view)
+        assert len(buttons) >= 6, f"only {len(buttons)} buttons on the Modules action bar"
+        clipped = [why for why in (_clipped(b) for b in buttons) if why is not None]
+        assert clipped == [], f"toolbar text cut off at {size}: {clipped}"
+        outside = _bar_holds_every_line(view)
+        assert outside == [], f"a button is drawn outside the action bar at {size}: {outside}"
+
+    _at(window, (1280, 800))
+    tops = sorted({b.y() for b in _module_toolbar_buttons(view)})
+    assert len(tops) == 1, f"the bar wrapped at the size the app opens at: {tops}"
+
+
+def test_the_modules_toolbar_wraps_rather_than_shrinking_at_the_smallest_window(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """And the mechanism, because "nothing is clipped" has other solutions.
+
+    A bar whose buttons were given shorter labels would pass the test above, and
+    so would one that dropped four of them into a `More…` menu. What is asserted
+    here is that the same six buttons are all still DRAWN, on more than one line,
+    and each at its own full size hint -- which is the difference between
+    wrapping and the `QHBoxLayout` this replaced, whose only answer to a bar that
+    does not fit is to shrink every item in it.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+
+    buttons = _module_toolbar_buttons(view)
+    tops = sorted({b.y() for b in buttons})
+    assert len(tops) > 1, (
+        f"the bar is still one line at {main.MINIMUM_WINDOW_SIZE}, so it did not wrap: "
+        f"{[(b.text(), b.width(), b.sizeHint().width()) for b in buttons]}"
+    )
+    shrunk = [
+        f"{b.text()!r}: {b.width()} < {b.sizeHint().width()}"
+        for b in buttons
+        if b.width() < b.sizeHint().width()
+    ]
+    assert shrunk == [], f"a wrapped bar still squeezed its buttons: {shrunk}"
+    assert all(b.isVisible() for b in buttons), "wrapping hid a button instead of moving it"
+    assert _bar_holds_every_line(view) == [], "the bar is shorter than the lines it drew"
+
+
+def _a_flow_bar_in_a_tight_column(labels: list[str], width: int, spare: int) -> tuple[Any, Any]:
+    """A `FlowBar` of buttons in a column that has `spare` pixels to give away.
+
+    The bar is tested through a `QVBoxLayout` and not on its own, because every
+    claim it makes is a claim about what a PARENT layout does with it: the size
+    policy decides whether it is asked for `heightForWidth()` at all, and the
+    minimum decides what happens when there is not enough height to go round.
+
+    The second widget is what makes the column tight. It has a minimum height
+    and it expands, so the column's demand is its minimum plus the bar's, and
+    `spare` says how many pixels over that the host is made -- zero is a column
+    with nothing to give away, which is the state in which the bar's claim on
+    the height has to be honoured rather than merely preferred.
+
+    Returns the host (which every caller must keep in a local: dropping it
+    deletes the C++ objects under the bar) and the bar.
+    """
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+    from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.widgets.flow_layout import flow_bar
+
+    host = QWidget()
+    apply_dadcraft_theme(host, width=1280)
+    column = QVBoxLayout(host)
+    column.setContentsMargins(0, 0, 0, 0)
+    column.setSpacing(0)
+    bar = flow_bar(host)
+    for label in labels:
+        bar.flow().addWidget(QPushButton(label, bar))
+    column.addWidget(bar)
+    filler = QWidget(host)
+    filler.setMinimumHeight(200)
+    column.addWidget(filler, 1)
+    host.resize(width, 400)
+    host.show()
+    process_events()
+    host.resize(width, bar.flow().heightForWidth(width) + 200 + spare)
+    process_events()
+    return host, bar
+
+
+THE_SIX_ON_THE_MODULES_BAR = [
+    "Check for updates",
+    "Refresh",
+    "Adopt as imported…",
+    "Apply pending database updates…",
+    "Apply module SQL",
+    "Rebuild the server…",
+]
+"""The Modules action bar's own labels, for the widget tests below.
+
+Copied deliberately rather than imported: these are tests of `FlowBar`, and what
+they need is a realistic set of button widths, not today's Modules tab. The tab
+is asserted separately and through the real window.
+"""
+
+
+def test_a_column_gives_a_flow_bar_the_height_its_lines_need(qapp: object) -> None:
+    """The claim a wrapping bar lives or dies by, asked of the COLUMN it is in.
+
+    Everything else about wrapping can be right and still produce a bar drawn
+    one line tall with its second line painted over the widget beneath it: the
+    buttons are at their hints, visible and unclipped horizontally, and every
+    assertion that looks at the bar alone stays green. What decides it is
+    whether the parent layout asks for `heightForWidth()` and honours the
+    answer, and that is a question about `FlowLayout.hasHeightForWidth()` and
+    `_lay()` agreeing with `setGeometry()` -- which is why they are one function
+    (see `FlowLayout._lay`).
+
+    Asked with a column that has nothing spare, so the answer cannot come from
+    surplus height the bar was handed for another reason.
+    """
+    host, bar = _a_flow_bar_in_a_tight_column(THE_SIX_ON_THE_MODULES_BAR, width=700, spare=0)
+    flow = bar.flow()
+    needed = flow.heightForWidth(bar.width())
+
+    assert len(flow._lines(bar.width())) > 1, "700px did not wrap the bar, so nothing is tested"
+    assert bar.height() >= needed, (
+        f"the column gave the bar {bar.height()}px for the {needed} its "
+        f"{len(flow._lines(bar.width()))} lines take"
+    )
+    buttons = [flow.itemAt(i).widget() for i in range(flow.count())]
+    assert max(b.y() + b.height() for b in buttons) <= bar.height(), (
+        "a button is drawn below the bottom of the bar: "
+        f"{[(b.text(), b.y(), b.height()) for b in buttons]}"
+    )
+    host.hide()
+
+
+def test_a_flow_bar_re_states_its_height_when_a_drag_changes_the_line_count(
+    qapp: object,
+) -> None:
+    """Dragged from a width that fits one line to one that does not, and back.
+
+    What makes the bar itself the right height is the parent `QBoxLayout`
+    re-asking `heightForWidth()` on every layout pass, and a resize is one -- so
+    the drag alone is enough for the GEOMETRY, which is all this test looks at.
+    The bar's MINIMUM is a separate question with a separate answer
+    (`FlowBar.resizeEvent`, and
+    `test_a_wrap_reaches_the_tabs_own_minimum_without_a_restyle` is where that
+    is asserted); removing `updateGeometry()` leaves this test green, and saying
+    so here is the point -- it is what stopped this docstring citing a mechanism
+    it does not exercise.
+
+    Both directions, because a bar that re-stated its height on the way down and
+    never on the way back would hold a two-line floor forever and take a row of
+    whatever is under it on every window.
+    """
+    host, bar = _a_flow_bar_in_a_tight_column(THE_SIX_ON_THE_MODULES_BAR, width=1400, spare=-40)
+    flow = bar.flow()
+    assert len(flow._lines(bar.width())) == 1, "1400px already wrapped, so the drag proves nothing"
+    one_line = bar.height()
+
+    host.resize(700, host.height())
+    process_events()
+
+    assert len(flow._lines(bar.width())) > 1, "700px did not wrap the bar"
+    assert bar.height() >= flow.heightForWidth(bar.width()), (
+        f"the drag wrapped the bar and it was left {bar.height()}px tall, against the "
+        f"{flow.heightForWidth(bar.width())} its lines now take"
+    )
+
+    host.resize(1400, host.height())
+    process_events()
+
+    assert len(flow._lines(bar.width())) == 1
+    assert bar.height() <= one_line, (
+        f"the bar came back to one line and kept {bar.height()}px of the two, against the "
+        f"{one_line} it started at"
+    )
+    host.hide()
+
+
+def test_a_flow_bar_puts_a_single_lines_leftover_at_the_gap(qapp: object) -> None:
+    """`add_gap()`, which is the `addStretch(1)` the Modules bar used to carry.
+
+    The bar reads as "the two that only READ this install" and then "the four
+    that change it", and on one line that grouping is a gap between the second
+    button and the third. Asserted as the gap being WIDER than the ordinary
+    spacing on a wide bar and gone on a wrapped one -- the second half matters,
+    because a gap that survived wrapping would push the last button of a line
+    off the end.
+    """
+    from PySide6.QtWidgets import QPushButton, QWidget
+
+    from yulon.ui.widgets.flow_layout import FLOW_SPACING, flow_bar
+
+    host = QWidget()
+    bar = flow_bar(host)
+    flow = bar.flow()
+    for index, label in enumerate(THE_SIX_ON_THE_MODULES_BAR):
+        if index == 2:
+            flow.add_gap()
+        flow.addWidget(QPushButton(label, bar))
+    host.resize(2000, 200)
+    host.show()
+    bar.resize(2000, flow.heightForWidth(2000))
+    process_events()
+
+    buttons = [flow.itemAt(i).widget() for i in range(flow.count())]
+    assert len({b.y() for b in buttons}) == 1, "2000px wrapped the bar, so there is no leftover"
+    at_the_gap = buttons[2].x() - (buttons[1].x() + buttons[1].width())
+    elsewhere = buttons[1].x() - (buttons[0].x() + buttons[0].width())
+    assert elsewhere == FLOW_SPACING, f"ordinary spacing is {elsewhere}, not {FLOW_SPACING}"
+    assert at_the_gap > elsewhere, (
+        f"the gap is {at_the_gap}px, the same as the spacing between any two buttons, so a "
+        "2000px bar is not putting its leftover width there"
+    )
+
+    bar.resize(700, flow.heightForWidth(700))
+    process_events()
+    buttons = [flow.itemAt(i).widget() for i in range(flow.count())]
+    assert len({b.y() for b in buttons}) > 1, "700px did not wrap the bar"
+    for button in buttons:
+        assert button.x() + button.width() <= bar.width(), (
+            f"{button.text()!r} runs off the end of a wrapped bar: it ends at "
+            f"{button.x() + button.width()} in {bar.width()}px"
+        )
+    host.hide()
+
+
+def test_a_locked_row_keeps_its_reason_on_screen_at_every_width(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T75's handheld promise, asked of every width the window can be dragged to.
+
+    T75 said the lock survives down to 1280x800 and meant it: below that the
+    row's status column is narrower than a lock chip plus the overflow mark, and
+    the strip dropped the lock. Measured themed at 960 on the shipped WotLK
+    catalog, `accountwide` drew NO chip at all -- the `…` and nothing else -- so
+    the one sentence saying why its Install is dead was behind a hover on the
+    row most in need of it.
+
+    Swept from `main.MINIMUM_WINDOW_SIZE` to 3000 rather than asked at 960
+    alone, because the strip's rule changes shape twice across that range (the
+    lock displaces the mark, then the lock itself has to be elided) and a single
+    width only ever exercises one of them.
+
+    Three assertions, and the last two are what keep the first honest. A lock
+    drawn is not a lock READ: it may have been given a width its label does not
+    fit, and the promise then is that the whole sentence is one hover away. And
+    the sweep must really reach the narrow case -- a fix that made the strip
+    wider instead would satisfy "the lock is drawn" at every width while leaving
+    the rule it was meant to add untested, so the elided case is asserted to
+    have happened at least once.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+
+    locked = [row for row in view.modules_panel.rows() if row.data.install_reason is not None]
+    assert locked, "no row on the shipped WotLK catalog has a locked Install"
+    # The row the ticket was filed about, by name, because a sweep over "every
+    # locked row" is satisfied by a catalog whose lock chips all happen to be
+    # short today. `accountwide`'s is the longest one shipped.
+    assert any(row.data.id == "accountwide" for row in locked), "`accountwide` is no longer locked"
+
+    gone: list[str] = []
+    silent: list[str] = []
+    elided_somewhere = False
+    for width in range(main.MINIMUM_WINDOW_SIZE[0], 3001, 40):
+        _at(window, (width, 800))
+        for row in locked:
+            lock = next(chip for chip in row.data.chips if chip.detail == row.data.install_reason)
+            strip = row.chip_strip
+            if lock.label not in strip.visible_chip_labels():
+                gone.append(f"{width}: {row.data.id} hid {lock.label!r}")
+                continue
+            if lock.label not in strip.elided_chip_labels():
+                continue
+            elided_somewhere = True
+            button = next(
+                b for b, chip in zip(row.chip_buttons, row.data.chips, strict=True) if chip is lock
+            )
+            # The whole refusal, and it is matched against `install_reason` --
+            # the sentence the APPLIER would refuse with -- rather than against
+            # a string spelled here, so the chip and the refusal cannot drift.
+            if row.data.install_reason not in button.toolTip():
+                silent.append(f"{width}: {row.data.id}'s elided lock says nothing on hover")
+    assert gone == [], f"the reason Install is locked left the screen at {gone[:3]}"
+    assert silent == [], f"an elided lock with the sentence nowhere: {silent[:3]}"
+    assert elided_somewhere, (
+        "no lock chip was ever drawn narrower than its label in the whole sweep, so the "
+        "elision this test is about was never exercised"
+    )
+
+
+def test_a_narrow_row_spends_the_overflow_mark_on_its_lock(qapp: object) -> None:
+    """The RULE behind the sweep, asked of a row carrying all eight chips.
+
+    The catalog's own locked rows carry two chips at most, so they cannot say
+    what the strip does when the lock is one of six things competing for the
+    width. This one is narrowed until only the mark would have fitted, and what
+    must happen is that the mark is not drawn at all: it is the one chip whose
+    whole job is to say others exist, and a lock is the one chip that has to be
+    on screen, so below the width that holds both, the mark is what goes.
+
+    Which makes the mark's tooltip somebody else's to carry, and that is the
+    other half asserted here -- every chip the width hid is still findable, on
+    the lock instead of on the mark. Dropping that line leaves a row that has
+    silently stopped mentioning three of its chips, and the assertion above it
+    stays green.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=700)
+    strip = row.chip_strip
+    lock = modules_panel.chip_needs_label("Playerbots")
+
+    assert (
+        lock in strip.visible_chip_labels()
+    ), f"the lock is not drawn on a strip this narrow: {strip.visible_chip_labels()}"
+    assert lock not in strip.elided_chip_labels(), (
+        "this width is narrow enough to ELIDE the lock, so it is exercising the step below "
+        "the one this test names; the mark going is what happens first"
+    )
+    assert strip.overflow is not None
+    assert not strip.overflow.isVisibleTo(
+        strip
+    ), "the '…' took the room the lock needed; it is the chip that must go first"
+    hidden = strip.hidden_chips()
+    assert hidden, "700px fitted every chip, so nothing was displaced and this proves nothing"
+    button = next(b for b, chip in zip(row.chip_buttons, chips, strict=True) if chip.label == lock)
+    missing = [
+        chip.label
+        for chip in hidden
+        if chip.label not in button.toolTip() or chip.detail not in button.toolTip()
+    ]
+    assert missing == [], f"the mark is gone and nothing took over what it said: {missing}"
+    # And the lock's own sentence is still the first thing on that tooltip: it
+    # is the reason the chip exists, and a tooltip that opened with somebody
+    # else's chips would have buried it.
+    needs = next(chip for chip in chips if chip.label == lock)
+    assert button.toolTip().startswith(needs.detail)
+
+
+def test_a_strip_dragged_narrow_and_back_stops_eliding(qapp: object) -> None:
+    """The lock is drawn short at 360px and whole again at 3000, on the same widget.
+
+    A row lives in a list a user drags, so every rule here is applied twice: once
+    on the way down and once on the way back. This is the half that is easy to
+    leave out -- an implementation that shortened the label by SETTING it would
+    pass every assertion above and keep the shortened label for good, because the
+    size hint it is measured against is computed from the text it was given.
+    """
+    chips = _every_chip()
+    host, row = _a_row_carrying(chips, width=360)
+    strip = row.chip_strip
+    lock = modules_panel.chip_needs_label("Playerbots")
+    assert lock in strip.elided_chip_labels(), "the lock fits at 360px, so nothing is proved"
+
+    host.resize(3000, 400)
+    process_events()
+
+    assert strip.elided_chip_labels() == (), f"still elided at 3000px: {strip.elided_chip_labels()}"
+    assert strip.visible_chip_labels() == tuple(chip.label for chip in chips)
+    assert strip.hidden_chips() == ()
+    needs = next(chip for chip in chips if chip.label == lock)
+    button = next(b for b, chip in zip(row.chip_buttons, chips, strict=True) if chip is needs)
+    assert (
+        button.toolTip() == needs.detail
+    ), "the lock is still carrying the overflow mark's tooltip at a width that draws the mark"
+    assert button.text() == needs.label, "a chip button's text is not the chip's own label"
+
+
+def test_a_pinned_lock_draws_an_elided_label_and_keeps_its_own(qapp: object) -> None:
+    """What a narrowed lock chip PAINTS, and what it still answers when asked.
+
+    Two different questions and the split between them is the design. `text()`
+    is the chip's whole label at every width, because `RowWidget.chip_buttons` is
+    published and read by the row's own menu and by half a dozen tests, and a
+    button whose text depended on today's geometry would make every one of those
+    readers a question about the window. `drawn_text()` is the other one, and it
+    is what `paintEvent` puts on screen.
+
+    Asserted as a PREFIX of the label plus Qt's own ellipsis rather than as a
+    literal string: how many characters fit is the font's business, and a test
+    that spelled `needs AzerothCore Lua Eng…` would fail on any honest change to
+    a font while proving nothing extra.
+
+    And the mark is checked to be absent, because a strip that drew both would
+    have squeezed the lock for a reason this test cannot see.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=400)
+    strip = row.chip_strip
+    needs = next(
+        chip for chip in chips if chip.label == modules_panel.chip_needs_label("Playerbots")
+    )
+    button = next(b for b, chip in zip(row.chip_buttons, chips, strict=True) if chip is needs)
+
+    assert needs.label in strip.elided_chip_labels(), (
+        f"the lock is not being squeezed at 400px, so this proves nothing: "
+        f"{strip.elided_chip_labels()}"
+    )
+    assert button.text() == needs.label, "the chip's own label is gone, not just its drawing"
+    drawn = button.drawn_text()
+    assert (
+        drawn != needs.label
+    ), "the button paints its whole label into a width that cannot hold it"
+    assert drawn.endswith("…"), f"the label was cut rather than elided: {drawn!r}"
+    assert needs.label.startswith(
+        drawn[:-1]
+    ), f"what is drawn is not the start of the label: {drawn!r}"
+    # Measured against the style's own text area, asked for HERE rather than read
+    # back out of `text_room()`: an assertion that used the function under test
+    # to say how much room there was would hold whatever that function returned
+    # -- it stayed green against `text_room()` answering the button's whole
+    # width, which puts the last characters under the border.
+    from PySide6.QtWidgets import QStyle, QStyleOptionButton
+
+    option = QStyleOptionButton()
+    button.initStyleOption(option)
+    area = button.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, button)
+    assert (
+        button.fontMetrics().horizontalAdvance(drawn) <= area.width()
+    ), f"{drawn!r} is wider than the {area.width()}px the style gives this button for text"
+    assert needs.detail in button.toolTip(), "an elided lock with its sentence nowhere"
+
+
+def test_a_chip_that_fits_is_painted_by_qt_itself(qapp: object) -> None:
+    """The other side of `drawn_text()`, and what stops it being always-elide.
+
+    A `drawn_text()` that returned a shortened string at every width would pass
+    the test above and would put `Rebuild pendin…` on a 4K screen. At a width
+    that fits, what is drawn is exactly what the chip says, for every chip on
+    the row -- which is also the assertion that `text_room()`'s chrome
+    arithmetic is not quietly one pixel short.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=3000)
+
+    painted = {chip.label: b.drawn_text() for b, chip in zip(row.chip_buttons, chips, strict=True)}
+    assert painted == {
+        chip.label: chip.label for chip in chips
+    }, f"a chip is drawn shortened at a width that fits all eight: {painted}"
+
+
+def test_a_failed_jobs_folded_strip_says_what_failed_on_one_line(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T80's strip, at the width gate A2 was taken in and after a job that FAILED.
+
+    A refusal on these tabs is `str(exc)` -- one paragraph -- and the strip's
+    status field used to WRAP it. Folded, the strip is the whole panel, so those
+    extra lines were the panel's whole height and the tab had nothing spare to
+    give them: the gate caught a three-line sentence with its third line cut in
+    half.
+
+    Four assertions. The first two are the defect, and they are asked of
+    `heightForWidth()` -- how tall the field's own text is at the width it is
+    really drawn in -- against the font's line spacing. Not against the field's
+    HEIGHT, which is 50px either way because the field is stretched to the row
+    that holds the Stop button, and not against the panel's `minimumSizeHint()`,
+    which is a wrapping `QLabel`'s small one and does not move: both were tried
+    and both stayed green against the wrapping label this replaced (measured:
+    the refusal needs 56px of the 50 it has at 285px wide, four lines where
+    there is room for three and a half -- which is the half-line the gate
+    photographed).
+
+    The last two are what stop that being met by a field that simply keeps
+    less: the whole refusal is still what the panel reports and what a hover
+    shows.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1000, 700))
+    refusal = (
+        "that compose file was not written by Yu'lon, so this app will not rebuild the "
+        "server it describes; move it aside and install again, and nothing here is touched."
+    )
+    assert view.rebuild_log.run(lambda: _raise(RuntimeError(refusal)), title="rebuild") is True
+    pump_until(lambda: not view.rebuild_log.running, "the failed job finished")
+    process_events()
+    view.rebuild_log.set_collapsed(True)
+    process_events()
+
+    field = view.rebuild_log._status
+    assert (
+        refusal in view.rebuild_log.status_text()
+    ), f"the panel no longer reports what failed: {view.rebuild_log.status_text()!r}"
+    assert refusal in field.toolTip(), "the refusal is neither on screen in full nor on hover"
+    needed = field.heightForWidth(field.width())
+    one_line = field.fontMetrics().lineSpacing()
+    assert needed <= one_line, (
+        f"the folded strip's sentence needs {needed}px at the {field.width()}px it is drawn "
+        f"in -- {needed / one_line:.1f} lines of {one_line}px -- so it is wrapping"
+    )
+    assert (
+        needed <= field.height()
+    ), f"the field is {field.height()}px and its text needs {needed}: the bottom line is cut"
+    # One line is not enough on its own: a field that kept the whole paragraph
+    # on one line and let the style cut it at the edge measures the same height
+    # and says nothing about having been cut. What is DRAWN has to fit, and it
+    # has to be elided rather than chopped -- the ellipsis is the only mark on
+    # screen that tells the reader there is more to hover for.
+    drawn = field.text()
+    assert drawn != refusal, "the whole paragraph is on one line, so it is being cut at the edge"
+    assert drawn.endswith("…"), f"the sentence was chopped rather than elided: {drawn!r}"
+    assert (
+        field.fontMetrics().horizontalAdvance(drawn) <= field.width()
+    ), f"{drawn!r} is wider than the {field.width()}px field it is drawn in"
+    assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
+        f"the folded log is CLIPPED at {view.rebuild_log.height()}px against the "
+        f"{view.rebuild_log.minimumSizeHint().height()} it says it needs"
+    )
+
+
+def _raise(exc: Exception) -> Iterator[str]:
+    """A line source that fails the way a refusing job fails: it raises."""
+    yield "starting"
+    raise exc
+
+
+LOG_OPEN_WIDTHS = ((1000, 700), (960, 600))
+"""The two windows the Modules tab is measured at with a job's output in the log.
+
+1000x700 is the window gate A2 was taken in and the one this case was found in;
+960x600 is `main.MINIMUM_WINDOW_SIZE`. Both are here because they fail
+differently: 1000x700 has room for everything except the last 13px, and 960x600
+is 112px short -- a fix sized to either one alone misses the other.
+"""
+
+
+def _drawn_under_their_minimum(tab: Any) -> list[str]:
+    """Every widget on `tab` drawn shorter than it says it needs.
+
+    `_squeezed()` above asks the same question and is kept separate on purpose:
+    that one is called at sizes where the tab is expected to fit outright, and
+    this one at sizes where something has to give -- the assertion is that what
+    gives is a widget's own choice (the log folds) and never Qt's proportional
+    cut, which takes the bottom off whatever is in the way.
+    """
+    from PySide6.QtWidgets import QVBoxLayout
+
+    box = tab.layout()
+    assert isinstance(box, QVBoxLayout)
+    return [
+        f"{type(w).__name__}: {w.height()} < {w.minimumSizeHint().height()}"
+        for w in (box.itemAt(i).widget() for i in range(box.count()))
+        if w is not None and w.isVisible() and w.height() < w.minimumSizeHint().height()
+    ]
+
+
+def test_a_job_leaves_nothing_on_the_modules_tab_cut_at_the_narrow_windows(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The wrapped bar's second line must not be paid for out of the log's text pane.
+
+    T83 round 1's defect, and it is what a minimum that under-reports buys.
+    `FlowLayout.minimumSize()` answered one line at every width, so with the bar
+    wrapped at 1000x700 the tab's own layout claimed it needed 482px when the
+    real need was 538 -- and `QBoxLayout`, told the tab fitted, drew
+    `_IdleLogPanel` at 153px of the 180 it needs and cut its text pane. That is
+    the state T80's cap docstring exists to prevent, and it came back one ticket
+    later through a widget that had nothing to do with logs.
+
+    Three assertions, each of which the other two are satisfied without:
+
+    * nothing on the tab is drawn under its own minimum, which is the defect;
+    * every toolbar label is still whole, so the height cannot be found by
+      un-wrapping the bar and clipping the text again;
+    * and the log is USABLE at whatever height it ended up with -- folded is
+      fine, because a folded `LogPanel` is its strip and the strip carries the
+      job's status line and Stop; drawn-but-cut is not, and the two are a few
+      pixels apart on screen.
+
+    Run AFTER a job, because that is the only state in which this tab has an
+    open log at all: `_IdleLogPanel` starts folded and it is `run_started` that
+    asks for the room (T80).
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    assert not view.rebuild_log.collapsed, "the job did not open the log, so nothing is tested"
+
+    for size in LOG_OPEN_WIDTHS:
+        _at(window, size)
+        assert _drawn_under_their_minimum(tab) == [], (
+            f"something on the Modules tab is drawn under its own minimum at {size} with "
+            f"the log open: {_drawn_under_their_minimum(tab)}"
+        )
+        clipped = [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
+        assert clipped == [], f"toolbar text cut off at {size}: {clipped}"
+        assert _bar_holds_every_line(view) == [], (
+            f"a toolbar button is drawn outside the action bar at {size}: "
+            f"{_bar_holds_every_line(view)}"
+        )
+        log = view.rebuild_log
+        assert log.height() >= log.minimumSizeHint().height(), (
+            f"the log is drawn at {log.height()}px against the {log.minimumSizeHint().height()} "
+            f"it needs at {size}: it was cut rather than folded"
+        )
+        assert log.status_text() != "", f"the log's strip is empty at {size}"
+
+
+def test_the_modules_log_takes_its_height_back_when_the_window_grows(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The fold the panel does for room is undone when the room comes back.
+
+    The other half of the test above, and the one that says the fold is a
+    response to a width rather than a one-way door. It is easy to get wrong in
+    exactly one way: a panel that remembers "I folded myself" and clears that
+    memory on its own `set_collapsed()` never re-opens -- measured, with the log
+    left folded at 1280x800 where there were 312px of room for it.
+
+    And the last assertion is the other direction: a fold the USER asked for
+    survives a window that grows, or the app re-opens a panel somebody has just
+    put away.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.rebuild_log.collapsed, (
+        f"the log is open at {main.MINIMUM_WINDOW_SIZE}, where the tab has "
+        f"{view.rebuild_log.height()}px for the {view.rebuild_log.minimumSizeHint().height()} "
+        "an open one needs"
+    )
+
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+
+    assert not view.rebuild_log.collapsed, (
+        "the log was folded to fit a narrow window and never came back at "
+        f"{main.DEFAULT_WINDOW_SIZE}"
+    )
+    assert "Compile finished." in view.rebuild_log.text(), "the fold lost the job's output"
+
+    _click(_the_handle_on(view.rebuild_log))
+    assert view.rebuild_log.collapsed, "the handle did not fold the log"
+    _at(window, (1920, 1080))
+
+    assert view.rebuild_log.collapsed, (
+        "a bigger window re-opened a log the user had folded; only a fold the PANEL did "
+        "for room is its own to undo"
+    )
+
+
+def _what_the_tab_owes(tab: Any) -> int:
+    """The height every widget on `tab` needs, added up the way its layout does.
+
+    Recomputed from the children rather than read off the tab, because the whole
+    question is whether the tab's OWN answer has kept up with them.
+    """
+    from PySide6.QtWidgets import QVBoxLayout
+
+    box = tab.layout()
+    assert isinstance(box, QVBoxLayout)
+    margins = box.contentsMargins()
+    owed = margins.top() + margins.bottom()
+    shown = 0
+    for index in range(box.count()):
+        item = box.itemAt(index)
+        widget = item.widget()
+        if widget is not None and not widget.isVisible():
+            continue
+        shown += 1
+        owed += widget.minimumSizeHint().height() if widget is not None else 0
+    return owed + box.spacing() * max(0, shown - 1)
+
+
+def test_a_wrap_reaches_the_tabs_own_minimum_without_a_restyle(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The bar wrapping has to move the TAB's minimum, and a plain resize is the test.
+
+    A parent `QBoxLayout` works its children's minimums out when it is
+    invalidated and re-uses them until a child says they have moved.
+    `FlowLayout.minimumSize()` answers for the width the layout was last GIVEN,
+    so a bar that wraps has a new minimum and no way to say so --
+    `FlowBar.resizeEvent`'s `updateGeometry()` is the saying.
+
+    **Resized without `_at()`, and that is the whole point.** `_at()` re-applies
+    the theme, which invalidates every layout on the window and makes the parent
+    re-ask anyway; so does a real drag, most of the time
+    (`main._Window._restyle_for_width`). Measured through `_at()`, removing
+    `updateGeometry()` changes nothing and reads as dead code -- it was removed
+    once on exactly that evidence. Through a plain `resize()` the tab's minimum
+    stays at the 376px it had with the bar on one line while the bar itself says
+    106, and everything downstream -- `_IdleLogPanel`'s room, and so whether the
+    log is folded or cut -- is decided from that stale number.
+
+    Two assertions: the tab's minimum went UP by at least a line when the bar
+    wrapped, and it is at least what its children add up to. The second is the
+    invariant and the first is what makes it non-vacuous -- a tab whose minimum
+    was already generous would satisfy the second at both widths.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    bar = view.module_actions
+
+    window.resize(1400, 800)
+    process_events()
+    assert len(bar.flow()._lines(bar.width())) == 1, "1400px already wrapped the bar"
+    on_one_line = tab.minimumSizeHint().height()
+    line = bar.flow()._line_height()
+
+    window.resize(960, 800)
+    process_events()
+
+    assert len(bar.flow()._lines(bar.width())) > 1, "960px did not wrap the bar"
+    wrapped = tab.minimumSizeHint().height()
+    assert wrapped >= on_one_line + line, (
+        f"the bar wrapped and the tab's minimum went {on_one_line} -> {wrapped}, less than the "
+        f"{line}px line it gained: the tab is still being laid out against the old one"
+    )
+    assert wrapped >= _what_the_tab_owes(tab), (
+        f"the tab says it needs {wrapped}px and its own children add up to "
+        f"{_what_the_tab_owes(tab)}"
+    )
+
+
+A_REFUSAL_IN_THE_REPORT_BOX = (
+    "mod-city-bots: FAILED. the applier refused: mod-playerbots is not installed, and this "
+    "module declares it in requires. Install it first, then press Install again."
+)
+"""What the Modules report box holds after any press that did not work.
+
+A paragraph and not a word, because the box is sized to its TEXT: an empty box
+is folded away by its strip (T80) and a one-word one is a line, so a fixture
+that put `no` in it would be measuring a tab that still had the height. Wrapped
+at these widths this is what `_module_failed` really leaves behind.
+"""
+
+
+def _counting_folds(panel: Any) -> tuple[list[str], Callable[[], None]]:
+    """Watch `panel`'s real fold transitions; returns the log and a restore.
+
+    Patched on the CLASS and not the instance, because the calls being counted
+    are the panel's own `self.set_collapsed(...)` -- an instance attribute would
+    be found by those too, but so would any other panel of the same type in the
+    same test, and counting one widget's flicker is the whole point. Only a call
+    that CHANGES the state is recorded: `set_collapsed` is a documented no-op
+    otherwise, and counting no-ops would make this a test of how often the
+    method is reached rather than of what the user sees.
+    """
+    kind = type(panel)
+    real = kind.set_collapsed
+    seen: list[str] = []
+
+    def counting(self: Any, collapsed: bool) -> None:
+        if self is panel and collapsed != self.collapsed:
+            seen.append("fold" if collapsed else "open")
+        real(self, collapsed)
+
+    kind.set_collapsed = counting  # type: ignore[method-assign]
+    return seen, lambda: setattr(kind, "set_collapsed", real)
+
+
+def test_a_populated_report_leaves_nothing_on_the_modules_tab_cut(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The state after ANY press on this tab, at the two narrow windows.
+
+    Round 2 folded the log and stopped there, and the tab still did not fit: a
+    report box is 90px of minimum and it is populated the moment anything on
+    this tab is pressed. Measured with the log already folded -- at 1000x700 the
+    custom-module card was drawn 109 of the 122 it needs, and at 960x600 the
+    ACTION BAR was drawn 74 of its 106, its second row of buttons sliced through
+    horizontally, which is this ticket's own defect arriving from underneath.
+
+    The order is what is asserted, not just the absence of clipping: the things
+    that may give are the two that fold to a strip and the list that scrolls,
+    and a "fix" that met the first assertion by letting the card or a toolbar
+    line be short would be the bug with a passing test.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    process_events()
+    assert not view.module_report_strip.collapsed, "the report box did not open for its text"
+    assert not view.rebuild_log.collapsed, "the job did not open the log"
+
+    for size in LOG_OPEN_WIDTHS:
+        _at(window, size)
+        assert _drawn_under_their_minimum(tab) == [], (
+            f"something on the Modules tab is drawn under its own minimum at {size} with a "
+            f"report in the box: {_drawn_under_their_minimum(tab)}"
+        )
+        clipped = [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
+        assert clipped == [], f"toolbar text cut off at {size}: {clipped}"
+        assert _bar_holds_every_line(view) == [], (
+            f"a toolbar button is drawn outside the action bar at {size}: "
+            f"{_bar_holds_every_line(view)}"
+        )
+        # The report is still REACHABLE where it has been folded for room: the
+        # strip names it and one press brings it back, which is the difference
+        # between a box that gave its height up and a box that was cut.
+        assert view.module_report_strip.isVisible(), f"the report's strip is gone at {size}"
+        assert (
+            view.module_report.toPlainText() == A_REFUSAL_IN_THE_REPORT_BOX
+        ), f"folding the report for room at {size} lost what it said"
+
+
+def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The ORDER, asked as three questions the absence of clipping does not ask.
+
+    A tab that folded everything at every width would pass the test above, and
+    so would one that took the height out of the list first and left the user
+    with two rows on a window that could have shown six. What is asserted is
+    that each step is only taken when the one before it was not enough:
+
+    * at 960x600 with a report in the box, BOTH boxes are folded and the list is
+      at its own floor -- the narrowest case, where all three steps are needed;
+    * at 1280x800 NEITHER is folded and the list floor is back, so none of this
+      is a one-way door;
+    * and the list never gives while a box is still open, which is the order
+      itself.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    process_events()
+
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.rebuild_log.collapsed, "the log is open at the smallest window"
+    assert view.module_report_strip.collapsed, "the report is open at the smallest window"
+    assert view.modules_panel.minimumHeight() < controller_view_module.MODULE_LIST_MIN_HEIGHT, (
+        "both boxes are folded and the tab STILL does not fit at this size -- the action bar "
+        "takes two lines and the custom-module card needs 126px of wrapped sentence -- so the "
+        f"list's floor is the one thing left to give: it is still "
+        f"{view.modules_panel.minimumHeight()} of {controller_view_module.MODULE_LIST_MIN_HEIGHT}"
+    )
+    # Strictly less, and that is a claim about the shipped catalog and theme at
+    # this one size rather than about the rule. If a future theme makes 960x600
+    # fit outright this goes red, and that is the right red: the ladder's last
+    # rung would no longer be exercised anywhere, and this is the test that says
+    # so rather than quietly covering nothing.
+    assert view.modules_panel.minimumHeight() >= view.modules_panel.minimumSizeHint().height(), (
+        f"the floor was lowered to {view.modules_panel.minimumHeight()}, under the "
+        f"{view.modules_panel.minimumSizeHint().height()} the list itself needs -- which Qt "
+        "ignores, so it is a fit this object only claims to have made"
+    )
+
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+
+    assert not view.rebuild_log.collapsed, "the log never came back at the default window"
+    assert not view.module_report_strip.collapsed, "the report never came back"
+    assert view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT, (
+        f"the list's floor is still {view.modules_panel.minimumHeight()} at a window with "
+        f"room for the {controller_view_module.MODULE_LIST_MIN_HEIGHT} it asks for"
+    )
+
+    # And the order: wherever the list has given anything, both boxes are away.
+    for width in range(960, 1400, 20):
+        _at(window, (width, 700))
+        if view.modules_panel.minimumHeight() < controller_view_module.MODULE_LIST_MIN_HEIGHT:
+            assert view.rebuild_log.collapsed and view.module_report_strip.collapsed, (
+                f"at {width}px the list gave height while a box was still open: log "
+                f"folded={view.rebuild_log.collapsed}, report "
+                f"folded={view.module_report_strip.collapsed}"
+            )
+
+
+def test_a_restyle_at_an_unchanged_width_folds_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The flicker: a themed restyle used to unfold the log and refold it.
+
+    Every height on this tab is a function of the theme, the theme is
+    regenerated at every width the window settles at
+    (`main._Window._restyle_for_width`), and a widget's size hint is stale until
+    it has been polished. Decided inside the layout pass that asks for it, the
+    fold was taken against half-updated numbers: the action bar's minimum still
+    said one line, so the tab looked 56px roomier than it was, the log opened,
+    the bar was re-laid, and the log folded again. Two transitions per settle at
+    every width from 940 to 1110 -- a visible flash on every drag below the fold
+    width, measured before `_TabFit`'s coalescing timer.
+
+    Asserted as ZERO at an unchanged size and at most one per step across the
+    sweep, for BOTH of the strips that fold for room. One is the honest bound for
+    a step that really does cross a fold width: the state has to change once, and
+    it is the SECOND transition that is the flicker.
+    """
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    process_events()
+    _at(window, (1000, 700))
+    assert view.rebuild_log.collapsed, "1000x700 does not fold the log, so this proves nothing"
+    assert view.module_report_strip.collapsed, "1000x700 does not fold the report either"
+
+    # BOTH strips, because they are two objects running the same derivation and
+    # a flicker in either is the same flash on the same tab. Counted with the
+    # report POPULATED, which is also what gives the report strip a fold to
+    # flicker: an empty box is folded by its text and never consulted about room.
+    log_seen, restore_log = _counting_folds(view.rebuild_log)
+    report_seen, restore_report = _counting_folds(view.module_report_strip)
+    try:
+        apply_dadcraft_theme(window, width=window.width())
+        process_events()
+        assert log_seen == [], f"a restyle at an unchanged size folded the log {log_seen}"
+        assert report_seen == [], f"a restyle at an unchanged size folded the report {report_seen}"
+
+        worst: list[str] = []
+        moved = 0
+        # Up to 1200 and not 1110: the report's own fold width is 1120 at this
+        # height, and a sweep that stopped short of it counted a strip that
+        # never moves -- which cannot flicker, so half of this test would have
+        # been green about nothing. `moved` is what says so out loud.
+        for width in range(940, 1201, 10):
+            log_seen.clear()
+            report_seen.clear()
+            window.resize(width, 700)
+            apply_dadcraft_theme(window, width=window.width())
+            process_events()
+            moved += len(log_seen) + len(report_seen)
+            if len(log_seen) > 1:
+                worst.append(f"{width}: log {log_seen}")
+            if len(report_seen) > 1:
+                worst.append(f"{width}: report {report_seen}")
+        assert worst == [], f"a strip flickered during a drag at {worst[:3]}"
+        assert moved, (
+            "neither strip folded or unfolded anywhere in the sweep, so 'at most one "
+            "transition per step' is a bound on nothing"
+        )
+    finally:
+        restore_log()
+        restore_report()
+
+
+def test_opening_the_report_by_hand_cannot_cut_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A press on a strip is a request, not a `setVisible()`.
+
+    `_TabFit` folds the report for room and then answers the same way for as
+    long as the width holds -- `set_room(False)` is a no-op when the answer has
+    not changed -- so anything that shows the box behind its back stays shown.
+    Until round 3 the strip's own handler did exactly that, and one click at
+    960x600 with a refusal in the box drew the action bar at 76px of the 106 its
+    two lines need, `Rebuild the server…` sliced through, and the custom-module
+    card's label at 9px of 28.
+
+    Either outcome is allowed and only one of them is asserted for, because the
+    rule is about what must not happen: the box may stay folded (it does), or it
+    may open with the list's floor giving the difference. What may not happen is
+    the tab being cut. The click is a real mouse press on the strip, because the
+    defect was in the handler that press reaches.
+
+    The second half is the one that keeps this from passing for the wrong
+    reason: the press must still be LIVE. A strip that had been made unclickable,
+    or one that never folds at all, satisfies "nothing is cut" and is a
+    different bug -- so the same press is made again at a width with the room,
+    and there it opens.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    process_events()
+
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.module_report_strip.collapsed, "the report is not folded here, so no press to test"
+
+    _click(view.module_report_strip)
+    process_events()
+
+    assert _drawn_under_their_minimum(tab) == [], (
+        "a click on the report's strip at the smallest window cut the tab: "
+        f"{_drawn_under_their_minimum(tab)}"
+    )
+    clipped = [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
+    assert clipped == [], f"the click cut the toolbar's text: {clipped}"
+    assert (
+        _bar_holds_every_line(view) == []
+    ), f"the click pushed a toolbar button outside the bar: {_bar_holds_every_line(view)}"
+
+    _at(window, DESKTOP_1080P)
+    was = view.module_report_strip.collapsed
+    _click(view.module_report_strip)
+    process_events()
+    assert view.module_report_strip.collapsed is not was, (
+        "the report's strip no longer answers a press at a window with the room for it, so "
+        "the assertions above are about a dead control"
+    )
+
+
+def test_an_open_report_is_counted_at_the_height_the_layout_holds_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`_owed()` has to count the report box the way the layout counts it.
+
+    A layout item's minimum is the larger of its widget's hint and any explicit
+    `minimumHeight()`, and the theme puts one on every text field (T45). Counted
+    by the hint alone the box came to 90 against the 106 the layout really holds
+    back, so `_owed()` under-reported an open report by 16px -- and between 1030
+    and 1080 wide that is the whole margin: the sum came to 522 against a tab of
+    525 while the tab's real minimum was 538, the report stayed open, and the
+    custom-module card was drawn 108 of its 122.
+
+    1040x700 and not a sweep, because this is an arithmetic error with an exact
+    window where it shows: wider and the card fits anyway, narrower and the
+    report folds for other reasons. The card is named because it is the widget
+    that pays -- it is the one thing on this tab with a wrapped sentence in it
+    and no way to be shorter except by cutting the words.
+    """
+    from PySide6.QtWidgets import QGroupBox
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    process_events()
+    _at(window, (1040, 700))
+
+    card = tab.findChild(QGroupBox)
+    assert card is not None, "the custom-module card is gone from the Modules tab"
+    assert card.height() >= card.minimumSizeHint().height(), (
+        f"the custom-module card is drawn {card.height()}px against the "
+        f"{card.minimumSizeHint().height()} it needs at 1040x700"
+    )
+    assert (
+        _drawn_under_their_minimum(tab) == []
+    ), f"something on the tab is cut at 1040x700: {_drawn_under_their_minimum(tab)}"
+    # And the arithmetic itself, at the seam the defect was in: what the strip
+    # says the box needs is what the box's own layout item holds back for it.
+    box = tab.layout().itemAt(_index_of(tab, view.module_report))
+    assert box is not None
+    assert view.module_report_strip.box_minimum() >= box.minimumSize().height(), (
+        f"the strip says its box needs {view.module_report_strip.box_minimum()}px and its "
+        f"layout item holds back {box.minimumSize().height()}"
+    )
+
+
+def _index_of(tab: Any, widget: Any) -> int:
+    """Where `widget` sits in `tab`'s layout."""
+    box = tab.layout()
+    for index in range(box.count()):
+        item = box.itemAt(index)
+        if item is not None and item.widget() is widget:
+            return index
+    raise AssertionError(f"{widget} is not in {tab}'s layout")

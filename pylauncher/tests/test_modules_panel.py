@@ -970,7 +970,7 @@ def test_each_owed_chip_names_the_action_that_answers_it_and_a_fact_names_none()
     owed = {c.label: c.action for c in _row(rows, "mod-a").chips if c.kind == "owed"}
     assert owed[mp.CHIP_REBUILD_PENDING] == "rebuild"
     assert owed[mp.CHIP_SQL_PENDING] == "sql"
-    assert all(c.action is None for c in _row(rows, "mod-ask").chips if c.kind == "fact")
+    assert all(c.action is None for c in _row(rows, "mod-ask").chips if c.kind != "owed")
 
 
 def test_every_chip_action_has_a_button_label() -> None:

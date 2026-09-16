@@ -595,16 +595,16 @@ def test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window(
     back without resizing the window. The owner hit it on the first refusal a
     real user would ever see.
 
-    Asserts the WIDTH THE PANEL DEMANDS rather than `wordWrap()`, which is a
-    declaration and would still pass if the label were replaced by something
-    else that does not wrap. Compares a short status against one twenty times
+    Asserts the WIDTH THE PANEL DEMANDS rather than a declaration about the
+    label, which would still pass if the label were replaced by something else
+    that does not keep the promise. Compares a short status against one twenty times
     longer instead of pinning a pixel count, because the number depends on the
     font the box happens to have.
     """
     panel = LogPanel()
     panel.resize(400, 300)
 
-    panel._status.setText("idle")
+    panel._status.say("idle")
     # `activate()` is load-bearing, and its absence made the first version of
     # this test pass against the bug: a layout that has not been activated
     # returns the size hint it last computed, so both readings below were the
@@ -613,7 +613,7 @@ def test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window(
     panel.layout().activate()
     short = panel.minimumSizeHint().width()
 
-    panel._status.setText(
+    panel._status.say(
         "FAILED: InstallerError: /home/pk is your home folder itself. A server "
         "install owns the folder it is given - a reinstall removes it - so pick a "
         "dedicated subfolder inside your home folder instead. Pick a different "
@@ -629,19 +629,23 @@ def test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window(
 
 
 def test_the_status_label_still_says_what_failed(qapp: object) -> None:
-    """Wrapping must not have been bought by truncating the sentence.
+    """Narrowing must not have been bought by throwing the sentence away.
 
-    The neighbour of the fix above: a label that elides its text would also stop
-    demanding the window's width, and would pass that test while telling the user
-    less than it used to. This asserts the whole refusal is still readable.
+    The neighbour of the fix above: a field that stops demanding the window's
+    width by keeping less of what it was told would pass that test while telling
+    the user less than it used to. Since T83 the field DOES elide -- the strip is
+    one line and a refusal is a paragraph -- so what this asserts is that the
+    eliding is a drawing and not a loss: the whole refusal is still what the
+    panel reports and what a hover shows.
     """
     panel = LogPanel()
     message = (
         "/home/pk is your home folder itself. A server install owns the folder it "
         "is given - a reinstall removes it - so pick a dedicated subfolder."
     )
-    panel._status.setText("FAILED: " + message)
+    panel._status.say("FAILED: " + message)
     assert panel.status_text() == "FAILED: " + message
+    assert panel._status.toolTip() == "FAILED: " + message
 
 
 def test_the_status_label_text_can_be_selected_and_copied(qapp: object) -> None:
@@ -676,20 +680,21 @@ def test_the_selectable_flags_do_not_reopen_the_wrap_bug(qapp: object) -> None:
     that, and pinning it to one would only be pinning a pre-existing,
     unrelated property of `QLabel.sizeHint()` under word wrap.
     `minimumSizeHint()` is the quantity that actually determines what a
-    `QSplitter` demands (see the comment on `setWordWrap(True)` above), which
-    is why the original fix measured it and why this does too. Mutation:
-    comment out `self._status.setWordWrap(True)` and this test fails the
-    same way the original one does, which is the proof this measures the
-    right thing.
+    `QSplitter` demands (see the comment on the status field above), which is why
+    the original fix measured it and why this does too. Mutation: give
+    `self._status` a plain `QLabel` in place of the `_StripLabel` T83 made it
+    -- or take `QSizePolicy.Policy.Ignored` off `_StripLabel` -- and this test
+    fails the same way it did against `setWordWrap`, which is the proof it
+    measures the right thing.
     """
     panel = LogPanel()
     panel.resize(400, 300)
 
-    panel._status.setText("idle")
+    panel._status.say("idle")
     panel.layout().activate()
     short = panel.minimumSizeHint().width()
 
-    panel._status.setText(
+    panel._status.say(
         "FAILED: InstallerError: /home/pk is your home folder itself. A server "
         "install owns the folder it is given - a reinstall removes it - so pick a "
         "dedicated subfolder inside your home folder instead. Pick a different "
@@ -1183,7 +1188,7 @@ def test_the_strip_does_not_reopen_the_wrap_bug(qapp: object) -> None:
     """
     panel = LogPanel()
     panel.resize(400, 300)
-    panel._status.setText("idle")
+    panel._status.say("idle")
     panel.layout().activate()
     short = panel.minimumSizeHint().width()
 
