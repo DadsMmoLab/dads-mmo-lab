@@ -3900,7 +3900,15 @@ class StagedInstaller:
             yield from self.check_carried_patches(server_dir)
             yield from self._rewrite_what_we_own(server_dir, opts, state)
             yield from self.apply_carried_patches(server_dir)
-        except InstallerError as exc:
+        except (InstallerError, OSError) as exc:
+            # `OSError` as well, and not for symmetry: everything between the
+            # first fetch and the compile WRITES -- `_rewrite_what_we_own()`
+            # renders three compose files, `apply_carried_patches()` writes into
+            # the checkout -- and a full disk or a read-only mount surfaces as a
+            # bare `OSError` that no `InstallerError` wraps. Skipping the
+            # restore on it would leave the folder ahead of the image for the
+            # one failure most likely to happen twice in a row (cold review
+            # round 2, 2026-09-16).
             yield from self._restore_the_folder(moved, server_dir, opts, state)
             raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
         try:
@@ -3954,6 +3962,17 @@ class StagedInstaller:
         of the two it is. "We could not ask" is never "there is nothing to
         lose" -- the rule every `None` in `git.py` is documented under.
 
+        **The closing clause changes half way down the list, and the change is
+        the point.** The refusals above `no_local_commits` end "nothing was
+        fetched and nothing was changed", and that is literally true. The ones
+        below it end "nothing in that folder was changed", because
+        `no_local_commits()` FETCHES -- its own docstring says so, and names the
+        network round trip it pays -- so by then objects and `FETCH_HEAD` have
+        been written into `.git`. Nothing in the working tree has moved, which
+        is what the user is being told and what they can check; saying "nothing
+        was fetched" there would be a sentence this method knows to be false
+        (cold review round 2, 2026-09-16).
+
         Returns `(source, dest, sha)` per source, with the sha read HERE rather
         than inside the loop that moves them: the restore path needs a commit
         that was read before anything fetched, and a read taken after the first
@@ -4001,14 +4020,14 @@ class StagedInstaller:
                 raise InstallerError(
                     f"{dest} carries commits that upstream does not, and an update moves it onto "
                     f"upstream's newest commit, which would leave them reachable only through "
-                    f"git's reflog. Nothing was fetched and nothing was changed."
+                    f"git's reflog. Nothing in that folder was changed."
                 )
             sha = self._seams.head_sha(dest)
             if sha is None:
                 raise InstallerError(
                     f"Yu'lon could not read which commit {dest} is on, so it could not promise to "
-                    f"put that checkout back if the new build failed. Nothing was fetched and "
-                    f"nothing was changed."
+                    f"put that checkout back if the new build failed. Nothing in that folder "
+                    f"was changed."
                 )
             plan.append((source, dest, sha))
         return tuple(plan)

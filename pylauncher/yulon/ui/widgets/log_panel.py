@@ -259,10 +259,41 @@ class _StreamWorker(QObject):
     line = Signal(str)
     finished = Signal(bool, str)  # ok, message
 
-    def __init__(self, source: LineSource) -> None:
+    def __init__(self, source: LineSource, *, drains: bool = False) -> None:
         super().__init__()
         self._source = source
         self._stop = False
+        self._drains = drains
+        """Does this source END on its own once Stop is asked for? (T64 round 2.)
+
+        **The `break` below is not a way of leaving a loop; it is a way of
+        DESTROYING a generator, and that is what this flag exists to stop
+        doing.** Dropping the last reference to a suspended generator makes
+        CPython throw `GeneratorExit` at the yield it is parked on, and a
+        `GeneratorExit` is not an `Exception`: it is not caught by
+        `except InstallerError`, or by any `except` clause a route wrote for its
+        own failures. So every line a route yields while cleaning up after a
+        failure -- and every statement between those yields -- was dropped on
+        the floor the instant Stop was pressed.
+
+        What that cost, measured by reading (cold review round 2, 2026-09-16):
+        Stop during a `update_to_latest()` compile kills the build's child, the
+        engine raises, `update_to_latest()`'s handler starts putting the moved
+        sources back, `_put_sources_back()` restores the FIRST of them and
+        yields -- and the worker broke there. The other source stayed on
+        upstream's tip, `_rewrite_what_we_own()` never ran, and the folder was
+        left ahead of the image that is running, which is the one state that
+        whole route is arranged to prevent. `rebuild()`'s own image rollback had
+        the same hole and nobody had noticed, because its cleanup happened to
+        finish inside one yield more often than not.
+
+        True when `LogPanel.run()` was given a `cancel` event, and that is the
+        whole rule: a source with a cancel is one that has undertaken to END
+        when the event is set, so reading it to exhaustion terminates. A source
+        with none -- the Console tab's `docker logs -f` -- has made no such
+        promise and is still abandoned at the break, because draining it would
+        never return and Stop would stop nothing.
+        """
         self._ident: int | None = None
 
     @Slot()
@@ -285,8 +316,14 @@ class _StreamWorker(QObject):
                 self._quit_own_thread()
                 return
             for text in self._source():
-                if self._stop:
+                if self._stop and not self._drains:
                     break
+                # EMITTED even after a stop, when the source drains: the lines
+                # a route yields after Stop are its cleanup saying what it put
+                # back, and they are the half of the report the user most needs
+                # ("the source folders were put back on the commits they were
+                # on"). Suppressing them would keep the mechanism and throw away
+                # the evidence of it.
                 self.line.emit(text)
         except Exception as exc:  # boundary: anything the job raises becomes a UI message
             ok = False
@@ -685,7 +722,9 @@ class LogPanel(QWidget):
         # between `start()` and the OS scheduling the thread must not take the
         # worker down with it - see `job.InFlight`.
         thread = QThread()
-        worker = _StreamWorker(source)
+        # `drains=` is exactly "was a cancel given", and `_StreamWorker._drains`
+        # holds why that is the right question rather than a proxy for it.
+        worker = _StreamWorker(source, drains=cancel is not None)
         worker.moveToThread(thread)
         in_flight().hold(thread, worker)
         thread.started.connect(worker.run)

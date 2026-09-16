@@ -149,6 +149,13 @@ def test_every_shipped_source_is_classified_and_only_the_db_repos_stay() -> None
         if native.held_at_its_pin(source)
     }
     assert held == {"cmangos/tbc-db", "cmangos/classic-db"}, held
+    # The two figures the `commits_since()` docstring quotes, DERIVED here so
+    # the words cannot rot: round 2 of the cold review found them reading
+    # "nine sources, seven shallow" when the catalog held ten and nine. A number
+    # in prose that nothing recomputes is a number that was true once.
+    every = [source for entry in load_catalog().games for source in entry.emulator.sources]
+    assert len(every) == 10, [s.repo for s in every]
+    assert sum(1 for s in every if s.depth is not None) == 9
     moving = {
         entry.id: tuple(s.repo for s in entry.emulator.sources if not native.held_at_its_pin(s))
         for entry in load_catalog().games
@@ -486,6 +493,74 @@ def test_a_cmangos_entry_owns_its_patch_paths_and_no_compose_file(tmp_path: Path
     owned = tbc.app_written_paths(server_dir)
     assert set(owned) == {"src/mangos-tbc"}, owned
     assert all(path.startswith("contrib/") for path in owned["src/mangos-tbc"]), owned
+
+
+def test_the_apps_own_dirty_compose_does_not_refuse_the_update(tmp_path: Path) -> None:
+    """The exemption DRIVEN, not just derived — a surviving mutation, round 2.
+
+    `test_the_wotlk_compose_file_is_the_apps_and_not_read_as_the_users_work`
+    asserts what `app_written_paths()` ANSWERS; nothing asserted that the answer
+    reaches `local_edits()`. So `local_edits(dest, ours.get(...))` mutated to
+    `local_edits(dest, ())` and all 38 tests stayed green — while the shipped
+    app would have refused every WotLK update there has ever been, because that
+    checkout's `docker-compose.yml` is modified on every healthy install.
+
+    The dirty path here is the app's OWN, seeded exactly as an install leaves
+    it. The press must go all the way through.
+    """
+    from yulon.catalog import composegen
+
+    rec, server_dir = _ready(tmp_path)
+    rec.edits[server_dir] = (composegen.BASE_FILE,)
+
+    said = _press(rec, server_dir)
+
+    assert _heads(rec, server_dir) == {s.repo: NEW for s in ENTRY.emulator.sources}
+    assert any("is running on" in line for line in said), said
+
+
+def test_a_cmangos_patch_path_left_dirty_by_the_install_does_not_refuse_the_update(
+    tmp_path: Path,
+) -> None:
+    """The same exemption on the family it was written for, through the real patch files.
+
+    `patch-sources` edits `contrib/vmap_extractor/...` inside the core checkout
+    on every CMaNGOS install, so that tree is dirty at those exact paths for as
+    long as the install exists. The paths are not written down here: they are
+    read back out of `app_written_paths()`, which reads them out of the patch
+    file — so a patch that grows a hunk in a new file cannot leave this test
+    behind either.
+    """
+    rec, server_dir, tbc = _tbc(tmp_path)
+    owned = tbc.app_written_paths(server_dir)["src/mangos-tbc"]
+    assert owned, "the entry carries no patch paths, so this proves nothing"
+    rec.edits[server_dir / "src/mangos-tbc"] = owned
+
+    list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
+
+    assert rec.heads[server_dir / "src/mangos-tbc"] == NEW
+
+
+def test_a_users_edit_beside_the_apps_own_still_refuses(tmp_path: Path) -> None:
+    """The exemption is a subtraction, not an off switch.
+
+    A guard that answered "this checkout has app-written paths in it, carry on"
+    would pass the two tests above and throw away the user's work, which is the
+    thing the guard exists for. The compose file is exempt; the file next to it
+    is not, and only IT is named.
+    """
+    from yulon.catalog import composegen
+
+    rec, server_dir = _ready(tmp_path)
+    rec.edits[server_dir] = (composegen.BASE_FILE, "src/server/game/World.cpp")
+
+    with pytest.raises(InstallerError) as raised:
+        _press(rec, server_dir)
+
+    said = str(raised.value)
+    assert "src/server/game/World.cpp" in said
+    assert composegen.BASE_FILE not in said, "the app's own file was blamed on the user"
+    assert rec.clones == []
 
 
 def test_the_update_writes_this_apps_compose_back_over_the_one_the_fetch_restored(
@@ -1053,7 +1128,7 @@ def test_restoring_a_source_asks_the_remote_for_nothing(tmp_path: Path) -> None:
 def test_a_shallow_clone_answers_could_not_count_rather_than_one_commit(
     origin: Path, tmp_path: Path
 ) -> None:
-    """Seven of the nine shipped sources are `depth: 1`, and the count lies on every one.
+    """Nine of the ten shipped sources are `depth: 1`, and the count lies on every one.
 
     `Source.depth` defaults to 1 and only AzerothCore's core overrides it, and
     `ContainerGit.clone()` — the production seam — passes that depth on its
