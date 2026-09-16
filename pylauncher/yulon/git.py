@@ -840,7 +840,7 @@ class RunnerGit:
         return _parse_count(proc.stdout)
 
     def restore_rev(self, dest: Path, rev: str) -> None:
-        """Put this checkout back on `rev`, detached. Raises `GitError` if it will not go.
+        """Put this checkout back on `rev`, detached, discarding what is in the way.
 
         **No fetch, and that is the whole difference from `_pin()`.** This is the
         undo half of T64's update route: `rev` is a commit the checkout was
@@ -849,11 +849,28 @@ class RunnerGit:
         network that has just been shown to be the reason we are restoring.
         `_pin()` fetches because ITS `rev` may be one this clone has never had.
 
+        **`--force`, and it is the difference between a restore that works and
+        one that fails on the family it matters most for.** Without it `git
+        checkout --detach` refuses whenever a tracked file differs in the
+        working tree AND between the two commits ("Your local changes would be
+        overwritten"), and on AzerothCore there is always such a file: the
+        server directory IS the checkout, that repository tracks its own
+        `docker-compose.yml`, and this app overwrites it. So the plain form
+        would refuse exactly the restore whose failure leaves a folder and a
+        running image disagreeing.
+
+        What `--force` can discard is bounded by WHERE this is called from, and
+        only there: `native._refuse_unless_updatable()` has already refused
+        unless the only modified tracked files are ones this app wrote
+        (`app_written_paths()`), and the caller writes those again immediately
+        afterwards. It is not a general-purpose checkout and there must not be
+        a second caller that has not made that check.
+
         It does not swallow a failure. A restore that did not happen leaves the
         source tree ahead of the image that was built from it, and the caller's
         sentence has to be able to say so.
         """
-        _run_git(["git", *_LINE_ENDING_ARGS, "checkout", "--detach", rev], cwd=dest)
+        _run_git(["git", *_LINE_ENDING_ARGS, "checkout", "--detach", "--force", rev], cwd=dest)
 
     def commits_behind(self, dest: Path, branch: str | None) -> int | None:
         """How many commits an update would bring into `dest`. None = cannot ask.
@@ -1300,8 +1317,14 @@ class ContainerGit:
         return _parse_count(proc.stdout)
 
     def restore_rev(self, dest: Path, rev: str) -> None:
-        """`RunnerGit.restore_rev()`, containerised: a checkout is a write, and no fetch."""
-        self._capture(dest, ["checkout", "--detach", rev], writes=True)
+        """`RunnerGit.restore_rev()`, containerised: a checkout is a write, and no fetch.
+
+        `--force` for its reason there, which is a fact about git and not about
+        the transport: without it the checkout refuses whenever a tracked file
+        differs in the working tree and between the two commits, which on
+        AzerothCore is always true of `docker-compose.yml`.
+        """
+        self._capture(dest, ["checkout", "--detach", "--force", rev], writes=True)
 
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
         """Is every commit on HEAD already on what the update would reset to? None = cannot ask.

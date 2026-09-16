@@ -638,6 +638,48 @@ def test_a_rebuild_that_fails_puts_the_sources_back_so_folder_and_image_agree(
     assert any(call.startswith("restore:") for call in rec.calls)
 
 
+def test_the_restore_writes_this_apps_own_compose_back_into_the_checkout_it_reverted(
+    tmp_path: Path,
+) -> None:
+    """The half a `checkout --force` undoes, and without which the recovery breaks the install.
+
+    `restore_rev()` puts the checkout on the old commit and, with it, puts
+    UPSTREAM's copy of every tracked file back -- including the ones this app
+    overwrote. On AzerothCore that is `docker-compose.yml`. A restore that
+    stopped at the sha would leave the folder on the right commit with a compose
+    file this app does not recognise, and the NEXT press of anything, Rebuild
+    included, would refuse it with "these compose files were not written by
+    Yu'lon": the press would have fixed the sha and broken the install.
+
+    Modelled by making the restore do what a real `checkout --force` does to
+    that file. The assertion is on the marker, because the marker is exactly
+    what the next press reads.
+    """
+    from yulon.catalog import composegen
+
+    rec, server_dir = _ready(tmp_path)
+    base = server_dir / composegen.BASE_FILE
+    upstream = "services:\n  ac-database:\n    image: mysql:8.4\n"
+
+    def restore_like_git(dest: Path, rev: str) -> None:
+        rec.heads[dest] = rev
+        if dest == server_dir:
+            base.write_text(upstream, encoding="utf-8")
+
+    rec.build_result = AttachedRun(2, ("error: no",))
+    with pytest.raises(InstallerError):
+        list(
+            engine(rec, restore_rev=restore_like_git).update_to_latest(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+
+    assert rec.heads[server_dir] == OLD
+    assert composegen.GENERATED_MARKER in base.read_text(
+        encoding="utf-8"
+    ), "the restore reverted the compose file and left the install unrebuildable"
+
+
 def test_a_source_that_will_not_go_back_is_said_out_loud_with_the_command_to_fix_it(
     tmp_path: Path,
 ) -> None:
@@ -971,7 +1013,12 @@ def test_restoring_a_source_asks_the_remote_for_nothing(tmp_path: Path) -> None:
 
     assert len(seen) == 1, seen
     assert "fetch" not in seen[0], seen[0]
-    assert seen[0][-3:] == ["checkout", "--detach", OLD]
+    # `--force` is not a flourish: without it `checkout --detach` refuses
+    # whenever a tracked file differs in the working tree AND between the two
+    # commits, which on AzerothCore is always true of `docker-compose.yml` --
+    # the one family where a failed restore matters most. What it may discard is
+    # bounded by the guard that ran before any of this.
+    assert seen[0][-4:] == ["checkout", "--detach", "--force", OLD]
 
 
 def test_the_two_transports_parse_one_status_the_same_way() -> None:

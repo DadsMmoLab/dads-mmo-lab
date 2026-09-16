@@ -3901,7 +3901,7 @@ class StagedInstaller:
             yield from self._rewrite_what_we_own(server_dir, opts, state)
             yield from self.apply_carried_patches(server_dir)
         except InstallerError as exc:
-            yield from self._put_sources_back(moved)
+            yield from self._restore_the_folder(moved, server_dir, opts, state)
             raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
         try:
             yield from self.rebuild(opts, cancel=cancel)
@@ -3909,7 +3909,7 @@ class StagedInstaller:
             # AFTER `rebuild()` has done its own rollback, never instead of it.
             # It puts the IMAGE back; this puts the SOURCE back; and it is the
             # pair that makes the folder and the running container agree again.
-            yield from self._put_sources_back(moved)
+            yield from self._restore_the_folder(moved, server_dir, opts, state)
             raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
         self._record_source_revs(server_dir, state, moved)
         yield (
@@ -4021,6 +4021,45 @@ class StagedInstaller:
         if new == old:
             return f"{source.repo} was already on {new[:7]}; nothing moved."
         return f"{source.repo}: {old[:7]} -> {new[:7]}."
+
+    def _restore_the_folder(
+        self,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+        server_dir: Path,
+        opts: InstallOptions,
+        state: InstallState,
+    ) -> Iterator[str]:
+        """Put the sources back AND write this app's own files into them again.
+
+        **Two halves, and the second is not tidying.** `restore_rev()` is a
+        `checkout --force`: it puts the checkout on the old commit and, with it,
+        puts UPSTREAM's copy of every tracked file back -- including the ones
+        this app overwrote. On AzerothCore that is `docker-compose.yml`, so a
+        restore that stopped at the first half would leave the folder on the
+        right commit with a compose file this app does not recognise, and the
+        NEXT press of anything -- Rebuild included -- would refuse it with "these
+        compose files were not written by Yu'lon". The press would have fixed
+        the sha and broken the install, which is the same shape as the defect
+        `app_written_paths()` exists for, arriving on the recovery path.
+
+        Never raises, for `_put_sources_back()`'s reason: this runs on a path
+        that is already failing. A second half that could not run is reported
+        rather than thrown, because the sentence in front of it is the one that
+        says what actually went wrong.
+        """
+        yield from self._put_sources_back(moved)
+        if not moved:
+            return
+        try:
+            yield from self._rewrite_what_we_own(server_dir, opts, state)
+            yield from self.apply_carried_patches(server_dir)
+        except (InstallerError, OSError) as exc:
+            logger.warning(f"could not put this app's own files back into {server_dir}: {exc}")
+            yield (
+                f"The source folders are back on their old commits, but Yu'lon's own files "
+                f"inside them could not be written again ({exc}). Press Rebuild once the "
+                f"reason is fixed; nothing was compiled."
+            )
 
     def _put_sources_back(self, moved: Sequence[tuple[EmulatorSource, Path, str]]) -> Iterator[str]:
         """Return every source this press moved to the commit it was on. Never raises.
