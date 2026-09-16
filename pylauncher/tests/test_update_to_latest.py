@@ -686,6 +686,47 @@ def test_the_patches_are_resolved_dry_before_a_single_one_is_written(tmp_path: P
     assert not any(line.startswith("Applying ") for line in said[:settled]), said
 
 
+def test_a_write_that_the_disk_refuses_still_puts_the_sources_back(tmp_path: Path) -> None:
+    """The handler caught `InstallerError` only, and a bare `OSError` skipped the restore.
+
+    Everything between the first fetch and the compile WRITES —
+    `_rewrite_what_we_own()` renders three compose files through
+    `composegen.write_plan()`, whose `path.write_text(...)` carries no `try`, and
+    `apply_carried_patches()` writes into the checkout. A full disk, a read-only
+    mount or a file somebody chmod'ed comes out as a plain `OSError` that no
+    `InstallerError` wraps, and on it the sources stayed where the fetch put
+    them (cold review round 2, 2026-09-16).
+
+    Driven with a real read-only file rather than a raise injected at the seam:
+    the point is that the exception escapes the write path untranslated, which
+    only the real write can show.
+    """
+    from yulon.catalog import composegen
+
+    rec, server_dir = _ready(tmp_path)
+    base = server_dir / composegen.BASE_FILE
+
+    def reset_then_lock(dest: Path) -> None:
+        if dest != server_dir:
+            return
+        # What the fetch really does to a file the repo tracks and this app
+        # overwrote: upstream's copy comes back. The content now DIFFERS from
+        # what `write_plan()` wants, so it will try to write -- and cannot.
+        base.write_text("services:\n  ac-database:\n    image: mysql:8.4\n", encoding="utf-8")
+        base.chmod(0o444)
+
+    rec.on_clone = reset_then_lock
+    try:
+        with pytest.raises(InstallerError) as raised:
+            _press(rec, server_dir)
+    finally:
+        base.chmod(0o644)
+
+    assert native.SOURCES_PUT_BACK_NOTE in str(raised.value)
+    assert _heads(rec, server_dir) == {s.repo: OLD for s in ENTRY.emulator.sources}
+    assert any(call.startswith("restore:") for call in rec.calls)
+
+
 def test_a_rebuild_that_fails_puts_the_sources_back_so_folder_and_image_agree(
     tmp_path: Path,
 ) -> None:
