@@ -1028,7 +1028,7 @@ def remove_volume(name: str, *, wsl_distro: str | None = None) -> None:
     logger.info(f"removed volume {name}")
 
 
-def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
+def remove_image(ref: str, *, force: bool = False, wsl_distro: str | None = None) -> str:
     """Delete one image by its exact reference. Returns why it could not be, or `""`.
 
     One ref at a time, and never a compose flag. Measured on yulon-ubuntu
@@ -1046,8 +1046,24 @@ def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
     or a running title is holding a layer, and that is not this uninstall's
     business. The Rust prior art reached the same conclusion from the other end
     (`destructive.rs:574-602`).
+
+    `force` is `docker image rm -f`, and it exists for T79. A name whose image
+    no OTHER name points at cannot be removed while any container references
+    that image, *including a container that has exited*: the daemon answers
+    `conflict: unable to delete <id> (must be forced) - container <id> is using
+    its referenced image` (measured live 2026-09-09). The rebuild's
+    recreate deliberately never selects the one-shot services
+    (`staged_up_argv()`'s `--no-deps` over `spec.compose_services()`), so their
+    EXITED containers still hold the pre-rebuild `db-import` and `client-data`
+    images when the rollback names are let go -- and a refusal there leaves a
+    `-rollback` tag on the daemon for ever, which is exactly what the round-3
+    gate found. Forcing removes the NAME; the image it last pointed at becomes
+    dangling and the exited container keeps running on the layers it already
+    has until compose next recreates it from the live tag. `(cannot be forced)`
+    -- a RUNNING container -- is a different answer, and this function passes
+    both back for the caller to tell apart rather than retrying blind.
     """
-    proc = _docker(["image", "rm", ref], wsl_distro=wsl_distro)
+    proc = _docker(["image", "rm", *(["-f"] if force else []), ref], wsl_distro=wsl_distro)
     if proc.returncode == 0:
         logger.info(f"removed image {ref}")
         return ""

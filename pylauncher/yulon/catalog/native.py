@@ -214,6 +214,17 @@ is not a state anybody chose, so `_restore_rollback` asks again after its own
 recreate, which is the thing that frees them.
 """
 
+_MUST_BE_FORCED = "must be forced"
+"""The daemon's own words for "the only thing in the way is a stopped container".
+
+Docker says `conflict: unable to delete <id> (must be forced) - container <id>
+is using its referenced image` for a container that has EXITED, and `(cannot be
+forced)` for one that is running -- measured live on the first restore, and
+pinned in `FAILED_TAG_SUFFIX` above. `_let_go()` matches on the first because it
+is the one that a second ask with `-f` answers; the second is a server somebody
+is using, and no name is worth taking an image out from under it.
+"""
+
 DOCKERFILE_STAGE = "write-dockerfile"
 """The stage that renders this install's build recipe from the app's own templates.
 
@@ -2164,8 +2175,16 @@ class Seams:
     to compose.
     """
     tag_image: Callable[[str, str], str] = docker.tag_image
-    remove_image: Callable[[str], str] = docker.remove_image
+    remove_image: Callable[..., str] = docker.remove_image
     """The rebuild's rollback: kept as a second tag before the compile, let go as one after.
+
+    `Callable[...]` because of the second argument, `force=`, which `_let_go()`
+    passes only after the daemon has said in its own words that the removal
+    `must be forced` -- see `docker.remove_image()` for why a name the rebuild
+    made can end up held by a container the rebuild never touches. A double that
+    accepts `ref` alone therefore still answers the first ask and fails loudly on
+    the retry, which is the right way round: a fake that silently swallowed the
+    force would be a fake that cannot see T79's defect.
 
     Two seams and not one `docker` handle, for the reason `recreate` is its
     own: a test that could not see the tag happen BEFORE the build, or the
@@ -3381,6 +3400,37 @@ class StagedInstaller:
            closing line tells the user to look rather than promising it
            happened.
 
+        **Every transient name this makes, and every way out (T79).** Two names
+        per image in `built_image_refs()` -- four images on an AzerothCore
+        install, so up to eight names: `<ref>-rollback` before the compile
+        (`_keep_rollback`), and `<ref>-failed` only if a restore starts
+        (`_restore_rollback`). A `-rollback` name must not outlive the press:
+
+        * **the rebuild finished** -- the `-rollback` names are released here,
+          and no `-failed` name was ever made;
+        * **`_keep_rollback` refuses** -- the names it had already made are
+          released before it raises;
+        * **a stage failed, or was cancelled, before the compile finished** --
+          released; the live tags never moved, so they were duplicates;
+        * **the world came up and then stopped** (`WorldStoppedAfterReadyError`,
+          T71's keep) -- released, and the new build keeps the live names;
+        * **a stage failed after the compile** -- `_restore_rollback` puts the
+          old build back and releases both sets, its `-failed` names after the
+          recreate that frees them (see `FAILED_TAG_SUFFIX`);
+        * **...and the old build did not come up either** -- released too, which
+          is the exit that kept them until T79;
+        * **...and docker refused to NAME or to MOVE a tag** -- the `-rollback`
+          names are KEPT, deliberately: the restore did not happen, so they are
+          the only copy of the old build there is, and the sentence the user
+          reads says exactly that;
+        * **anything that is not an `InstallerError`** -- released if no compile
+          finished, kept and logged if one did.
+
+        A release is `_let_go()`, which reads the daemon's refusal and asks again
+        with `-f` where the only thing in the way is a stopped container -- the
+        leak the round-3 gate found, and the reason the table above was written
+        down rather than assumed.
+
         Raises:
             InstallerError: any refusal (see `_refuse_unless_rebuildable`), any
                 stage that failed, or a cancel. The message is the sentence a
@@ -3505,7 +3555,7 @@ class StagedInstaller:
             if not built:
                 # A compile that failed or was stopped leaves the live tags on
                 # the build that is running: the second name is a duplicate.
-                self._let_go(kept)
+                yield from self._release(kept)
                 raise
             if isinstance(exc, WorldStoppedAfterReadyError):
                 # The owner's answer, 2026-09-16: keep the new build and report
@@ -3520,7 +3570,7 @@ class StagedInstaller:
                 # Every PRE-banner verdict still rolls back below: a build whose
                 # server never came up at all is a build worth putting back, and
                 # that is the whole of what this subclass separates.
-                self._let_go(kept)
+                yield from self._release(kept)
                 kept_build = (
                     f"{exc} The build from this rebuild was KEPT and is what the containers "
                     f"are running: the compile finished and the server it made did start, so "
@@ -3532,7 +3582,33 @@ class StagedInstaller:
             message = yield from self._restore_rollback(ctx, refs, kept, touched, str(exc))
             self._record_error(server_dir, ctx.state, message)
             raise InstallerError(message) from exc
-        self._let_go(kept)
+        except BaseException:
+            # NOT a refusal this method has an answer for: a bug in a stage, a
+            # `KeyboardInterrupt`, or a consumer that stopped reading (which
+            # arrives here as `GeneratorExit`). Until T79 the rollback names
+            # simply stayed on the daemon, because `except InstallerError` is
+            # the only handler there was and every release lives inside it.
+            #
+            # Nothing may be YIELDED here -- a `GeneratorExit` handler that
+            # yields raises `RuntimeError: generator ignored GeneratorExit` and
+            # would replace the real failure with that one -- so this path is
+            # silent in the log panel and loud in the log file.
+            #
+            # `built` decides, and it decides the same way the branch above
+            # does: with no compile finished the live tags still name the build
+            # that is running and the rollback names are duplicates, so they go.
+            # Once a compile HAS finished, those names are the only copy of the
+            # old build there is, and an unknown failure is the worst moment to
+            # throw it away -- they are kept, and the log says where they are.
+            if not built:
+                self._let_go(kept)
+            else:
+                logger.error(
+                    f"rebuild of {self.entry.id} ended unexpectedly after the compile; the "
+                    f"build from before it is still on the daemon as {', '.join(kept)}"
+                )
+            raise
+        yield from self._release(kept)
         logger.info(f"rebuild of {self.entry.id} finished")
         self._clear_error(server_dir, state)
         yield REBUILD_CLOSING_NOTE
@@ -3638,7 +3714,7 @@ class StagedInstaller:
         for ref, name in zip(refs, failed, strict=True):
             problem = self._seams.tag_image(ref, name)
             if problem:
-                self._let_go(named)
+                yield from self._release(named)
                 return (
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build could not be given a name to undo "
@@ -3652,7 +3728,7 @@ class StagedInstaller:
             if problem:
                 undone = [r for r in moved if not self._seams.tag_image(r + FAILED_TAG_SUFFIX, r)]
                 mixed = [r for r in moved if r not in undone]
-                self._let_go(named)
+                yield from self._release(named)
                 if mixed:
                     return (
                         f"{failure} Putting the build from before this rebuild back failed "
@@ -3668,9 +3744,9 @@ class StagedInstaller:
                     f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
                 )
             moved.append(ref)
-        self._let_go(named)
+        yield from self._release(named)
         if not touched:
-            self._let_go(kept)
+            yield from self._release(kept)
             return (
                 f"{failure} The tags were put back to the build that is running, and no "
                 f"container was replaced."
@@ -3704,23 +3780,87 @@ class StagedInstaller:
             # them. Both calls are kept because the failure paths ABOVE this
             # one never reach a recreate, and a name docker already let go is a
             # no-op here (`remove_image` treats "no such image" as done).
-            self._let_go(named)
+            yield from self._release(named)
             yield from self.wait_for_ready(ctx, self._native().ready)
         except InstallerError as second:
+            # T79. Every ref above is back on the old build -- `moved` is all of
+            # them or this line is not reached -- so the `-rollback` names are
+            # now second names for images the live tags already point at, and
+            # letting them go removes a name rather than the last copy of
+            # anything. Until T79 this one exit kept them: a restore whose
+            # server did not come up left four `-rollback` tags on the daemon
+            # and said nothing about them, which is the same leak the success
+            # path had and the harder one to notice, because the press was
+            # already reporting a failure.
+            yield from self._release(named)
+            yield from self._release(kept)
             return (
                 f"{failure} The build from before this rebuild was put back, but it did not "
                 f"report ready either: {second}{said}{database}"
             )
-        self._let_go(kept)
+        yield from self._release(kept)
         return (
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
 
-    def _let_go(self, kept: Sequence[str]) -> None:
-        """Remove the rollback names. A refusal is logged by the seam and changes nothing here."""
+    def _let_go(self, kept: Sequence[str]) -> tuple[str, ...]:
+        """Take the transient names off the daemon. Returns the ones still there.
+
+        **T79, and the reason the answer had to stop being `None`.** This asked
+        once and threw the refusal away. `docker.remove_image()` is deliberately
+        soft -- it logs and returns the daemon's words -- so a name docker
+        declined to remove was left on the daemon with nothing said anywhere a
+        user or a gate would look. The round-3 gate then found a stale
+        `ac-wotlk-db-import:...-rollback` after two clean rebuilds, and the
+        earlier failed build had left a `client-data` one the same way.
+
+        It is not luck which two: the rebuild's recreate is `compose up
+        --force-recreate --no-deps` over `spec.compose_services()`, which never
+        selects the one-shot import or the client-data job, so their EXITED
+        containers still reference the pre-rebuild images when these names are
+        let go. `-rollback` is by then the image's only name, so removing it
+        removes the image, and the daemon refuses: `conflict: unable to delete
+        <id> (must be forced) - container <id> is using its referenced image`.
+        Every rebuild of this shape leaks two names, which is what "a leftover,
+        not a rollback" in the gate actually was.
+
+        So the refusal is READ. `must be forced` is the daemon saying the only
+        thing in the way is a container that is not running, and the second ask
+        carries `-f`, which takes the NAME off and leaves the layers the exited
+        container holds. Anything else -- `cannot be forced`, a read-only layer
+        store, a daemon that went away -- is returned to the caller to say out
+        loud, because a name this module documents as transient sitting on the
+        daemon for ever is a thing the user has to be told, not a thing to
+        retry blind.
+        """
+        left: list[str] = []
         for back in kept:
-            self._seams.remove_image(back)
+            problem = self._seams.remove_image(back)
+            if problem and _MUST_BE_FORCED in problem:
+                logger.info(f"{back} is held by a stopped container; asking again with --force")
+                problem = self._seams.remove_image(back, force=True)
+            if problem:
+                logger.warning(f"{back} is still on the daemon: {problem}")
+                left.append(back)
+        return tuple(left)
+
+    def _release(self, kept: Sequence[str]) -> Iterator[str]:
+        """`_let_go()`, with a sentence for whatever the daemon would not take.
+
+        Used on every exit that can still speak. The sentence is not a failure --
+        the rebuild's own verdict is decided elsewhere and is not changed by a
+        name -- it is the one place a leaked tag becomes visible to the person
+        who would otherwise find it in `docker images` months later.
+        """
+        left = self._let_go(kept)
+        if left:
+            yield (
+                f"Docker would not take {len(left)} transient name(s) off the daemon: "
+                f"{', '.join(left)}. They are this rebuild's own bookkeeping and nothing "
+                f"needs them; the log says what docker objected to. `docker image rm -f` "
+                f"each one once this server is stopped."
+            )
 
     def _recipe_ground(self, server_dir: Path) -> dict[str, RecipeGround]:
         """The build-recipe files as found. Bytes, `None` for absent, `UNREADABLE` for neither.

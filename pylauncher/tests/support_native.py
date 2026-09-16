@@ -617,9 +617,15 @@ class Recorder:
         self.calls.append(f"tag:{src}->{dst}")
         return self.tag_problem
 
-    def remove_image(self, ref: str) -> str:
-        """`docker.remove_image()`: recorded as `rmi:<ref>`, always allowed here."""
-        self.calls.append(f"rmi:{ref}")
+    def remove_image(self, ref: str, force: bool = False) -> str:
+        """`docker.remove_image()`: recorded as `rmi:<ref>` / `rmi -f:<ref>`, always allowed.
+
+        `force` is recorded under its own name rather than folded in, for the
+        reason `recreate` is not `start`: a run that had to force every removal
+        is a run whose containers are holding images it thinks it is done with,
+        and a double that could not tell the two asks apart could not see it.
+        """
+        self.calls.append(f"rmi -f:{ref}" if force else f"rmi:{ref}")
         return ""
 
     def recreate(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
