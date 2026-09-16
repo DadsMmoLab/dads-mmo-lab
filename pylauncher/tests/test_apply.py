@@ -11,7 +11,11 @@ every step that could not run appears in `ApplyReport.skipped`.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
+import shutil
+import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +24,7 @@ import pytest
 from yulon import apply as apply_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native
-from yulon.git import CloneSpec, RunnerGit
+from yulon.git import CloneSpec, RunnerGit, git_available
 from yulon.manifest import parse_manifest
 from yulon.ownership import Ownership
 
@@ -591,7 +595,6 @@ def test_remove_of_a_shared_dir_deploy_leaves_other_scripts_alone(tmp_path: Path
 
     # Clone already gone: a directory deploy cannot be undone safely → skipped, not guessed.
     applier.install(m)
-    import shutil
 
     shutil.rmtree(applier.clone_dir(m))
     report = applier.remove(m)
@@ -3908,3 +3911,425 @@ def test_a_report_names_the_family_of_the_manifest_it_ran(tmp_path: Path) -> Non
     )
     assert applier.install(ale).family == "ale"
     assert applier.remove(ale).family == "ale"
+
+
+# --------------------------------------------------------------------------
+# T60: no module manifest pins a revision, so the install path with `rev=None`
+# is the ONLY path a shipped module takes. Driven against real git.
+# --------------------------------------------------------------------------
+
+
+class _LocalOrigin:
+    """`RunnerGit`, with the manifest's https URL answered by a local repository.
+
+    Only the URL is swapped: branch, depth, sparse path and -- the point --
+    `rev` reach the real clone seam exactly as `Applier.install()` built them.
+    `file://` and not a bare path, because git clones a local path by
+    hardlinking and ignores `--depth`, which would quietly test a FULL clone
+    where every real module clone is shallow.
+    """
+
+    def __init__(self, origin: Path) -> None:
+        self.origin = origin
+        self.specs: list[CloneSpec] = []
+
+    def _local(self, spec: CloneSpec) -> CloneSpec:
+        self.specs.append(spec)
+        return dataclasses.replace(spec, url=self.origin.as_uri())
+
+    def clone(self, spec: CloneSpec) -> None:
+        RunnerGit().clone(self._local(spec))
+
+    def clone_lines(self, spec: CloneSpec, *, stage: str = "clone") -> Iterator[str]:
+        return RunnerGit().clone_lines(self._local(spec), stage=stage)
+
+
+def _git(cwd: Path, *argv: str) -> str:
+    author = ["-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    return subprocess.run(
+        ["git", *author, *argv], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _publish(origin: Path, files: dict[str, str], version: str) -> str:
+    """Commit `files` (with `{v}` filled) to `origin`; return the new commit's sha."""
+    for rel, text in files.items():
+        target = origin / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text.replace("{v}", version), encoding="utf-8")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-qm", version)
+    return _git(origin, "rev-parse", "HEAD")
+
+
+_UNPINNED: dict[str, tuple[str, str, dict[str, str], str]] = {
+    # id: (family, game, upstream files, where the content lands under tmp_path)
+    "lootpet": (
+        "ale",
+        "wow-wotlk",
+        {"LootPet.lua": "-- LootPet {v}\n"},
+        f"server/{LUA}/LootPet.lua",
+    ),
+    "mod-ale": (
+        "module",
+        "wow-wotlk",
+        {
+            "conf/mod_ale.conf.dist": 'ALE.ScriptPath = "lua_scripts"\nALE.Enabled = true\n',
+            "src/LuaEngine/ALEConfig.cpp": "// ALE {v}\n",
+        },
+        # A C++ module lands as the clone the rebuild compiles.
+        "server/modules/mod-ale/src/LuaEngine/ALEConfig.cpp",
+    ),
+    "tortoise-bots-manager": (
+        "mod",
+        "wow-tortoise",
+        {
+            "TortoiseBotsManager.toc": "## Interface: 11200\nCore.lua\n",
+            "Core.lua": "-- TBM {v}\n",
+        },
+        "TurtleWoW/Interface/AddOns/TortoiseBotsManager/Core.lua",
+    ),
+}
+
+
+def _unpinned_shipped(item_id: str) -> Any:
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    family, game, _files, _lands = _UNPINNED[item_id]
+    stores = {"wow-wotlk": wotlk_modules.store, "wow-tortoise": tortoise_modules.store}
+    manifest = stores[game]().load(family, item_id)  # type: ignore[arg-type]
+    assert (
+        manifest.source is not None and manifest.source.rev is None
+    ), f"{item_id} is supposed to be unpinned (T60); this test proves nothing about a pin"
+    return manifest
+
+
+def _unpinned_applier(tmp_path: Path, origin: Path) -> tuple[Applier, _LocalOrigin]:
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface" / "AddOns").mkdir(parents=True, exist_ok=True)
+    git = _LocalOrigin(origin)
+    return Applier(tmp_path / "server", git=git, client_dir=client), git
+
+
+def _reinstall(applier: Applier, manifest: Any, item_id: str) -> None:
+    """The second install.
+
+    A wrapper with nothing left in it, kept only so the three call sites read
+    as one action. It caught a `shutil.Error` for `tortoise-bots-manager`
+    until T65 was fixed: `client: [{src: "."}]` copied the checkout's `.git`
+    into AddOns and the second copy could not overwrite git's 0444 pack files.
+    """
+    applier.install(manifest)
+
+
+_UNPINNED_PARAMS = sorted(_UNPINNED)
+
+
+def _origin(tmp_path: Path) -> Path:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    return origin
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("item_id", _UNPINNED_PARAMS)
+def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
+    item_id: str, tmp_path: Path
+) -> None:
+    """T60's real path: an ale script, a rebuilt C++ module and a client addon, all `rev=None`.
+
+    The owner removed every module pin, so what has to hold is not the schema
+    but the clone: a fresh install checks out the default branch's tip, and
+    the next install over that checkout -- which IS the pull, `fetch origin
+    HEAD` + `reset --hard FETCH_HEAD` -- lands the tip as it is THEN, and the
+    new content reaches where the module is used (the Lua folder, the module
+    tree the rebuild compiles, the client's AddOns).
+
+    The upstream moves between the two installs, so the second answer differs
+    from the first: a seam that cloned once and then did nothing, or that
+    checked out a remembered commit, leaves `v1` where `v2` is asserted.
+
+    Every parameter reaches every assertion, the addon included.
+    """
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    first = _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier, git = _unpinned_applier(tmp_path, origin)
+    clone = applier.clone_dir(manifest)
+
+    report = applier.install(manifest)
+
+    assert [spec.rev for spec in git.specs] == [None]
+    assert _git(clone, "rev-parse", "HEAD") == first
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+    assert report.rebuild_required is (item_id == "mod-ale"), report
+
+    second = _publish(origin, files, "v2")
+    _reinstall(applier, manifest, item_id)
+
+    assert _git(clone, "rev-parse", "HEAD") == second, "the reinstall did not follow the tip"
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    assert (clone / ".git" / "shallow").is_file(), "a module clone stays shallow"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("item_id", _UNPINNED_PARAMS)
+def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_path: Path) -> None:
+    """Somebody installed one of these while it was pinned. The next install unpins it.
+
+    Their checkout is DETACHED at the old revision (`_pin()` checks out
+    `--detach`), a starting state no unpinned clone of this app's produces --
+    and the fixture is the harder of its two shapes: the pin was already behind
+    the tip when it was cloned, so the depth-1 clone holds the tip and the pin
+    as two unconnected shallow commits. The unpinned install must still move
+    HEAD to the tip and the tip's content to where it is used.
+
+    The addon parameter reaches those assertions too.
+    """
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    old = _publish(origin, files, "v1")
+    tip = _publish(origin, files, "v2")
+    manifest = _unpinned_shipped(item_id)
+    assert manifest.source is not None
+    pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
+    applier, git = _unpinned_applier(tmp_path, origin)
+    clone = applier.clone_dir(manifest)
+
+    applier.install(pinned)
+    assert _git(clone, "rev-parse", "HEAD") == old, "the fixture did not reproduce the old pin"
+    assert _git(clone, "branch", "--show-current") == "", "a pin checks out detached"
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+
+    _reinstall(applier, manifest, item_id)
+
+    assert [spec.rev for spec in git.specs] == [old, None]
+    assert _git(clone, "rev-parse", "HEAD") == tip
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
+    """The half of the addon's reinstall that T65 broke, in a test of its own.
+
+    The two tests above assert where the CHECKOUT ends up, which is what
+    removing the pins changed. This asserts what the user gets: the moved
+    upstream's files in their own AddOns folder.
+
+    It also asserts what must NOT be there, and that is the whole of T65: the
+    checkout's `.git` used to be copied in with everything else, and git's
+    0444 pack files cannot be overwritten, so this second install raised a
+    raw `shutil.Error` (Errno 13) having landed nothing. Asserting the absence
+    as well as the landing is what separates the fix from a reinstall that
+    happens to succeed because the user is root, which can overwrite a 0444
+    file and left this passing on a root-run suite either way.
+    """
+    item_id = "tortoise-bots-manager"
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier, _git_seam = _unpinned_applier(tmp_path, origin)
+
+    applier.install(manifest)
+    addon = (tmp_path / lands).parent
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+    # The FIRST install is where the exclusion has to hold: nothing to
+    # overwrite yet, so a copy that still brought `.git` would land it here in
+    # silence and only fail on the next press.
+    assert not (addon / ".git").exists(), "the checkout's history was copied into the client"
+    assert not (addon / apply_module.CLAIM_FILE).exists(), "so was this app's own claim"
+    assert (addon / "TortoiseBotsManager.toc").is_file(), "and the addon itself did not land"
+    assert (applier.clone_dir(manifest) / ".git").is_dir(), "the history belongs in the clone"
+
+    _publish(origin, files, "v2")
+    applier.install(manifest)
+
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    assert not (addon / ".git").exists()
+
+
+# --------------------------------------------------------------------------
+# T66: the Modules tab's Update button, against real git. Every clone this app
+# makes carries an untracked `.yulon-clone.json`, and every such clone was
+# refused as dirty; the second layer refused the same clone again for carrying
+# "commits of its own" when the only thing it carried was a shallow graft.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to ask about a real checkout")
+@pytest.mark.parametrize(
+    ("make", "asked_about", "expected"),
+    [
+        # Exactly one thing is present in each tree, so exactly one rule can
+        # decide the answer. The first row is the whole of T66's first layer:
+        # an app-made clone, untouched, holding nothing but the app's marker.
+        ("marker", ".", True),
+        ("nothing", ".", True),
+        # ... and these three prove the exclusion is not a blanket "ignore
+        # untracked files". Each is the marker's neighbour, not the marker.
+        ("other_untracked", ".", False),
+        ("edited_tracked", ".", False),
+        ("deleted_tracked", ".", False),
+        # Asked about the marker BY NAME the answer must not change: that is a
+        # different question, and `_require_own_clone()` (apply.py:1903) reads
+        # a True there as "the repository itself tracks a file at this name",
+        # which is how a module that commits one stays installable.
+        ("marker", apply_module.CLAIM_FILE, False),
+        ("nothing", apply_module.CLAIM_FILE, True),
+    ],
+)
+def test_is_unmodified_ignores_the_apps_own_marker_and_only_that(
+    make: str, asked_about: str, expected: bool, tmp_path: Path
+) -> None:
+    """`git status` over a clone this app made reports the app's own bookkeeping.
+
+    `.yulon-clone.json` is written by `_claim_clone()` into the checkout and is
+    never committed, so `status --porcelain` says `?? .yulon-clone.json` and
+    `Applier._update_refusal()` told every user that their clone "has changes
+    in it that are not committed". The file is this app's, the app knows it
+    wrote it, and a `reset --hard` that removes it destroys nothing of theirs.
+
+    Nothing else is forgiven: a file the USER left in the checkout, a tracked
+    file they edited and a tracked file they deleted each still answer False,
+    and each is here on its own so that the row cannot pass because a
+    neighbouring difference was there to be found.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "tracked.txt").write_text("upstream\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "v1")
+    if make in {"marker", "other_untracked", "edited_tracked", "deleted_tracked"}:
+        if make == "marker":
+            (repo / apply_module.CLAIM_FILE).write_text('{"item_id": "x"}\n', encoding="utf-8")
+        elif make == "other_untracked":
+            (repo / "notes-of-mine.txt").write_text("mine\n", encoding="utf-8")
+        elif make == "edited_tracked":
+            (repo / "tracked.txt").write_text("edited by hand\n", encoding="utf-8")
+        else:
+            (repo / "tracked.txt").unlink()
+
+    assert RunnerGit().is_unmodified(repo, asked_about) is expected
+
+
+def _update_applier(tmp_path: Path, origin: Path, manifest: Any) -> Applier:
+    """`_unpinned_applier()`, with `origin` answered as the manifest's own URL.
+
+    `update()` asks four questions and the first is `same_repo(remote, url)`.
+    The checkout's real `origin` is the `file://` fixture, which is not the
+    manifest's github.com URL, so without this the update refuses at question 1
+    and the tests below would be green over a rule they are not about.
+    """
+    applier, _git_seam = _unpinned_applier(tmp_path, origin)
+    assert manifest.source is not None
+    url = manifest.source.url
+    applier.remote_url = lambda _dest: url
+    return applier
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_update_fast_forwards_a_clone_this_app_installed(tmp_path: Path) -> None:
+    """T66's first layer, end to end: install, upstream moves, press Update.
+
+    The clone is the one `install()` made, marker and all, and nobody has
+    touched it. Before the fix this raised `ApplyError` saying the folder "has
+    changes in it that are not committed" -- the app's own marker -- so the
+    Update button did not work on any module anybody had installed.
+    """
+    item_id = "lootpet"
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier = _update_applier(tmp_path, origin, manifest)
+    clone = applier.clone_dir(manifest)
+
+    applier.install(manifest)
+    assert (clone / apply_module.CLAIM_FILE).is_file(), "the fixture must carry the app's marker"
+
+    tip = _publish(origin, files, "v2")
+    report = applier.update(manifest)
+
+    assert _git(clone, "rev-parse", "HEAD") == tip
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    assert report.action == "install"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_update_fast_forwards_a_clone_pinned_behind_the_tip(tmp_path: Path) -> None:
+    """T66's second layer: a depth-1 clone whose two commits are not connected.
+
+    Somebody installed while the module was pinned (T60's five old pins) and
+    the pin was ALREADY behind the tip, so `_pin()`'s `fetch --depth 1 <rev>`
+    left the checkout holding the tip and the pin as two grafted roots with no
+    edge between them. `rev-list --count FETCH_HEAD..HEAD` then counts the pin
+    as a commit HEAD carries and FETCH_HEAD does not, and the update refused
+    for work the user never did.
+
+    Measured, not assumed: on git 2.43 `merge-base --is-ancestor HEAD
+    FETCH_HEAD` also answers no here, because the graft cuts the same edge.
+    """
+    item_id = "lootpet"
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    old = _publish(origin, files, "v1")
+    _publish(origin, files, "v2")
+    manifest = _unpinned_shipped(item_id)
+    assert manifest.source is not None
+    pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
+    applier = _update_applier(tmp_path, origin, manifest)
+    clone = applier.clone_dir(manifest)
+
+    applier.install(pinned)
+    assert _git(clone, "rev-parse", "HEAD") == old, "the fixture did not reproduce the old pin"
+    roots = (clone / ".git" / "shallow").read_text(encoding="utf-8").split()
+    assert old in roots and len(roots) == 2, "the fixture must be the disconnected shallow shape"
+
+    tip = _publish(origin, files, "v3")
+    applier.update(manifest)
+
+    assert _git(clone, "rev-parse", "HEAD") == tip
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v3")
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_update_still_refuses_a_shallow_clone_carrying_a_commit_of_the_users_own(
+    tmp_path: Path,
+) -> None:
+    """The other half of the second layer, and the reason it is not `--untracked-files=no`.
+
+    Same shallow, disconnected checkout as above, plus one commit the user
+    made on top. `reset --hard FETCH_HEAD` would move off it, so the update
+    must still refuse -- and it must refuse for THAT reason, not for a dirty
+    tree: the working tree here is clean, and the marker is committed away.
+    """
+    item_id = "lootpet"
+    _family, _game, files, _lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    old = _publish(origin, files, "v1")
+    _publish(origin, files, "v2")
+    manifest = _unpinned_shipped(item_id)
+    assert manifest.source is not None
+    pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
+    applier = _update_applier(tmp_path, origin, manifest)
+    clone = applier.clone_dir(manifest)
+
+    applier.install(pinned)
+    (clone / "MyOwn.lua").write_text("-- mine\n", encoding="utf-8")
+    _git(clone, "add", "MyOwn.lua")  # not `-A`: the app's marker stays untracked, as it is live
+    _git(clone, "commit", "-qm", "mine")
+    mine = _git(clone, "rev-parse", "HEAD")
+    assert RunnerGit().is_unmodified(clone, ".") is True, "the tree itself must be clean"
+
+    _publish(origin, files, "v3")
+    with pytest.raises(ApplyError, match="commits of its own"):
+        applier.update(manifest)
+
+    assert _git(clone, "rev-parse", "HEAD") == mine, "nothing was changed"

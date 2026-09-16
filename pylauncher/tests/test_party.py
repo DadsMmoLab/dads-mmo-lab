@@ -417,14 +417,22 @@ def test_the_manifest_writes_the_engine_on_rather_than_naming_the_key() -> None:
     assert enabled.get("default") == "1"
 
 
-def test_the_lua_engine_is_pinned() -> None:
-    """The box asks for a revision. `azerothcore/mod-ale` moved from `c3de7942`
-    (HEAD 2026-09-06, `phase8-delta.md:18`) to `319f43ed` (HEAD 2026-09-07) in
-    two days, so an unpinned manifest hands a two-hour rebuild whatever that
-    morning's HEAD is."""
-    rev = _ale_manifest()["source"].get("rev")
-    assert rev == party.MOD_ALE_REV
-    assert len(rev) == 40
+def test_the_lua_engine_tracks_its_repositorys_latest() -> None:
+    """The manifest names the repository and no revision (owner, 2026-09-15, T60).
+
+    This test used to assert the opposite: the manifest was pinned to
+    `319f43ed`, the HEAD of 2026-09-07 that this module's conf facts were read
+    from, because `azerothcore/mod-ale` had moved two commits in two days and a
+    rebuild takes two hours. The owner was given that reason and decided every
+    module tracks its repository's latest. The conf-key tests above were read
+    from the module's source on 2026-09-08 and are not re-read on each move.
+    """
+    source = _ale_manifest()["source"]
+    assert source["repo"] == "azerothcore/mod-ale"
+    assert "rev" not in source, (
+        f"mod-ale is pinned to {source['rev']!r}; the owner's decision of 2026-09-15 (T60) "
+        "is that every module tracks its repository's latest"
+    )
 
 
 def test_the_script_path_the_manifest_writes_is_the_absolute_container_path() -> None:
