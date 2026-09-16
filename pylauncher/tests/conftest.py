@@ -633,6 +633,28 @@ def pump_until(done: Callable[[], bool], what: str, *, timeout: float = HANG_BOU
         turns += 1
 
 
+def join_panel_thread(panel: object) -> None:
+    """Join a `LogPanel`'s worker thread WITHOUT pumping the Qt event loop.
+
+    `wait_for_panel()` is the one to want almost always: it pumps, so the job's
+    queued `run_finished` reaches its slots and the panel is settled. This one
+    is for the rare test that must observe the world in the gap BETWEEN the
+    worker exiting and the owner reacting to it -- T74's
+    `test_the_suggestion_is_never_created_by_asking_about_it`, which asserts on
+    a directory that the view's own finished handling would go on to touch.
+    Pump afterwards (`wait_for_panel`) so the queued signal is spent inside the
+    test that caused it rather than in whichever test next pumps the shared
+    `QApplication`.
+
+    `HANG_BOUND_MS` is the same deadlock breaker `wait_for_panel` takes, and it
+    is asserted here for the same reason: a `wait()` whose result is dropped
+    turns a hung thread into a mystery in the NEXT assertion.
+    """
+    assert panel.wait(HANG_BOUND_MS), (  # type: ignore[attr-defined]
+        "the panel's job thread never exited"
+    )
+
+
 def wait_for_panel(panel: object, *, timeout: float = HANG_BOUND) -> None:
     """Pump until a `LogPanel`'s job has stopped running, then join its thread.
 
