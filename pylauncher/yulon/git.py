@@ -825,12 +825,30 @@ class RunnerGit:
         checkout already has, so nothing is fetched and nothing is asked of a
         remote. It is affordable on a tab reload for that reason.
 
-        `None` and `0` stay different answers, for `BehindReader`'s recorded
-        reason: a shallow clone whose history was truncated before `rev` cannot
-        answer this at all, and "we could not count" must not print as "it is on
-        the pin".
+        **A SHALLOW clone is refused outright, and that is what makes the number
+        trustworthy at all.** Seven of the nine sources this app ships are
+        `depth: 1` (`Source.depth` defaults to 1, and only AzerothCore's core
+        overrides it), and `ContainerGit.clone()` -- the production seam --
+        passes that depth on its update fetch, so HEAD's parents are cut at the
+        graft. The old pin's object is still in the store, because the checkout
+        was sitting on it a moment ago, so `rev-list --count <pin>..HEAD` walks
+        HEAD, finds no parent, and answers **1** whatever the real distance is.
+        A version line reading "1 commit past the tested pin" after a year of
+        upstream history is a figure with nothing behind it (cold review,
+        2026-09-16), and it is exactly the class this file has already recorded
+        twice: `None` and a number are different sentences.
+
+        `None` and `0` stay different for the same reason.
         """
         if not (dest / ".git").is_dir():
+            return None
+        try:
+            shallow = _run_git(["git", "rev-parse", "--is-shallow-repository"], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not ask whether {dest} is a shallow clone: {exc}")
+            return None
+        if shallow.stdout.strip() != "false":
+            logger.debug(f"{dest} is a shallow clone; the distance from {rev} cannot be counted")
             return None
         try:
             proc = _run_git(["git", "rev-list", "--count", f"{rev}..HEAD"], cwd=dest)
@@ -1306,8 +1324,23 @@ class ContainerGit:
         return tuple(path for path in parse_status(proc.stdout) if path not in skip)
 
     def commits_since(self, dest: Path, rev: str) -> int | None:
-        """`RunnerGit.commits_since()`, containerised. `writes=False`: nothing is fetched."""
+        """`RunnerGit.commits_since()`, containerised. `writes=False`: nothing is fetched.
+
+        The shallow refusal is asked here too, and this is the transport it was
+        MEASURED against: `clone()` above passes `_pull_depth_args(spec.depth)`
+        on its update fetch, so a `depth: 1` source stays grafted and the count
+        would answer 1 for any distance. Both bodies must answer identically --
+        a caller never learns which it got, and the figure is read by a person.
+        """
         if not (dest / ".git").is_dir():
+            return None
+        try:
+            shallow = self._capture(dest, ["rev-parse", "--is-shallow-repository"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask whether {dest} is a shallow clone: {exc}")
+            return None
+        if shallow.stdout.strip() != "false":
+            logger.debug(f"{dest} is a shallow clone; the distance from {rev} cannot be counted")
             return None
         try:
             proc = self._capture(dest, ["rev-list", "--count", f"{rev}..HEAD"], writes=False)

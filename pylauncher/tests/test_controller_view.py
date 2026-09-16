@@ -9535,7 +9535,12 @@ def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
     view = ControllerView(WOTLK, services, status_poll_ms=0)
     view._set_busy(True)
 
-    assert view.update_to_latest() is True, "a refusal has to be distinguishable from a decline"
+    # FALSE, like every other refusal on this tab: the answer is "was anything
+    # started?", and a press that was refused started nothing. It was True here
+    # until the cold review of 2026-09-16 pointed out that it made this one
+    # press mean something different from `_start_update_to_latest()` and
+    # `return_to_the_tested_pin()`, which answer False for the same refusal.
+    assert view.update_to_latest() is False
     assert spy.presses == []
     assert view.update_to_latest_button.isEnabled() is False
 
@@ -9605,3 +9610,64 @@ def test_declining_the_return_starts_nothing(qapp: object, ps: _Ps, tmp_path: Pa
     assert view.return_to_the_tested_pin() is False
     assert spy.pin_presses == []
     assert view.rebuild_log.running is False
+
+
+def test_a_second_update_press_while_the_backup_runs_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate neither `_busy` nor the panel can see, and what it cost without one.
+
+    The chained backup runs through `_run()` -- off the GUI thread, for minutes
+    -- and `_busy` is the LOG PANEL's flag, set by a job in that panel. A
+    `mysqldump` is not one, so a second press during it passed both gates:
+    "Update without a backup" then tore the database container down underneath
+    the dump that was still running, after which the first press's own handler
+    reported "Backup failed -- the update was not started" about a backup the
+    user was watching succeed (cold review, 2026-09-16).
+
+    **The second press is made from INSIDE the backup**, which is the only
+    moment that window exists and the only way this file can reach it:
+    `_inline_jobs` (autouse here) runs every `_run` synchronously, so the seam's
+    own body IS the in-flight window. A test that pressed afterwards would be
+    testing a state the guard is not about.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: qmb.StandardButton.No,
+    )
+    told: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "information",
+        lambda parent, title, text, *a, **k: told.append(title),
+    )
+    during: list[object] = []
+    made = _FakeMaintenance()
+    real_backup = made.back_up
+    view: ControllerView | None = None
+
+    def backup_and_press_again() -> BackupReport:
+        assert view is not None
+        during.append(view._backup_before_update)
+        during.append(view.update_to_latest_button.isEnabled())
+        during.append(view.update_to_latest())
+        during.append(view.return_to_the_tested_pin())
+        return real_backup()
+
+    made.back_up = backup_and_press_again  # type: ignore[method-assign]
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    assert made.backups == 1, "the backup never ran, so the window was never entered"
+    # In order: the flag was set before the worker started, the buttons were
+    # dead, and both presses were refused rather than started.
+    assert during == [True, False, False, False], during
+    assert spy.presses == [] and spy.pin_presses == []
+    assert told and told[0] == "A backup is running", told
+    # And it is released: the lock is not a one-way door.
+    assert view._backup_before_update is False
+    assert view.update_to_latest_button.isEnabled() is True

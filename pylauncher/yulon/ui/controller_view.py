@@ -2814,6 +2814,11 @@ class ControllerView(QWidget):
         # the panel's success alone would tell a user their module was live
         # because an unrelated SQL run went through.
         self._rebuild_is_compile = False
+        # T64: a `mysqldump` is running off the GUI thread, chained in front of
+        # an update. `_busy` is the LOG PANEL's flag and a backup is not a job in
+        # that panel, so without this nothing on the tab knows -- see
+        # `_update_route_busy()` for what a second press did.
+        self._backup_before_update = False
         self._sql_owed: dict[tuple[str, str], tuple[str, ...]] = {}
         self._behind: dict[tuple[str, str], int] = {}
         self._repair_armed = False
@@ -3714,8 +3719,7 @@ class ControllerView(QWidget):
             # press that moved this server off its pins, so the line and the
             # "Return to the tested pin…" button beside it are both stale until
             # this runs.
-            self.update_to_latest_button.setEnabled(self.services.update_to_latest is not None)
-            self.return_to_pin_button.setEnabled(self.services.update_to_latest is not None)
+            self._set_update_buttons()
             self._refresh_source_version()
             # Back to what this install can do, never unconditionally: three of
             # the four games have no such phase and must not be handed a live
@@ -6849,6 +6853,19 @@ class ControllerView(QWidget):
             cancel=cancel,
         )
 
+    def _set_update_buttons(self) -> None:
+        """Both T64 presses, back to what this install can do and what is running.
+
+        Its own method for `_set_adopt_button()`'s reason: three places hand
+        these buttons back — a job finishing, a chained backup finishing, and a
+        chained backup failing — and a rule spelled three times is a rule that
+        drifts. A backup in flight keeps them dead, because `_busy` cannot see
+        one.
+        """
+        offered = self.services.update_to_latest is not None and not self._backup_before_update
+        self.update_to_latest_button.setEnabled(offered)
+        self.return_to_pin_button.setEnabled(offered)
+
     def _refresh_source_version(self) -> None:
         """Redraw the version line and decide whether there is a pin to return to.
 
@@ -6885,7 +6902,26 @@ class ControllerView(QWidget):
         so anything that refuses one has to refuse the other. Factored rather
         than copied because there are two presses here and a third copy of a
         guard is the copy that drifts.
+
+        **THREE, since the cold review of 2026-09-16, and the third is the one
+        neither `_busy` nor the panel can see.** The backup this control chains
+        runs through `_run()` -- off the GUI thread, for minutes -- and nothing
+        else on this tab knows it is happening: `_busy` is the LOG PANEL's flag,
+        set by a job in that panel, and a `mysqldump` is not one. So a second
+        press during it passed both gates, and "Update without a backup" then
+        tore the database container down underneath the dump that was still
+        running, after which the first press's own handler reported "Backup
+        failed — the update was not started" about a backup the user was
+        watching succeed.
         """
+        if self._backup_before_update:
+            QMessageBox.information(
+                self,
+                "A backup is running",
+                "This server is being backed up before an update. Wait for the backup to "
+                "finish — it will ask whether to go ahead. Nothing was started.",
+            )
+            return True
         if self.rebuild_log.running:
             QMessageBox.information(
                 self,
@@ -6940,7 +6976,13 @@ class ControllerView(QWidget):
         if route is None:
             return False
         if self._update_route_busy():
-            return True
+            # FALSE, like every other refusal on this tab and like
+            # `_start_update_to_latest()` and `return_to_the_tested_pin()`: the
+            # return value answers "was anything started?", and a press that was
+            # refused started nothing. It answered True here until the cold
+            # review of 2026-09-16, which made the one press with three exits
+            # the one whose answer meant something different from the other two.
+            return False
         # The module function, not a seam on this class: a test that wants to
         # answer this drives the real dialog through `QMessageBox.exec`, which
         # is what `conftest._no_modal_dialogs` already disarms. A seam here
@@ -6954,7 +6996,13 @@ class ControllerView(QWidget):
             return False
         if choice is UpdateChoice.WITHOUT_BACKUP:
             return self._start_update_to_latest()
+        # SET BEFORE the worker starts, and cleared in BOTH handlers: it is the
+        # only thing on this tab that knows a `mysqldump` is in flight, and
+        # `_update_route_busy()` holds what a second press does without it.
+        self._backup_before_update = True
         self.backup_button.setEnabled(False)
+        self.update_to_latest_button.setEnabled(False)
+        self.return_to_pin_button.setEnabled(False)
         self.maintenance_report.setPlainText(
             "Backing up before the update… this can take minutes on a full world."
         )
@@ -6974,7 +7022,12 @@ class ControllerView(QWidget):
         updating without the backup somebody asked for and without anybody
         having said the backup did not happen.
         """
+        # FIRST, before anything that can put a modal on screen: the flag is a
+        # lock, and a lock still held while its own handler blocks on a dialog
+        # would refuse the very press that dialog is asking for.
+        self._backup_before_update = False
         self.backup_button.setEnabled(True)
+        self._set_update_buttons()
         if not isinstance(result, wotlk_maintenance.BackupReport):
             self._backup_before_update_failed("the backup did not say what it wrote")
             return
@@ -6999,7 +7052,9 @@ class ControllerView(QWidget):
     def _backup_before_update_failed(self, exc: object) -> None:
         """A backup that did not happen stops the update, and says so in `dml`'s own words."""
         message = f"Backup failed — the update was not started: {exc}"
+        self._backup_before_update = False
         self.backup_button.setEnabled(True)
+        self._set_update_buttons()
         self.maintenance_report.setPlainText(message)
         self.action_failed.emit(message)
         QMessageBox.warning(self, f"{self.entry.name}", message)

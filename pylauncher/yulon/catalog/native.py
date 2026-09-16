@@ -4080,7 +4080,7 @@ class StagedInstaller:
                 yield (
                     f"{source.repo} in {dest} could NOT be put back on {old[:7]} ({exc}). That "
                     f"folder is now ahead of the server that is running: put it back with "
-                    f"`git -C {dest} checkout --detach {old}`."
+                    f"`git -C {dest} checkout --detach --force {old}`."
                 )
                 continue
             yield f"{source.repo} was put back on {old[:7]}."
@@ -4104,6 +4104,18 @@ class StagedInstaller:
         that could not be written costs a version line, and taking the whole
         press down at the end of a successful build to report that would be a
         failure about a decoration.
+
+        **The state is RE-READ here and the caller's copy is not used, and that
+        is not tidiness.** `rebuild()` has just run, and on success it calls
+        `_clear_error()` — which exists because an install record that keeps a
+        stale `last_error` tells a user their working server failed (measured
+        on m910q, 2026-09-02). The caller's `state` was read BEFORE that, so
+        writing `replace(state, ...)` would put the cleared sentence straight
+        back: a press that failed, then a press that succeeded, and a server
+        that is running the new build with a record saying the update failed
+        (cold review, 2026-09-16). A read that will not answer skips the write
+        rather than falling back to the stale copy — losing a version line is
+        the cheaper of the two.
         """
         found: list[SourceRev] = []
         for source, dest, _old in moved:
@@ -4122,12 +4134,19 @@ class StagedInstaller:
             )
         if not found:
             return
+        fresh = read_state(server_dir, valid=self.stage_names())
+        if fresh is None:
+            logger.warning(
+                f"{server_dir} would not say what it is after the rebuild, so what this update "
+                "built from was not recorded; nothing else was changed."
+            )
+            return
         # Every OTHER source's record survives: a family could gain a source
         # this press does not move, and dropping its row because this press did
         # not visit it would delete a true reading.
         keep = {rev.repo for rev in found}
-        merged = tuple(rev for rev in state.source_revs if rev.repo not in keep) + tuple(found)
-        write_state(server_dir, replace(state, source_revs=tuple(sorted(merged, key=_by_repo))))
+        merged = tuple(rev for rev in fresh.source_revs if rev.repo not in keep) + tuple(found)
+        write_state(server_dir, replace(fresh, source_revs=tuple(sorted(merged, key=_by_repo))))
 
     def _keep_rollback(
         self, ctx: StageContext, refs: Sequence[str]

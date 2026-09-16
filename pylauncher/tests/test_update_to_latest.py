@@ -705,7 +705,11 @@ def test_a_source_that_will_not_go_back_is_said_out_loud_with_the_command_to_fix
 
     text = "\n".join(said)
     assert "could NOT be put back" in text, text
-    assert f"checkout --detach {OLD}" in text
+    # `--force`, the same flag `restore_rev()` uses, because the command a user
+    # is handed has to be the one that works: without it git refuses whenever a
+    # tracked file differs in the working tree and between the commits, which is
+    # the state this folder is in.
+    assert f"checkout --detach --force {OLD}" in text
     assert rec.heads[server_dir] == NEW, "the head moved back though the restore refused"
 
 
@@ -765,6 +769,31 @@ def test_what_the_server_was_built_from_survives_a_write_and_a_read(tmp_path: Pa
         pin=PINNED,
         ahead=12,
     )
+
+
+def test_a_press_that_succeeds_does_not_put_back_the_error_the_last_one_recorded(
+    tmp_path: Path,
+) -> None:
+    """A working, updated server whose record says the update failed.
+
+    `rebuild()` clears `last_error` on success (`_clear_error()`, written after
+    the m910q reading of 2026-09-02), and the state this method was handed was
+    read BEFORE that — so writing `replace(state, ...)` put the cleared sentence
+    straight back. The input is two presses: one that fails, then one that
+    works. Found by the cold review of 2026-09-16, not by a test.
+    """
+    rec, server_dir = _ready(tmp_path)
+    rec.build_result = AttachedRun(2, ("error: no",))
+    with pytest.raises(InstallerError):
+        _press(rec, server_dir)
+    assert json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))["last_error"]
+
+    rec.build_result = AttachedRun(0, ("built",))
+    _press(rec, server_dir)
+
+    payload = json.loads((server_dir / native.STATE_FILE).read_text(encoding="utf-8"))
+    assert payload["last_error"] == "", payload["last_error"]
+    assert payload["source_revs"], "the record this press exists to write was lost with it"
 
 
 def test_an_install_that_was_never_updated_writes_no_source_revs_at_all(tmp_path: Path) -> None:
@@ -1019,6 +1048,49 @@ def test_restoring_a_source_asks_the_remote_for_nothing(tmp_path: Path) -> None:
     # the one family where a failed restore matters most. What it may discard is
     # bounded by the guard that ran before any of this.
     assert seen[0][-4:] == ["checkout", "--detach", "--force", OLD]
+
+
+def test_a_shallow_clone_answers_could_not_count_rather_than_one_commit(
+    origin: Path, tmp_path: Path
+) -> None:
+    """Seven of the nine shipped sources are `depth: 1`, and the count lies on every one.
+
+    `Source.depth` defaults to 1 and only AzerothCore's core overrides it, and
+    `ContainerGit.clone()` — the production seam — passes that depth on its
+    update fetch. HEAD's parents are then cut at the graft while the old pin's
+    object is still in the store (the checkout was on it a moment ago), so
+    `rev-list --count <pin>..HEAD` walks HEAD, finds no parent and answers **1**
+    whatever the real distance is. "1 commit past the tested pin" after a year
+    of upstream history is a figure with nothing behind it.
+
+    Driven against real git at depth 1, with the same repository cloned in full
+    beside it as the control: the shallow one must answer `None` and the full
+    one must answer the true number, or this test would pass against a function
+    that had simply stopped counting.
+    """
+    if not git.git_available():
+        pytest.skip("no host git")
+    first = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=origin, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    for n in (2, 3, 4):
+        (origin / "README").write_text(f"{n}\n", encoding="utf-8", newline="\n")
+        _git(["add", "-A"], origin)
+        _git(["commit", "-qm", f"c{n}"], origin)
+
+    real = git.RunnerGit()
+    full = tmp_path / "full"
+    real.clone(git.CloneSpec(url=f"file://{origin}", dest=full, branch="main", depth=None))
+    assert real.commits_since(full, first) == 3, "the control could not count a full history"
+
+    shallow = tmp_path / "shallow"
+    real.clone(git.CloneSpec(url=f"file://{origin}", dest=shallow, branch="main", depth=1))
+    # The pin's object is put in the store by hand, which is what the update
+    # route's own fetch leaves behind: the checkout was sitting on it.
+    _git(["fetch", "--depth=1", "origin", first], shallow)
+    assert (
+        real.commits_since(shallow, first) is None
+    ), "a shallow clone answered a distance it cannot know"
 
 
 def test_the_two_transports_parse_one_status_the_same_way() -> None:
