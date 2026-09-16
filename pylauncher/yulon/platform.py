@@ -3448,6 +3448,45 @@ class VmResources:
     cpus: int
 
 
+def docker_info(run: RunCmd | None = None) -> dict[str, object] | None:
+    """Everything `docker info` reports, as a dict. None = the daemon did not answer.
+
+    The one function in this module that asks the daemon about itself, so the
+    two questions below it — how big the VM is, and where the images land —
+    parse one shape rather than two.
+
+    It is NOT one probe. `preflight.gather()` calls `vm_resources()` and then
+    `data_root()`, and each calls this, so a real preflight runs `docker info`
+    twice and the two answers can still disagree if the daemon stops in
+    between. Threading one dict through `gather()` would fix that and belongs
+    to whoever owns `catalog/preflight.py`.
+
+    Bounded like every other probe here: a CLI that never returns has to arrive
+    at the caller as "unknown", which each caller already knows how to say,
+    rather than as a preflight that never finishes.
+    """
+    do = run if run is not None else _DefaultRunner()
+    program = docker_program()
+    if program is None:
+        return None
+    try:
+        proc = _bounded(do, _DOCKER_PROBE_SECONDS)([program, "info", "--format", "{{json .}}"])
+    except OSError as exc:
+        logger.debug(f"could not start {program}: {exc}")
+        return None
+    if proc.returncode != 0:
+        logger.info(f"docker info would not answer: {proc.stderr}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.info("docker info did not return JSON")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
 def vm_resources(run: RunCmd | None = None) -> VmResources | None:
     """Memory and CPU count the container engine reports, or None if it did not answer.
 
@@ -3460,28 +3499,8 @@ def vm_resources(run: RunCmd | None = None) -> VmResources | None:
     it would refuse every install on the machine with "0 GB of RAM" — the exact
     fabricated refusal the tri-state discipline exists to prevent.
     """
-    do = run if run is not None else _DefaultRunner()
-    program = docker_program()
-    if program is None:
-        return None
-    try:
-        # The other `docker info` in this module, and bounded for the same
-        # reason: a CLI that never returns must arrive here as "unknown", which
-        # this function already knows how to say, rather than as a preflight
-        # that never finishes.
-        proc = _bounded(do, _DOCKER_PROBE_SECONDS)([program, "info", "--format", "{{json .}}"])
-    except OSError as exc:
-        logger.debug(f"could not start {program}: {exc}")
-        return None
-    if proc.returncode != 0:
-        logger.info(f"docker info would not answer, so the VM's size is unknown: {proc.stderr}")
-        return None
-    try:
-        parsed = json.loads(proc.stdout)
-    except ValueError:
-        logger.info("docker info did not return JSON, so the VM's size is unknown")
-        return None
-    if not isinstance(parsed, dict):
+    parsed = docker_info(run)
+    if parsed is None:
         return None
     memory = parsed.get("MemTotal")
     cpus = parsed.get("NCPU")
@@ -3564,7 +3583,124 @@ def _macos_default_data_root() -> Path:
     return Path.home().joinpath(*_MACOS_DOCKER_RAW)
 
 
-def docker_desktop_data_root() -> Path | None:
+_DOCKER_DESKTOP_OPERATING_SYSTEM = "Docker Desktop"
+"""What `docker info` calls its `OperatingSystem` when Docker Desktop is the daemon.
+
+Measured on a Windows 11 gate box (Docker Desktop 29.7.2, 2026-09-16) from
+inside a WSL distro on Desktop's WSL integration: `OperatingSystem=Docker
+Desktop`, `Name=docker-desktop`. The same distro with a native `docker.io`
+engine answered `OperatingSystem=Ubuntu 26.04.1 LTS` and its own hostname.
+`OperatingSystem` is the field that separates them; `DockerRootDir` does NOT —
+both said `/var/lib/docker` (see `_desktop_wsl_vhdx()`).
+"""
+
+_DESKTOP_WSL_VHDX = ("AppData", "Local", "Docker", "wsl", "disk", "docker_data.vhdx")
+"""Docker Desktop's WSL2 data disk, relative to a Windows user profile.
+
+Measured at `/mnt/c/Users/<user>/AppData/Local/Docker/wsl/disk/docker_data.vhdx`
+on the same box, 2026-09-16: pulling 3.3 GB of images through Desktop's WSL
+integration grew that file 23,048,749,056 -> 24,803,016,704 bytes and dropped
+C:'s free space by 1,766,502,400, while the distro's own `/` moved 8 MB. Read
+with the VHDX still open it does not move at all — the directory entry is stale
+until `wsl --shutdown` — which is why the drive's free space is what preflight
+measures, not the file's length.
+"""
+
+
+_WSL_MOUNT_ROOT = Path("/mnt")
+"""Where a WSL distro mounts the Windows drives. A constant so a test can move it."""
+
+
+def _windows_drive_mounts() -> list[Path]:
+    """Every `/mnt/<letter>` that is a mounted Windows drive, as seen from a WSL distro.
+
+    Single-letter names only, so the distro's own `/mnt/wsl` and Desktop's
+    `/mnt/host` are not mistaken for drives.
+    """
+    try:
+        entries = sorted(_WSL_MOUNT_ROOT.iterdir())
+    except OSError as exc:
+        logger.debug(f"could not list {_WSL_MOUNT_ROOT}: {exc}")
+        return []
+    return [entry for entry in entries if len(entry.name) == 1 and entry.name.isalpha()]
+
+
+def _desktop_wsl_vhdx() -> Path | None:
+    """Docker Desktop's data VHDX on the Windows drive, or None if it cannot be pinned down.
+
+    Reached over the WSL interop mount, because the path `docker info` reports
+    is no use here: under Desktop's WSL integration the daemon answers
+    `DockerRootDir=/var/lib/docker`, and that is a path inside Desktop's OWN
+    utility VM. The distro the launcher runs in has no `/var/lib/docker` at all
+    — `df` on it fails outright — so the old answer sent `free_bytes()` walking
+    up to `/var/lib` and reporting the distro's 954 GiB for a Docker whose real
+    budget was 32 GiB of room on C: (measured on the gate box, 2026-09-16).
+
+    Exactly one match is an answer. None, or several Windows profiles each with
+    their own Desktop install, is "could not be established" — the caller
+    renders that *unchecked*, which is the honest reading. Guessing which
+    profile owns the running daemon would put a number under a refusal that
+    nothing measured.
+
+    Unbounded, and the only unbounded reach `preflight.gather()` makes: every
+    `docker` probe in this module goes through `_bounded()`, but `iterdir()`
+    and `is_file()` here cross drvfs into Windows, and a mapped network drive
+    whose server is gone can sit there for tens of seconds per letter. Not
+    measured — the gate box had two local drives and the whole search was
+    instant — so it is recorded rather than fixed behind a number nobody took.
+    """
+    found: list[Path] = []
+    for mount in _windows_drive_mounts():
+        try:
+            profiles = sorted((mount / "Users").iterdir())
+        except OSError:
+            # Not every drive has a Users directory, and an unreadable one is
+            # not an error worth a log line per drive per preflight.
+            continue
+        for profile in profiles:
+            candidate = profile.joinpath(*_DESKTOP_WSL_VHDX)
+            try:
+                if candidate.is_file():
+                    found.append(candidate)
+            except OSError:
+                continue
+    if len(found) == 1:
+        return found[0]
+    logger.info(
+        f"Docker Desktop provides the daemon, but its data disk could not be pinned down "
+        f"on a Windows drive ({len(found)} candidates); its free space stays unchecked"
+    )
+    return None
+
+
+def _linux_data_root(run: RunCmd | None) -> Path | None:
+    """Where a daemon reached from a Linux (or WSL) launcher actually keeps its images.
+
+    Asked of the daemon rather than assumed, because `detect()` answers "linux"
+    inside WSL too and two very different daemons arrive here: a Docker Engine
+    installed in this filesystem, and Docker Desktop's, reached through WSL
+    integration. The old constant `/var/lib/docker` was right for the first and
+    measured the wrong filesystem for the second.
+    """
+    info = docker_info(run)
+    if info is None:
+        return None
+    operating_system = info.get("OperatingSystem")
+    if not isinstance(operating_system, str) or not operating_system.strip():
+        logger.info(
+            f"docker info reported OperatingSystem={operating_system!r}; treating as unknown"
+        )
+        return None
+    if operating_system.strip() == _DOCKER_DESKTOP_OPERATING_SYSTEM:
+        return _desktop_wsl_vhdx()
+    root = info.get("DockerRootDir")
+    if not isinstance(root, str) or not root.strip():
+        logger.info(f"docker info reported DockerRootDir={root!r}; treating as unknown")
+        return None
+    return Path(root)
+
+
+def docker_desktop_data_root(run: RunCmd | None = None) -> Path | None:
     """The path whose free space decides whether the build fits. None = unknown.
 
     This is NOT the server directory. On Windows and macOS the images and the
@@ -3572,10 +3708,19 @@ def docker_desktop_data_root() -> Path | None:
     user picked answers for the wrong drive entirely (`rust-prior-art.md` §3) —
     what has to be measured is the host file that backs the VM.
 
-    * Linux: `/var/lib/docker`, which really is a host directory.
+    * Linux: whatever the daemon says, via `_linux_data_root()`. It used to be
+      the constant `/var/lib/docker`, which is only true of an engine installed
+      in this filesystem; under Docker Desktop's WSL integration it named a
+      directory that does not exist in the distro at all (T39).
     * Windows: the `dataFolder`/`diskPath` in Docker Desktop's settings store,
       falling back to `%LOCALAPPDATA%\\Docker\\wsl` — the WSL2 backend's default
-      home for `docker_data`. Believed, not measured on a real box.
+      home for `docker_data`. The fallback stopped being merely believed on
+      2026-09-16: on a Windows 11 box with Docker Desktop 29.7.2 and no
+      `dataFolder` key set at all, the disk was
+      `%LOCALAPPDATA%\\Docker\\wsl\\disk\\docker_data.vhdx`. That is one level
+      below what this returns, which does not matter to the caller — free space
+      is a property of the volume, and both are on it — but the directory is
+      the one that exists whether or not Desktop has created the disk yet.
     * macOS: the settings store's `diskPath`/`DataFolder`, falling back to
       Docker Desktop's default sparse disk (`Docker.raw`). `preflight` measures
       HOST free space on the volume holding that file — the answer to "can the
@@ -3590,7 +3735,7 @@ def docker_desktop_data_root() -> Path | None:
     """
     here = detect()
     if here == "linux":
-        return Path("/var/lib/docker")
+        return _linux_data_root(run)
     if here == "macos":
         store = docker_desktop_settings_file()
         configured = _settings_data_folder(store) if store is not None else None
