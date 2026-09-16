@@ -29,6 +29,11 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from yulon import docker, platform
+
+# By name and not as the module. `import_gate_for()` below binds a local called
+# `native` in a walrus (`entry.install.native`), and a module of the same name
+# imported at the top of the file is exactly the kind of shadow that type-checks
+# in one function and not in the other.
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import (
     DEFAULT_INSTALLERS_ROOT,
@@ -37,6 +42,13 @@ from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
     installer_for,
+)
+from yulon.catalog.native import (
+    LatestRoute,
+    read_state,
+    return_to_pin_confirmation,
+    source_revs_line,
+    update_to_latest_confirmation,
 )
 from yulon.log import configure, get_logger, use_utf8_streams
 from yulon.ui import lines
@@ -209,6 +221,64 @@ def rebuild_for_app(
         yield from engine.rebuild(InstallOptions(server_dir=server_dir), cancel=cancel)
 
     return rebuild
+
+
+def update_to_latest_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> LatestRoute | None:
+    """The "Update the server to latest…" control for this install, or None when it has none.
+
+    Two reasons to answer None, and they are different facts — `controller_view.
+    _updates_route()`'s division, applied to T64's control:
+
+    * **The entry does not offer it.** `install.native.update_to_latest`, read
+      off the catalog rather than off an id, so an entry that gains the flag
+      gains the control with no code change here. An entry with no `native`
+      block at all has no engine either and is the same answer.
+    * **The server lives inside a WSL distro.** `rebuild_for_app()` holds this
+      argument in full and this press ENDS in that very rebuild, so the refusal
+      it would raise is the one that applies. It is made here as an ABSENT
+      control rather than there as a refusal, for the reason the app already
+      applies to a missing pty: a control that is visibly unavailable beats one
+      that is pressed and then explains itself. `rebuild_for_app()` keeps its own
+      refusal as well, because the Rebuild button is reached without passing
+      through here.
+
+    The engine is built inside each callable, per press, for `rebuild_for_app()`'s
+    reason — except `version_line`, which is called on every tab reload and
+    therefore builds nothing at all: it reads one small JSON file. `valid=()` is
+    what says so, and `catalog.native._parse_state()` documents it as "the caller is not
+    asking about stages", which this one is not.
+    """
+    if wsl_distro is not None:
+        return None
+    block = entry.install.native
+    if block is None or not block.update_to_latest:
+        return None
+    options = InstallOptions(server_dir=server_dir)
+    moving = installer_for(entry).sources_that_move()
+    # The repository the dialog names. The FIRST source that moves is the core
+    # in every shipped entry, and it is the one whose sha a user would paste
+    # into an issue. Read through the engine rather than as `sources[0]` so the
+    # dialog can never name a database repository this press does not touch.
+    repo = moving[0].repo if moving else entry.emulator.sources[0].repo
+
+    def press(cancel: threading.Event | None = None) -> Iterator[str]:
+        yield from installer_for_app(entry).update_to_latest(options, cancel=cancel)
+
+    def to_pin(cancel: threading.Event | None = None) -> Iterator[str]:
+        yield from installer_for_app(entry).update_to_latest(options, to_pin=True, cancel=cancel)
+
+    return LatestRoute(
+        confirmation=lambda: update_to_latest_confirmation(entry, server_dir, repo),
+        press=press,
+        pin_confirmation=lambda: return_to_pin_confirmation(entry, server_dir, repo),
+        to_pin=to_pin,
+        version_line=lambda: source_revs_line(read_state(server_dir, valid=())),
+    )
 
 
 def _terminal_prompter(prompt: str) -> str:

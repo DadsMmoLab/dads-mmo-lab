@@ -35,7 +35,7 @@ from typing import Protocol
 
 from yulon import docker, platform, resources, runner
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, EmulatorSource
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -825,6 +825,27 @@ class InstallEngine(Protocol):
         *,
         cancel: threading.Event | None = None,
     ) -> Iterator[str]: ...
+
+    def sources_that_move(self) -> tuple[EmulatorSource, ...]: ...
+
+    def update_to_latest(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        to_pin: bool = False,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]: ...
+
+    """Move this install's sources to upstream's tip (or back to their pins) and rebuild (T64).
+
+    Two members and not one, for `adopt_state`'s reason: the wiring has to know
+    WHICH repository the confirmation names before it can compose it, and
+    `sources_that_move()` is the only thing that can say -- a wiring that read
+    `emulator.sources[0]` itself would be a second derivation of the `*-db` rule
+    and the one that would be forgotten when a family gained a fourth source.
+
+    No `ask`, for `rebuild`'s reason: this route provisions nothing.
+    """
 
     def adopt_state(self, options: InstallOptions | None = None) -> docker.ImportState: ...
 
