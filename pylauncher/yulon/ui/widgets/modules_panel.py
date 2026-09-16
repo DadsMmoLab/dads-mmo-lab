@@ -34,8 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QPoint, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QMouseEvent
+from PySide6.QtCore import QPoint, QSize, Qt, Signal, Slot
+from PySide6.QtGui import QFont, QMouseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
@@ -61,6 +61,7 @@ from yulon.ui.theme import (
     COLOR_TEXT_PRIMARY,
     COLOR_TEXT_WARNING,
     COLOR_UNCOMMON,
+    TOUCH_TARGET_PX,
 )
 from yulon.ui.widgets.panel_style import panel_qss
 
@@ -428,7 +429,7 @@ def _chips_for(
     blocked_by: str | None = None,
     needs: str | None = None,
 ) -> tuple[Chip, ...]:
-    """The seven chips a row may carry, and nothing beyond them.
+    """The eight chips a row may carry, and nothing beyond them.
 
     `blocked_by` is the NAME of an installed module this row's manifest declares
     a conflict with, or `None` (T55). `needs` is the NAME of something this
@@ -437,12 +438,24 @@ def _chips_for(
     reason for it. Both are decided by `build_module_rows()`,
     which is the one place that holds both the catalog and what is installed.
 
-    Owed first and facts after, because the owed ones name work somebody has to
-    do and the facts only explain the row. Six and not seven: an "Update" chip
-    that could be PRESSED to pull is not here because no per-module pull exists
-    below this tab -- `apply.module_updates()` counts and nothing else -- and a
-    button that reports a number is not the same control as a button that
-    fetches.
+    **This order is load-bearing since T75**, because it is also the order the
+    row DROPS chips in when they do not fit its width:
+
+    1. the OWED chips, which name work somebody still has to do;
+    2. the LOCK chips, which say why Install cannot be pressed at all (T55, T69);
+    3. the remaining facts, which only explain the row.
+
+    The lock chips moved ahead of the other facts in review: on a 1280x800
+    handheld -- the Steam Deck, which is a shipping target and has no hover --
+    `battlepass` showed `needs the client folder` and hid
+    `needs AzerothCore Lua Engine (ALE), not installed` behind the overflow
+    mark, so the one sentence saying why the button is dead was in a tooltip a
+    touch user cannot open. A lock is the last fact to go.
+
+    Eight and not nine: an "Update" chip that could be PRESSED to pull is not
+    here because no per-module pull exists below this tab --
+    `apply.module_updates()` counts and nothing else -- and a button that
+    reports a number is not the same control as a button that fetches.
     """
     chips: list[Chip] = []
     key = (family, item_id)
@@ -483,6 +496,37 @@ def _chips_for(
                 "update",
             )
         )
+    # The two lock chips come BEFORE the other facts (T75 review), and follow
+    # the CALLER's decision rather than re-deriving half of it from `installed`
+    # (T68). `build_module_rows()` passes a name here only for a row that offers
+    # Install, which since T68 includes a clone whose install never finished --
+    # and on that row `and not installed` would have dropped the one sentence
+    # saying why the button is locked, leaving the reason in the tooltip alone.
+    # The condition was never a second opinion; it was the same one spelled
+    # twice, and the copy that went stale is this one.
+    #
+    # Their PLACE in this list is the same argument made about width instead of
+    # about a boolean: a chip the row cannot fit goes behind the overflow mark,
+    # where its sentence is a tooltip, and a tooltip is not reachable by touch.
+    # Measured at 1280x800 before the move: `battlepass` drew
+    # `needs the client folder` and hid `needs AzerothCore Lua Engine (ALE), not
+    # installed`, which is the one that explains the dead button.
+    if blocked_by is not None:
+        chips.append(
+            Chip(
+                "fact",
+                chip_conflicts_with_label(blocked_by),
+                conflict_reason(blocked_by),
+            )
+        )
+    if needs is not None:
+        chips.append(
+            Chip(
+                "fact",
+                chip_needs_label(needs),
+                apply_module.requirement_refusal(item_id, needs),
+            )
+        )
     if manifest is not None and not installed:
         asked = [
             prompt
@@ -514,29 +558,6 @@ def _chips_for(
                 chip_required_by_label(dependants),
                 f"{', '.join(dependants)} — installed here — name this in `requires`, so "
                 "removing it would break them. Remove them first.",
-            )
-        )
-    # The two lock chips follow the CALLER's decision and no longer re-derive
-    # half of it from `installed` (T68). `build_module_rows()` passes a name
-    # here only for a row that offers Install, which since T68 includes a clone
-    # whose install never finished -- and on that row `and not installed` would
-    # have dropped the one sentence saying why the button is locked, leaving the
-    # reason in the tooltip alone. The condition was never a second opinion; it
-    # was the same one spelled twice, and the copy that went stale is this one.
-    if blocked_by is not None:
-        chips.append(
-            Chip(
-                "fact",
-                chip_conflicts_with_label(blocked_by),
-                conflict_reason(blocked_by),
-            )
-        )
-    if needs is not None:
-        chips.append(
-            Chip(
-                "fact",
-                chip_needs_label(needs),
-                apply_module.requirement_refusal(item_id, needs),
             )
         )
     return tuple(chips)
@@ -766,6 +787,251 @@ lengths, and a column that sized itself per row put the presses on a ragged edge
 down the card.
 """
 
+ROW_VERTICAL_PADDING = 2
+"""The pixels above and below a row's content (T75). Eight before.
+
+Here beside `BUTTON_COLUMN_WIDTH` rather than in `theme.py`, for the reason that
+one is: these are this widget's own geometry and no stylesheet reads them. T45's
+rule is about what the THEME authors -- fonts, colours, `min-height`s, the touch
+floor -- and nothing here renders larger than the theme says. It renders in less
+space around it.
+"""
+
+ROW_LINE_SPACING = 0
+"""Between the row's name line and its description line.
+
+Nothing, and the two lines still read apart: the name is gold and bold and the
+description is muted, which is a stronger separator than two pixels ever were.
+Two pixels here is two pixels off the height of every row in the list, and the
+row's total is what T75 is about.
+"""
+
+DETAIL_SPACING = 4
+"""Between the row proper and the subpanel an owed chip opens under it.
+
+Not `ROW_LINE_SPACING`: this gap is only ever drawn on the ONE row whose chip is
+open, so it costs the list nothing, and the panel it separates is a different
+thing from the row rather than a second line of it.
+"""
+
+ROW_GAP = 1
+"""Between one row and the next inside a card. Two before.
+
+The gap the eye reads between two rows is not this: it is this plus the two
+rows' own `ROW_VERTICAL_PADDING`, so five pixels of sheet still separate one
+module's button from the next one's. What this number alone decides is how many
+rows a screen holds -- it is paid 40 times on the shipped WotLK catalog.
+"""
+
+CARD_SPACING = 6
+"""Between one family card and the next, and under a card's last row. Eight before."""
+
+CARD_LINE_SPACING = 2
+"""Between a card's hint, its headers, its toggle and its rows. Four before.
+
+Four of these gaps stand above the first row of the list -- the hint, the
+installed header, the toggle -- so halving them is 8px off where the rows start
+on every window, paid once rather than per row.
+"""
+
+CHIP_SPACING = 4
+"""Between the badge, the chips, and the overflow chip after them."""
+
+CHIP_OVERFLOW_LABEL = "…"
+"""The chip that stands for the chips the row's width could not fit (T75).
+
+One character, because it is the only chip whose width is spent on saying that
+there are others: every pixel it takes is a pixel a real chip does not get. What
+it hides is in its tooltip, label and sentence both, and what it hides is always
+the LAST chips -- which is why `_chips_for()`'s order is owed, then locks, then
+the rest: the work somebody still has to do survives the squeeze, then the
+reason Install cannot be pressed at all, and only what merely explains the row
+goes behind the mark.
+
+The tooltip is the reason the locks are second rather than last: it is not
+reachable at all on a touch screen, and the Steam Deck is a shipping target
+(`theme.TOUCH_TARGET_PX` exists for the same reason).
+"""
+
+ELIDED_LABEL_MIN_CHARS = 8
+"""How much of an elided label must survive the narrowest window.
+
+A `QLabel` that does not wrap reports its whole text as its minimum width, which
+on a row is a floor the card cannot go under -- the description of `mod-ah-bot`
+would decide how narrow the window may be. Eight characters and a tooltip is the
+honest floor: enough to see that something is written there, and the whole of it
+one hover away.
+"""
+
+
+class _ElidedLabel(QLabel):
+    """One line of text that shortens itself to the width it is given (T75).
+
+    The row used to spend a wrapped line -- sometimes two -- on the description
+    and another on the conf files, and a row is a LIST row: what it needs is one
+    line that says as much as fits and hands the rest to a tooltip. `full_text`
+    is what it was given and what the tooltip carries; `text()` is Qt's and is
+    whatever is on screen, which is why nothing should read a value back out of
+    it.
+
+    The minimum width is overridden for the reason in `ELIDED_LABEL_MIN_CHARS`:
+    a non-wrapping `QLabel`'s own minimum is its whole string, and three of those
+    on a row is a floor the window cannot be dragged under.
+    """
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.full_text = text
+        self.setToolTip(text)
+        self.setWordWrap(False)
+        self._relayout()
+
+    # No setter, deliberately: a row is REBUILT on every `set_rows()` (the panel
+    # says so in its own docstring), so a label whose text changes in place would
+    # be a mechanism with no caller -- and the one thing on this row that really
+    # does fill in late, the version, is a plain `QLabel` with `set_version()`.
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
+        hint = super().minimumSizeHint()
+        return QSize(
+            min(hint.width(), self.fontMetrics().averageCharWidth() * ELIDED_LABEL_MIN_CHARS),
+            hint.height(),
+        )
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802  (Qt's own name)
+        super().resizeEvent(event)
+        self._relayout()
+
+    def _relayout(self) -> None:
+        width = self.width()
+        if width <= 0:
+            super().setText(self.full_text)
+            return
+        super().setText(
+            self.fontMetrics().elidedText(self.full_text, Qt.TextElideMode.ElideRight, width)
+        )
+
+
+class _ChipStrip(QWidget):
+    """Every chip a row carries, on ONE line, with an "…" for what did not fit (T75).
+
+    The row drew its chips in a `QHBoxLayout` under the badge, which cost a
+    second line on every row whether it had a chip or not -- half of T75's 85px.
+    One line is cheap and one line can run out of room, so this widget places its
+    own children rather than handing them to a layout: it shows as many chips as
+    the width takes, in `_chips_for()`'s order (owed, then locks, then the rest
+    -- that function's docstring owns the reason), and the rest go
+    behind `CHIP_OVERFLOW_LABEL` with their labels and their sentences in its
+    tooltip.
+
+    `buttons` is EVERY chip's button, hidden ones included, because that tuple is
+    what `RowWidget.chip_buttons` publishes and a caller asking "does this row
+    say `SQL pending`?" is asking about the row and not about today's width.
+    `visible_chip_labels()` is the other question, asked separately.
+    """
+
+    def __init__(
+        self, buttons: Sequence[QPushButton], chips: Sequence[Chip], parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.buttons = tuple(buttons)
+        self.chips = tuple(chips)
+        for button in self.buttons:
+            # Built by the row (it is the row that wires their presses) and
+            # adopted here, because this widget places its children by geometry
+            # and can only place its own.
+            button.setParent(self)
+        self.overflow: QPushButton | None = None
+        if self.buttons:
+            self.overflow = QPushButton(CHIP_OVERFLOW_LABEL, self)
+            self.overflow.setFlat(True)
+            self.overflow.setStyleSheet(
+                f"color: {COLOR_TEXT_MUTED}; border: 1px solid {COLOR_BRASS_DARK}; "
+                f"padding: 0px 6px; min-height: {TOUCH_TARGET_PX}px;"
+            )
+            self.overflow.setVisible(False)
+        self._place()
+
+    def _line_height(self) -> int:
+        return max((b.sizeHint().height() for b in self.buttons), default=0)
+
+    def sizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
+        widths = [b.sizeHint().width() for b in self.buttons]
+        spacing = CHIP_SPACING * max(0, len(widths) - 1)
+        return QSize(sum(widths) + spacing, self._line_height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802  (Qt's own name)
+        # One chip's worth of width and no more: the strip must be squeezable to
+        # the "…" alone, or a row with six chips is what decides how narrow the
+        # window may be dragged -- which is the floor `_ElidedLabel` exists to
+        # avoid on the other half of the row.
+        width = 0 if self.overflow is None else self.overflow.sizeHint().width()
+        return QSize(width, self._line_height())
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802  (Qt's own name)
+        super().resizeEvent(event)
+        self._place()
+
+    def visible_chip_labels(self) -> tuple[str, ...]:
+        """The chips this width leaves drawn, in the order they are drawn.
+
+        `isVisibleTo(self)` and not `isVisible()`, which is `detail_visible()`'s
+        lesson from T44 in the other direction: a row on a tab nobody has opened
+        is not on screen, and the question here is what THIS widget has hidden,
+        not whether the window is showing. Asked with `isVisible()` a strip on a
+        background tab answers that it has hidden everything.
+        """
+        return tuple(b.text() for b in self.buttons if b.isVisibleTo(self))
+
+    def hidden_chips(self) -> tuple[Chip, ...]:
+        """The chips the width could not fit, which are the ones in the tooltip."""
+        return tuple(
+            chip
+            for chip, button in zip(self.chips, self.buttons, strict=True)
+            if not button.isVisibleTo(self)
+        )
+
+    def _place(self) -> None:
+        if not self.buttons:
+            return
+        available = self.width()
+        height = self.height() or self._line_height()
+        widths = [b.sizeHint().width() for b in self.buttons]
+        needed = sum(widths) + CHIP_SPACING * (len(widths) - 1)
+        shown = len(self.buttons) if needed <= available else self._how_many_fit(widths, available)
+        x = 0
+        for index, button in enumerate(self.buttons):
+            if index < shown:
+                button.setGeometry(x, 0, widths[index], height)
+                x += widths[index] + CHIP_SPACING
+            button.setVisible(index < shown)
+        if self.overflow is not None:
+            hiding = self.buttons[shown:]
+            self.overflow.setVisible(bool(hiding))
+            if hiding:
+                self.overflow.setGeometry(x, 0, self.overflow.sizeHint().width(), height)
+                self.overflow.setToolTip(
+                    "Also on this row:\n\n"
+                    + "\n\n".join(f"{chip.label} — {chip.detail}" for chip in self.hidden_chips())
+                )
+
+    def _how_many_fit(self, widths: Sequence[int], available: int) -> int:
+        """How many chips fit beside the "…", which is itself always drawn.
+
+        The overflow chip's own width is reserved FIRST and never traded away:
+        fitting one more real chip by dropping the mark that says others exist
+        is the one outcome this widget must not produce -- the row would then be
+        quietly wrong rather than merely short.
+        """
+        assert self.overflow is not None
+        room = available - self.overflow.sizeHint().width() - CHIP_SPACING
+        used = 0
+        for count, width in enumerate(widths):
+            used += width if count == 0 else width + CHIP_SPACING
+            if used > room:
+                return count
+        return len(widths)
+
 
 class RowWidget(QFrame):
     """One module's row: what it is, what it owes, and the one press it offers.
@@ -801,15 +1067,15 @@ class RowWidget(QFrame):
         # would open under whatever the card laid out next, which after a
         # reload is not necessarily the same module.
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 8, 10, 8)
-        outer.setSpacing(6)
+        outer.setContentsMargins(10, ROW_VERTICAL_PADDING, 10, ROW_VERTICAL_PADDING)
+        outer.setSpacing(DETAIL_SPACING)
         box = QHBoxLayout()
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(10)
         outer.addLayout(box)
 
         left = QVBoxLayout()
-        left.setSpacing(2)
+        left.setSpacing(ROW_LINE_SPACING)
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
         self.name_label = QLabel(data.name, self)
@@ -831,25 +1097,32 @@ class RowWidget(QFrame):
         self.version_label.setFont(QFont("monospace"))
         self.version_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         title_row.addWidget(self.version_label)
+        # The conf files this manifest writes, FOLDED onto the name line (T75).
+        # They were a line of their own -- one per file, stacked -- which is a
+        # paragraph of paths on a row whose subject is a module. Joined, elided
+        # and hovered: the whole list is still one hover away, and on a wide
+        # window it is simply read.
+        if data.paths:
+            self.paths_label: _ElidedLabel | None = _ElidedLabel(", ".join(data.paths), self)
+            self.paths_label.setFont(QFont("monospace"))
+            self.paths_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+            title_row.addWidget(self.paths_label, 1)
+        else:
+            self.paths_label = None
         title_row.addStretch(1)
         left.addLayout(title_row)
 
-        self.description_label = QLabel(data.description, self)
-        self.description_label.setWordWrap(True)
+        # One line, elided, with the whole sentence in its tooltip. Wrapped, a
+        # long description was worth up to 20px of extra row on the narrow
+        # windows -- the 105px rows measured at 1280x800 before T75 -- and it was
+        # the one thing on the row whose height nobody could predict.
+        self.description_label = _ElidedLabel(data.description, self)
         self.description_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         left.addWidget(self.description_label)
-
-        if data.paths:
-            self.paths_label: QLabel | None = QLabel("\n".join(data.paths), self)
-            self.paths_label.setFont(QFont("monospace"))
-            self.paths_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
-            left.addWidget(self.paths_label)
-        else:
-            self.paths_label = None
         box.addLayout(left, 1)
 
-        middle = QVBoxLayout()
-        middle.setSpacing(4)
+        middle = QHBoxLayout()
+        middle.setSpacing(CHIP_SPACING)
         self.badge_label = QLabel(data.badge, self)
         # Three tones for four badges, and the pairing is by what the badge
         # ASKS OF THE READER rather than by its text: green for a module that
@@ -863,8 +1136,6 @@ class RowWidget(QFrame):
             badge_colour = COLOR_TEXT_MUTED
         self.badge_label.setStyleSheet(f"color: {badge_colour}; font-weight: bold;")
         middle.addWidget(self.badge_label)
-        chips = QHBoxLayout()
-        chips.setSpacing(4)
         buttons: list[QPushButton] = []
         for chip in data.chips:
             button = QPushButton(chip.label, self)
@@ -872,7 +1143,8 @@ class RowWidget(QFrame):
             button.setToolTip(chip.detail)
             colour = COLOR_TEXT_WARNING if chip.kind == "owed" else COLOR_TEXT_MUTED
             button.setStyleSheet(
-                f"color: {colour}; border: 1px solid {COLOR_BRASS_DARK}; padding: 1px 6px;"
+                f"color: {colour}; border: 1px solid {COLOR_BRASS_DARK}; padding: 0px 6px; "
+                f"min-height: {TOUCH_TARGET_PX}px;"
             )
             if chip.kind == "owed":
                 # Only an owed chip is a press: a fact chip names something no
@@ -885,16 +1157,31 @@ class RowWidget(QFrame):
                 # `_row_install` selects before acting (round 2).
                 button.clicked.connect(lambda _checked=False, which=chip: self._chip(which))
             buttons.append(button)
-            chips.addWidget(button)
-        chips.addStretch(1)
         self.chip_buttons = tuple(buttons)
-        middle.addLayout(chips)
-        middle.addStretch(1)
-        box.addLayout(middle, 1)
+        # Beside the badge and no longer under it (T75): the second line the
+        # chips had was drawn on every row, chips or none, and a row that owes
+        # nothing is most of the list.
+        self.chip_strip = _ChipStrip(buttons, data.chips, self)
+        middle.addWidget(self.chip_strip, 1)
+        # TWO shares against the text column's one (T75 review). What this column
+        # carries is the row's STATE, and a chip that does not fit is a sentence
+        # in a tooltip -- which on the Steam Deck (1280x800, touch) is a sentence
+        # nobody can read. What the left column carries is prose, and it is
+        # already elided with the whole of it one hover away on a machine that
+        # HAS hover. Measured at 1280x800: an even split gave the strip 373px
+        # against a lock chip of 341 plus the mark, so `battlepass` drew no chip
+        # at all; two shares give it 533 and both of its chips are on screen.
+        box.addLayout(middle, 2)
 
         self.install_button: QPushButton | None = None
         self.remove_button: QPushButton | None = None
         column = QVBoxLayout()
+        # No margins of its own (T75). A `QVBoxLayout` on a bare `QWidget` takes
+        # the style's default 9px on all four sides, so the action column asked
+        # for 69px around a 51px button and WAS the row's 85px floor -- measured
+        # themed at every width from 960 to 2560, where the two text columns
+        # varied and this one did not.
+        column.setContentsMargins(0, 0, 0, 0)
         # T68: a clone whose install never finished keeps Install, even though
         # the folder is there. The refusal that produced that state says "Press
         # Stop, then install again", and before this the only "again" on offer
@@ -916,6 +1203,14 @@ class RowWidget(QFrame):
         action = self.install_button or self.remove_button
         if action is not None:
             action.setFixedWidth(BUTTON_COLUMN_WIDTH)
+            # The theme gives every `QPushButton` `padding: 8px 16px` on top of
+            # its `min-height`, which is right for a dialog's buttons and is
+            # 17px of air per module row. The vertical padding goes and
+            # `TOUCH_TARGET_PX` is spelled back in explicitly: an override that
+            # dropped the `min-height` with it would take the handheld floor
+            # away, which is the one size on this row that is not ours to spend
+            # (T45, and `theme.TOUCH_TARGET_PX`'s own docstring).
+            action.setStyleSheet(f"padding: 0px 16px; min-height: {TOUCH_TARGET_PX}px;")
         column.addStretch(1)
         holder = QWidget(self)
         holder.setLayout(column)
@@ -1070,7 +1365,13 @@ class _FamilyCard(QGroupBox):
         self.family = family
         self.setObjectName("moduleFamilyCard")
         box = QVBoxLayout(self)
-        box.setSpacing(4)
+        # The theme's `QGroupBox` padding IS the card's inset -- 12px at the top
+        # and 10px on each side -- and this layout's own 9px default was a second
+        # one inside it (T75). So all four are dropped, horizontally included:
+        # the sides already clear the card's border by the theme's 10px, and each
+        # row adds 10px of its own on top of that.
+        box.setContentsMargins(0, 0, 0, CARD_SPACING)
+        box.setSpacing(CARD_LINE_SPACING)
         # Above the header rather than beside it: the count answers "how many do
         # I have?" and the hint answers "what does having one cost?", and a
         # single line carrying both put the second half off the right edge of
@@ -1085,13 +1386,13 @@ class _FamilyCard(QGroupBox):
         self.installed_box = QWidget(self)
         self._installed_layout = QVBoxLayout(self.installed_box)
         self._installed_layout.setContentsMargins(0, 0, 0, 0)
-        self._installed_layout.setSpacing(2)
+        self._installed_layout.setSpacing(ROW_GAP)
         box.addWidget(self.installed_box)
         self.toggle: QToolButton | None = None
         self.available_box = QWidget(self)
         self._available_layout = QVBoxLayout(self.available_box)
         self._available_layout.setContentsMargins(0, 0, 0, 0)
-        self._available_layout.setSpacing(2)
+        self._available_layout.setSpacing(ROW_GAP)
         self._box = box
 
     def fill(self, installed: Sequence[RowWidget], available: Sequence[RowWidget]) -> None:
@@ -1218,7 +1519,13 @@ class ModulesPanel(QWidget):
         self._area.setWidgetResizable(True)
         self._content = QWidget(self._area)
         self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setSpacing(8)
+        # No margin of its own inside the scroll area (T75): the cards are
+        # QGroupBoxes and the theme already gives each one a 10px top margin, a
+        # 12px top padding and a border, so the default 9px here was a fourth
+        # inset between the viewport's edge and the first row -- 9px off the top
+        # of the list on every window.
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(CARD_SPACING)
         self.empty_label = QLabel(NO_MODULES_NOTE, self._content)
         self.empty_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         self._content_layout.addWidget(self.empty_label)
