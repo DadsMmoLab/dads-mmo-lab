@@ -23,6 +23,9 @@ from yulon.apply import (
     FolderSource,
     ModuleUpdate,
     SqlRunner,
+    applied_updates,
+    module_sql_plan,
+    module_sql_report,
 )
 from yulon.apply import module_updates as apply_updates
 from yulon.controller_wow_wotlk import docker_ctl
@@ -332,7 +335,60 @@ def apply_module_sql(
     other buttons are working (the shape of the 2026-08-27 Discord report).
     `test_controller_view.py`'s seam scan is what found this one, on the day
     its first call site was written.
+
+    **What the updater is given, and what it is not (T78).** The importer is no
+    longer handed every folder under `modules/`. A module whose manifest says
+    this app applies its own `data/sql/**.sql` directly is withheld, because the
+    core updater has no ledger row for a file this app ran with its own client
+    and exits 1 over it — which is what the round-3 gate's press 9c read as
+    "may be part-applied" on a world database this app had written itself.
+    `apply.module_sql_plan()` makes that split and carries the evidence; this
+    binding supplies the two per-game facts it cannot know, the manifest store
+    and the importer's service name, and prints the per-file verdicts through
+    `output` so they arrive in the same panel as the importer's own lines,
+    whether the run finishes or is refused.
     """
-    return docker.apply_module_sql(
-        docker_ctl.SPEC, server_dir, output=output, wsl_distro=wsl_distro
-    )
+    say: Callable[[str], None] = output if output is not None else logger.info
+    plan = module_sql_plan(server_dir, _module_manifests(), docker.module_dir_names(server_dir))
+    service = docker_ctl.SPEC.import_service or "the importer"
+    say(f"Modules {service} is allowed to update: {plan.allowed or 'none'}")
+    seen: list[str] = []
+
+    def collect(line: str) -> None:
+        seen.append(line)
+        say(line)
+
+    try:
+        run = docker.apply_module_sql(
+            docker_ctl.SPEC,
+            server_dir,
+            output=collect,
+            modules=plan.allowed,
+            wsl_distro=wsl_distro,
+        )
+    except docker.DockerCommandError as refused:
+        for line in module_sql_report(
+            plan, service=service, applied=applied_updates(seen), refusal=str(refused)
+        ):
+            say(line)
+        raise
+    for line in module_sql_report(
+        plan, service=service, applied=applied_updates([*seen, *run.tail])
+    ):
+        say(line)
+    return run
+
+
+def _module_manifests() -> tuple[Manifest, ...]:
+    """Every module manifest this app knows, or none if the tree cannot be read.
+
+    The same boundary `module_updates()` keeps one function above, for the same
+    reason: a single broken manifest must not turn a press into a traceback. An
+    empty answer is the pre-T78 behaviour — nothing is withheld — and it is
+    logged, because "the updater was given everything" is a decision here.
+    """
+    try:
+        return tuple(store().load_all("module"))
+    except Exception as exc:  # boundary: a broken manifest tree must not stop the press
+        logger.warning(f"could not read the wow-wotlk module manifests: {exc}")
+        return ()

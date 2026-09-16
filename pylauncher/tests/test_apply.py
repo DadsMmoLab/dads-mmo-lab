@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from yulon import apply as apply_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native
 from yulon.git import CloneSpec, RunnerGit
-from yulon.manifest import parse_manifest
+from yulon.manifest import Manifest, parse_manifest
 from yulon.ownership import Ownership
 
 LUA = "env/dist/etc/modules/lua_scripts"
@@ -3908,3 +3909,354 @@ def test_a_report_names_the_family_of_the_manifest_it_ran(tmp_path: Path) -> Non
     )
     assert applier.install(ale).family == "ale"
     assert applier.remove(ale).family == "ale"
+
+
+# ------------------------------------------- what the core updater may be given
+#
+# T78, from the round-3 live gate (press 9c): ARAC's `data/sql/db-world/arac.sql`
+# is `applied_by="direct"`, this app had run it twice with its own client, and
+# `Apply module SQL` then handed `mod-arac` to the core updater like every other
+# folder under `modules/`. The updater has no `updates` row for a file it did not
+# apply, ran it into a world database that already held its columns, and the
+# press ended `ac-db-import exited 1, so its modules' SQL may be part-applied`.
+
+
+def _sql_module(item_id: str, steps: list[dict[str, object]]) -> Manifest:
+    return parse_manifest(
+        {
+            "id": item_id,
+            "name": item_id,
+            "type": "module",
+            "game": "wow-wotlk",
+            "description": "x",
+            "source": {"repo": f"acme/{item_id}"},
+            "sql": steps,
+        }
+    )
+
+
+def _clone_with(server_dir: Path, item_id: str, *files: str) -> Path:
+    clone = server_dir / "modules" / item_id
+    for rel in files:
+        path = clone / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("-- x\n", encoding="utf-8")
+    clone.mkdir(parents=True, exist_ok=True)
+    return clone
+
+
+ARAC_SQL = "data/sql/db-world/arac.sql"
+CHAR_SQL = "data/sql/db-characters/one.sql"
+
+
+def test_a_module_whose_sql_this_app_applied_itself_is_not_given_to_the_updater(
+    tmp_path: Path,
+) -> None:
+    """The gate's own shape, and the two modules differ in ONE field.
+
+    `mine` and `theirs` declare the same path in the same folder with the same
+    file on disk; the only difference is `applied_by`. So a plan that withheld
+    on anything else -- the folder, the database, the file's existence -- would
+    withhold both and fail here, and the rule under test is the only rule that
+    can tell them apart.
+    """
+    _clone_with(tmp_path, "mine", ARAC_SQL, CHAR_SQL)
+    _clone_with(tmp_path, "theirs", ARAC_SQL)
+    plan = apply_module.module_sql_plan(
+        tmp_path,
+        [
+            _sql_module(
+                "mine",
+                [
+                    {"db": "world", "path": ARAC_SQL, "applied_by": "direct"},
+                    {"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"},
+                ],
+            ),
+            _sql_module("theirs", [{"db": "world", "path": ARAC_SQL, "applied_by": "db-import"}]),
+        ],
+        ["mine", "theirs"],
+    )
+    assert plan.withheld == ("mine",)
+    assert plan.handed == ("theirs",)
+    assert plan.allowed == "theirs"
+
+
+def test_a_direct_file_the_updater_could_never_open_does_not_withhold_its_module(
+    tmp_path: Path,
+) -> None:
+    """Two halves, one fixture each, and each fixture breaks exactly one of them.
+
+    `UpdateFetcher` walks `<module>/data/sql` and applies `.sql` files. A direct
+    step outside that subtree (Battle Pass keeps its SQL in `sql/`) and a direct
+    step inside it that is not an update file (npc-teleporter ships two `.dist`
+    files there) are both invisible to the updater, so neither is a reason to
+    stop handing the module its real db-import work.
+    """
+    _clone_with(tmp_path, "outside", "sql/battlepass_world.sql", CHAR_SQL)
+    _clone_with(tmp_path, "notsql", "data/sql/db-world/teleporter.dist", CHAR_SQL)
+    plan = apply_module.module_sql_plan(
+        tmp_path,
+        [
+            _sql_module(
+                "outside",
+                [
+                    {"db": "world", "path": "sql/battlepass_world.sql", "applied_by": "direct"},
+                    {"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"},
+                ],
+            ),
+            _sql_module(
+                "notsql",
+                [
+                    {
+                        "db": "world",
+                        "path": "data/sql/db-world/teleporter.dist",
+                        "applied_by": "direct",
+                    },
+                    {"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"},
+                ],
+            ),
+        ],
+        ["notsql", "outside"],
+    )
+    assert plan.withheld == ()
+    assert plan.allowed == "notsql,outside"
+
+
+def test_a_folder_that_cannot_be_read_leaves_the_press_exactly_as_it_was(tmp_path: Path) -> None:
+    """`None` is "could not ask", and the answer to it is upstream's own default.
+
+    Not `""`: measured on the real image, an empty value is `Loading modules:
+    none` and switches module updates OFF, so an unreadable folder must not
+    quietly stop applying the SQL it was applying yesterday.
+    """
+    plan = apply_module.module_sql_plan(tmp_path, [], None)
+    assert plan.allowed == "all"
+    assert plan.files == ()
+
+
+def test_every_module_withheld_asks_for_none_and_not_for_all(tmp_path: Path) -> None:
+    """The one case where `""` is the right answer, and `"all"` would be a re-run.
+
+    `"all"` is the list CMake baked into the image, and after a rebuild that list
+    holds the very module whose file this app applied itself -- so collapsing
+    "nothing to allow" into "all" would hand the updater `arac.sql` again by the
+    other door.
+    """
+    _clone_with(tmp_path, "mine", ARAC_SQL)
+    plan = apply_module.module_sql_plan(
+        tmp_path,
+        [_sql_module("mine", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}])],
+        ["mine"],
+    )
+    assert plan.allowed == ""
+    assert plan.allowed != "all"
+
+
+def test_a_module_no_manifest_describes_is_still_the_updaters_to_apply(tmp_path: Path) -> None:
+    """mod-playerbots is on every install here and in no manifest of ours.
+
+    This app has applied none of its SQL, so the updater is its only route and
+    withholding it would stop work that has always happened.
+    """
+    _clone_with(tmp_path, "mod-playerbots", CHAR_SQL)
+    plan = apply_module.module_sql_plan(tmp_path, [], ["mod-playerbots"])
+    assert plan.handed == ("mod-playerbots",)
+    assert plan.unmanifested == ("mod-playerbots",)
+
+
+def test_no_module_on_disk_at_all_is_still_upstreams_default(tmp_path: Path) -> None:
+    """An empty `modules/` answered `all` before T78 and answers `all` after it."""
+    assert apply_module.module_sql_plan(tmp_path, [], []).allowed == "all"
+
+
+def test_the_importers_own_line_is_what_applied_is_read_from() -> None:
+    """Measured live 2026-09-07 while `acore_world.updates` went 2967 -> 2968.
+
+    The colour run is not decoration in a test: the same image wrapped its
+    refusal in `[0m[31;1m` in the round-3 gate capture, so a parser anchored at
+    the start of the line would read nothing on a real terminal.
+    """
+    assert apply_module.applied_updates(
+        [
+            ">> Applying update aoe_loot_module_string.sql",
+            "\x1b[0m>> Applying update \"data/sql/db-world/city_bot_poi.sql\" 'ab12'...",
+            ">> Applied 1 query",
+        ]
+    ) == frozenset({"aoe_loot_module_string.sql", "city_bot_poi.sql"})
+
+
+def _two_route_plan(tmp_path: Path) -> apply_module.ModuleSqlPlan:
+    """`mine`, whose SQL this app applied, beside `theirs`, which is the updater's."""
+    clone = _clone_with(tmp_path, "mine", ARAC_SQL)
+    claim = clone / apply_module.CLAIM_FILE
+    claim.write_text("{}", encoding="utf-8")
+    os.utime(claim, (1_757_980_800, 1_757_980_800))  # 2025-09-16 UTC
+    _clone_with(tmp_path, "theirs", CHAR_SQL)
+    return apply_module.module_sql_plan(
+        tmp_path,
+        [
+            _sql_module("mine", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}]),
+            _sql_module(
+                "theirs", [{"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"}]
+            ),
+        ],
+        ["mine", "theirs"],
+    )
+
+
+def test_the_report_says_per_file_what_was_done_with_it(tmp_path: Path) -> None:
+    """The verdicts, and the date comes off the record this app wrote.
+
+    The date is asserted against a timestamp this test PUT on the claim file, so
+    it cannot be satisfied by any sentence the code builds out of its own
+    arguments: it is a fact from the filesystem or it is wrong. What it is a
+    date OF is the subject of the two tests below.
+    """
+    plan = _two_route_plan(tmp_path)
+    applied = apply_module.module_sql_report(
+        plan, service="ac-db-import", applied=frozenset({"one.sql"})
+    )
+    assert (
+        f"sql {ARAC_SQL} -> world: not handed to the updater: this app applies it itself at "
+        f"install (module installed here on 2025-09-16)" in applied
+    )
+    assert f"sql {CHAR_SQL} -> characters: applied" in applied
+
+    quiet = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
+    assert (
+        f"sql {CHAR_SQL} -> characters: not applied now: ac-db-import did not name it"
+        in " ".join(quiet)
+    )
+
+    refused = apply_module.module_sql_report(
+        plan,
+        service="ac-db-import",
+        applied=frozenset(),
+        refusal="Could not update the World database",
+    )
+    assert f"sql {CHAR_SQL} -> characters: refused: Could not update the World database" in refused
+    # The file this app owns reads the same whatever the updater did with the
+    # rest: it was never handed over, so no verdict of the run applies to it.
+    assert [line for line in refused if ARAC_SQL in line] == [
+        line for line in applied if ARAC_SQL in line
+    ]
+
+
+def test_a_claim_is_not_evidence_that_the_direct_sql_ever_ran(tmp_path: Path) -> None:
+    """Review round 1's must-fix, driven through the REAL install that leaves this state.
+
+    `install()` writes the claim (`apply.py:1366`) and runs the SQL
+    (`apply.py:1386`) in that order, so an install whose SQL step raises leaves a
+    clone and a dated claim behind with nothing whatever in the world database.
+    T2 measured that failure on a real box: `DockerSql` refusing with *"container
+    ... is not running"*. The report may therefore never turn a claim into
+    "applied" -- it has no record of an application to turn.
+
+    Driven by letting the real applier fail at its real SQL step rather than by
+    writing a claim by hand, because the fixture that writes the claim itself is
+    free to write the state that makes the sentence true.
+    """
+    module = _sql_module("mine", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}])
+
+    class _DeadContainer:
+        def run_file(self, db: str, path: Path) -> None:
+            raise ApplyError("container ac-database is not running")
+
+        def run_statement(self, db: str, statement: str) -> None:
+            raise AssertionError("not reached")
+
+    applier = Applier(
+        tmp_path,
+        git=_FakeGit({ARAC_SQL: "ALTER TABLE x ADD COLUMN y INT;\n"}),
+        sql=_DeadContainer(),
+        remote_url=_Origins("https://github.com/acme/mine.git"),
+        world_running=lambda: False,
+    )
+    with pytest.raises(ApplyError, match="not running"):
+        applier.install(module)
+    clone = tmp_path / "modules" / "mine"
+    assert (clone / apply_module.CLAIM_FILE).is_file(), "the install did not get as far as a claim"
+
+    said = apply_module.module_sql_report(
+        apply_module.module_sql_plan(tmp_path, [module], ["mine"]),
+        service="ac-db-import",
+        applied=frozenset(),
+    )
+    arac = [line for line in said if ARAC_SQL in line]
+    assert arac and "applies it itself at install" in arac[0], said
+    assert "applied" not in arac[0], (
+        "the panel claims a file was applied on the strength of a claim written "
+        f"BEFORE the SQL that never ran: {arac[0]}"
+    )
+
+
+def test_a_clone_this_app_did_not_make_is_given_no_date_at_all(tmp_path: Path) -> None:
+    """No claim, no date. The directory's own mtime is not a record of ours.
+
+    A checkout somebody else put in `modules/` has no install of this app's to
+    date, and its mtime moves when a `git pull`, an editor or the compile writes
+    inside it. Printing that as the day this app did something would invent the
+    record T78 exists because we do not keep.
+
+    The clone here is given a mtime the assertion would notice if it leaked --
+    the same stamp the test above pins on a claim.
+    """
+    clone = _clone_with(tmp_path, "mine", ARAC_SQL)
+    os.utime(clone, (1_757_980_800, 1_757_980_800))  # 2025-09-16 UTC
+    assert not (clone / apply_module.CLAIM_FILE).exists()
+
+    plan = apply_module.module_sql_plan(
+        tmp_path,
+        [_sql_module("mine", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}])],
+        ["mine"],
+    )
+    assert [entry.installed_on for entry in plan.files] == [""]
+    said = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
+    arac = [line for line in said if ARAC_SQL in line]
+    assert arac == [
+        f"sql {ARAC_SQL} -> world: not handed to the updater: this app applies it itself at install"
+    ], arac
+    assert "2025-09-16" not in " ".join(said), said
+
+
+def test_a_db_import_file_inside_a_withheld_module_is_not_reported_as_ledgered(
+    tmp_path: Path,
+) -> None:
+    """The verdict that would be T78 upside down.
+
+    A module withheld for its direct file takes its db-import files with it --
+    `AC_UPDATES_ALLOWED_MODULES` is per module, not per file -- so those files
+    were not offered to the updater at all. Calling them "already in its ledger"
+    because nothing complained would promise a row in the database on the
+    strength of a run they were never part of.
+    """
+    _clone_with(tmp_path, "mine", ARAC_SQL, CHAR_SQL)
+    plan = apply_module.module_sql_plan(
+        tmp_path,
+        [
+            _sql_module(
+                "mine",
+                [
+                    {"db": "world", "path": ARAC_SQL, "applied_by": "direct"},
+                    {"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"},
+                ],
+            )
+        ],
+        ["mine"],
+    )
+    said = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
+    assert (
+        f"sql {CHAR_SQL} -> characters: not applied: mine was not given to ac-db-import, so the "
+        f"updater was not offered this file either" in said
+    ), said
+    assert not [line for line in said if "ledger looks like" in line], said
+
+    # Nor is it blamed for a refusal it was not part of, which is the same rule
+    # from the other side: no verdict of the run applies to a file the run never
+    # had. Every line reads the same whatever the updater said.
+    assert (
+        apply_module.module_sql_report(
+            plan, service="ac-db-import", applied=frozenset(), refusal="Could not update the World"
+        )
+        == said
+    )

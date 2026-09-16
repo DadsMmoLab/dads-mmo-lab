@@ -9204,3 +9204,151 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     which is the review this change would owe.
     """
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
+
+
+# ------------------ the press that ran the updater over SQL the app had applied
+#
+# T78, round-3 live gate press 9c. These go through the REAL binding --
+# `controller_wow_wotlk.modules.apply_module_sql()` -- with only Docker faked, so
+# what is asserted is the argument the importer would really have been started
+# with. A `_FakeImporter` in its place could not see it: the whole defect is in
+# the binding these two tests are the only callers of.
+
+
+ARAC_FILE = "modules/mod-arac/data/sql/db-world/arac.sql"
+AOE_FILE = "modules/mod-aoe-loot/data/sql/db-world/aoe_loot_module_string.sql"
+APPLYING_AOE = ">> Applying update aoe_loot_module_string.sql"
+
+
+def _two_modules_on_disk(server_dir: Path) -> None:
+    """One shipped module of each route, with its SQL where its manifest says.
+
+    `mod-arac` declares `data/sql/db-world/arac.sql` as `applied_by="direct"`
+    and `mod-aoe-loot` declares `data/sql/db-world/*.sql` as `db-import`, in the
+    bundled manifests these tests read through the real store.
+    """
+    for rel in (ARAC_FILE, AOE_FILE):
+        path = server_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("-- x\n", encoding="utf-8")
+
+
+def _real_module_sql(
+    ps: _Ps,
+    tmp_path: Path,
+    fake: Callable[..., docker.AttachedRun],
+    monkeypatch: pytest.MonkeyPatch,
+) -> ControllerView:
+    monkeypatch.setattr(docker, "apply_module_sql", fake)
+    services = _services(ps, tmp_path, [])
+    services.module_sql = lambda output: modules.apply_module_sql(tmp_path, output=output)
+    return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def test_the_module_sql_press_never_hands_the_updater_a_file_this_app_applied(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix, asserted on what was SENT rather than on what the panel says about it.
+
+    `AC_UPDATES_ALLOWED_MODULES` is the whole mechanism: a module that is not in
+    it is one `UpdateFetcher` never joins a path for, so its `arac.sql` is never
+    opened and the exit 1 the gate met cannot happen. The panel's sentences are
+    checked too, but the first assertion is the argument itself.
+    """
+    _two_modules_on_disk(tmp_path)
+    handed: list[str | None] = []
+
+    def fake(
+        spec: object,
+        server_dir: Path,
+        *,
+        output: Callable[[str], None],
+        modules: str | None,
+        **kw: object,
+    ) -> docker.AttachedRun:
+        handed.append(modules)
+        output(APPLYING_AOE)
+        return docker.AttachedRun(0, (APPLYING_AOE,))
+
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    view.apply_module_sql()
+
+    assert handed == ["mod-aoe-loot"]
+    text = view.module_report.toPlainText()
+    assert (
+        "sql data/sql/db-world/arac.sql -> world: not handed to the updater: this app "
+        "applies it itself at install" in text
+    )
+    assert "sql data/sql/db-world/aoe_loot_module_string.sql -> world: applied" in text
+    assert "FAILED" not in text, text
+
+
+def test_a_refused_import_still_says_which_file_this_app_owns(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal path reports per file too, and the withheld file is not blamed.
+
+    An importer that exits 1 for a reason of its own must not leave the user
+    guessing which of the files on screen it was about -- and the one file this
+    app applied itself is the one it was NOT about, because it was never given.
+    """
+    _two_modules_on_disk(tmp_path)
+    words = "ac-db-import exited 1: Could not update the World database"
+
+    def fake(
+        spec: object,
+        server_dir: Path,
+        *,
+        output: Callable[[str], None],
+        modules: str | None,
+        **kw: object,
+    ) -> docker.AttachedRun:
+        raise docker.DockerCommandError(words)
+
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.apply_module_sql()
+
+    text = view.module_report.toPlainText()
+    assert f"aoe_loot_module_string.sql -> world: refused: {words}" in text
+    assert "arac.sql -> world: not handed to the updater: this app applies it itself" in text
+    assert "arac.sql -> world: refused" not in text
+    assert failures and words in failures[0]
+
+
+def test_an_install_with_only_direct_sql_asks_for_none_and_still_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`""` has to reach the importer as an empty value, not as an absent one.
+
+    Upstream reads three meanings out of `Updates.AllowedModules`, and the one
+    this needs -- `Loading modules: none` -- is the empty string.
+    `run_one_shot()` branches on `allowed_modules is None`, so `""` still
+    travels as `-e AC_UPDATES_ALLOWED_MODULES=`; a falsy check anywhere on this
+    path would turn it into "all", which after a rebuild is the CMake list with
+    ARAC compiled in, and the press would apply `arac.sql` again by the other
+    door. The run still happens: the core's own updates are the importer's main
+    job and this app's direct SQL has nothing to do with them.
+    """
+    path = tmp_path / ARAC_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("-- x\n", encoding="utf-8")
+    handed: list[str | None] = []
+
+    def fake(
+        spec: object,
+        server_dir: Path,
+        *,
+        output: Callable[[str], None],
+        modules: str | None,
+        **kw: object,
+    ) -> docker.AttachedRun:
+        handed.append(modules)
+        return docker.AttachedRun(0, ())
+
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    view.apply_module_sql()
+
+    assert handed == [""], handed
+    assert handed != ["all"]

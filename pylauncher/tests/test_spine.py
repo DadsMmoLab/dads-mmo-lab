@@ -2452,16 +2452,18 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("apply.py", "_run_sql"): (
         "resolves a manifest's `sql path` glob the same way, with the same by-name refusal"
     ),
-    ("apply.py", "_pending_sql"): (
-        "resolves a `db-import` step's glob so the file count on `PendingSql` is one this run "
-        "actually took -- reads the clone this app just made, decides no write anywhere, and "
-        "runs nothing. Its emptiness verdict is deliberate and is NOT a refusal: upstream's "
-        "own updater joins `<module>/data/sql` and skips what is not there "
-        "(`UpdateFetcher.cpp:159-186`), so a module that brought no SQL is normal. The verdict "
-        "it must not give is a confident zero for a path it could not resolve, which is why a "
-        "`{key}` in the path answers `files=None` instead of globbing the literal braces"
+    ("apply.py", "_sql_files"): (
+        "resolves a step's glob so the file count reported is one this run actually took -- "
+        "reads the clone this app just made, decides no write anywhere, and runs nothing. It "
+        "is `_pending_sql()`'s listing, shared since T78 with `module_sql_plan()` so that what "
+        "is waiting and what each route owns cannot be resolved two different ways. Its "
+        "emptiness verdict is deliberate and is NOT a refusal: upstream's own updater joins "
+        "`<module>/data/sql` and skips what is not there (`UpdateFetcher.cpp:159-186`), so a "
+        "module that brought no SQL is normal. The verdict it must not give is a confident "
+        "zero for a path it could not resolve, which is why a `{key}` in the path answers "
+        "`None` instead of globbing the literal braces"
     ),
-    ("docker.py", "_module_dir_names"): (
+    ("docker.py", "module_dir_names"): (
         "lists `<server>/modules` to name the modules the database importer may apply SQL for; "
         "decides no write to that folder and never touches it. Its `except OSError` logs and "
         "answers `all`, which is upstream's own default (the modules COMPILED into the image), "

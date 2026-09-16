@@ -27,10 +27,11 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
@@ -2419,16 +2420,7 @@ class Applier:
         find) — but the assert says so rather than the type checker alone.
         """
         assert step.path is not None
-        if _fields(step.path):
-            return PendingSql(db=step.db, path=step.path, files=None)
-        matches = sorted(clone.glob(step.path)) if _is_glob(step.path) else [clone / step.path]
-        # `as_posix()`, not `_rel()`: these names are compared against the
-        # manifest's own `path` (forward slashes, always) and read by a person
-        # who may be on Windows, and `_rel()` would answer
-        # `data\sql\db-world\a.sql` there and `data/sql/db-world/a.sql` on the
-        # Linux box the same install was measured on. One spelling, both.
-        found = tuple(p.relative_to(clone).as_posix() for p in matches if p.is_file())
-        return PendingSql(db=step.db, path=step.path, files=found)
+        return PendingSql(db=step.db, path=step.path, files=_sql_files(clone, step.path))
 
     def _run_sql(self, step: SqlStep, clone: Path, vals: Mapping[str, str], log: _Log) -> None:
         assert self.sql is not None
@@ -2575,6 +2567,32 @@ class Applier:
 # --------------------------------------------------------------- functions
 
 
+def _sql_files(clone: Path, path: str) -> tuple[str, ...] | None:
+    """A step's declared `path` resolved against `clone`. `None` when it cannot be.
+
+    Shared by `Applier._pending_sql()` (which reports what is waiting) and
+    `module_sql_plan()` (which reports what each route owns), because the two
+    describe the SAME files and a second resolver here would be a second answer
+    to "which files does this step name".
+
+    The path is globbed UNRENDERED on purpose. `_action_templates()` leaves
+    db-import paths out of `required_prompts()`, so a `{key}` in one was never
+    put to the user and `_render()` would raise on a step this run is not
+    performing -- turning a report into a failure. A `{key}` gets `None` instead
+    of a glob that would match nothing and call it zero; see `PendingSql`.
+
+    `as_posix()`, not `_rel()`: these names are compared against the manifest's
+    own `path` (forward slashes, always) and read by a person who may be on
+    Windows, and `_rel()` would answer `data\\sql\\db-world\\a.sql` there and
+    `data/sql/db-world/a.sql` on the Linux box the same install was measured on.
+    One spelling, both.
+    """
+    if _fields(path):
+        return None
+    matches = sorted(clone.glob(path)) if _is_glob(path) else [clone / path]
+    return tuple(p.relative_to(clone).as_posix() for p in matches if p.is_file())
+
+
 def _render(template: str, values: Mapping[str, str], what: str) -> str:
     """`{key}` substitution; a missing key is an `ApplyError`, never silent garbage."""
     try:
@@ -2714,3 +2732,304 @@ def module_updates(
         behind = git.commits_behind(path, branch_of.get(path.name)) if checkout else None
         rows.append(ModuleUpdate(key=path.name, path=path, is_checkout=checkout, behind=behind))
     return tuple(rows)
+
+
+# ---------------------------------------------------------------------------
+# What "Apply module SQL" may hand to the core's own updater (T78)
+
+
+IMPORTER_SQL_ROOT = "data/sql/"
+"""The subtree of a module's clone AzerothCore's own updater walks.
+
+`UpdateFetcher.cpp:159-186` joins every allowed module name onto
+`<source>/modules/<name>/data/sql/` and walks what it finds there -- the reading
+recorded on `docker.ALL_MODULES`, measured live 2026-09-07. So a
+`.sql` file under this prefix is one the updater WILL open if its module is in
+`AC_UPDATES_ALLOWED_MODULES`, whoever else applied it first, and a `.sql` file
+anywhere else in the clone is one it can never see.
+"""
+
+_APPLIED_UPDATE = re.compile(r"Applying update\s+[\"']?(\S+\.sql)")
+"""The importer's own evidence that it applied a file.
+
+Measured live 2026-09-07 while `acore_world.updates` went 2967 ->
+2968: `>> Applying update aoe_loot_module_string.sql`. The quotes are optional in
+the pattern because the same image prints its refusals wrapped in ANSI colour
+runs (the round-3 gate's importer capture) and this line's exact punctuation is
+upstream's to change; the file name is the part that is stable.
+"""
+
+
+@dataclass(frozen=True)
+class ModuleSqlFile:
+    """One SQL file of one installed module, and which route owns it.
+
+    `route` is the manifest's `applied_by` for the step that names the file, so
+    it is a declaration and not a guess: `direct` means THIS app runs the file
+    with its own client, `db-import` means the file is left to the core updater.
+    A file is evidence of no database row either way -- what a press then did
+    with it is the verdict `module_sql_report()` prints.
+    """
+
+    module: str
+    db: Db
+    path: str
+    route: Literal["direct", "db-import"]
+    when: When = "install"
+    installed_on: str = ""
+    """The date on this app's claim for the clone, `""` when there is no claim.
+
+    **The date the module was INSTALLED here, and nothing more than that** --
+    the name said `applied_on` for one round of review and was wrong twice over.
+    `install()` writes the claim at `apply.py:1366` and runs the SQL at
+    `apply.py:1386`, so the claim exists for every install that got as far as
+    cloning, including one whose `_run_sql()` then raised -- T2 measured exactly
+    that, `DockerSql` refusing with *"container ... is not running"*. Nothing in
+    this app records that a direct file reached a database; that is the whole of
+    T78, and it is why no sentence built from this may say "applied".
+
+    No claim means no date: a clone this app did not make has no install of ours
+    to date, and the directory's own mtime is whatever last wrote inside it -- a
+    `git pull`, an editor, the compile. It was the fallback for one round of
+    review, and printing it as a date this app did something would be inventing
+    the record T78 exists because we do not keep.
+    """
+
+
+@dataclass(frozen=True)
+class ModuleSqlPlan:
+    """Which installed modules the core updater may be given, and why not the rest.
+
+    Built before the importer is started, so the refusal it would otherwise
+    produce is a sentence the user reads instead of an exit code.
+    """
+
+    allowed: str
+    """The value for `AC_UPDATES_ALLOWED_MODULES`.
+
+    `docker.ALL_MODULES` when the folder could not be read or holds no module at
+    all -- exactly what `docker.allowed_modules()` answers, so an install this
+    plan has nothing to say about behaves as it did before T78. Otherwise the
+    comma-joined `handed`, and an empty `handed` with modules on disk is `""`,
+    which upstream reads as *"Loading modules: none"*: the third meaning
+    recorded on `docker.ALL_MODULES`, and the only one that applies no module
+    file at all."""
+
+    handed: tuple[str, ...]
+    withheld: tuple[str, ...]
+    unmanifested: tuple[str, ...]
+    files: tuple[ModuleSqlFile, ...]
+
+
+def module_sql_plan(
+    server_dir: Path,
+    manifests: Sequence[Manifest],
+    installed: Sequence[str] | None,
+) -> ModuleSqlPlan:
+    """Split the modules on disk into the ones the updater may have and the ones it may not.
+
+    **The defect (T78, round-3 gate press 9c).** ARAC's
+    `data/sql/db-world/arac.sql` is `applied_by="direct"`: this app runs it
+    itself, with its own client, and nothing writes a row into the `updates`
+    ledger when it does -- upstream's updater has no way to learn that a file it
+    can see has already been run. `docker.allowed_modules()` then handed the
+    importer every folder under `modules/`, ARAC among them, so the updater
+    opened `arac.sql`, ran it against a world database that already held its
+    columns, and the press ended `ac-db-import exited 1, so its modules' SQL may
+    be part-applied` over a state this app itself had created.
+
+    **Why this and not a ledger row.** Recording the direct route's files in
+    `updates` was the other candidate and is refused on evidence: nothing in this
+    repository carries that table's schema -- no fixture, no SQL file, no compose
+    file names one of its columns -- the updater re-checks the hash it stored on
+    every later run, and its own refusal says in as many words that applying
+    repository SQL with your own client and using the auto-update system are not
+    to be mixed. A row written from here would be this app guessing at somebody
+    else's bookkeeping, and a wrong guess aborts the NEXT legitimate update
+    rather than this press.
+
+    `installed` is the folder listing -- `None` for "could not be read", which is
+    the one answer that is not a decision: the plan then changes nothing and the
+    press behaves exactly as it did before, which is what
+    `docker.allowed_modules()` does with the same `None`.
+
+    A module on disk that no manifest describes is handed over: this app has no
+    record of applying anything of its own, the updater is its only route, and
+    withholding it would silently stop applying SQL that has always been applied.
+    """
+    if installed is None:
+        return ModuleSqlPlan(
+            allowed=docker.ALL_MODULES, handed=(), withheld=(), unmanifested=(), files=()
+        )
+    by_id = {manifest.id: manifest for manifest in manifests if manifest.type == "module"}
+    handed: list[str] = []
+    withheld: list[str] = []
+    unmanifested: list[str] = []
+    files: list[ModuleSqlFile] = []
+    for name in installed:
+        manifest = by_id.get(name)
+        if manifest is None:
+            unmanifested.append(name)
+            handed.append(name)
+            continue
+        clone = server_dir / CLONE_DIRS["module"] / name
+        installed_on = _installed_on(clone)
+        conflicting = [step for step in manifest.sql if _the_updater_would_find_it(step)]
+        for step in manifest.sql:
+            if step.path is None:
+                continue  # an inline statement is in no file the updater could open
+            for found in _sql_files(clone, step.path) or (step.path,):
+                files.append(
+                    ModuleSqlFile(
+                        module=name,
+                        db=step.db,
+                        path=found,
+                        route=step.applied_by,
+                        when=step.when,
+                        installed_on=installed_on if step.applied_by == "direct" else "",
+                    )
+                )
+        (withheld if conflicting else handed).append(name)
+    return ModuleSqlPlan(
+        allowed=",".join(handed) if installed else docker.ALL_MODULES,
+        handed=tuple(handed),
+        withheld=tuple(withheld),
+        unmanifested=tuple(unmanifested),
+        files=tuple(files),
+    )
+
+
+def _the_updater_would_find_it(step: SqlStep) -> bool:
+    """Is this a file THIS app applies that the core updater would also open?
+
+    Both halves are required and neither is enough on its own.
+    `applied_by="direct"` alone catches `sql/battlepass_world.sql`, which lives
+    outside `data/sql/` and is therefore invisible to `UpdateFetcher` --
+    withholding its module would stop real db-import work over a file that was
+    never in the updater's way. The prefix alone catches every ordinary
+    `data/sql/db-world/*.sql`, which is exactly what the updater is FOR.
+
+    `.sql`, because the updater applies nothing else: `npc-teleporter` keeps two
+    `data/sql/db-world/*.dist` files, which sit under the prefix and are not
+    update files.
+
+    The `when` is deliberately not read. A `remove` step's file is one this app
+    runs itself too, and a Down script applied by the updater on an install that
+    still wants the module is a worse outcome than a skipped update.
+    """
+    return (
+        step.applied_by == "direct"
+        and step.path is not None
+        and step.path.startswith(IMPORTER_SQL_ROOT)
+        and step.path.endswith(".sql")
+    )
+
+
+def _installed_on(clone: Path) -> str:
+    """The date on this app's own claim for `clone`, or `""` when there is none.
+
+    The claim and nothing else. A directory mtime was the fallback for one round
+    of review and is not a date this app did anything: it moves when a `git
+    pull`, an editor or a compile writes inside the checkout, and for a clone
+    this app never made it would put OUR name on a stranger's timestamp. No
+    claim is no record, and the sentence then carries no date at all.
+    """
+    try:
+        return date.fromtimestamp((clone / CLAIM_FILE).stat().st_mtime).isoformat()
+    except (OSError, ValueError, OverflowError):
+        return ""
+
+
+def applied_updates(lines: Sequence[str]) -> frozenset[str]:
+    """The file names the importer said it applied, as base names.
+
+    Base names, because that is what upstream prints and what `UpdateFetcher`
+    keys its ledger on -- not the clone-relative path this app tracks a step by.
+    Two modules shipping a file of the same name would therefore both read as
+    applied; that is the direction that cannot invent an application which did
+    not happen.
+    """
+    found: set[str] = set()
+    for line in lines:
+        match = _APPLIED_UPDATE.search(line)
+        if match:
+            found.add(PurePosixPath(match.group(1)).name)
+    return frozenset(found)
+
+
+def module_sql_report(
+    plan: ModuleSqlPlan,
+    *,
+    service: str,
+    applied: frozenset[str],
+    refusal: str = "",
+) -> tuple[str, ...]:
+    """One sentence per SQL file: what this press did with it, and what it did not.
+
+    The report T78 owes. Three verdicts were asked for and there are five, and
+    the two that were added are the two that would otherwise have been lies:
+
+    * a db-import file the importer did not name is not "applied" (nothing ran)
+      and not "refused" (nothing complained) -- it is a file already in the
+      updater's own ledger, which is what every press after the first looks
+      like;
+    * a db-import file inside a WITHHELD module was not offered to the updater
+      at all, so no verdict of this run belongs to it.
+
+    **Nothing here says a direct file was applied**, and that is the whole
+    discipline of this function rather than a nicety. This app keeps no record
+    that a direct file reached a database -- exactly the gap T78 is about -- so
+    the only honest report of one is which route owns it, plus the date of this
+    app's own claim where there is one. See `ModuleSqlFile.installed_on`.
+
+    `refusal` is the updater's words, empty when it exited 0. It is printed
+    against every db-import file the run did not name, because an importer that
+    stopped part-way cannot say which of the files it had not reached it would
+    have applied -- and naming them all is the only reading that does not
+    promise one of them was fine.
+    """
+    lines: list[str] = []
+    for name in plan.withheld:
+        lines.append(
+            f"{name}: not given to {service} -- this app runs that folder's SQL itself, and "
+            f"the updater refuses a file it holds no ledger row for."
+        )
+    for name in plan.unmanifested:
+        lines.append(
+            f"{name}: given to {service} -- this app has no manifest for it and runs none of "
+            f"its SQL, so the updater is its only route."
+        )
+    for entry in plan.files:
+        where = f"sql {entry.path} -> {entry.db}"
+        if entry.route == "direct":
+            # NEVER "applied". This app keeps no record that a direct file
+            # reached a database -- that absence IS T78 -- and the claim it does
+            # keep is written before the SQL runs (`install()`, apply.py:1366
+            # ahead of :1386), so an install whose `_run_sql()` raised leaves a
+            # clone and a claim behind with nothing in the world database. What
+            # is known is the route and, if this app made the clone, the date it
+            # installed the module; the sentence says exactly those two.
+            when = "at install" if entry.when == "install" else f"on {entry.when}"
+            on = f" (module installed here on {entry.installed_on})" if entry.installed_on else ""
+            lines.append(
+                f"{where}: not handed to the updater: this app applies it itself {when}{on}"
+            )
+        elif entry.module in plan.withheld:
+            # The module went nowhere, so neither did this file. Reporting it as
+            # already-ledgered would be the T78 defect upside down: a promise
+            # that a file is in the database because nothing complained about a
+            # run it was never part of.
+            lines.append(
+                f"{where}: not applied: {entry.module} was not given to {service}, so the "
+                f"updater was not offered this file either"
+            )
+        elif PurePosixPath(entry.path).name in applied:
+            lines.append(f"{where}: applied")
+        elif refusal:
+            lines.append(f"{where}: refused: {refusal}")
+        else:
+            lines.append(
+                f"{where}: not applied now: {service} did not name it, which is what a file "
+                f"already in its updates ledger looks like"
+            )
+    return tuple(lines)
