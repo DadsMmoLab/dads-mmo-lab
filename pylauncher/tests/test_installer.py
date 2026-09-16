@@ -202,6 +202,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     "resources",
     "runner",
     "CatalogEntry",
+    # T64. `InstallEngine.sources_that_move()` answers in this type, so the
+    # Protocol the app drives has to be able to name it — added deliberately,
+    # which is what the docstring below asks for.
+    "EmulatorSource",
     "get_logger",
 }
 

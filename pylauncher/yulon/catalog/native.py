@@ -214,6 +214,15 @@ is not a state anybody chose, so `_restore_rollback` asks again after its own
 recreate, which is the thing that frees them.
 """
 
+COMPOSE_STAGE = "generate-compose"
+"""The stage that writes this install's three compose files.
+
+Named here because T64 selects on it: a family whose core checkout IS the
+server directory has its `docker-compose.yml` overwritten by this stage, so
+that path is one the app owns rather than the user, and a route that resets the
+checkout has to write it again (`StagedInstaller.app_written_paths()`).
+"""
+
 DOCKERFILE_STAGE = "write-dockerfile"
 """The stage that renders this install's build recipe from the app's own templates.
 
@@ -3678,15 +3687,73 @@ class StagedInstaller:
             source for source in self.entry.emulator.sources if not held_at_its_pin(source)
         )
 
-    def carried_patch_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
-        """Paths this app's own patches edit, per source `dest`. Empty on the spine.
+    def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
+        """Paths inside a source's checkout that THIS APP wrote, per source `dest`.
 
-        What `local_edits()` is told to ignore. Nothing here patches anything --
-        AzerothCore's entry carries no `patches` at all -- and the CMaNGOS family
-        overrides it. See `git.RunnerGit.local_edits()` for why a guard that did
-        not know about these paths would refuse every CMaNGOS update.
+        What `local_edits()` is told to ignore, and what
+        `_rewrite_what_we_own()` puts back afterwards -- the two always travel
+        together, because a path this app overwrites is a path a `reset --hard`
+        restores to upstream's version.
+
+        **The spine's own contribution is the compose files, and it was found by
+        a test rather than reasoned about.** AzerothCore's core source has
+        `dest: "."` -- the server directory IS the checkout -- and that
+        repository tracks its own `docker-compose.yml`, which
+        `stage_generate_compose()` then overwrites with this app's marked one
+        (its docstring calls that "the one recognised exception"). So every
+        healthy WotLK install has a modified tracked file in its checkout, and
+        the first version of this route did both wrong things with it at once:
+        `local_edits()` reported it, so the update was refused on every WotLK
+        install there has ever been; and with the guard silenced the reset put
+        upstream's compose back, after which `rebuild()`'s own guard refused
+        with "these compose files were not written by Yu'lon" and the press
+        ended having broken the install it was updating.
+
+        CMaNGOS adds the paths its carried patches edit. Its sources all live
+        under `src/`, so it never meets the compose case, and the two
+        contributions have never overlapped -- which is why this is a mapping
+        per `dest` rather than one list.
         """
-        return {}
+        return {
+            source.dest: composegen.COMPOSE_FILES
+            for source in self.entry.emulator.sources
+            if source.dest == "." and COMPOSE_STAGE in self.stage_names()
+        }
+
+    def _rewrite_what_we_own(
+        self, server_dir: Path, opts: InstallOptions, state: InstallState
+    ) -> Iterator[str]:
+        """Put this app's own files back into a checkout the fetch just reset. Spine: compose.
+
+        `rebuild_stages()` deliberately excludes `generate-compose` because it
+        "rewrites files a running server is using", and that exclusion is right
+        for a rebuild, which re-clones nothing. It is exactly wrong here: the
+        reset has ALREADY replaced this install's compose file with upstream's,
+        so the choice is not "rewrite it or leave it" but "rewrite it or hand
+        `rebuild()` a folder it refuses". Writing it back is restoring what was
+        there, not changing it.
+
+        Nothing is written for a family whose sources all live in
+        subdirectories -- the three CMaNGOS entries -- because a reset inside
+        `src/mangos-tbc` cannot touch a file at the server dir. The condition is
+        `app_written_paths()`'s own, read off the same fact, so the guard's
+        exception and the restore cannot come apart.
+        """
+        if not self.app_written_paths(server_dir):
+            return
+        yield from self.stage_generate_compose(
+            StageContext(
+                server_dir=server_dir,
+                client_dir=opts.client_dir,
+                state=state,
+                # None, and not the press's own event: this write is the
+                # RECOVERY of a file the fetch already replaced, and a Stop
+                # landing inside it would leave the install with upstream's
+                # compose and no route that puts it back.
+                cancel=None,
+                secrets=self.resolve_secrets(server_dir),
+            )
+        )
 
     def check_carried_patches(self, server_dir: Path) -> Iterator[str]:
         """Resolve every carried patch against the moved sources WITHOUT writing. Spine: none.
@@ -3831,6 +3898,7 @@ class StagedInstaller:
                 yield self._moved_line(source, dest, old)
             self._check_cancel(cancel)
             yield from self.check_carried_patches(server_dir)
+            yield from self._rewrite_what_we_own(server_dir, opts, state)
             yield from self.apply_carried_patches(server_dir)
         except InstallerError as exc:
             yield from self._put_sources_back(moved)
@@ -3891,7 +3959,7 @@ class StagedInstaller:
         that was read before anything fetched, and a read taken after the first
         source has already moved is a read of a tree this press has changed.
         """
-        ours = self.carried_patch_paths(server_dir)
+        ours = self.app_written_paths(server_dir)
         plan: list[tuple[EmulatorSource, Path, str]] = []
         for source in moving:
             dest = server_dir / source.dest

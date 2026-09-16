@@ -340,7 +340,7 @@ class CmangosInstaller(StagedInstaller):
 
     # -- what T64's update route needs from this family ------------------
 
-    def carried_patch_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
+    def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
         """Which files in which checkout this app patches itself, for the dirty-tree guard.
 
         Read out of the patch FILES rather than written down a second time in
@@ -356,7 +356,11 @@ class CmangosInstaller(StagedInstaller):
         looking at the catalog yet. The patch is loaded again, for real, a few
         steps later -- and it refuses there.
         """
-        found: dict[str, tuple[str, ...]] = {}
+        # The spine's own contribution first, and kept: it is the compose files
+        # of a source whose `dest` is the server directory, which no CMaNGOS
+        # entry has -- so today this adds nothing here and a family that gained
+        # one would not silently lose it.
+        found: dict[str, tuple[str, ...]] = dict(super().app_written_paths(server_dir))
         for spec in self._data().patches:
             try:
                 text = self._patch_text(spec)
