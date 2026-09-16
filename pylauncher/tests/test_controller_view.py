@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -9352,3 +9353,139 @@ def test_an_install_with_only_direct_sql_asks_for_none_and_still_runs(
 
     assert handed == [""], handed
     assert handed != ["all"]
+
+
+# ---- T78 round 3: the module the 2026-09-17 live gate found withheld
+#
+# mod-city-bots is the only shipped manifest where "withhold the file" and
+# "withhold the module" differ, and withholding it whole left the world in a
+# restart loop on `Table 'acore_world.city_bot_poi' doesn't exist` with the
+# app's own remedy -- "Press Apply module SQL" -- unreachable from the button
+# that prints it. The assertion below is the argument the importer is started
+# with, because that argument IS the mechanism.
+
+CITY_BOTS_SQL: list[dict[str, object]] = [
+    {
+        "db": "auth",
+        "path": "data/sql/db-auth/updates/*.sql",
+        "applied_by": "db-import",
+    },
+    {
+        "db": "characters",
+        "path": "data/sql/db-characters/updates/*.sql",
+        "applied_by": "db-import",
+    },
+    {"db": "world", "path": "data/sql/db-world/updates/*.sql", "applied_by": "db-import"},
+    {
+        "db": "playerbots",
+        "path": "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql",
+        "applied_by": "direct",
+    },
+]
+"""mod-city-bots' `sql` block, path for path and route for route.
+
+The manifest itself arrives with T63 and is not on this branch, so the shipped
+tree is copied and this one file added to it -- every other manifest the plan
+reads here, `mod-arac` included, is the real one, and `ManifestStore`,
+`module_sql_plan()`, `module_sql_report()` and the binding are all real too.
+"""
+
+CITY_BOTS_FILES = (
+    "data/sql/db-auth/updates/2026_07_16_03_stage_cast_one_account_per_bot.sql",
+    "data/sql/db-characters/updates/2026_08_22_01_stage_cast_outfits.sql",
+    "data/sql/db-world/updates/2026_07_13_01_city_bot_poi.sql",
+    "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql",
+)
+
+
+def _manifests_with_city_bots(tmp_path: Path) -> Path:
+    """The bundled manifest tree, plus mod-city-bots, at a path of our own."""
+    root = tmp_path / "manifests"
+    shutil.copytree(modules.BUNDLED_MANIFESTS_DIR, root)
+    game = root / "wow-wotlk"
+    index_file = game / "modules.json"
+    index = json.loads(index_file.read_text(encoding="utf-8"))
+    index["items"] = sorted([*index["items"], "mod-city-bots"])
+    index_file.write_text(json.dumps(index), encoding="utf-8")
+    (game / "modules" / "mod-city-bots.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "id": "mod-city-bots",
+                "name": "City Bots",
+                "type": "module",
+                "game": "wow-wotlk",
+                "description": "x",
+                "source": {"repo": "pjerra/mod-city-bots"},
+                "sql": CITY_BOTS_SQL,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_the_module_sql_press_hands_over_city_bots_and_withholds_only_arac(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's FAIL row 3d, as a press: `mod-city-bots` is in the list again.
+
+    Two modules on disk that differ in one thing only -- where their `direct`
+    `.sql` lives. `mod-arac`'s is `data/sql/db-world/arac.sql`, inside a
+    directory the updater walks, so it is still withheld and its file still
+    reads "not handed to the updater". City Bots' is
+    `data/sql/playerbots/updates/…`, which the updater joins no path for, so the
+    module goes to the importer and its three db-import groups are applied --
+    which is what "Press Apply module SQL, then Start" has to mean for the
+    world to come up at all.
+    """
+    root = _manifests_with_city_bots(tmp_path)
+    monkeypatch.setattr(modules, "store", lambda *a, **k: ManifestStore(root, modules.GAME))
+    path = tmp_path / ARAC_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("-- x\n", encoding="utf-8")
+    for rel in CITY_BOTS_FILES:
+        found = tmp_path / "modules" / "mod-city-bots" / rel
+        found.parent.mkdir(parents=True, exist_ok=True)
+        found.write_text("-- x\n", encoding="utf-8")
+    handed: list[str | None] = []
+    applying = [
+        f">> Applying update {Path(rel).name}" for rel in CITY_BOTS_FILES if "playerbots" not in rel
+    ]
+
+    def fake(
+        spec: object,
+        server_dir: Path,
+        *,
+        output: Callable[[str], None],
+        modules: str | None,
+        **kw: object,
+    ) -> docker.AttachedRun:
+        handed.append(modules)
+        for line in applying:
+            output(line)
+        return docker.AttachedRun(0, tuple(applying))
+
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    view.apply_module_sql()
+
+    assert handed == ["mod-city-bots"], handed
+    text = view.module_report.toPlainText()
+    for rel, db in (
+        (CITY_BOTS_FILES[0], "auth"),
+        (CITY_BOTS_FILES[1], "characters"),
+        (CITY_BOTS_FILES[2], "world"),
+    ):
+        assert f"sql {rel} -> {db}: applied" in text, text
+    assert (
+        f"sql {CITY_BOTS_FILES[3]} -> playerbots: not handed to the updater: this app "
+        f"applies it itself at install" in text
+    ), text
+    # The sentence the gate photographed, and the module it was wrong about.
+    assert "mod-city-bots: not given to ac-db-import" not in text, text
+    assert "mod-city-bots was not given to ac-db-import" not in text, text
+    # ARAC is untouched by the change, and its reason now names its file.
+    assert (
+        "mod-arac: not given to ac-db-import -- this app runs data/sql/db-world/arac.sql "
+        "itself, and the updater refuses a file it holds no ledger row for." in text
+    ), text

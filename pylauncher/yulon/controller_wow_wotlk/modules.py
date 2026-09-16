@@ -338,10 +338,15 @@ def apply_module_sql(
 
     **What the updater is given, and what it is not (T78).** The importer is no
     longer handed every folder under `modules/`. A module whose manifest says
-    this app applies its own `data/sql/**.sql` directly is withheld, because the
-    core updater has no ledger row for a file this app ran with its own client
-    and exits 1 over it — which is what the round-3 gate's press 9c read as
-    "may be part-applied" on a world database this app had written itself.
+    this app applies a `.sql` of its own under one of the three directories the
+    updater walks (`apply.IMPORTER_DB_DIRS`) is withheld, because the core
+    updater has no ledger row for a file this app ran with its own client and
+    exits 1 over it — which is what the round-3 gate's press 9c read as
+    "may be part-applied" on a world database this app had written itself. A
+    direct file ANYWHERE ELSE — Battle Pass's `sql/`, City Bots'
+    `data/sql/playerbots/` — withholds nothing: the round-5 gate measured what
+    that cost, a module whose three db-import groups went unapplied over one
+    file no updater was ever going to open.
     `apply.module_sql_plan()` makes that split and carries the evidence; this
     binding supplies the two per-game facts it cannot know, the manifest store
     and the importer's service name, and prints the per-file verdicts through

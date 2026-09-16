@@ -859,7 +859,7 @@ def test_a_rebuild_waits_for_a_realm_line_whatever_address_it_advertises(
 
 
 def test_the_ready_wait_still_refuses_a_realm_line_on_another_port(tmp_path: Path) -> None:
-    """The control for the test above, and the reason the marker is not just `\S+`.
+    r"""The control for the test above, and the reason the marker is not just `\S+`.
 
     Opening the ADDRESS is the change; opening the port would make the marker
     match a realm this install is not, which is what the port is in it for. A

@@ -13,7 +13,7 @@ from __future__ import annotations
 import ast
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -23,7 +23,9 @@ from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native
 from yulon.git import CloneSpec, RunnerGit
 from yulon.manifest import Manifest, parse_manifest
+from yulon.manifest_store import ManifestStore
 from yulon.ownership import Ownership
+from yulon.resources import manifests_dir
 
 LUA = "env/dist/etc/modules/lua_scripts"
 
@@ -4182,7 +4184,7 @@ def test_a_claim_is_not_evidence_that_the_direct_sql_ever_ran(tmp_path: Path) ->
         service="ac-db-import",
         applied=frozenset(),
     )
-    arac = [line for line in said if ARAC_SQL in line]
+    arac = [line for line in said if line.startswith(f"sql {ARAC_SQL} ")]
     assert arac and "applies it itself at install" in arac[0], said
     assert "applied" not in arac[0], (
         "the panel claims a file was applied on the strength of a claim written "
@@ -4212,7 +4214,7 @@ def test_a_clone_this_app_did_not_make_is_given_no_date_at_all(tmp_path: Path) -
     )
     assert [entry.installed_on for entry in plan.files] == [""]
     said = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
-    arac = [line for line in said if ARAC_SQL in line]
+    arac = [line for line in said if line.startswith(f"sql {ARAC_SQL} ")]
     assert arac == [
         f"sql {ARAC_SQL} -> world: not handed to the updater: this app applies it itself at install"
     ], arac
@@ -4260,3 +4262,166 @@ def test_a_db_import_file_inside_a_withheld_module_is_not_reported_as_ledgered(
         )
         == said
     )
+
+
+# ---- T78 round 3: the withholding is decided per FILE, not per `data/sql/`
+#
+# The 2026-09-17 live gate's finding. City Bots keeps THREE `db-import` groups
+# under the three directories the updater walks and ONE `direct` file under
+# `data/sql/playerbots/`, which nothing joins a path for -- and that one file
+# withheld the module whole, so the three groups went unapplied, the world died
+# on `Table 'acore_world.city_bot_poi' doesn't exist`, and the app's own remedy
+# ("Press Apply module SQL") could not be followed by pressing that button.
+# ARAC could not see this: its ONLY SQL step is the direct one, so withholding
+# the module and withholding the file are the same act there.
+
+CITY_AUTH = "data/sql/db-auth/updates/2026_07_16_03_stage_cast_one_account_per_bot.sql"
+CITY_CHAR = "data/sql/db-characters/updates/2026_08_22_01_stage_cast_outfits.sql"
+CITY_WORLD = "data/sql/db-world/updates/2026_07_13_01_city_bot_poi.sql"
+CITY_ROSTER = "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql"
+"""mod-city-bots' four SQL paths, verbatim off the shipped manifest."""
+
+
+def _city_bots_shape(tmp_path: Path, direct: str) -> apply_module.ModuleSqlPlan:
+    """City Bots' manifest with its one direct file moved to `direct`, and nothing else.
+
+    The two callers differ in ONE field -- which directory the direct file sits
+    in -- so no other rule can account for a difference between their answers.
+    The three db-import groups are declared as globs, as the shipped manifest
+    declares them, so a rule that read the declared path instead of the resolved
+    one would be visible here.
+    """
+    _clone_with(tmp_path, "mod-city-bots", CITY_AUTH, CITY_CHAR, CITY_WORLD, direct)
+    return apply_module.module_sql_plan(
+        tmp_path,
+        [
+            _sql_module(
+                "mod-city-bots",
+                [
+                    {
+                        "db": "auth",
+                        "path": "data/sql/db-auth/updates/*.sql",
+                        "applied_by": "db-import",
+                    },
+                    {
+                        "db": "characters",
+                        "path": "data/sql/db-characters/updates/*.sql",
+                        "applied_by": "db-import",
+                    },
+                    {
+                        "db": "world",
+                        "path": "data/sql/db-world/updates/*.sql",
+                        "applied_by": "db-import",
+                    },
+                    {"db": "playerbots", "path": direct, "applied_by": "direct"},
+                ],
+            )
+        ],
+        ["mod-city-bots"],
+    )
+
+
+def test_a_direct_file_outside_the_updaters_directories_keeps_its_module_in_the_list(
+    tmp_path: Path,
+) -> None:
+    """The gate's finding, as the plan: City Bots is handed over, all three groups with it.
+
+    `data/sql/playerbots/` is under `data/sql/` and is walked by nobody -- the
+    core updater runs once per `DatabaseLoader` pool and mod-playerbots builds
+    its own with no module list at all. So the roster file is not in the
+    updater's way, and it is not a reason to cost this module the three groups
+    that ARE the updater's work.
+    """
+    plan = _city_bots_shape(tmp_path, CITY_ROSTER)
+    assert plan.withheld == ()
+    assert plan.handed == ("mod-city-bots",)
+    assert plan.allowed == "mod-city-bots"
+
+    said = apply_module.module_sql_report(
+        plan,
+        service="ac-db-import",
+        applied=frozenset(PurePosixPath(p).name for p in (CITY_AUTH, CITY_CHAR, CITY_WORLD)),
+    )
+    assert f"sql {CITY_AUTH} -> auth: applied" in said, said
+    assert f"sql {CITY_CHAR} -> characters: applied" in said, said
+    assert f"sql {CITY_WORLD} -> world: applied" in said, said
+    assert (
+        f"sql {CITY_ROSTER} -> playerbots: not handed to the updater: this app applies it "
+        f"itself at install" in said
+    ), said
+    # No withholding sentence at all, and in particular not the two the gate
+    # photographed: the panel must not tell the user this module was skipped.
+    assert not [line for line in said if "not given to ac-db-import" in line], said
+
+
+def test_a_direct_file_inside_the_updaters_directories_still_withholds_and_says_which(
+    tmp_path: Path,
+) -> None:
+    """The control for the test above, and the sentence a mixed module needs.
+
+    Same manifest, same clone, same three db-import groups; the ONE difference
+    is that the direct file now sits in `data/sql/db-world/`, where the updater
+    would open it and exit 1 over a file it holds no ledger row for. Withholding
+    the module is the only lever `AC_UPDATES_ALLOWED_MODULES` has and the three
+    groups are its price -- so the sentence has to say which file cost them.
+    "That folder's SQL" was false here: this app runs one of four.
+    """
+    inside = "data/sql/db-world/updates/2026_07_15_00_citizen_roster.sql"
+    plan = _city_bots_shape(tmp_path, inside)
+    assert plan.withheld == ("mod-city-bots",)
+    assert plan.allowed == ""
+
+    said = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
+    assert (
+        f"mod-city-bots: not given to ac-db-import -- this app runs {inside} itself, and "
+        f"the updater refuses a file it holds no ledger row for." in said
+    ), said
+    # It names the ONE file: not the folder, and not the three it is not about.
+    reason = [line for line in said if line.startswith("mod-city-bots: not given")][0]
+    assert "that folder's SQL" not in reason, reason
+    assert CITY_WORLD not in reason, reason
+
+
+def test_the_withheld_sentence_names_the_file_for_a_module_with_only_one_step(
+    tmp_path: Path,
+) -> None:
+    """ARAC's shape, which is where the old wording was accidentally true.
+
+    Named separately because it is the case the gate PASSED: a one-step module
+    where "that folder's SQL" and `arac.sql` describe the same thing. The new
+    sentence has to stay true here as well as become true of the mixed one.
+    """
+    _clone_with(tmp_path, "mod-arac", ARAC_SQL)
+    plan = apply_module.module_sql_plan(
+        tmp_path,
+        [_sql_module("mod-arac", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}])],
+        ["mod-arac"],
+    )
+    said = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
+    assert (
+        f"mod-arac: not given to ac-db-import -- this app runs {ARAC_SQL} itself, and "
+        f"the updater refuses a file it holds no ledger row for." in said
+    ), said
+
+
+def test_every_shipped_db_import_step_names_a_directory_the_updater_actually_walks() -> None:
+    """A `db-import` step outside `IMPORTER_DB_DIRS` would be a promise nobody keeps.
+
+    The catalog's own data, not a fixture. `applied_by: "db-import"` means "this
+    app runs none of it, the core updater will" -- and the core updater walks
+    `data/sql/db-auth`, `data/sql/db-characters` and `data/sql/db-world` and
+    nothing else. A shipped manifest naming, say, `data/sql/playerbots/` as
+    db-import would leave that file applied by no route at all, which is exactly
+    the trap City Bots' manifest avoids by declaring its roster `direct`.
+    """
+    store = ManifestStore(manifests_dir(), "wow-wotlk")
+    checked = 0
+    for manifest in store.load_all("module"):
+        for step in manifest.sql:
+            if step.applied_by != "db-import" or step.path is None:
+                continue
+            assert step.path.startswith(
+                apply_module.IMPORTER_SQL_DIRS
+            ), f"{manifest.id} leaves {step.path} to the updater, which never walks it"
+            checked += 1
+    assert checked, "no shipped db-import step was examined, so this asserted nothing"

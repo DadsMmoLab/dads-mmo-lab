@@ -2739,15 +2739,50 @@ def module_updates(
 
 
 IMPORTER_SQL_ROOT = "data/sql/"
-"""The subtree of a module's clone AzerothCore's own updater walks.
+"""The subtree of a module's clone AzerothCore's own updater is pointed at.
 
 `UpdateFetcher.cpp:159-186` joins every allowed module name onto
-`<source>/modules/<name>/data/sql/` and walks what it finds there -- the reading
-recorded on `docker.ALL_MODULES`, measured live 2026-09-07. So a
-`.sql` file under this prefix is one the updater WILL open if its module is in
-`AC_UPDATES_ALLOWED_MODULES`, whoever else applied it first, and a `.sql` file
-anywhere else in the clone is one it can never see.
+`<source>/modules/<name>/data/sql/` and skips the ones that are not directories
+-- the reading recorded on `docker.ALL_MODULES`, measured live 2026-09-07. It is
+the ROOT and not the answer: what the updater opens under it is `IMPORTER_DB_DIRS`
+and nothing else.
 """
+
+IMPORTER_DB_DIRS = ("db-auth", "db-characters", "db-world")
+"""The directories under `IMPORTER_SQL_ROOT` the core updater actually walks.
+
+**One per database it loads, and that is the whole set.** `DBUpdater` runs once
+for each of the three `DatabaseLoader` pools and walks
+`<module>/data/sql/<that pool's directory>/` recursively -- `base/` and
+`updates/` alike, which is why this is a directory prefix and not a file list.
+Evidence in this tree, none of it inferred:
+
+* `catalog/installers/wow-wotlk/native/base.yml.tmpl:163-164` mounts `./modules`
+  into the importer *because* "the import applies every module's own
+  `data/sql/db-auth` and `db-characters` updates as well as AzerothCore's", and
+  `docker.verify_import()` carries the live measurement behind it (yulon-ubuntu
+  2026-08-23: a first-ever import of an install carrying mod-city-bots came out
+  with 400 accounts and 400 characters, every row from that module's own
+  `db-auth`/`db-characters` files). Those two plus `db-world` are the three.
+* `data/sql/playerbots/` is NOT one of them, and that is the whole of T78 round
+  3. mod-playerbots builds its OWN `DatabaseLoader` for `acore_playerbots` with
+  no module list at all, so nothing joins a path under `playerbots/` and no
+  press of any button applies a file there -- this app does, at install. The
+  2026-09-17 live gate is the measurement: City Bots' `db-auth`, `db-characters`
+  and `db-world` files were the updater's to apply, and its one
+  `data/sql/playerbots/updates/…citizen_roster.sql` was not.
+
+A direct `.sql` OUTSIDE these directories is therefore never in the updater's
+way, and withholding its module -- which is the only granularity
+`AC_UPDATES_ALLOWED_MODULES` has -- costs real db-import work for nothing. That
+is what it cost live: City Bots' three db-import groups went unapplied because
+of its one `playerbots/` file, the world died on `Table 'acore_world.city_bot_poi'
+doesn't exist`, and the app's own remedy ("Press Apply module SQL") could not be
+followed by pressing the button it named.
+"""
+
+IMPORTER_SQL_DIRS = tuple(f"{IMPORTER_SQL_ROOT}{name}/" for name in IMPORTER_DB_DIRS)
+"""`IMPORTER_DB_DIRS` as clone-relative prefixes, in manifest spelling (POSIX)."""
 
 _APPLIED_UPDATE = re.compile(r"Applying update\s+[\"']?(\S+\.sql)")
 """The importer's own evidence that it applied a file.
@@ -2838,6 +2873,23 @@ def module_sql_plan(
     columns, and the press ended `ac-db-import exited 1, so its modules' SQL may
     be part-applied` over a state this app itself had created.
 
+    **What "in the updater's way" means, and it is per FILE (T78 round 3).** The
+    first version of this asked only whether a direct file was under
+    `data/sql/`, which is where the updater is pointed rather than what it
+    walks. City Bots keeps three db-import groups under the three directories
+    the updater DOES walk and one direct file under `data/sql/playerbots/`,
+    which nothing joins a path for -- and that one file withheld the module
+    whole. Measured live 2026-09-17: City Bots installed with "3 left
+    unapplied", the rebuild succeeded, the world aborted on `Table
+    'acore_world.city_bot_poi' doesn't exist`, the app printed its own correct
+    remedy ("Press Apply module SQL on the Modules tab, then Start"), and that
+    button withheld `mod-city-bots`; the world restarted 18 times. A direct file
+    outside `IMPORTER_DB_DIRS` is now no reason to withhold anything, and a
+    direct file inside one still withholds its module -- that is the only lever
+    `AC_UPDATES_ALLOWED_MODULES` offers for a file the updater can see, and the
+    module's db-import work is the price. `module_sql_report()` then says which
+    file cost it.
+
     **Why this and not a ledger row.** Recording the direct route's files in
     `updates` was the other candidate and is refused on evidence: nothing in this
     repository carries that table's schema -- no fixture, no SQL file, no compose
@@ -2874,7 +2926,7 @@ def module_sql_plan(
             continue
         clone = server_dir / CLONE_DIRS["module"] / name
         installed_on = _installed_on(clone)
-        conflicting = [step for step in manifest.sql if _the_updater_would_find_it(step)]
+        conflicting = False
         for step in manifest.sql:
             if step.path is None:
                 continue  # an inline statement is in no file the updater could open
@@ -2889,6 +2941,13 @@ def module_sql_plan(
                         installed_on=installed_on if step.applied_by == "direct" else "",
                     )
                 )
+                # Decided per RESOLVED FILE and then raised to the module,
+                # because the module is the only granularity the updater has.
+                # `_blocking_files()` re-asks the same question of the same
+                # strings when the report has to name them, so the sentence
+                # cannot name a file the decision was not made on.
+                if step.applied_by == "direct" and _the_updater_would_find_it(found):
+                    conflicting = True
         (withheld if conflicting else handed).append(name)
     return ModuleSqlPlan(
         allowed=",".join(handed) if installed else docker.ALL_MODULES,
@@ -2899,30 +2958,56 @@ def module_sql_plan(
     )
 
 
-def _the_updater_would_find_it(step: SqlStep) -> bool:
-    """Is this a file THIS app applies that the core updater would also open?
+def _the_updater_would_find_it(path: str) -> bool:
+    """Would the core updater open this clone-relative file if it were given the module?
 
-    Both halves are required and neither is enough on its own.
-    `applied_by="direct"` alone catches `sql/battlepass_world.sql`, which lives
-    outside `data/sql/` and is therefore invisible to `UpdateFetcher` --
-    withholding its module would stop real db-import work over a file that was
-    never in the updater's way. The prefix alone catches every ordinary
-    `data/sql/db-world/*.sql`, which is exactly what the updater is FOR.
+    Asked of ONE FILE, and the caller supplies the other half (`applied_by ==
+    "direct"`): a db-import file under the same prefix is the updater's job and
+    is no reason to withhold anything.
+
+    `IMPORTER_SQL_DIRS`, not `IMPORTER_SQL_ROOT`, and the difference is T78 round
+    3. `data/sql/` is where the updater is POINTED; the three directories under
+    it are what it walks. A direct file anywhere else under `data/sql/` --
+    City Bots' `data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql` is
+    the shipped one -- is as invisible to it as Battle Pass's `sql/`, so
+    withholding a module over it takes that module's REAL db-import work down
+    with it and leaves the world unable to start. See `IMPORTER_DB_DIRS`.
 
     `.sql`, because the updater applies nothing else: `npc-teleporter` keeps two
-    `data/sql/db-world/*.dist` files, which sit under the prefix and are not
-    update files.
+    `data/sql/db-world/*.dist` files, which sit inside a walked directory and
+    are not update files.
 
-    The `when` is deliberately not read. A `remove` step's file is one this app
-    runs itself too, and a Down script applied by the updater on an install that
-    still wants the module is a worse outcome than a skipped update.
+    The step's `when` is deliberately not read by the caller. A `remove` step's
+    file is one this app runs itself too, and a Down script applied by the
+    updater on an install that still wants the module is a worse outcome than a
+    skipped update.
     """
-    return (
-        step.applied_by == "direct"
-        and step.path is not None
-        and step.path.startswith(IMPORTER_SQL_ROOT)
-        and step.path.endswith(".sql")
+    return path.endswith(".sql") and path.startswith(IMPORTER_SQL_DIRS)
+
+
+def _blocking_files(plan: ModuleSqlPlan, module: str) -> tuple[str, ...]:
+    """The files of `module` that are the reason it was withheld, in plan order.
+
+    Derived from the plan rather than carried beside it, and asked with the same
+    predicate `module_sql_plan()` decided with, over the same resolved strings.
+    A second field would be a second answer to "which file cost this module its
+    updates", and the sentence could then name a file the decision was not made
+    on -- which is exactly the shape of the bug being fixed, one level up.
+    """
+    return tuple(
+        entry.path
+        for entry in plan.files
+        if entry.module == module
+        and entry.route == "direct"
+        and _the_updater_would_find_it(entry.path)
     )
+
+
+def _and_list(items: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c` -- for a sentence a person reads, not a log grep."""
+    if len(items) == 1:
+        return items[0]
+    return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def _installed_on(clone: Path) -> str:
@@ -2976,6 +3061,13 @@ def module_sql_report(
     * a db-import file inside a WITHHELD module was not offered to the updater
       at all, so no verdict of this run belongs to it.
 
+    **The withheld module's sentence names the file that cost it.** It used to
+    say "this app runs that folder's SQL itself", which is true of ARAC -- whose
+    one SQL step IS the direct one -- and false of every module with more than
+    one. The 2026-09-17 gate read that sentence over `mod-city-bots`, where the
+    app runs one of four SQL groups; saying which file is what makes it true of
+    a mixed module, and it is the sentence a user needs to act on.
+
     **Nothing here says a direct file was applied**, and that is the whole
     discipline of this function rather than a nicety. This app keeps no record
     that a direct file reached a database -- exactly the gap T78 is about -- so
@@ -2990,8 +3082,10 @@ def module_sql_report(
     """
     lines: list[str] = []
     for name in plan.withheld:
+        blocking = _blocking_files(plan, name)
+        what = _and_list(blocking) if blocking else "that folder's SQL"
         lines.append(
-            f"{name}: not given to {service} -- this app runs that folder's SQL itself, and "
+            f"{name}: not given to {service} -- this app runs {what} itself, and "
             f"the updater refuses a file it holds no ledger row for."
         )
     for name in plan.unmanifested:
