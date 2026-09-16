@@ -151,6 +151,67 @@ writes and not a same-named file somewhere inside the module's own tree.
 """
 
 
+GENERATED_INCLUDE = "include.sh"
+"""The other file this engine writes into a clone, and the only one it can create EMPTY.
+
+`Applier.install()` touches it for a C++ module whose upstream ships none,
+because CMake's `CollectSourceFiles()` silently skips a module without one. See
+`_without_the_generated_include()` for the one status line it is allowed to
+account for, and for everything that line is not.
+"""
+
+_UNTRACKED_INCLUDE = f"?? {GENERATED_INCLUDE}"
+"""The ONE `status --porcelain` line this app wrote itself.
+
+`??` is git's code for "not tracked by this repository at all", which is the
+whole of the distinction `_without_the_generated_include()` turns on: a file
+the repository TRACKS produces ` M`, ` D`, `M ` or `A ` instead, and none of
+those is this app's doing.
+"""
+
+
+def _without_the_generated_include(dest: Path, relative_path: str, porcelain: str) -> str:
+    """`status --porcelain` output with the app's own untracked, empty `include.sh` dropped.
+
+    T47, and it is a LINE filter rather than a pathspec exclusion on purpose.
+    `install()` touches an `include.sh` into every C++ module whose upstream
+    ships none, so `mod-ale`'s own clone answered `?? include.sh` for a checkout
+    nobody had touched and both destructive paths refused it -- the same bug T66
+    fixed for `CLONE_MARKER`, still live for the second file this engine writes.
+
+    **`:(exclude,top)include.sh` would have hidden more than that, and hidden it
+    silently** (review, round 1): a pathspec exclusion drops the path from the
+    question entirely, so a repository that TRACKS a non-empty `include.sh`
+    which the user then truncated to nothing produced ` M include.sh`, was
+    answered "unmodified", and would have been `reset --hard` over without a
+    word. Reading the line's own status code is what separates "this app
+    touched a file into somebody's checkout" from "somebody changed a file the
+    module ships": only `?? ` is ever the first, and it is the only code
+    dropped here.
+
+    Both conditions, and neither is enough alone. `?? ` says the repository does
+    not track it; zero bytes says there is nothing in it anybody could lose.
+    A file somebody has written in answers False whichever way it got there,
+    which is the content check `apply._adoption_refusal()` asks for -- the
+    strictest one there is, rather than a name allowlist.
+
+    **Dropped when `include.sh` is the path being asked about**, for the reason
+    `_status_pathspec()` drops the marker's exclusion in the same case: that is
+    a different question, and a caller that asked it wants the file's own
+    answer rather than this one.
+    """
+    if Path(relative_path).name == GENERATED_INCLUDE:
+        return porcelain
+    generated = dest / GENERATED_INCLUDE
+    try:
+        if not (generated.is_file() and generated.stat().st_size == 0):
+            return porcelain
+    except OSError as exc:  # unreadable is not empty: leave the line counted
+        logger.debug(f"could not size {generated}: {exc}")
+        return porcelain
+    return "\n".join(line for line in porcelain.splitlines() if line != _UNTRACKED_INCLUDE)
+
+
 def _status_pathspec(relative_path: str) -> list[str]:
     """`--` and the pathspec for a `git status` that ignores this app's marker.
 
@@ -171,6 +232,10 @@ def _status_pathspec(relative_path: str) -> list[str]:
     answer: `Applier._require_own_clone()` reads a True for `CLONE_MARKER` as
     "the repository itself tracks a file at this name" and would otherwise
     treat this app's own claim as upstream content.
+
+    The app's OTHER generated file is not handled here and must not be: an
+    exclusion answers about a path rather than about a change, and
+    `_without_the_generated_include()` carries what that cost.
     """
     if Path(relative_path).name == CLONE_MARKER:
         return ["--", relative_path]
@@ -682,8 +747,11 @@ class RunnerGit:
     def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
         """Is `relative_path` exactly what this checkout's HEAD committed? None = cannot ask.
 
-        The app's own `CLONE_MARKER` does not count as a change to the tree;
-        `_status_pathspec()` carries why, and why only there.
+        Two of this app's own files do not count as a change to the tree: the
+        `CLONE_MARKER` it writes into every clone (`_status_pathspec()`), and an
+        untracked, empty `include.sh` it touched into a C++ module that ships
+        none (`_without_the_generated_include()`). Each carries why, and why
+        only in the one case it names.
         """
         if not (dest / ".git").is_dir():
             return None
@@ -694,7 +762,7 @@ class RunnerGit:
         except GitError as exc:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
-        return not proc.stdout.strip()
+        return not _without_the_generated_include(dest, relative_path, proc.stdout).strip()
 
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
         """Is every commit on HEAD already on what the update would reset to? None = cannot ask.
@@ -1199,7 +1267,7 @@ class ContainerGit:
         except GitError as exc:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
-        return not proc.stdout.strip()
+        return not _without_the_generated_include(dest, relative_path, proc.stdout).strip()
 
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
         """Is every commit on HEAD already on what the update would reset to? None = cannot ask.
