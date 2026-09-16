@@ -1461,3 +1461,154 @@ def test_an_empty_leftover_greys_the_row_while_the_applier_would_allow_it(
     assert Applier(tmp_path)._conflict_refusal(plus) is None
     (tmp_path / "modules" / "mod-ah-bot" / "AuctionHouseBot.cpp").write_text("//\n")
     assert Applier(tmp_path)._conflict_refusal(plus) is not None, "content must still refuse"
+
+
+# ------------------------------------------------- T69: requires locks Install
+
+
+MANIFESTS_DIR = Path(__file__).resolve().parents[1] / "manifests"
+
+_SHIPPED_DIR: dict[ManifestType, str] = {"module": "modules", "ale": "ale", "keg": "kegs"}
+
+
+def _shipped(kind: ManifestType, item_id: str) -> Manifest:
+    """One manifest as it SHIPS, read off disk.
+
+    The rest of this file builds synthetic manifests on purpose (see `_m`), and
+    these tests are the deliberate exception: T69 is about the eleven
+    `requires` lines the repository actually ships, and what would make it
+    regress in the field is one of those files changing -- a `requires`
+    dropped, an id renamed -- while a synthetic fixture kept saying yes.
+    """
+    from yulon.manifest_store import load_manifest
+
+    return load_manifest(MANIFESTS_DIR / "wow-wotlk" / _SHIPPED_DIR[kind] / f"{item_id}.json")
+
+
+def test_loot_pet_is_locked_until_mod_ale_is_actually_here(tmp_path: Path) -> None:
+    """A shipped `requires` locks Install, and the lock lifts when the clone appears (T69).
+
+    `requires` was in the schema, in eleven shipped manifests and read by
+    NOTHING. Loot Pet declares `mod-ale` and installed cleanly without it,
+    which drops a Lua script into a server with no Lua engine: a success
+    report, and then nothing happens, ever, with no line anywhere saying why.
+
+    Exactly one rule can lock this row. `lootpet.json` declares no
+    `conflicts_with` at all, so a green assertion here cannot be T55's guard
+    answering in T69's place -- and the second half proves the lock is about
+    the FOLDER rather than about the declaration, which the first half alone
+    cannot: `requires` is unchanged between the two reads, and only the disk
+    moves.
+    """
+    from yulon.apply import installed_clones
+
+    lootpet = _shipped("ale", "lootpet")
+    assert lootpet.requires == ("mod-ale",) and lootpet.conflicts_with == ()
+    catalog = [_shipped("module", "mod-ale"), lootpet]
+
+    (tmp_path / "ale_scripts").mkdir()
+    locked = _row(_rows(catalog, installed_clones(tmp_path)), "lootpet")
+    assert not locked.installable
+    assert locked.install_reason is not None
+    # By NAME, as `conflicts with` and `required by` are: `mod-ale` is what the
+    # machine matched on, and the name is what the row above it shows.
+    assert "AzerothCore Lua Engine (ALE)" in locked.install_reason
+    assert mp.chip_needs_label("AzerothCore Lua Engine (ALE)") in _labels(locked)
+
+    # The server has ALE now. Same catalog, same declaration, one new folder.
+    (tmp_path / "modules" / "mod-ale").mkdir(parents=True)
+    freed = _row(_rows(catalog, installed_clones(tmp_path)), "lootpet")
+    assert freed.installable, "the lock did not lift when the requirement arrived"
+    assert freed.install_reason is None
+    assert not [label for label in _labels(freed) if label.startswith("needs ")]
+
+
+def test_city_bots_is_freed_by_the_mod_playerbots_the_server_itself_cloned(
+    tmp_path: Path,
+) -> None:
+    """The non-catalog case, which is the one a catalog lookup gets wrong (T69).
+
+    `mod-city-bots` requires `mod-playerbots`, and `mod-playerbots` has NO
+    manifest: `catalog.json` lists it among wow-wotlk's emulator sources with
+    `dest: modules/mod-playerbots`, so the SERVER install clones it and every
+    Playerbots install has it. Enforcing `requires` by looking the target up as
+    a catalog id is the obvious implementation, and it would lock City Bots
+    forever on precisely the machines where its requirement is present.
+
+    So the rule asks the disk. `mod-city-bots` declares no `conflicts_with`,
+    so nothing but T69's rule can lock this row either.
+    """
+    from yulon.apply import installed_clones
+
+    city = _shipped("module", "mod-city-bots")
+    assert city.requires == ("mod-playerbots",) and city.conflicts_with == ()
+    catalog = [city]
+
+    (tmp_path / "modules" / "mod-playerbots").mkdir(parents=True)
+    assert _row(_rows(catalog, installed_clones(tmp_path)), "mod-city-bots").installable
+
+    bare = tmp_path / "bare"
+    (bare / "modules").mkdir(parents=True)
+    locked = _row(_rows(catalog, installed_clones(bare)), "mod-city-bots")
+    assert not locked.installable
+    # No catalog entry, so the id IS the name -- and it is the right thing to
+    # print: it is what the folder under `modules/` is called.
+    assert mp.chip_needs_label("mod-playerbots") in _labels(locked)
+
+
+def test_the_tab_and_the_applier_refuse_the_same_install_in_the_same_words(
+    tmp_path: Path,
+) -> None:
+    """The lock is UI; the refusal is the guarantee; one sentence covers both (T69).
+
+    The row's Install is disabled, but `install()` is reachable without it --
+    the context menu, and a custom-folder install of a manifest the user
+    edited. T55's line is *lock Install where the applier would refuse*, and
+    the half that makes it true is that both read `missing_requirements()` and
+    spell the answer with `requirement_refusal()`.
+
+    Asserted against the applier's REAL refusal rather than a phrase both
+    happen to contain: the row's reason is the applier's sentence minus the
+    trailing *Nothing was changed.*, which only the applier can promise.
+    """
+    from yulon.apply import Applier, installed_clones, requirement_refusal
+
+    lootpet = _shipped("ale", "lootpet")
+    (tmp_path / "ale_scripts").mkdir()
+    row = _row(_rows([lootpet], installed_clones(tmp_path)), "lootpet")
+
+    # Spelled out ONCE, as text. Comparing the two callers to each other only
+    # says they agree; it does not say what they agree on, and a mutation that
+    # emptied `requirement_refusal()` would satisfy that comparison happily.
+    sentence = (
+        "lootpet needs mod-ale, which is not installed here: this manifest names it in "
+        "`requires`, and lootpet does nothing without it. Install mod-ale first."
+    )
+    assert requirement_refusal("lootpet", "mod-ale") == sentence
+
+    refusal = Applier(tmp_path)._requires_refusal(lootpet)
+    assert refusal == sentence + " Nothing was changed."
+    # The same words on the row. `mod-ale` is not in this catalog, so there is
+    # no display name to substitute and both sides print the id.
+    assert row.install_reason == sentence
+
+
+def test_a_conflict_and_a_missing_requirement_do_not_both_speak(tmp_path: Path) -> None:
+    """One lock, one reason, and the conflict is the one that keeps the row (T69).
+
+    A row told both would have the user remove one module in order to be told
+    to install another. The conflict wins because its remedy is on this machine
+    already. Pinned because the alternative -- last writer wins -- is what an
+    `install_reason` assigned twice would silently become.
+    """
+    from yulon.apply import installed_clones
+
+    (tmp_path / "modules" / "mod-ah-bot").mkdir(parents=True)
+    both = _m("mod-ah-bot-plus", conflicts_with=("mod-ah-bot",), requires=("mod-ale",))
+    rows = _rows([_m("mod-ah-bot"), both], installed_clones(tmp_path))
+
+    locked = _row(rows, "mod-ah-bot-plus")
+    assert not locked.installable
+    assert locked.install_reason == mp.conflict_reason("Mod Ah Bot")
+    assert mp.chip_conflicts_with_label("Mod Ah Bot") in _labels(locked)
+    assert not [label for label in _labels(locked) if label.startswith("needs ")]

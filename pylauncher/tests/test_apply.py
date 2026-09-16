@@ -119,6 +119,24 @@ ALE: dict[str, Any] = {
     "prompts": [{"key": "duration", "question": "seconds", "kind": "int", "default": "20"}],
 }
 
+
+def _have_requirements(server_dir: Path, manifest: Any) -> None:
+    """Put every id a manifest `requires` on disk, the way a server install leaves it.
+
+    T69 turned `requires` into a refusal, so a fixture that installs a manifest
+    declaring one now has to supply it: `mod-ale` for the nine shipped ale
+    scripts and kegs, `mod-playerbots` for the two bot modules. A folder under
+    a clone directory is the whole of it -- `missing_requirements()` asks the
+    disk -- and the tests calling this are about something else entirely.
+
+    Called with the MANIFEST rather than a hard-coded id so that a fixture
+    whose manifest requires nothing gets nothing, and one that grows a
+    requirement is carried without an edit here.
+    """
+    for needed in manifest.requires:
+        (server_dir / "modules" / needed / ".git").mkdir(parents=True, exist_ok=True)
+
+
 MODULE: dict[str, Any] = {
     "id": "mod-ah-bot",
     "name": "AH Bot",
@@ -147,6 +165,7 @@ def test_ale_install_deploys_patches_on_configure_and_removes(tmp_path: Path) ->
     sql = _FakeSql()
     applier = Applier(tmp_path, git=git, sql=sql)
     m = parse_manifest(ALE)
+    _have_requirements(tmp_path, m)
 
     report = applier.install(m)
     assert git.calls[0].url == "https://github.com/Brytenwally/SitMeansRest.git"
@@ -231,7 +250,9 @@ def test_a_caller_tells_applied_from_not_applied_without_reading_a_sentence(
     be the same defect one layer up — the report's own English is not an API.
     """
     ale_git = _FakeGit({"SitMeansRest.lua": "x\n", "sql/tables.sql": "C"})
-    direct = Applier(tmp_path / "ale", git=ale_git, sql=_FakeSql()).install(parse_manifest(ALE))
+    ale = parse_manifest(ALE)
+    _have_requirements(tmp_path / "ale", ale)
+    direct = Applier(tmp_path / "ale", git=ale_git, sql=_FakeSql()).install(ale)
     assert direct.pending_sql == ()
 
     deferred = Applier(
@@ -3784,6 +3805,90 @@ def test_a_conflict_is_found_in_another_familys_clone_folder(tmp_path: Path) -> 
     assert not applier.clone_dir(module).exists()
 
 
+def test_install_refuses_a_module_whose_requirement_is_not_installed(tmp_path: Path) -> None:
+    """`requires` is enforced at install, not merely parsed (T69).
+
+    The twin of `conflicts_with`'s defect, and worse in one way: a conflict
+    fails loudly, at the linker, twenty minutes in. A missing requirement fails
+    SILENTLY. Loot Pet and SitMeansRest declare `mod-ale`, installed cleanly on
+    a server with no Lua engine, reported success -- and then the script never
+    ran, with no line anywhere saying why.
+
+    The Modules tab locks the row for the same reason, and this is the half
+    that is a guarantee: the context menu and a custom-folder install reach
+    `install()` without the button.
+
+    Exactly one rule can refuse this fixture. It declares no `conflicts_with`,
+    nothing else is on disk for a conflict to find, and the refusal is matched
+    against `requirement_refusal()`'s own sentence rather than against a phrase
+    the neighbouring guards also contain.
+    """
+    from yulon.apply import requirement_refusal
+
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    needy = parse_manifest({**OWNED_ITEM, "id": "mod-thing", "requires": ["mod-ale"]})
+
+    with pytest.raises(ApplyError) as caught:
+        applier.install(needy)
+
+    assert str(caught.value) == (
+        requirement_refusal("mod-thing", "mod-ale") + " Nothing was changed."
+    )
+    # And it really changed nothing: the refusal is raised before the clone.
+    assert not applier.clone_dir(needy).exists(), "the refused install still cloned"
+
+
+def test_a_requirement_the_server_install_cloned_lets_the_install_through(
+    tmp_path: Path,
+) -> None:
+    """A folder under `modules/` is the requirement, whoever put it there (T69).
+
+    `mod-city-bots` requires `mod-playerbots`, which has no manifest at all:
+    `catalog.json` lists it among wow-wotlk's emulator sources with `dest:
+    modules/mod-playerbots`, so the server install clones it. A guard that
+    resolved `requires` against the catalog would refuse City Bots forever on
+    every machine that in fact has its requirement.
+
+    The fixture answers differently on the second read and only the DISK moves
+    between them, so this cannot pass by the guard being absent: the first half
+    refuses, the second allows, with one identical manifest.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    needy = parse_manifest({**OWNED_ITEM, "id": "mod-city-bots", "requires": ["mod-playerbots"]})
+
+    with pytest.raises(ApplyError):
+        Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL)).install(needy)
+
+    (tmp_path / "modules" / "mod-playerbots" / ".git").mkdir(parents=True)
+    report = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL)).install(needy)
+    assert report.item_id == "mod-city-bots"
+    assert (Applier(tmp_path).clone_dir(needy) / "README.md").is_file()
+
+
+def test_a_requirement_is_found_in_another_familys_clone_folder(tmp_path: Path) -> None:
+    """The search is every family's folder, and here that is the ORDINARY case (T69).
+
+    Nine of the eleven shipped `requires` are an ale script or a keg naming
+    `mod-ale`, which is a MODULE: the requirer lands in `ale_scripts/` and the
+    requirement in `modules/`. A check that looked only where the manifest
+    being installed will land reads correctly, is one line shorter, and refuses
+    every one of them forever.
+    """
+    ale = parse_manifest(
+        {**OWNED_ITEM, "id": "some-ale-script", "type": "ale", "requires": ["mod-ale"]}
+    )
+    git = _FakeGit({"LootPet.lua": "-- pet\n"})
+
+    with pytest.raises(ApplyError) as caught:
+        Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL)).install(ale)
+    assert "mod-ale" in str(caught.value)
+
+    (tmp_path / "modules" / "mod-ale" / ".git").mkdir(parents=True)
+    report = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL)).install(ale)
+    assert report.item_id == "some-ale-script"
+
+
 def test_a_module_installs_on_a_machine_with_no_host_git(tmp_path: Path, monkeypatch) -> None:
     """The server install never needed host git, so the module install must not (T58).
 
@@ -4013,10 +4118,16 @@ def _unpinned_shipped(item_id: str) -> Any:
     return manifest
 
 
-def _unpinned_applier(tmp_path: Path, origin: Path) -> tuple[Applier, _LocalOrigin]:
+def _unpinned_applier(
+    tmp_path: Path, origin: Path, manifest: Any = None
+) -> tuple[Applier, _LocalOrigin]:
     client = tmp_path / "TurtleWoW"
     (client / "Interface" / "AddOns").mkdir(parents=True, exist_ok=True)
     git = _LocalOrigin(origin)
+    if manifest is not None:
+        # `lootpet` requires `mod-ale` and T69 refuses without it. These tests
+        # are about where HEAD ends up, not about the guard.
+        _have_requirements(tmp_path / "server", manifest)
     return Applier(tmp_path / "server", git=git, client_dir=client), git
 
 
@@ -4095,7 +4206,7 @@ def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
     origin = _origin(tmp_path)
     first = _publish(origin, files, "v1")
     manifest = _unpinned_shipped(item_id)
-    applier, git = _unpinned_applier(tmp_path, origin)
+    applier, git = _unpinned_applier(tmp_path, origin, manifest)
     clone = applier.clone_dir(manifest)
 
     report = applier.install(manifest)
@@ -4136,7 +4247,7 @@ def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_
     manifest = _unpinned_shipped(item_id)
     assert manifest.source is not None
     pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
-    applier, git = _unpinned_applier(tmp_path, origin)
+    applier, git = _unpinned_applier(tmp_path, origin, manifest)
     clone = applier.clone_dir(manifest)
 
     applier.install(pinned)
@@ -4170,7 +4281,7 @@ def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
     origin = _origin(tmp_path)
     _publish(origin, files, "v1")
     manifest = _unpinned_shipped(item_id)
-    applier, _git_seam = _unpinned_applier(tmp_path, origin)
+    applier, _git_seam = _unpinned_applier(tmp_path, origin, manifest)
 
     applier.install(manifest)
     assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
@@ -4280,6 +4391,10 @@ class _ScriptedDb(_FakeSql):
 
 
 def _city_bots_applier(tmp_path: Path, db: _ScriptedDb) -> Applier:
+    # The server install clones `mod-playerbots` (`catalog.json`, `dest:
+    # modules/mod-playerbots`), City Bots requires it, and T69 refuses without
+    # it. Every one of these tests is about the roster import.
+    _have_requirements(tmp_path, _shipped(CITY_BOTS_ID))
     return Applier(
         tmp_path,
         git=_FakeGit(_city_bots_clone()),
@@ -4448,6 +4563,7 @@ def test_a_precondition_is_never_asked_without_a_reader(tmp_path: Path) -> None:
         sql=plain,
         world_running=lambda: False,
     )
+    _have_requirements(tmp_path, _shipped(CITY_BOTS_ID))
 
     report = applier.install(_shipped(CITY_BOTS_ID))
 

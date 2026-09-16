@@ -200,6 +200,15 @@ def chip_conflicts_with_label(name: str) -> str:
     return f"conflicts with {name}"
 
 
+def chip_needs_label(name: str) -> str:
+    """The install lock's chip when a declared requirement is absent, by NAME (T69).
+
+    The owner's own words for the row (2026-09-16). Named beside the other two
+    so the three lock chips cannot drift apart in wording.
+    """
+    return f"needs {name}, not installed"
+
+
 @dataclass(frozen=True)
 class Chip:
     """One small thing a row has to say, and the sentence behind it.
@@ -261,8 +270,10 @@ class ModuleRow:
 
     False when something INSTALLED is a declared alternative to this module --
     `apply.conflicting_installed()`, the same reading the applier refuses on --
-    so the tab does not offer a press whose only outcome is a refusal. At the
-    end of the dataclass, with a default, because the tests build rows
+    so the tab does not offer a press whose only outcome is a refusal. False
+    too when something this manifest names in `requires` is NOT installed
+    (`apply.missing_requirements()`, T69): the same shape, the other direction.
+    At the end of the dataclass, with a default, because the tests build rows
     positionally.
     """
 
@@ -399,11 +410,15 @@ def _chips_for(
     client_dir: Path | None,
     dependants: Sequence[str],
     blocked_by: str | None = None,
+    needs: str | None = None,
 ) -> tuple[Chip, ...]:
     """The seven chips a row may carry, and nothing beyond them.
 
     `blocked_by` is the NAME of an installed module this row's manifest declares
-    a conflict with, or `None` (T55). It is decided by `build_module_rows()`,
+    a conflict with, or `None` (T55). `needs` is the NAME of something this
+    row's manifest declares in `requires` and that is NOT here, or `None` (T69).
+    At most one of the two is ever set, because a row carries one lock and one
+    reason for it. Both are decided by `build_module_rows()`,
     which is the one place that holds both the catalog and what is installed.
 
     Owed first and facts after, because the owed ones name work somebody has to
@@ -493,6 +508,14 @@ def _chips_for(
                 conflict_reason(blocked_by),
             )
         )
+    if needs is not None and not installed:
+        chips.append(
+            Chip(
+                "fact",
+                chip_needs_label(needs),
+                apply_module.requirement_refusal(item_id, needs),
+            )
+        )
     return tuple(chips)
 
 
@@ -569,10 +592,41 @@ def build_module_rows(
         other, kind = found[0]
         return names.get((kind, other), other)
 
+    # `Manifest.requires` names an id and never a family, so the display name is
+    # looked up across every family rather than under the requirer's own. Where
+    # two families really do share an id both carry the same name anyway; where
+    # the catalog knows nothing about the target -- `mod-playerbots`, which the
+    # SERVER install clones -- the id IS the name, and that is the right thing
+    # to print: it is what the folder under `modules/` is called.
+    names_by_id = {manifest.id: manifest.name for manifest in catalog}
+
+    def _needs(manifest: Manifest) -> str | None:
+        # The applier's own reading (T69), for the same reason `_blocked_by()`
+        # borrows `conflicting_installed()`: the tab must not offer a press the
+        # applier will refuse. A folder under any clone directory answers it,
+        # which is what makes the server-cloned `mod-playerbots` count.
+        missing = apply_module.missing_requirements(manifest, installed)
+        if not missing:
+            return None
+        return names_by_id.get(missing[0], missing[0])
+
     def _row(manifest: Manifest) -> ModuleRow:
         here = (manifest.type, manifest.id) in installed_keys
         needed_by = dependants.get(manifest.id, [])
         blocked_by = None if here else _blocked_by(manifest)
+        # One lock and one reason. A conflict is about what is HERE and a
+        # missing requirement about what is not, and a row told both at once
+        # would have the user remove one module in order to be told to install
+        # another. The conflict wins because it is the older answer and the one
+        # whose remedy is on this machine already.
+        needs = None if here or blocked_by is not None else _needs(manifest)
+        lock_reason = (
+            conflict_reason(blocked_by)
+            if blocked_by is not None
+            else (
+                apply_module.requirement_refusal(manifest.id, needs) if needs is not None else None
+            )
+        )
         return ModuleRow(
             id=manifest.id,
             family=manifest.type,
@@ -591,6 +645,7 @@ def build_module_rows(
                 client_dir,
                 needed_by,
                 blocked_by,
+                needs,
             ),
             removable=not (here and needed_by),
             remove_reason=(
@@ -603,8 +658,8 @@ def build_module_rows(
             # clone to read, and looking one up for all 41 would be 20 reads
             # of folders that are not there.
             version=seen_versions.get((manifest.type, manifest.id)) if here else None,
-            installable=blocked_by is None,
-            install_reason=None if blocked_by is None else conflict_reason(blocked_by),
+            installable=lock_reason is None,
+            install_reason=lock_reason,
         )
 
     # T41's per-FOLDER accounting, moved here from `reload_modules()`. `ale` and
