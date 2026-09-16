@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,7 @@ from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install,
 from tests.test_families_cmangos import ENTRY as TBC
 from tests.test_families_cmangos import engine as tbc_engine
 from tests.test_families_cmangos import install as tbc_install
-from yulon import git, runner
+from yulon import git, resources, rmtree, runner
 from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.cmangos import CmangosInstaller
@@ -1207,6 +1208,194 @@ def test_a_shallow_clone_answers_could_not_count_rather_than_one_commit(
     assert (
         real.commits_since(shallow, first) is None
     ), "a shallow clone answered a distance it cannot know"
+
+
+def _sha(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _grafts(dest: Path) -> list[str]:
+    """`.git/shallow` — the commits git handed this checkout with their parents cut."""
+    return (dest / ".git" / "shallow").read_text(encoding="utf-8").split()
+
+
+def _real_git_tbc(
+    rec: Recorder, server_dir: Path, origin: Path, pin: str
+) -> tuple[CmangosInstaller, native.CatalogEntry]:
+    """A TBC engine whose git is REAL git over `origin`, pinned at `pin`.
+
+    Two seams are doubled and the rest of git is not, and which two matters.
+    `clone` is handed the route's own `CloneSpec` with nothing changed but the
+    URL, because a `file://` path cannot be spelled in a manifest (`Source.repo`
+    takes `owner/name` or an https host), and `remote_url` answers the catalog's
+    URL for the same reason — `same_repo()` would otherwise refuse a checkout of
+    the very repository this test cloned. Everything the guard under test reads
+    (`local_edits`, `no_local_commits`, `head_sha`, `commits_since`) is
+    `git.RunnerGit`'s own, run against the checkout on disk, and the depth,
+    branch and rev on every spec are the catalog's.
+
+    The rest of the machine stays the Recorder's, as in every other route test
+    here: what follows the guard is a compile, and this test is about what git
+    says to the guard.
+    """
+    moving = {"cmangos/mangos-tbc", "cmangos/playerbots"}
+    entry = TBC.model_copy(
+        update={
+            "emulator": TBC.emulator.model_copy(
+                update={
+                    "sources": tuple(
+                        source.model_copy(update={"rev": pin}) if source.repo in moving else source
+                        for source in TBC.emulator.sources
+                    )
+                }
+            )
+        }
+    )
+    real = git.RunnerGit()
+    urls = {server_dir / source.dest: source.url for source in entry.emulator.sources}
+
+    def clone(spec: git.CloneSpec) -> None:
+        rec.clones.append(spec)
+        real.clone(replace(spec, url=origin.as_uri()))
+
+    made = CmangosInstaller(
+        entry,
+        installers_root=resources.installers_dir(),
+        seams=rec.seams(
+            platform_id=lambda: "linux",
+            clone=clone,
+            remote_url=urls.get,
+            local_edits=real.local_edits,
+            no_local_commits=real.no_local_commits,
+            head_sha=real.head_sha,
+            head_version=real.head_version,
+            commits_since=real.commits_since,
+            restore_rev=real.restore_rev,
+        ),
+    )
+    made._test_gate = native.CallableGate(rec.probe, rec.reset)  # type: ignore[attr-defined]
+    return made, entry
+
+
+def test_a_source_that_was_updated_and_returned_is_still_updatable_over_two_grafts(
+    tmp_path: Path,
+) -> None:
+    """T82: the live refusal, at the route, on a shape only real git makes.
+
+    Three ordinary presses on a `depth: 1` source — clone at the pin, "Update to
+    latest", "Return to the tested pin" — leave `.git/shallow` holding TWO
+    grafted commits with no edge between them: the tip the update fetched and
+    the pin the return fetched back. `rev-list --count FETCH_HEAD..HEAD` then
+    answers 1 and `merge-base --is-ancestor` answers no, and on the update route
+    alone (`_refuse_unless_updatable()`) that read as "carries commits that
+    upstream does not" and refused BOTH buttons, permanently, on a checkout
+    nobody had committed anything into. Measured live on a real playerbots
+    clone, 2026-09-16; `git.no_local_commits()`'s `_only_grafts()` is what lets
+    it through, and this is the route-layer test that pins the pair together.
+
+    The shape is BUILT BY THE ROUTE, not by writing `.git/shallow`: a
+    hand-written graft file would prove this route survives a file a test wrote,
+    and the whole finding is that the app's own two presses are what make it.
+    `_grafts()` is asserted before the third press for exactly that reason — if
+    a future `_pin()` stopped leaving two boundaries, this test would go on
+    passing while testing nothing, and the assertion is what makes it fail
+    instead.
+
+    Both directions are pressed afterwards, because the live refusal was both:
+    the guard is the same code on the way out and the way back, so a fix that
+    only freed the update would strand a user one press further along.
+    """
+    if not git.git_available():
+        pytest.skip("no host git")
+    # The origin is named for the dest the carried patch applies to, so
+    # `lay_patch_sources` lays the pre-image of the files this family's patch
+    # edits INTO THE COMMIT — a real clone then carries them and the route's
+    # patch stage has something to apply to.
+    origin = tmp_path / "origin" / "src" / "mangos-tbc"
+    origin.mkdir(parents=True)
+    _git(["init", "-q", "-b", "main", "."], origin)
+    _git(["config", "user.email", "t@example.invalid"], origin)
+    _git(["config", "user.name", "T"], origin)
+    lay_patch_sources(TBC)(origin)
+    (origin / "README").write_text("the tested pin\n", encoding="utf-8", newline="\n")
+    _git(["add", "-A"], origin)
+    _git(["commit", "-qm", "pinned"], origin)
+    pin = _sha(origin)
+    # Upstream is AHEAD of the pin when the install clones, which is every
+    # shipped source's ordinary state: the pin is a commit somebody gated weeks
+    # ago. That is what makes `_pin()`'s `fetch --depth 1 <rev>` graft a second
+    # time instead of walking a parent it already has.
+    (origin / "README").write_text("upstream moved on\n", encoding="utf-8", newline="\n")
+    _git(["add", "-A"], origin)
+    _git(["commit", "-qm", "past the pin"], origin)
+
+    rec, server_dir, _ = _tbc(tmp_path)
+    tbc, entry = _real_git_tbc(rec, server_dir, origin, pin)
+    moving = [source for source in entry.emulator.sources if not native.held_at_its_pin(source)]
+    dests = [server_dir / source.dest for source in moving]
+    # The install above ran on the Recorder's clone double, which leaves a bare
+    # `.git`. These are the same sources cloned FOR REAL at the pin, which is
+    # the state a finished install is in and the first of the three presses.
+    for dest in dests:
+        # `exists()` because playerbots is cloned INSIDE the core checkout, so
+        # the core's removal takes it with it.
+        if dest.exists():
+            rmtree.remove_tree(dest)
+    for source, dest in zip(moving, dests, strict=True):
+        tbc._seams.clone(
+            git.CloneSpec(
+                url=source.url,
+                dest=dest,
+                branch=source.branch,
+                sparse_path=source.sparse_path,
+                depth=source.depth,
+                rev=source.rev,
+            )
+        )
+        assert pin in _grafts(dest), f"{dest} did not start on a grafted pin"
+    rec.clones.clear()
+
+    (origin / "README").write_text("upstream has moved\n", encoding="utf-8", newline="\n")
+    _git(["add", "-A"], origin)
+    _git(["commit", "-qm", "the tip"], origin)
+    tip = _sha(origin)
+    real = git.RunnerGit()
+
+    list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert [real.head_sha(dest) for dest in dests] == [tip, tip]
+
+    list(tbc.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
+    assert [real.head_sha(dest) for dest in dests] == [pin, pin]
+    for dest in dests:
+        grafts = _grafts(dest)
+        assert len(grafts) == 2 and pin in grafts, f"not the twice-grafted shape: {grafts}"
+        # And the two questions the guard's own fetch then asks, measured here:
+        # they must be LYING, or the press below would proceed for a reason that
+        # has nothing to do with `_only_grafts()`. Both figures are the live
+        # gate's (`.notes` T82): one commit "ahead", and no ancestry either way.
+        _git(["fetch", "-q", "origin", "HEAD"], dest)
+        ahead = subprocess.run(
+            ["git", "rev-list", "--count", "FETCH_HEAD..HEAD"],
+            cwd=dest,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert ahead == "1", f"{dest} is not the shape that counts one commit ahead"
+        connected = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"], cwd=dest, check=False
+        )
+        assert connected.returncode != 0, "if git ever connects these, this fix can be simpler"
+
+    # The third press: the one that was refused live, on the checkout the two
+    # above left behind and with nothing else done to it.
+    list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
+    assert [real.head_sha(dest) for dest in dests] == [tip, tip], "the update was refused"
+
+    list(tbc.update_to_latest(InstallOptions(server_dir=server_dir), to_pin=True))
+    assert [real.head_sha(dest) for dest in dests] == [pin, pin], "the way back was refused"
 
 
 def test_the_two_transports_parse_one_status_the_same_way() -> None:

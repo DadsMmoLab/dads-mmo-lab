@@ -4089,7 +4089,12 @@ class StagedInstaller:
           this route resets, which would discard the commits outright and leave
           them reachable only through the reflog. `git.HistoryReader`'s own
           docstring is the argument: a checkout somebody committed their work
-          into is perfectly clean by `status`.
+          into is perfectly clean by `status`. **This one depends on
+          `git._only_grafts()` to stay usable at all** (T82, measured live
+          2026-09-16): a `depth: 1` source that has been updated and then
+          returned to its pin carries two grafted, unconnected commits in
+          `.git/shallow`, counts as one commit ahead of upstream, and without
+          that second layer both buttons refuse it for ever.
 
         `None` from any of the three reads refuses, and the sentence says which
         of the two it is. "We could not ask" is never "there is nothing to
