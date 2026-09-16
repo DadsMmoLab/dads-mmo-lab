@@ -506,9 +506,9 @@ def test_the_update_writes_this_apps_compose_back_over_the_one_the_fetch_restore
     rec.on_clone = reset_the_tracked_compose
     _press(rec, server_dir)
 
-    assert composegen.GENERATED_MARKER in base.read_text(encoding="utf-8"), (
-        "the fetch put upstream's compose back and nothing wrote ours again"
-    )
+    assert composegen.GENERATED_MARKER in base.read_text(
+        encoding="utf-8"
+    ), "the fetch put upstream's compose back and nothing wrote ours again"
 
 
 # -- the restores -----------------------------------------------------------

@@ -60,10 +60,14 @@ from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
+    RETURN_TO_PIN_BUTTON_LABEL,
     TUNING_RECREATE_LABEL,
     TUNING_RESTART_LABEL,
+    UPDATE_TO_LATEST_BUTTON_LABEL,
     ControllerServices,
     ControllerView,
+    UpdateChoice,
+    ask_update_choice,
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
 from yulon.ui.widgets.job import run_inline
@@ -9204,3 +9208,400 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     which is the review this change would owe.
     """
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
+
+
+# -- T64: "Update the server to latest…" --------------------------------------
+
+
+class _LatestSpy:
+    """Everything `LatestRoute` is asked, and what it answers.
+
+    A recorder rather than four lambdas, because the interesting assertions are
+    about ORDER and COUNT -- did the backup happen before the press, did a
+    declined dialog reach the press at all -- and four separate closures cannot
+    be asked that.
+    """
+
+    def __init__(self) -> None:
+        self.presses: list[object] = []
+        self.pin_presses: list[object] = []
+        self.line = ""
+
+    def route(self) -> native.LatestRoute:
+        def press(cancel: object = None) -> Iterator[str]:
+            self.presses.append(cancel)
+            yield "--- update-sources"
+            yield "moved"
+
+        def to_pin(cancel: object = None) -> Iterator[str]:
+            self.pin_presses.append(cancel)
+            yield "back on the pin"
+
+        return native.LatestRoute(
+            confirmation=lambda: (
+                "Update WoW WotLK in /srv to the newest x/y code?\n\nThis builds code nobody "
+                "has tested with this app."
+            ),
+            press=press,
+            pin_confirmation=lambda: (
+                "Put WoW WotLK back on the tested commit? It does NOT undo anything the newer "
+                "server already wrote into your databases."
+            ),
+            to_pin=to_pin,
+            version_line=lambda: self.line,
+        )
+
+
+def _latest(
+    ps: _Ps, tmp_path: Path, made: _FakeMaintenance | None = None
+) -> tuple[ControllerServices, _LatestSpy]:
+    services = _services(ps, tmp_path, [], made)
+    spy = _LatestSpy()
+    services.update_to_latest = spy.route()
+    return services, spy
+
+
+def _answer(monkeypatch: pytest.MonkeyPatch, which: object) -> list[object]:
+    """Answer the REAL three-way dialog with `which`, and keep the box it was asked on.
+
+    `QMessageBox.exec` and not a seam on the view: `ask_update_choice()` is the
+    code under test as much as the slot is, and a seam would let these tests
+    answer a question whose buttons nothing had checked. The instance is kept
+    so the buttons, their labels and the default ARE checked, once, below.
+    """
+    boxes: list[object] = []
+
+    def exec_(self: object) -> object:
+        boxes.append(self)
+        return which
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "exec", exec_)
+    return boxes
+
+
+def test_the_update_button_sits_beside_rebuild_and_is_hidden_where_there_is_no_route(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Hidden rather than greyed, which is this tab's one exception to its own rule.
+
+    A greyed control says "this exists and is not available now". For a server
+    adopted from a WSL distro, or an entry whose catalog does not offer the
+    route, nothing will ever enable it -- so there is nothing to grey.
+    """
+    services, _ = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.update_to_latest_button.text() == UPDATE_TO_LATEST_BUTTON_LABEL
+    assert not view.update_to_latest_button.isHidden()
+
+    bare = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert bare.services.update_to_latest is None
+    assert bare.update_to_latest_button.isHidden()
+    assert bare.update_to_latest() is False
+
+
+def test_the_one_dialog_offers_three_buttons_in_the_designs_words_and_defaults_to_cancel(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither the labels nor the default is observable from the outcome.
+
+    So this is the one place the dialog ITSELF is the subject: three buttons,
+    the approved design's words on them, and Cancel as both the default (what
+    Enter does) and the escape button (what Escape and the title bar's X do).
+    An update of untested code is not something Enter should be able to start.
+    """
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Cancel)
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is False
+    assert spy.presses == [], "Cancel started the update"
+    box = boxes[0]
+    # By ROLE and not by position. `QMessageBox` lays its buttons out in the
+    # host platform's order, so a positional assertion here would be a claim
+    # about the window manager rather than about this dialog, and it would be a
+    # different claim on Windows and macOS (both of which this app ships to).
+    assert {b.text() for b in box.buttons()} == {
+        "Back up first, then update",
+        "Update without a backup",
+        "Cancel",
+    }
+    assert box.button(qmb.StandardButton.Yes).text() == "Back up first, then update"
+    assert box.button(qmb.StandardButton.Save).text() == "Update without a backup"
+    assert (
+        box.button(qmb.StandardButton.No) is None
+    ), "No is the answer conftest gives an unpatched dialog, and it must mean nothing here"
+    assert box.defaultButton() is box.button(qmb.StandardButton.Cancel)
+    assert box.escapeButton() is box.button(qmb.StandardButton.Cancel)
+    assert "nobody has tested" in box.text()
+
+
+def test_an_answer_the_dialog_does_not_recognise_cancels_rather_than_updating(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The safety property behind the button choice, asserted on the function itself.
+
+    `conftest._no_modal_dialogs` answers every unpatched `exec()` with `No`,
+    because `No` is the reply that takes no action. If `No` meant "update
+    without a backup" here, every test in this suite that so much as brushed
+    this control would start a compile of untested code. `NoButton` is the same
+    question: it is what Escape and the window's close button answer.
+    """
+    qmb = controller_view_module.QMessageBox
+    for answer in (
+        qmb.StandardButton.No,
+        qmb.StandardButton.NoButton,
+        int(qmb.StandardButton.Close),
+    ):
+        _answer(monkeypatch, answer)
+        assert ask_update_choice(None, "t", "b") is UpdateChoice.CANCEL, answer
+
+
+def test_a_real_static_int_answer_is_read_the_same_as_the_enum_member(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33's shape at the newest site: `==`, never `is`, on either return type.
+
+    PySide6 6.11's dialogs hand back a plain `int` from the static call and a
+    `StandardButton` member from an instance's, and `is` against the member was
+    always False for the first. Both are driven rather than argued about.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, int(qmb.StandardButton.Save))
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: "moved" in view.rebuild_log.text(), "the update reached the panel")
+    assert len(spy.presses) == 1, "an int answer did not start the update"
+
+
+def test_update_without_a_backup_starts_the_press_and_takes_no_backup(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both halves, because the first alone would be true of a route that backed up anyway.
+
+    Somebody who chose "Update without a backup" chose that; a mysqldump of a
+    full world they did not ask for is minutes of their evening and a file on
+    their disk.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    made = _FakeMaintenance()
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: "moved" in view.rebuild_log.text(), "the update reached the panel")
+    assert len(spy.presses) == 1
+    assert spy.presses[0] is not None, "the panel's Stop button has nothing to set"
+    assert made.backups == 0, "a backup was taken though the user said not to"
+
+
+def test_backing_up_first_takes_the_backup_then_asks_again_before_updating(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second question is not a formality: minutes have passed and the answer is on screen.
+
+    No by default, read through `said_yes()`, and the update only starts on an
+    explicit Yes. Asserted in ORDER -- the backup happened, and only then was
+    the press made -- because "both happened" is also true of a route that
+    updated first.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return qmb.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    made = _FakeMaintenance()
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: made.backups == 1, "the backup ran")
+    pump_until(lambda: len(spy.presses) == 1, "the update started after the backup")
+    assert asked and asked[0].startswith("Backup saved to backups."), asked
+    assert "Update now?" in asked[0]
+
+
+def test_declining_the_second_question_leaves_the_backup_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saying no after the backup costs nothing, and the backup is still theirs.
+
+    The report says where it is rather than going quiet: a user who spent five
+    minutes on a dump and then changed their mind must not be left wondering
+    whether it happened.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: qmb.StandardButton.No,
+    )
+    made = _FakeMaintenance()
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.update_to_latest()
+    pump_until(lambda: made.backups == 1, "the backup ran")
+    pump_until(
+        lambda: "was not started" in view.maintenance_report.toPlainText(),
+        "the decline was reported",
+    )
+    assert spy.presses == []
+    assert "backups" in view.maintenance_report.toPlainText()
+
+
+def test_a_backup_that_fails_stops_the_update_in_dmls_own_words(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`dml wow update`'s rule, and not wow-manage's.
+
+    wow-manage offered a backup and continued regardless. Somebody who asked
+    for a backup FIRST asked for it because they want one before this runs, and
+    "we could not take one, so we did the dangerous thing anyway" is the
+    opposite of the answer they gave.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text, *a, **k: warned.append(text),
+    )
+    made = _FakeMaintenance()
+
+    def refuse() -> BackupReport:
+        raise MaintenanceError("the database container is not running")
+
+    made.back_up = refuse  # type: ignore[method-assign]
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.update_to_latest()
+    pump_until(lambda: bool(warned), "the failed backup was reported")
+
+    assert spy.presses == [], "the update ran after the backup failed"
+    assert warned[0].startswith("Backup failed — the update was not started")
+    assert "not running" in warned[0], "the reason was dropped"
+    assert failures and failures[0] == warned[0]
+
+
+def test_a_backup_that_answers_with_something_else_is_treated_as_a_failure(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_backup_done()` ignores a value it cannot draw; here that would be updating blind.
+
+    The two are looking at the same value with different stakes. There, "nothing
+    to draw" costs a report line. Here, carrying on would mean updating without
+    the backup somebody asked for and with nobody having said it did not happen.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    made = _FakeMaintenance()
+    made.back_up = lambda: None  # type: ignore[assignment,return-value]
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.update_to_latest()
+    pump_until(
+        lambda: "Backup failed" in view.maintenance_report.toPlainText(),
+        "the unusable backup was reported as a failure",
+    )
+    assert spy.presses == []
+
+
+def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rebuild's own gates, and this press ENDS in that rebuild.
+
+    Asserted through `_busy` rather than through a running panel, because
+    `_busy` is the state an import puts the tab in and an import is the job
+    that cannot be stopped at all.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view._set_busy(True)
+
+    assert view.update_to_latest() is True, "a refusal has to be distinguishable from a decline"
+    assert spy.presses == []
+    assert view.update_to_latest_button.isEnabled() is False
+
+
+def test_the_version_line_and_the_way_back_appear_together_or_not_at_all(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """ONE reading decides both, and that is the point of asking once.
+
+    `version_line()` is empty exactly when this install is still on its catalog
+    pins, which is exactly when there is nothing to return from. Two readings
+    could disagree -- a press finishing between them is all it would take -- and
+    the disagreement's shape is a live "Return to the tested pin…" over a line
+    saying the server IS on it.
+    """
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.source_version_label.text() == ""
+    assert view.source_version_label.isHidden()
+    assert view.return_to_pin_button.isHidden()
+
+    spy.line = "Built from a1b2c3d (2026-09-16), 12 commits past the tested pin f82e7d6"
+    view._refresh_source_version()
+    assert view.source_version_label.text() == spy.line
+    assert not view.source_version_label.isHidden()
+    assert not view.return_to_pin_button.isHidden()
+    assert view.return_to_pin_button.text() == RETURN_TO_PIN_BUTTON_LABEL
+
+
+def test_returning_to_the_pin_asks_yes_no_defaulting_to_no_and_offers_no_backup(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No backup here is deliberate rather than an omission.
+
+    What a backup protects against is a NEW server writing into an old
+    database, and that has already happened by the time anybody wants this
+    button. The offer belongs to the press that caused it. Offering one here
+    would suggest this undoes those writes, which it does not.
+    """
+    qmb = controller_view_module.QMessageBox
+    calls: list[tuple[object, ...]] = []
+
+    def question(*a: object, **k: object) -> object:
+        calls.append(a)
+        return qmb.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    made = _FakeMaintenance()
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.return_to_the_tested_pin() is True
+    pump_until(lambda: "back on the pin" in view.rebuild_log.text(), "the return reached the panel")
+    assert len(spy.pin_presses) == 1
+    assert made.backups == 0
+    yes = qmb.StandardButton.Yes
+    no = qmb.StandardButton.No
+    assert calls[0][-2] == yes | no
+    assert calls[0][-1] is no, "Enter would start an hour of compiling"
+    assert "NOT undo" in str(calls[0][2])
+
+
+def test_declining_the_return_starts_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """`conftest` answers No, so this is also what every other test here asserts implicitly."""
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.return_to_the_tested_pin() is False
+    assert spy.pin_presses == []
+    assert view.rebuild_log.running is False
