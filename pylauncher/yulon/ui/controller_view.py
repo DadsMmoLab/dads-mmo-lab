@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -121,7 +121,7 @@ from yulon.ui.theme import (
 )
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
-from yulon.ui.widgets.log_panel import LogPanel
+from yulon.ui.widgets.log_panel import CollapseHandle, LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
 from yulon.ui.widgets.modules_panel import (
     ModulesPanel,
@@ -2479,6 +2479,55 @@ class _ReportBox(QPlainTextEdit):
         return QSize(hint.width(), max(hint.height(), self._lines_tall(1)))
 
 
+REPORT_STRIP_TITLE = "Last action"
+"""The title on a report box's strip, and the first one those boxes have had.
+
+A `_ReportBox` is the answer to the press the user just made, and until T80 it
+was an unlabelled field that was 106px of nothing until it had one. The strip
+names it AND folds it away, which is why the title arrives with the handle.
+"""
+
+
+class _ReportStrip(CollapseHandle):
+    """The strip over a `_ReportBox`: it names the box and folds it away.
+
+    Not part of `_ReportBox` itself, deliberately. `module_report` and
+    `tuning_report` are `QPlainTextEdit`s that a dozen call sites write with
+    `setPlainText()` and the tests read with `toPlainText()`; wrapping them in a
+    container would have moved every one of those onto an inner widget for a
+    strip that is one label. The strip OWNS the box instead, and the box is the
+    same object it always was.
+
+    **It follows the text rather than remembering a preference**, which is the
+    same rule the log's handle follows: open when there is a report, folded when
+    there is not. The box is empty on every start -- which is when the list needs
+    the room -- and an empty box still costs the 90px min-height the theme gives
+    every text field (T45: that floor is not this ticket's to overrule). A user
+    who folds a long report away gets the rows back; the next press unfolds it,
+    because a press whose answer is hidden is a press that looks like it did
+    nothing.
+    """
+
+    def __init__(self, box: QPlainTextEdit, parent: QWidget | None = None) -> None:
+        super().__init__(REPORT_STRIP_TITLE, parent)
+        self._box = box
+        self.toggled.connect(self._fold)
+        box.textChanged.connect(self._follow_the_text)
+        self._follow_the_text()
+
+    def _fold(self, collapsed: bool) -> None:
+        self._box.setVisible(not collapsed)
+
+    def _follow_the_text(self) -> None:
+        """Open iff the box has something to say.
+
+        `set_collapsed` is a no-op when the state already holds, so this does not
+        fight the user on every keystroke of a report being written into the box
+        a line at a time -- only the empty-to-something edge moves anything.
+        """
+        self.set_collapsed(not self._box.toPlainText())
+
+
 _WHEN_A_MINIMUM_MOVES = (
     QEvent.Type.Polish,
     QEvent.Type.PolishRequest,
@@ -2496,58 +2545,138 @@ run. The rest are the ways it can change again afterwards.
 """
 
 
+LOG_SHARE_OF_THE_TAB = 4
+"""The most of its tab a log with a job's output in it may keep, as a divisor.
+
+T80, and it is the whole of what that ticket promises: whatever a rebuild
+writes, three quarters of the tab stay with the list above it. T73 lifted the
+idle cap to `_NO_HEIGHT_CAP` the first time a job started and never put anything
+back -- the honest reading of "a job's output is what the panel is for" -- and
+live on a maximised 1080p desktop that was ~400px of log over a list of a row and
+a half. The hand restarted the app to reach the next row.
+
+A QUARTER, and the ticket's own suggestion of a third was measured first: a
+maximised window on a real 1080p desktop is 47px shorter than the screen (GNOME's
+top bar and the title bar), and at that shape a third left the list at 294px and
+FOUR rows -- one under the count this is meant to guarantee. A quarter is 213px
+there, which is the strip and some eight lines of output, and it leaves five.
+
+Floored at the panel's own minimum by `_share_of_the_tab()`, so on a small window
+this can only ever be "as small as the panel is allowed to be" and never a cap
+that clips the strip.
+
+The other half of the fix is that the user can fold the panel away entirely, so
+this is the number that applies while they have NOT said anything; it is not a
+claim that a quarter is always the right amount.
+"""
+
+
 class _IdleLogPanel(LogPanel):
-    """A `LogPanel` that stays at its smallest until a job has something to say.
+    """A `LogPanel` that starts folded away and never takes more than its share.
 
     The Modules tab's log is empty on every start -- it carries a rebuild's or a
     database update's output, and neither has run -- and an empty panel asking
-    for its full 240px was a third of the tab's height spent on nothing.
+    for its full 240px was a quarter of the tab's height spent on nothing.
 
-    Capped rather than hidden: the strip with the elapsed field and the Stop
-    button stays on screen, so the panel is where it was when a job does start.
-    It is lifted for good the first time a run starts -- a job's output is then
-    the thing worth the height, and the user who came to read it should not have
-    to give it back.
+    Folded rather than hidden: the strip with the handle, the elapsed field and
+    the Stop button stays on screen, so the panel is where it was when a job does
+    start. It unfolds itself the first time a run starts -- a job's output is
+    then worth the height -- and from that point it is capped at
+    `LOG_SHARE_OF_THE_TAB`, so the list above it is never the thing that pays.
 
-    The cap is this panel's OWN `minimumSizeHint()`, re-read on every event that
-    can change it rather than measured once. A cap taken in `__init__` is taken
-    before the panel has a parent, and the theme it will be styled by is applied
-    to the WINDOW (`apply_dadcraft_theme(window)` in `build_window`) before this
-    object exists: measured 2026-09-16 in that order, the cap came out 152px
-    against a minimum of 180, so the panel was drawn 148 -- 32px under its own
-    floor, with the text pane clipped -- and it stayed there, because the next
-    restyle only happens if the window is resized to a NEW width and the app
-    opens at the one the theme was already generated for.
+    **Nothing here is on a timer.** The panel changes height when a job starts or
+    when the user uses the handle, and at no other moment: a log that folded
+    itself away after a grace period would take the failure line off the screen
+    of the reader who was reading it, and every test of that rule would be a test
+    of a `QTimer` (T80).
+
+    The floor under the cap is this panel's OWN `minimumSizeHint()`, re-read on
+    every event that can change it rather than measured once. A cap taken in
+    `__init__` is taken before the panel has a parent, and the theme it will be
+    styled by is applied to the WINDOW (`apply_dadcraft_theme(window)` in
+    `build_window`) before this object exists: measured 2026-09-16 in that order,
+    the cap came out 152px against a minimum of 180, so the panel was drawn 148
+    -- 32px under its own floor, with the text pane clipped -- and it stayed
+    there, because the next restyle only happens if the window is resized to a
+    NEW width and the app opens at the one the theme was already generated for.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._idle_cap = True
-        self._cap_to_the_strip()
+        self._watching: QWidget | None = None
+        self.set_collapsed(True)
+        self.collapse_toggled.connect(lambda _folded: self._hold_its_share())
         self.run_started.connect(self._give_it_the_room)
+        self._watch_the_tab()
+        self._hold_its_share()
 
-    def _cap_to_the_strip(self) -> None:
-        """Hold the panel at its own minimum, whatever that has become.
+    def _share_of_the_tab(self) -> int:
+        """The tallest this panel may be drawn right now, in pixels.
 
-        A no-op when the cap is already right, which is what keeps this safe to
-        call from `LayoutRequest`: `setMaximumHeight` asks for another layout, so
-        a cap written unconditionally would ask for one forever.
+        Folded, that is its own minimum -- the strip and nothing else. Open, it
+        is a quarter of the tab it sits in, floored at that same minimum so the cap
+        can never clip the strip on a small window (the tab is 600px at the
+        smallest the window can be dragged to, and a third of that is less than
+        the strip needs).
+
+        Measured off the PARENT and not off the window: what the list is losing
+        is the tab's height, and the tab is the widget whose layout this panel
+        and that list are both in.
         """
-        if not self._idle_cap:
-            return
-        wanted = self.minimumSizeHint().height()
+        floor = self.minimumSizeHint().height()
+        if self.collapsed:
+            return floor
+        tab = self.parentWidget()
+        if tab is None:
+            return _NO_HEIGHT_CAP
+        return max(floor, tab.height() // LOG_SHARE_OF_THE_TAB)
+
+    def _hold_its_share(self) -> None:
+        """Write the cap, if it is not already what it should be.
+
+        The "if" is what keeps this safe to call from `LayoutRequest` and from a
+        resize: `setMaximumHeight` asks for another layout, so a cap written
+        unconditionally would ask for one forever.
+        """
+        wanted = self._share_of_the_tab()
         if self.maximumHeight() != wanted:
             self.setMaximumHeight(wanted)
 
     def _give_it_the_room(self) -> None:
-        """A job started: this panel is now the thing worth reading, for good."""
-        self._idle_cap = False
-        self.setMaximumHeight(_NO_HEIGHT_CAP)
+        """A job started: unfold, and take a quarter of the tab to say it in."""
+        self.set_collapsed(False)
+        self._hold_its_share()
+
+    def _watch_the_tab(self) -> None:
+        """Follow the parent's resizes, because the cap is a share of them.
+
+        A `QLayout` sends `LayoutRequest` to the widget it lays out -- the tab --
+        and not to the children it moves, and a child whose geometry the layout
+        did not change sees no event at all. So a window dragged taller would
+        leave this panel capped at a third of the size the tab USED to be, which
+        is a cap that only ever shrinks. Watching the parent is the one place
+        that number changes.
+        """
+        tab = self.parentWidget()
+        if tab is self._watching:
+            return
+        if self._watching is not None:
+            self._watching.removeEventFilter(self)
+        self._watching = tab
+        if tab is not None:
+            tab.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Resize:
+            self._hold_its_share()
+        return bool(super().eventFilter(watched, event))
 
     def event(self, event: QEvent) -> bool:
         handled = super().event(event)
+        if event.type() == QEvent.Type.ParentChange:
+            self._watch_the_tab()
         if event.type() in _WHEN_A_MINIMUM_MOVES:
-            self._cap_to_the_strip()
+            self._hold_its_share()
         return handled
 
 
@@ -5856,6 +5985,10 @@ class ControllerView(QWidget):
         # height on this tab belongs to the list above it -- see `REPORT_LINES`.
         self.module_report = _ReportBox(tab)
         self.module_report.setReadOnly(True)
+        # T80: the strip that names the box above and folds it away when there is
+        # nothing in it -- which is every start, and the moment the list most
+        # wants the 106px an empty text field costs.
+        self.module_report_strip = _ReportStrip(self.module_report, tab)
         # The two buttons that used to act on "the selection" are gone: every
         # row carries its own Install or Remove, so there is no second place for
         # the tab and the user to disagree about what is selected.
@@ -6030,6 +6163,7 @@ class ControllerView(QWidget):
         box.addWidget(self.rebuild_banner)
         box.addWidget(self.modules_panel, 1)
         box.addWidget(custom)
+        box.addWidget(self.module_report_strip)
         box.addWidget(self.module_report)
         box.addWidget(self.rebuild_log)
         self.modules_panel.setMinimumHeight(MODULE_LIST_MIN_HEIGHT)
@@ -7229,9 +7363,13 @@ class ControllerView(QWidget):
         # are what grows, the report is what the last press did and no taller.
         self.tuning_report = _ReportBox(tab)
         self.tuning_report.setReadOnly(True)
+        # And the same strip (T80), because it is the same box with the same
+        # problem: the cards are what the height is for.
+        self.tuning_report_strip = _ReportStrip(self.tuning_report, tab)
         box.addLayout(actions)
         box.addWidget(self.tuning_banner)
         box.addWidget(self.tuning_panel, 1)
+        box.addWidget(self.tuning_report_strip)
         box.addWidget(self.tuning_report)
         # No `MODULE_LIST_MIN_HEIGHT` here, deliberately: `TuningPanel` asks for
         # 288px of its own as a minimum where `ModulesPanel` asks for 70, so a

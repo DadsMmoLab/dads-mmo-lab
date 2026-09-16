@@ -10424,3 +10424,295 @@ def test_a_rows_long_description_and_conf_paths_are_a_hover_away(qapp: object) -
     assert row.paths_label is not None
     assert row.paths_label.toolTip() == "env/dist/etc/modules/solocraft.conf"
     assert row.description_label.full_text == "Scales dungeons for a small group."
+
+
+# ---------------------------------------------------------------------------
+# T80: what is left of the tab AFTER a job, and the handles that give it back.
+#
+# T73 and T75 measured an app that had never run anything. Gate A ran one job on
+# a maximised 1080p desktop and the list came back as a row and a half: T73's
+# lifted cap is permanent by design, so the log kept ~400px for the rest of the
+# session and the hand restarted the app to reach the next row.
+#
+# Everything below is measured at the DESKTOP shape as well as the bare screen,
+# because the two are not the same window and the difference is a row.
+
+
+DESKTOP_1080P = (1920, 1080 - 47)
+"""A window MAXIMISED on a real 1080p desktop, which is not a 1080px window.
+
+47px of the screen belong to the desktop and not to the app: GNOME's top bar and
+the window's own title bar, measured on yulon-ubuntu during gate A (round 3,
+2026-09-16). Every number T73 and T75 published was taken at the bare 1920x1080,
+so each of them was one row optimistic about what a maximised window shows --
+T73's "three whole rows" read two live, which is half of why T80 was filed.
+
+Beside the bare screen rather than instead of it: 1920x1080 is also what a
+borderless or a non-GNOME desktop really gives, and the pair of them is what says
+the 47px no longer costs a row.
+"""
+
+ROWS_VISIBLE_AT_DESKTOP_1080P = 8
+"""Whole module rows on the maximised desktop with nothing having run yet.
+
+The SAME number as `ROWS_VISIBLE_AT_1080P`, and that is the assertion: before
+T80 the desktop's 47px took the bare screen's 8 down to 7, and now both measure
+well over it (12 at the desktop shape, 13 at the bare screen) because the two
+empty boxes under the list start folded -- an empty report costs 106px of the
+theme's own floor and an empty log 180.
+"""
+
+ROWS_VISIBLE_AFTER_A_JOB = 5
+"""And the count once a rebuild has written to the log, at the desktop shape.
+
+Measured 4 before T80 and 5 after it; 6 at the bare 1920x1080 either way. This
+is the number the ticket is about, so it is the one with the least headroom in
+this file: one row. The ticket's own first suggestion -- capping the log at a
+THIRD of the tab -- measures 4 here, which is why `LOG_SHARE_OF_THE_TAB` is 4
+and not 3.
+"""
+
+
+def _the_handle_on(panel: Any) -> Any:
+    """The collapse handle on a log panel's strip, found the way a user finds it."""
+    from yulon.ui.widgets.log_panel import CollapseHandle
+
+    handle = panel.findChild(CollapseHandle)
+    assert handle is not None, "the log panel has no collapse handle on its strip"
+    return handle
+
+
+def _click(widget: Any) -> None:
+    """Press `widget` with the real mouse, then let the layout settle."""
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtTest import QTest
+
+    QTest.mouseClick(widget, _Qt.MouseButton.LeftButton)
+    process_events()
+
+
+def _ran_a_job(view: ControllerView, last_line: str = "Compile finished.") -> None:
+    """Put a finished rebuild's output in the Modules tab's log.
+
+    Through `LogPanel.run()` -- the call `rebuild_server()` itself makes -- so
+    the panel is opened by the same signal the app raises and not by a flag set
+    here.
+    """
+    assert view.rebuild_log.run(lambda: iter(["compiling", last_line]), title="rebuild") is True
+    pump_until(lambda: not view.rebuild_log.running, "the job finished")
+    process_events()
+
+
+def test_the_module_list_keeps_five_rows_after_a_job_at_the_desktop_shape(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The defect gate A found: one rebuild, and the list is a row and a half.
+
+    Four assertions, and each is here because the other three are satisfied by
+    something that would not fix this:
+
+    * the ROW COUNT is the complaint, and it is measured at the desktop shape
+      rather than the bare screen because that is the window the complaint was
+      made about;
+    * the log is NOT CLIPPED, so the count cannot be met by squeezing the panel
+      under its own minimum -- which is what the tab does on its own when it is
+      over-subscribed, and it would read as a fix here while showing a log with
+      its strip cut off;
+    * the log still HOLDS ITS LAST LINE and is showing it, so the count cannot be
+      met by a panel that has been made useless rather than smaller;
+    * and the cap is really the thing doing it -- the panel is at its share of
+      the tab and not at whatever a job's output happened to ask for.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+
+    _ran_a_job(view)
+    # And a report in the box under it, because a press that starts a rebuild
+    # writes one: the two boxes take the tab together or not at all.
+    view.module_report.setPlainText("Rebuild finished.")
+    process_events()
+
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert whole >= ROWS_VISIBLE_AFTER_A_JOB, (
+        f"after one job only {whole} of {len(view.modules_panel.rows())} rows are wholly on "
+        f"screen at {DESKTOP_1080P}: the list has {view.modules_panel.height()}px of the "
+        f"tab's {tab.height()}, the log {view.rebuild_log.height()} and the report "
+        f"{view.module_report.height()}"
+    )
+    assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
+        f"the log is CLIPPED at {view.rebuild_log.height()}px, not merely capped: it says "
+        f"it needs {view.rebuild_log.minimumSizeHint().height()}"
+    )
+    assert not view.rebuild_log.collapsed, "a finished job left its own output folded away"
+    assert (
+        "Compile finished." in view.rebuild_log.text()
+    ), f"the log does not hold the job's last line: {view.rebuild_log.text()!r}"
+    share = tab.height() // controller_view_module.LOG_SHARE_OF_THE_TAB
+    assert view.rebuild_log.maximumHeight() == share, (
+        f"the log is not held to its share of the tab: its cap is "
+        f"{view.rebuild_log.maximumHeight()}px against the {share} a quarter of "
+        f"{tab.height()} comes to"
+    )
+
+
+def test_the_desktop_shapes_missing_47px_no_longer_costs_a_module_row(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Maximised on a real desktop shows what the bare screen does, idle.
+
+    T73 and T75 both measured 1920x1080 exactly, and a maximised GNOME window is
+    47px shorter than that, so both published a count a live hand could not
+    reproduce. Asserted against the same constant as the bare screen on purpose:
+    the claim is that the two shapes agree, and a separate smaller number here
+    would let them drift apart again silently.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert whole >= ROWS_VISIBLE_AT_DESKTOP_1080P, (
+        f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen "
+        f"maximised at {DESKTOP_1080P}: the list has {view.modules_panel.height()}px of "
+        f"the tab's {tab.height()}"
+    )
+    assert _squeezed(tab) == [], f"clipped on the maximised desktop: {_squeezed(tab)}"
+
+
+def test_the_log_strip_folds_the_output_away_and_the_list_takes_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A click on the handle, and the height the log kept goes to the list.
+
+    Driven with `QTest.mouseClick` on the handle the panel really builds -- found
+    through `findChild`, which is as much as a user has -- rather than by calling
+    `set_collapsed()`: a toggle nothing on screen can reach is not a toggle.
+
+    Both directions, because a fold that cannot be undone is a hidden panel:
+    the second click must bring the output back, with the job's line still in it.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    open_log = view.rebuild_log.height()
+    open_list = view.modules_panel.height()
+    handle = _the_handle_on(view.rebuild_log)
+
+    _click(handle)
+
+    assert view.rebuild_log.collapsed, "the click did not fold the log"
+    assert (
+        view.rebuild_log.height() < open_log
+    ), f"the log is folded but still {view.rebuild_log.height()}px, against {open_log} open"
+    assert view.modules_panel.height() > open_list, (
+        f"the log folded and the list did not grow: {view.modules_panel.height()}px, "
+        f"against {open_list} with the log open"
+    )
+    assert view.rebuild_log.status_text() != "", "folding the log took its strip with it"
+
+    _click(handle)
+
+    assert not view.rebuild_log.collapsed, "the second click did not bring the log back"
+    assert (
+        view.rebuild_log.height() == open_log
+    ), f"the log came back at {view.rebuild_log.height()}px, not the {open_log} it had"
+    assert "Compile finished." in view.rebuild_log.text(), "folding the log lost its output"
+
+
+def test_a_folded_log_unfolds_itself_when_the_next_job_starts(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Whatever the user folded away, the next job's output is worth showing.
+
+    The one thing the fold must not do is make a rebuild silent. Two jobs, the
+    fold between them, and the second one drives the panel through `run()` -- so
+    what unfolds it is `run_started`, the signal the app raises, and not a call
+    this test makes.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view, last_line="the first job")
+    _click(_the_handle_on(view.rebuild_log))
+    assert view.rebuild_log.collapsed, "the fold this test is about did not happen"
+
+    _ran_a_job(view, last_line="the second job")
+
+    assert not view.rebuild_log.collapsed, "a new job ran with its output still folded away"
+    assert "the second job" in view.rebuild_log.text()
+
+
+def test_an_empty_report_box_is_folded_and_a_report_unfolds_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The report box is 106px of nothing until there is a report, and then it is not.
+
+    Two halves of one rule and they fail for different reasons: the box is folded
+    while empty (which is every start, and the moment the list most needs the
+    height), and it is open the moment anything is written to it (a press whose
+    answer is hidden is a press that looks like it did nothing).
+
+    The unfold is driven by `setPlainText` -- what `_format_report` and every
+    refusal on this tab do -- and not by the strip, because the strip is not what
+    the app calls.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+
+    assert view.module_report_strip.collapsed, "an empty report box is open on a fresh tab"
+    assert not view.module_report.isVisible(), "the folded report box is still drawn"
+    folded_list = view.modules_panel.height()
+
+    view.module_report.setPlainText("solocraft: installed.")
+    process_events()
+
+    assert not view.module_report_strip.collapsed, "a report arrived and the box stayed folded"
+    assert view.module_report.isVisible()
+    assert (
+        view.modules_panel.height() < folded_list
+    ), "the report box unfolded and took nothing from the list, so it is not on screen"
+
+    _click(view.module_report_strip)
+
+    assert view.module_report_strip.collapsed, "the click did not fold the report away"
+    assert view.modules_panel.height() == folded_list, (
+        f"the folded report gave the list {view.modules_panel.height()}px, not the "
+        f"{folded_list} it had before the report arrived"
+    )
+    assert (
+        view.module_report.toPlainText() == "solocraft: installed."
+    ), "folding the report box threw its text away"
+
+
+def test_the_tuning_report_folds_the_same_way_and_the_cards_take_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The Tuning tab is the same shape, so it gets the same handle.
+
+    Its own test and not a parametrisation of the Modules one: the two tabs build
+    their strips separately, and the way this goes wrong is one of them being
+    wired and the other not.
+    """
+    view = _tuning_view(ps, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Tuning")
+    _at(window, DESKTOP_1080P)
+
+    assert view.tuning_report_strip.collapsed, "an empty tuning report is open on a fresh tab"
+    folded_cards = view.tuning_panel.height()
+
+    view.tuning_report.setPlainText("solocraft: wrote 2 keys.")
+    process_events()
+    assert not view.tuning_report_strip.collapsed, "a report arrived and the box stayed folded"
+    open_cards = view.tuning_panel.height()
+    assert open_cards < folded_cards
+
+    _click(view.tuning_report_strip)
+
+    assert view.tuning_report_strip.collapsed
+    assert view.tuning_panel.height() > open_cards, (
+        f"the tuning report folded and the cards did not grow: {view.tuning_panel.height()}px, "
+        f"against {open_cards} with it open"
+    )
