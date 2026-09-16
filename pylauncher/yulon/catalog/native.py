@@ -3941,7 +3941,7 @@ class StagedInstaller:
           and the pop lands on a tree that may share no history with the one the
           edit was made against. A refusal that names the files is a worse
           evening and a better outcome than a silent three-way merge into
-          somebody's server source. `carried_patch_paths()` is subtracted first;
+          somebody's server source. `app_written_paths()` is subtracted first;
           see `git.RunnerGit.local_edits()`.
         * **local commits.** NEITHER prior launcher checks. `git pull --ff-only`
           would have refused a diverged branch, which is a third of the case;
