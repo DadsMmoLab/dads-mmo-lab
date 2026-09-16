@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn, cast
 
@@ -9214,6 +9215,10 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
 # -- T64: "Update the server to latest…" --------------------------------------
 
 
+_PIN = "993f18094e2f3d38e0f0e6b0a2b4c1d9e8f7a6b5"
+"""A catalog `rev`, spelled as the catalog spells one: all forty characters."""
+
+
 class _LatestSpy:
     """Everything `LatestRoute` is asked, and what it answers.
 
@@ -9226,16 +9231,35 @@ class _LatestSpy:
     def __init__(self) -> None:
         self.presses: list[object] = []
         self.pin_presses: list[object] = []
-        self.line = ""
+        self.revs: tuple[native.SourceRev, ...] = ()
+
+    def version(self) -> native.SourceVersion:
+        """The REAL rule, over whatever rows this install's record holds.
+
+        Not a line and a flag the test chose: `native.source_version()` is half
+        of what T77 fixed, and a spy that answered a boolean would let the view
+        test agree with a view that read the record's EXISTENCE -- which is the
+        bug (live gate, 2026-09-16, press 6).
+        """
+        return native.source_version(
+            native.InstallState(game_id="wow-wotlk", install_id="x", source_revs=self.revs)
+        )
 
     def route(self) -> native.LatestRoute:
         def press(cancel: object = None) -> Iterator[str]:
             self.presses.append(cancel)
+            # What `_record_source_revs()` writes after an update: the checkout
+            # is somewhere upstream, the pin is where the gates were.
+            self.revs = (native.SourceRev("x/y", "7bcee96 · 2026-09-15", pin=_PIN),)
             yield "--- update-sources"
             yield "moved"
 
         def to_pin(cancel: object = None) -> Iterator[str]:
             self.pin_presses.append(cancel)
+            # And after a return: built == pin, which is what the button's rule
+            # has to read. `ahead` stays None because every shipped source but
+            # one is a shallow clone and cannot be counted.
+            self.revs = (native.SourceRev("x/y", f"{_PIN[:7]} · 2026-09-02", pin=_PIN),)
             yield "back on the pin"
 
         return native.LatestRoute(
@@ -9249,7 +9273,7 @@ class _LatestSpy:
                 "server already wrote into your databases."
             ),
             to_pin=to_pin,
-            version_line=lambda: self.line,
+            source_version=self.version,
         )
 
 
@@ -9546,29 +9570,128 @@ def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
     assert view.update_to_latest_button.isEnabled() is False
 
 
-def test_the_update_version_line_and_the_way_back_appear_together_or_not_at_all(
+def test_the_version_line_and_the_way_back_are_drawn_from_one_reading(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """ONE reading decides both, and that is the point of asking once.
 
-    `version_line()` is empty exactly when this install is still on its catalog
-    pins, which is exactly when there is nothing to return from. Two readings
-    could disagree -- a press finishing between them is all it would take -- and
-    the disagreement's shape is a live "Return to the tested pin…" over a line
-    saying the server IS on it.
+    Two readings could disagree -- a press finishing between them is all it
+    would take -- and the disagreement's shape is a live "Return to the tested
+    pin…" over a line saying the server IS on it.
+
+    They are not the same ANSWER, though, and that is T77: the line is drawn
+    whenever there is something to say, the button only while something is off
+    its pin. This is the first state, where both are absent.
     """
     services, spy = _latest(ps, tmp_path)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert spy.revs == ()
     assert view.source_version_label.text() == ""
     assert view.source_version_label.isHidden()
     assert view.return_to_pin_button.isHidden()
 
-    spy.line = "Built from a1b2c3d (2026-09-16), 12 commits past the tested pin f82e7d6"
+    spy.revs = (native.SourceRev("x/y", "a1b2c3d · 2026-09-16", pin=_PIN, ahead=12),)
     view._refresh_source_version()
-    assert view.source_version_label.text() == spy.line
+    assert view.source_version_label.text() == (
+        f"Built from a1b2c3d (2026-09-16), 12 commits past the tested pin {_PIN[:7]}"
+    )
     assert not view.source_version_label.isHidden()
     assert not view.return_to_pin_button.isHidden()
     assert view.return_to_pin_button.text() == RETURN_TO_PIN_BUTTON_LABEL
+
+
+def test_the_way_back_is_hidden_after_a_return_and_offered_again_after_an_update(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T77's finding, driven as the two transitions rather than asserted as a rule.
+
+    The live gate's press 6 (2026-09-16): after a successful return the button
+    was still shown and enabled, because `_refresh_source_version()` offered it
+    whenever the version line was non-empty and `_record_source_revs()` writes
+    `source_revs` after a `to_pin=True` press exactly as it does after an
+    update. Pressing it there fetches, moves nothing, and recompiles for the
+    better part of an hour to arrive where it already is -- the state the design
+    says the control must not be in.
+
+    Both presses go through the real panel and the real dialogs, and the line
+    is asserted alongside the button each time: hiding the row entirely after a
+    return would also hide the one sentence that says where the server stands.
+    """
+    qmb = controller_view_module.QMessageBox
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: qmb.StandardButton.Yes
+    )
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.return_to_pin_button.isHidden(), "the way back was offered")
+    assert view.source_version_label.text() == (
+        f"Built from 7bcee96 (2026-09-15); the tested pin is {_PIN[:7]}"
+    )
+
+    assert view.return_to_the_tested_pin() is True
+    pump_until(lambda: view.return_to_pin_button.isHidden(), "the way back was withdrawn")
+    # The LINE stays: the server has been moved and moved back, and that is
+    # still a fact about this folder the catalog does not carry.
+    assert view.source_version_label.text() == f"On the tested pin {_PIN[:7]} (2026-09-02)"
+    assert not view.source_version_label.isHidden()
+
+    # And an update offers it again, which is what says the rule reads the
+    # record rather than latching once.
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.return_to_pin_button.isHidden(), "the way back came back")
+
+
+def test_a_mixed_record_still_offers_the_way_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """One row home and one not is not "returned", and the press that finishes it must stay.
+
+    WotLK moves two sources. A return whose second source failed, or a record
+    written where only one repository had moved in the first place, leaves an
+    install whose core is on the pin and whose module checkout is not. `any` and
+    not `all` is what keeps the control there; the test exists because `all`
+    reads just as plausibly in the source.
+    """
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    spy.revs = (
+        native.SourceRev("a/b", f"{_PIN[:7]} · 2026-09-02", pin=_PIN),
+        native.SourceRev("c/d", "7bcee96 · 2026-09-15", pin=_PIN),
+    )
+    view._refresh_source_version()
+
+    assert not view.return_to_pin_button.isHidden()
+    said = view.source_version_label.text().splitlines()
+    assert said[0] == f"a/b: on the tested pin {_PIN[:7]} (2026-09-02)"
+    assert said[1] == f"c/d: built from 7bcee96 (2026-09-15); the tested pin is {_PIN[:7]}"
+
+
+def test_a_read_that_failed_draws_nothing_and_offers_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The fallback is a decision, not a formality, and it goes the careful way.
+
+    `_refresh_source_version()` runs on the reload path and after every job, so
+    an exception there takes the tab down over a line of text. What it does with
+    the failure is the part worth a test: a read that did not happen knows
+    nothing about where the sources stand, and offering an hour of compiling off
+    that is worse than offering nothing. Both halves hidden, not just the line.
+    """
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    spy.revs = (native.SourceRev("x/y", "7bcee96 · 2026-09-15", pin=_PIN),)
+    view._refresh_source_version()
+    assert not view.return_to_pin_button.isHidden()
+
+    def unreadable() -> native.SourceVersion:
+        raise OSError("the state file could not be read")
+
+    services.update_to_latest = replace(spy.route(), source_version=unreadable)
+    view._refresh_source_version()
+    assert view.source_version_label.isHidden()
+    assert view.source_version_label.text() == ""
+    assert view.return_to_pin_button.isHidden()
 
 
 def test_returning_to_the_pin_asks_yes_no_defaulting_to_no_and_offers_no_backup(

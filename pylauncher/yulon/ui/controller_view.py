@@ -6987,17 +6987,29 @@ class ControllerView(QWidget):
     def _refresh_source_version(self) -> None:
         """Redraw the version line and decide whether there is a pin to return to.
 
-        Both from ONE reading, taken here: `LatestRoute.version_line()` is empty
-        exactly when this install is still on its catalog pins, which is exactly
-        when there is nothing to return from. Asking twice would be two readings
-        of one file that can disagree -- a press finishing between them is all it
-        would take -- and the disagreement's shape is a live "Return to the
-        tested pin…" over a line that says the server IS on it.
+        Both from ONE reading, taken here: `LatestRoute.source_version()`
+        answers the line and the button from a single read of the state file.
+        Asking twice would be two readings of one file that can disagree -- a
+        press finishing between them is all it would take -- and the
+        disagreement's shape is a live "Return to the tested pin…" over a line
+        that says the server IS on it.
+
+        **The two are no longer the same question, and conflating them is what
+        T77 is.** The line is drawn whenever there is something to say, which
+        includes an install that has just RETURNED to its pins; the button is
+        offered only while some source is still off its pin. Shown on the
+        content's own terms rather than on the line's emptiness, this control
+        disappears after a successful return and comes back after an update --
+        instead of offering a ~36-minute compile that ends exactly where it
+        started (live gate, 2026-09-16, press 6).
 
         Never raises. It is called from the reload path and from every job
         finishing, and an exception on either would take the tab down over a
-        line of text; the seam's own contract is that it answers `""` rather
-        than raising, and this holds it to that.
+        line of text; the seam's own contract is that it reads rather than
+        raising, and this holds it to that. The fallback hides the button as
+        well as the line: a read that failed knows nothing about where the
+        sources stand, and offering an hour of compiling off that is worse than
+        offering nothing.
         """
         route = self.services.update_to_latest
         if route is None:
@@ -7005,13 +7017,13 @@ class ControllerView(QWidget):
             self.return_to_pin_button.setVisible(False)
             return
         try:
-            said = route.version_line()
-        except OSError as exc:  # pragma: no cover - the seam reads and never raises
+            said = route.source_version()
+        except OSError as exc:
             logger.warning(f"could not read what {self.entry.id} was built from: {exc}")
-            said = ""
-        self.source_version_label.setText(said)
-        self.source_version_label.setVisible(bool(said))
-        self.return_to_pin_button.setVisible(bool(said))
+            said = native.SourceVersion(line="", past_the_pin=False)
+        self.source_version_label.setText(said.line)
+        self.source_version_label.setVisible(bool(said.line))
+        self.return_to_pin_button.setVisible(said.past_the_pin)
 
     def _update_route_busy(self) -> bool:
         """The two gates both T64 presses share, put to the user and answered True when hit.

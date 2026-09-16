@@ -516,15 +516,20 @@ class LatestRoute:
     """The "Return to the tested pin" dialog's text."""
     to_pin: Callable[[threading.Event | None], Iterator[str]]
     """The same route aimed at each source's `rev` instead of at upstream's tip."""
-    version_line: Callable[[], str]
-    """What this install was last built from, or `""` for one still on its pins.
+    source_version: Callable[[], SourceVersion]
+    """What this install was built from, and whether there is a pin to return to.
 
-    A callable rather than a string, for `AdoptRoute.state`'s reason: it is a
+    A callable rather than a value, for `AdoptRoute.state`'s reason: it is a
     READING -- of the state file, on the tab's own schedule -- and a value
     computed when the tab was built would go stale the moment a press finished.
     It reads one small file and asks no daemon and no remote anything, so it is
     affordable on a reload; it never raises, for `git.head_version()`'s reason,
     because an exception here would take a tab down over a decoration.
+
+    It answers BOTH questions because one reading has to settle both (T77). It
+    returned the line alone until 2026-09-16, and the button's rule was
+    "non-empty" -- which is true after a return as well as after an update, so
+    the control stayed offered on a server that was already on the pin.
     """
 
 
@@ -620,13 +625,89 @@ def commits_past_pin(rev: SourceRev) -> str:
     head = f"built from {said[0]} ({said[1]})" if len(said) == 2 else f"built from {rev.built}"
     if not rev.pin:
         return head
-    short = rev.pin[:7]
+    short = rev.pin[:_SHORT_SHA]
+    if on_its_pin(rev):
+        # The whole sentence, not a clause bolted onto "built from …". After a
+        # return the old line read *"built from 993f180 (2026-09-02); the
+        # tested pin is 993f180"* -- the same two shas, and a reader had to
+        # compare them character by character to learn the one thing the line
+        # existed to tell them (T77, and the live gate's PARTIAL of
+        # 2026-09-16). This says it instead.
+        when = f" ({said[1]})" if len(said) == 2 else ""
+        return f"on the tested pin {short}{when}"
     if rev.ahead is None:
         return f"{head}; the tested pin is {short}"
     if rev.ahead == 0:
+        # Reachable only for a record whose `built` is not a sha this can read
+        # against the pin -- `on_its_pin()` answers the sha question first.
+        # Kept rather than folded in, because a zero that came off disk with an
+        # unreadable `built` is still "no distance" and still must not print as
+        # `None`'s "could not say".
         return f"{head}, the tested pin"
     plural = "commit" if rev.ahead == 1 else "commits"
     return f"{head}, {rev.ahead} {plural} past the tested pin {short}"
+
+
+_SHORT_SHA = 7
+"""How many characters of a sha this app shows, and the fewest it will compare.
+
+`git.head_version()` abbreviates to seven and `commits_past_pin()` has printed
+`pin[:7]` since T64, so seven is what a user sees on both sides of the line.
+It is also the floor for `on_its_pin()`: a prefix shorter than this could match
+a pin it is not, and the answer decides whether a button offering a multi-hour
+compile is on screen.
+"""
+
+
+def on_its_pin(rev: SourceRev) -> bool:
+    """Is this source standing on the commit the app was tested against? (T77)
+
+    The one predicate, asked by the version line and by the "Return to the
+    tested pin…" button, because the two must never disagree: a live Return
+    over a line that says the server IS on the pin is the state the design
+    forbids, and it is what shipped -- the button's rule read whether
+    `source_revs` EXISTED, and `_record_source_revs()` writes it after a return
+    just as it does after an update (live gate, 2026-09-16, press 6).
+
+    **The sha is the authority and `ahead` can only refute it.** Seven of the
+    nine shipped sources are shallow clones, where `commits_since()` cannot
+    count at all and records `None` (T64, cold review round 1) -- so a rule
+    written on `ahead == 0` would answer "not on the pin" for the very installs
+    this is for. A counted, non-zero `ahead` still wins, because it is a
+    measurement of the same two commits and a disagreement means the record is
+    not to be trusted in the direction that offers the compile.
+
+    `built` is `git.head_version()`'s string (`a1b2c3d · 2026-09-16`) and `pin`
+    is the catalog's full 40 characters, so the comparison is a prefix one. A
+    `built` that does not begin with at least `_SHORT_SHA` sha-ish characters --
+    somebody's hand-edited file, a future format -- answers False, which keeps
+    the button offered: the failure that costs an hour of compiling is better
+    than the one that strands a user on untested code with no way back.
+    """
+    if not rev.pin:
+        return False
+    if rev.ahead:
+        return False
+    head = rev.built.split(git.VERSION_SEPARATOR)[0].strip()
+    return len(head) >= _SHORT_SHA and rev.pin.startswith(head)
+
+
+def past_the_tested_pin(state: InstallState | None) -> bool:
+    """Is there anything to return FROM? The button's rule, read off the CONTENT.
+
+    True while ANY row is off its pin, which is what makes the mixed case right:
+    a WotLK install whose core went back and whose second source did not is
+    still past the pin, and the press that finishes the job must stay offered.
+
+    False for an install with no `source_revs` at all -- every install that has
+    never pressed "Update the server to latest…" -- and false again the moment
+    a return has rewritten every row. Pressing it there would fetch, move
+    nothing, and recompile for the better part of an hour to arrive exactly
+    where it already was.
+    """
+    if state is None or not state.source_revs:
+        return False
+    return any(not on_its_pin(rev) for rev in state.source_revs)
 
 
 def source_revs_line(state: InstallState | None) -> str:
@@ -654,6 +735,34 @@ def source_revs_line(state: InstallState | None) -> str:
         said = commits_past_pin(state.source_revs[0])
         return said[0].upper() + said[1:]
     return "\n".join(f"{rev.repo}: {commits_past_pin(rev)}" for rev in state.source_revs)
+
+
+@dataclass(frozen=True)
+class SourceVersion:
+    """What the tab draws about this install's sources, from ONE reading (T77).
+
+    Two answers in one object because they come from one file and must not
+    disagree: the line the user reads and whether there is anything to return
+    from. Asked separately they would be two reads of a file a press can
+    rewrite between them, and the disagreement's shape is exactly the defect
+    this type was added for -- a live "Return to the tested pin…" over a line
+    saying the server is on it.
+    """
+
+    line: str
+    """The version line, or `""` for an install still on its catalog pins."""
+    past_the_pin: bool
+    """Whether "Return to the tested pin…" has anything to do."""
+
+
+def source_version(state: InstallState | None) -> SourceVersion:
+    """Both halves of the version line, from one `InstallState`.
+
+    Deliberately takes the state rather than reading it: the read is the
+    caller's (`install_wiring`), and a function that read the file itself could
+    not be handed the three shapes a test needs.
+    """
+    return SourceVersion(line=source_revs_line(state), past_the_pin=past_the_tested_pin(state))
 
 
 def import_reads_as_finished(state: docker.ImportState) -> bool:
@@ -1055,6 +1164,30 @@ Every clause names something this method really does, in the order it does it,
 and nothing here is a reassurance: the checks are `_refuse_unless_updatable()`,
 the restore is `_put_sources_back()`, and "the build you have keeps running" is
 `rebuild()`'s own rollback rather than a promise made on its behalf.
+"""
+
+RETURN_TO_PIN_OPENING_NOTE = (
+    "This is the commit this app was tested against, and it is still a full build -- the same "
+    "wait as the update, and your server is down while its containers are replaced. Every "
+    "source is checked first -- it must be the repository this app cloned, with no changes and "
+    "no commits of your own in it -- and if anything after that fails, every source is put back "
+    "on the commit it is on now and the build you have keeps running."
+)
+"""What the route says before it fetches on the way BACK. The opposite fact, first.
+
+The same three clauses as `UPDATE_TO_LATEST_OPENING_NOTE` in the same order,
+because a user who has read one has read the shape of the other and the
+difference is what should stand out -- and the difference is the first clause,
+which is the only one that is not the same in both directions. Sharing the
+update's note here told somebody returning to the gated commit that *"this is
+code nobody has tested with this app"*, which is the opposite of true (live
+gate, 2026-09-16, press 6).
+
+What it adds rather than borrows is the cost, said here and not only in the
+dialog: this is where a user finds out, having pressed, that they have an hour
+to wait and a server that will go down inside it. What it does NOT say is that
+this fixes anything -- the return restores the server and not the database, and
+`return_to_pin_confirmation()` is where that is spelled out.
 """
 
 SOURCES_PUT_BACK_NOTE = (
@@ -3866,7 +3999,7 @@ class StagedInstaller:
         plan = self._refuse_unless_updatable(server_dir, moving)
         where = "the commit this app was tested against" if to_pin else "the newest upstream code"
         yield f"Moving {self.entry.name}'s sources in {server_dir} to {where}."
-        yield UPDATE_TO_LATEST_OPENING_NOTE
+        yield RETURN_TO_PIN_OPENING_NOTE if to_pin else UPDATE_TO_LATEST_OPENING_NOTE
         self._check_cancel(cancel)
         moved: list[tuple[EmulatorSource, Path, str]] = []
         try:
