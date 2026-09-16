@@ -3184,6 +3184,29 @@ line starting with `>`. Two rules and a `>` alone was enough to make an
 unrelated tool's output be read as a build (review, 2026-09-12).
 """
 
+_BUILD_FAILED = re.compile(r"^(?:ERROR:|#\d+ ERROR:)|failed to solve:")
+"""The line that says a build failed, in every spelling a front end prints it.
+
+Three shapes, measured rather than guessed:
+
+* `ERROR: failed to build: failed to solve: …` — the classic `docker build`
+  epilogue, all T38 was measured on (an Ubuntu test box, Docker 29.7.2, 2026-09-12);
+* `#17 ERROR: process "/bin/sh -c …" …` — BuildKit's step-numbered line, which
+  `docker compose build` prints and which `startswith("ERROR:")` rejects;
+* `failed to solve: …`, and through this app's panel `target ac-worldserver:
+  failed to solve: …` — how `docker compose build` ENDS, with no `ERROR:`
+  anywhere on the line.
+
+The third is why T38 shipped and changed nothing for the user who reported it:
+this app builds with `docker compose build` (`build_staged()`), so the only
+shape T38 could match was the one shape this app never produces (T70, measured
+live 2026-09-16, Compose 2.40.3 / Engine 29.1.3).
+
+`failed to solve:` is matched anywhere on the line because the prefix is the
+front end's to choose; the two `ERROR:` spellings are anchored because `ERROR:`
+alone, unanchored, is a word an import or a map extractor can print in passing.
+"""
+
 _ERROR_KEEP = 70
 """How much of each end of BuildKit's `ERROR:` line survives the elision.
 
@@ -3232,19 +3255,32 @@ def _buildkit_failure(said: list[str]) -> tuple[list[str], str]:
     sign anything went wrong. Returning the block alone hid it (review,
     2026-09-12).
 
-    Fences are paired structurally rather than by taking the last two: the
-    opening one is the last that carries a `_BUILDKIT_STEP_HEADER`, and the
-    closing one is the first fence after it. An odd count, a stray rule in some
-    tool's output, or a `------` inside the step's own lines then costs at most
-    a short block instead of silently choosing two unrelated rules.
+    Fences are paired structurally rather than by taking the last two, and
+    independently of where the marker sits — see `_step_fences()`. The marker
+    is then the last `_BUILD_FAILED` line OUTSIDE the block, which is both
+    halves of T70: this app builds with `docker compose build`, whose epilogue
+    says `failed to solve:` with no `ERROR:` prefix and whose only `ERROR:`
+    line is step-numbered and printed ABOVE the opening fence.
+
+    Requiring the marker to sit outside the block is not tidiness. A compiler
+    may print a line of its own beginning `ERROR:`, and counting that would let
+    a step block from a build that SUCCEEDED be reported as the failure of
+    whatever ran after it — the case the no-marker fallback already pins.
 
     An empty block with a non-empty `ERROR:` line, or both empty, tells the
     caller to fall back — a silent failing step must not come out worse than
     it did before.
     """
+    opened, closed = _step_fences(said)
+    # The block is located FIRST and the marker is then read from outside it.
+    # Searching back from the marker, which is what T38 did, cannot work on the
+    # compose route at all: BuildKit's `#17 ERROR:` line is printed ABOVE the
+    # opening fence there, so a marker widened to match it would still find no
+    # block behind it (T70).
+    inside = range(opened, closed + 1) if opened is not None and closed is not None else range(0)
     error_at: int | None = None
     for index in range(len(said) - 1, -1, -1):
-        if said[index].startswith("ERROR:"):
+        if index not in inside and _BUILD_FAILED.search(said[index]):
             error_at = index
             break
     if error_at is None:
@@ -3252,24 +3288,33 @@ def _buildkit_failure(said: list[str]) -> tuple[list[str], str]:
         # a map extractor reaches here too, and none of them is parsed.
         return [], ""
     error_line = said[error_at]
-
-    opened: int | None = None
-    for index in range(error_at - 1, 0, -1):
-        if said[index - 1] == _BUILDKIT_FENCE and _BUILDKIT_STEP_HEADER.match(said[index]):
-            opened = index - 1
-            break
-    if opened is None:
-        return [], error_line
-    closed: int | None = None
-    for index in range(opened + 2, error_at):
-        if said[index] == _BUILDKIT_FENCE:
-            closed = index
-            break
-    if closed is None:
+    if opened is None or closed is None:
         return [], error_line
     # `opened + 2` drops the header: naming the command is what this ticket
     # exists to stop doing.
     return said[opened + 2 : closed], error_line
+
+
+def _step_fences(said: list[str]) -> tuple[int | None, int | None]:
+    """The last `------`/step-header pair and the first rule after it, or `(None, None)`.
+
+    Paired structurally rather than by taking the last two rules in the output:
+    the opening one is the last that carries a `_BUILDKIT_STEP_HEADER`, and the
+    closing one is the first fence after it. An odd count, a stray rule in some
+    tool's output, or a `------` inside the step's own lines then costs at most
+    a short block instead of silently choosing two unrelated rules (review,
+    2026-09-12).
+
+    Searched over the WHOLE tail rather than up to the failure marker, which is
+    T70's half of the fix — see `_buildkit_failure()`.
+    """
+    for index in range(len(said) - 1, 0, -1):
+        if said[index - 1] == _BUILDKIT_FENCE and _BUILDKIT_STEP_HEADER.match(said[index]):
+            for after in range(index + 1, len(said)):
+                if said[after] == _BUILDKIT_FENCE:
+                    return index - 1, after
+            return index - 1, None
+    return None, None
 
 
 _BUILD_DETAILS = re.compile(r"View build details:\s*(\S+)")

@@ -6302,6 +6302,132 @@ def test_buildkit_shaped_output_with_no_failure_marker_falls_back() -> None:
     assert "[3/3]" in said, said
 
 
+_COMPOSE_CAPTURE = Path(__file__).resolve().parent / "data" / "compose-failed-build-epilogue.txt"
+"""The last 250 lines of a real failed `docker compose build`, verbatim.
+
+Captured on the live gate of 2026-09-16 (Compose 2.40.3, Engine 29.1.3) from
+`docker compose -f docker-compose.yml -f docker-compose.build.yml build
+ac-worldserver` with one undeclared identifier in `mod-city-bots`. The full
+capture is 2149 lines; the end of it is kept because the end is all this app
+retains (`KEEP_OUTPUT_LINES`), and the capture's own trailing `exit=1` marker —
+written by the gate's shell, not by Docker — is dropped so the fixture is what
+the app would have held. Nothing else is edited: reconstructing an epilogue
+from what the code expects is how T50 wrote a fixture that passed against the
+bug it was filed for.
+"""
+
+
+def _compose_tail() -> tuple[str, ...]:
+    """The fixture through the app's own bound, exactly as `run_attached()` keeps it."""
+    lines_read = _COMPOSE_CAPTURE.read_text(encoding="utf-8").splitlines()
+    return tuple(lines_read[-docker.KEEP_OUTPUT_LINES :])
+
+
+def test_a_failed_compose_build_reports_the_compiler_error_not_the_command() -> None:
+    """T70: T38's extractor never fired on the builder this app actually uses.
+
+    Measured live 2026-09-16: a Rebuild with a broken module printed the cmake
+    command line, left-truncated at the 400-character cap — Lac's message, from
+    a build carrying T38's fix. `_buildkit_failure()` keyed on a line that
+    `startswith("ERROR:")`, and `docker compose build` has none: its epilogue
+    ends `failed to solve: …` (through the app's panel,
+    `target ac-worldserver: failed to solve: …`), and the only `ERROR:` in the
+    2149 lines is BuildKit's step-numbered `#17 ERROR: …`, which also sits
+    BEFORE the opening fence rather than after the block.
+
+    Everything else was already there and inside the bound: the fences, the
+    `> [build 8/8] RUN …` header and the compiler's own diagnostic.
+    """
+    said = docker.last_words(_compose_tail(), from_build=True)
+
+    # What the user came for, and what no build message has ever carried.
+    assert "CbDuelBotUtil.cpp:11:16: fatal error" in said, said
+    assert "use of undeclared identifier" in said, said
+    # It LEADS, because a diagnostic names its place first and the cap bites
+    # from the far end of the sentence.
+    assert said.startswith("138.3 /azerothcore/modules/mod-city-bots/src/"), said[:160]
+    # And not the cmake invocation, which is the whole complaint. The `ERROR:`
+    # line stays for its exit code (the 137 case, review 2026-09-12) but only
+    # with its embedded command elided, so none of the flags Lac was shown in
+    # place of an error can reach the sentence.
+    assert "-DBoost_USE_STATIC_LIBS" not in said, said
+    assert "-DCMAKE_INSTALL_PREFIX" not in said, said
+    assert "$(nproc)" not in said, said
+    assert "…" in said, said
+    # Nor BuildKit's own scaffolding: the step header names the command a
+    # second time, and the Dockerfile context is not an error.
+    assert "[build 8/8]" not in said, said
+    assert "------" not in said, said
+    assert ">>>" not in said, said
+    # The exit code survives, which is the half of the epilogue worth keeping.
+    assert "exit code: 1" in said, said
+
+
+def test_the_compose_epilogue_spelling_the_panel_shows_is_also_a_failure_marker() -> None:
+    """Through the app the same line arrives as `target <service>: failed to solve: …`.
+
+    The gate's direct run printed it bare; the panel printed it with compose's
+    service prefix. Both are the same failure and neither starts with `ERROR:`.
+    """
+    tail = (
+        "------",
+        " > [build 8/8] RUN cmake --build .:",
+        "138.3 src/Cb.cpp:11:16: fatal error: use of undeclared identifier",
+        "------",
+        "Dockerfile:83",
+        'target ac-worldserver: failed to solve: process "/bin/sh -c cmake" did not '
+        "complete successfully: exit code: 1",
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert said.startswith("138.3 src/Cb.cpp:11:16: fatal error"), said
+    assert "exit code: 1" in said, said
+
+
+def test_buildkit_step_numbered_error_is_a_marker_even_before_the_fence() -> None:
+    """`#17 ERROR: …` counts, and the block is found without searching back from it.
+
+    On the compose route BuildKit prints its step-numbered `ERROR:` line ABOVE
+    the opening fence, so pairing the fences by walking backwards from the
+    marker finds nothing however wide the marker is. This is that shape with
+    the trailing `failed to solve:` line absent — a stream cut short, and the
+    case that keeps the two halves of this fix independent.
+    """
+    tail = (
+        '#17 ERROR: process "/bin/sh -c cmake --build ." did not complete '
+        "successfully: exit code: 1",
+        "------",
+        " > [build 8/8] RUN cmake --build .:",
+        "138.3 src/Cb.cpp:11:16: fatal error: use of undeclared identifier",
+        "------",
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert said.startswith("138.3 src/Cb.cpp:11:16: fatal error"), said
+
+
+def test_a_failure_word_inside_the_step_block_is_not_the_build_failing() -> None:
+    """The marker has to sit OUTSIDE the block, or a fenced block proves itself.
+
+    A compiler is free to print a line beginning `ERROR:` of its own. Counting
+    that as BuildKit's failure marker would let any fenced step output from a
+    build that SUCCEEDED be reported as the failure of whatever came later —
+    the case `test_buildkit_shaped_output_with_no_failure_marker_falls_back()`
+    pins for the marker's absence, and widening the marker reopened it.
+    """
+    tail = (
+        "------",
+        " > [3/3] RUN cmake --build .:",
+        "ERROR: deprecated flag ignored",
+        "[100%] Built target worldserver",
+        "------",
+        "the import could not reach the database",
+    )
+    said = docker.last_words(tail)
+    assert "the import could not reach the database" in said, said
+    # The plain tail, fences and all — not a parse that happens to end here.
+    assert "------" in said, said
+    assert "[3/3]" in said, said
+
+
 def test_clone_names_reads_folders_only(tmp_path: Path) -> None:
     """T41: what the Modules tab marks its rows with.
 

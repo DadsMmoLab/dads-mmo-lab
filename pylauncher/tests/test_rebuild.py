@@ -1474,3 +1474,41 @@ def test_a_rebuild_tuple_missing_the_stage_the_rollback_watches_refuses_before_t
     assert "could not be rolled back" in said and "Nothing was started" in said, said
     assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
     assert "build" not in rec.calls, rec.calls
+
+
+# -- T70: what the press actually SAYS when the compile fails ----------------
+
+COMPOSE_CAPTURE = Path(__file__).resolve().parent / "data" / "compose-failed-build-epilogue.txt"
+"""The real epilogue of a failed `docker compose build` — see `test_docker.py`."""
+
+
+def test_a_rebuild_whose_compile_fails_names_the_compiler_error_in_its_refusal(
+    tmp_path: Path,
+) -> None:
+    """T70, at the call site rather than at the function.
+
+    `docker.last_words()` is not what a user reads; this sentence is. T38 was
+    unit-tested on a bare `docker build` epilogue and shipped, and the press
+    that reaches it — Rebuild, through `stage_build()` and `_check_run(…,
+    from_build=True)` — went on printing the cmake command line for another
+    four days, because the builder on this route is `docker compose build` and
+    its epilogue has no `ERROR:` line (measured live 2026-09-16). A test that
+    only ever calls the extractor cannot tell those two apart, so this one
+    drives the real press with the real capture as the build's tail.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    tail = COMPOSE_CAPTURE.read_text(encoding="utf-8").splitlines()[-docker.KEEP_OUTPUT_LINES :]
+    rec.build_result = docker.AttachedRun(1, tuple(tail))
+
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+
+    said = str(raised.value)
+    assert said.startswith("the build failed (exit 1). Its last words were: "), said
+    assert "CbDuelBotUtil.cpp:11:16: fatal error" in said, said
+    assert "use of undeclared identifier" in said, said
+    # Lac's message, which this press printed verbatim on the live gate.
+    assert "-DBoost_USE_STATIC_LIBS" not in said, said
+    assert "$(nproc)" not in said, said
+    assert "build" in rec.calls, rec.calls
