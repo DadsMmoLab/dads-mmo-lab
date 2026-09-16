@@ -3471,14 +3471,20 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
 
     The brief for the press called `mod-arac` *the only shipped manifest with a
     direct world-SQL step*. `SqlStep.applied_by` DEFAULTS to `"direct"`
-    (`manifest.py:136`), so every step that names no route is one: 43 steps
-    across 18 manifests in all four games. `mod-arac` is the only `module`-type
-    one, which is the narrower true statement.
+    (`manifest.py:136`), so every step that names no route is one: 44 steps
+    across 19 manifests in all four games. `mod-arac` and `mod-city-bots` are
+    the only `module`-type ones, which is the narrower true statement.
 
-    The 44th direct step in the tree is `wow-wotlk/ale/paragon.json`'s, into
-    `ale` -- outside `WORLD_HELD_DBS`, which is what makes the two numbers
-    differ and why this counts the set the guard names rather than every direct
-    step.
+    One direct step in the tree is outside these numbers:
+    `wow-wotlk/ale/paragon.json`'s, into `ale` -- outside `WORLD_HELD_DBS`,
+    which is what makes the two numbers differ and why this counts the set the
+    guard names rather than every direct step.
+
+    It was 43 across 18 until T63 added `mod-city-bots`, whose citizen-roster
+    import is a direct step into `playerbots`. That is not an incidental bump:
+    `playerbots` is in `WORLD_HELD_DBS`, so the roster import is the second
+    module-type write this guard stands in front of, and the count moving is
+    what says the new step joined the guarded set rather than slipping past it.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -3499,8 +3505,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        43,
-        18,
+        44,
+        19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
 
@@ -4173,3 +4179,331 @@ def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
     applier.install(manifest)
 
     assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+
+
+# ------------------------------------------------- T63: the City Bots roster
+#
+# The one file AzerothCore never applies for a module. The core updater reads a
+# module's `data/sql/db-auth|db-characters|db-world` from `AC_MODULES_LIST`;
+# mod-playerbots then builds its OWN `DatabaseLoader` for `acore_playerbots`
+# with no modules list at all, so `data/sql/playerbots/` is scanned by nobody
+# (verified against the AC playerbots-branch source, 2026-08-22).
+#
+# That makes the roster a direct step, and a direct step whose ORDER cannot be
+# satisfied inside one press: the tables it writes are created by the world
+# server's first start, which is after the rebuild an install only reports. The
+# three tests that matter are therefore about time, not about SQL — refused
+# under a live world, skipped before the tables exist, imported on the press
+# after — and each of them drives the real `Applier.install()` over the real
+# shipped manifest, because a synthetic manifest would prove the engine works
+# on a manifest nobody ships.
+
+CITY_BOTS_ID = "mod-city-bots"
+ROSTER_REL = "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql"
+_PRECONDITION_MARK = "information_schema"
+_ROSTER_COUNT_MARK = "FROM citizen_roster"
+_ACCOUNT_TYPE_MARK = "FROM playerbots_account_type"
+
+
+def _city_bots_clone() -> dict[str, str]:
+    """What the repository puts at `modules/mod-city-bots`, as far as this engine reads it."""
+    return {
+        "conf/mod_city_bots.conf.dist": "CitizenBots.Enable = 1\n",
+        ROSTER_REL: "DROP TABLE IF EXISTS `citizen_roster`;\n",
+        "data/sql/db-auth/updates/2026_07_16_03_stage_cast_one_account_per_bot.sql": "-- auth\n",
+        "data/sql/db-characters/updates/2026_08_22_00_stage_cast_characters.sql": "-- chars\n",
+        "data/sql/db-characters/updates/2026_08_22_01_stage_cast_outfits.sql": "-- outfits\n",
+        "data/sql/db-world/updates/2026_07_13_01_city_bot_poi.sql": "-- world\n",
+    }
+
+
+class _ScriptedDb(_FakeSql):
+    """A reader whose answer depends on WHICH question was asked, and a shared event log.
+
+    Two things no existing fake in this file can do, and the tests below need
+    both.
+
+    **Per-query answers.** `_FakeReader` returns one `rows` for every `query()`,
+    so a fixture built on it cannot tell the precondition apart from either
+    verify entry — and a test whose fixture answers every check the same way
+    cannot fail for the reason its name claims (mechanism 1 of
+    `nine-ways-a-test-proves-nothing`). `answers` maps a substring of the query
+    to what that one question gets: a string of rows, `""` for no row, or an
+    exception instance to raise.
+
+    **A per-call answer.** A value may be a LIST, popped left to right, which is
+    what makes "skipped now, imported on the next press" testable at all: a
+    fixture that answers the same thing twice cannot detect a repeat
+    (mechanism 2). `_ScriptedDb` also records `world_running` in the same log as
+    the queries and the files, so a test can assert the guard was consulted
+    BEFORE the first read and the read before the write, rather than merely that
+    all three happened.
+    """
+
+    def __init__(self, answers: dict[str, Any], *, world: bool | None = False) -> None:
+        super().__init__()
+        self.answers = answers
+        self.world = world
+        self.log: list[str] = []
+        self.queries: list[tuple[str, str]] = []
+        self.started_db = 0
+
+    def world_running(self) -> bool | None:
+        self.log.append("world_running?")
+        return self.world
+
+    def start_database(self) -> bool:
+        self.started_db += 1
+        self.log.append("start_database")
+        return True
+
+    def run_file(self, db: str, path: Path) -> None:
+        self.log.append(f"run_file {db}:{path.name}")
+        super().run_file(db, path)
+
+    def run_statement(self, db: str, statement: str) -> None:
+        self.log.append(f"run_statement {db}")
+        super().run_statement(db, statement)
+
+    def query(self, db: str, statement: str) -> str:
+        self.queries.append((db, statement))
+        for mark, answer in self.answers.items():
+            if mark in statement:
+                self.log.append(f"query {db}:{mark}")
+                if isinstance(answer, list):
+                    answer = answer.pop(0)
+                if isinstance(answer, BaseException):
+                    raise answer
+                assert isinstance(answer, str)
+                return answer
+        raise AssertionError(f"the fixture has no answer for {statement!r}")
+
+
+def _city_bots_applier(tmp_path: Path, db: _ScriptedDb) -> Applier:
+    return Applier(
+        tmp_path,
+        git=_FakeGit(_city_bots_clone()),
+        sql=db,
+        world_running=db.world_running,
+        start_database=db.start_database,
+    )
+
+
+def _ready() -> dict[str, Any]:
+    """Every check answered yes: the tables are there and the import produced 400/400."""
+    return {_PRECONDITION_MARK: "1\n", _ROSTER_COUNT_MARK: "1\n", _ACCOUNT_TYPE_MARK: "1\n"}
+
+
+def test_the_shipped_city_bots_manifest_imports_only_the_roster_itself() -> None:
+    """The routing, by value, off the file the app actually ships.
+
+    Four SQL steps and only one of them is this app's work. Asserted as a whole
+    tuple rather than "the roster is direct", because the defect this entry is
+    guarding against is the opposite one too: applying a module's
+    `db-auth`/`db-characters`/`db-world` by hand breaks the core's own `updates`
+    ledger, which is why `applied_by="db-import"` exists.
+    """
+    manifest = _shipped(CITY_BOTS_ID)
+
+    assert [(s.db, s.applied_by) for s in manifest.sql] == [
+        ("auth", "db-import"),
+        ("characters", "db-import"),
+        ("world", "db-import"),
+        ("playerbots", "direct"),
+    ]
+    roster = manifest.sql[-1]
+    assert roster.path == ROSTER_REL
+    assert roster.when == "install"
+    assert roster.precondition is not None and len(roster.verify) == 2
+    assert manifest.build.rebuild is True
+    assert manifest.requires == ("mod-playerbots",)
+    assert manifest.source is not None and manifest.source.rev is None
+    # The conf template the entry names is the one the repository ships, spelled
+    # as the module spells it -- a typo here activates nothing and says nothing.
+    assert manifest.conf[0].template == "conf/mod_city_bots.conf.dist"
+
+
+def test_the_city_bots_roster_is_issued_against_the_playerbots_database(tmp_path: Path) -> None:
+    """The whole sequence of one successful press, in order, as one assertion.
+
+    ORDER is the claim, and it is asserted as a list because every individual
+    member of it was already true before T63 of a step that ran at the wrong
+    time. The running-world guard is consulted before anything is read or
+    written; the database is started alone; the guard is re-read after that
+    start (the window T7 round 2 is about); the precondition is asked before the
+    file is opened; and only then does the roster reach `playerbots`.
+    """
+    db = _ScriptedDb(_ready())
+
+    report = _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    assert db.log == [
+        "world_running?",
+        "start_database",
+        "world_running?",
+        f"query playerbots:{_PRECONDITION_MARK}",
+        "run_file playerbots:2026_07_15_00_citizen_roster.sql",
+        f"query playerbots:{_ROSTER_COUNT_MARK}",
+        f"query playerbots:{_ACCOUNT_TYPE_MARK}",
+    ]
+    # Nothing else was run by hand: the other three steps are the core's.
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+    assert db.statements == []
+    assert {p.db for p in report.pending_sql} == {"auth", "characters", "world"}
+    assert any("citizen_roster" in line for line in report.done)
+    assert report.rebuild_required is True
+
+
+def test_the_city_bots_roster_is_refused_while_the_world_server_runs(tmp_path: Path) -> None:
+    """T7's guard stands in front of the roster, and nothing is read or written behind it.
+
+    `playerbots` is in `WORLD_HELD_DBS`, so this is the guard's own rule and not
+    a second one -- and the assertion that matters is the second half: the
+    precondition was never even ASKED. A refusal that had already read the
+    database would mean the pre-pass had been replaced by a per-step check, and
+    a per-step check is what lets a multi-step manifest half-apply.
+    """
+    db = _ScriptedDb(_ready(), world=True)
+
+    with pytest.raises(ApplyError) as refusal:
+        _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    message = str(refusal.value)
+    assert "the world server is running" in message
+    assert "playerbots" in message and ROSTER_REL in message
+    assert "Press Stop" in message
+    assert db.queries == [], "it read the database behind a refusal"
+    assert db.files == [] and db.statements == []
+
+
+def test_the_roster_waits_for_the_tables_and_imports_on_the_next_press(tmp_path: Path) -> None:
+    """The ordering problem itself: too early is skipped and said, and the repeat works.
+
+    One test for both halves on purpose. The first press is the state every
+    fresh install is in -- mod-playerbots cloned, never started, so its tables
+    do not exist -- and the second is the same press after the rebuild and one
+    start. The fixture answers NO to the precondition once and YES afterwards,
+    because a fixture that answers the same thing twice cannot tell a deferral
+    from a step that never runs at all.
+
+    What the first press must NOT do is fail: everything it did (the clone, the
+    conf) is real and worth keeping, and the module is not broken -- it is
+    unfinished, and the remaining work is the user's.
+    """
+    db = _ScriptedDb({**_ready(), _PRECONDITION_MARK: ["", "1\n"]})
+    applier = _city_bots_applier(tmp_path, db)
+
+    first = applier.install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == [], "it imported the roster before the tables existed"
+    skipped = [s for s in first.skipped if ROSTER_REL in s]
+    assert len(skipped) == 1, first.skipped
+    assert "mod-playerbots has not created its tables yet" in skipped[0]
+    assert "no rows were written" in skipped[0]
+    assert "install City Bots again" in skipped[0]
+    assert (tmp_path / "modules" / CITY_BOTS_ID / ROSTER_REL).is_file(), "the clone is still there"
+
+    second = applier.install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+    assert any(ROSTER_REL.rsplit("/", 1)[-1] in line for line in second.done)
+    assert not [s for s in second.skipped if ROSTER_REL in s]
+
+
+def test_a_precondition_that_cannot_be_asked_skips_and_carries_the_reason(tmp_path: Path) -> None:
+    """Fail closed, and the seam's own words with it.
+
+    The case the precondition was written for is not a missing TABLE, it is a
+    missing SCHEMA: before mod-playerbots has ever started, `acore_playerbots`
+    does not exist, and a `mysql` told to connect to it exits non-zero rather
+    than returning no rows. So *could not ask* has to mean the same as *no* --
+    the write on the other side of this question starts with `DROP TABLE` -- and
+    the sentence has to carry why, because "not yet" and "your database is
+    unreachable" send the user to two different places.
+    """
+    db = _ScriptedDb(
+        {**_ready(), _PRECONDITION_MARK: RuntimeError("Unknown database 'acore_playerbots'")}
+    )
+
+    report = _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == []
+    skipped = [s for s in report.skipped if ROSTER_REL in s]
+    assert len(skipped) == 1, report.skipped
+    assert "Unknown database 'acore_playerbots'" in skipped[0]
+    assert "mod-playerbots has not created its tables yet" in skipped[0]
+
+
+def test_a_precondition_is_never_asked_without_a_reader(tmp_path: Path) -> None:
+    """A runner that cannot be read is the same answer as a database that will not say.
+
+    `_FakeSql` is a `SqlRunner` and nothing more, which is exactly what a caller
+    that passes its own write-only seam hands the engine. The step must not run
+    on the strength of a question that was never put.
+    """
+    plain = _FakeSql()
+    applier = Applier(
+        tmp_path,
+        git=_FakeGit(_city_bots_clone()),
+        sql=plain,
+        world_running=lambda: False,
+    )
+
+    report = applier.install(_shipped(CITY_BOTS_ID))
+
+    assert plain.files == []
+    skipped = [s for s in report.skipped if ROSTER_REL in s]
+    assert len(skipped) == 1 and "no database reader" in skipped[0]
+
+
+@pytest.mark.parametrize(
+    ("mark", "names", "not_named"),
+    [
+        (_ROSTER_COUNT_MARK, "citizen_roster does not hold the 400", "account type 3"),
+        (_ACCOUNT_TYPE_MARK, "not all marked playerbots account type 3", "does not hold the 400"),
+    ],
+)
+def test_a_verify_entry_refuses_and_names_the_half_that_failed(
+    tmp_path: Path, mark: str, names: str, not_named: str
+) -> None:
+    """wow-manage's 400/400, and the reason it is two checks rather than one.
+
+    `city_bots_import_roster()` counts the roster rows AND the city-bot account
+    types, and calls anything else a failure: `mysql` exiting 0 over a file of
+    400 inserts says the statements parsed, not that the cast is there.
+
+    Each case answers NO to exactly ONE of the two, and asserts the OTHER's
+    sentence is absent. A refusal that named both -- or a single query with two
+    clauses -- is green for two different reasons and red for two more, and
+    sends the operator to look in the wrong table. `not_named` is the assertion
+    people skip, and the only one that proves which check fired.
+    """
+    db = _ScriptedDb({**_ready(), mark: ""})
+
+    with pytest.raises(ApplyError) as refusal:
+        _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    message = str(refusal.value)
+    assert names in message
+    assert not_named not in message
+    # It does not claim nothing happened: the file ran, and that is the point.
+    assert "was run" in message and "repeat repairs rather than duplicates" in message
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+
+
+def test_a_verify_that_cannot_be_asked_is_reported_and_does_not_refuse(tmp_path: Path) -> None:
+    """The opposite of the precondition's fail-closed, and deliberately so.
+
+    There the unknown gates a write that has not happened; here the write has
+    already happened, and a database that cannot be asked is not evidence
+    against it. Refusing would report a failed install over a successful import.
+    """
+    db = _ScriptedDb({**_ready(), _ROSTER_COUNT_MARK: RuntimeError("database has gone away")})
+
+    report = _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+    unchecked = [s for s in report.skipped if "NOT checked against the database" in s]
+    assert len(unchecked) == 1, report.skipped
+    assert "database has gone away" in unchecked[0]
+    assert "ran, but" in unchecked[0]
