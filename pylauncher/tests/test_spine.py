@@ -2359,6 +2359,16 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "container -- and a listing that comes back without a `.dbc` in it is a refusal "
         "(`no .dbc files in ...`), never a copy reported as done"
     ),
+    ("apply.py", "_receipts"): (
+        "T67. Lists the SOURCE tree inside the clone this app made -- the files a `dest: data` "
+        "client step copies -- and maps each onto its destination, to hash the record "
+        "`remove()` checks before it DELETES anything from the user's game client. It decides "
+        "no write; it decides a later delete, and it is the reason the listing is of the clone "
+        "and not of the destination: round 1 review, 2026-09-16, listing `<client>/Data` "
+        "recorded the user's own archives as this app's and removing the Season of Discovery "
+        "keg emptied the folder. A listing that comes back empty records nothing, which at "
+        "remove time reads as 'no record of copying it' and LEAVES the file alone"
+    ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"

@@ -328,6 +328,10 @@ def test_removing_arac_names_what_it_did_not_take_back(
 
     The manifest's own note says so ("Removing the clone does NOT revert the
     SQL/DBC/MPQ"), and the report the user reads has to agree with it.
+
+    Since T67 the MPQ is the one of the three that IS taken back, so it is named
+    in `done` here rather than in `left_behind`; T67's own tests cover the arms
+    where it is not. The DBCs and the SQL are still nobody's to undo.
     """
     manifest = _manifest(ARAC)
     server_dir = tmp_path / "server"
@@ -343,15 +347,16 @@ def test_removing_arac_names_what_it_did_not_take_back(
 
     assert report.left_behind == (
         "the server DBC files from patch-contents/DBFilesContent (in the server's data volume)",
-        "Patch-A.MPQ (in your game client folder)",
         "what data/sql/db-world/arac.sql wrote into the world database",
     )
     text = _format_report(report)
     assert "Removing mod-arac did not undo everything it installed" in text
-    assert "Patch-A.MPQ (in your game client folder)" in text
+    assert "the server DBC files from patch-contents/DBFilesContent" in text
     # And the report is telling the truth about the machine, not only about itself.
     assert (volume / "dbc" / "CharBaseInfo.dbc").read_bytes() == _dbc_bytes("CharBaseInfo.dbc")
-    assert (client_dir / "Data" / "Patch-A.MPQ").exists()
+    # T67: the one step of the three that IS undone, in `done` and on disk.
+    assert f"took back Patch-A.MPQ from {client_dir / 'Data'}" in report.done
+    assert not (client_dir / "Data" / "Patch-A.MPQ").exists()
 
 
 def test_a_remove_that_leaves_nothing_behind_says_nothing_about_it(tmp_path: Path) -> None:
