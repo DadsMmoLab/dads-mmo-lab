@@ -4623,3 +4623,214 @@ def test_a_verify_that_cannot_be_asked_is_reported_and_does_not_refuse(tmp_path:
     assert len(unchecked) == 1, report.skipped
     assert "database has gone away" in unchecked[0]
     assert "ran, but" in unchecked[0]
+
+
+# ------------------------------------------------- T68: the install's finished mark
+
+
+def _claim_of(clone: Path) -> dict[str, Any]:
+    """The claim file as JSON, read the way anything but this app would read it.
+
+    Deliberately not through `_parse_clone_claim()`: the tests below are about
+    what is ON DISK, and asking the module's own reader would let a mark that is
+    never written and a reader that invents one pass together.
+    """
+    parsed = json.loads((clone / apply_module.CLAIM_FILE).read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_a_world_running_refusal_leaves_the_clone_marked_unfinished(tmp_path: Path) -> None:
+    """T68's own state: the clone is on disk and the install did not finish.
+
+    The refusal is the T7 direct-SQL guard's, raised from `_sql()` — after the
+    clone, the claim, the deploy and the patches, and before conf, client files
+    and DBCs. That is the state the Modules tab read as `Remove`.
+
+    Two assertions and not one: the mark on disk is `false`, and the module's
+    own reader says unfinished. Asserting only the reader would pass on a build
+    that wrote no mark at all and answered from a default.
+    """
+    clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
+    applier = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: True)
+
+    with pytest.raises(ApplyError, match="the world server is running"):
+        applier.install(parse_manifest(STACKABLES))
+
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is False
+    assert apply_module.clone_install_unfinished(clone, item_id="all-stackables") is True
+
+
+def test_an_install_that_ran_every_step_marks_the_clone_finished(tmp_path: Path) -> None:
+    """The other half of the pair, over the SAME manifest and the same applier.
+
+    Only `world_running` differs, so nothing but the guard can account for the
+    difference between this and the test above — a second manifest here would
+    leave "unfinished" provable by anything else either input changed.
+    """
+    clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: False)
+
+    applier.install(parse_manifest(STACKABLES))
+
+    assert sql.files == [("world", "up.sql")]  # the steps really ran
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is True
+    assert apply_module.clone_install_unfinished(clone, item_id="all-stackables") is False
+
+
+class _RefusingDbc:
+    """A DBC copier that fails, so the LAST step of `install()` is the one that raises."""
+
+    def copy_dbc_dir(self, src: Path) -> None:
+        raise OSError("data/dbc is read-only")
+
+
+def test_the_finished_mark_waits_for_the_last_step_and_not_for_the_sql(tmp_path: Path) -> None:
+    """The mark is written after `_dbc()`, the last thing `install()` does.
+
+    The T7 guard is the refusal T68 was reported for, but it is not the only
+    one: every step after it can raise too, and each leaves the clone on disk
+    with its install unfinished. So this run gets past the SQL — `sql.statements`
+    proves it — and dies in the DBC copy.
+
+    Mutation: move the completed write to just after `_sql()`, or into the claim
+    write itself, and this clone is marked finished with its DBCs never copied.
+    """
+    m = parse_manifest(
+        {
+            "id": "sod",
+            "name": "SOD",
+            "type": "keg",
+            "game": "wow-wotlk",
+            "source": {"repo": "DadsMmoLab/dads-mmo-lab", "sparse_path": "kegs/sod"},
+            "sql": [{"db": "world", "statement": "SELECT 1"}],
+            "server_dbc": [{"src": "dbc"}],
+        }
+    )
+    clone = tmp_path / "ale_scripts" / "sod"
+    sql = _FakeSql()
+    applier = Applier(
+        tmp_path,
+        git=_FakeGit({"dbc/Spell.dbc": "y"}),
+        sql=sql,
+        dbc=_RefusingDbc(),
+        world_running=lambda: False,
+    )
+
+    with pytest.raises(OSError, match="read-only"):
+        applier.install(m)
+
+    assert sql.statements == [("world", "SELECT 1")]  # the SQL step DID run
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is False
+    assert apply_module.clone_install_unfinished(clone, item_id="sod") is True
+
+
+def test_a_claim_from_a_build_before_the_mark_reads_as_finished(tmp_path: Path) -> None:
+    """No key is an OLDER build's claim, and it must not put Install back on that row.
+
+    Every build before this one wrote the claim in the same place — right after
+    the clone, before the steps — so a half install and a whole install left
+    byte-identical claims and nothing on disk tells them apart. Reading the
+    absent key as unfinished would therefore flip every module installed by
+    every previous build back to an Install button.
+
+    The fixture is this app's own writer with the one key removed, so it is the
+    older record rather than a hand-typed guess at it.
+    """
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(clone, item_id="mod-ah-bot", url=OWNED_URL)
+    old = _claim_of(clone)
+    del old[apply_module.COMPLETED_KEY]
+    (clone / apply_module.CLAIM_FILE).write_text(json.dumps(old), encoding="utf-8")
+
+    assert apply_module.read_clone_claim(clone, item_id="mod-ah-bot") is Ownership.OWNED
+    assert apply_module.clone_install_unfinished(clone, item_id="mod-ah-bot") is False
+
+
+def test_a_folder_this_app_did_not_claim_is_never_unfinished(tmp_path: Path) -> None:
+    """A stranger's checkout offers no Install, whatever else is true of it.
+
+    `unfinished` puts a press back on a row whose folder is on disk, and
+    `_require_own_clone()` refuses that press for a folder this app did not
+    make. The two must agree, so this reads an unclaimed folder and a claim that
+    names another item — both under a name this app uses.
+    """
+    mine = tmp_path / "modules" / "mod-ah-bot"
+    mine.mkdir(parents=True)
+    theirs = tmp_path / "modules" / "mod-transmog"
+    theirs.mkdir(parents=True)
+    apply_module.write_clone_claim(theirs, item_id="something-else", url=OWNED_URL)
+
+    assert apply_module.clone_install_unfinished(mine, item_id="mod-ah-bot") is False
+    assert apply_module.clone_install_unfinished(theirs, item_id="mod-transmog") is False
+
+
+def test_unfinished_clones_names_only_the_half_installed_one_per_family(tmp_path: Path) -> None:
+    """The tab's reading: the same folders `installed_clones()` walks, filtered.
+
+    Three clones in two families, one of them unfinished, and the answer is a
+    strict subset of the listing beside it — which is what lets the panel key
+    both by `(family, id)`.
+    """
+    finished = tmp_path / "modules" / "mod-ah-bot"
+    halfway = tmp_path / "modules" / "mod-transmog"
+    stranger = tmp_path / "ale_scripts" / "sitmeanrest"
+    for path in (finished, halfway, stranger):
+        path.mkdir(parents=True)
+    apply_module.write_clone_claim(finished, item_id="mod-ah-bot", url=OWNED_URL, completed=True)
+    apply_module.write_clone_claim(halfway, item_id="mod-transmog", url=OWNED_URL, completed=False)
+
+    listed = apply_module.installed_clones(tmp_path)
+    unfinished = apply_module.unfinished_clones(tmp_path)
+
+    assert listed["module"] == frozenset({"mod-ah-bot", "mod-transmog"})
+    assert unfinished["module"] == frozenset({"mod-transmog"})
+    assert unfinished["ale"] == frozenset() and listed["ale"] == frozenset({"sitmeanrest"})
+    for family, names in unfinished.items():
+        assert names <= listed[family], family
+
+
+def test_a_reinstall_that_fails_leaves_a_finished_module_finished(tmp_path: Path) -> None:
+    """A failed second install must not take Remove off a module that works.
+
+    `update()` and the Install press both run `install()` again over a clone
+    that is already here and already finished. The first claim write happens
+    before any step, so writing a flat `False` there would demote a working
+    module the moment anything downstream raised — the user's row would offer
+    Install for an install that had succeeded, and no longer offer Remove.
+
+    Mutation: `completed=False` at the first write and the second half of this
+    fails while every other T68 test still passes.
+    """
+    clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
+    m = parse_manifest(STACKABLES)
+    Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: False).install(m)
+    assert apply_module.clone_install_completed(clone, item_id="all-stackables") is True
+
+    refused = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: True)
+    with pytest.raises(ApplyError, match="the world server is running"):
+        refused.install(m)
+
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is True
+    assert apply_module.clone_install_unfinished(clone, item_id="all-stackables") is False
+
+
+def test_a_refused_install_over_an_unfinished_clone_stays_unfinished(tmp_path: Path) -> None:
+    """The control for the test above: carrying the old value forward is not "always True".
+
+    The second press of the row's Install — the one T68 exists to offer — hits
+    the same guard again, and the clone must still be the one that keeps the
+    button.
+    """
+    clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
+    m = parse_manifest(STACKABLES)
+    applier = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: True)
+
+    for _ in range(2):
+        with pytest.raises(ApplyError, match="the world server is running"):
+            applier.install(m)
+
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is False
+    assert apply_module.clone_install_unfinished(clone, item_id="all-stackables") is True
