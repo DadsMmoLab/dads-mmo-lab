@@ -9336,7 +9336,7 @@ def test_the_one_dialog_offers_three_buttons_in_the_designs_words_and_defaults_t
     assert "nobody has tested" in box.text()
 
 
-def test_an_answer_the_dialog_does_not_recognise_cancels_rather_than_updating(
+def test_an_update_answer_the_dialog_does_not_recognise_cancels_rather_than_updating(
     qapp: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The safety property behind the button choice, asserted on the function itself.
@@ -9540,7 +9540,7 @@ def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
     assert view.update_to_latest_button.isEnabled() is False
 
 
-def test_the_version_line_and_the_way_back_appear_together_or_not_at_all(
+def test_the_update_version_line_and_the_way_back_appear_together_or_not_at_all(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """ONE reading decides both, and that is the point of asking once.

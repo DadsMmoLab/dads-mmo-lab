@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support_native import ENTRY, Recorder, engine, install
+from tests.support_native import ENTRY, VMAP_FIXTURE, Recorder, engine, install, lay_patch_sources
 
 # The CMaNGOS half of this file drives a REAL TBC install, and the machinery
 # that lays the SQL a CMaNGOS plan names -- and the import gate it needs --
@@ -277,8 +277,18 @@ def test_a_checkout_git_will_not_describe_is_refused_rather_than_assumed_clean(
     rec, server_dir = _ready(tmp_path)
     rec.git_reads = False
 
-    with pytest.raises(InstallerError, match="could not ask git"):
+    with pytest.raises(InstallerError) as raised:
         _press(rec, server_dir)
+
+    # BY THE WHOLE SENTENCE, because "could not ask git" alone is in the NEXT
+    # refusal too. A mutation that deleted this guard survived a `match=` on
+    # that fragment: with `local_edits()` ignored, the press fell through to the
+    # local-commits read, which also answers None on this machine, and raised a
+    # different refusal with the same words in it. A substring that two
+    # branches share proves neither of them ran.
+    said = str(raised.value)
+    assert said.startswith("Yu'lon could not ask git whether"), said
+    assert "has changes of your own in it" in said, said
     assert rec.clones == []
 
 
@@ -546,6 +556,59 @@ def test_a_patch_that_no_longer_applies_stops_the_press_and_puts_every_source_ba
     assert rec.heads[core] == OLD, "the core was left on upstream's tip under an old image"
     assert rec.heads[server_dir / "src/mangos-tbc/src/modules/Bots"] == OLD
     assert "build" not in rec.calls[-1], "it compiled after the patch refused"
+
+
+def test_the_carried_patch_is_written_into_the_moved_source_before_anything_compiles(
+    tmp_path: Path,
+) -> None:
+    """The half the dry run does not do, and without which the compile is of unpatched code.
+
+    `rebuild_stages()` excludes `patch-sources` -- a rebuild does not re-clone,
+    so there was never anything to re-patch -- and this route DOES re-clone, by
+    `reset --hard` onto upstream's tip, which discards the patch the install
+    wrote. A mutation that ran the dry run and then skipped the write survived
+    every other test in this file: the press succeeded, said nothing wrong, and
+    compiled the defect the patch exists to stop.
+
+    Asserted on the BYTES in the checkout, not on a line in the log: the log
+    says what the code believes and the file is what the compiler reads.
+    """
+    rec, server_dir, tbc = _tbc(tmp_path)
+    core = server_dir / "src/mangos-tbc"
+    patched = sorted(core.rglob("*.cpp"))
+    assert patched, "the fixture laid no file for the patch to edit"
+    # The fetch's own effect on a patched tree: `reset --hard` puts upstream's
+    # UNPATCHED bytes back. `lay_patch_sources` is what lays that pre-image, so
+    # re-arming it as the clone hook is the fetch, modelled.
+    patched_now = {path: path.read_bytes() for path in patched}
+    rec.on_clone = lay_patch_sources(TBC)
+
+    list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
+
+    after = {path: path.read_bytes() for path in patched}
+    assert after == patched_now, "the fetch reset the tree and nothing wrote the patch again"
+    pre_image = {path: (VMAP_FIXTURE / path.name).read_bytes() for path in patched}
+    assert after != pre_image, "the fixture and the patched file are the same bytes"
+
+
+def test_the_patches_are_resolved_dry_before_a_single_one_is_written(tmp_path: Path) -> None:
+    """The order the design turns on, and the only thing that makes the restore free.
+
+    A press that wrote each patch as it resolved it would, with two carried
+    patches and the second no longer applying, have edited the first checkout
+    before it found out -- and `_put_sources_back()` moves HEAD, which would
+    then throw that edit away along with everything else. Only one patch ships
+    today, so the guarantee is asserted on the ORDER of what the route says:
+    every patch is checked, and only then is any applied.
+    """
+    rec, server_dir, tbc = _tbc(tmp_path)
+    said = list(tbc.update_to_latest(InstallOptions(server_dir=server_dir)))
+
+    checked = next(i for i, line in enumerate(said) if line.startswith("Checking "))
+    settled = next(i for i, line in enumerate(said) if line.startswith("Every source patch"))
+    applied = next(i for i, line in enumerate(said) if line.startswith("Applying "))
+    assert checked < settled < applied, said
+    assert not any(line.startswith("Applying ") for line in said[:settled]), said
 
 
 def test_a_rebuild_that_fails_puts_the_sources_back_so_folder_and_image_agree(
@@ -876,6 +939,39 @@ def test_real_local_edits_reports_the_users_file_and_skips_the_one_we_patch(
     assert "untracked.txt" not in (
         real.local_edits(dest) or ()
     ), "an untracked file reset --hard never touches was counted as an edit"
+
+
+def test_restoring_a_source_asks_the_remote_for_nothing(tmp_path: Path) -> None:
+    """The one difference from `_pin()`, and a mutation that added a fetch survived without it.
+
+    `restore_rev()` runs on a path that is ALREADY failing, and one of the
+    things that path fails over is the network. `rev` is a commit the checkout
+    was sitting on a moment ago, so the object is in the store; asking the
+    remote for it again would make the restore depend on the very thing that
+    may be the reason we are restoring — and the real-git test above cannot see
+    that, because its origin is a `file://` path that is always reachable.
+
+    So this is asserted on the argv. `_pin()` fetches because ITS `rev` may be
+    one the clone has never had; this one may not.
+    """
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], cwd: Path | None = None, **_k: object) -> object:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    dest = tmp_path / "work"
+    (dest / ".git").mkdir(parents=True)
+    saved = runner.run
+    try:
+        runner.run = fake_run  # type: ignore[assignment]
+        git.RunnerGit().restore_rev(dest, OLD)
+    finally:
+        runner.run = saved  # type: ignore[assignment]
+
+    assert len(seen) == 1, seen
+    assert "fetch" not in seen[0], seen[0]
+    assert seen[0][-3:] == ["checkout", "--detach", OLD]
 
 
 def test_the_two_transports_parse_one_status_the_same_way() -> None:
