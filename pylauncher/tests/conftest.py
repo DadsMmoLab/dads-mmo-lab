@@ -886,17 +886,35 @@ def a_world_container_that_answers(monkeypatch: pytest.MonkeyPatch) -> None:
     `tortoise-mangosd` — and passing.
 
     A constant, and a benign one: every test that takes this fixture also makes
-    the wait answer True on its first window, so exactly one reading is taken
-    and nothing is decided by it. A test ABOUT the reading builds its own (see
+    the wait answer True on its first window, so nothing is decided by the
+    reading. A test ABOUT the reading builds its own (see
     `tests/test_ready_budget.py`, where `FakeWorld` is the machine).
+
+    Since T71 the wait keeps reading this constant for a grace window after the
+    banner — an unchanging "up, never restarted" world, which is what that watch
+    calls still up — and it sleeps between polls. `time.sleep` goes with the
+    reading for that reason: without it these tests answer the same and take
+    `READY_GRACE_SECONDS` of real wall clock EACH to do it (four games to a test
+    in `test_controller_view.py`, so four minutes for one assertion about
+    arguments).
     """
     from yulon.catalog import native
 
     monkeypatch.setattr(
         native,
         "_world_output",
-        lambda spec, **_kwargs: native.WorldOutput(text="loading", restarts=0, status="running"),
+        lambda spec, **_kwargs: native.WorldOutput(
+            # Every family's ready marker: one fixture answers for all four
+            # games, and T71's watch asks each of them whether THIS run's log
+            # still holds its own banner (a log without it is a container that
+            # restarted since). `_world_output()` really does return the whole
+            # of the current run, banner included.
+            text="loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",
+            restarts=0,
+            status="running",
+        ),
     )
+    monkeypatch.setattr(native.time, "sleep", lambda seconds: None)
 
 
 @pytest.fixture

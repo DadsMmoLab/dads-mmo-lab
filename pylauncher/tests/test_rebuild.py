@@ -50,6 +50,7 @@ from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
+    WorldStoppedAfterReadyError,
     installer_for,
     rebuild_confirmation,
 )
@@ -477,6 +478,90 @@ def test_a_rebuild_whose_server_never_comes_up_puts_the_old_build_back(
     said = str(raised.value)
     assert "never reported ready" in said
     assert "put back" in said and "running again" in said, said
+
+
+ABORTED_AFTER_READY = native.WorldOutput(
+    text=(
+        "ready...\n"
+        "Avg Diff: 15ms\n"
+        "AC> [1146] Table 'acore_world.city_bot_poi' doesn't exist\n"
+        "Your database structure is not up to date.\n"
+        ">> ABORTED"
+    ),
+    restarts=0,
+    status="exited",
+)
+"""The T63 world, as `world_output` sees it: it said ready, then aborted, and is down.
+
+Both families' banners are in the text so the reading is the same machine
+whichever entry drives it, and what ends the watch is the STATUS -- an exited
+container, whose current log is the log of the run that died.
+"""
+
+
+def test_a_rebuild_whose_world_aborts_after_its_banner_keeps_the_new_build(
+    tmp_path: Path,
+) -> None:
+    """Owner answer, 2026-09-16: keep the new build and report the abort (T71).
+
+    The compile finished, the containers were replaced, and the server that came
+    out of it DID start -- it then stopped for a reason on the data side of the
+    binary. Rolling an hour of correct compiling back does not create the
+    missing table, so this failure is the one ready-stage failure that does not
+    restore: no `-rollback` tag goes back, no second recreate, and the rollback
+    names are let go exactly as a success lets them go.
+
+    The sentence carries the remedy the T63 gate ran by hand and recorded as
+    working (Stop, Apply module SQL, Start), because a missing TABLE is the one
+    abort this app can name a button for.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        list(
+            engine(rec, world_output=lambda spec: ABORTED_AFTER_READY).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+
+    refs, backs = _refs(server_dir), _rollback_refs(server_dir)
+    restores = [f"tag:{b}->{r}" for r, b in zip(refs, backs, strict=True)]
+    assert not [c for c in rec.calls if c in restores], rec.calls
+    assert [c for c in rec.calls if c.startswith("rmi:")] == [f"rmi:{b}" for b in backs], rec.calls
+    assert len([c for c in rec.calls if c == "recreate"]) == 1, rec.calls
+    said = str(raised.value)
+    assert "came up and then stopped" in said
+    assert "Table 'acore_world.city_bot_poi' doesn't exist" in said
+    assert "Press Apply module SQL on the Modules tab, then Start." in said
+    assert "KEPT" in said
+    assert "put back" not in said, said
+
+
+def test_a_world_that_never_came_up_at_all_still_puts_the_old_build_back(
+    tmp_path: Path,
+) -> None:
+    """The other side of the same decision, so the two cannot be collapsed by accident.
+
+    A rebuild whose server never reaches ready is a build worth restoring, and
+    T71 changed nothing about it. Kept as its own test beside the one above
+    because the distinction is a single `isinstance` in `rebuild()`, and a
+    refactor that widened it would make both of these pass the wrong way if only
+    one existed.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, wait_ready=_answers(False, True)).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+
+    assert not isinstance(raised.value, WorldStoppedAfterReadyError)
+    refs, backs = _refs(server_dir), _rollback_refs(server_dir)
+    for restore in [f"tag:{b}->{r}" for r, b in zip(refs, backs, strict=True)]:
+        assert restore in rec.calls, rec.calls
+    assert "put back" in str(raised.value)
 
 
 def test_a_rebuild_that_comes_up_lets_the_rollback_go(tmp_path: Path) -> None:
