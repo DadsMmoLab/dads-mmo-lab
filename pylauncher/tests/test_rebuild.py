@@ -1512,3 +1512,43 @@ def test_a_rebuild_whose_compile_fails_names_the_compiler_error_in_its_refusal(
     assert "-DBoost_USE_STATIC_LIBS" not in said, said
     assert "$(nproc)" not in said, said
     assert "build" in rec.calls, rec.calls
+
+
+ABOVE_FENCE_CAPTURE = (
+    Path(__file__).resolve().parent / "data" / "compose-build-error-above-the-fence.txt"
+)
+"""The capture T70's live re-gate failed on — see `test_docker.py`."""
+
+
+def test_a_rebuild_whose_error_is_above_the_fence_still_names_the_file(
+    tmp_path: Path,
+) -> None:
+    """T70 round 2, at the press rather than at the function.
+
+    The re-gate of 2026-09-16 drove this exact path and the panel showed five
+    `[163/1838] Building CXX object …` lines followed by the elided epilogue:
+    round 1's fence parser was correct and the fence held no diagnostic. The
+    unit test above cannot catch that recurrence, because it is fed the tail
+    the app would have held only if the app really hands this one over — so
+    this drives `rebuild()` with the whole re-gate capture behind the same
+    bound the app applies.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    tail = ABOVE_FENCE_CAPTURE.read_text(encoding="utf-8").splitlines()[-docker.KEEP_OUTPUT_LINES :]
+    rec.build_result = docker.AttachedRun(1, tuple(tail))
+
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+
+    said = str(raised.value)
+    assert said.startswith(
+        "the build failed (exit 1). Its last words were: "
+        "/azerothcore/modules/mod-1v1-arena/src/1v1_loader.cpp:6:5: fatal error:"
+    ), said
+    assert "use of undeclared identifier 'GATE_T70_UNDECLARED_IDENTIFIER'" in said, said
+    # The two things the re-gate showed instead.
+    assert "Building CXX object" not in said, said
+    assert "-DCMAKE_INSTALL_PREFIX" not in said, said
+    assert "$(nproc)" not in said, said
+    assert "build" in rec.calls, rec.calls

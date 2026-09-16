@@ -6344,8 +6344,12 @@ def test_a_failed_compose_build_reports_the_compiler_error_not_the_command() -> 
     assert "CbDuelBotUtil.cpp:11:16: fatal error" in said, said
     assert "use of undeclared identifier" in said, said
     # It LEADS, because a diagnostic names its place first and the cap bites
-    # from the far end of the sentence.
-    assert said.startswith("138.3 /azerothcore/modules/mod-city-bots/src/"), said[:160]
+    # from the far end of the sentence. No `138.3 ` in front of it: round 2
+    # takes the diagnostic from the stream rather than from the fenced replay,
+    # and strips BuildKit's `#<n> <t> ` bookkeeping off what it quotes.
+    assert said.startswith(
+        "/azerothcore/modules/mod-city-bots/src/CbDuelBotUtil.cpp:11:16: fatal error:"
+    ), said[:160]
     # And not the cmake invocation, which is the whole complaint. The `ERROR:`
     # line stays for its exit code (the 137 case, review 2026-09-12) but only
     # with its embedded command elided, so none of the flags Lac was shown in
@@ -6426,6 +6430,382 @@ def test_a_failure_word_inside_the_step_block_is_not_the_build_failing() -> None
     # The plain tail, fences and all — not a parse that happens to end here.
     assert "------" in said, said
     assert "[3/3]" in said, said
+
+
+_ABOVE_FENCE_CAPTURE = (
+    Path(__file__).resolve().parent / "data" / "compose-build-error-above-the-fence.txt"
+)
+"""The whole of a failed `docker compose build`, verbatim — T70's live re-gate.
+
+459 lines, captured 2026-09-16 on the app's own route (`build_staged()` →
+`docker compose -f … -f … -f … build --progress plain`, the mode
+`test_build_staged_passes_all_three_compose_files_and_plain_progress()` pins)
+with one undeclared identifier compiled into `mod-1v1-arena`. Nothing is
+edited but the first line, an ssh known-hosts warning from the shell that ran
+it; everything below is Docker's. The paths in it are the container's.
+
+This is the capture round 1 FAILED on, and it is kept whole rather than
+trimmed to an epilogue because the two things that broke it are both outside
+any epilogue: the diagnostic fifteen ninja jobs above the fenced replay, and
+three services racing to be the one whose epilogue is replayed.
+"""
+
+
+def _above_fence_tail() -> tuple[str, ...]:
+    """The capture through the app's own bound, exactly as `run_attached()` keeps it."""
+    lines_read = _ABOVE_FENCE_CAPTURE.read_text(encoding="utf-8").splitlines()
+    return tuple(lines_read[-docker.KEEP_OUTPUT_LINES :])
+
+
+def test_a_compose_error_above_the_fenced_replay_is_still_the_sentence() -> None:
+    """T70 round 2: a perfect fence parser finds no diagnostic on the real route.
+
+    Round 1 widened the failure marker and paired the fences independently of
+    it, and the live re-gate still showed nothing useful. BuildKit replays only
+    the LAST TEN lines of the failed step between its `------` rules, and
+    `cmake --build -j` had let fifteen more parallel ninja jobs finish after
+    the compile that failed — so those ten lines are `Building CXX object …`
+    progress and the `fatal error:` is above them.
+    """
+    said = docker.last_words(_above_fence_tail(), from_build=True)
+
+    # The diagnostic LEADS, with no `#25 7.331 ` bookkeeping in front of it.
+    assert said.startswith(
+        "/azerothcore/modules/mod-1v1-arena/src/1v1_loader.cpp:6:5: fatal error:"
+    ), said[:160]
+    assert "use of undeclared identifier 'GATE_T70_UNDECLARED_IDENTIFIER'" in said, said
+    # Its context, which is what makes a diagnostic readable.
+    assert "1 error generated." in said, said
+    # Not the cmake invocation — the whole complaint, and what round 1 still
+    # showed on this capture.
+    assert "-DBoost_USE_STATIC_LIBS" not in said, said
+    assert "-DCMAKE_INSTALL_PREFIX" not in said, said
+    assert "$(nproc)" not in said, said
+    # And not one ninja progress line, which is what round 1 selected here:
+    # its sentence was five of `[163/1838] Building CXX object …`.
+    assert "/1838]" not in said, said
+    assert "Building CXX object" not in said, said
+    # The epilogue's exit code still survives beside it (the 137 case).
+    assert "exit code: 1" in said, said
+
+
+def test_the_fenced_replay_on_that_capture_holds_no_diagnostic_at_all() -> None:
+    """Why the fence rule could not have produced the sentence above.
+
+    Named separately because the assertion it protects is the one a reviewer
+    cannot check by reading the message: without this, the test above passes
+    and nobody can tell whether the fence path or the new inline scan answered
+    it. Here the fence path is asked on its own, and it has nothing.
+    """
+    said = [line.strip() for line in _above_fence_tail() if line.strip()]
+    opened, closed = docker._step_fences(said)
+    assert opened is not None and closed is not None, (opened, closed)
+
+    replay = said[opened + 2 : closed]
+
+    assert replay, replay
+    assert not any("error" in line for line in replay), replay
+    # What it holds instead: ninja progress, and ninja giving up.
+    assert all(
+        "Building CXX object" in line or line.endswith("ninja: build stopped: subcommand failed.")
+        for line in replay
+    ), replay
+    # And the header names a DIFFERENT service from the one the final line
+    # blames — the race that makes "read the failing service's block" unusable.
+    assert "[ac-db-import build 8/8]" in said[opened + 1], said[opened + 1]
+    assert said[-1].startswith("target ac-authserver: failed to solve:"), said[-1]
+
+
+def test_a_run_that_just_exits_non_zero_still_falls_back_to_the_fenced_block() -> None:
+    """No compiler anywhere: the fence is the only thing that knows what happened.
+
+    Preferring inline diagnostics must not cost the shape that has none — a
+    `RUN apt-get install …` that exits 100, a failing script, T38's classic
+    builder. Those are the fence's, and the fence still answers them.
+    """
+    tail = (
+        "#9 [ac-worldserver build 4/8] RUN apt-get install -y libfoo-dev",
+        "#9 3.001 E: Unable to locate package libfoo-dev",
+        '#9 ERROR: process "/bin/sh -c apt-get install -y libfoo-dev" did not complete '
+        "successfully: exit code: 100",
+        "------",
+        " > [ac-worldserver build 4/8] RUN apt-get install -y libfoo-dev:",
+        "3.001 E: Unable to locate package libfoo-dev",
+        "------",
+        'target ac-worldserver: failed to solve: process "/bin/sh -c apt-get install -y '
+        'libfoo-dev" did not complete successfully: exit code: 100',
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert said.startswith("3.001 E: Unable to locate package libfoo-dev"), said
+    assert "exit code: 100" in said, said
+    # The header is still dropped, so the command is not named twice.
+    assert "[ac-worldserver build 4/8]" not in said, said
+
+
+def test_several_parallel_jobs_failing_are_quoted_twice_and_counted() -> None:
+    """`-j $(nproc)+1` can fail four compiles before ninja stops.
+
+    Quoting all of them would spend the cap on the fourth; quoting one and
+    dropping the rest would tell a user the build has one problem when it has
+    four. Two are quoted and the remainder counted.
+    """
+    tail = (
+        "#25 7.331 FAILED: a.cpp.o ",
+        "#25 7.331 src/a.cpp:1:1: error: first one",
+        "#25 7.332 FAILED: b.cpp.o ",
+        "#25 7.332 src/b.cpp:2:2: error: second one",
+        "#25 7.333 FAILED: c.cpp.o ",
+        "#25 7.333 src/c.cpp:3:3: error: third one",
+        "#25 7.334 FAILED: d.cpp.o ",
+        "#25 7.334 src/d.cpp:4:4: error: fourth one",
+        "#25 7.400 ninja: build stopped: subcommand failed.",
+        "------",
+        " > [ac-worldserver build 8/8] RUN cmake --build .:",
+        "7.400 ninja: build stopped: subcommand failed.",
+        "------",
+        'target ac-worldserver: failed to solve: process "/bin/sh -c cmake --build ." did '
+        "not complete successfully: exit code: 1",
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert said.startswith("src/a.cpp:1:1: error: first one"), said
+    assert "src/b.cpp:2:2: error: second one" in said, said
+    assert "(and 2 more compiler errors)" in said, said
+    # Not quoted, only counted — the cap is four hundred characters.
+    assert "third one" not in said, said
+    assert "fourth one" not in said, said
+
+
+def test_the_count_is_of_the_errors_not_shown_when_each_carries_its_context() -> None:
+    """The arithmetic the test above cannot reach, because its errors have no context.
+
+    Real clang prints three lines under each diagnostic, so three failures are
+    twelve lines competing for five. Counting `found - _DIAGNOSTIC_KEEP` is
+    right only while the quoted diagnostics are bare: with context the second
+    one is cut for space and the sentence still says "and 1 more", so a user is
+    told one file is broken when two are, fixes one, and runs a two-hour build
+    again for the same answer (review, 2026-09-16).
+
+    The rule now is that the count is computed from what SURVIVED the cut, so
+    the claim and the showing cannot drift. Here `b` is quoted — it fits once
+    the context is shared out — and exactly one error is left to count.
+    """
+    tail = (
+        "#25 7.331 FAILED: a.cpp.o ",
+        "#25 7.331 src/a.cpp:1:1: error: first one",
+        "#25 7.331     1 | int a = nope_a;",
+        "#25 7.331       |         ^",
+        "#25 7.331 1 error generated.",
+        "#25 7.332 FAILED: b.cpp.o ",
+        "#25 7.332 src/b.cpp:2:2: error: second one",
+        "#25 7.332     2 | int b = nope_b;",
+        "#25 7.332       |         ^",
+        "#25 7.332 1 error generated.",
+        "#25 7.333 FAILED: c.cpp.o ",
+        "#25 7.333 src/c.cpp:3:3: error: third one",
+        "#25 7.333     3 | int c = nope_c;",
+        "#25 7.333       |         ^",
+        "#25 7.333 1 error generated.",
+        "#25 7.400 ninja: build stopped: subcommand failed.",
+        "------",
+        " > [ac-worldserver build 8/8] RUN cmake --build .:",
+        "7.400 ninja: build stopped: subcommand failed.",
+        "------",
+        'target ac-worldserver: failed to solve: process "/bin/sh -c cmake --build ." did '
+        "not complete successfully: exit code: 1",
+    )
+    said = docker.last_words(tail, from_build=True)
+
+    assert said.startswith("src/a.cpp:1:1: error: first one"), said
+    # The second diagnostic is NAMED, not silently dropped to make room.
+    assert "src/b.cpp:2:2: error: second one" in said, said
+    # And the count is ONE, matching the one error that is genuinely unshown.
+    assert "(and 1 more compiler error)" in said, said
+    assert "more compiler errors)" not in said, said
+    assert "third one" not in said, said
+    # Each quoted diagnostic keeps its own source line — the context is shared
+    # out a rank at a time rather than spent entirely on the first.
+    assert "int a = nope_a;" in said, said
+    assert "int b = nope_b;" in said, said
+    # Left-stripped: clang's alignment is already lost to the ` / ` join.
+    assert " /     1 |" not in said, said
+    assert "/ 1 | int a = nope_a;" in said, said
+
+
+def test_a_driver_killed_for_memory_is_a_diagnostic_though_it_names_no_file() -> None:
+    """`c++: fatal error: Killed signal terminated program cc1plus` — the OOM.
+
+    `-j $(nproc)+1` on a VM too small is the failure this project warns about
+    before the build starts, and it is the one the compiler reports WITHOUT a
+    file, line or column, because the process that had them was killed. A rule
+    keyed on `path:line:col:` alone sees nothing and falls back to the fence —
+    where, as ever, there are ten lines of progress.
+    """
+    tail = (
+        "#25 900.1 [900/1838] Building CXX object src/server/game/CMakeFiles/game.dir/a.cpp.o",
+        "#25 901.2 c++: fatal error: Killed signal terminated program cc1plus",
+        "#25 901.2 compilation terminated.",
+        "#25 901.3 ninja: build stopped: subcommand failed.",
+        "------",
+        " > [ac-worldserver build 8/8] RUN cmake --build .:",
+        "901.3 ninja: build stopped: subcommand failed.",
+        "------",
+        'target ac-worldserver: failed to solve: process "/bin/sh -c cmake --build ." did '
+        "not complete successfully: exited with code: 137",
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert said.startswith("c++: fatal error: Killed signal terminated program cc1plus"), said
+    assert "compilation terminated." in said, said
+    # The 137 beside it is what says this was the kernel and not the code.
+    assert "137" in said, said
+    assert "Building CXX object" not in said, said
+
+
+def test_a_clang_driver_that_could_not_run_its_own_command_is_a_diagnostic() -> None:
+    """`clang++: error: unable to execute command: Killed` — the same kill, clang's words.
+
+    Separate from the `c++:` case above because the two toolchains word it
+    differently and this project builds with clang: a test that pins only gcc's
+    spelling would pass while the launcher's own compiler went unread.
+    """
+    tail = (
+        "#25 880.4 [880/1838] Building CXX object modules/CMakeFiles/modules.dir/x.cpp.o",
+        "#25 881.0 clang++: error: unable to execute command: Killed",
+        "#25 881.0 clang++: error: clang frontend command failed due to signal",
+        "#25 881.1 ninja: build stopped: subcommand failed.",
+        "------",
+        " > [ac-worldserver build 8/8] RUN cmake --build .:",
+        "881.1 ninja: build stopped: subcommand failed.",
+        "------",
+        'target ac-worldserver: failed to solve: process "/bin/sh -c cmake --build ." did '
+        "not complete successfully: exited with code: 137",
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert said.startswith("clang++: error: unable to execute command: Killed"), said
+    assert "137" in said, said
+
+
+def test_a_linker_undefined_symbol_is_a_diagnostic_in_both_linkers_spellings() -> None:
+    """`ld.lld: error: undefined symbol:` and GNU ld's `undefined reference to`.
+
+    A link failure is the commonest way a module that COMPILES still breaks the
+    build — a header declaring what nothing defines — and it arrives at the very
+    end, where the fenced replay is most likely to hold linking progress. The
+    two linkers word it differently and neither gives a line and column: lld
+    names a symbol, GNU ld names a section offset.
+    """
+    lld = docker.last_words(
+        (
+            "#25 990.1 [1837/1838] Linking CXX executable worldserver",
+            "#25 991.0 ld.lld: error: undefined symbol: CityBots::Hub::level()",
+            "#25 991.1 ninja: build stopped: subcommand failed.",
+            "------",
+            " > [ac-worldserver build 8/8] RUN cmake --build .:",
+            "991.1 ninja: build stopped: subcommand failed.",
+            "------",
+            'target ac-worldserver: failed to solve: process "/bin/sh -c cmake" did not '
+            "complete successfully: exit code: 1",
+        ),
+        from_build=True,
+    )
+    assert lld.startswith("ld.lld: error: undefined symbol: CityBots::Hub::level()"), lld
+    assert "Linking CXX executable" not in lld, lld
+
+    gnu = docker.last_words(
+        (
+            "#25 990.1 [1837/1838] Linking CXX executable worldserver",
+            "#25 991.0 /usr/bin/ld: CMakeFiles/worldserver.dir/Main.cpp.o: in function `main':",
+            "#25 991.0 Main.cpp:(.text+0x28): undefined reference to `CityBots::Hub::level()'",
+            "#25 991.0 collect2: error: ld returned 1 exit status",
+            "#25 991.1 ninja: build stopped: subcommand failed.",
+            "------",
+            " > [ac-worldserver build 8/8] RUN cmake --build .:",
+            "991.1 ninja: build stopped: subcommand failed.",
+            "------",
+            'target ac-worldserver: failed to solve: process "/bin/sh -c cmake" did not '
+            "complete successfully: exit code: 1",
+        ),
+        from_build=True,
+    )
+    assert gnu.startswith("Main.cpp:(.text+0x28): undefined reference to"), gnu
+    assert "CityBots::Hub::level()" in gnu, gnu
+
+
+def test_a_cmake_error_before_any_compiler_ran_is_a_diagnostic() -> None:
+    """`CMake Error at …` — a module whose `CMakeLists.txt` is wrong.
+
+    The build never reaches a compiler, so there is no `path:line:col: error:`
+    anywhere in the stream, and cmake's own configure output is long enough to
+    push the message well above the ten replayed lines.
+    """
+    tail = (
+        "#25 3.1 -- Found MySQL version: 8.0.46",
+        "#25 3.2 CMake Error at modules/mod-city-bots/CMakeLists.txt:7 (add_library):",
+        "#25 3.2 Cannot find source file: src/CbNoSuchFile.cpp",
+        "#25 3.3 -- Configuring incomplete, errors occurred!",
+        "------",
+        " > [ac-worldserver build 8/8] RUN cmake /azerothcore -G Ninja:",
+        "3.3 -- Configuring incomplete, errors occurred!",
+        "------",
+        'target ac-worldserver: failed to solve: process "/bin/sh -c cmake" did not '
+        "complete successfully: exit code: 1",
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert said.startswith(
+        "CMake Error at modules/mod-city-bots/CMakeLists.txt:7 (add_library):"
+    ), said
+    assert "Cannot find source file: src/CbNoSuchFile.cpp" in said, said
+
+
+def test_the_same_error_from_three_racing_services_is_one_error() -> None:
+    """Three compose services build ONE image; a bad header fails all three.
+
+    Counting those as three errors would be an artefact of the race, not a
+    fact about the code, and "(and 2 more compiler errors)" would send a user
+    looking for two more broken files.
+    """
+    tail = (
+        "#25 7.331 src/a.cpp:1:1: error: only one thing is wrong",
+        "#26 7.331 src/a.cpp:1:1: error: only one thing is wrong",
+        "#27 7.331 src/a.cpp:1:1: error: only one thing is wrong",
+        "#25 7.400 ninja: build stopped: subcommand failed.",
+        "------",
+        " > [ac-db-import build 8/8] RUN cmake --build .:",
+        "7.400 ninja: build stopped: subcommand failed.",
+        "------",
+        'target ac-authserver: failed to solve: process "/bin/sh -c cmake --build ." did '
+        "not complete successfully: exit code: 1",
+    )
+    said = docker.last_words(tail, from_build=True)
+    assert said.startswith("src/a.cpp:1:1: error: only one thing is wrong"), said
+    assert "more compiler error" not in said, said
+
+
+def test_a_diagnostic_quoted_inside_the_run_command_is_not_read_as_one() -> None:
+    """`path:line:col: error:` is only a diagnostic at the start of a line.
+
+    A `RUN` whose shell echoes a diagnostic puts that same text inside the step
+    header, inside the Dockerfile context and inside the `ERROR:` line — T38's
+    own fixture does exactly this. Reading any of them as the compiler's would
+    quote the command this ticket exists to stop quoting, and would do it from
+    a build that SUCCEEDED whenever the echo was harmless.
+    """
+    tail = (
+        "#4 [2/2] RUN echo 'skipping src/Old.cpp:9:9: error: no member named X' && true",
+        "#4 0.1 skipping src/Old.cpp:9:9: error: no member named X",
+        "#4 DONE 0.2s",
+        "------",
+        " > [3/3] RUN cmake --build .:",
+        "9.9 [100%] Linking CXX executable worldserver",
+        "------",
+        'target ac-worldserver: failed to solve: process "/bin/sh -c cmake --build ." did '
+        "not complete successfully: exited with code: 137",
+    )
+    said = docker.last_words(tail, from_build=True)
+    # The fenced block, because nothing inline is a diagnostic — and with it the
+    # 137 that is the only sign an out-of-memory kill happened.
+    assert said.startswith("9.9 [100%] Linking CXX executable worldserver"), said
+    assert "137" in said, said
+    assert "no member named X" not in said, said
 
 
 def test_clone_names_reads_folders_only(tmp_path: Path) -> None:

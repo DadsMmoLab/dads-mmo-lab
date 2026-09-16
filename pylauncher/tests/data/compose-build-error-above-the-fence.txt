@@ -1,0 +1,459 @@
+--progress is a global compose flag, better use `docker compose --progress xx build ...
+#1 [internal] load local bake definitions
+#1 reading from stdin 2.17kB done
+#1 DONE 0.0s
+
+#2 [ac-client-data-init internal] load build definition from Dockerfile
+#2 transferring dockerfile: 9.07kB done
+#2 DONE 0.0s
+
+#3 [ac-client-data-init internal] load metadata for docker.io/library/ubuntu:24.04
+#3 DONE 1.2s
+
+#4 [ac-authserver internal] load .dockerignore
+#4 transferring context: 261B done
+#4 DONE 0.0s
+
+#5 [ac-authserver internal] load build context
+#5 DONE 0.0s
+
+#6 [ac-db-import internal] load build context
+#6 DONE 0.0s
+
+#7 [ac-db-import skeleton 1/4] FROM docker.io/library/ubuntu:24.04@sha256:69cecf4bbf72d2d44a9eef1b71fb98c7fb973d78af11399deccef19beb008ad9
+#7 resolve docker.io/library/ubuntu:24.04@sha256:69cecf4bbf72d2d44a9eef1b71fb98c7fb973d78af11399deccef19beb008ad9 0.1s done
+#7 resolve docker.io/library/ubuntu:24.04@sha256:69cecf4bbf72d2d44a9eef1b71fb98c7fb973d78af11399deccef19beb008ad9 0.1s done
+#7 DONE 0.1s
+
+#8 [ac-authserver skeleton 3/4] RUN apt-get update                                                           && apt-get install -y --no-install-recommends tzdata ca-certificates     && ln -snf "/usr/share/zoneinfo/Etc/UTC" /etc/localtime                      && echo "Etc/UTC" > /etc/timezone                                              && dpkg-reconfigure --frontend noninteractive tzdata                     && rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#9 [ac-authserver skeleton 4/4] WORKDIR /azerothcore
+#9 CACHED
+
+#10 [ac-authserver skeleton 2/4] RUN mkdir -pv         /azerothcore/bin                           /azerothcore/data                          /azerothcore/deps                          /azerothcore/env/dist/bin                  /azerothcore/env/dist/data/Cameras         /azerothcore/env/dist/data/dbc             /azerothcore/env/dist/data/maps            /azerothcore/env/dist/data/mmaps           /azerothcore/env/dist/data/vmaps           /azerothcore/env/dist/logs                 /azerothcore/env/dist/temp                 /azerothcore/env/dist/etc                  /azerothcore/modules                       /azerothcore/src                           /azerothcore/build
+#10 CACHED
+
+#11 [ac-db-import runtime 1/4] RUN apt-get update     && apt-get install -y --no-install-recommends       libmysqlclient21 libreadline8 libicu74 libncurses5-dev       gettext-base default-mysql-client       adduser     && rm -rf /var/lib/apt/lists/*
+#11 CACHED
+
+#5 [ac-authserver internal] load build context
+#5 ...
+
+#12 [ac-client-data-init internal] load build context
+#12 transferring context: 595.41kB 0.6s done
+#12 DONE 0.7s
+
+#5 [ac-authserver internal] load build context
+#5 ...
+
+#9 [ac-client-data-init skeleton 4/4] WORKDIR /azerothcore
+#9 CACHED
+
+#10 [ac-client-data-init skeleton 2/4] RUN mkdir -pv         /azerothcore/bin                           /azerothcore/data                          /azerothcore/deps                          /azerothcore/env/dist/bin                  /azerothcore/env/dist/data/Cameras         /azerothcore/env/dist/data/dbc             /azerothcore/env/dist/data/maps            /azerothcore/env/dist/data/mmaps           /azerothcore/env/dist/data/vmaps           /azerothcore/env/dist/logs                 /azerothcore/env/dist/temp                 /azerothcore/env/dist/etc                  /azerothcore/modules                       /azerothcore/src                           /azerothcore/build
+#10 CACHED
+
+#8 [ac-client-data-init skeleton 3/4] RUN apt-get update                                                           && apt-get install -y --no-install-recommends tzdata ca-certificates     && ln -snf "/usr/share/zoneinfo/Etc/UTC" /etc/localtime                      && echo "Etc/UTC" > /etc/timezone                                              && dpkg-reconfigure --frontend noninteractive tzdata                     && rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#13 [ac-client-data-init client-data 1/3] RUN apt-get update &&     apt-get install -y curl unzip adduser &&     rm -rf /var/lib/apt/lists/*
+#13 CACHED
+
+#14 [ac-client-data-init client-data 2/3] RUN userdel --remove ubuntu   && addgroup --gid "1000" "acore"   && adduser --disabled-password --gecos '' --uid "1000" --gid "1000" "acore"   && passwd -d "acore"   && chown -R "acore:acore" /azerothcore
+#14 CACHED
+
+#15 [ac-client-data-init client-data 3/3] COPY --chown=acore:acore apps apps
+#15 CACHED
+
+#5 [ac-authserver internal] load build context
+#5 ...
+
+#16 [ac-client-data-init] exporting to image
+#16 exporting layers done
+#16 exporting manifest sha256:fec85ef9e6c0704cbe8cbb937c059d976750adbc3b1882e5bbd1ac43e67f01aa done
+#16 exporting config sha256:5f82a64bf10806f5472f6a12ca62eb514e3db3077412af9979f99fe61b91740e done
+#16 exporting attestation manifest sha256:26019c645016b8a608bbc145a202a0aa496a7828b35c099c8c84145f909abe91 0.1s done
+#16 exporting manifest list sha256:b6c7722b6499a47bbfcf77ffd818585ffa21c31e3c805a8d01b8970f90eb5f3d 0.1s done
+#16 naming to yulon.local/ac-wotlk-client-data:native-243c46e3 0.0s done
+#16 unpacking to yulon.local/ac-wotlk-client-data:native-243c46e3 0.0s done
+#16 DONE 0.4s
+
+#5 [ac-authserver internal] load build context
+#5 ...
+
+#17 [ac-client-data-init] resolving provenance for metadata file
+#17 DONE 0.0s
+
+#5 [ac-authserver internal] load build context
+#5 transferring context: 698.16MB 5.6s
+#5 ...
+
+#6 [ac-db-import internal] load build context
+#6 transferring context: 848.59MB 7.5s done
+#6 DONE 7.6s
+
+#18 [ac-db-import build 6/8] COPY modules /azerothcore/modules
+#18 CACHED
+
+#19 [ac-db-import build 4/8] COPY deps /azerothcore/deps
+#19 CACHED
+
+#20 [ac-db-import build 5/8] COPY src /azerothcore/src
+#20 CACHED
+
+#21 [ac-db-import build 1/8] RUN apt-get update                                                         && apt-get install -y --no-install-recommends                                 build-essential ccache libtool cmake-data ninja-build cmake clang            git lsb-base curl unzip default-mysql-client openssl                          default-libmysqlclient-dev libboost-all-dev libssl-dev libmysql++-dev         libreadline-dev zlib1g-dev libbz2-dev libncurses5-dev liblzma-dev      && rm -rf /var/lib/apt/lists/*
+#21 CACHED
+
+#22 [ac-db-import build 2/8] COPY CMakeLists.txt /azerothcore/CMakeLists.txt
+#22 CACHED
+
+#23 [ac-db-import build 3/8] COPY conf /azerothcore/conf
+#23 CACHED
+
+#24 [ac-db-import build 7/8] WORKDIR /azerothcore/build
+#24 CACHED
+
+#5 [ac-authserver internal] load build context
+#5 transferring context: 1.53GB 11.6s done
+#5 DONE 11.9s
+
+#25 [ac-db-import build 8/8] RUN --mount=type=cache,target=/ccache,sharing=locked     --mount=type=bind,target=/azerothcore/.git,source=.git     git config --global --add safe.directory /azerothcore     && cmake /azerothcore        -G Ninja        -DCMAKE_INSTALL_PREFIX="/azerothcore/env/dist"         -DAPPS_BUILD="all"                                     -DTOOLS_BUILD="all"                          -DSCRIPTS="static"                                  -DMODULES="static"                                  -DWITH_WARNINGS="ON"                      -DCMAKE_BUILD_TYPE="RelWithDebInfo"                            -DCMAKE_CXX_COMPILER="clang++"                         -DCMAKE_C_COMPILER="clang"                             -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"                 -DCMAKE_C_COMPILER_LAUNCHER="ccache"                   -DBoost_USE_STATIC_LIBS="ON"                        && cmake --build . --config "RelWithDebInfo" -j $(($(nproc) + 1))     && cmake --install . --config "RelWithDebInfo"
+#25 0.465 -- CMake version: 3.28.3
+#25 0.619 -- The CXX compiler identification is Clang 18.1.3
+#25 0.979 -- The C compiler identification is Clang 18.1.3
+#25 1.027 -- Detecting CXX compiler ABI info
+#25 1.220 -- Detecting CXX compiler ABI info - done
+#25 1.232 -- Check for working CXX compiler: /usr/bin/clang++ - skipped
+#25 1.233 -- Detecting CXX compile features
+#25 1.233 -- Detecting CXX compile features - done
+#25 1.270 -- Detecting C compiler ABI info
+#25 1.408 -- Detecting C compiler ABI info - done
+#25 1.420 -- Check for working C compiler: /usr/bin/clang - skipped
+#25 1.420 -- Detecting C compile features
+#25 1.421 -- Detecting C compile features - done
+#25 1.430 -- Running cmake hook: AFTER_LOAD_CONF
+#25 1.430 -- No hooks registered for AFTER_LOAD_CONF
+#25 1.430 -- Enabled С++20 standard
+#25 1.430 -- Detected 64-bit platform
+#25 1.430 -- Detected amd64 processor architecture
+#25 1.431 -- UNIX: Using jemalloc
+#25 1.431 -- UNIX: Using default configuration directory
+#25 1.431 -- UNIX: Using default library directory
+#25 1.431 -- UNIX: Configuring uninstall target
+#25 1.431 -- UNIX: Created uninstall target
+#25 1.431 -- UNIX: Detected compiler: /usr/bin/clang
+#25 1.432 -- Clang: disable pch timestamp when ccache and pch enabled
+#25 1.432 -- Clang: Minimum version required is 10.0.0, found 18.1.3 - ok!
+#25 1.432 -- Performing Test CLANG_HAVE_PROPER_CHARCONV
+#25 1.735 -- Performing Test CLANG_HAVE_PROPER_CHARCONV - Success
+#25 1.735 -- Clang: All warnings enabled
+#25 1.735 -- Running cmake hook: AFTER_LOAD_CMAKE_MODULES
+#25 1.735 -- No hooks registered for AFTER_LOAD_CMAKE_MODULES
+#25 1.736 -- Using mysql-config: /usr/bin/mysql_config
+#25 1.766 -- Found MySQL:    
+#25 1.776 -- Found MySQL version: 8.0.46
+#25 1.777 -- Found git binary : /usr/bin/git
+#25 2.482 
+#25 2.482 * AzerothCore revision            : 413bea61a85e+ 2026-09-04 09:03:49 -0700 (Playerbot branch)
+#25 2.482 * AzerothCore buildtype           : RelWithDebInfo
+#25 2.482 
+#25 2.482 * Install core to                 : /azerothcore/env/dist
+#25 2.482 * Install libraries to            : /azerothcore/env/dist/lib
+#25 2.482 * Install configs to              : /azerothcore/env/dist/etc
+#25 2.482 
+#25 2.482 * Build applications              : Yes (all)
+#25 2.483 * Build tools                     : Yes (all)
+#25 2.483 * Build with scripts              : Yes (static)
+#25 2.483 * Build with modules              : Yes (static)
+#25 2.483 * Build unit tests                : No  (default)
+#25 2.483 * Build core w/PCH                : Yes (default)
+#25 2.483 * Build scripts w/PCH             : Yes (default)
+#25 2.483 * Show all warnings               : Yes
+#25 2.483 * Use coreside debug              : No  (default)
+#25 2.483 * Use unix gperftools             : No  (default)
+#25 2.483 * Use GIT revision hash           : Yes (default)
+#25 2.483 * Use stub for libsidecar         : Yes
+#25 2.483 * Enable vmap DisableMgr checks   : Yes (default)
+#25 2.483 * Show source tree                : No (For UNIX default)
+#25 2.483 
+#25 2.632 -- Found Boost: /usr/lib/x86_64-linux-gnu/cmake/Boost-1.83.0/BoostConfig.cmake (found suitable version "1.83.0", minimum required is "1.74") found components: filesystem program_options iostreams regex thread 
+#25 2.637 -- Looking for MADV_FREE
+#25 2.762 -- Looking for MADV_FREE - found
+#25 2.772 -- Found OpenSSL: /usr/lib/x86_64-linux-gnu/libcrypto.so (found version "3.0.13") found components: Crypto SSL 
+#25 2.774 -- Looking for C++ include filesystem
+#25 4.162 -- Looking for C++ include filesystem - found
+#25 4.162 -- Performing Test CXX_FILESYSTEM_NO_LINK_NEEDED
+#25 ...
+
+#24 [ac-authserver build 7/8] WORKDIR /azerothcore/build
+#24 CACHED
+
+#25 [ac-authserver build 8/8] RUN --mount=type=cache,target=/ccache,sharing=locked     --mount=type=bind,target=/azerothcore/.git,source=.git     git config --global --add safe.directory /azerothcore     && cmake /azerothcore        -G Ninja        -DCMAKE_INSTALL_PREFIX="/azerothcore/env/dist"         -DAPPS_BUILD="all"                                     -DTOOLS_BUILD="all"                          -DSCRIPTS="static"                                  -DMODULES="static"                                  -DWITH_WARNINGS="ON"                      -DCMAKE_BUILD_TYPE="RelWithDebInfo"                            -DCMAKE_CXX_COMPILER="clang++"                         -DCMAKE_C_COMPILER="clang"                             -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"                 -DCMAKE_C_COMPILER_LAUNCHER="ccache"                   -DBoost_USE_STATIC_LIBS="ON"                        && cmake --build . --config "RelWithDebInfo" -j $(($(nproc) + 1))     && cmake --install . --config "RelWithDebInfo"
+#25 ...
+
+#24 [ac-worldserver build 7/8] WORKDIR /azerothcore/build
+#24 CACHED
+
+#25 [ac-worldserver build 8/8] RUN --mount=type=cache,target=/ccache,sharing=locked     --mount=type=bind,target=/azerothcore/.git,source=.git     git config --global --add safe.directory /azerothcore     && cmake /azerothcore        -G Ninja        -DCMAKE_INSTALL_PREFIX="/azerothcore/env/dist"         -DAPPS_BUILD="all"                                     -DTOOLS_BUILD="all"                          -DSCRIPTS="static"                                  -DMODULES="static"                                  -DWITH_WARNINGS="ON"                      -DCMAKE_BUILD_TYPE="RelWithDebInfo"                            -DCMAKE_CXX_COMPILER="clang++"                         -DCMAKE_C_COMPILER="clang"                             -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"                 -DCMAKE_C_COMPILER_LAUNCHER="ccache"                   -DBoost_USE_STATIC_LIBS="ON"                        && cmake --build . --config "RelWithDebInfo" -j $(($(nproc) + 1))     && cmake --install . --config "RelWithDebInfo"
+#25 5.569 -- Performing Test CXX_FILESYSTEM_NO_LINK_NEEDED - Success
+#25 5.573 -- Found Threads: TRUE  
+#25 5.585 -- Found ZLIB: /usr/lib/x86_64-linux-gnu/libz.so (found version "1.3")  
+#25 5.593 -- Found Readline library: /usr/lib/x86_64-linux-gnu/libreadline.so
+#25 5.593 -- Include dir is: /usr/include
+#25 5.601 -- Found BZip2: /usr/lib/x86_64-linux-gnu/libbz2.so (found version "1.0.8") 
+#25 5.602 -- Looking for BZ2_bzCompressInit
+#25 5.721 -- Looking for BZ2_bzCompressInit - found
+#25 5.761 -- Running cmake hook: BEFORE_SRC_LOAD
+#25 5.761 -- No hooks registered for BEFORE_SRC_LOAD
+#25 5.764 
+#25 5.764 * Apps build list (all):
+#25 5.764   |
+#25 5.764   +- apps
+#25 5.764   |   +- authserver
+#25 5.764   |   +- worldserver
+#25 5.764   |
+#25 5.764 
+#25 5.785 -- Running cmake hook: BEFORE_GAME_LIBRARY
+#25 5.785 -- No hooks registered for BEFORE_GAME_LIBRARY
+#25 5.890 -- Running cmake hook: AFTER_GAME_LIBRARY
+#25 5.890 -- No hooks registered for AFTER_GAME_LIBRARY
+#25 5.891 -- Running cmake hook: BEFORE_SCRIPTS_LIBRARY
+#25 5.891 -- No hooks registered for BEFORE_SCRIPTS_LIBRARY
+#25 5.893 * Script configuration (static):
+#25 5.893   |
+#25 5.893   +- worldserver
+#25 5.893   |   +- Commands
+#25 5.893   |   +- Custom
+#25 5.893   |   +- EasternKingdoms
+#25 5.893   |   +- Events
+#25 5.893   |   +- Kalimdor
+#25 5.893   |   +- Northrend
+#25 5.893   |   +- OutdoorPvP
+#25 5.893   |   +- Outland
+#25 5.893   |   +- Pet
+#25 5.893   |   +- Spells
+#25 5.893   |   +- World
+#25 5.893   |
+#25 6.015 
+#25 6.016 
+#25 6.016 * Tools build list (all):
+#25 6.016   |
+#25 6.016   +- tools
+#25 6.016   |   +- dbimport
+#25 6.016   |   +- map_extractor
+#25 6.016   |   +- mmaps_generator
+#25 6.016   |   +- vmap4_assembler
+#25 6.016   |   +- vmap4_extractor
+#25 6.016   |
+#25 6.016 
+#25 6.028 * Modules configuration (static):
+#25 6.028   |
+#25 6.028   +- worldserver
+#25 6.028   |   +- mod-1v1-arena
+#25 6.028   |   +- mod-npc-beastmaster
+#25 6.028   |   +- mod-playerbots
+#25 6.028   |
+#25 6.028 
+#25 6.319 -- * Modules config list:
+#25 6.319   |
+#25 6.319 --   +- mod-1v1-arena
+#25 6.319 --   |  * 1v1arena.conf
+#25 6.319 --   +- mod-npc-beastmaster
+#25 6.320 --   |  * mod_npc_beastmaster.conf
+#25 6.320 --   +- mod-playerbots
+#25 6.320 --   |  * playerbots.conf
+#25 6.320 
+#25 6.320 -- Running cmake hook: AFTER_SRC_LOAD
+#25 6.320 -- No hooks registered for AFTER_SRC_LOAD
+#25 6.324 -- Configuring done (5.9s)
+#25 6.830 -- Generating done (0.4s)
+#25 6.909 -- Build files have been written to: /azerothcore/build
+#25 7.045 [1/1838] Building C object deps/SFMT/CMakeFiles/sfmt.dir/SFMT.c.o
+#25 7.046 [2/1838] Building C object deps/argon2/CMakeFiles/argon2.dir/argon2/argon2.c.o
+#25 7.047 [3/1838] Building C object deps/argon2/CMakeFiles/argon2.dir/argon2/thread.c.o
+#25 7.048 [4/1838] Building C object deps/argon2/CMakeFiles/argon2.dir/argon2/blake2/blake2b.c.o
+#25 7.049 [5/1838] Building C object deps/argon2/CMakeFiles/argon2.dir/argon2/core.c.o
+#25 7.050 [6/1838] Building C object deps/argon2/CMakeFiles/argon2.dir/argon2/encoding.c.o
+#25 7.052 [7/1838] Building CXX object deps/fmt/CMakeFiles/fmt.dir/src/os.cc.o
+#25 7.054 [8/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/arena.c.o
+#25 7.055 [9/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/base.c.o
+#25 7.055 [10/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/bitmap.c.o
+#25 7.056 [11/1838] Building CXX object deps/fmt/CMakeFiles/fmt.dir/src/format.cc.o
+#25 7.057 [12/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/background_thread.c.o
+#25 7.057 [13/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/ckh.c.o
+#25 7.059 [14/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/ctl.c.o
+#25 7.060 [15/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/div.c.o
+#25 7.061 [16/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/extent_mmap.c.o
+#25 7.065 [17/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/large.c.o
+#25 7.066 [18/1838] Building CXX object deps/jemalloc/CMakeFiles/jemalloc.dir/src/jemalloc_cpp.cpp.o
+#25 7.067 [19/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/malloc_io.c.o
+#25 7.070 [20/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/nstime.c.o
+#25 7.075 [21/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/prng.c.o
+#25 7.093 [22/1838] Building C object deps/argon2/CMakeFiles/argon2.dir/argon2/opt.c.o
+#25 7.094 [23/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/extent_dss.c.o
+#25 7.095 [24/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/bin.c.o
+#25 7.096 [25/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/jemalloc.c.o
+#25 7.097 [26/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/log.c.o
+#25 7.098 [27/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/extent.c.o
+#25 7.098 [28/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/hash.c.o
+#25 7.099 [29/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/mutex_pool.c.o
+#25 7.101 [30/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/hook.c.o
+#25 7.102 [31/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/mutex.c.o
+#25 7.103 [32/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/pages.c.o
+#25 7.103 [33/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/prof.c.o
+#25 7.104 [34/1838] Linking CXX static library deps/SFMT/libsfmt.a
+#25 7.105 [35/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/rtree.c.o
+#25 7.106 [36/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/sc.c.o
+#25 7.107 [37/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/safety_check.c.o
+#25 7.108 [38/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/stats.c.o
+#25 7.113 [39/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/tsd.c.o
+#25 7.113 [40/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/witness.c.o
+#25 7.114 [41/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/tcache.c.o
+#25 7.115 [42/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/test_hooks.c.o
+#25 7.116 [43/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/ticker.c.o
+#25 7.117 [44/1838] Linking CXX static library deps/fmt/libfmt.a
+#25 7.118 [45/1838] Building C object deps/jemalloc/CMakeFiles/jemalloc.dir/src/sz.c.o
+#25 7.119 [46/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/AABox.cpp.o
+#25 7.120 [47/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/AnyTableReader.cpp.o
+#25 7.121 [48/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/BinaryFormat.cpp.o
+#25 7.122 [49/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Any.cpp.o
+#25 7.123 [50/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Box.cpp.o
+#25 7.124 [51/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/BinaryInput.cpp.o
+#25 7.125 [52/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/BinaryOutput.cpp.o
+#25 7.128 [53/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Capsule.cpp.o
+#25 7.129 [54/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/CollisionDetection.cpp.o
+#25 7.132 [55/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/CoordinateFrame.cpp.o
+#25 7.133 [56/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Crypto.cpp.o
+#25 7.133 [57/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Cylinder.cpp.o
+#25 7.134 [58/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/debugAssert.cpp.o
+#25 7.135 [59/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/format.cpp.o
+#25 7.136 [60/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/g3dfnmatch.cpp.o
+#25 7.137 [61/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/fileutils.cpp.o
+#25 7.139 [62/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/GThread.cpp.o
+#25 7.140 [63/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/FileSystem.cpp.o
+#25 7.141 [64/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/g3dmath.cpp.o
+#25 7.141 [65/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/LineSegment.cpp.o
+#25 7.143 [66/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Log.cpp.o
+#25 7.145 [67/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Line.cpp.o
+#25 7.147 [68/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Matrix3.cpp.o
+#25 7.148 [69/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/MemoryManager.cpp.o
+#25 7.149 [70/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/prompt.cpp.o
+#25 7.149 [71/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Matrix4.cpp.o
+#25 7.150 [72/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/PhysicsFrame.cpp.o
+#25 7.151 [73/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Plane.cpp.o
+#25 7.152 [74/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Quat.cpp.o
+#25 7.153 [75/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Random.cpp.o
+#25 7.154 [76/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Ray.cpp.o
+#25 7.155 [77/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/RegistryUtil.cpp.o
+#25 7.156 [78/1838] Linking CXX static library deps/argon2/libargon2.a
+#25 7.158 [79/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Sphere.cpp.o
+#25 7.160 [80/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/stringutils.cpp.o
+#25 7.161 [81/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/TextInput.cpp.o
+#25 7.162 [82/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/TextOutput.cpp.o
+#25 7.163 [83/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/uint128.cpp.o
+#25 7.164 [84/1838] Building CXX object deps/recastnavigation/Detour/CMakeFiles/Detour.dir/Source/DetourAlloc.cpp.o
+#25 7.165 [85/1838] Building CXX object deps/recastnavigation/Detour/CMakeFiles/Detour.dir/Source/DetourAssert.cpp.o
+#25 7.166 [86/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/System.cpp.o
+#25 7.166 [87/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Triangle.cpp.o
+#25 7.168 [88/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/UprightFrame.cpp.o
+#25 7.168 [89/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Vector2.cpp.o
+#25 7.169 [90/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Vector3.cpp.o
+#25 7.170 [91/1838] Building CXX object deps/recastnavigation/Detour/CMakeFiles/Detour.dir/Source/DetourCommon.cpp.o
+#25 7.171 [92/1838] Building CXX object deps/recastnavigation/Detour/CMakeFiles/Detour.dir/Source/DetourNavMesh.cpp.o
+#25 7.171 [93/1838] Building CXX object deps/g3dlite/CMakeFiles/g3dlib.dir/source/Vector4.cpp.o
+#25 7.172 [94/1838] Building CXX object deps/recastnavigation/Detour/CMakeFiles/Detour.dir/Source/DetourNavMeshBuilder.cpp.o
+#25 7.173 [95/1838] Building CXX object deps/recastnavigation/Detour/CMakeFiles/Detour.dir/Source/DetourNavMeshQuery.cpp.o
+#25 7.173 [96/1838] Building CXX object deps/recastnavigation/Detour/CMakeFiles/Detour.dir/Source/DetourNode.cpp.o
+#25 7.175 [97/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/Recast.cpp.o
+#25 7.176 [98/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastAlloc.cpp.o
+#25 7.176 [99/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastAssert.cpp.o
+#25 7.177 [100/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastFilter.cpp.o
+#25 7.180 [101/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastLayers.cpp.o
+#25 7.181 [102/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastMesh.cpp.o
+#25 7.182 [103/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastArea.cpp.o
+#25 7.183 [104/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastContour.cpp.o
+#25 7.184 [105/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastMeshDetail.cpp.o
+#25 7.185 [106/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastRasterization.cpp.o
+#25 7.185 [107/1838] Building CXX object deps/recastnavigation/Recast/CMakeFiles/Recast.dir/Source/RecastRegion.cpp.o
+#25 7.186 [108/1838] Building C object deps/libmpq/CMakeFiles/mpq.dir/libmpq/common.c.o
+#25 7.187 [109/1838] Building CXX object deps/gsoap/CMakeFiles/gsoap.dir/soapC.cpp.o
+#25 7.188 [110/1838] Building CXX object deps/gsoap/CMakeFiles/gsoap.dir/soapServer.cpp.o
+#25 7.189 [111/1838] Building C object deps/libmpq/CMakeFiles/mpq.dir/libmpq/explode.c.o
+#25 7.189 [112/1838] Building C object deps/libmpq/CMakeFiles/mpq.dir/libmpq/extract.c.o
+#25 7.192 [113/1838] Building C object deps/libmpq/CMakeFiles/mpq.dir/libmpq/huffman.c.o
+#25 7.192 [114/1838] Building C object deps/libmpq/CMakeFiles/mpq.dir/libmpq/mpq.c.o
+#25 7.192 [115/1838] Building C object deps/libmpq/CMakeFiles/mpq.dir/libmpq/wave.c.o
+#25 7.192 [116/1838] Building C object deps/libsidecar/CMakeFiles/libsidecar.dir/stub/battleground-api.c.o
+#25 7.194 [117/1838] Building CXX object deps/gsoap/CMakeFiles/gsoap.dir/stdsoap2.cpp.o
+#25 7.195 [118/1838] Building C object deps/libsidecar/CMakeFiles/libsidecar.dir/stub/events-group.c.o
+#25 7.196 [119/1838] Building C object deps/libsidecar/CMakeFiles/libsidecar.dir/stub/events-guild.c.o
+#25 7.196 [120/1838] Building C object deps/libsidecar/CMakeFiles/libsidecar.dir/stub/events-servers-registry.c.o
+#25 7.197 [121/1838] Building C object deps/libsidecar/CMakeFiles/libsidecar.dir/stub/libsidecar.c.o
+#25 7.198 [122/1838] Building C object deps/libsidecar/CMakeFiles/libsidecar.dir/stub/monitoring.c.o
+#25 7.199 [123/1838] Building C object deps/libsidecar/CMakeFiles/libsidecar.dir/stub/player-interactions-api.c.o
+#25 7.200 [124/1838] Building C object deps/libsidecar/CMakeFiles/libsidecar.dir/stub/player-items-api.c.o
+#25 7.202 [125/1838] Building C object deps/libsidecar/CMakeFiles/libsidecar.dir/stub/player-money-api.c.o
+#25 7.203 [126/1838] Building CXX object src/server/shared/CMakeFiles/shared.dir/SharedDefines.cpp.o
+#25 7.210 [127/1838] Linking CXX static library deps/jemalloc/libjemalloc.a
+#25 7.211 [128/1838] Building CXX object src/server/shared/CMakeFiles/shared.dir/DataStores/DBCDatabaseLoader.cpp.o
+#25 7.214 [129/1838] Building CXX object src/server/shared/CMakeFiles/shared.dir/DataStores/DBCStore.cpp.o
+#25 7.220 [130/1838] Building CXX object src/server/shared/CMakeFiles/shared.dir/Packets/ByteBuffer.cpp.o
+#25 7.221 [131/1838] Building CXX object src/server/shared/CMakeFiles/shared.dir/enuminfo_SharedDefines.cpp.o
+#25 7.228 [132/1838] Building CXX object src/server/shared/CMakeFiles/shared.dir/Secrets/SecretMgr.cpp.o
+#25 7.232 [133/1838] Building CXX object src/server/shared/CMakeFiles/shared.dir/Realms/Realm.cpp.o
+#25 7.234 [134/1838] Building CXX object src/server/shared/CMakeFiles/shared.dir/Realms/RealmList.cpp.o
+#25 7.235 [135/1838] Building CXX object modules/CMakeFiles/modules.dir/gen_scriptloader/static/ModulesLoader.cpp.o
+#25 7.237 [136/1838] Linking CXX static library deps/recastnavigation/Detour/libDetour.a
+#25 7.248 [137/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-1v1-arena/src/cs_1v1arena.cpp.o
+#25 7.254 [138/1838] Linking CXX static library deps/libmpq/libmpq.a
+#25 7.260 [139/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-1v1-arena/src/npc_arena1v1.cpp.o
+#25 7.263 [140/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AcceptBattlegroundInvitationAction.cpp.o
+#25 7.265 [141/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AcceptDuelAction.cpp.o
+#25 7.268 [142/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-npc-beastmaster/src/NpcBeastmaster.cpp.o
+#25 7.274 [143/1838] Linking CXX static library deps/gsoap/libgsoap.a
+#25 7.277 [144/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/PlayerbotAIConfig.cpp.o
+#25 7.278 [145/1838] Linking CXX static library deps/recastnavigation/Recast/libRecast.a
+#25 7.279 [146/1838] Linking CXX static library deps/libsidecar/liblibsidecar.a
+#25 7.282 [147/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AcceptInvitationAction.cpp.o
+#25 7.302 [148/1838] Building CXX object src/common/CMakeFiles/common.dir/cmake_pch.hxx.pch
+#25 7.316 [149/1838] Linking CXX static library deps/g3dlite/libg3dlib.a
+#25 7.330 [150/1838] Building CXX object src/server/database/CMakeFiles/database.dir/cmake_pch.hxx.pch
+#25 7.331 [151/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-1v1-arena/src/1v1_loader.cpp.o
+#25 7.331 FAILED: modules/CMakeFiles/modules.dir/mod-1v1-arena/src/1v1_loader.cpp.o 
+#25 7.331 ccache /usr/bin/clang++ -DAC_BUILD_HAS_DEBUG_INFO=1 -DAC_BUILD_TYPE=\"RelWithDebInfo\" -DBOOST_ASIO_NO_DEPRECATED -DBOOST_ATOMIC_NO_LIB -DBOOST_BIND_NO_PLACEHOLDERS -DBOOST_CHRONO_NO_LIB -DBOOST_CONFIG_SUPPRESS_OUTDATED_MESSAGE -DBOOST_DATE_TIME_NO_LIB -DBOOST_FILESYSTEM_NO_LIB -DBOOST_IOSTREAMS_NO_LIB -DBOOST_PROGRAM_OPTIONS_NO_LIB -DBOOST_REGEX_NO_LIB -DBOOST_SERIALIZATION_NO_LIB -DBOOST_SYSTEM_USE_UTF8 -DBOOST_THREAD_NO_LIB -DENABLE_VMAP_CHECKS -DHAVE_SSE2 -DNO_BUFFERPOOL -DNO_CORE_FUNCS -DSFMT_MEXP=19937 -D_CONF_DIR=\"/azerothcore/env/dist/etc\" -I/azerothcore/modules -I/azerothcore/modules/mod-1v1-arena/src -I/azerothcore/modules/mod-npc-beastmaster/src -I/azerothcore/modules/mod-playerbots/src -I/azerothcore/modules/mod-playerbots/src/Ai -I/azerothcore/modules/mod-playerbots/src/Ai/Base -I/azerothcore/modules/mod-playerbots/src/Ai/Base/Actions -I/azerothcore/modules/mod-playerbots/src/Ai/Base/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Base/Trigger -I/azerothcore/modules/mod-playerbots/src/Ai/Base/Util -I/azerothcore/modules/mod-playerbots/src/Ai/Base/Value -I/azerothcore/modules/mod-playerbots/src/Ai/Class -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Dk -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Dk/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Druid -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Druid/Action -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Druid/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Hunter -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Hunter/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Mage -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Mage/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Paladin -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Paladin/Actions -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Paladin/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Priest -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Priest/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Rogue -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Rogue/Action -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Rogue/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Shaman -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Shaman/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Warlock -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Warlock/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Warrior -I/azerothcore/modules/mod-playerbots/src/Ai/Class/Warrior/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/AC -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/AK -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/AN -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/CoS -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/DTK -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/FoS -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/GD -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/HoL -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/HoS -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/Mech -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/Nex -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/OC -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/PoS -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/Seth -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/TOC -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/UB -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/UK -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/UP -I/azerothcore/modules/mod-playerbots/src/Ai/Dungeon/VH -I/azerothcore/modules/mod-playerbots/src/Ai/Raid -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Aq20 -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/BT -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/BWL -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/EoE -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Gruul -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Hyjal -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Hyjal/Util -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/ICC -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/ICC/Action -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Kara -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/MC -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Mag -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Mag/Util -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Naxx -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Naxx/Action -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/OS -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Ony -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/RS -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/RS/Action -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/SSC -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/TK -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/TK/Util -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Uld -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/Uld/Util -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/VoA -I/azerothcore/modules/mod-playerbots/src/Ai/Raid/ZA -I/azerothcore/modules/mod-playerbots/src/Ai/World -I/azerothcore/modules/mod-playerbots/src/Ai/World/Rpg -I/azerothcore/modules/mod-playerbots/src/Ai/World/Rpg/Action -I/azerothcore/modules/mod-playerbots/src/Ai/World/Rpg/Strategy -I/azerothcore/modules/mod-playerbots/src/Ai/World/Rpg/Trigger -I/azerothcore/modules/mod-playerbots/src/Bot -I/azerothcore/modules/mod-playerbots/src/Bot/Cmd -I/azerothcore/modules/mod-playerbots/src/Bot/Debug -I/azerothcore/modules/mod-playerbots/src/Bot/Engine -I/azerothcore/modules/mod-playerbots/src/Bot/Engine/Action -I/azerothcore/modules/mod-playerbots/src/Bot/Engine/Strategy -I/azerothcore/modules/mod-playerbots/src/Bot/Engine/Trigger -I/azerothcore/modules/mod-playerbots/src/Bot/Engine/Value -I/azerothcore/modules/mod-playerbots/src/Bot/Engine/WorldPacket -I/azerothcore/modules/mod-playerbots/src/Bot/Factory -I/azerothcore/modules/mod-playerbots/src/Db -I/azerothcore/modules/mod-playerbots/src/Mgr -I/azerothcore/modules/mod-playerbots/src/Mgr/Guild -I/azerothcore/modules/mod-playerbots/src/Mgr/Item -I/azerothcore/modules/mod-playerbots/src/Mgr/Move -I/azerothcore/modules/mod-playerbots/src/Mgr/Security -I/azerothcore/modules/mod-playerbots/src/Mgr/Talent -I/azerothcore/modules/mod-playerbots/src/Mgr/Text -I/azerothcore/modules/mod-playerbots/src/Mgr/Travel -I/azerothcore/modules/mod-playerbots/src/Script -I/azerothcore/modules/mod-playerbots/src/Script/WorldThr -I/azerothcore/modules/mod-playerbots/src/Util -I/azerothcore/src/server/game -I/azerothcore/src/server/game/AI -I/azerothcore/src/server/game/AI/CoreAI -I/azerothcore/src/server/game/AI/ScriptedAI -I/azerothcore/src/server/game/AI/SmartScripts -I/azerothcore/src/server/game/Accounts -I/azerothcore/src/server/game/Achievements -I/azerothcore/src/server/game/Addons -I/azerothcore/src/server/game/ArenaSpectator -I/azerothcore/src/server/game/AuctionHouse -I/azerothcore/src/server/game/Autobroadcast -I/azerothcore/src/server/game/Battlefield -I/azerothcore/src/server/game/Battlefield/Zones -I/azerothcore/src/server/game/Battlegrounds -I/azerothcore/src/server/game/Battlegrounds/ArenaSeason -I/azerothcore/src/server/game/Battlegrounds/Zones -I/azerothcore/src/server/game/Cache -I/azerothcore/src/server/game/Calendar -I/azerothcore/src/server/game/Chat -I/azerothcore/src/server/game/Chat/Channels -I/azerothcore/src/server/game/Chat/ChatCommands -I/azerothcore/src/server/game/Combat -I/azerothcore/src/server/game/Conditions -I/azerothcore/src/server/game/DataStores -I/azerothcore/src/server/game/DungeonFinding -I/azerothcore/src/server/game/Entities -I/azerothcore/src/server/game/Entities/Corpse -I/azerothcore/src/server/game/Entities/Creature -I/azerothcore/src/server/game/Entities/DynamicObject -I/azerothcore/src/server/game/Entities/GameObject -I/azerothcore/src/server/game/Entities/Item -I/azerothcore/src/server/game/Entities/Item/Container -I/azerothcore/src/server/game/Entities/Object -I/azerothcore/src/server/game/Entities/Object/Updates -I/azerothcore/src/server/game/Entities/Pet -I/azerothcore/src/server/game/Entities/Player -I/azerothcore/src/server/game/Entities/Totem -I/azerothcore/src/server/game/Entities/Transport -I/azerothcore/src/server/game/Entities/Unit -I/azerothcore/src/server/game/Entities/Vehicle -I/azerothcore/src/server/game/Events -I/azerothcore/src/server/game/Globals -I/azerothcore/src/server/game/Grids -I/azerothcore/src/server/game/Grids/Cells -I/azerothcore/src/server/game/Grids/Notifiers -I/azerothcore/src/server/game/Groups -I/azerothcore/src/server/game/Guilds -I/azerothcore/src/server/game/Handlers -I/azerothcore/src/server/game/Instances -I/azerothcore/src/server/game/Loot -I/azerothcore/src/server/game/Mails -I/azerothcore/src/server/game/Maps -I/azerothcore/src/server/game/Misc -I/azerothcore/src/server/game/Miscellaneous -I/azerothcore/src/server/game/Modules -I/azerothcore/src/server/game/Motd -I/azerothcore/src/server/game/Movement -I/azerothcore/src/server/game/Movement/MovementGenerators -I/azerothcore/src/server/game/Movement/Spline -I/azerothcore/src/server/game/Movement/Waypoints -I/azerothcore/src/server/game/OutdoorPvP -I/azerothcore/src/server/game/Petitions -I/azerothcore/src/server/game/Pools -I/azerothcore/src/server/game/Quests -I/azerothcore/src/server/game/Reputation -I/azerothcore/src/server/game/Scripting -I/azerothcore/src/server/game/Scripting/ScriptDefines -I/azerothcore/src/server/game/Server -I/azerothcore/src/server/game/Server/Packets -I/azerothcore/src/server/game/Server/Protocol -I/azerothcore/src/server/game/Skills -I/azerothcore/src/server/game/Spells -I/azerothcore/src/server/game/Spells/Auras -I/azerothcore/src/server/game/TC9Sidecar -I/azerothcore/src/server/game/Texts -I/azerothcore/src/server/game/Tickets -I/azerothcore/src/server/game/Time -I/azerothcore/src/server/game/Tools -I/azerothcore/src/server/game/Warden -I/azerothcore/src/server/game/Warden/Modules -I/azerothcore/src/server/game/Weather -I/azerothcore/src/server/game/World -I/azerothcore/src/server/shared -I/azerothcore/src/server/shared/DataStores -I/azerothcore/src/server/shared/Network -I/azerothcore/src/server/shared/Packets -I/azerothcore/src/server/shared/Realms -I/azerothcore/src/server/shared/Secrets -I/azerothcore/src/server/database -I/azerothcore/src/server/database/Database -I/azerothcore/src/server/database/Database/Implementation -I/azerothcore/src/server/database/Logging -I/azerothcore/src/server/database/Updater -I/azerothcore/build -I/azerothcore/src/common -I/azerothcore/src/common/Asio -I/azerothcore/src/common/Collision -I/azerothcore/src/common/Collision/Management -I/azerothcore/src/common/Collision/Maps -I/azerothcore/src/common/Collision/Models -I/azerothcore/src/common/Configuration -I/azerothcore/src/common/Cryptography -I/azerothcore/src/common/Cryptography/Authentication -I/azerothcore/src/common/DataStores -I/azerothcore/src/common/Debugging -I/azerothcore/src/common/Dynamic -I/azerothcore/src/common/Dynamic/LinkedReference -I/azerothcore/src/common/Encoding -I/azerothcore/src/common/IPLocation -I/azerothcore/src/common/Logging -I/azerothcore/src/common/Metric -I/azerothcore/src/common/Navigation -I/azerothcore/src/common/Platform -I/azerothcore/src/common/Threading -I/azerothcore/src/common/Utilities -I/azerothcore/deps/argon2 -I/azerothcore/deps/SFMT -I/azerothcore/deps/utf8cpp -I/azerothcore/deps/fmt/include -I/azerothcore/deps/g3dlite/include -I/azerothcore/deps/recastnavigation/Detour/Include -isystem /usr/include/mysql -Xclang -fno-pch-timestamp -O2 -g -DNDEBUG -std=gnu++20 -DMOD_PLAYERBOTS -Wno-narrowing -Wno-deprecated-register -W -Wall -Wextra -Winit-self -Wfatal-errors -Wno-mismatched-tags -Woverloaded-virtual -MD -MT modules/CMakeFiles/modules.dir/mod-1v1-arena/src/1v1_loader.cpp.o -MF modules/CMakeFiles/modules.dir/mod-1v1-arena/src/1v1_loader.cpp.o.d -o modules/CMakeFiles/modules.dir/mod-1v1-arena/src/1v1_loader.cpp.o -c /azerothcore/modules/mod-1v1-arena/src/1v1_loader.cpp
+#25 7.331 /azerothcore/modules/mod-1v1-arena/src/1v1_loader.cpp:6:5: fatal error: use of undeclared identifier 'GATE_T70_UNDECLARED_IDENTIFIER'
+#25 7.331     6 |     GATE_T70_UNDECLARED_IDENTIFIER;
+#25 7.331       |     ^
+#25 7.331 1 error generated.
+#25 7.350 [152/1838] Building CXX object src/common/CMakeFiles/common.dir/Banner.cpp.o
+#25 7.373 [153/1838] Building CXX object src/common/CMakeFiles/common.dir/Common.cpp.o
+#25 7.548 [154/1838] Building CXX object src/server/scripts/CMakeFiles/scripts.dir/cmake_pch.hxx.pch
+#25 7.924 [155/1838] cd /azerothcore && /usr/bin/cmake -DBUILDDIR="/azerothcore/build" -P /azerothcore/src/cmake/genrev.cmake /azerothcore/build
+#25 8.447 [156/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AutoMaintenanceOnLevelupAction.cpp.o
+#25 8.448 [157/1838] Building CXX object src/common/CMakeFiles/common.dir/GitRevision.cpp.o
+#25 8.506 [158/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AcceptResurrectAction.cpp.o
+#25 8.515 [159/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/BankAction.cpp.o
+#25 8.522 [160/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AcceptQuestAction.cpp.o
+#25 8.540 [161/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/ArenaTeamActions.cpp.o
+#25 8.556 [162/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/BattleGroundJoinAction.cpp.o
+#25 8.587 [163/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AreaTriggerAction.cpp.o
+#25 8.589 [164/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AddLootAction.cpp.o
+#25 8.600 [165/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/BattleGroundTactics.cpp.o
+#25 8.624 [166/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp.o
+#25 8.624 ninja: build stopped: subcommand failed.
+#25 ERROR: process "/bin/sh -c git config --global --add safe.directory /azerothcore     && cmake /azerothcore        -G Ninja        -DCMAKE_INSTALL_PREFIX=\"/azerothcore/env/dist\"         -DAPPS_BUILD=\"all\"                                     -DTOOLS_BUILD=\"$CTOOLS_BUILD\"                          -DSCRIPTS=\"$CSCRIPTS\"                                  -DMODULES=\"$CMODULES\"                                  -DWITH_WARNINGS=\"$CWITH_WARNINGS\"                      -DCMAKE_BUILD_TYPE=\"$CTYPE\"                            -DCMAKE_CXX_COMPILER=\"clang++\"                         -DCMAKE_C_COMPILER=\"clang\"                             -DCMAKE_CXX_COMPILER_LAUNCHER=\"ccache\"                 -DCMAKE_C_COMPILER_LAUNCHER=\"ccache\"                   -DBoost_USE_STATIC_LIBS=\"ON\"                        && cmake --build . --config \"$CTYPE\" -j $(($(nproc) + 1))     && cmake --install . --config \"$CTYPE\"" did not complete successfully: exit code: 1
+------
+ > [ac-db-import build 8/8] RUN --mount=type=cache,target=/ccache,sharing=locked     --mount=type=bind,target=/azerothcore/.git,source=.git     git config --global --add safe.directory /azerothcore     && cmake /azerothcore        -G Ninja        -DCMAKE_INSTALL_PREFIX="/azerothcore/env/dist"         -DAPPS_BUILD="all"                                     -DTOOLS_BUILD="all"                          -DSCRIPTS="static"                                  -DMODULES="static"                                  -DWITH_WARNINGS="ON"                      -DCMAKE_BUILD_TYPE="RelWithDebInfo"                            -DCMAKE_CXX_COMPILER="clang++"                         -DCMAKE_C_COMPILER="clang"                             -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"                 -DCMAKE_C_COMPILER_LAUNCHER="ccache"                   -DBoost_USE_STATIC_LIBS="ON"                        && cmake --build . --config "RelWithDebInfo" -j $(($(nproc) + 1))     && cmake --install . --config "RelWithDebInfo":
+8.506 [158/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AcceptResurrectAction.cpp.o
+8.515 [159/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/BankAction.cpp.o
+8.522 [160/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AcceptQuestAction.cpp.o
+8.540 [161/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/ArenaTeamActions.cpp.o
+8.556 [162/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/BattleGroundJoinAction.cpp.o
+8.587 [163/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AreaTriggerAction.cpp.o
+8.589 [164/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AddLootAction.cpp.o
+8.600 [165/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/BattleGroundTactics.cpp.o
+8.624 [166/1838] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp.o
+8.624 ninja: build stopped: subcommand failed.
+------
+target ac-authserver: failed to solve: process "/bin/sh -c git config --global --add safe.directory /azerothcore     && cmake /azerothcore        -G Ninja        -DCMAKE_INSTALL_PREFIX=\"/azerothcore/env/dist\"         -DAPPS_BUILD=\"all\"                                     -DTOOLS_BUILD=\"$CTOOLS_BUILD\"                          -DSCRIPTS=\"$CSCRIPTS\"                                  -DMODULES=\"$CMODULES\"                                  -DWITH_WARNINGS=\"$CWITH_WARNINGS\"                      -DCMAKE_BUILD_TYPE=\"$CTYPE\"                            -DCMAKE_CXX_COMPILER=\"clang++\"                         -DCMAKE_C_COMPILER=\"clang\"                             -DCMAKE_CXX_COMPILER_LAUNCHER=\"ccache\"                 -DCMAKE_C_COMPILER_LAUNCHER=\"ccache\"                   -DBoost_USE_STATIC_LIBS=\"ON\"                        && cmake --build . --config \"$CTYPE\" -j $(($(nproc) + 1))     && cmake --install . --config \"$CTYPE\"" did not complete successfully: exit code: 1
+
