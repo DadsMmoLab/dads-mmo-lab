@@ -20,6 +20,7 @@ reached servers that have none of them.
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 from collections import deque
@@ -28,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -49,6 +50,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -2351,6 +2353,203 @@ importer works a FILE at a time and names each one itself, so a total invented
 here would be the same defect 8.7a's other half was opened for — a module
 reported as done while nothing ran.
 """
+
+REPORT_LINES = 6
+"""The most lines of a report box that are on screen at once, before it scrolls.
+
+A `QPlainTextEdit` asks for 12 lines whatever is in it, and the Modules tab has
+two text boxes under its list, so the default was ~230px of mostly empty text
+fields over a module list that had 311 -- two whole rows of forty, measured in
+the themed window at 1920x1080, where T44's approved mockup shows ten. Six lines
+is what these boxes say: every sentence in the `MODULE_*`/`TUNING_*` constants
+above fits, and the outputs with no length limit at all -- a rebuild's, a
+database update's -- go to the `LogPanel` beside them and not here.
+
+A CEILING, not a height: `_ReportBox` is as tall as it has something to say, one
+line to six. It is empty on every start, which is when the list needs the room.
+"""
+
+MODULE_LIST_MIN_HEIGHT = 100
+"""The floor under the Modules tab's list of cards, in pixels.
+
+Below this the list is a scrollbar with the top of a family card beside it and
+nothing that can be read or pressed. It is the second line of defence and not
+the first: what keeps the boxes below from taking the tab is their own ceilings
+(`REPORT_LINES`, and `_IdleLogPanel`'s cap), and this is what is left if one of
+them is ever wrong again -- an error message wrapped into a report box did
+exactly that during T73's own review.
+
+Deliberately SHORTER than one row (85px plus its card's header under this
+theme): a floor is paid for by whatever is under it, in clipped text, at the
+sizes where the tab is already over-subscribed. 100 is the largest that still
+leaves the 1280x800 the app opens at fitting with nothing cut.
+"""
+
+_NO_HEIGHT_CAP = 16777215
+"""Qt's `QWIDGETSIZE_MAX`, which PySide6 does not re-export under any name.
+
+`setMaximumHeight()` takes it to mean "no cap"; it is how `_IdleLogPanel` gives
+its height back when a job finally needs it.
+"""
+
+
+class _ReportBox(QPlainTextEdit):
+    """A report box as tall as its own text, to a ceiling of `REPORT_LINES`.
+
+    Two things a plain `QPlainTextEdit` gets wrong under a list that wants the
+    height: it asks for twelve lines when it is empty, and it asks for them in
+    pixels measured once. This asks for what it holds, in lines converted through
+    its own `fontMetrics()` on every layout -- so it is still right after the
+    theme regenerates its stylesheet at a new font scale, which it does whenever
+    the window is resized to a width it has not been styled for.
+
+    `Maximum` vertically: the hint is a ceiling the box will not grow past, and
+    it may still be shrunk under it on a small window. The floor stays the one
+    the theme sets -- its stylesheet gives every `QPlainTextEdit` a 90px
+    min-height so a report reads as a panel rather than a stray line, and that
+    is not this ticket's to overrule (T45: the sizes are `theme.py`'s). A floor
+    pinned HERE instead, at six lines, is what clipped the report by 21px at the
+    size the app opens at (measured 2026-09-16, themed).
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        # The document's layout knows its own height in lines, wrapped ones
+        # included, and says so when it changes. Without this the box keeps the
+        # height it was given before the text arrived.
+        self.document().documentLayout().documentSizeChanged.connect(
+            lambda _size: self.updateGeometry()
+        )
+
+    def _lines_tall(self, count: int) -> int:
+        """`count` lines as this box really draws them, plus its own chrome.
+
+        The chrome is MEASURED -- the gap between this widget and its viewport --
+        rather than added up from `frameWidth()`. The theme's stylesheet gives
+        every text box `padding: 7px 10px`, and padding on a scroll area is
+        spent on the viewport's margins, which no property this class can name
+        accounts for: a height built from the frame alone is 14px short, most of
+        a line, and the box then scrolls the last of the six it was sized for.
+
+        The trailing pixel is not a rounding fudge either: `QPlainTextEdit`
+        offers a scrollbar as soon as the document is as tall as the viewport,
+        not taller than it.
+        """
+        chrome = max(0, self.height() - self.viewport().height())
+        return (
+            math.ceil(self._line_height() * count)
+            + int(self.document().documentMargin()) * 2
+            + chrome
+            + 1
+        )
+
+    def _line_height(self) -> float:
+        """ONE line as the DOCUMENT lays it out, not as the font describes it.
+
+        `fontMetrics().lineSpacing()` is a rounded integer and the text layout's
+        own line height is not: at this theme's size the two differ by a pixel,
+        and a pixel a line is a whole line lost over six of them -- measured, as
+        a six-line box that scrolled.
+
+        Divided by the block's own line count, which is the correction this
+        needed: `blockBoundingRect` is the height of a whole PARAGRAPH, wrapped
+        lines and all, and `_lines_held()` counts wrapped lines too. Multiplying
+        the two asked 967px for one 120-word paragraph in a 600px-wide box and
+        left the list above it nothing at all (review, round 2).
+        """
+        block = self.document().firstBlock()
+        drawn = self.document().documentLayout().blockBoundingRect(block).height()
+        block_layout = block.layout()
+        wrapped = block_layout.lineCount() if block_layout is not None else 0
+        if drawn > 0 and wrapped > 0:
+            return drawn / wrapped
+        return float(self.fontMetrics().lineSpacing())
+
+    def _lines_held(self) -> int:
+        """Lines of text in the box right now, at least one and at most the cap."""
+        held = math.ceil(self.document().documentLayout().documentSize().height())
+        return max(1, min(REPORT_LINES, int(held)))
+
+    def sizeHint(self) -> QSize:
+        return QSize(super().sizeHint().width(), self._lines_tall(self._lines_held()))
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        return QSize(hint.width(), max(hint.height(), self._lines_tall(1)))
+
+
+_WHEN_A_MINIMUM_MOVES = (
+    QEvent.Type.Polish,
+    QEvent.Type.PolishRequest,
+    QEvent.Type.Show,
+    QEvent.Type.FontChange,
+    QEvent.Type.StyleChange,
+    QEvent.Type.LayoutRequest,
+)
+"""The events after which a widget's `minimumSizeHint()` may be a new number.
+
+`Polish` is the one that matters and the one a `changeEvent` handler does not
+see: a widget is polished -- given its stylesheet's fonts, margins and borders --
+on its way to being shown, which is AFTER every line of the tab that built it has
+run. The rest are the ways it can change again afterwards.
+"""
+
+
+class _IdleLogPanel(LogPanel):
+    """A `LogPanel` that stays at its smallest until a job has something to say.
+
+    The Modules tab's log is empty on every start -- it carries a rebuild's or a
+    database update's output, and neither has run -- and an empty panel asking
+    for its full 240px was a third of the tab's height spent on nothing.
+
+    Capped rather than hidden: the strip with the elapsed field and the Stop
+    button stays on screen, so the panel is where it was when a job does start.
+    It is lifted for good the first time a run starts -- a job's output is then
+    the thing worth the height, and the user who came to read it should not have
+    to give it back.
+
+    The cap is this panel's OWN `minimumSizeHint()`, re-read on every event that
+    can change it rather than measured once. A cap taken in `__init__` is taken
+    before the panel has a parent, and the theme it will be styled by is applied
+    to the WINDOW (`apply_dadcraft_theme(window)` in `build_window`) before this
+    object exists: measured 2026-09-16 in that order, the cap came out 152px
+    against a minimum of 180, so the panel was drawn 148 -- 32px under its own
+    floor, with the text pane clipped -- and it stayed there, because the next
+    restyle only happens if the window is resized to a NEW width and the app
+    opens at the one the theme was already generated for.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._idle_cap = True
+        self._cap_to_the_strip()
+        self.run_started.connect(self._give_it_the_room)
+
+    def _cap_to_the_strip(self) -> None:
+        """Hold the panel at its own minimum, whatever that has become.
+
+        A no-op when the cap is already right, which is what keeps this safe to
+        call from `LayoutRequest`: `setMaximumHeight` asks for another layout, so
+        a cap written unconditionally would ask for one forever.
+        """
+        if not self._idle_cap:
+            return
+        wanted = self.minimumSizeHint().height()
+        if self.maximumHeight() != wanted:
+            self.setMaximumHeight(wanted)
+
+    def _give_it_the_room(self) -> None:
+        """A job started: this panel is now the thing worth reading, for good."""
+        self._idle_cap = False
+        self.setMaximumHeight(_NO_HEIGHT_CAP)
+
+    def event(self, event: QEvent) -> bool:
+        handled = super().event(event)
+        if event.type() in _WHEN_A_MINIMUM_MOVES:
+            self._cap_to_the_strip()
+        return handled
+
 
 TUNING_SAVED = (
     "{module}: wrote {keys} in {file}. A backup of the file as it was is beside it at "
@@ -5653,7 +5852,9 @@ class ControllerView(QWidget):
         self.modules_panel.chip_pressed.connect(self._chip_pressed)
         self.modules_panel.chip_action_pressed.connect(self._chip_action_pressed)
         self.modules_panel.context_menu_requested.connect(self._show_module_context_menu)
-        self.module_report = QPlainTextEdit(tab)
+        # T73: six lines, and not the twelve a `QPlainTextEdit` asks for. The
+        # height on this tab belongs to the list above it -- see `REPORT_LINES`.
+        self.module_report = _ReportBox(tab)
         self.module_report.setReadOnly(True)
         # The two buttons that used to act on "the selection" are gone: every
         # row carries its own Install or Remove, so there is no second place for
@@ -5748,7 +5949,7 @@ class ControllerView(QWidget):
         # want the same containers — and a second panel would have to be locked
         # against the first, registered with `log_panels()` for the exit path,
         # and stopped by it. The panel's own `running` flag is that lock already.
-        self.rebuild_log = LogPanel(tab)
+        self.rebuild_log = _IdleLogPanel(tab)
         # The lock, in both directions. A rebuild replaces the containers the
         # Server tab's Start/Stop/Remove act on, so those go dead for its
         # duration; `rebuild_server()` refuses while `_busy` for the mirror
@@ -5812,12 +6013,26 @@ class ControllerView(QWidget):
         custom_row.addStretch(1)
         custom_box.addLayout(custom_row)
 
+        # T73: ONE stretching widget on this tab, and it is the list. Everything
+        # under it is as tall as it has something to say -- the report a line
+        # per line to a ceiling of six, the log its strip until a job writes to
+        # it -- and every pixel left over is the list's.
+        #
+        # It used to be 3:1:2 between the list, the report and the log, which
+        # sounds like the list wins and does not: `QVBoxLayout` hands every
+        # widget its `sizeHint` before it shares the SURPLUS by stretch, and
+        # both text boxes' hints are twelve lines of nothing. Measured in the
+        # themed window (the fonts scale with its width, so nothing here can be
+        # measured without the theme on): at 1920x1080 the list had 311px of the
+        # tab's 900 and two whole rows of forty, and at the 1280x800 the app
+        # opens at it had 70 -- a scrollbar and the top of a family card.
         box.addLayout(actions)
         box.addWidget(self.rebuild_banner)
-        box.addWidget(self.modules_panel, 3)
+        box.addWidget(self.modules_panel, 1)
         box.addWidget(custom)
-        box.addWidget(self.module_report, 1)
-        box.addWidget(self.rebuild_log, 2)
+        box.addWidget(self.module_report)
+        box.addWidget(self.rebuild_log)
+        self.modules_panel.setMinimumHeight(MODULE_LIST_MIN_HEIGHT)
         self._add_panel_tab(tab, "modules", "Modules")
         # Keyed by (FAMILY, id) since round 2, for `modules_panel._rows`'s
         # reason: nothing makes an id unique across families, and an id-keyed
@@ -7010,12 +7225,18 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.tuning_banner.setVisible(False)
-        self.tuning_report = QPlainTextEdit(tab)
+        # The same shape as the Modules tab, so the same rule (T73): the cards
+        # are what grows, the report is what the last press did and no taller.
+        self.tuning_report = _ReportBox(tab)
         self.tuning_report.setReadOnly(True)
         box.addLayout(actions)
         box.addWidget(self.tuning_banner)
-        box.addWidget(self.tuning_panel, 4)
-        box.addWidget(self.tuning_report, 1)
+        box.addWidget(self.tuning_panel, 1)
+        box.addWidget(self.tuning_report)
+        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately: `TuningPanel` asks for
+        # 288px of its own as a minimum where `ModulesPanel` asks for 70, so a
+        # floor of 100 under it could never be the number that applied. A guard
+        # that cannot fire is a guard nobody can test (measured 2026-09-16).
         # "modules", because `icons.py` is a file T43 must not edit and it has
         # no `tuning` key: the fallback is the SERVER icon, which would collide
         # with the Server tab. Sharing the Modules puzzle is the smaller
