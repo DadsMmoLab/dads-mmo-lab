@@ -629,6 +629,22 @@ def build_window() -> object:
         _warn_unless_remembered(state, window)
         add_controller(game, sd, cd, known.wsl_distro if known else None)
 
+    def on_fresh_install(game: str, server_dir: object, client_dir: object) -> None:
+        """A FRESH install ended with the world up and, since T87, with its
+        channel keys written, so the tab may mint and prove its account now
+        rather than on the next Start.
+
+        Hung off `fresh_install`, not `installed`: "Use existing..." emits
+        `installed` too, wrote nothing, and a tab opened over a folder the user
+        merely pointed at must not write a row into his auth database
+        (review, 2026-09-18). Looked up rather than returned: a repeat install
+        into a known folder focuses the existing tab, and that tab is the one
+        to ask.
+        """
+        view = controllers.get((game, Path(str(server_dir))))
+        if view is not None:
+            view.settle_channel_after_install()
+
     def on_adopted(game: str, server_dir: object, client_dir: object, wsl_distro: object) -> None:
         """A server adopted from a WSL distro, which is remembered with it.
 
@@ -645,6 +661,7 @@ def build_window() -> object:
         add_controller(game, sd, cd, distro)
 
     catalog_view.installed.connect(on_installed)
+    catalog_view.fresh_install.connect(on_fresh_install)
     catalog_view.adopted.connect(on_adopted)
 
     # README §10: non-blocking update check on a background thread; banner only if newer.

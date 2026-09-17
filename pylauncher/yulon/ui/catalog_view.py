@@ -304,6 +304,15 @@ class CatalogView(QWidget):
     install_started = Signal(str)  # game id
     install_finished = Signal(str, bool, str)  # game id, ok, message
     installed = Signal(str, object, object)  # game id, server_dir (Path), client_dir (Path|None)
+    fresh_install = Signal(str, object, object)
+    """The same three, emitted after `installed` ONLY from `_on_run_finished()`.
+
+    `installed` also fires from "Use existing...", which pointed the app at a
+    folder and wrote nothing; a window slot that writes anything (the T87
+    post-install channel settle mints an account) hangs off this one, so a
+    folder the user merely pointed at never gets a row written into its auth
+    database (review, 2026-09-18).
+    """
     adopted = Signal(str, object, object, object)
     """A server adopted from a WSL distro: game id, server_dir, client_dir, distro name.
 
@@ -967,6 +976,7 @@ class CatalogView(QWidget):
             # unlock undoes it. Asserted, not just stated.
             self._remember_installed(game_id, server_dir)
             self.installed.emit(game_id, server_dir, client_dir)
+            self.fresh_install.emit(game_id, server_dir, client_dir)
 
     def _offer_a_restart_instead(self, message: str) -> bool:
         """Offer to restart when a restart is now the whole of what is missing.

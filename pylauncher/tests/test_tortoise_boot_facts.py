@@ -612,11 +612,13 @@ def test_the_conf_block_writes_the_keys_this_core_needs_and_none_it_removed() ->
     `Console.Enable` is the whole of this entry's command channel now that its
     `operations` block says `attach`.
 
-    **The three that left** are `SOAP.Enabled`, `SOAP.IP` and `SOAP.Port`. The
-    subsystem is gone from the core -- not the keys, the code: the only match
-    for the string under `src/` is a comment at `src/game/World.h:799`, and no
-    gsoap is vendored. They were never written from the conf table anyway; they
-    came from `operations.enable_conf`, and they go back the same way.
+    **The three that left with the fork and came back with PR #491** are
+    `SOAP.Enabled`, `SOAP.IP` and `SOAP.Port`. On the T30 pin the subsystem was
+    gone from the core (the only match for the string under `src/` was a comment
+    at `src/game/World.h:799`, no gsoap vendored) and the keys were out of the
+    table. Since T86 the pin carries the subsystem, and since T87 the install
+    table writes the keys too, so the first boot binds the port; the same three
+    stay in `operations.enable_conf` for installs made before that.
 
     `GameType` is checked because its DEFAULT moved (the dist ships `6` on this
     core where the fork shipped `0`), which is the quiet kind of change: an
@@ -634,15 +636,15 @@ def test_the_conf_block_writes_the_keys_this_core_needs_and_none_it_removed() ->
     ):
         assert arrived in keys, f"{arrived} is new on this core and nothing writes it"
     assert keys["Console.Enable"] == "1", (
-        "this entry's command channel is the console (`operations.channel: attach`); with "
-        "the console off it has no channel at all"
+        "the Console tab types at this console whichever channel the entry speaks; with "
+        "the console off that tab has nothing to type at"
     )
     assert keys["Database.AutoUpdate.SortByName"] == "1"
-    for left in ("SOAP.Enabled", "SOAP.IP", "SOAP.Port"):
-        assert left not in keys, (
-            f"{left} is written into a conf this core never reads. It belongs to "
-            "`operations.enable_conf`, and that block comes back with the subsystem"
-        )
+    assert (keys["SOAP.Enabled"], keys["SOAP.IP"], keys["SOAP.Port"]) == ("1", "0.0.0.0", "7878"), (
+        "the install writes the channel on (T87); the core reads these keys since PR #491 "
+        "(`mangosd.conf.dist.in` ships them at 0 / 127.0.0.1 / 7878) and the entry's "
+        "`operations.enable_conf` names the same three"
+    )
     assert keys["GameType"] == "0", (
         "the shipped default moved to 6 on this core; an entry that leaves the key alone "
         "gets a different world than the one that was measured"

@@ -282,7 +282,11 @@
                     "CharacterDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{CHAR_DB}}\"",
                     "LogsDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{LOGS_DB}}\"",
                     "DataDir": "\"/opt/mangos/data\"",
-                    "WorldServerPort": "{{WORLD_PORT}}"
+                    "WorldServerPort": "{{WORLD_PORT}}",
+                    "SOAP.Enabled": "1",
+                    "SOAP.IP": "0.0.0.0",
+                    "SOAP.Port": "7878",
+                    "Ra.Enable": "0"
                   }
                 },
                 "realmd.conf": {
@@ -694,7 +698,11 @@
                     "CharacterDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{CHAR_DB}}\"",
                     "LogsDatabaseInfo": "\"{{DB_HOST}};3306;{{DB_USER}};{{DB_PASSWORD}};{{LOGS_DB}}\"",
                     "DataDir": "\"/opt/mangos/data\"",
-                    "WorldServerPort": "{{WORLD_PORT}}"
+                    "WorldServerPort": "{{WORLD_PORT}}",
+                    "SOAP.Enabled": "1",
+                    "SOAP.IP": "0.0.0.0",
+                    "SOAP.Port": "7878",
+                    "Ra.Enable": "0"
                   }
                 },
                 "realmd.conf": {
@@ -1119,7 +1127,10 @@
                     "GM.StartLevel": "1",
                     "AutoHonorRestart": "0",
                     "AutoRestart.MaxServerUptime": "0",
-                    "Console.Enable": "1"
+                    "Console.Enable": "1",
+                    "SOAP.Enabled": "1",
+                    "SOAP.IP": "0.0.0.0",
+                    "SOAP.Port": "7878"
                   }
                 },
                 "realmd.conf": {

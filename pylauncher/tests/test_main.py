@@ -803,6 +803,58 @@ def test_the_entry_point_wires_installs_through_install_wiring_and_no_controller
 # the live `AppState`, and neither the view nor the catalog can reach them.
 
 
+def test_a_finished_install_settles_the_new_tabs_channel(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`installed` -> the tab -> one `settle_channel_after_install()` (T87).
+
+    The tab itself only checks on open; the window is the one thing that knows
+    an install just finished, so it is the window that asks. A repeat install
+    into a known folder focuses the existing tab, and that tab is asked.
+    """
+    from yulon.ui.controller_view import ControllerView
+
+    asked: list[Any] = []
+    monkeypatch.setattr(
+        ControllerView,
+        "settle_channel_after_install",
+        lambda self: asked.append(self.services.controller.server_dir),
+    )
+    server_dir = tmp_path / "settle-me"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    assert asked == [], "`installed` alone is also what Use existing... emits; it must not settle"
+    catalog.fresh_install.emit("wow-wotlk", server_dir, None)
+
+    assert asked == [server_dir], asked
+    assert _tab_for(window, server_dir) is not None
+
+
+def test_use_existing_does_not_write_an_account_into_a_server_it_was_pointed_at(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pointing the app at a folder is not an install, and not permission to write (T87).
+
+    `attach_existing()` emits `installed` and never `fresh_install`, so the
+    window's settle stays out of it: a `settle()` on Idle would mint a GM
+    account in an auth database the user only showed the app.
+    """
+    from yulon.ui.controller_view import ControllerView
+
+    asked: list[Any] = []
+    monkeypatch.setattr(
+        ControllerView, "settle_channel_after_install", lambda self: asked.append(1)
+    )
+    server_dir = tmp_path / "pointed-at"
+    catalog = _catalog_view(window)
+    fired: list[str] = []
+    catalog.fresh_install.connect(lambda *a: fired.append("fresh"))
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+
+    assert asked == [] and fired == []
+    assert _tab_for(window, server_dir) is not None
+
+
 def test_an_uninstalled_server_loses_its_tab_and_every_registry_entry(
     window: Any, tmp_path: Any
 ) -> None:
