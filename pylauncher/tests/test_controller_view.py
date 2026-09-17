@@ -10533,6 +10533,36 @@ def _ran_a_job(view: ControllerView, last_line: str = "Compile finished.") -> No
     process_events()
 
 
+def _a_rebuild_is_owed(view: ControllerView) -> None:
+    """Put the "A rebuild is owed" banner on the Modules tab, the way a press does.
+
+    Through `_deliver_report()` with `rebuild_required=True`, which is the
+    `ApplyReport` a real install returns and the only thing that raises this
+    banner: `_module_done` notes the fact, `_refresh_rebuild_banner` shows the
+    widget. A test that called `setVisible(True)` on `view.rebuild_banner`
+    instead would still show a banner and would say nothing about the state a
+    user is really in -- and it is the state that matters here, because it is
+    also what fills the report box under it.
+
+    It leaves a populated report behind, which is deliberate and is what gate
+    round 6 photographed: the install that owes the rebuild is the same press
+    whose answer is in the box.
+    """
+    _deliver_report(
+        view, ApplyReport("install", "mod-solocraft", family="module", rebuild_required=True)
+    )
+    process_events()
+    assert view.rebuild_banner.isHidden() is False, "the banner is not on screen, so nothing is set"
+
+
+def _a_rebuild_is_not_owed(view: ControllerView) -> None:
+    """Take the banner back off, through the same session state that raised it."""
+    view._rebuild_owed.clear()
+    view._refresh_rebuild_banner()
+    process_events()
+    assert view.rebuild_banner.isHidden() is True, "the banner is still on screen"
+
+
 def test_the_module_list_keeps_five_rows_after_a_job_at_the_desktop_shape(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -11661,12 +11691,18 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     with two rows on a window that could have shown six. What is asserted is
     that each step is only taken when the one before it was not enough:
 
-    * at 960x600 with a report in the box, BOTH boxes are folded and the list is
-      at its own floor -- the narrowest case, where all three steps are needed;
+    * at the smallest window with a report in the box AND a rebuild owed, BOTH
+      boxes are folded and the list is at its own floor -- the narrowest case,
+      where all three steps are needed;
     * at 1280x800 NEITHER is folded and the list floor is back, so none of this
       is a one-way door;
     * and the list never gives while a box is still open, which is the order
       itself.
+
+    The banner is what makes the first case reach step 3 at all since T85: the
+    minimum window went up to hold the wrapped bar and the card whole with one on
+    screen, and without one the smallest window now fits with the list at its
+    full `MODULE_LIST_MIN_HEIGHT`.
     """
     import main
 
@@ -11675,6 +11711,7 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     _at(window, DESKTOP_1080P)
     _ran_a_job(view)
     view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    _a_rebuild_is_owed(view)
     process_events()
 
     _at(window, main.MINIMUM_WINDOW_SIZE)
@@ -11682,21 +11719,29 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
     assert view.module_report_strip.collapsed, "the report is open at the smallest window"
     assert view.modules_panel.minimumHeight() < controller_view_module.MODULE_LIST_MIN_HEIGHT, (
         "both boxes are folded and the tab STILL does not fit at this size -- the action bar "
-        "takes two lines and the custom-module card needs 126px of wrapped sentence -- so the "
+        "takes two lines, the card needs 136px of wrapped sentence and the banner 62 -- so the "
         f"list's floor is the one thing left to give: it is still "
         f"{view.modules_panel.minimumHeight()} of {controller_view_module.MODULE_LIST_MIN_HEIGHT}"
     )
     # Strictly less, and that is a claim about the shipped catalog and theme at
-    # this one size rather than about the rule. If a future theme makes 960x600
-    # fit outright this goes red, and that is the right red: the ladder's last
-    # rung would no longer be exercised anywhere, and this is the test that says
-    # so rather than quietly covering nothing.
-    assert view.modules_panel.minimumHeight() >= view.modules_panel.minimumSizeHint().height(), (
+    # this one size rather than about the rule. If a future theme makes the
+    # smallest window fit outright this goes red, and that is the right red: the
+    # ladder's last rung would no longer be exercised anywhere, and this is the
+    # test that says so rather than quietly covering nothing.
+    #
+    # `_LIST_FLOOR_FLOOR` and NOT the list's own `minimumSizeHint()`, which is
+    # what this asserted until T85 on the belief that Qt ignores a minimum under
+    # a widget's hint. It does not -- `qSmartMinSize` prefers an explicit
+    # `minimumHeight()` at any value above zero -- and the hint was 70 where the
+    # ladder needed 40, so the last rung was 30px shorter than it reads and the
+    # shortfall went on to the toolbar and the card instead.
+    assert view.modules_panel.minimumHeight() >= controller_view_module._LIST_FLOOR_FLOOR, (
         f"the floor was lowered to {view.modules_panel.minimumHeight()}, under the "
-        f"{view.modules_panel.minimumSizeHint().height()} the list itself needs -- which Qt "
-        "ignores, so it is a fit this object only claims to have made"
+        f"{controller_view_module._LIST_FLOOR_FLOOR} that is the bottom of this ladder -- "
+        "below it the honest answer is a tab that scrolls, not a shorter list"
     )
 
+    _a_rebuild_is_not_owed(view)
     _at(window, main.DEFAULT_WINDOW_SIZE)
 
     assert not view.rebuild_log.collapsed, "the log never came back at the default window"
@@ -11715,6 +11760,291 @@ def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
                 f"folded={view.rebuild_log.collapsed}, report "
                 f"folded={view.module_report_strip.collapsed}"
             )
+
+
+THE_WRAPPED_WIDTHS = tuple(range(960, 1120, 10))
+"""Every width at the minimum window's height where the action bar takes two lines.
+
+960 is `main.MINIMUM_WINDOW_SIZE`'s width and 1120 is where the bar goes back to
+one line; between them the theme's font grows with the width while the bar still
+wraps, so the tab wants MORE height as the window gets wider. Swept rather than
+asked at 960 because the worst case is not at either end: with the rebuild banner
+up, the smallest height at which nothing is cut is 634 at 960 and 637 at 1090,
+and a test that asked only at the minimum width would have passed on a 634 that
+clips the custom-module card thirteen widths later (T85).
+
+Every ten pixels rather than every twenty, so that 1090 is really asked: a
+twenty-pixel step from 960 lands on 1080 and 1100 and steps over the worst one.
+"""
+
+
+def _cut_on_the_modules_tab(view: ControllerView, tab: Any) -> list[str]:
+    """Everything on the Modules tab that is drawn too short to read, which must be none.
+
+    Four questions, and the list is exempt from the first of them BY DESIGN: it
+    is the one widget here that is complete at any height because it scrolls, and
+    `_TabFit`'s last rung takes it under its own `minimumSizeHint()` on purpose.
+    Every other widget drawn under its minimum is text somebody cannot read.
+
+    The card's BUTTONS are asked for separately from the card's height because
+    they fail separately: `QGroupBox` is happy to be drawn shorter than its own
+    layout and lets the children hang out of the bottom of the frame, which is
+    what gate round 6 photographed -- two buttons below the card's own edge, on a
+    card whose height on its own looked only a little short.
+    """
+    from PySide6.QtWidgets import QGroupBox, QPushButton
+
+    cut = [
+        why
+        for why in _drawn_under_their_minimum(tab)
+        if not why.startswith(type(view.modules_panel).__name__)
+    ]
+    cut += [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
+    cut += _bar_holds_every_line(view)
+    for card in tab.findChildren(QGroupBox):
+        for button in card.findChildren(QPushButton):
+            if button.y() < 0 or button.y() + button.height() > card.height():
+                cut.append(
+                    f"{button.text()!r} ends at {button.y() + button.height()}px of the "
+                    f"{card.height()}px card {card.title()!r}"
+                )
+    return cut
+
+
+def test_the_smallest_window_draws_the_toolbar_and_the_card_whole_with_a_rebuild_owed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T85's first half: the size the app PROMISES, in the state gate 6 found it in.
+
+    The banner is the whole of what was new. It costs this tab 62px plus the
+    spacing above it, it is on screen for as long as it takes a user to press
+    Rebuild, and at the 960x600 the app used to allow it put the tab 82px past
+    what `_TabFit`'s whole ladder could give: the wrapped action bar was drawn
+    82px of its 106 with `Rebuild the server…` sliced through its own border, and
+    the custom-module card 82 of 122 with both its buttons hanging below the
+    frame. `QBoxLayout` shares a shortfall over every child, so the two widgets
+    whose only way of being shorter is to cut the words in them paid it.
+
+    Two things had to change and this test needs both. The ladder's last rung was
+    30px shorter than it read -- `_TabFit` floored the list at its own
+    `minimumSizeHint()` of 70 on the belief that Qt ignores anything under it,
+    and Qt does not -- and even with the list at `_LIST_FLOOR_FLOOR` the tab was
+    48px short, so `MINIMUM_WINDOW_SIZE` went from 600 to 640.
+
+    Swept across `THE_WRAPPED_WIDTHS` rather than asked at the minimum, because
+    the worst case is at 1090 and not at 960: see that constant.
+
+    After a job AND with a report in the box, which is the state that puts every
+    rung of the ladder under load at once.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    _a_rebuild_is_owed(view)
+    assert view.module_report.toPlainText() != "", "the report box is empty, so a rung is unloaded"
+
+    for width in THE_WRAPPED_WIDTHS:
+        _at(window, (width, main.MINIMUM_WINDOW_SIZE[1]))
+        assert (
+            view.rebuild_banner.isHidden() is False
+        ), f"the banner left the screen at {width}px, so this is not the case under test"
+        assert (
+            len({b.y() for b in _module_toolbar_buttons(view)}) > 1
+        ), f"the action bar is one line at {width}px, so the hard case is not being measured"
+        assert _cut_on_the_modules_tab(view, tab) == [], (
+            f"something on the Modules tab is cut at {width}x{main.MINIMUM_WINDOW_SIZE[1]} with a "
+            f"rebuild owed: {_cut_on_the_modules_tab(view, tab)}"
+        )
+
+
+def test_the_logs_minimum_in_the_state_it_is_not_in_is_the_one_it_really_has(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`open_minimum()` folded must equal what the panel really needs open, and back.
+
+    Those two methods exist because `_TabFit` has to ask an open panel what it
+    would need folded and a folded one what it would need open -- that IS the
+    question it is deciding -- so both are DERIVED from the state the panel is
+    not in. A derivation that is 16px light is a tab that finds room it does not
+    have: it opens the log, is asked again with the honest number now that the
+    pane is showing, and folds it. One resize, two transitions, and the panel
+    ends up where it started with a flash in between.
+
+    Sixteen is not a guess. The theme gives every `QPlainTextEdit` a 90px
+    `min-height` and the pane really holds back 106, and a layout item's minimum
+    is the larger of the widget's hint and its explicit `minimumHeight()` --
+    `_ReportStrip.box_minimum()` already carries that scar (T45), and
+    `_IdleLogPanel` was written next to it with the hint alone.
+
+    Asserted as an EQUALITY between two numbers computed by different code: the
+    panel's arithmetic on one side and Qt's own laid-out answer on the other. A
+    test that recomputed the derivation would agree with itself whatever it said.
+
+    Maximised, so neither answer is a cap's or a shortfall's.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    log = view.rebuild_log
+
+    assert log.collapsed, "the log did not start folded, so `open_minimum()` is not derived here"
+    derived_open = log.open_minimum()
+
+    _ran_a_job(view)
+    assert not log.collapsed, "the job did not open the log"
+    really_open = log.minimumSizeHint().height()
+    derived_folded = log.folded_minimum()
+
+    assert derived_open == really_open, (
+        f"folded, the panel said an open one needs {derived_open}px; open, it needs "
+        f"{really_open}. The tab decides whether to unfold from the first number"
+    )
+
+    _click(_the_handle_on(log))
+    assert log.collapsed, "the handle did not fold the log"
+    really_folded = log.minimumSizeHint().height()
+
+    assert derived_folded == really_folded, (
+        f"open, the panel said a folded one needs {derived_folded}px; folded, it needs "
+        f"{really_folded}"
+    )
+
+
+THE_CLIENT_INSIDE_A_1280x800_FRAME = (1252, 734)
+"""What `main.DEFAULT_WINDOW_SIZE` leaves the app when the number is the FRAME.
+
+`xdotool search` returns mutter's frame rather than the client, and on the box
+gate round 6 ran on the frame is 28px wider and 66px taller than what the app
+gets. Round 6 corrected for it and sized every shot against the client, so the
+1280x800 in T85 really is a 1280x800 client -- and this size is asserted beside
+it because the correction is one line of a recipe and the failure mode is
+silent: a run that sizes the frame instead is measuring a 554px tab where the
+test measures 620, which is the difference between an open log needing the
+report to give and needing the report AND the list's floor.
+"""
+
+
+def test_a_press_on_the_log_reopens_it_at_the_window_the_app_opens_at(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T85's second half: the fold that went one way, and the chevron that did nothing.
+
+    Live at 1280x800 with a rebuild owed, a log left open while maximised folded
+    itself on the way down and its chevron was then dead -- it came back only on
+    a window big enough that nothing had to give. The banner is why: it costs
+    this tab 52px at this width, and with it an open log and a populated report
+    want 668px of a 620px tab. One of them has to fold, the published order sends
+    the log, and pressing its handle did nothing at all, because `_apply()`
+    derives the fold from `_has_room` and `set_room(False)` is a no-op when the
+    answer has not changed.
+
+    The answer is that a press REORDERS the ladder (`_TabFit._give_order`): the
+    panel a person last asked for goes last, so the other one gives for it, and
+    a press may spend the list's floor where folding the other one is not
+    enough. Both directions are asserted, and the second is what stops this being
+    "the log always wins" -- a press on the REPORT's strip takes it back, and
+    neither panel is privileged over the other.
+
+    Asked at two sizes: 1280x800, which is what gate round 6 photographed, and
+    the 1252x734 a 1280x800 FRAME leaves the client on that box. At 620px of tab
+    folding the report is enough; at 554 it leaves the log two pixels short, so
+    the second case is the one that needs the list's floor as well.
+
+    The last assertion is the one the live defect would still pass without: the
+    log is not merely un-collapsed but drawn at the height it needs. A panel
+    opened at a size that cannot hold it is a cut panel, which is what T83's
+    round 3 measured when the press showed the box itself.
+    """
+    import main
+
+    for size in (main.DEFAULT_WINDOW_SIZE, THE_CLIENT_INSIDE_A_1280x800_FRAME):
+        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+        window, _tab = _controller_in_the_real_window(view, "Modules")
+        _at(window, DESKTOP_1080P)
+        _ran_a_job(view)
+        _a_rebuild_is_owed(view)
+        assert not view.rebuild_log.collapsed, "the job did not open the log while maximised"
+
+        _at(window, size)
+        assert view.rebuild_log.collapsed, (
+            f"the log is still open at {size} with a rebuild owed, so the press below is not "
+            "the press this ticket is about"
+        )
+
+        _click(_the_handle_on(view.rebuild_log))
+
+        assert not view.rebuild_log.collapsed, (
+            f"the chevron did nothing: the log is still folded at {size}, where the tab can "
+            "hold it once the report and the list's floor give"
+        )
+        assert view.module_report_strip.collapsed, (
+            f"both are open at {size}, so nothing gave -- either the tab grew or this is "
+            "measuring a size where the question does not arise"
+        )
+        assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
+            f"the log was opened at {view.rebuild_log.height()}px against the "
+            f"{view.rebuild_log.minimumSizeHint().height()} it needs at {size}: open and cut"
+        )
+        assert "Compile finished." in view.rebuild_log.text(), "the fold lost the job's output"
+
+        # And back the other way: the report's own strip takes the height back.
+        _click(view.module_report_strip)
+
+        assert not view.module_report_strip.collapsed, (
+            f"a press on the report's strip did not reopen it at {size} -- the log is being "
+            "privileged rather than the panel the user last asked for"
+        )
+        assert view.rebuild_log.collapsed, f"the report reopened without the log giving at {size}"
+
+
+def test_folding_the_log_by_hand_gives_the_report_its_height_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The other side of the reorder: what the user puts AWAY costs the tab nothing.
+
+    `_TabFit` used to ask "can this tab hold both panels open?" whatever anybody
+    wanted, and that question has no answer that helps here. Once a press has put
+    the log at the end of the give order, a tab asking it keeps refusing the
+    report for a log that is folded and that nobody is asking for -- the user
+    presses the log shut to get the report back and gets neither.
+
+    So `settle()` starts from what is ASKED FOR (`wants_open()`) rather than from
+    both panels open. The log folded by hand is not asked for, the sum drops by
+    the whole of an open log, and the report fits with room over.
+
+    Three presses, and the third is the assertion: the first proves the size is
+    one where they do not both fit, the second is the reorder, the third is this.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    _a_rebuild_is_owed(view)
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+
+    assert view.rebuild_log.collapsed and not view.module_report_strip.collapsed, (
+        "the tab holds both at this size, so there is nothing for either press to cost: "
+        f"log folded={view.rebuild_log.collapsed}, report "
+        f"folded={view.module_report_strip.collapsed}"
+    )
+
+    _click(_the_handle_on(view.rebuild_log))
+    assert not view.rebuild_log.collapsed, "the press did not open the log"
+    assert view.module_report_strip.collapsed, "the report did not give for it"
+
+    _click(_the_handle_on(view.rebuild_log))
+
+    assert view.rebuild_log.collapsed, "the second press did not fold the log"
+    assert not view.module_report_strip.collapsed, (
+        "the report is still folded for a log the user has just put away: the room is being "
+        "worked out from what the tab COULD hold rather than from what is asked for"
+    )
+    assert view.module_report.toPlainText() != "", "the report came back empty"
 
 
 def test_a_restyle_at_an_unchanged_width_folds_nothing(
