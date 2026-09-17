@@ -6565,9 +6565,9 @@ OLD_FORK_SERVER = {
 
 Every path is one the OLD `wow-tortoise` entry wrote or cloned and the new one
 does not: the two SQL directories its plan globbed, the Eluna checkout its
-second source cloned, and a `mangosd.conf` carrying a `SOAP.Enabled` this core
-has no key for. `~/tortoise-vm` on `yulon-arch` and the owner's own install on
-m910q are both this shape.
+second source cloned, and a `mangosd.conf` carrying a `SOAP.Enabled` -- a key the
+Penqle core lacked until PR #491 and has again since T86. `~/tortoise-vm` on
+`yulon-arch` and the owner's own install on m910q are both this shape.
 """
 
 
@@ -6621,9 +6621,11 @@ def test_a_server_installed_from_the_retired_fork_still_opens_its_tabs(tmp_path:
     assert services.play is not None
     assert services.bots is not None
     assert services.store is not None and services.applier is not None
-    assert services.console_probe is not None, (
-        "this entry's channel is the console again; a fork install reaches its world the "
-        "same way a new one does"
+    assert services.channel_setup is not None, (
+        "this entry's channel is SOAP again (T86); a fork install reaches its world through "
+        "the same channel setup a new one does -- the retired fork had SOAP too, and a "
+        "bot-helpers install (no SOAP in its binary, and no path here moves its pin: a "
+        "rebuild reuses its own src/) answers `could not ask` until it is reinstalled"
     )
     assert services.rebuild is not None, (
         "the rebuild press is what puts such an install onto the new stack when its owner "

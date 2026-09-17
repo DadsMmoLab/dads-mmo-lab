@@ -952,9 +952,10 @@ def test_tortoise_clones_the_core_branch_the_bots_module_requires_and_the_module
     assert len(sources) == 2, f"the stack is the core plus the module: {[s.repo for s in sources]}"
     core, module = sources
     assert core.repo == "tortoise-wow/tortoise-wow"
-    assert core.branch == "bot-helpers", (
-        "`main` is a core without the headless bot sessions the module hooks; `bot-helpers` "
-        "is the branch TortoiseBots' own README §2 requires"
+    assert core.branch == "1181dev", (
+        "`1181dev` is `main` (which carries the headless bot sessions since `bot-helpers` was "
+        "merged into it) plus the SOAP interface of PR #491, merged there and not into `main` "
+        "on 2026-09-17; `bot-helpers` itself is 0 commits ahead of `main` and has no SOAP"
     )
     assert core.dest == "src/tortoise-wow"
     assert module.repo == "Sagiroth/TortoiseBots"
