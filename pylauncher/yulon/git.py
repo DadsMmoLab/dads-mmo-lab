@@ -151,6 +151,67 @@ writes and not a same-named file somewhere inside the module's own tree.
 """
 
 
+GENERATED_INCLUDE = "include.sh"
+"""The other file this engine writes into a clone, and the only one it can create EMPTY.
+
+`Applier.install()` touches it for a C++ module whose upstream ships none,
+because CMake's `CollectSourceFiles()` silently skips a module without one. See
+`_without_the_generated_include()` for the one status line it is allowed to
+account for, and for everything that line is not.
+"""
+
+_UNTRACKED_INCLUDE = f"?? {GENERATED_INCLUDE}"
+"""The ONE `status --porcelain` line this app wrote itself.
+
+`??` is git's code for "not tracked by this repository at all", which is the
+whole of the distinction `_without_the_generated_include()` turns on: a file
+the repository TRACKS produces ` M`, ` D`, `M ` or `A ` instead, and none of
+those is this app's doing.
+"""
+
+
+def _without_the_generated_include(dest: Path, relative_path: str, porcelain: str) -> str:
+    """`status --porcelain` output with the app's own untracked, empty `include.sh` dropped.
+
+    T47, and it is a LINE filter rather than a pathspec exclusion on purpose.
+    `install()` touches an `include.sh` into every C++ module whose upstream
+    ships none, so `mod-ale`'s own clone answered `?? include.sh` for a checkout
+    nobody had touched and both destructive paths refused it -- the same bug T66
+    fixed for `CLONE_MARKER`, still live for the second file this engine writes.
+
+    **`:(exclude,top)include.sh` would have hidden more than that, and hidden it
+    silently** (review, round 1): a pathspec exclusion drops the path from the
+    question entirely, so a repository that TRACKS a non-empty `include.sh`
+    which the user then truncated to nothing produced ` M include.sh`, was
+    answered "unmodified", and would have been `reset --hard` over without a
+    word. Reading the line's own status code is what separates "this app
+    touched a file into somebody's checkout" from "somebody changed a file the
+    module ships": only `?? ` is ever the first, and it is the only code
+    dropped here.
+
+    Both conditions, and neither is enough alone. `?? ` says the repository does
+    not track it; zero bytes says there is nothing in it anybody could lose.
+    A file somebody has written in answers False whichever way it got there,
+    which is the content check `apply._adoption_refusal()` asks for -- the
+    strictest one there is, rather than a name allowlist.
+
+    **Dropped when `include.sh` is the path being asked about**, for the reason
+    `_status_pathspec()` drops the marker's exclusion in the same case: that is
+    a different question, and a caller that asked it wants the file's own
+    answer rather than this one.
+    """
+    if Path(relative_path).name == GENERATED_INCLUDE:
+        return porcelain
+    generated = dest / GENERATED_INCLUDE
+    try:
+        if not (generated.is_file() and generated.stat().st_size == 0):
+            return porcelain
+    except OSError as exc:  # unreadable is not empty: leave the line counted
+        logger.debug(f"could not size {generated}: {exc}")
+        return porcelain
+    return "\n".join(line for line in porcelain.splitlines() if line != _UNTRACKED_INCLUDE)
+
+
 def _status_pathspec(relative_path: str) -> list[str]:
     """`--` and the pathspec for a `git status` that ignores this app's marker.
 
@@ -171,6 +232,10 @@ def _status_pathspec(relative_path: str) -> list[str]:
     answer: `Applier._require_own_clone()` reads a True for `CLONE_MARKER` as
     "the repository itself tracks a file at this name" and would otherwise
     treat this app's own claim as upstream content.
+
+    The app's OTHER generated file is not handled here and must not be: an
+    exclusion answers about a path rather than about a change, and
+    `_without_the_generated_include()` carries what that cost.
     """
     if Path(relative_path).name == CLONE_MARKER:
         return ["--", relative_path]
@@ -722,8 +787,11 @@ class RunnerGit:
     def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
         """Is `relative_path` exactly what this checkout's HEAD committed? None = cannot ask.
 
-        The app's own `CLONE_MARKER` does not count as a change to the tree;
-        `_status_pathspec()` carries why, and why only there.
+        Two of this app's own files do not count as a change to the tree: the
+        `CLONE_MARKER` it writes into every clone (`_status_pathspec()`), and an
+        untracked, empty `include.sh` it touched into a C++ module that ships
+        none (`_without_the_generated_include()`). Each carries why, and why
+        only in the one case it names.
         """
         if not (dest / ".git").is_dir():
             return None
@@ -1370,194 +1438,6 @@ class ContainerGit:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
         return not _without_the_generated_include(dest, relative_path, proc.stdout).strip()
-
-    def head_version(self, dest: Path) -> str | None:
-        """`RunnerGit.head_version()`, containerised: what this checkout is at, or None.
-
-        T44 wired the modules panel to `RunnerGit.head_version` directly and
-        this class had no such method, which was right there -- that panel reads
-        clones the APP made on a machine that has already run host git. T64 asks
-        the same question about a SERVER source, from an engine whose every
-        other git call goes through this class, and a question answered by a
-        different transport from the write beside it is the split §27 of the bug
-        checklist is about. So it is answered here too, and `RunnerGit`'s
-        docstring holds the reasoning for the format and for never guessing.
-
-        `writes=False`: one local `git log -1`, no remote, no working tree.
-        """
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            proc = self._capture(dest, ["log", "-1", f"--format={VERSION_FORMAT}"], writes=False)
-        except GitError as exc:
-            logger.debug(f"could not read what {dest} is at: {exc}")
-            return None
-        parts = proc.stdout.strip().split()
-        if len(parts) != 2:
-            logger.debug(f"git log -1 in {dest} did not answer with a sha and a date: {parts!r}")
-            return None
-        return VERSION_SEPARATOR.join(parts)
-
-    def head_sha(self, dest: Path) -> str | None:
-        """`git rev-parse HEAD`, containerised; see `RunnerGit.head_sha()` for why it is full."""
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            proc = self._capture(dest, ["rev-parse", "HEAD"], writes=False)
-        except GitError as exc:
-            logger.debug(f"could not read what {dest} is on: {exc}")
-            return None
-        said = proc.stdout.strip()
-        return said or None
-
-    def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
-        """`RunnerGit.local_edits()`, containerised. Both must answer identically.
-
-        A caller narrowing to neither class never learns which it got, and this
-        is a guard's input: a disagreement would be a refusal that means one
-        thing on a machine with host git and another on a Mac without Xcode's
-        command line tools. The flags and the parse are therefore shared
-        constants (`_STATUS_ARGS`, `parse_status()`) rather than two spellings.
-        """
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            proc = self._capture(dest, _STATUS_ARGS, writes=False)
-        except GitError as exc:
-            logger.debug(f"could not ask git what is changed in {dest}: {exc}")
-            return None
-        skip = set(ignoring)
-        return tuple(path for path in parse_status(proc.stdout) if path not in skip)
-
-    def commits_since(self, dest: Path, rev: str) -> int | None:
-        """`RunnerGit.commits_since()`, containerised. `writes=False`: nothing is fetched.
-
-        The shallow refusal is asked here too, and this is the transport it was
-        MEASURED against: `clone()` above passes `_pull_depth_args(spec.depth)`
-        on its update fetch, so a `depth: 1` source stays grafted and the count
-        would answer 1 for any distance. Both bodies must answer identically --
-        a caller never learns which it got, and the figure is read by a person.
-        """
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            shallow = self._capture(dest, ["rev-parse", "--is-shallow-repository"], writes=False)
-        except GitError as exc:
-            logger.debug(f"could not ask whether {dest} is a shallow clone: {exc}")
-            return None
-        if shallow.stdout.strip() != "false":
-            logger.debug(f"{dest} is a shallow clone; the distance from {rev} cannot be counted")
-            return None
-        try:
-            proc = self._capture(dest, ["rev-list", "--count", f"{rev}..HEAD"], writes=False)
-        except GitError as exc:
-            logger.debug(f"could not count what {dest} carries past {rev}: {exc}")
-            return None
-        return _parse_count(proc.stdout)
-
-    def restore_rev(self, dest: Path, rev: str) -> None:
-        """`RunnerGit.restore_rev()`, containerised: a checkout is a write, and no fetch.
-
-        `--force` for its reason there, which is a fact about git and not about
-        the transport: without it the checkout refuses whenever a tracked file
-        differs in the working tree and between the two commits, which on
-        AzerothCore is always true of `docker-compose.yml`.
-        """
-        self._capture(dest, ["checkout", "--detach", "--force", rev], writes=True)
-
-    def head_version(self, dest: Path) -> str | None:
-        """`RunnerGit.head_version()`, containerised: what this checkout is at, or None.
-
-        T44 wired the modules panel to `RunnerGit.head_version` directly and
-        this class had no such method, which was right there -- that panel reads
-        clones the APP made on a machine that has already run host git. T64 asks
-        the same question about a SERVER source, from an engine whose every
-        other git call goes through this class, and a question answered by a
-        different transport from the write beside it is the split §27 of the bug
-        checklist is about. So it is answered here too, and `RunnerGit`'s
-        docstring holds the reasoning for the format and for never guessing.
-
-        `writes=False`: one local `git log -1`, no remote, no working tree.
-        """
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            proc = self._capture(dest, ["log", "-1", f"--format={VERSION_FORMAT}"], writes=False)
-        except GitError as exc:
-            logger.debug(f"could not read what {dest} is at: {exc}")
-            return None
-        parts = proc.stdout.strip().split()
-        if len(parts) != 2:
-            logger.debug(f"git log -1 in {dest} did not answer with a sha and a date: {parts!r}")
-            return None
-        return VERSION_SEPARATOR.join(parts)
-
-    def head_sha(self, dest: Path) -> str | None:
-        """`git rev-parse HEAD`, containerised; see `RunnerGit.head_sha()` for why it is full."""
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            proc = self._capture(dest, ["rev-parse", "HEAD"], writes=False)
-        except GitError as exc:
-            logger.debug(f"could not read what {dest} is on: {exc}")
-            return None
-        said = proc.stdout.strip()
-        return said or None
-
-    def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
-        """`RunnerGit.local_edits()`, containerised. Both must answer identically.
-
-        A caller narrowing to neither class never learns which it got, and this
-        is a guard's input: a disagreement would be a refusal that means one
-        thing on a machine with host git and another on a Mac without Xcode's
-        command line tools. The flags and the parse are therefore shared
-        constants (`_STATUS_ARGS`, `parse_status()`) rather than two spellings.
-        """
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            proc = self._capture(dest, _STATUS_ARGS, writes=False)
-        except GitError as exc:
-            logger.debug(f"could not ask git what is changed in {dest}: {exc}")
-            return None
-        skip = set(ignoring)
-        return tuple(path for path in parse_status(proc.stdout) if path not in skip)
-
-    def commits_since(self, dest: Path, rev: str) -> int | None:
-        """`RunnerGit.commits_since()`, containerised. `writes=False`: nothing is fetched.
-
-        The shallow refusal is asked here too, and this is the transport it was
-        MEASURED against: `clone()` above passes `_pull_depth_args(spec.depth)`
-        on its update fetch, so a `depth: 1` source stays grafted and the count
-        would answer 1 for any distance. Both bodies must answer identically --
-        a caller never learns which it got, and the figure is read by a person.
-        """
-        if not (dest / ".git").is_dir():
-            return None
-        try:
-            shallow = self._capture(dest, ["rev-parse", "--is-shallow-repository"], writes=False)
-        except GitError as exc:
-            logger.debug(f"could not ask whether {dest} is a shallow clone: {exc}")
-            return None
-        if shallow.stdout.strip() != "false":
-            logger.debug(f"{dest} is a shallow clone; the distance from {rev} cannot be counted")
-            return None
-        try:
-            proc = self._capture(dest, ["rev-list", "--count", f"{rev}..HEAD"], writes=False)
-        except GitError as exc:
-            logger.debug(f"could not count what {dest} carries past {rev}: {exc}")
-            return None
-        return _parse_count(proc.stdout)
-
-    def restore_rev(self, dest: Path, rev: str) -> None:
-        """`RunnerGit.restore_rev()`, containerised: a checkout is a write, and no fetch.
-
-        `--force` for its reason there, which is a fact about git and not about
-        the transport: without it the checkout refuses whenever a tracked file
-        differs in the working tree and between the two commits, which on
-        AzerothCore is always true of `docker-compose.yml`.
-        """
-        self._capture(dest, ["checkout", "--detach", "--force", rev], writes=True)
 
     def head_version(self, dest: Path) -> str | None:
         """`RunnerGit.head_version()`, containerised: what this checkout is at, or None.
