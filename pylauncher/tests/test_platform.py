@@ -271,10 +271,10 @@ def test_the_windows_data_root_comes_from_docker_desktops_settings(
     ("path", "expected"),
     [
         (r"\\fileserver\share\wow", "network path"),
-        ("/Users/pk/OneDrive/wow", "cloud-synced"),
-        ("/Users/pk/Library/Mobile Documents/com~apple~CloudDocs/wow", "iCloud Drive"),
-        ("/Users/pk/Dropbox/wow", "cloud-synced"),
-        ("/Users/pk/games/wow", ""),
+        ("/Users/user/OneDrive/wow", "cloud-synced"),
+        ("/Users/user/Library/Mobile Documents/com~apple~CloudDocs/wow", "iCloud Drive"),
+        ("/Users/user/Dropbox/wow", "cloud-synced"),
+        ("/Users/user/games/wow", ""),
         ("/", "root of a filesystem"),
         ("/etc", "system directory"),
         ("/tmp", "system directory"),
@@ -578,7 +578,7 @@ def test_the_home_directory_itself_is_refused_before_the_installer_sees_it(
 ) -> None:
     """The picker opens on home, so this is the path a click-through actually produces.
 
-    Live gate on clean Fedora 44 (2026-08-25): choosing `/home/pk` passed
+    Live gate on clean Fedora 44 (2026-08-25): choosing `/home/user` passed
     `server_dir_problem()`, reached `install-wow-wotlk-fedora.sh`, and died on
     its `case "$SERVER_DIR" in /|"$HOME"|...` branch - but only AFTER the user
     had typed a sudo password into Yu'lon's own dialog and waited through
@@ -603,7 +603,7 @@ def test_a_symlink_onto_a_reserved_directory_is_refused_too() -> None:
     """The scripts `realpath -m --` before their `case`; a lexical check cannot.
 
     On Fedora Atomic `/home` is a symlink to `/var/home`, so a picker returning
-    `/home/pk` and a script seeing `/var/home/pk` disagree about whether the
+    `/home/user` and a script seeing `/var/home/user` disagree about whether the
     path is the home folder - and the user pays for that disagreement with a
     sudo password and a wait before the script refuses.
     """
@@ -756,7 +756,7 @@ def test_wsl_linux_path_converts_a_unc_path_back_to_the_distro_view() -> None:
 
 def test_wsl_linux_path_is_none_for_a_path_that_is_not_in_wsl() -> None:
     """An ordinary Windows path has no Linux spelling, and guessing one would lie."""
-    assert platform.wsl_linux_path(Path(r"C:\Users\pk\srv")) is None
+    assert platform.wsl_linux_path(Path(r"C:\Users\user\srv")) is None
     assert platform.wsl_linux_path(Path(r"\\nas\share\srv")) is None
 
 

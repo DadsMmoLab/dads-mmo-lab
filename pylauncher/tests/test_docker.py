@@ -1776,7 +1776,7 @@ def test_the_unpinned_remedy_warns_about_the_copy_case(tmp_path: Path) -> None:
 # Provisioning succeeded and the next `docker compose up` still died with
 # `[WinError 2] The system cannot find the file specified`.
 
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 @pytest.fixture

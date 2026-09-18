@@ -236,9 +236,9 @@ def test_the_clone_mount_is_labelled_when_selinux_is_enforcing(
     so it is `user_home_t`, and a confined container may only write
     `container_file_t`:
 
-        $ docker run --rm -v /home/pk/labtest:/git ... -c "touch /git/x"
+        $ docker run --rm -v /home/user/labtest:/git ... -c "touch /git/x"
         touch: /git/x: Permission denied
-        $ docker run --rm -v /home/pk/labtest:/git:z ... -c "touch /git/y"
+        $ docker run --rm -v /home/user/labtest:/git:z ... -c "touch /git/y"
         (succeeded)
 
     So with the preflight probe fixed, every Fedora install stopped one stage
@@ -458,7 +458,7 @@ def test_a_read_only_git_question_runs_unconfined_so_it_can_see_an_unlabelled_fo
     Measured on Fedora 44, Enforcing (2026-08-30), against a checkout the user
     made themselves, so `unconfined_u:object_r:user_home_t:s0`:
 
-        $ docker run --rm -v /home/pk/ownco:/git ... remote get-url origin
+        $ docker run --rm -v /home/user/ownco:/git ... remote get-url origin
         fatal: not a git repository (or any parent up to mount point /)
         $ docker run --rm --security-opt label:disable -v ... remote get-url origin
         https://github.com/mod-playerbots/azerothcore-wotlk.git
@@ -1190,7 +1190,7 @@ def test_container_git_reports_a_failure_as_a_git_error(
 # `ensure_docker()` put Docker there. Hardcoding `docker` here made that clone
 # the very next thing to fail after provisioning was fixed.
 
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 def test_container_git_runs_the_docker_this_host_can_start(
