@@ -1528,10 +1528,10 @@ class ContainerGit:
         # far:
         #
         #     $ ls -Zd ~/labtest
-        #     unconfined_u:object_r:user_home_t:s0 /home/pk/labtest
-        #     $ docker run --rm -v /home/pk/labtest:/git ... -c "touch /git/x"
+        #     unconfined_u:object_r:user_home_t:s0 /home/user/labtest
+        #     $ docker run --rm -v /home/user/labtest:/git ... -c "touch /git/x"
         #     touch: /git/x: Permission denied
-        #     $ docker run --rm -v /home/pk/labtest:/git:z ... -c "touch /git/y"
+        #     $ docker run --rm -v /home/user/labtest:/git:z ... -c "touch /git/y"
         #     (succeeded, and the folder is now container_file_t)
         #
         # **`:z` for a write, `--security-opt label:disable` for a read, and the
@@ -1562,7 +1562,7 @@ class ContainerGit:
         # Fedora 44, Enforcing, against a user's own unlabelled checkout
         # (`unconfined_u:object_r:user_home_t:s0`):
         #
-        #     $ docker run --rm -v /home/pk/ownco:/git ... remote get-url origin
+        #     $ docker run --rm -v /home/user/ownco:/git ... remote get-url origin
         #     fatal: not a git repository (or any parent up to mount point /)
         #     $ docker run --rm --security-opt label:disable -v ... get-url origin
         #     https://github.com/mod-playerbots/azerothcore-wotlk.git

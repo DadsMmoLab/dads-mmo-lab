@@ -671,7 +671,7 @@ def test_generated_files_are_lf_even_on_windows(tmp_path: Path) -> None:
 # `platform.docker_program()`). `docker exec` here had the same hardcoded name
 # as everything else.
 
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 def test_docker_sql_execs_through_the_cli_this_host_can_start(
