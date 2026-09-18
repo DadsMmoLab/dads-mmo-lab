@@ -357,6 +357,10 @@ def test_removing_arac_names_what_it_did_not_take_back(
     # T67: the one step of the three that IS undone, in `done` and on disk.
     assert f"took back Patch-A.MPQ from {client_dir / 'Data'}" in report.done
     assert not (client_dir / "Data" / "Patch-A.MPQ").exists()
+    assert "Patch-A.MPQ (in your game client folder)" in text
+    # And the report is telling the truth about the machine, not only about itself.
+    assert (volume / "dbc" / "CharBaseInfo.dbc").read_bytes() == _dbc_bytes("CharBaseInfo.dbc")
+    assert (client_dir / "Data" / "Patch-A.MPQ").exists()
 
 
 def test_a_remove_that_leaves_nothing_behind_says_nothing_about_it(tmp_path: Path) -> None:

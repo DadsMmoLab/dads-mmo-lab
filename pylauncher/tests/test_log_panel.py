@@ -614,7 +614,7 @@ def test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window(
     short = panel.minimumSizeHint().width()
 
     panel._status.setText(
-        "FAILED: InstallerError: /home/pk is your home folder itself. A server "
+        "FAILED: InstallerError: /home/user is your home folder itself. A server "
         "install owns the folder it is given - a reinstall removes it - so pick a "
         "dedicated subfolder inside your home folder instead. Pick a different "
         "folder and try again. Nothing was written."
@@ -637,7 +637,7 @@ def test_the_status_label_still_says_what_failed(qapp: object) -> None:
     """
     panel = LogPanel()
     message = (
-        "/home/pk is your home folder itself. A server install owns the folder it "
+        "/home/user is your home folder itself. A server install owns the folder it "
         "is given - a reinstall removes it - so pick a dedicated subfolder."
     )
     panel._status.setText("FAILED: " + message)
@@ -690,7 +690,7 @@ def test_the_selectable_flags_do_not_reopen_the_wrap_bug(qapp: object) -> None:
     short = panel.minimumSizeHint().width()
 
     panel._status.setText(
-        "FAILED: InstallerError: /home/pk is your home folder itself. A server "
+        "FAILED: InstallerError: /home/user is your home folder itself. A server "
         "install owns the folder it is given - a reinstall removes it - so pick a "
         "dedicated subfolder inside your home folder instead. Pick a different "
         "folder and try again. Nothing was written."

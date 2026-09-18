@@ -6,8 +6,7 @@
   "game": "wow-wotlk",
   "description": "Regen buff while sitting (/sit or the X key); stripped on movement or standing up.",
   "source": {
-    "repo": "pjerra/SitMeansRest",
-    "rev": "efe08c3fbec2101fee4123a68b3a248259233a45"
+    "repo": "pjerra/SitMeansRest"
   },
   "requires": [
     "mod-ale"

@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "id": "mod-city-bots",
+  "name": "City Bots",
+  "type": "module",
+  "game": "wow-wotlk",
+  "description": "A fixed 400-bot stage cast that lives in the capitals: duel hubs at the city gates, fishers, inn dancers and living-crowd scenes. Extends mod-playerbots.",
+  "source": {
+    "repo": "pjerra/mod-city-bots"
+  },
+  "requires": [
+    "mod-playerbots"
+  ],
+  "build": {
+    "rebuild": true
+  },
+  "sql": [
+    {
+      "db": "auth",
+      "path": "data/sql/db-auth/updates/*.sql",
+      "applied_by": "db-import",
+      "note": "one auth account per stage-cast character, so all 400 can be online at once"
+    },
+    {
+      "db": "characters",
+      "path": "data/sql/db-characters/updates/*.sql",
+      "applied_by": "db-import",
+      "note": "the 400 characters and their outfits, as two self-contained seeds"
+    },
+    {
+      "db": "world",
+      "path": "data/sql/db-world/updates/*.sql",
+      "applied_by": "db-import"
+    },
+    {
+      "db": "playerbots",
+      "path": "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql",
+      "applied_by": "direct",
+      "note": "The one file AzerothCore never applies for a module. The core updates auth, characters and world from AC_MODULES_LIST, and mod-playerbots then builds its OWN DatabaseLoader for acore_playerbots with no modules list at all, so data/sql/playerbots/ is scanned by nobody. Imported here instead, after the tables its precondition names exist. The file drops and recreates citizen_roster and rewrites playerbots_account_type 12001-12400, so a re-import is a repair, not a duplicate -- and hand-edited roster rows are lost by it.",
+      "precondition": {
+        "db": "playerbots",
+        "query": "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('playerbots_account_type', 'playerbots_random_bots') HAVING COUNT(*) = 2",
+        "missing": "mod-playerbots has not created its tables yet, so the citizen roster was NOT imported and no rows were written. Rebuild the world server, start it once (that is what creates them), press Stop, then install City Bots again -- the import repeats safely"
+      },
+      "verify": [
+        {
+          "db": "playerbots",
+          "query": "SELECT 1 FROM citizen_roster HAVING COUNT(*) = 400",
+          "missing": "citizen_roster does not hold the 400 shipped citizens"
+        },
+        {
+          "db": "playerbots",
+          "query": "SELECT 1 FROM playerbots_account_type WHERE account_id BETWEEN 12001 AND 12400 AND account_type = 3 HAVING COUNT(*) = 400",
+          "missing": "the 400 city-bot accounts 12001-12400 are not all marked playerbots account type 3, and a stage-cast account marked type 2 makes playerbots load all 400 into its addclass cache"
+        }
+      ]
+    }
+  ],
+  "conf": [
+    {
+      "file": "env/dist/etc/modules/mod_city_bots.conf",
+      "template": "conf/mod_city_bots.conf.dist",
+      "keys": [
+        {
+          "key": "CitizenBots.Enable",
+          "label": "Enable city bots",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.LogLevel",
+          "label": "Log level",
+          "explain": "LogLevel 0 = errors only, 1 = warnings/errors, 2 = info/warnings/errors, 3 = debug/info/warnings/errors.",
+          "type": "int",
+          "min": 0,
+          "max": 3
+        },
+        {
+          "key": "CitizenBots.UseDedicatedAccounts",
+          "label": "Use the dedicated stage cast",
+          "explain": "Dedicated accounts are the fixed 400-character cast seeded by SQL (GUIDs 9000001-9000400, accounts citybot12001-citybot12400).",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.Percent",
+          "label": "Convert random bots (%)",
+          "explain": "0% means \"do not convert random leveling bots into city bots\".",
+          "type": "int",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "key": "CitizenBots.BlockAchievements",
+          "label": "Block achievements",
+          "explain": "1 (default) blocks the stage cast from completing achievements and from tracking achievement criteria. mod-playerbots only shields its own random/addclass bots from realm firsts, and citizen bots run on dedicated accounts, so without this they compete with real players for realm firsts. Set to 0 only if you want city bots to earn achievements like players.",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.HybridPopulation",
+          "label": "Hybrid population",
+          "explain": "1 (the shipped setting) keeps a low always-on baseline that bursts to max when a real player enters a regional hub; 0 keeps all configured city bots online all the time.",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.CountRealPlayers",
+          "label": "Count real players",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.BurstGraceSec",
+          "label": "Burst grace period (seconds)",
+          "type": "int"
+        },
+        {
+          "key": "CitizenBots.Assign.RequireListed",
+          "label": "Only listed bots log in",
+          "explain": "Set to 0 to keep unlisted roster rows as their database-defined fallback assignment. With the default 1, an unlisted citybot does not log in.",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.ActivityDurationMinSec",
+          "label": "Shortest activity (seconds)",
+          "explain": "Shorter activity windows make the stage feel alive without letting permanent cast members wander away from their assigned city/POI.",
+          "type": "int"
+        },
+        {
+          "key": "CitizenBots.ActivityDurationMaxSec",
+          "label": "Longest activity (seconds)",
+          "type": "int"
+        },
+        {
+          "key": "CitizenBots.EnableSay",
+          "label": "Let city bots talk",
+          "explain": "Whether city bots may talk in /say (the shipped setting is 1, on). Playerbot chat replies can cascade hard when many staged bots hear each other; set 0 to let emotes/dances/duels carry the ambiance instead.",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.EnableFishing",
+          "label": "Enable fishing",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.EnableCrowdScenes",
+          "label": "Living-crowd scenes",
+          "explain": "Living-crowd scenes at the bank and auction-house squares.",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.MountBetweenPoiChance",
+          "label": "Mount between POIs (%)",
+          "explain": "Chance for non-dueler city bots to mount while traveling between outdoor POIs. Bots dismount again when they arrive so emotes/fishing/social actions look normal.",
+          "type": "int",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "key": "CitizenBots.TeleportIfOutsideCity",
+          "label": "Teleport strays back",
+          "type": "bool"
+        },
+        {
+          "key": "CitizenBots.DedicatedCount",
+          "label": "Dedicated count (legacy)",
+          "explain": "Legacy fallback only. With CityCount.* configured above, this is ignored. Leave at 0 for the V2 fixed-roster profile.",
+          "type": "int"
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "Set the world server's PlayerLimit to at least MaxRandomBots + 400 (e.g. 1600 for 1200 random bots plus the full stage cast), or the cast cannot all log in.",
+    "The per-location assignment sheet (CitizenBots.Assign.*, CitizenBots.CityCount.*, CitizenBots.Weight.*) is left to the shipped .conf.dist: those are lists of 400 GUIDs and the maintainer's own live-server values, and this catalog has nothing truer to say about them.",
+    "wow-manage.sh's city_bots_import_roster() is the same import by hand: stop the world, import, verify 400 roster rows and 400 account types, start. The two verify entries below are that count."
+  ]
+}

@@ -417,14 +417,22 @@ def test_the_manifest_writes_the_engine_on_rather_than_naming_the_key() -> None:
     assert enabled.get("default") == "1"
 
 
-def test_the_lua_engine_is_pinned() -> None:
-    """The box asks for a revision. `azerothcore/mod-ale` moved from `c3de7942`
-    (HEAD 2026-09-06, `phase8-delta.md:18`) to `319f43ed` (HEAD 2026-09-07) in
-    two days, so an unpinned manifest hands a two-hour rebuild whatever that
-    morning's HEAD is."""
-    rev = _ale_manifest()["source"].get("rev")
-    assert rev == party.MOD_ALE_REV
-    assert len(rev) == 40
+def test_the_lua_engine_tracks_its_repositorys_latest() -> None:
+    """The manifest names the repository and no revision (owner, 2026-09-15, T60).
+
+    This test used to assert the opposite: the manifest was pinned to
+    `319f43ed`, the HEAD of 2026-09-07 that this module's conf facts were read
+    from, because `azerothcore/mod-ale` had moved two commits in two days and a
+    rebuild takes two hours. The owner was given that reason and decided every
+    module tracks its repository's latest. The conf-key tests above were read
+    from the module's source on 2026-09-08 and are not re-read on each move.
+    """
+    source = _ale_manifest()["source"]
+    assert source["repo"] == "azerothcore/mod-ale"
+    assert "rev" not in source, (
+        f"mod-ale is pinned to {source['rev']!r}; the owner's decision of 2026-09-15 (T60) "
+        "is that every module tracks its repository's latest"
+    )
 
 
 def test_the_script_path_the_manifest_writes_is_the_absolute_container_path() -> None:
@@ -2367,7 +2375,7 @@ def _picked(
     out = party.candidates(
         rows,
         master=master,
-        accounts={1: "PERZI", 2: "OTHER", 3: "FRIEND"} if accounts is None else accounts,
+        accounts={1: "OWNER", 2: "OTHER", 3: "FRIEND"} if accounts is None else accounts,
         pool=pool,
         linked=linked,
         flags=flags or party.AllowFlags.all_on(),
@@ -2742,7 +2750,7 @@ def test_linking_refuses_an_account_this_server_does_not_have(tmp_path: Path) ->
     that writes no row and reports success, which is the shape of every false
     success this feature has been fixed out of.
     """
-    seam, sql = _linkable(tmp_path, "1\tPERZI", "")
+    seam, sql = _linkable(tmp_path, "1\tOWNER", "")
     result = seam.link_account("Pakka", "NOBODY")
     assert result.linked is False
     assert sql.written == []
@@ -2752,8 +2760,8 @@ def test_linking_refuses_an_account_this_server_does_not_have(tmp_path: Path) ->
 def test_linking_refuses_the_masters_own_account(tmp_path: Path) -> None:
     """Rule 1 already covers it (`sameAccount`, `AllowAccountBots`), and a row
     linking an account to itself is a row that changes nothing."""
-    seam, sql = _linkable(tmp_path, "1\tPERZI", "1\tPERZI")
-    result = seam.link_account("Pakka", "PERZI")
+    seam, sql = _linkable(tmp_path, "1\tOWNER", "1\tOWNER")
+    result = seam.link_account("Pakka", "OWNER")
     assert result.linked is False
     assert sql.written == []
     assert "own account" in result.sentence
@@ -2762,7 +2770,7 @@ def test_linking_refuses_the_masters_own_account(tmp_path: Path) -> None:
 def test_linking_refuses_a_pair_that_is_already_linked(tmp_path: Path) -> None:
     """`INSERT IGNORE` would report success over a row that was already there,
     and "linked" would then be said about a press that did nothing."""
-    seam, sql = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "1\t2\n2\t1\n")
+    seam, sql = _linkable(tmp_path, "1\tOWNER", "2\tFRIEND", "1\t2\n2\t1\n")
     result = seam.link_account("Pakka", "FRIEND")
     assert result.linked is False
     assert sql.written == []
@@ -2773,13 +2781,13 @@ def test_the_link_write_inserts_both_directions_and_names_both_accounts(tmp_path
     """Both directions, because the module's own command writes both
     (`PlayerbotMgr.cpp:1840-1885`) and `IsAccountLinked` is asked with the two
     ids in whichever order the add happens to put them."""
-    seam, sql = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "")
+    seam, sql = _linkable(tmp_path, "1\tOWNER", "2\tFRIEND", "")
     result = seam.link_account("Pakka", "FRIEND")
     assert result.linked is True
     written = sql.written[0][1]
     assert "playerbots_account_links" in written
     assert "(1, 2)" in written and "(2, 1)" in written
-    assert "PERZI" in result.sentence and "FRIEND" in result.sentence
+    assert "OWNER" in result.sentence and "FRIEND" in result.sentence
 
 
 def test_a_link_asked_for_over_a_running_world_is_still_written_and_says_so(
@@ -2794,7 +2802,7 @@ def test_a_link_asked_for_over_a_running_world_is_still_written_and_says_so(
     copy for a row written beside it to fall out of step with. The ledger row
     carries the argument in full.
     """
-    sql = _WriteSql("1\tPERZI", "2\tFRIEND", "")
+    sql = _WriteSql("1\tOWNER", "2\tFRIEND", "")
     seam = _install(_ready_install(tmp_path), sql, None, running=True, link_writer=sql)
     assert seam.link_account("Pakka", "FRIEND").linked is True
     assert len(sql.written) == 1
@@ -2806,7 +2814,7 @@ def test_an_install_with_no_write_route_says_so_rather_than_failing_quietly(
     """`link_writer` is a seam of its own and not the read seam widened:
     `dbreads.SqlReader` deliberately cannot reach `run_statement`, and this
     feature's one write arrives through a type that says exactly what it is."""
-    sql = _WriteSql("1\tPERZI", "2\tFRIEND", "")
+    sql = _WriteSql("1\tOWNER", "2\tFRIEND", "")
     plain = _install(_ready_install(tmp_path), sql, None)
     result = plain.link_account("Pakka", "FRIEND")
     assert result.linked is False
@@ -2819,11 +2827,11 @@ def test_the_confirmation_names_both_accounts_and_what_it_would_mean(tmp_path: P
     accounts and the consequence, because the consequence is the point: from
     then on the module treats EVERY character of that account as one this master
     may add."""
-    seam, sql = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "")
+    seam, sql = _linkable(tmp_path, "1\tOWNER", "2\tFRIEND", "")
     plan = seam.link_plan("Pakka", "FRIEND")
     assert plan.linked is False
     assert plan.blocker == ""
-    assert "PERZI" in plan.sentence and "FRIEND" in plan.sentence
+    assert "OWNER" in plan.sentence and "FRIEND" in plan.sentence
     assert "every character" in plan.sentence
     assert sql.written == [], "a confirmation writes nothing"
 
@@ -2854,7 +2862,7 @@ def test_the_seam_folds_its_four_reads_into_the_rows_the_picker_shows(tmp_path: 
         "1001\n",  # Pakka is online, guid 1001
         "Bottom\t777\t8\t1\n",  # one bot in the party already
         "1001\tPakka\t6\t2\t102\t1\t0\t\n2\tNore\t60\t8\t102\t0\t0\t\n",
-        "102\tPERZI\n",
+        "102\tOWNER\n",
         "",
     )
     server = _with_playerbots_conf(_ready_install(tmp_path), account=1, guild=1, linked=1)
@@ -2863,7 +2871,7 @@ def test_the_seam_folds_its_four_reads_into_the_rows_the_picker_shows(tmp_path: 
     assert picked.added == 1
     assert [row.name for row in picked.rows] == ["Nore"]
     assert picked.rows[0].allowed_by == party.ALLOWED_SAME_ACCOUNT
-    assert picked.rows[0].account_or_guild == "PERZI"
+    assert picked.rows[0].account_or_guild == "OWNER"
     assert picked.note, "the cap is reported beside the rows, never applied to them"
 
 
@@ -2902,7 +2910,7 @@ def test_an_install_with_no_deployed_conf_offers_nothing_on_the_three_gated_rule
         "1001\n",
         "",
         "1001\tPakka\t6\t2\t102\t1\t0\t\n2\tNore\t60\t8\t102\t0\t0\t\n",
-        "102\tPERZI\n",
+        "102\tOWNER\n",
         "",
     )
     picked = _install(_ready_install(tmp_path), sql, chan).candidates("Pakka")
@@ -2931,7 +2939,7 @@ def test_a_party_already_holding_the_caps_worth_of_bots_still_offers_its_rows(
         "1001\n",
         "Bottom\t777\t8\t1\nOther\t778\t8\t1\n",  # two bots in the party
         "1001\tPakka\t6\t2\t102\t1\t0\t\n2\tNore\t60\t8\t102\t0\t0\t\n",
-        "102\tPERZI\n",
+        "102\tOWNER\n",
         "",
     )
     server = _with_playerbots_conf(_ready_install(tmp_path), account=1, guild=1, linked=1, cap=2)
@@ -3010,7 +3018,7 @@ def test_the_link_write_is_one_transaction_that_reads_itself_back(tmp_path: Path
     check-then-write). The order assertions fail, and with them the only
     evidence the app has that the rows are there.
     """
-    seam, sql = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "")
+    seam, sql = _linkable(tmp_path, "1\tOWNER", "2\tFRIEND", "")
     assert seam.link_account("Pakka", "FRIEND").linked is True
     script = sql.written[0][1]
     order = [
@@ -3039,7 +3047,7 @@ def test_a_concurrent_insert_is_not_reported_as_this_press_writing_the_rows(
     """
     seam, sql = _linkable(
         tmp_path,
-        "1\tPERZI",
+        "1\tOWNER",
         "2\tFRIEND",
         "",  # the pre-read: neither row
         wrote=f"{party.WROTE_TAG}\t0\n{party.ROW_TAG}\t1\t2\n{party.ROW_TAG}\t2\t1\n",
@@ -3065,7 +3073,7 @@ def test_a_half_linked_pair_is_repaired_and_the_report_says_which_row_it_wrote(
     """
     seam, sql = _linkable(
         tmp_path,
-        "1\tPERZI",
+        "1\tOWNER",
         "2\tFRIEND",
         "1\t2\n",  # the pre-read: the master's direction only
         wrote=f"{party.WROTE_TAG}\t1\n{party.ROW_TAG}\t1\t2\n{party.ROW_TAG}\t2\t1\n",
@@ -3080,7 +3088,7 @@ def test_a_half_linked_pair_is_repaired_and_the_report_says_which_row_it_wrote(
 def test_the_confirmation_says_a_half_linked_pair_would_be_repaired(tmp_path: Path) -> None:
     """The first press has to name what the second one will do, and repairing a
     half link is not the same thing as making one."""
-    seam, _ = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "2\t1\n")
+    seam, _ = _linkable(tmp_path, "1\tOWNER", "2\tFRIEND", "2\t1\n")
     plan = seam.link_plan("Pakka", "FRIEND")
     assert plan.blocker == ""
     assert "one way only" in plan.sentence
@@ -3097,7 +3105,7 @@ def test_a_write_that_could_not_be_read_back_is_never_reported_as_linked(
     that answered nothing at all reads as a link the module will not honour.
     """
     seam, sql = _linkable(
-        tmp_path, "1\tPERZI", "2\tFRIEND", "", wrote=RuntimeError("docker is not running")
+        tmp_path, "1\tOWNER", "2\tFRIEND", "", wrote=RuntimeError("docker is not running")
     )
     result = seam.link_account("Pakka", "FRIEND")
     assert result.linked is False
@@ -3111,7 +3119,7 @@ def test_a_readback_that_finds_one_row_is_not_a_link(tmp_path: Path) -> None:
     being sent. One row is what the module honours in one direction only."""
     seam, _ = _linkable(
         tmp_path,
-        "1\tPERZI",
+        "1\tOWNER",
         "2\tFRIEND",
         "",
         wrote=f"{party.WROTE_TAG}\t1\n{party.ROW_TAG}\t1\t2\n",
@@ -3130,7 +3138,7 @@ def test_a_link_write_that_answers_something_else_is_reported_and_not_parsed_pas
     assert isinstance(read, str)
     assert "something else" in read
     assert isinstance(party.read_link_write("row\t1\t2\n"), str), "no row count is no answer"
-    seam, _ = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "", wrote="what?\n")
+    seam, _ = _linkable(tmp_path, "1\tOWNER", "2\tFRIEND", "", wrote="what?\n")
     assert seam.link_account("Pakka", "FRIEND").linked is False
 
 
