@@ -2011,14 +2011,10 @@ class Applier:
            and running its SQL over the result. A local read (`git remote
            get-url`), so it is asked first and both names go in the refusal.
         2. **The working tree.** `reset --hard` destroys precisely what `git
-           status` reports, minus the two files this app itself put in the
-           checkout: its own `CLAIM_FILE` (T66 — see `git._status_pathspec()`;
-           until it was fixed that one untracked file refused an update on
-           every clone this app had ever made) and an untracked, EMPTY
-           `include.sh` it touched into a C++ module whose upstream ships none
-           (T47 — `git._without_the_generated_include()`, which reads the
-           status CODE so that a tracked `include.sh` somebody changed is still
-           their work). Also a local read.
+           status` reports, minus this app's own `CLAIM_FILE`, which it wrote
+           and rewrites (T66 — see `git._status_pathspec()`; until it was fixed
+           that one untracked file refused an update on every clone this app
+           had ever made). Also a local read.
         3. **HEAD.** `status` compares the tree and the index against HEAD and
            says nothing about what HEAD itself carries, so a user who
            COMMITTED their work passes 1 and 2. `no_local_commits()` counts
@@ -2820,30 +2816,20 @@ class Applier:
         module clone this app can point at as the one that matters. That also
         means an UNTRACKED file blocks adoption, which is stricter than the harm
         requires — a hard reset does not delete untracked files — and it is the
-        `include.sh` case above.
-
-        **Two names `unmodified()` does not count, and the argument this
-        paragraph used to make against the second one.** `CLAIM_FILE` is the
-        first (T66, `git._status_pathspec()`), and it changes nothing here:
-        this method is reached only for `UNCLAIMED`, and the two ways to be
-        `UNCLAIMED` are no such file at all and one the REPOSITORY tracks —
+        `include.sh` case above. `CLAIM_FILE` is the one name `unmodified()`
+        does not count (T66, `git._status_pathspec()`), and it changes nothing
+        here: this method is reached only for `UNCLAIMED`, and the two ways to
+        be `UNCLAIMED` are no such file at all and one the REPOSITORY tracks —
         which `status` already reports as unchanged. A claim this app wrote but
         cannot read as its own is `UNKNOWN`, and `_require_own_clone()` raises
         on that before ever getting here.
-
-        The second is an untracked, EMPTY `include.sh` (T47,
-        `git._without_the_generated_include()`). This paragraph refused it for
-        years on the grounds that "an exact-name allowlist would have to become
-        a content check to be safe, and a content check is the first step of
-        deciding which of somebody's untracked files are innocent" — and the
-        first half was right, which is why it IS a content check and not a
-        name. Two conditions, both read from the checkout: `?? ` in the status
-        line, so the repository does not track the file, and zero bytes, so
-        there is nothing in it to lose. Nothing decides that somebody's file is
-        innocent; a file with anything at all in it is counted, and so is one
-        the repository tracks, however small. What it buys is the case that
-        made the rule wrong: the app touches that file itself, into a folder it
-        created, and then refused to update it because of what it had done.
+        Deliberate, and NOT allowlisted even for that
+        one generated name: the file this app writes is empty, a user's
+        `include.sh` need not be, so an exact-name allowlist would have to
+        become a content check to be safe, and a content check is the first step
+        of deciding which of somebody's untracked files are innocent. The
+        direction of this error is a re-clone; the direction of that one is lost
+        work.
         """
         if self.server_dir_claim(self.server_dir) is not Ownership.OWNED:
             return _NoAdoption.NO_RECORD
@@ -3386,9 +3372,7 @@ class Applier:
             else:
                 target = self.client_dir / "Data"
             if src.is_dir():
-                shutil.copytree(src, target, dirs_exist_ok=True)
-                if step.dest == "data":
-                    log.client_copies += self._receipts(step.src, src, target)
+                shutil.copytree(src, target, dirs_exist_ok=True, ignore=_NOT_FOR_THE_CLIENT)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target / src.name)

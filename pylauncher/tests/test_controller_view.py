@@ -9247,182 +9247,829 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
 
 
-def test_a_broken_custom_manifest_costs_its_own_row_and_the_family_still_draws(
+# -- T64: "Update the server to latest…" --------------------------------------
+
+
+_PIN = "993f18094e2f3d38e0f0e6b0a2b4c1d9e8f7a6b5"
+"""A catalog `rev`, spelled as the catalog spells one: all forty characters."""
+
+
+class _LatestSpy:
+    """Everything `LatestRoute` is asked, and what it answers.
+
+    A recorder rather than four lambdas, because the interesting assertions are
+    about ORDER and COUNT -- did the backup happen before the press, did a
+    declined dialog reach the press at all -- and four separate closures cannot
+    be asked that.
+    """
+
+    def __init__(self) -> None:
+        self.presses: list[object] = []
+        self.pin_presses: list[object] = []
+        self.revs: tuple[native.SourceRev, ...] = ()
+
+    def version(self) -> native.SourceVersion:
+        """The REAL rule, over whatever rows this install's record holds.
+
+        Not a line and a flag the test chose: `native.source_version()` is half
+        of what T77 fixed, and a spy that answered a boolean would let the view
+        test agree with a view that read the record's EXISTENCE -- which is the
+        bug (live gate, 2026-09-16, press 6).
+        """
+        return native.source_version(
+            native.InstallState(game_id="wow-wotlk", install_id="x", source_revs=self.revs)
+        )
+
+    def route(self) -> native.LatestRoute:
+        def press(cancel: object = None) -> Iterator[str]:
+            self.presses.append(cancel)
+            # What `_record_source_revs()` writes after an update: the checkout
+            # is somewhere upstream, the pin is where the gates were.
+            self.revs = (native.SourceRev("x/y", "7bcee96 · 2026-09-15", pin=_PIN),)
+            yield "--- update-sources"
+            yield "moved"
+
+        def to_pin(cancel: object = None) -> Iterator[str]:
+            self.pin_presses.append(cancel)
+            # And after a return: built == pin, which is what the button's rule
+            # has to read. `ahead` stays None because every shipped source but
+            # one is a shallow clone and cannot be counted.
+            self.revs = (native.SourceRev("x/y", f"{_PIN[:7]} · 2026-09-02", pin=_PIN),)
+            yield "back on the pin"
+
+        return native.LatestRoute(
+            confirmation=lambda: (
+                "Update WoW WotLK in /srv to the newest x/y code?\n\nThis builds code nobody "
+                "has tested with this app."
+            ),
+            press=press,
+            pin_confirmation=lambda: (
+                "Put WoW WotLK back on the tested commit? It does NOT undo anything the newer "
+                "server already wrote into your databases."
+            ),
+            to_pin=to_pin,
+            source_version=self.version,
+        )
+
+
+def _latest(
+    ps: _Ps, tmp_path: Path, made: _FakeMaintenance | None = None
+) -> tuple[ControllerServices, _LatestSpy]:
+    services = _services(ps, tmp_path, [], made)
+    spy = _LatestSpy()
+    services.update_to_latest = spy.route()
+    return services, spy
+
+
+def _answer(monkeypatch: pytest.MonkeyPatch, which: object) -> list[object]:
+    """Answer the REAL three-way dialog with `which`, and keep the box it was asked on.
+
+    `QMessageBox.exec` and not a seam on the view: `ask_update_choice()` is the
+    code under test as much as the slot is, and a seam would let these tests
+    answer a question whose buttons nothing had checked. The instance is kept
+    so the buttons, their labels and the default ARE checked, once, below.
+    """
+    boxes: list[object] = []
+
+    def exec_(self: object) -> object:
+        boxes.append(self)
+        return which
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "exec", exec_)
+    return boxes
+
+
+def test_the_update_button_sits_beside_rebuild_and_is_hidden_where_there_is_no_route(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The tab keeps every shipped module and names the one file it could not read (T46).
+    """Hidden rather than greyed, which is this tab's one exception to its own rule.
 
-    Driven through `reload_modules()` against a REAL file on disk rather than a
-    `Manifest` handed to the builder: the defect lived in the store, surfaced in
-    `_load_manifests()`, and was only ever visible at this call site -- a test
-    that injected a broken manifest into the panel would have proved nothing
-    about either.
-
-    Before T46 the `!!` line was the ONLY thing this tab drew for the family:
-    `list(store.load_all(kind))` is forced inside one `try`, so ~21 shipped
-    WotLK modules disappeared behind one file the user's own custom-module route
-    had written.
+    A greyed control says "this exists and is not available now". For a server
+    adopted from a WSL distro, or an entry whose catalog does not offer the
+    route, nothing will ever enable it -- so there is nothing to grey.
     """
-    user = tmp_path / "user-manifests"
-    items = user / modules.GAME / "modules"
-    items.mkdir(parents=True)
-    (user / modules.GAME / "modules.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "game": modules.GAME,
-                "type": "module",
-                # Both bad ones sort FIRST, so a store that stopped at the raise
-                # stopped before `mod-kept` -- the user row after the bad one is
-                # the half of the family a family-scoped catch never reached.
-                "items": ["mod-broken", "mod-bad-shape", "mod-kept"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (items / "mod-broken.json").write_text("{not json", encoding="utf-8")
-    # Valid JSON that fails the SCHEMA. It is the realistic bad file -- this app
-    # persisted these itself, so an older build's shape is what ages badly -- and
-    # it does not arrive as `ManifestError`: pydantic raises it, straight through
-    # `load_manifest()`, and the skip has to be wide enough to hold it.
-    (items / "mod-bad-shape.json").write_text(
-        json.dumps(
-            {
-                "id": "mod-bad-shape",
-                "name": 5,
-                "type": "module",
-                "game": modules.GAME,
-                "source": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (items / "mod-kept.json").write_text(
-        json.dumps(
-            {
-                "id": "mod-kept",
-                "name": "Kept",
-                "type": "module",
-                "game": modules.GAME,
-                "source": {"repo": "you/mod-kept"},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    services = _services(ps, tmp_path, [])
-    services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)
+    services, _ = _latest(ps, tmp_path)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    # The report box accumulates: constructing the view already reloaded once.
-    # Cleared so what is counted below is ONE reload's worth, not the session's.
-    view.module_report.clear()
+    assert view.update_to_latest_button.text() == UPDATE_TO_LATEST_BUTTON_LABEL
+    assert not view.update_to_latest_button.isHidden()
 
-    view.reload_modules()
-
-    # The family is still there. Counted, not sampled: a test that looked for one
-    # known id would pass on a tab that drew only that one.
-    shipped = services.store.load_index("module").items
-    drawn = {r.data.id for r in view.modules_panel.rows()}
-    assert set(shipped) <= drawn
-    assert len(shipped) >= 20
-    # And the USER row that comes after the bad one, which is the half of the
-    # loss `module_updates()` used to take silently: the skip has to continue
-    # the pass, not merely survive the rows already yielded.
-    assert "mod-kept" in drawn
-    assert "mod-broken" not in drawn
-    assert "mod-bad-shape" not in drawn
-
-    # And the file that would not read is named, once, where every other refusal
-    # on this tab is read.
-    report = view.module_report.toPlainText()
-    # Counted by LINE, not by substring: the id appears twice in its own sentence
-    # -- once as the id and once inside the filename -- so `report.count(...)`
-    # measures the sentence's shape rather than how many times it was written.
-    named = [line for line in report.splitlines() if "mod-broken" in line]
-    assert len(named) == 1, report
-    assert "is not valid JSON" in named[0]
-    # The schema failure gets ONE line too, which is the assertion that fails if
-    # the skip is narrowed: a `ValidationError` reaching the report unflattened
-    # is five lines, and reaching `_load_manifests()` uncaught is none of them
-    # and the family-wide line instead.
-    shaped = [line for line in report.splitlines() if "mod-bad-shape" in line]
-    assert len(shaped) == 1, report
-    assert "name" in shaped[0]
-    # Not as the family-wide failure, which is what it used to be.
-    assert "could not load modules" not in report
-
-    # And the skips outlive the one thing on this tab that CLEARS the box rather
-    # than appending to it. `check_module_updates()` `setPlainText`s its result,
-    # which would erase the lines above -- except that `_module_updates_done()`
-    # ends in `reload_modules()`, which re-reads the store and appends them
-    # again. Asserted rather than reasoned, because the order of those two
-    # statements is the whole of it and nothing else pins it.
-    view._module_updates_done(())
-    after = view.module_report.toPlainText()
-    assert "mod-broken" in after and "mod-bad-shape" in after
+    bare = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert bare.services.update_to_latest is None
+    assert bare.update_to_latest_button.isHidden()
+    assert bare.update_to_latest() is False
 
 
-def test_a_foreign_game_manifest_is_a_reported_skip_and_never_a_row(
+def test_the_one_dialog_offers_three_buttons_in_the_designs_words_and_defaults_to_cancel(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither the labels nor the default is observable from the outcome.
+
+    So this is the one place the dialog ITSELF is the subject: three buttons,
+    the approved design's words on them, and Cancel as both the default (what
+    Enter does) and the escape button (what Escape and the title bar's X do).
+    An update of untested code is not something Enter should be able to start.
+    """
+    qmb = controller_view_module.QMessageBox
+    boxes = _answer(monkeypatch, qmb.StandardButton.Cancel)
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is False
+    assert spy.presses == [], "Cancel started the update"
+    box = boxes[0]
+    # By ROLE and not by position. `QMessageBox` lays its buttons out in the
+    # host platform's order, so a positional assertion here would be a claim
+    # about the window manager rather than about this dialog, and it would be a
+    # different claim on Windows and macOS (both of which this app ships to).
+    assert {b.text() for b in box.buttons()} == {
+        "Back up first, then update",
+        "Update without a backup",
+        "Cancel",
+    }
+    assert box.button(qmb.StandardButton.Yes).text() == "Back up first, then update"
+    assert box.button(qmb.StandardButton.Save).text() == "Update without a backup"
+    assert (
+        box.button(qmb.StandardButton.No) is None
+    ), "No is the answer conftest gives an unpatched dialog, and it must mean nothing here"
+    assert box.defaultButton() is box.button(qmb.StandardButton.Cancel)
+    assert box.escapeButton() is box.button(qmb.StandardButton.Cancel)
+    assert "nobody has tested" in box.text()
+
+
+def test_an_update_answer_the_dialog_does_not_recognise_cancels_rather_than_updating(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The safety property behind the button choice, asserted on the function itself.
+
+    `conftest._no_modal_dialogs` answers every unpatched `exec()` with `No`,
+    because `No` is the reply that takes no action. If `No` meant "update
+    without a backup" here, every test in this suite that so much as brushed
+    this control would start a compile of untested code. `NoButton` is the same
+    question: it is what Escape and the window's close button answer.
+    """
+    qmb = controller_view_module.QMessageBox
+    for answer in (
+        qmb.StandardButton.No,
+        qmb.StandardButton.NoButton,
+        int(qmb.StandardButton.Close),
+    ):
+        _answer(monkeypatch, answer)
+        assert ask_update_choice(None, "t", "b") is UpdateChoice.CANCEL, answer
+
+
+def test_a_real_static_int_answer_is_read_the_same_as_the_enum_member(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33's shape at the newest site: `==`, never `is`, on either return type.
+
+    PySide6 6.11's dialogs hand back a plain `int` from the static call and a
+    `StandardButton` member from an instance's, and `is` against the member was
+    always False for the first. Both are driven rather than argued about.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, int(qmb.StandardButton.Save))
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: "moved" in view.rebuild_log.text(), "the update reached the panel")
+    assert len(spy.presses) == 1, "an int answer did not start the update"
+
+
+def test_update_without_a_backup_starts_the_press_and_takes_no_backup(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both halves, because the first alone would be true of a route that backed up anyway.
+
+    Somebody who chose "Update without a backup" chose that; a mysqldump of a
+    full world they did not ask for is minutes of their evening and a file on
+    their disk.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    made = _FakeMaintenance()
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: "moved" in view.rebuild_log.text(), "the update reached the panel")
+    assert len(spy.presses) == 1
+    assert spy.presses[0] is not None, "the panel's Stop button has nothing to set"
+    assert made.backups == 0, "a backup was taken though the user said not to"
+
+
+def test_backing_up_first_takes_the_backup_then_asks_again_before_updating(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second question is not a formality: minutes have passed and the answer is on screen.
+
+    No by default, read through `said_yes()`, and the update only starts on an
+    explicit Yes. Asserted in ORDER -- the backup happened, and only then was
+    the press made -- because "both happened" is also true of a route that
+    updated first.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return qmb.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    made = _FakeMaintenance()
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: made.backups == 1, "the backup ran")
+    pump_until(lambda: len(spy.presses) == 1, "the update started after the backup")
+    assert asked and asked[0].startswith("Backup saved to backups."), asked
+    assert "Update now?" in asked[0]
+
+
+def test_declining_the_second_question_leaves_the_backup_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saying no after the backup costs nothing, and the backup is still theirs.
+
+    The report says where it is rather than going quiet: a user who spent five
+    minutes on a dump and then changed their mind must not be left wondering
+    whether it happened.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: qmb.StandardButton.No,
+    )
+    made = _FakeMaintenance()
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.update_to_latest()
+    pump_until(lambda: made.backups == 1, "the backup ran")
+    pump_until(
+        lambda: "was not started" in view.maintenance_report.toPlainText(),
+        "the decline was reported",
+    )
+    assert spy.presses == []
+    assert "backups" in view.maintenance_report.toPlainText()
+
+
+def test_a_backup_that_fails_stops_the_update_in_dmls_own_words(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`dml wow update`'s rule, and not wow-manage's.
+
+    wow-manage offered a backup and continued regardless. Somebody who asked
+    for a backup FIRST asked for it because they want one before this runs, and
+    "we could not take one, so we did the dangerous thing anyway" is the
+    opposite of the answer they gave.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text, *a, **k: warned.append(text),
+    )
+    made = _FakeMaintenance()
+
+    def refuse() -> BackupReport:
+        raise MaintenanceError("the database container is not running")
+
+    made.back_up = refuse  # type: ignore[method-assign]
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.update_to_latest()
+    pump_until(lambda: bool(warned), "the failed backup was reported")
+
+    assert spy.presses == [], "the update ran after the backup failed"
+    assert warned[0].startswith("Backup failed — the update was not started")
+    assert "not running" in warned[0], "the reason was dropped"
+    assert failures and failures[0] == warned[0]
+
+
+def test_a_backup_that_answers_with_something_else_is_treated_as_a_failure(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_backup_done()` ignores a value it cannot draw; here that would be updating blind.
+
+    The two are looking at the same value with different stakes. There, "nothing
+    to draw" costs a report line. Here, carrying on would mean updating without
+    the backup somebody asked for and with nobody having said it did not happen.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    made = _FakeMaintenance()
+    made.back_up = lambda: None  # type: ignore[assignment,return-value]
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.update_to_latest()
+    pump_until(
+        lambda: "Backup failed" in view.maintenance_report.toPlainText(),
+        "the unusable backup was reported as a failure",
+    )
+    assert spy.presses == []
+
+
+def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rebuild's own gates, and this press ENDS in that rebuild.
+
+    Asserted through `_busy` rather than through a running panel, because
+    `_busy` is the state an import puts the tab in and an import is the job
+    that cannot be stopped at all.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view._set_busy(True)
+
+    # FALSE, like every other refusal on this tab: the answer is "was anything
+    # started?", and a press that was refused started nothing. It was True here
+    # until the cold review of 2026-09-16 pointed out that it made this one
+    # press mean something different from `_start_update_to_latest()` and
+    # `return_to_the_tested_pin()`, which answer False for the same refusal.
+    assert view.update_to_latest() is False
+    assert spy.presses == []
+    assert view.update_to_latest_button.isEnabled() is False
+
+
+def test_the_version_line_and_the_way_back_are_drawn_from_one_reading(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Why `Not for this game` is declined, as a test rather than as a comment (T46 item 4).
+    """ONE reading decides both, and that is the point of asking once.
 
-    T44 item 5 asked for the badge and T46 item 4 carried the ask; the owner
-    declined it on 2026-09-15 because every `ManifestStore` path is
-    `<root>/<game>/...` and the game is the store's. The only file this tab can
-    read already lives in THIS game's directory, so one declaring another game is
-    a mis-declared file, not a module that belongs somewhere else -- the badge
-    would have labelled the row with something untrue of it.
+    Two readings could disagree -- a press finishing between them is all it
+    would take -- and the disagreement's shape is a live "Return to the tested
+    pin…" over a line saying the server IS on it.
 
-    What the file gets instead is the skip T46 built: named, with the path and
-    what it declared, and no row. The assertion is on the ROW SET, not on the
-    absence of a badge string: a test that only checked the badge text would pass
-    on a tab that drew the row with any other badge on it.
-
-    The fixture is a real file written to a real user root. T44's round 1 proved
-    this row by handing `build_module_rows()` a `Manifest` it built in memory --
-    coverage of a row nothing on disk can produce, which is what this replaces.
+    They are not the same ANSWER, though, and that is T77: the line is drawn
+    whenever there is something to say, the button only while something is off
+    its pin. This is the first state, where both are absent.
     """
-    user = tmp_path / "user-manifests"
-    items = user / modules.GAME / "modules"
-    items.mkdir(parents=True)
-    (user / modules.GAME / "modules.json").write_text(
-        json.dumps(
-            {"schema_version": 1, "game": modules.GAME, "type": "module", "items": ["mod-foreign"]}
-        ),
-        encoding="utf-8",
-    )
-    # Valid JSON and a valid manifest -- the ONE thing wrong with it is the game,
-    # so nothing but the game check can be what refuses it.
-    (items / "mod-foreign.json").write_text(
-        json.dumps(
-            {
-                "id": "mod-foreign",
-                "name": "Foreign",
-                "type": "module",
-                "game": "wow-tbc",
-                "source": {"repo": "you/mod-foreign"},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    services = _services(ps, tmp_path, [])
-    services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)
+    services, spy = _latest(ps, tmp_path)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
-    view.module_report.clear()
+    assert spy.revs == ()
+    assert view.source_version_label.text() == ""
+    assert view.source_version_label.isHidden()
+    assert view.return_to_pin_button.isHidden()
 
-    view.reload_modules()
+    spy.revs = (native.SourceRev("x/y", "a1b2c3d · 2026-09-16", pin=_PIN, ahead=12),)
+    view._refresh_source_version()
+    assert view.source_version_label.text() == (
+        f"Built from a1b2c3d (2026-09-16), 12 commits past the tested pin {_PIN[:7]}"
+    )
+    assert not view.source_version_label.isHidden()
+    assert not view.return_to_pin_button.isHidden()
+    assert view.return_to_pin_button.text() == RETURN_TO_PIN_BUTTON_LABEL
 
-    drawn = {r.data.id for r in view.modules_panel.rows()}
-    assert "mod-foreign" not in drawn
-    # The family it would have replaced is drawn, which is the T46 half of this.
-    assert set(services.store.load_index("module").items) <= drawn
 
-    report = view.module_report.toPlainText()
-    named = [line for line in report.splitlines() if "mod-foreign" in line]
-    assert len(named) == 1, report
-    # The sentence says what it declared and what was expected, so a reader can
-    # tell a mis-declared game from an unparseable file without opening either.
-    assert "wow-tbc" in named[0] and modules.GAME in named[0]
-    assert "could not load modules" not in report
+def test_the_way_back_is_hidden_after_a_return_and_offered_again_after_an_update(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T77's finding, driven as the two transitions rather than asserted as a rule.
+
+    The live gate's press 6 (2026-09-16): after a successful return the button
+    was still shown and enabled, because `_refresh_source_version()` offered it
+    whenever the version line was non-empty and `_record_source_revs()` writes
+    `source_revs` after a `to_pin=True` press exactly as it does after an
+    update. Pressing it there fetches, moves nothing, and recompiles for the
+    better part of an hour to arrive where it already is -- the state the design
+    says the control must not be in.
+
+    Both presses go through the real panel and the real dialogs, and the line
+    is asserted alongside the button each time: hiding the row entirely after a
+    return would also hide the one sentence that says where the server stands.
+    """
+    qmb = controller_view_module.QMessageBox
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: qmb.StandardButton.Yes
+    )
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.return_to_pin_button.isHidden(), "the way back was offered")
+    assert view.source_version_label.text() == (
+        f"Built from 7bcee96 (2026-09-15); the tested pin is {_PIN[:7]}"
+    )
+
+    assert view.return_to_the_tested_pin() is True
+    pump_until(lambda: view.return_to_pin_button.isHidden(), "the way back was withdrawn")
+    # The LINE stays: the server has been moved and moved back, and that is
+    # still a fact about this folder the catalog does not carry.
+    assert view.source_version_label.text() == f"On the tested pin {_PIN[:7]} (2026-09-02)"
+    assert not view.source_version_label.isHidden()
+
+    # And an update offers it again, which is what says the rule reads the
+    # record rather than latching once.
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.return_to_pin_button.isHidden(), "the way back came back")
+
+
+def test_a_mixed_record_still_offers_the_way_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """One row home and one not is not "returned", and the press that finishes it must stay.
+
+    WotLK moves two sources. A return whose second source failed, or a record
+    written where only one repository had moved in the first place, leaves an
+    install whose core is on the pin and whose module checkout is not. `any` and
+    not `all` is what keeps the control there; the test exists because `all`
+    reads just as plausibly in the source.
+    """
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    spy.revs = (
+        native.SourceRev("a/b", f"{_PIN[:7]} · 2026-09-02", pin=_PIN),
+        native.SourceRev("c/d", "7bcee96 · 2026-09-15", pin=_PIN),
+    )
+    view._refresh_source_version()
+
+    assert not view.return_to_pin_button.isHidden()
+    said = view.source_version_label.text().splitlines()
+    assert said[0] == f"a/b: on the tested pin {_PIN[:7]} (2026-09-02)"
+    assert said[1] == f"c/d: built from 7bcee96 (2026-09-15); the tested pin is {_PIN[:7]}"
+
+
+def test_a_read_that_failed_draws_nothing_and_offers_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The fallback is a decision, not a formality, and it goes the careful way.
+
+    `_refresh_source_version()` runs on the reload path and after every job, so
+    an exception there takes the tab down over a line of text. What it does with
+    the failure is the part worth a test: a read that did not happen knows
+    nothing about where the sources stand, and offering an hour of compiling off
+    that is worse than offering nothing. Both halves hidden, not just the line.
+    """
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    spy.revs = (native.SourceRev("x/y", "7bcee96 · 2026-09-15", pin=_PIN),)
+    view._refresh_source_version()
+    assert not view.return_to_pin_button.isHidden()
+
+    def unreadable() -> native.SourceVersion:
+        raise OSError("the state file could not be read")
+
+    services.update_to_latest = replace(spy.route(), source_version=unreadable)
+    view._refresh_source_version()
+    assert view.source_version_label.isHidden()
+    assert view.source_version_label.text() == ""
+    assert view.return_to_pin_button.isHidden()
+
+
+def test_returning_to_the_pin_asks_yes_no_defaulting_to_no_and_offers_no_backup(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No backup here is deliberate rather than an omission.
+
+    What a backup protects against is a NEW server writing into an old
+    database, and that has already happened by the time anybody wants this
+    button. The offer belongs to the press that caused it. Offering one here
+    would suggest this undoes those writes, which it does not.
+    """
+    qmb = controller_view_module.QMessageBox
+    calls: list[tuple[object, ...]] = []
+
+    def question(*a: object, **k: object) -> object:
+        calls.append(a)
+        return qmb.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    made = _FakeMaintenance()
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.return_to_the_tested_pin() is True
+    pump_until(lambda: "back on the pin" in view.rebuild_log.text(), "the return reached the panel")
+    assert len(spy.pin_presses) == 1
+    assert made.backups == 0
+    yes = qmb.StandardButton.Yes
+    no = qmb.StandardButton.No
+    assert calls[0][-2] == yes | no
+    assert calls[0][-1] is no, "Enter would start an hour of compiling"
+    assert "NOT undo" in str(calls[0][2])
+
+
+def test_declining_the_return_starts_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """`conftest` answers No, so this is also what every other test here asserts implicitly."""
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.return_to_the_tested_pin() is False
+    assert spy.pin_presses == []
+    assert view.rebuild_log.running is False
+
+
+def test_a_second_update_press_while_the_backup_runs_is_refused(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate neither `_busy` nor the panel can see, and what it cost without one.
+
+    The chained backup runs through `_run()` -- off the GUI thread, for minutes
+    -- and `_busy` is the LOG PANEL's flag, set by a job in that panel. A
+    `mysqldump` is not one, so a second press during it passed both gates:
+    "Update without a backup" then tore the database container down underneath
+    the dump that was still running, after which the first press's own handler
+    reported "Backup failed -- the update was not started" about a backup the
+    user was watching succeed (cold review, 2026-09-16).
+
+    **The second press is made from INSIDE the backup**, which is the only
+    moment that window exists and the only way this file can reach it:
+    `_inline_jobs` (autouse here) runs every `_run` synchronously, so the seam's
+    own body IS the in-flight window. A test that pressed afterwards would be
+    testing a state the guard is not about.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: qmb.StandardButton.No,
+    )
+    told: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "information",
+        lambda parent, title, text, *a, **k: told.append(title),
+    )
+    during: list[object] = []
+    made = _FakeMaintenance()
+    real_backup = made.back_up
+    view: ControllerView | None = None
+
+    def backup_and_press_again() -> BackupReport:
+        assert view is not None
+        during.append(view._backup_before_update)
+        during.append(view.update_to_latest_button.isEnabled())
+        during.append(view.update_to_latest())
+        during.append(view.return_to_the_tested_pin())
+        return real_backup()
+
+    made.back_up = backup_and_press_again  # type: ignore[method-assign]
+    services, spy = _latest(ps, tmp_path, made)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    assert made.backups == 1, "the backup never ran, so the window was never entered"
+    # In order: the flag was set before the worker started, the buttons were
+    # dead, and both presses were refused rather than started.
+    assert during == [True, False, False, False], during
+    assert spy.presses == [] and spy.pin_presses == []
+    assert told and told[0] == "A backup is running", told
+    # And it is released: the lock is not a one-way door.
+    assert view._backup_before_update is False
+    assert view.update_to_latest_button.isEnabled() is True
+
+
+# -- T76: the backup starts the database when it is down ----------------------
+
+
+class _FakeDatabase:
+    """This install's database container, as the two T76 seams see it.
+
+    A recorder with STATE rather than two counters, because the assertions that
+    matter are about the state the backup ran IN and the state the press left
+    behind -- "start was called" is also true of a press that started the
+    container after the dump, or one that left it running afterwards.
+    """
+
+    def __init__(self, *, running: bool, refuses: str = "") -> None:
+        self.running = running
+        self.refuses = refuses
+        self.starts = 0
+        self.stops = 0
+
+    def start(self) -> bool:
+        """`docker.start_database()`'s contract: True only where it had to start it."""
+        self.starts += 1
+        if self.refuses:
+            raise MaintenanceError(self.refuses)
+        if self.running:
+            return False
+        self.running = True
+        return True
+
+    def stop(self) -> None:
+        self.stops += 1
+        self.running = False
+
+    def alone(self) -> DatabaseAlone:
+        return DatabaseAlone(bring_up=self.start, take_down=self.stop)
+
+
+def _with_database(
+    ps: _Ps, tmp_path: Path, db: _FakeDatabase
+) -> tuple[ControllerServices, _LatestSpy, _FakeMaintenance]:
+    """Services whose backup REFUSES while `db` is down, the way the real one does.
+
+    The fixture is the point. `maintenance.backup()` is a `mysqldump` through
+    `docker exec`, and with the container stopped it raises rather than
+    returning an empty report. A fake that succeeded either way could not tell
+    a press that started the database from one that did not: it would have
+    passed before this fix exactly as it passes after it.
+    """
+    made = _FakeMaintenance()
+    real = made.back_up
+
+    def back_up() -> BackupReport:
+        if not db.running:
+            raise MaintenanceError("ac-database is not running, so there is no database to back up")
+        return real()
+
+    made.back_up = back_up  # type: ignore[method-assign]
+    services, spy = _latest(ps, tmp_path, made)
+    services.database_alone = db.alone()
+    return services, spy, made
+
+
+def test_backing_up_before_an_update_starts_the_stopped_database_and_the_update_proceeds(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T76, through the real dialog: the press a stopped server gets is the one that works.
+
+    Measured on the Vanilla box 2026-09-16 (T64's live gate, `dbdown-*`): with
+    every container stopped -- which is how a server nobody is playing on is
+    found, and the state somebody is in when they decide to update it -- "Back
+    up first, then update" answered *"Backup failed -- the update was not
+    started: vanilla-db is not running, so there is no database to back up"* and
+    fetched nothing.
+
+    Asserted in the order the fix claims. The backup fake refuses exactly as
+    `maintenance.backup()` does, so a route that skipped the start cannot reach
+    `spy.presses` at all -- and the last two lines are what say the server was
+    left as it was found rather than with a database nobody asked to run.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: qmb.StandardButton.Yes
+    )
+    db = _FakeDatabase(running=False)
+    services, spy, made = _with_database(ps, tmp_path, db)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: len(spy.presses) == 1, "the update started after the backup")
+    assert db.starts == 1, "nothing asked the database to start"
+    assert made.backups == 1, "the backup did not run"
+    assert db.stops == 1, "the database this press started was left running"
+    assert db.running is False, "the server was not left as it was found"
+
+
+def test_a_database_that_cannot_start_stops_the_update_and_fetches_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure sentence is unchanged, and it now carries docker's own reason.
+
+    `dml wow update`'s rule is untouched by T76: a backup that did not happen
+    stops the update. What changed is only what can fail -- the database was
+    down and could not be brought up, rather than the database was down.
+
+    The neighbour is asserted too, and it is the half that matters: nothing was
+    fetched. A route that reported the failure and pressed anyway would satisfy
+    the sentence on its own.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text, *a, **k: warned.append(text),
+    )
+    db = _FakeDatabase(
+        running=False,
+        refuses="ac-database did not report healthy within 180s, so no backup was taken",
+    )
+    services, spy, made = _with_database(ps, tmp_path, db)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.update_to_latest()
+    pump_until(lambda: bool(warned), "the failed start was reported")
+
+    assert warned[0].startswith("Backup failed — the update was not started")
+    assert "did not report healthy" in warned[0], "docker's own reason was dropped"
+    assert spy.presses == [], "the update fetched after the database could not be started"
+    assert made.backups == 0
+    assert db.stops == 0, "a container that was never started was stopped"
+
+
+def test_a_database_that_is_already_up_is_not_started_and_not_stopped(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half that would cost somebody their evening if it were wrong.
+
+    Back up now is pressed on servers people are playing on. `start()` answers
+    False there -- it started nothing -- and only that answer may run `stop()`.
+    A fix that stopped the container unconditionally would take a live server's
+    database away underneath its worldserver.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: qmb.StandardButton.Yes
+    )
+    db = _FakeDatabase(running=True)
+    services, spy, made = _with_database(ps, tmp_path, db)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: len(spy.presses) == 1, "the update started after the backup")
+    assert made.backups == 1
+    assert db.stops == 0, "a database the user had running was stopped by a backup"
+    assert db.running is True
+
+
+def test_the_plain_backup_button_starts_the_database_the_same_way(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """One decision, both places -- T76's own open question, answered yes.
+
+    The plain Backup button failed on a stopped server for exactly the reason
+    the update's chained one did, and a user pressing the two an hour apart
+    would otherwise get two different answers to "is the database up?". Both go
+    through `_backup_with_the_database()`; this is the test that says the second
+    button was not forgotten, which is this project's commonest defect shape.
+    """
+    db = _FakeDatabase(running=False)
+    services, _, made = _with_database(ps, tmp_path, db)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.back_up()
+    pump_until(lambda: made.backups == 1, "the backup ran")
+    assert db.starts == 1 and db.stops == 1
+    assert db.running is False
+    assert "Backed up to backups" in view.maintenance_report.toPlainText()
+
+
+def test_a_tab_with_no_database_seam_backs_up_exactly_as_it_did_before(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`database_alone=None` is a real state and it must not be a crash.
+
+    It is what a `ControllerServices` built by hand carries -- a test, a future
+    game whose wiring is not written yet. The backup still runs; it simply has
+    nothing to start, which is what every build before 2026-09-16 did.
+    """
+    made = _FakeMaintenance()
+    services, _ = _latest(ps, tmp_path, made)
+    assert services.database_alone is None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.back_up()
+    pump_until(lambda: made.backups == 1, "the backup ran without a database seam")
+
+
+def test_every_game_wires_the_database_seam_to_its_own_container_and_daemon(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam reaches docker, for the right container, on the right daemon.
+
+    "The mechanism exists and nothing calls it" is this project's most expensive
+    defect shape, and a `DatabaseAlone` whose halves were never bound to
+    `docker.start_database` / `docker.stop_containers` would pass every test
+    above -- they all supply their own. So both halves are driven here, through
+    the object each game factory really builds, for all four games rather than
+    for the one that was being thought about.
+    """
+    started: list[tuple[str, object]] = []
+    stopped: list[tuple[list[str], object]] = []
+    reasons: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.docker,
+        "start_database",
+        lambda spec, server_dir, because="", wsl_distro=None: (
+            started.append((spec.db, wsl_distro)) or reasons.append(because) or True
+        ),
+    )
+    monkeypatch.setattr(
+        controller_view_module.docker,
+        "stop_containers",
+        lambda names, wsl_distro=None: stopped.append((list(names), wsl_distro)),
+    )
+    catalog = load_catalog()
+    for game in controller_view_module._FACTORIES:
+        entry = catalog.get(game)
+        services = ControllerServices.for_entry(entry, tmp_path, None, "dml-arch")
+        alone = services.database_alone
+        assert alone is not None, f"{game} has no database seam"
+        assert alone.bring_up() is True
+        alone.take_down()
+        assert started[-1] == (entry.container_spec().db, "dml-arch"), game
+        assert stopped[-1] == ([entry.container_spec().db], "dml-arch"), game
+        # `because` completes the timeout sentence `start_database()` raises
+        # with, and it must say what was NOT done: a user reading "…did not
+        # report healthy within 180s, so no backup was taken" knows the state
+        # their server is in, which is the whole job of that sentence.
+        assert reasons[-1] == "no backup was taken", game

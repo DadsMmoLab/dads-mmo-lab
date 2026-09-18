@@ -20,6 +20,7 @@ reached servers that have none of them.
 
 from __future__ import annotations
 
+import enum
 import math
 import re
 import threading
@@ -7078,6 +7079,8 @@ class ControllerView(QWidget):
         custom_row.addStretch(1)
         custom_box.addLayout(custom_row)
 
+        box.addLayout(actions)
+        box.addWidget(self.source_version_label)
         # T73: ONE stretching widget on this tab, and it is the list. Everything
         # under it is as tall as it has something to say -- the report a line
         # per line to a ceiling of six, the log its strip until a job writes to
