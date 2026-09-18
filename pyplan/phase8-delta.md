@@ -12,9 +12,9 @@
 
 | Read | Report | Tree and revision |
 |---|---|---|
-| Yu'lon as shipped | `phase8-reads/yulon.md` | `C:\Users\perzi\dml-phase8` at **7bc5ebd3** (`yulon-phase7` tip; this branch adds only `pyplan/`). Every `path:line` in the "Yu'lon today" column is at that SHA. **Paths resolve under two roots and the prefix says which:** `yulon/...` and bare module names (`docker.py`, `apply.py`, `accounts.py`, `ui/controller_view.py`, `catalog/catalog.py`, `catalog/composegen.py`) sit under `pylauncher/yulon/`; `catalog/installers/...`, `manifests/...`, `tests/...` and `main.py` sit under `pylauncher/`. |
+| Yu'lon as shipped | `phase8-reads/yulon.md` | `C:\Users\user\dml-phase8` at **7bc5ebd3** (`yulon-phase7` tip; this branch adds only `pyplan/`). Every `path:line` in the "Yu'lon today" column is at that SHA. **Paths resolve under two roots and the prefix says which:** `yulon/...` and bare module names (`docker.py`, `apply.py`, `accounts.py`, `ui/controller_view.py`, `catalog/catalog.py`, `catalog/composegen.py`) sit under `pylauncher/yulon/`; `catalog/installers/...`, `manifests/...`, `tests/...` and `main.py` sit under `pylauncher/`. |
 | Hypeer Launcher (Rust) | `phase8-reads/hypeer.md` | `origin/rust-main` at **21cfdf14**. Cited as `RUST path:line`. |
-| The Lab | `phase8-reads/lab.md` | `archive/guides/` at 7bc5ebd3, plus three dated memory records; the memory record of 2026-07-15 is cited as **MEM-0715** (source-verified against mod-playerbots `master` on that day, unpinned). The Lab itself was not downloaded or run. |
+| The Lab | `phase8-reads/lab.md` | `archive/guides/` at 7bc5ebd3, plus three dated maintainer notes (kept privately); the note of 2026-07-15 is cited as **MEM-0715** (source-verified against mod-playerbots `master` on that day, unpinned). The Lab itself was not downloaded or run. |
 | AzerothCore + mod-playerbots | `phase8-reads/azerothcore.md` | `mod-playerbots/azerothcore-wotlk` at **413bea61** (the catalog's `rev`), `mod-playerbots/mod-playerbots` at **b949b50b** (the catalog's `rev`), `azerothcore/mod-ale` at **c3de7942** (HEAD of 2026-09-06 — the manifest pins nothing). Cited `AC`, `PB`, `ALE`. |
 | CMaNGOS lineage | `phase8-reads/cmangos.md` | `cmangos/mangos-tbc` **f82e7d67**, `cmangos/mangos-classic` **8ec338a1**, `cmangos/playerbots` **993f1809** (all three the catalog's `rev`), `Shyalya/tortoise-wow` **7c0fb278** (branch `playerbots-integration-gh`, the catalog's `rev`). Cited `TBC`, `VAN`, `PBC`, `TW`. |
 
@@ -22,7 +22,7 @@ Two reads were added by hand after the reports: `.additem` on AzerothCore and `.
 password` on the three CMaNGOS-lineage trees (cited inline below with their lines).
 
 Verification labels used in the "verified how" column: **source read** (a file at the pinned
-revision, cited); **MEM-0715** (the memory record above); **RUST notes** (an incident comment in the
+revision, cited); **MEM-0715** (the maintainer note above); **RUST notes** (an incident comment in the
 Rust code recording a live observation, with its date); **Yu'lon code**; **UNVERIFIED** (nobody has
 asked the machine, and the row says what a spike would have to ask). A row never says "works over
 X" without one of the first four behind it.
@@ -86,7 +86,7 @@ Columns: feature · source · what Yu'lon ships today (at 7bc5ebd3) · the delta
 | **Autostart with the OS** | Hypeer §7 | nothing | start the launcher at login | `reg.exe add HKCU\…\Run` with a quoted path (`RUST autostart.rs:13-14`, `:60-65`); Linux/macOS equivalents unwritten. | RUST code | later (owner Q8iv) |
 | **Realmlist check / fix in the client folder** | Hypeer §7 | `networking.write_client_realmlist()` exists and **nothing calls it** (`networking.py:3711-3737`; callers only in tests); the Networking tab prints "Players set realmlist to:" (`ui/controller_view.py:1909`); `Config.wtf` is never read | read both files, offer the fix | client files only: `Data/<locale>/realmlist.wtf` written, `WTF/Config.wtf` read as the fallback the 3.3.5 client actually uses (`RUST realmlist.rs:3-11`, `:194-245`, `:299`). Per family the client differs (2.4.3, 1.12.1, 1.18.1 layouts not recorded). | Yu'lon code; RUST notes (WotLK client); **other clients UNVERIFIED** | the fix is refused (owner Q5: no client-folder writes); a read-only check is Phase 9 |
 | **LAN / internet play** | Hypeer | **shipped**: Networking tab, `networking.plan()`/`apply()` (`networking.py:3134`, `:3516`), three modes incl. loopback (bug §41 closed), realmlist `UPDATE`, firewall, intent file | none | — | Yu'lon code; gates `.notes/gates/bug39-lan-press-2026-09-05/`, `bug41-loopback-2026-09-05/` | none |
-| **Play Together** (Tailscale + alembic.gg) | Lab | nothing | — | a third-party hosted service with its own auth and a character-snapshot merge (memory record 2026-07-14) | MEM 2026-07-14 (observed) | **refused**: depends on a service this project does not run |
+| **Play Together** (Tailscale + alembic.gg) | Lab | nothing | — | a third-party hosted service with its own auth and a character-snapshot merge (maintainer note 2026-07-14) | MEM 2026-07-14 (observed) | **refused**: depends on a service this project does not run |
 | **Detect and migrate an existing DML / Lab install** | Lab | `state.json` remembers installs the app made; "Existing install found" fires on a directory that is not one (bug line 616) | adopt a server folder the app did not create | reading a foreign folder's compose files and volumes; the Rust `migrate.rs` path is recorded as not worth porting (`pyplan/rust-prior-art.md:203-204`) | Yu'lon code | later (owner Q8iv) |
 
 ## Rows that raise questions the owner has to answer
@@ -133,7 +133,7 @@ Listed so section 4 of the kickoff can pick from them; none is settled here.
    character sheet leaves Phase 9.
 5. **Client process enumeration per platform** — how a `Wow.exe` under Wine/Proton on Linux, a
    native `Wow.exe` on Windows and the client on macOS show up to a watcher; a spike on a box with
-   a client (`vmhost` holds a WotLK client; m910q holds all four).
+   a client (the VM host holds a WotLK client; m910q holds all four).
 6. **Steam's `shortcuts.vdf` format and the compat-tool assignment** — a read of a real Steam
    userdata folder. None exists on a test box this side, but the owner named two on 2026-09-06
    (answer 13): Baerthe's and DaddyCool's Steam Decks, running SteamOS. The read is an owner-run

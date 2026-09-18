@@ -777,7 +777,7 @@ def test_an_address_other_machines_can_dial_survives_and_loses_its_whitespace() 
     is the bug. The trailing newline is what a detector reading a command's
     stdout hands over, and `_sql_literal()` would call that "not an address".
     """
-    assert networking.advertisable("100.78.24.50") == "100.78.24.50"
+    assert networking.advertisable("100.64.0.10") == "100.64.0.10"
     assert networking.advertisable(" 192.168.1.25\n") == "192.168.1.25"
     assert networking.advertisable("wow.example.com") == "wow.example.com"
 
@@ -855,7 +855,7 @@ _M910Q_UNPRIVILEGED = (
     "LISTEN 0      128                      127.0.0.1:5939  0.0.0.0:*\n"
     "LISTEN 0      4096                       0.0.0.0:3724  0.0.0.0:*\n"
     "LISTEN 0      4096                 127.0.0.53%lo:53    0.0.0.0:*\n"
-    "LISTEN 0      4096                  100.78.24.50:45057 0.0.0.0:*\n"
+    "LISTEN 0      4096                  100.64.0.10:45057 0.0.0.0:*\n"
     "LISTEN 0      4096                     127.0.0.1:3306  0.0.0.0:*\n"
     "LISTEN 0      4096                       0.0.0.0:8085  0.0.0.0:*\n"
     "LISTEN 0      128                      127.0.0.1:631   0.0.0.0:*\n"
@@ -897,7 +897,7 @@ _NAMESPACED_ROOT_WITH_ITS_OWN_SSHD = (
     "LISTEN 0 128 127.0.0.1:5939 0.0.0.0:*\n"
     "LISTEN 0 4096 0.0.0.0:3724 0.0.0.0:*\n"
     "LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:*\n"
-    "LISTEN 0 4096 100.78.24.50:45057 0.0.0.0:*\n"
+    "LISTEN 0 4096 100.64.0.10:45057 0.0.0.0:*\n"
     "LISTEN 0 4096 127.0.0.1:3306 0.0.0.0:*\n"
     'LISTEN 0 128 127.0.0.1:2222 0.0.0.0:* users:(("sshd",pid=6,fd=4))\n'
     "LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:*\n"
@@ -954,7 +954,7 @@ _M910Q_ROOT = (
     'LISTEN 0 128 127.0.0.1:5939 0.0.0.0:* users:(("teamviewerd",pid=2754,fd=17))\n'
     'LISTEN 0 4096 0.0.0.0:3724 0.0.0.0:* users:(("docker-proxy",pid=1259133,fd=8))\n'
     'LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=410,fd=14))\n'
-    'LISTEN 0 4096 100.78.24.50:45057 0.0.0.0:* users:(("tailscaled",pid=7526,fd=27))\n'
+    'LISTEN 0 4096 100.64.0.10:45057 0.0.0.0:* users:(("tailscaled",pid=7526,fd=27))\n'
     'LISTEN 0 4096 127.0.0.1:3306 0.0.0.0:* users:(("docker-proxy",pid=1241546,fd=8))\n'
     'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* users:(("docker-proxy",pid=1259161,fd=8))\n'
     'LISTEN 0 128 127.0.0.1:631 0.0.0.0:* users:(("cupsd",pid=843052,fd=7))\n'
@@ -988,7 +988,7 @@ _YULON_UBUNTU_ROOT = (
     'LISTEN 0 4096 127.0.0.1:631 0.0.0.0:* users:(("cupsd",pid=1216,fd=7))\n'
     'LISTEN 0 4096 127.0.0.54:53 0.0.0.0:* users:(("systemd-resolve",pid=805,fd=17))\n'
     'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* users:(("docker-proxy",pid=40565,fd=7))\n'
-    'LISTEN 0 4096 100.71.125.58:40030 0.0.0.0:* users:(("tailscaled",pid=21160,fd=27))\n'
+    'LISTEN 0 4096 100.64.0.11:40030 0.0.0.0:* users:(("tailscaled",pid=21160,fd=27))\n'
     'LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=805,fd=15))\n'
     'LISTEN 0 4096 [::]:22 [::]:* users:(("sshd",pid=17501,fd=4),("systemd",pid=1,fd=139))\n'
     'LISTEN 0 4096 [::]:3724 [::]:* users:(("docker-proxy",pid=40596,fd=7))\n'
@@ -2443,7 +2443,7 @@ def test_a_supplied_ssh_port_is_not_a_reading_of_the_socket_table() -> None:
     `SSH_CONNECTION` discarded the flag built to mean "the table did not settle
     this". Measured on m910q as an ordinary desktop uid, 2026-09-04:
 
-        euid=1000  SSH_CONNECTION="100.72.215.6 63739 100.78.24.50 22"
+        euid=1000  SSH_CONNECTION="100.64.0.12 63739 100.64.0.10 22"
         detect_ssh_route() -> SshRoute(True, (22,), listeners_readable=False)
         plan(enable_firewall=True) -> ufw allow 3724/tcp, 8085/tcp, 22/tcp,
                                       ufw --force enable ; refusals ()
@@ -2455,7 +2455,7 @@ def test_a_supplied_ssh_port_is_not_a_reading_of_the_socket_table() -> None:
     port is proof of ONE way in and no evidence at all that it is the only one.
     """
     route = _route(
-        environ={"SSH_CONNECTION": "100.72.215.6 63739 100.78.24.50 22"}, run=_unprivileged_ss
+        environ={"SSH_CONNECTION": "100.64.0.12 63739 100.64.0.10 22"}, run=_unprivileged_ss
     )
     assert route == networking.SshRoute(connected=True, ports=(22,), listeners_readable=False)
     p = _ufw_plan(enable_firewall=True, route=route)

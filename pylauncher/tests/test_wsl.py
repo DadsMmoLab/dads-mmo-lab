@@ -168,13 +168,13 @@ def test_a_windows_folder_mounted_into_a_distro_is_not_a_wsl_server() -> None:
 
     A project whose compose file is at `/mnt/c/...` is a Windows folder reached
     through the distro, not a server living in it. Adopting one would hand back
-    a UNC path back into `mnt/c/Users/pk/proj` - a local folder taken the long
+    a UNC path back into `mnt/c/Users/user/proj` - a local folder taken the long
     way round, then managed through the wrong daemon. "Use existing…" adopts
     those as themselves.
     """
     windows_project = (
         '[{"Name":"myapp","Status":"running(1)",'
-        '"ConfigFiles":"/mnt/c/Users/pk/proj/docker-compose.yml"}]'
+        '"ConfigFiles":"/mnt/c/Users/user/proj/docker-compose.yml"}]'
     )
     assert wsl.parse_compose_ls("Ubuntu", windows_project) == ()
 

@@ -38,6 +38,7 @@ from yulon import docker, platform, rmtree, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
+    CLONE_MARKER,
     BehindReader,
     CloneSpec,
     ContainerGit,
@@ -269,7 +270,7 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
-CLAIM_FILE = ".yulon-clone.json"
+CLAIM_FILE = CLONE_MARKER
 """What this app writes INSIDE a clone it made, so it can recognise it later.
 
 The evidence half of `Ownership`. It is written after a clone succeeds and read
@@ -284,6 +285,22 @@ kind of entry there; `git reset --hard` does not remove untracked files, so the
 claim survives the very update path it authorises; and `remove()` deleting the
 clone deletes the claim with it, with no second place to forget about. It joins
 `include.sh` as the second file this engine writes into a clone.
+
+The name itself is `git.CLONE_MARKER`, because `is_unmodified()` has to know it
+too (T66) and `apply` imports `git`, not the other way round. This is the name
+every OTHER use in the tree reads.
+"""
+
+_NOT_FOR_THE_CLIENT = shutil.ignore_patterns(".git", CLAIM_FILE)
+"""What a `client` copy leaves in the clone: git's own directory, and the claim.
+
+T65, and `Applier._client()` carries the measurement. Both names are this app's
+or git's bookkeeping, neither is ever read by the game, and `.git`'s 0444 pack
+files are what made the second install of a `src: "."` addon die.
+
+A pattern list rather than a top-level name check, so a nested repository
+inside somebody's addon is left behind too — it has the same read-only packs
+and the same nothing to offer a WoW client.
 """
 
 CLAIM_VERSION = 1
@@ -1190,6 +1207,92 @@ def _no_adoption_message(refusal: _NoAdoption, rel: str, retry: str) -> str:
     return messages[refusal]
 
 
+class _Destroys(Enum):
+    """What a `git fetch` + `git reset --hard` over an existing clone would cost.
+
+    The three questions T44 gave `update()`, lifted out of it so `install()` can
+    ask exactly the same ones over exactly the same folder (T47). One value per
+    fact per answer, for `_NoAdoption`'s reasons — `None` out of a seam is "git
+    could not be asked", which is a different person from "no".
+
+    They are the questions a RESET must answer, not questions about updating, so
+    nothing here names a button: `_destroys_message()` takes the word for what
+    the user pressed and is the only place either route's vocabulary appears.
+    """
+
+    REPO_UNSEEN = "repo-unseen"
+    OTHER_REPO = "other-repo"
+    EDITED = "edited"
+    TREE_UNSEEN = "tree-unseen"
+    COMMITTED = "committed"
+    HISTORY_UNSEEN = "history-unseen"
+
+
+@dataclass(frozen=True)
+class _Reset:
+    """A `_Destroys` and the `origin` that was read while finding it.
+
+    `remote` travels with the fact because two of the six sentences name it and
+    re-reading it to write one would be a second `git remote get-url` whose
+    answer could differ from the one the guard actually decided on.
+    `""` where the fact was found without asking (the tree and HEAD questions
+    are reached only once the repository question has passed, so those carry a
+    real one; `REPO_UNSEEN` is the case where git would not say).
+    """
+
+    fact: _Destroys
+    remote: str
+
+
+def _destroys_message(found: _Reset, rel: str, item_id: str, url: str, doing: str) -> str:
+    """The sentence for one refused reset, in the words of the button that was pressed.
+
+    `doing` is "Updating" or "Installing" — the ONE thing that differs between
+    the two callers, and a parameter rather than two copies of six sentences.
+    T44 wrote these for `update()`; T47 found `install()` reaching the same
+    `reset --hard` over the same folder with none of them, and a copy would have
+    been the third place this vocabulary lives.
+
+    Every one ends "Nothing was changed.", which is true of both routes: the
+    guard runs before the clone seam, before the folder copy, and before this
+    app writes anything into the checkout.
+    """
+    lower = doing.lower()
+    messages = {
+        _Destroys.REPO_UNSEEN: (
+            f"{rel} is a git checkout, but git would not say what it is a checkout of, so "
+            f"{item_id} was not {'updated' if doing == 'Updating' else 'installed'} and "
+            f"nothing was changed."
+        ),
+        _Destroys.OTHER_REPO: (
+            f"{rel} is a checkout of {found.remote}, not of {url}. {doing} {item_id} would "
+            f"reset that folder to {url} and then deploy this module over it. Nothing was "
+            f"changed."
+        ),
+        _Destroys.EDITED: (
+            f"{rel} has changes in it that are not committed. {doing} {item_id} "
+            f"runs `git reset --hard`, which would delete them. Commit them, stash "
+            f"them, or copy them somewhere else first. Nothing was changed."
+        ),
+        _Destroys.TREE_UNSEEN: (
+            f"git could not say whether {rel} has uncommitted changes in it, and {lower} "
+            f"{item_id} would run `git reset --hard` over whatever is there. Nothing "
+            f"was changed."
+        ),
+        _Destroys.COMMITTED: (
+            f"{rel} carries commits of its own that {url} does not have. {doing} "
+            f"{item_id} runs `git reset --hard`, which would move off them and "
+            f"leave them reachable only through git's reflog. Nothing was changed."
+        ),
+        _Destroys.HISTORY_UNSEEN: (
+            f"Yu'lon could not reach {url} to see what {lower} {item_id} would bring "
+            f"in, so it did not touch {rel}. Check this machine's connection and try "
+            f"again. Nothing was changed."
+        ),
+    }
+    return messages[found.fact]
+
+
 # --------------------------------------------------- the answers to prompts
 
 _INT = re.compile(r"[+-]?\d+")
@@ -1447,6 +1550,7 @@ class Applier:
         *,
         folder: FolderSource | None = None,
         complete: Completer | None = None,
+        replacing: bool = False,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
 
@@ -1461,6 +1565,15 @@ class Applier:
         `complete` finishes a DERIVED manifest from the content that has just
         landed; see `Completer`. It runs after the clone or the copy, and
         everything from `_deploy()` onwards reads what it returned.
+
+        `replacing` is the user's answer to `replacement_question()`, and it is
+        the ONLY thing that lets this install reset a clean app-owned checkout
+        of a different repository (T47). Everything else `_costly_reset()`
+        finds is a refusal in the same sentences `update()` uses, over the same
+        folder — `update()` asks its own copy of those questions first and the
+        second pass here is deliberate: this is the method that reaches the
+        clone seam, and a guard that only one of two callers runs is how the
+        asymmetry T47 closes came about.
 
         `_check_values()` is NOT re-run against the completed manifest: it is
         the caller's answers that are being checked, and the fields a completer
@@ -1508,6 +1621,7 @@ class Applier:
             )
         if folder is not None:
             self._require_own_clone(manifest, clone, "install")
+            self._costly_reset(manifest, clone, replacing)
             self._copy_folder(folder, clone, log)
         elif manifest.source is None:
             # A manifest with no source never clones, so the guard used to sit
@@ -1523,6 +1637,7 @@ class Applier:
                 self._require_own_clone(manifest, clone, "install")
         else:
             self._require_own_clone(manifest, clone, "install")
+            self._costly_reset(manifest, clone, replacing)
             try:
                 self.git.clone(
                     CloneSpec(
@@ -1664,7 +1779,14 @@ class Applier:
            and running its SQL over the result. A local read (`git remote
            get-url`), so it is asked first and both names go in the refusal.
         2. **The working tree.** `reset --hard` destroys precisely what `git
-           status` reports. Also a local read.
+           status` reports, minus the two files this app itself put in the
+           checkout: its own `CLAIM_FILE` (T66 — see `git._status_pathspec()`;
+           until it was fixed that one untracked file refused an update on
+           every clone this app had ever made) and an untracked, EMPTY
+           `include.sh` it touched into a C++ module whose upstream ships none
+           (T47 — `git._without_the_generated_include()`, which reads the
+           status CODE so that a tracked `include.sh` somebody changed is still
+           their work). Also a local read.
         3. **HEAD.** `status` compares the tree and the index against HEAD and
            says nothing about what HEAD itself carries, so a user who
            COMMITTED their work passes 1 and 2. `no_local_commits()` counts
@@ -1708,46 +1830,155 @@ class Applier:
                 f"{manifest.id} is not installed here as a git checkout ({rel}), so there is "
                 f"nothing to update. Install it first. Nothing was changed."
             )
-        url = manifest.source.url
-        remote = self.remote_url(clone)
-        if remote is None:
-            return (
-                f"{rel} is a git checkout, but git would not say what it is a checkout of, so "
-                f"{manifest.id} was not updated and nothing was changed."
-            )
-        if not same_repo(remote, url):
-            return (
-                f"{rel} is a checkout of {remote}, not of {url}. Updating {manifest.id} would "
-                f"reset that folder to {url} and then deploy this module over it. Nothing was "
-                f"changed."
-            )
+        found = self._reset_cost(manifest, clone)
+        if found is None:
+            return None
+        return _destroys_message(found, rel, manifest.id, manifest.source.url, "Updating")
+
+    def _reset_cost(
+        self, manifest: Manifest, clone: Path, *, repository: bool = True, history: bool = True
+    ) -> _Reset | None:
+        """What a `git reset --hard` over `clone` would cost, or `None` for nothing.
+
+        The three questions, in one place, for the two callers that run that
+        reset: `update()` through `_update_refusal()`, and `install()` through
+        `_costly_reset()` (T47 — until then only one of them asked, over the
+        very same folder). The order is the order of what costs least and is
+        most certain, and it is argued in `update()`'s docstring.
+
+        `is True` / `is not True` throughout and never truthiness: `None` out of
+        a seam is "git could not be asked", which fails closed under its own
+        name rather than telling an offline user they have uncommitted changes.
+
+        Two questions can be switched off, and both switches belong to
+        `install()`:
+
+        - `repository=False` is "the user has already been shown the two
+          repository names and said replace it anyway". Only that question is
+          dropped; the tree and HEAD are still asked, so an agreement to replace
+          a DIFFERENT repository is never also an agreement to throw away
+          uncommitted work in it.
+        - `history=False` is `replacement_question()`, which runs on the GUI
+          thread before any job is queued and so may not fetch. Dropping the
+          HEAD question there can only make the question ASKED where the
+          install would then refuse — a refusal after a Yes, which changes
+          nothing on disk — never the reverse.
+
+        A manifest with no `source` has no repository to be a checkout of, so
+        the first question and `no_local_commits()`'s branch have nothing to
+        compare against and the folder is judged on its working tree alone.
+        """
+        source = manifest.source
+        url = source.url if source is not None else ""
+        remote = self.remote_url(clone) if url else ""
+        if url and repository:
+            if remote is None:
+                return _Reset(_Destroys.REPO_UNSEEN, "")
+            if not same_repo(remote, url):
+                return _Reset(_Destroys.OTHER_REPO, remote)
+        known = remote or ""
         clean = self.unmodified(clone, ".")
         if clean is not True:
-            if clean is False:
-                return (
-                    f"{rel} has changes in it that are not committed. Updating {manifest.id} "
-                    f"runs `git reset --hard`, which would delete them. Commit them, stash "
-                    f"them, or copy them somewhere else first. Nothing was changed."
-                )
-            return (
-                f"git could not say whether {rel} has uncommitted changes in it, and updating "
-                f"{manifest.id} would run `git reset --hard` over whatever is there. Nothing "
-                f"was changed."
-            )
-        nothing_of_theirs = self.no_local_commits(clone, manifest.source.branch)
+            return _Reset(_Destroys.EDITED if clean is False else _Destroys.TREE_UNSEEN, known)
+        if source is None or not history:
+            return None
+        nothing_of_theirs = self.no_local_commits(clone, source.branch)
         if nothing_of_theirs is not True:
-            if nothing_of_theirs is False:
-                return (
-                    f"{rel} carries commits of its own that {url} does not have. Updating "
-                    f"{manifest.id} runs `git reset --hard`, which would move off them and "
-                    f"leave them reachable only through git's reflog. Nothing was changed."
-                )
-            return (
-                f"Yu'lon could not reach {url} to see what updating {manifest.id} would bring "
-                f"in, so it did not touch {rel}. Check this machine's connection and try "
-                f"again. Nothing was changed."
+            return _Reset(
+                _Destroys.COMMITTED if nothing_of_theirs is False else _Destroys.HISTORY_UNSEEN,
+                known,
             )
         return None
+
+    def _costly_reset(self, manifest: Manifest, clone: Path, replacing: bool) -> None:
+        """Refuse an install that would `reset --hard` over a checkout worth keeping (T47).
+
+        `_require_own_clone()` answers *whose folder is this*; it returns the
+        moment this app's own claim reads `OWNED` and never asks whether there
+        is anything in it worth keeping. For a FIRST install that is right —
+        case 0 has nothing to lose, and this method returns at its first line
+        for it, so the ordinary install grows no question and no round trip.
+        For an install over a checkout that is already there it was a silent
+        `git reset --hard` over somebody's work, which is the one thing T44's
+        ticket says must not happen — and the same folder, one button over,
+        already refused it.
+
+        Reachable and reached: "Install Selected Module" on the Modules tab's
+        context menu is offered for a row whose clone exists (the row BUTTON is
+        not, which is why T44 recorded this as unreachable from there), and both
+        custom-module routes derive an id that may already name a clone.
+
+        `replacing` is the user's own answer to `replacement_question()`, and it
+        buys exactly one of the three questions: the two repository names were
+        put to them and they said go ahead. It never buys the other two —
+        `_reset_cost()` still asks them — so a Yes to "replace this checkout of
+        another repository" is not a Yes to deleting uncommitted work in it.
+        """
+        if not (clone / ".git").is_dir():
+            return
+        found = self._reset_cost(manifest, clone)
+        if replacing and found is not None and found.fact is _Destroys.OTHER_REPO:
+            # **`is OTHER_REPO` is load-bearing, and my first reading of it was
+            # wrong** (review, round 1). The repository question has TWO
+            # refusals, not one: `REPO_UNSEEN` is git declining to say what the
+            # folder is a checkout of, and `repository=False` drops both. So
+            # without this line an agreement to replace a NAMED repository
+            # would also wave through the folder whose name nobody could read —
+            # the fail-closed answer being spent on a question the user was
+            # never shown. Only the fact they were actually asked about is
+            # re-asked without.
+            found = self._reset_cost(manifest, clone, repository=False)
+        if found is None:
+            return
+        url = manifest.source.url if manifest.source is not None else ""
+        raise ApplyError(
+            _destroys_message(found, _rel(self.server_dir, clone), manifest.id, url, "Installing")
+        )
+
+    def replacement_question(self, manifest: Manifest) -> str | None:
+        """What a user must agree to before installing over the clone already at this path.
+
+        `None` means there is nothing to ask about: no clone, a clone this app
+        did not make (which `_require_own_clone()` refuses outright, and a
+        refusal is not a question — T41/T142 are not weakened by anything here),
+        a clone of the repository this manifest names, or one the install is
+        going to refuse anyway.
+
+        A sentence rather than a raised error, because the only honest answer
+        comes from the person: `modules/<id>` is named for an id, two different
+        repositories can carry the same module name, and a clean checkout of
+        another one at that path is either a fork the user has finished with or
+        the one they meant to keep. This app cannot tell, and resetting it
+        unasked is T47.
+
+        **It asks git nothing that leaves this machine.** `history=False`: the
+        caller is a view, on the GUI thread, before any job is queued, and a
+        `git fetch` there would freeze the window for as long as the network
+        takes. The HEAD question is asked by `_costly_reset()` inside the run,
+        so a clone that also carries commits of its own is refused after a Yes
+        rather than replaced — a refusal that changes nothing on disk.
+        """
+        clone = self.clone_dir(manifest)
+        if manifest.source is None or not (clone / ".git").is_dir():
+            return None
+        if read_clone_claim(clone, item_id=manifest.id) is not Ownership.OWNED:
+            return None
+        found = self._reset_cost(manifest, clone, history=False)
+        if found is None or found.fact is not _Destroys.OTHER_REPO:
+            return None
+        if self._reset_cost(manifest, clone, repository=False, history=False) is not None:
+            # The repository is not the only thing wrong with this folder, and a
+            # question whose Yes leads straight to a refusal is worse than the
+            # refusal: it reads as though answering it were enough. The install
+            # says which of the other questions stopped it, in its own words.
+            return None
+        rel = _rel(self.server_dir, clone)
+        return (
+            f"{rel} is a checkout of {found.remote}, not of {manifest.source.url}.\n\n"
+            f"Installing {manifest.id} here runs `git fetch` and `git reset --hard` over that "
+            f"folder to make it a checkout of {manifest.source.url}. Anything in it that "
+            f"{found.remote} does not have is lost.\n\nReplace it?"
+        )
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         """Re-apply the value-bearing steps: configure-time patches/SQL and conf keys.
@@ -2354,13 +2585,30 @@ class Applier:
         module clone this app can point at as the one that matters. That also
         means an UNTRACKED file blocks adoption, which is stricter than the harm
         requires — a hard reset does not delete untracked files — and it is the
-        `include.sh` case above. Deliberate, and NOT allowlisted even for that
-        one generated name: the file this app writes is empty, a user's
-        `include.sh` need not be, so an exact-name allowlist would have to
-        become a content check to be safe, and a content check is the first step
-        of deciding which of somebody's untracked files are innocent. The
-        direction of this error is a re-clone; the direction of that one is lost
-        work.
+        `include.sh` case above.
+
+        **Two names `unmodified()` does not count, and the argument this
+        paragraph used to make against the second one.** `CLAIM_FILE` is the
+        first (T66, `git._status_pathspec()`), and it changes nothing here:
+        this method is reached only for `UNCLAIMED`, and the two ways to be
+        `UNCLAIMED` are no such file at all and one the REPOSITORY tracks —
+        which `status` already reports as unchanged. A claim this app wrote but
+        cannot read as its own is `UNKNOWN`, and `_require_own_clone()` raises
+        on that before ever getting here.
+
+        The second is an untracked, EMPTY `include.sh` (T47,
+        `git._without_the_generated_include()`). This paragraph refused it for
+        years on the grounds that "an exact-name allowlist would have to become
+        a content check to be safe, and a content check is the first step of
+        deciding which of somebody's untracked files are innocent" — and the
+        first half was right, which is why it IS a content check and not a
+        name. Two conditions, both read from the checkout: `?? ` in the status
+        line, so the repository does not track the file, and zero bytes, so
+        there is nothing in it to lose. Nothing decides that somebody's file is
+        innocent; a file with anything at all in it is counted, and so is one
+        the repository tracks, however small. What it buys is the case that
+        made the rule wrong: the app touches that file itself, into a folder it
+        created, and then refused to update it because of what it had done.
         """
         if self.server_dir_claim(self.server_dir) is not Ownership.OWNED:
             return _NoAdoption.NO_RECORD
@@ -2880,6 +3128,26 @@ class Applier:
             log.conf_restart = True
 
     def _client(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+        """Copy this manifest's `client` steps into the game client's own folders.
+
+        **Never the checkout's bookkeeping** (T65). Two `wow-tortoise` addons
+        deploy with `src: "."` -- the addon IS the repository root -- so the
+        copy carried `.git` and this app's `CLAIM_FILE` into
+        `Interface/AddOns/<name>`. Git writes its pack and idx files 0444, and
+        `copytree(dirs_exist_ok=True)` cannot open a 0444 destination for
+        writing: the SECOND install of either addon died with a raw
+        `shutil.Error` (Errno 13) before it had landed a single new file, so
+        the addon could be installed once and never updated or reinstalled. A
+        pinned install failed identically, which is why this is not T60's.
+
+        Left out rather than force-overwritten: WoW reads the `.toc` and the
+        files it names, so a copy of somebody's git history in the AddOns
+        folder was never wanted -- it was 20+ MB of what the user's client has
+        to scan, and it is why the manifests' notes claimed the `.git` copy was
+        intended. Those notes are corrected with this change. A user who
+        removes and reinstalls also gets no stale `.git` back, because the
+        clone is where the history lives and it stays there.
+        """
         for step in manifest.client:
             if self.client_dir is None:
                 log.skipped.append(f"client {step.src}: no client dir configured")
@@ -2892,7 +3160,7 @@ class Applier:
             else:
                 target = self.client_dir / "Data"
             if src.is_dir():
-                shutil.copytree(src, target, dirs_exist_ok=True)
+                shutil.copytree(src, target, dirs_exist_ok=True, ignore=_NOT_FOR_THE_CLIENT)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target / src.name)

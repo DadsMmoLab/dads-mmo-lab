@@ -28,7 +28,7 @@ from yulon.catalog import installer
 # The directory the current Docker Desktop installs itself into, and the
 # `docker.exe` inside it. Real strings from a real machine (Windows 11 Pro
 # 26200, 2026-08-23) so the fakes below describe the case that was measured.
-DOCKER_BIN_DIR = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin"
+DOCKER_BIN_DIR = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin"
 DOCKER_EXE = DOCKER_BIN_DIR + r"\docker.EXE"
 
 
