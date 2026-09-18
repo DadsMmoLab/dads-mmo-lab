@@ -292,7 +292,7 @@ def test_a_folder_origin_module_needs_no_source_and_a_link_one_still_does() -> N
     folder = parse_manifest(
         {
             **sourceless,
-            "origin": {"kind": "folder", "path": "/home/pk/mod-x", "added": "2026-09-08"},
+            "origin": {"kind": "folder", "path": "/home/user/mod-x", "added": "2026-09-08"},
         }
     )
     assert folder.source is None

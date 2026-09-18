@@ -221,7 +221,7 @@ and `.dockerignore` through a single `dockerfile.write()` that rewrites whicheve
 differs and refuses either that carries no marker. Both user sentences say
 "build recipe" and name the pair, because a `.dockerignore` behind its template
 is rewritten by this press exactly as the Dockerfile is, and a dialog promising
-"nothing else in the folder" was wrong about the second one (Fable, round 1).
+"nothing else in the folder" was wrong about the second one (review, round 1).
 
 Named here because two things select on it: `rebuild_stages()`, which runs it
 again ahead of every compile for the families that have one, and
@@ -367,7 +367,7 @@ ADOPT_CONSEQUENCE = (
 """What adopting COSTS, in the owner's own words, said in the confirmation.
 
 Verbatim from the ticket's spec and not paraphrased, and it is the sentence the
-whole feature turns on: three rounds of an Opus and a Fable hand tried to
+whole feature turns on: three rounds of implementation tried to
 DERIVE "this import finished" from the plan — per-schema table counts, the
 plan's own `verify` rules, then the table set parsed out of every dump file —
 and each round's reviewer found the next layer of inference underneath. The
@@ -744,7 +744,7 @@ REALM_ADDRESS_PATTERN = r"\S+"
 Rebuild control.** `ready.auth` is `{{REALM_HOST}}:{{WORLD_PORT}}`, and filling
 the token with `INSTALL_REALM_HOST` made the marker `127\\.0\\.0\\.1:8085` while
 the auth server's own line said
-`Added realm "Yulon ubuntu2" at 100.99.204.5:8085.` — because
+`Added realm "Yulon ubuntu2" at 100.64.0.13:8085.` — because
 `_advertise_realm()` is the install's LAST act and had replaced that row hours
 earlier. The compile finished, the containers were replaced, the new
 worldserver came up with the module compiled in and answered a command over its
@@ -4952,7 +4952,7 @@ class StagedInstaller:
         connect could not — `realmd.realmlist.address` was still
         `127.0.0.1`, so the client had been told the world server was on its
         OWN machine and hung at "Connecting" saying nothing. One
-        `UPDATE realmd.realmlist SET address='100.78.24.50' WHERE id=1` later
+        `UPDATE realmd.realmlist SET address='100.64.0.10' WHERE id=1` later
         the same client reached a character screen. Every piece of this existed
         (`networking.realmlist_sql()`, `CatalogEntry.realmlist`,
         `platform.detect_lan_ip()`, the Networking tab) and nothing on the
