@@ -196,7 +196,7 @@ def test_the_report_line_survives_a_console_that_cannot_spell_the_step_text(
     can plausibly meet, and the escaping has to be lossless: a harness that reads
     a mangled path is no better off than one that reads nothing.
     """
-    step = r"downloaded the installer → C:\Users\pk\x.exe"
+    step = r"downloaded the installer → C:\Users\user\x.exe"
     monkeypatch.setattr(
         main.platform,
         "ensure_docker",

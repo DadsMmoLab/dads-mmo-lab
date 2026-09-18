@@ -446,7 +446,7 @@ def test_send_command_rejects_carriage_returns_too() -> None:
 # GM command silently dead, on a machine where Docker is installed and running,
 # because this process started before Docker Desktop's installer wrote its PATH.
 
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 def test_attach_uses_the_cli_this_host_can_actually_start(

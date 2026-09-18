@@ -2769,7 +2769,7 @@ def file_aces(path: Path) -> list[str]:
     carries no `:(`, so the entries are the lines that do.
 
     Callers read these for the `(I)` inherited flag and never for a principal:
-    the names are localised. Measured on PKGAME-LAPTOP (Windows 11 26200,
+    the names are localised. Measured on a Windows laptop (Windows 11 26200,
     Norwegian, CPython 3.13.14, 2026-09-01) the built-in groups printed as
     `NT-MYNDIGHET\\SYSTEM` and `BUILTIN\\Administratorer`, so a test matching
     `BUILTIN\\Users` there would fail for the language and not for the ACL.
@@ -2785,7 +2785,7 @@ def test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl
 ) -> None:
     """What the 0600 the writer asks for actually buys, per platform — measured, not assumed.
 
-    Measured on PKGAME-LAPTOP, Windows 11 26200, CPython 3.13.14, 2026-09-01,
+    Measured on a Windows laptop, Windows 11 26200, CPython 3.13.14, 2026-09-01,
     and reproduced there on 2026-09-01 while this assertion was written:
     `os.open(path, O_WRONLY|O_CREAT|O_TRUNC, 0o600)` leaves `st_mode & 0o777`
     at `0o666`, byte-identical to a plain `open(path, "w")`, and every ACE
@@ -2798,10 +2798,10 @@ def test_the_secret_file_is_owner_only_on_posix_and_only_inherits_the_folder_acl
     asserted here rather than only described. The Windows half turns red the
     day `_write_secret` grows the explicit DACL its "Open: Windows ACLs" note
     weighs, because an entry granted that way is not inherited and carries no
-    `(I)`. That red was produced rather than reasoned about, on PKGAME-LAPTOP
+    `(I)`. That red was produced rather than reasoned about, on a Windows laptop
     on 2026-09-01: `icacls <file> /inheritance:r /grant:r <user>:(F)` over a
     file written exactly as this stage writes it left one entry,
-    `PKGAME-LAPTOP\\perzi:(F)`, which this assertion rejects. It is recorded
+    `LAPTOP\\user:(F)`, which this assertion rejects. It is recorded
     because Linux CI skips this branch and can never show it.
 
     The CONSTANT is asserted as well as the file, because on Windows it is the
@@ -4042,7 +4042,7 @@ def test_the_conf_this_stage_leaves_behind_carries_the_mode_the_module_asks_for(
     beside them. `mangosd.conf` is copied and then patched on a first run, so
     it has been through both.
 
-    Measured on PKGAME-LAPTOP, Windows 11 26200, CPython 3.13.14, 2026-09-01:
+    Measured on a Windows laptop, Windows 11 26200, CPython 3.13.14, 2026-09-01:
     a file created by `write_text`, moved with `shutil.move` and chmodded
     (`materialise`'s shape) and one written, chmodded and `os.replace`d
     (`_write`'s shape) both read back `st_mode & 0o777 == 0o666`. The mode does

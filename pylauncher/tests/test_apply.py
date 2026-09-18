@@ -18,7 +18,7 @@ import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -76,6 +76,28 @@ class _FakeGit:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
         (spec.dest / ".git").mkdir(exist_ok=True)
+
+
+def _untouched(applier: Applier, manifest: Any) -> Applier:
+    """Answer T47's three reset questions as git would for a clone nobody has touched.
+
+    `install()` over a checkout that is already there IS a `git fetch` + `reset
+    --hard`, and since T47 it asks the same three questions `update()` does
+    before running one: what repository the folder is a checkout of, whether
+    anything in it is uncommitted, and whether HEAD carries commits the reset
+    would move off. A `_FakeGit`'s `.git` is an empty directory, so a real
+    `RunnerGit` answers `None` — "could not be asked" — to all three and the
+    guard fails closed. That is the designed behaviour and it is not what the
+    tests using this are about, so this says "asked, and untouched".
+
+    Only for a FAKE clone. The real-clone tests answer these from git.
+    """
+    assert manifest.source is not None
+    url = manifest.source.url
+    applier.remote_url = lambda _dest: url
+    applier.unmodified = lambda _dest, _path: True
+    applier.no_local_commits = lambda _dest, _branch: True
+    return applier
 
 
 class _FakeSql:
@@ -374,7 +396,7 @@ def test_steps_without_a_seam_are_reported_skipped_never_silent(tmp_path: Path) 
     client = tmp_path / "client"
     dbc = _FakeDbc()
     sql = _FakeSql()
-    full = Applier(tmp_path, git=git, sql=sql, client_dir=client, dbc=dbc).install(m)
+    full = _untouched(Applier(tmp_path, git=git, sql=sql, client_dir=client, dbc=dbc), m).install(m)
     assert full.skipped == ()
     assert (client / "Data" / "p.MPQ").exists()
     assert dbc.dirs == [tmp_path / "ale_scripts" / "sod" / "kegs/sod/Server Files/dbc"]
@@ -617,7 +639,6 @@ def test_remove_of_a_shared_dir_deploy_leaves_other_scripts_alone(tmp_path: Path
 
     # Clone already gone: a directory deploy cannot be undone safely → skipped, not guessed.
     applier.install(m)
-    import shutil
 
     shutil.rmtree(applier.clone_dir(m))
     report = applier.remove(m)
@@ -672,7 +693,7 @@ def test_generated_files_are_lf_even_on_windows(tmp_path: Path) -> None:
 # `platform.docker_program()`). `docker exec` here had the same hardcoded name
 # as everything else.
 
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 def test_docker_sql_execs_through_the_cli_this_host_can_start(
@@ -1194,7 +1215,7 @@ def test_a_first_install_needs_no_folder_and_the_second_updates_this_apps_own(
     tmp_path: Path,
 ) -> None:
     """The two cases that must keep working: nothing there, and this app's own clone."""
-    git = _FakeGit({"README.md": "upstream\n"})
+    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True, no_local_commits=True)
     origins = _Origins(OWNED_URL)
     applier = Applier(tmp_path, git=git, remote_url=origins)
     m = parse_manifest(OWNED_ITEM)
@@ -1207,7 +1228,12 @@ def test_a_first_install_needs_no_folder_and_the_second_updates_this_apps_own(
 
     applier.install(m)  # the update path, over a clone this app made
     assert len(git.calls) == 2
-    assert origins.asked == []  # the per-clone claim IS the corroboration
+    # The claim is still the whole of the OWNERSHIP question -- `_require_own_clone()`
+    # returns on it without asking anything -- and since T47 the same install
+    # asks `origin` once more, for a different question: this folder is about to
+    # be `reset --hard`, and what it is a checkout of decides whether that is
+    # this module's own update or somebody else's repository being overwritten.
+    assert origins.asked == [applier.clone_dir(m)]
 
 
 def test_remove_refuses_to_delete_a_module_folder_this_app_did_not_clone(tmp_path: Path) -> None:
@@ -1625,7 +1651,11 @@ def test_the_commit_question_is_asked_about_the_branch_the_update_would_reset_to
 
     applier.install(parse_manifest(branched))
 
-    assert git.branches_asked == ["wotlk"]
+    # Twice since T47: the adoption rule asks, and then `_costly_reset()` asks
+    # the same question again on the install's own destructive path. Both must
+    # name the MANIFEST's branch, which is what this test is about -- a caller
+    # that asked about the checkout's current branch would show up here.
+    assert git.branches_asked == ["wotlk", "wotlk"]
 
 
 def test_a_copied_server_folder_does_not_adopt_the_clones_in_the_copy(tmp_path: Path) -> None:
@@ -2028,9 +2058,8 @@ def test_a_guid_that_names_no_character_is_refused_by_name(tmp_path: Path) -> No
 def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Path) -> None:
     """ "I could not check" is said out loud, never spelled like "I checked"."""
     git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
-    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(
-        _shipped("mod-ah-bot-plus"), {"bot_guid": "42"}
-    )
+    plus = _shipped("mod-ah-bot-plus")
+    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(plus, {"bot_guid": "42"})
     assert any(
         "not checked" in s.lower() and "bot_guid" in s for s in report.skipped
     ), report.skipped
@@ -2038,8 +2067,10 @@ def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Pat
     # A reader that RAISED is the same answer, not "the character is missing":
     # a stopped database must not make a module uninstallable.
     stopped = _FakeReader(fail="Error response from daemon: container not running")
-    second = Applier(tmp_path, git=_FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST}), sql=stopped)
-    report2 = second.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "42"})
+    second = _untouched(
+        Applier(tmp_path, git=_FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST}), sql=stopped), plus
+    )
+    report2 = second.install(plus, {"bot_guid": "42"})
     assert any("not checked" in s.lower() for s in report2.skipped), report2.skipped
 
 

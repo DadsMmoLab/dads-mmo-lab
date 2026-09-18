@@ -883,7 +883,7 @@ def test_a_missing_docker_cli_is_reported_as_a_maintenance_error(
 
 
 # The shape `platform.docker_program()` caches: a real path, on no PATH here.
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 def test_a_resolved_docker_that_has_since_gone_is_reported_the_same_way(
