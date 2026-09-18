@@ -21,16 +21,18 @@ that is the controller's call (call down / signal up, §5).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
@@ -38,6 +40,7 @@ from yulon import docker, platform, rmtree, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
+    CLONE_MARKER,
     BehindReader,
     CloneSpec,
     ContainerGit,
@@ -269,7 +272,7 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
-CLAIM_FILE = ".yulon-clone.json"
+CLAIM_FILE = CLONE_MARKER
 """What this app writes INSIDE a clone it made, so it can recognise it later.
 
 The evidence half of `Ownership`. It is written after a clone succeeds and read
@@ -284,12 +287,150 @@ kind of entry there; `git reset --hard` does not remove untracked files, so the
 claim survives the very update path it authorises; and `remove()` deleting the
 clone deletes the claim with it, with no second place to forget about. It joins
 `include.sh` as the second file this engine writes into a clone.
+
+The name itself is `git.CLONE_MARKER`, because `is_unmodified()` has to know it
+too (T66) and `apply` imports `git`, not the other way round. This is the name
+every OTHER use in the tree reads.
+"""
+
+_NOT_FOR_THE_CLIENT = shutil.ignore_patterns(".git", CLAIM_FILE)
+"""What a `client` copy leaves in the clone: git's own directory, and the claim.
+
+T65, and `Applier._client()` carries the measurement. Both names are this app's
+or git's bookkeeping, neither is ever read by the game, and `.git`'s 0444 pack
+files are what made the second install of a `src: "."` addon die.
+
+A pattern list rather than a top-level name check, so a nested repository
+inside somebody's addon is left behind too — it has the same read-only packs
+and the same nothing to offer a WoW client.
 """
 
 CLAIM_VERSION = 1
 """Bumped only for a change this version could not read. A reader that does not
 recognise the version answers `UNKNOWN`, which refuses — never `UNCLAIMED`,
-which would let a newer app's clone be treated as a stranger's."""
+which would let a newer app's clone be treated as a stranger's.
+
+NOT bumped for `client_files` (T67): the key is additive and every reader of an
+older claim, which simply has no such key, gets the empty tuple and the
+"no record" arm — which leaves the file alone. A bump would have made every
+clone installed by an earlier build read `UNKNOWN`, i.e. unremovable."""
+
+
+@dataclass(frozen=True)
+class ClientCopy:
+    """One file this app copied into the game client's `Data/`, and the bytes it copied.
+
+    The receipt `remove()` needs in order to be allowed to delete anything from a
+    folder full of the user's own game (T67). `path` is the destination as it was
+    written, absolute and in the OS's own spelling; `sha256` is of the bytes that
+    landed there, taken from the DESTINATION after the copy rather than from the
+    source, so a copy that truncated is recorded as what is really on disk.
+
+    `step` is the manifest step's `src`, and `_unclient()` DOES match on it: a
+    step's receipts have to be found per step, because "this step has no record"
+    is the sentence a user gets about a step whose files must be left alone, and
+    it cannot be said by a lookup keyed on path alone. What identifies the FILE
+    is still `path`; `step` only groups.
+    """
+
+    step: str
+    path: str
+    sha256: str
+
+    def as_json(self) -> dict[str, str]:
+        return {"step": self.step, "path": self.path, "sha256": self.sha256}
+
+
+def sha256_of(path: Path) -> str:
+    """The file's SHA-256, read in chunks. An MPQ is hundreds of megabytes."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_client_copies(clone: Path, *, item_id: str) -> tuple[ClientCopy, ...]:
+    """The client-file receipts this app wrote into `clone`'s claim, or `()`.
+
+    `()` for every doubt: no claim, a claim that will not parse, a claim of
+    ANOTHER item, a `client_files` that is not a list, an entry that is not an
+    object of three strings. Every one of those means "this app cannot show that
+    it put that file there", and `remove()`'s rule is that it deletes nothing
+    from the user's game client it cannot show it put there.
+
+    Note what is NOT checked: `clone_id`. A claim written before the server
+    folder was moved names the old location and reads `UNKNOWN` for ownership —
+    but the client path inside it is still a path this app wrote, with the hash
+    of the bytes it wrote, and the hash is what authorises the delete. Ownership
+    of the clone is a separate question, asked separately, before this runs.
+    """
+    parsed = _parse_clone_claim(clone)
+    if parsed is None or parsed.get("item_id") != item_id:
+        return ()
+    raw = parsed.get("client_files")
+    if not isinstance(raw, list):
+        return ()
+    out: list[ClientCopy] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        step, path, digest = entry.get("step"), entry.get("path"), entry.get("sha256")
+        if isinstance(step, str) and isinstance(path, str) and isinstance(digest, str):
+            out.append(ClientCopy(step=step, path=path, sha256=digest))
+    return tuple(out)
+
+COMPLETED_KEY = "install_completed"
+"""The claim's key for "every step of `install()` ran", written by `install()` twice.
+
+`False` when the claim goes in, right after the clone or the copy; `True` from
+the LAST thing `install()` does. Between those two writes the folder exists and
+the install has not finished, which is the state T68 is about: the T7 direct-SQL
+guard refuses while the world runs, the clone is already at `modules/<id>`, and
+the row read `Remove` with no Install left to press.
+
+**Additive, and deliberately NOT a `CLAIM_VERSION` bump.** A bump makes every
+older claim unreadable, which answers `UNKNOWN`, which refuses both install and
+remove — a permanent lockout on every clone an older build made, for a key that
+says nothing about ownership. So the version stays 1 and this key is read as a
+three-state: `False` is this build saying the install stopped, `True` is this
+build saying it finished, and ABSENT is a claim written before this key existed.
+
+Absent counts as finished (`clone_install_unfinished()` answers False), and that
+is the only reading that cannot make things worse. Older builds wrote the claim
+in the same place this one does — immediately after the clone and before
+`_deploy`/`_sql`/`_conf`/`_client`/`_dbc` — so an older half-install and an
+older whole install leave byte-identical claims and nothing on disk tells them
+apart. Reading absent as UNFINISHED would therefore flip every module installed
+by every previous build back to an Install button; reading it as finished leaves
+those rows exactly as they are today.
+"""
+
+COMPLETED_KEY = "install_completed"
+"""The claim's key for "every step of `install()` ran", written by `install()` twice.
+
+`False` when the claim goes in, right after the clone or the copy; `True` from
+the LAST thing `install()` does. Between those two writes the folder exists and
+the install has not finished, which is the state T68 is about: the T7 direct-SQL
+guard refuses while the world runs, the clone is already at `modules/<id>`, and
+the row read `Remove` with no Install left to press.
+
+**Additive, and deliberately NOT a `CLAIM_VERSION` bump.** A bump makes every
+older claim unreadable, which answers `UNKNOWN`, which refuses both install and
+remove — a permanent lockout on every clone an older build made, for a key that
+says nothing about ownership. So the version stays 1 and this key is read as a
+three-state: `False` is this build saying the install stopped, `True` is this
+build saying it finished, and ABSENT is a claim written before this key existed.
+
+Absent counts as finished (`clone_install_unfinished()` answers False), and that
+is the only reading that cannot make things worse. Older builds wrote the claim
+in the same place this one does — immediately after the clone and before
+`_deploy`/`_sql`/`_conf`/`_client`/`_dbc` — so an older half-install and an
+older whole install leave byte-identical claims and nothing on disk tells them
+apart. Reading absent as UNFINISHED would therefore flip every module installed
+by every previous build back to an Install button; reading it as finished leaves
+those rows exactly as they are today.
+"""
 
 COMPLETED_KEY = "install_completed"
 """The claim's key for "every step of `install()` ran", written by `install()` twice.
@@ -553,14 +694,25 @@ def write_clone_claim(clone: Path, *, item_id: str, url: str, completed: bool = 
     filesystems is a copy, which is exactly the tearing being avoided — and the
     clone directory is where it goes. It is cleaned up on failure so a refusal
     never leaves debris inside a checkout `git status` will report on.
+
+    `client_files` are T67's receipts for what went into the user's game client.
+    They are written by a SECOND call, after the client copy has happened, over
+    the claim the install already wrote — the claim has to exist from the moment
+    the clone does (a killed install leaves a folder this app must still
+    recognise), and the receipts cannot exist until the bytes have landed. The
+    two orders of failure both fail safe: a claim with no receipts leaves the
+    client file alone, and there is no state in which a receipt exists for a copy
+    that did not happen.
     """
-    payload = {
+    payload: dict[str, object] = {
         "version": CLAIM_VERSION,
         "item_id": item_id,
         "clone_id": composegen.install_id(clone),
         "url": url,
         COMPLETED_KEY: completed,
     }
+    if client_files:
+        payload["client_files"] = [copy.as_json() for copy in client_files]
     fd, name = tempfile.mkstemp(dir=clone, prefix=CLAIM_FILE + ".", suffix=".tmp")
     os.close(fd)
     tmp = Path(name)
@@ -987,6 +1139,81 @@ class DockerSql:
             ) from None
 
 
+_DBC_WRITE = 'cat > "$1.yulon-part" && mv -f "$1.yulon-part" "$1"'
+"""The shell each DBC file is written with, the destination passed as `$1`.
+
+A positional argument rather than a name spliced into the script, so a file
+name is never parsed as shell. Written beside and then renamed over, so a copy
+that dies part-way leaves the server's own file whole rather than truncated —
+a half-written `CharBaseInfo.dbc` is a worldserver that will not start. No
+`mkdir -p`: a data volume with no `dbc/` folder holds no server data at all, and
+creating one to put three files in would report a copy into a server that
+cannot run."""
+
+
+@dataclass(frozen=True)
+class ComposeDbc:
+    """`DbcCopier` over the compose service that owns the server's data volume (T62).
+
+    Until this existed nothing implemented `DbcCopier`, so every `server_dbc`
+    step — `mod-arac`'s three race/class DBCs and the Season of Discovery keg's
+    — was reported skipped and never reached the server: new race/class
+    combinations started with no gear and the worldserver deleted their skills
+    (`heyitsbench/mod-arac#49`, `#50`).
+
+    The worldserver mounts that volume `:ro`, so the copy goes through the
+    one-shot service that mounts it read-write and filled it in the first place
+    (`ac-client-data-init` for AzerothCore). That service runs as the user that
+    wrote the files already there, so the new ones are owned alike. How the
+    bytes travel is `docker.compose_run_stdin()`'s docstring: over stdin, one
+    short-lived container per file, which is the bash launcher's own shape
+    (`copy_server_dbc`, `wow-manage.sh` on `upstream/main`) without its bind
+    mount or its `alpine` pull.
+
+    The DBCs are read at worldserver start only, so a copy changes nothing
+    until a restart; `ApplyReport.restart_recommended` already says so for any
+    manifest with a `server_dbc` step.
+    """
+
+    server_dir: Path
+    service: str
+    """The compose SERVICE that mounts the data volume read-write."""
+    data_dir: str
+    """Where that service mounts the volume; the DBCs go in `<data_dir>/dbc/`."""
+    wsl_distro: str | None = None
+    """The WSL2 distro this server's docker lives in, if it is not local."""
+
+    def copy_dbc_dir(self, src: Path) -> None:
+        if not src.is_dir():
+            raise ApplyError(f"server DBC folder missing in clone: {src}")
+        files = sorted(p for p in src.iterdir() if p.is_file() and p.suffix == ".dbc")
+        if not files:
+            # Refused, not passed over: `_dbc()` writes a done line after this
+            # returns, and "copied" over a folder holding nothing is the claim
+            # this seam was built to stop the report making.
+            raise ApplyError(f"no .dbc files in {src}, so there was nothing to copy")
+        for path in files:
+            dest = f"{self.data_dir.rstrip('/')}/dbc/{path.name}"
+            try:
+                with path.open("rb") as fh:
+                    proc = docker.compose_run_stdin(
+                        self.server_dir,
+                        self.service,
+                        "sh",
+                        ["-c", _DBC_WRITE, "sh", dest],
+                        fh,
+                        wsl_distro=self.wsl_distro,
+                    )
+            except (docker.DockerCommandError, docker.SourceUnreadableError) as exc:
+                raise ApplyError(str(exc)) from exc
+            if proc.returncode != 0:
+                reason = proc.stderr.strip() or proc.stdout.strip()
+                raise ApplyError(
+                    f"could not copy {path.name} into the server's data volume through "
+                    f"{self.service}: {reason}"
+                )
+
+
 def _check_sql(proc: subprocess.CompletedProcess[str], what: str) -> None:
     """Raise with the reason, wherever the reason happens to be.
 
@@ -1090,6 +1317,23 @@ class ApplyReport:
     rebuild_required: bool = False
     restart_recommended: bool = False
     pending_sql: tuple[PendingSql, ...] = ()
+    left_behind: tuple[str, ...] = ()
+    """What a REMOVE did not take back, one entry per step, each a plain phrase (T62).
+
+    `remove()` deletes the clone and what `deploy` put elsewhere, and runs any
+    remove-time SQL. It never touches the server's data volume, and it does not
+    undo install-time SQL a manifest gave no remove-time counterpart. A report of
+    `rm -r modules/mod-arac` and nothing else reads as a clean uninstall of a
+    module whose DBCs, client patch and database rows are all still in place — so
+    those are named here. Empty for every other action.
+
+    Since T67 the client half of this list is a fact about THIS RUN rather than a
+    reading of the manifest. A `Data/` patch this app can show it copied and
+    that nobody has edited since IS taken back, and says so in `done`; what is
+    named here is what was left and WHY — changed since install, no record of the
+    copy, no game client folder to reach, or an addon folder, which is never
+    deleted because the game can be told to ignore it instead.
+    """
 
 
 @dataclass
@@ -1102,6 +1346,11 @@ class _Log:
     # found nothing to do (the file already there, or no keyed value to write).
     # See `_report()`: this is the fourth thing `restart_recommended` can now see.
     conf_restart: bool = False
+    # T67. Filled by `_client()` on an install (the receipts that go into the
+    # claim) and by `_unclient()` on a remove (the client lines of `left_behind`,
+    # which on a remove replace the ones `_left_behind()` reads off the manifest).
+    client_copies: list[ClientCopy] = field(default_factory=list)
+    client_left_behind: list[str] = field(default_factory=list)
 
 
 class _NoAdoption(Enum):
@@ -1188,6 +1437,92 @@ def _no_adoption_message(refusal: _NoAdoption, rel: str, retry: str) -> str:
         ),
     }
     return messages[refusal]
+
+
+class _Destroys(Enum):
+    """What a `git fetch` + `git reset --hard` over an existing clone would cost.
+
+    The three questions T44 gave `update()`, lifted out of it so `install()` can
+    ask exactly the same ones over exactly the same folder (T47). One value per
+    fact per answer, for `_NoAdoption`'s reasons — `None` out of a seam is "git
+    could not be asked", which is a different person from "no".
+
+    They are the questions a RESET must answer, not questions about updating, so
+    nothing here names a button: `_destroys_message()` takes the word for what
+    the user pressed and is the only place either route's vocabulary appears.
+    """
+
+    REPO_UNSEEN = "repo-unseen"
+    OTHER_REPO = "other-repo"
+    EDITED = "edited"
+    TREE_UNSEEN = "tree-unseen"
+    COMMITTED = "committed"
+    HISTORY_UNSEEN = "history-unseen"
+
+
+@dataclass(frozen=True)
+class _Reset:
+    """A `_Destroys` and the `origin` that was read while finding it.
+
+    `remote` travels with the fact because two of the six sentences name it and
+    re-reading it to write one would be a second `git remote get-url` whose
+    answer could differ from the one the guard actually decided on.
+    `""` where the fact was found without asking (the tree and HEAD questions
+    are reached only once the repository question has passed, so those carry a
+    real one; `REPO_UNSEEN` is the case where git would not say).
+    """
+
+    fact: _Destroys
+    remote: str
+
+
+def _destroys_message(found: _Reset, rel: str, item_id: str, url: str, doing: str) -> str:
+    """The sentence for one refused reset, in the words of the button that was pressed.
+
+    `doing` is "Updating" or "Installing" — the ONE thing that differs between
+    the two callers, and a parameter rather than two copies of six sentences.
+    T44 wrote these for `update()`; T47 found `install()` reaching the same
+    `reset --hard` over the same folder with none of them, and a copy would have
+    been the third place this vocabulary lives.
+
+    Every one ends "Nothing was changed.", which is true of both routes: the
+    guard runs before the clone seam, before the folder copy, and before this
+    app writes anything into the checkout.
+    """
+    lower = doing.lower()
+    messages = {
+        _Destroys.REPO_UNSEEN: (
+            f"{rel} is a git checkout, but git would not say what it is a checkout of, so "
+            f"{item_id} was not {'updated' if doing == 'Updating' else 'installed'} and "
+            f"nothing was changed."
+        ),
+        _Destroys.OTHER_REPO: (
+            f"{rel} is a checkout of {found.remote}, not of {url}. {doing} {item_id} would "
+            f"reset that folder to {url} and then deploy this module over it. Nothing was "
+            f"changed."
+        ),
+        _Destroys.EDITED: (
+            f"{rel} has changes in it that are not committed. {doing} {item_id} "
+            f"runs `git reset --hard`, which would delete them. Commit them, stash "
+            f"them, or copy them somewhere else first. Nothing was changed."
+        ),
+        _Destroys.TREE_UNSEEN: (
+            f"git could not say whether {rel} has uncommitted changes in it, and {lower} "
+            f"{item_id} would run `git reset --hard` over whatever is there. Nothing "
+            f"was changed."
+        ),
+        _Destroys.COMMITTED: (
+            f"{rel} carries commits of its own that {url} does not have. {doing} "
+            f"{item_id} runs `git reset --hard`, which would move off them and "
+            f"leave them reachable only through git's reflog. Nothing was changed."
+        ),
+        _Destroys.HISTORY_UNSEEN: (
+            f"Yu'lon could not reach {url} to see what {lower} {item_id} would bring "
+            f"in, so it did not touch {rel}. Check this machine's connection and try "
+            f"again. Nothing was changed."
+        ),
+    }
+    return messages[found.fact]
 
 
 # --------------------------------------------------- the answers to prompts
@@ -1447,6 +1782,7 @@ class Applier:
         *,
         folder: FolderSource | None = None,
         complete: Completer | None = None,
+        replacing: bool = False,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
 
@@ -1461,6 +1797,15 @@ class Applier:
         `complete` finishes a DERIVED manifest from the content that has just
         landed; see `Completer`. It runs after the clone or the copy, and
         everything from `_deploy()` onwards reads what it returned.
+
+        `replacing` is the user's answer to `replacement_question()`, and it is
+        the ONLY thing that lets this install reset a clean app-owned checkout
+        of a different repository (T47). Everything else `_costly_reset()`
+        finds is a refusal in the same sentences `update()` uses, over the same
+        folder — `update()` asks its own copy of those questions first and the
+        second pass here is deliberate: this is the method that reaches the
+        clone seam, and a guard that only one of two callers runs is how the
+        asymmetry T47 closes came about.
 
         `_check_values()` is NOT re-run against the completed manifest: it is
         the caller's answers that are being checked, and the fields a completer
@@ -1508,6 +1853,7 @@ class Applier:
             )
         if folder is not None:
             self._require_own_clone(manifest, clone, "install")
+            self._costly_reset(manifest, clone, replacing)
             self._copy_folder(folder, clone, log)
         elif manifest.source is None:
             # A manifest with no source never clones, so the guard used to sit
@@ -1523,6 +1869,7 @@ class Applier:
                 self._require_own_clone(manifest, clone, "install")
         else:
             self._require_own_clone(manifest, clone, "install")
+            self._costly_reset(manifest, clone, replacing)
             try:
                 self.git.clone(
                     CloneSpec(
@@ -1664,7 +2011,14 @@ class Applier:
            and running its SQL over the result. A local read (`git remote
            get-url`), so it is asked first and both names go in the refusal.
         2. **The working tree.** `reset --hard` destroys precisely what `git
-           status` reports. Also a local read.
+           status` reports, minus the two files this app itself put in the
+           checkout: its own `CLAIM_FILE` (T66 — see `git._status_pathspec()`;
+           until it was fixed that one untracked file refused an update on
+           every clone this app had ever made) and an untracked, EMPTY
+           `include.sh` it touched into a C++ module whose upstream ships none
+           (T47 — `git._without_the_generated_include()`, which reads the
+           status CODE so that a tracked `include.sh` somebody changed is still
+           their work). Also a local read.
         3. **HEAD.** `status` compares the tree and the index against HEAD and
            says nothing about what HEAD itself carries, so a user who
            COMMITTED their work passes 1 and 2. `no_local_commits()` counts
@@ -1708,46 +2062,155 @@ class Applier:
                 f"{manifest.id} is not installed here as a git checkout ({rel}), so there is "
                 f"nothing to update. Install it first. Nothing was changed."
             )
-        url = manifest.source.url
-        remote = self.remote_url(clone)
-        if remote is None:
-            return (
-                f"{rel} is a git checkout, but git would not say what it is a checkout of, so "
-                f"{manifest.id} was not updated and nothing was changed."
-            )
-        if not same_repo(remote, url):
-            return (
-                f"{rel} is a checkout of {remote}, not of {url}. Updating {manifest.id} would "
-                f"reset that folder to {url} and then deploy this module over it. Nothing was "
-                f"changed."
-            )
+        found = self._reset_cost(manifest, clone)
+        if found is None:
+            return None
+        return _destroys_message(found, rel, manifest.id, manifest.source.url, "Updating")
+
+    def _reset_cost(
+        self, manifest: Manifest, clone: Path, *, repository: bool = True, history: bool = True
+    ) -> _Reset | None:
+        """What a `git reset --hard` over `clone` would cost, or `None` for nothing.
+
+        The three questions, in one place, for the two callers that run that
+        reset: `update()` through `_update_refusal()`, and `install()` through
+        `_costly_reset()` (T47 — until then only one of them asked, over the
+        very same folder). The order is the order of what costs least and is
+        most certain, and it is argued in `update()`'s docstring.
+
+        `is True` / `is not True` throughout and never truthiness: `None` out of
+        a seam is "git could not be asked", which fails closed under its own
+        name rather than telling an offline user they have uncommitted changes.
+
+        Two questions can be switched off, and both switches belong to
+        `install()`:
+
+        - `repository=False` is "the user has already been shown the two
+          repository names and said replace it anyway". Only that question is
+          dropped; the tree and HEAD are still asked, so an agreement to replace
+          a DIFFERENT repository is never also an agreement to throw away
+          uncommitted work in it.
+        - `history=False` is `replacement_question()`, which runs on the GUI
+          thread before any job is queued and so may not fetch. Dropping the
+          HEAD question there can only make the question ASKED where the
+          install would then refuse — a refusal after a Yes, which changes
+          nothing on disk — never the reverse.
+
+        A manifest with no `source` has no repository to be a checkout of, so
+        the first question and `no_local_commits()`'s branch have nothing to
+        compare against and the folder is judged on its working tree alone.
+        """
+        source = manifest.source
+        url = source.url if source is not None else ""
+        remote = self.remote_url(clone) if url else ""
+        if url and repository:
+            if remote is None:
+                return _Reset(_Destroys.REPO_UNSEEN, "")
+            if not same_repo(remote, url):
+                return _Reset(_Destroys.OTHER_REPO, remote)
+        known = remote or ""
         clean = self.unmodified(clone, ".")
         if clean is not True:
-            if clean is False:
-                return (
-                    f"{rel} has changes in it that are not committed. Updating {manifest.id} "
-                    f"runs `git reset --hard`, which would delete them. Commit them, stash "
-                    f"them, or copy them somewhere else first. Nothing was changed."
-                )
-            return (
-                f"git could not say whether {rel} has uncommitted changes in it, and updating "
-                f"{manifest.id} would run `git reset --hard` over whatever is there. Nothing "
-                f"was changed."
-            )
-        nothing_of_theirs = self.no_local_commits(clone, manifest.source.branch)
+            return _Reset(_Destroys.EDITED if clean is False else _Destroys.TREE_UNSEEN, known)
+        if source is None or not history:
+            return None
+        nothing_of_theirs = self.no_local_commits(clone, source.branch)
         if nothing_of_theirs is not True:
-            if nothing_of_theirs is False:
-                return (
-                    f"{rel} carries commits of its own that {url} does not have. Updating "
-                    f"{manifest.id} runs `git reset --hard`, which would move off them and "
-                    f"leave them reachable only through git's reflog. Nothing was changed."
-                )
-            return (
-                f"Yu'lon could not reach {url} to see what updating {manifest.id} would bring "
-                f"in, so it did not touch {rel}. Check this machine's connection and try "
-                f"again. Nothing was changed."
+            return _Reset(
+                _Destroys.COMMITTED if nothing_of_theirs is False else _Destroys.HISTORY_UNSEEN,
+                known,
             )
         return None
+
+    def _costly_reset(self, manifest: Manifest, clone: Path, replacing: bool) -> None:
+        """Refuse an install that would `reset --hard` over a checkout worth keeping (T47).
+
+        `_require_own_clone()` answers *whose folder is this*; it returns the
+        moment this app's own claim reads `OWNED` and never asks whether there
+        is anything in it worth keeping. For a FIRST install that is right —
+        case 0 has nothing to lose, and this method returns at its first line
+        for it, so the ordinary install grows no question and no round trip.
+        For an install over a checkout that is already there it was a silent
+        `git reset --hard` over somebody's work, which is the one thing T44's
+        ticket says must not happen — and the same folder, one button over,
+        already refused it.
+
+        Reachable and reached: "Install Selected Module" on the Modules tab's
+        context menu is offered for a row whose clone exists (the row BUTTON is
+        not, which is why T44 recorded this as unreachable from there), and both
+        custom-module routes derive an id that may already name a clone.
+
+        `replacing` is the user's own answer to `replacement_question()`, and it
+        buys exactly one of the three questions: the two repository names were
+        put to them and they said go ahead. It never buys the other two —
+        `_reset_cost()` still asks them — so a Yes to "replace this checkout of
+        another repository" is not a Yes to deleting uncommitted work in it.
+        """
+        if not (clone / ".git").is_dir():
+            return
+        found = self._reset_cost(manifest, clone)
+        if replacing and found is not None and found.fact is _Destroys.OTHER_REPO:
+            # **`is OTHER_REPO` is load-bearing, and my first reading of it was
+            # wrong** (review, round 1). The repository question has TWO
+            # refusals, not one: `REPO_UNSEEN` is git declining to say what the
+            # folder is a checkout of, and `repository=False` drops both. So
+            # without this line an agreement to replace a NAMED repository
+            # would also wave through the folder whose name nobody could read —
+            # the fail-closed answer being spent on a question the user was
+            # never shown. Only the fact they were actually asked about is
+            # re-asked without.
+            found = self._reset_cost(manifest, clone, repository=False)
+        if found is None:
+            return
+        url = manifest.source.url if manifest.source is not None else ""
+        raise ApplyError(
+            _destroys_message(found, _rel(self.server_dir, clone), manifest.id, url, "Installing")
+        )
+
+    def replacement_question(self, manifest: Manifest) -> str | None:
+        """What a user must agree to before installing over the clone already at this path.
+
+        `None` means there is nothing to ask about: no clone, a clone this app
+        did not make (which `_require_own_clone()` refuses outright, and a
+        refusal is not a question — T41/T142 are not weakened by anything here),
+        a clone of the repository this manifest names, or one the install is
+        going to refuse anyway.
+
+        A sentence rather than a raised error, because the only honest answer
+        comes from the person: `modules/<id>` is named for an id, two different
+        repositories can carry the same module name, and a clean checkout of
+        another one at that path is either a fork the user has finished with or
+        the one they meant to keep. This app cannot tell, and resetting it
+        unasked is T47.
+
+        **It asks git nothing that leaves this machine.** `history=False`: the
+        caller is a view, on the GUI thread, before any job is queued, and a
+        `git fetch` there would freeze the window for as long as the network
+        takes. The HEAD question is asked by `_costly_reset()` inside the run,
+        so a clone that also carries commits of its own is refused after a Yes
+        rather than replaced — a refusal that changes nothing on disk.
+        """
+        clone = self.clone_dir(manifest)
+        if manifest.source is None or not (clone / ".git").is_dir():
+            return None
+        if read_clone_claim(clone, item_id=manifest.id) is not Ownership.OWNED:
+            return None
+        found = self._reset_cost(manifest, clone, history=False)
+        if found is None or found.fact is not _Destroys.OTHER_REPO:
+            return None
+        if self._reset_cost(manifest, clone, repository=False, history=False) is not None:
+            # The repository is not the only thing wrong with this folder, and a
+            # question whose Yes leads straight to a refusal is worse than the
+            # refusal: it reads as though answering it were enough. The install
+            # says which of the other questions stopped it, in its own words.
+            return None
+        rel = _rel(self.server_dir, clone)
+        return (
+            f"{rel} is a checkout of {found.remote}, not of {manifest.source.url}.\n\n"
+            f"Installing {manifest.id} here runs `git fetch` and `git reset --hard` over that "
+            f"folder to make it a checkout of {manifest.source.url}. Anything in it that "
+            f"{found.remote} does not have is lost.\n\nReplace it?"
+        )
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         """Re-apply the value-bearing steps: configure-time patches/SQL and conf keys.
@@ -1794,6 +2257,9 @@ class Applier:
         self._sql(manifest, clone, vals, "remove", log)
         for step in manifest.deploy:
             self._undeploy(step, clone, log)
+        # T67, and BEFORE the `rmtree` below: the receipts that say which client
+        # files are this app's own live in the clone's claim file.
+        self._unclient(manifest, clone, log)
         if clone.exists():
             # T49: not `shutil.rmtree`. Git writes packs read-only on Windows and
             # a bare rmtree stops at the first one, having already deleted an
@@ -2354,13 +2820,30 @@ class Applier:
         module clone this app can point at as the one that matters. That also
         means an UNTRACKED file blocks adoption, which is stricter than the harm
         requires — a hard reset does not delete untracked files — and it is the
-        `include.sh` case above. Deliberate, and NOT allowlisted even for that
-        one generated name: the file this app writes is empty, a user's
-        `include.sh` need not be, so an exact-name allowlist would have to
-        become a content check to be safe, and a content check is the first step
-        of deciding which of somebody's untracked files are innocent. The
-        direction of this error is a re-clone; the direction of that one is lost
-        work.
+        `include.sh` case above.
+
+        **Two names `unmodified()` does not count, and the argument this
+        paragraph used to make against the second one.** `CLAIM_FILE` is the
+        first (T66, `git._status_pathspec()`), and it changes nothing here:
+        this method is reached only for `UNCLAIMED`, and the two ways to be
+        `UNCLAIMED` are no such file at all and one the REPOSITORY tracks —
+        which `status` already reports as unchanged. A claim this app wrote but
+        cannot read as its own is `UNKNOWN`, and `_require_own_clone()` raises
+        on that before ever getting here.
+
+        The second is an untracked, EMPTY `include.sh` (T47,
+        `git._without_the_generated_include()`). This paragraph refused it for
+        years on the grounds that "an exact-name allowlist would have to become
+        a content check to be safe, and a content check is the first step of
+        deciding which of somebody's untracked files are innocent" — and the
+        first half was right, which is why it IS a content check and not a
+        name. Two conditions, both read from the checkout: `?? ` in the status
+        line, so the repository does not track the file, and zero bytes, so
+        there is nothing in it to lose. Nothing decides that somebody's file is
+        innocent; a file with anything at all in it is counted, and so is one
+        the repository tracks, however small. What it buys is the case that
+        made the rule wrong: the app touches that file itself, into a folder it
+        created, and then refused to update it because of what it had done.
         """
         if self.server_dir_claim(self.server_dir) is not Ownership.OWNED:
             return _NoAdoption.NO_RECORD
@@ -2696,16 +3179,7 @@ class Applier:
         find) — but the assert says so rather than the type checker alone.
         """
         assert step.path is not None
-        if _fields(step.path):
-            return PendingSql(db=step.db, path=step.path, files=None)
-        matches = sorted(clone.glob(step.path)) if _is_glob(step.path) else [clone / step.path]
-        # `as_posix()`, not `_rel()`: these names are compared against the
-        # manifest's own `path` (forward slashes, always) and read by a person
-        # who may be on Windows, and `_rel()` would answer
-        # `data\sql\db-world\a.sql` there and `data/sql/db-world/a.sql` on the
-        # Linux box the same install was measured on. One spelling, both.
-        found = tuple(p.relative_to(clone).as_posix() for p in matches if p.is_file())
-        return PendingSql(db=step.db, path=step.path, files=found)
+        return PendingSql(db=step.db, path=step.path, files=_sql_files(clone, step.path))
 
     def _run_sql(self, step: SqlStep, clone: Path, vals: Mapping[str, str], log: _Log) -> None:
         assert self.sql is not None
@@ -2880,6 +3354,26 @@ class Applier:
             log.conf_restart = True
 
     def _client(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+        """Copy this manifest's `client` steps into the game client's own folders.
+
+        **Never the checkout's bookkeeping** (T65). Two `wow-tortoise` addons
+        deploy with `src: "."` -- the addon IS the repository root -- so the
+        copy carried `.git` and this app's `CLAIM_FILE` into
+        `Interface/AddOns/<name>`. Git writes its pack and idx files 0444, and
+        `copytree(dirs_exist_ok=True)` cannot open a 0444 destination for
+        writing: the SECOND install of either addon died with a raw
+        `shutil.Error` (Errno 13) before it had landed a single new file, so
+        the addon could be installed once and never updated or reinstalled. A
+        pinned install failed identically, which is why this is not T60's.
+
+        Left out rather than force-overwritten: WoW reads the `.toc` and the
+        files it names, so a copy of somebody's git history in the AddOns
+        folder was never wanted -- it was 20+ MB of what the user's client has
+        to scan, and it is why the manifests' notes claimed the `.git` copy was
+        intended. Those notes are corrected with this change. A user who
+        removes and reinstalls also gets no stale `.git` back, because the
+        clone is where the history lives and it stays there.
+        """
         for step in manifest.client:
             if self.client_dir is None:
                 log.skipped.append(f"client {step.src}: no client dir configured")
@@ -2893,12 +3387,146 @@ class Applier:
                 target = self.client_dir / "Data"
             if src.is_dir():
                 shutil.copytree(src, target, dirs_exist_ok=True)
+                if step.dest == "data":
+                    log.client_copies += self._receipts(step.src, src, target)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target / src.name)
+                if step.dest == "data":
+                    log.client_copies += self._receipts(step.src, src, target)
             else:
                 raise ApplyError(f"client source missing in clone: {src}")
             log.done.append(f"client {step.src} → {step.dest}")
+
+    @staticmethod
+    def _receipts(step: str, src: Path, target: Path) -> list[ClientCopy]:
+        """Hash what a `dest: data` step just put in the client, for `remove()` to check.
+
+        Only `dest: data`. An addon folder is never taken back (the owner's
+        decision, T67: the player disables it in the game's AddOns menu), and
+        `dest: interface` copies INTO the shared `Interface/` folder, where this
+        app cannot tell its own files from the client's — so neither is worth a
+        receipt nobody would act on.
+
+        **WHICH files is read off the SOURCE in the clone, never off a listing of
+        the destination, and that distinction is a whole `Data/` folder.** Round 1
+        review, 2026-09-16: the first version listed `target` — and for a step
+        whose `src` is a DIRECTORY, `_client` copies its contents INTO
+        `<client>/Data`, so `target` IS the user's `Data/` folder. It recorded a
+        receipt for every archive the user's WoW install has ever had, each
+        matching its own hash at remove time, and removing the shipped Season of
+        Discovery keg (`kegs/sod.json`, `src: .../Client Files/data`, `dest:
+        data`) emptied `Data/`. The source names exactly the files this app
+        copied; nothing else can be ours by definition.
+
+        The HASH is still taken from the destination copy, which is a different
+        question from which files to hash: same bytes when all goes well, and
+        when it does not — a short copy, a full disk — the receipt describes the
+        file that is really in the user's game, which is the one `remove()` will
+        be comparing against.
+
+        A source file with nothing at its destination, or a copy that cannot be
+        hashed, yields no receipt — the same state as an older install's: the
+        file stays at remove time and is named. Never fatal: the install itself
+        succeeded.
+        """
+        if src.is_dir():
+            pairs = [(target / p.relative_to(src)) for p in sorted(src.rglob("*")) if p.is_file()]
+        else:
+            pairs = [target / src.name]
+        out: list[ClientCopy] = []
+        for path in pairs:
+            try:
+                out.append(ClientCopy(step=step, path=str(path), sha256=sha256_of(path)))
+            except OSError as exc:
+                logger.warning(
+                    f"could not hash {path} after copying it, so it is not recorded: {exc}"
+                )
+        return out
+
+    def _unclient(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+        """Take back the client patches this app can PROVE it put there; name the rest (T67).
+
+        The owner's rule, 2026-09-16: a module's client MPQ is deleted from the
+        client's `Data/` only if it is still byte-for-byte the file this app
+        copied, and an addon folder is never deleted at all.
+
+        Why an MPQ is deleted and an addon folder is not, when both were copied
+        by the same step: the 3.3.5a client loads EVERY `Patch-*.MPQ` in `Data/`
+        at start and offers what they contain. A left-behind ARAC patch goes on
+        offering race/class pairs the server no longer has DBCs for, which is a
+        character creation screen that lies and a login that fails. An addon does
+        nothing of the kind, the game has a checkbox for turning it off, and the
+        player may have keybinds and saved variables attached to it.
+
+        Why a checksum and not "the app installed this item, so this file is
+        its": the path is `<the user's game>/Data/<a name a catalog entry
+        chose>`. The user may have put their own patch there, or edited ours.
+        `Ownership`'s lesson holds — evidence, and a refusal when there is none.
+
+        Must run BEFORE the clone is deleted: the receipts live in the clone's
+        claim file, which the `rmtree` at the end of `remove()` takes with it.
+        """
+        copies = read_client_copies(clone, item_id=manifest.id) if clone.is_dir() else ()
+        for step in manifest.client:
+            if self.client_dir is None:
+                log.client_left_behind.append(
+                    f"{step.src} (in whatever game client you installed it into — no game "
+                    f"client folder is set here now, so Yu'lon could not reach it)"
+                )
+                continue
+            if step.dest == "addons":
+                name = step.name or Path(step.src).name
+                log.client_left_behind.append(
+                    f"the {name} addon folder in your game client's Interface/AddOns "
+                    f"(Yu'lon does not delete addons — disable it in the game's AddOns menu)"
+                )
+                continue
+            if step.dest == "interface":
+                log.client_left_behind.append(
+                    f"{step.src} (copied into your game client's Interface folder, where "
+                    f"Yu'lon cannot tell its own files from the game's)"
+                )
+                continue
+            mine = [c for c in copies if c.step == step.src]
+            if not mine:
+                log.client_left_behind.append(
+                    f"{step.src} (in your game client's Data folder — Yu'lon has no record of "
+                    f"copying it, so it left it alone)"
+                )
+                continue
+            for copy in mine:
+                self._take_back(copy, log)
+
+    def _take_back(self, copy: ClientCopy, log: _Log) -> None:
+        """One recorded file: delete it if it is still ours byte-for-byte, else say why not."""
+        path = Path(copy.path)
+        if not path.exists():
+            log.skipped.append(f"client {path.name}: already gone from {path.parent}")
+            return
+        try:
+            same = sha256_of(path) == copy.sha256
+        except OSError as exc:
+            log.client_left_behind.append(
+                f"{path.name} in your game client's Data folder (Yu'lon could not read it to "
+                f"check whether it is still the file it copied: {exc})"
+            )
+            return
+        if not same:
+            log.client_left_behind.append(
+                f"{path.name} in your game client's Data folder (it has changed since Yu'lon "
+                f"copied it, so it left it alone)"
+            )
+            return
+        try:
+            path.unlink()
+        except OSError as exc:
+            log.client_left_behind.append(
+                f"{path.name} in your game client's Data folder (Yu'lon could not delete it: "
+                f"{exc} — close the game and delete it by hand)"
+            )
+            return
+        log.done.append(f"took back {path.name} from {path.parent}")
 
     def _dbc(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         for step in manifest.server_dbc:
@@ -2947,6 +3575,9 @@ class Applier:
                 or log.conf_restart
             ),
             pending_sql=tuple(log.pending_sql),
+            left_behind=(
+                _left_behind(manifest, tuple(log.client_left_behind)) if action == "remove" else ()
+            ),
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "
@@ -2957,6 +3588,32 @@ class Applier:
 
 
 # --------------------------------------------------------------- functions
+
+
+def _sql_files(clone: Path, path: str) -> tuple[str, ...] | None:
+    """A step's declared `path` resolved against `clone`. `None` when it cannot be.
+
+    Shared by `Applier._pending_sql()` (which reports what is waiting) and
+    `module_sql_plan()` (which reports what each route owns), because the two
+    describe the SAME files and a second resolver here would be a second answer
+    to "which files does this step name".
+
+    The path is globbed UNRENDERED on purpose. `_action_templates()` leaves
+    db-import paths out of `required_prompts()`, so a `{key}` in one was never
+    put to the user and `_render()` would raise on a step this run is not
+    performing -- turning a report into a failure. A `{key}` gets `None` instead
+    of a glob that would match nothing and call it zero; see `PendingSql`.
+
+    `as_posix()`, not `_rel()`: these names are compared against the manifest's
+    own `path` (forward slashes, always) and read by a person who may be on
+    Windows, and `_rel()` would answer `data\\sql\\db-world\\a.sql` there and
+    `data/sql/db-world/a.sql` on the Linux box the same install was measured on.
+    One spelling, both.
+    """
+    if _fields(path):
+        return None
+    matches = sorted(clone.glob(path)) if _is_glob(path) else [clone / path]
+    return tuple(p.relative_to(clone).as_posix() for p in matches if p.is_file())
 
 
 def _render(template: str, values: Mapping[str, str], what: str) -> str:
@@ -3109,3 +3766,398 @@ def module_updates(
         behind = git.commits_behind(path, branch_of.get(path.name)) if checkout else None
         rows.append(ModuleUpdate(key=path.name, path=path, is_checkout=checkout, behind=behind))
     return tuple(rows)
+
+
+# ---------------------------------------------------------------------------
+# What "Apply module SQL" may hand to the core's own updater (T78)
+
+
+IMPORTER_SQL_ROOT = "data/sql/"
+"""The subtree of a module's clone AzerothCore's own updater is pointed at.
+
+`UpdateFetcher.cpp:159-186` joins every allowed module name onto
+`<source>/modules/<name>/data/sql/` and skips the ones that are not directories
+-- the reading recorded on `docker.ALL_MODULES`, measured live 2026-09-07. It is
+the ROOT and not the answer: what the updater opens under it is `IMPORTER_DB_DIRS`
+and nothing else.
+"""
+
+IMPORTER_DB_DIRS = ("db-auth", "db-characters", "db-world")
+"""The directories under `IMPORTER_SQL_ROOT` the core updater actually walks.
+
+**One per database it loads, and that is the whole set.** `DBUpdater` runs once
+for each of the three `DatabaseLoader` pools and walks
+`<module>/data/sql/<that pool's directory>/` recursively -- `base/` and
+`updates/` alike, which is why this is a directory prefix and not a file list.
+Evidence in this tree, none of it inferred:
+
+* `catalog/installers/wow-wotlk/native/base.yml.tmpl:163-164` mounts `./modules`
+  into the importer *because* "the import applies every module's own
+  `data/sql/db-auth` and `db-characters` updates as well as AzerothCore's", and
+  `docker.verify_import()` carries the live measurement behind it (yulon-ubuntu
+  2026-08-23: a first-ever import of an install carrying mod-city-bots came out
+  with 400 accounts and 400 characters, every row from that module's own
+  `db-auth`/`db-characters` files). Those two plus `db-world` are the three.
+* `data/sql/playerbots/` is NOT one of them, and that is the whole of T78 round
+  3. mod-playerbots builds its OWN `DatabaseLoader` for `acore_playerbots` with
+  no module list at all, so nothing joins a path under `playerbots/` and no
+  press of any button applies a file there -- this app does, at install. The
+  2026-09-17 live gate is the measurement: City Bots' `db-auth`, `db-characters`
+  and `db-world` files were the updater's to apply, and its one
+  `data/sql/playerbots/updates/…citizen_roster.sql` was not.
+
+A direct `.sql` OUTSIDE these directories is therefore never in the updater's
+way, and withholding its module -- which is the only granularity
+`AC_UPDATES_ALLOWED_MODULES` has -- costs real db-import work for nothing. That
+is what it cost live: City Bots' three db-import groups went unapplied because
+of its one `playerbots/` file, the world died on `Table 'acore_world.city_bot_poi'
+doesn't exist`, and the app's own remedy ("Press Apply module SQL") could not be
+followed by pressing the button it named.
+"""
+
+IMPORTER_SQL_DIRS = tuple(f"{IMPORTER_SQL_ROOT}{name}/" for name in IMPORTER_DB_DIRS)
+"""`IMPORTER_DB_DIRS` as clone-relative prefixes, in manifest spelling (POSIX)."""
+
+_APPLIED_UPDATE = re.compile(r"Applying update\s+[\"']?(\S+\.sql)")
+"""The importer's own evidence that it applied a file.
+
+Measured live 2026-09-07 while `acore_world.updates` went 2967 ->
+2968: `>> Applying update aoe_loot_module_string.sql`. The quotes are optional in
+the pattern because the same image prints its refusals wrapped in ANSI colour
+runs (the round-3 gate's importer capture) and this line's exact punctuation is
+upstream's to change; the file name is the part that is stable.
+"""
+
+
+@dataclass(frozen=True)
+class ModuleSqlFile:
+    """One SQL file of one installed module, and which route owns it.
+
+    `route` is the manifest's `applied_by` for the step that names the file, so
+    it is a declaration and not a guess: `direct` means THIS app runs the file
+    with its own client, `db-import` means the file is left to the core updater.
+    A file is evidence of no database row either way -- what a press then did
+    with it is the verdict `module_sql_report()` prints.
+    """
+
+    module: str
+    db: Db
+    path: str
+    route: Literal["direct", "db-import"]
+    when: When = "install"
+    installed_on: str = ""
+    """The date on this app's claim for the clone, `""` when there is no claim.
+
+    **The date the module was INSTALLED here, and nothing more than that** --
+    the name said `applied_on` for one round of review and was wrong twice over.
+    `install()` writes the claim at `apply.py:1366` and runs the SQL at
+    `apply.py:1386`, so the claim exists for every install that got as far as
+    cloning, including one whose `_run_sql()` then raised -- T2 measured exactly
+    that, `DockerSql` refusing with *"container ... is not running"*. Nothing in
+    this app records that a direct file reached a database; that is the whole of
+    T78, and it is why no sentence built from this may say "applied".
+
+    No claim means no date: a clone this app did not make has no install of ours
+    to date, and the directory's own mtime is whatever last wrote inside it -- a
+    `git pull`, an editor, the compile. It was the fallback for one round of
+    review, and printing it as a date this app did something would be inventing
+    the record T78 exists because we do not keep.
+    """
+
+
+@dataclass(frozen=True)
+class ModuleSqlPlan:
+    """Which installed modules the core updater may be given, and why not the rest.
+
+    Built before the importer is started, so the refusal it would otherwise
+    produce is a sentence the user reads instead of an exit code.
+    """
+
+    allowed: str
+    """The value for `AC_UPDATES_ALLOWED_MODULES`.
+
+    `docker.ALL_MODULES` when the folder could not be read or holds no module at
+    all -- exactly what `docker.allowed_modules()` answers, so an install this
+    plan has nothing to say about behaves as it did before T78. Otherwise the
+    comma-joined `handed`, and an empty `handed` with modules on disk is `""`,
+    which upstream reads as *"Loading modules: none"*: the third meaning
+    recorded on `docker.ALL_MODULES`, and the only one that applies no module
+    file at all."""
+
+    handed: tuple[str, ...]
+    withheld: tuple[str, ...]
+    unmanifested: tuple[str, ...]
+    files: tuple[ModuleSqlFile, ...]
+
+
+def module_sql_plan(
+    server_dir: Path,
+    manifests: Sequence[Manifest],
+    installed: Sequence[str] | None,
+) -> ModuleSqlPlan:
+    """Split the modules on disk into the ones the updater may have and the ones it may not.
+
+    **The defect (T78, round-3 gate press 9c).** ARAC's
+    `data/sql/db-world/arac.sql` is `applied_by="direct"`: this app runs it
+    itself, with its own client, and nothing writes a row into the `updates`
+    ledger when it does -- upstream's updater has no way to learn that a file it
+    can see has already been run. `docker.allowed_modules()` then handed the
+    importer every folder under `modules/`, ARAC among them, so the updater
+    opened `arac.sql`, ran it against a world database that already held its
+    columns, and the press ended `ac-db-import exited 1, so its modules' SQL may
+    be part-applied` over a state this app itself had created.
+
+    **What "in the updater's way" means, and it is per FILE (T78 round 3).** The
+    first version of this asked only whether a direct file was under
+    `data/sql/`, which is where the updater is pointed rather than what it
+    walks. City Bots keeps three db-import groups under the three directories
+    the updater DOES walk and one direct file under `data/sql/playerbots/`,
+    which nothing joins a path for -- and that one file withheld the module
+    whole. Measured live 2026-09-17: City Bots installed with "3 left
+    unapplied", the rebuild succeeded, the world aborted on `Table
+    'acore_world.city_bot_poi' doesn't exist`, the app printed its own correct
+    remedy ("Press Apply module SQL on the Modules tab, then Start"), and that
+    button withheld `mod-city-bots`; the world restarted 18 times. A direct file
+    outside `IMPORTER_DB_DIRS` is now no reason to withhold anything, and a
+    direct file inside one still withholds its module -- that is the only lever
+    `AC_UPDATES_ALLOWED_MODULES` offers for a file the updater can see, and the
+    module's db-import work is the price. `module_sql_report()` then says which
+    file cost it.
+
+    **Why this and not a ledger row.** Recording the direct route's files in
+    `updates` was the other candidate and is refused on evidence: nothing in this
+    repository carries that table's schema -- no fixture, no SQL file, no compose
+    file names one of its columns -- the updater re-checks the hash it stored on
+    every later run, and its own refusal says in as many words that applying
+    repository SQL with your own client and using the auto-update system are not
+    to be mixed. A row written from here would be this app guessing at somebody
+    else's bookkeeping, and a wrong guess aborts the NEXT legitimate update
+    rather than this press.
+
+    `installed` is the folder listing -- `None` for "could not be read", which is
+    the one answer that is not a decision: the plan then changes nothing and the
+    press behaves exactly as it did before, which is what
+    `docker.allowed_modules()` does with the same `None`.
+
+    A module on disk that no manifest describes is handed over: this app has no
+    record of applying anything of its own, the updater is its only route, and
+    withholding it would silently stop applying SQL that has always been applied.
+    """
+    if installed is None:
+        return ModuleSqlPlan(
+            allowed=docker.ALL_MODULES, handed=(), withheld=(), unmanifested=(), files=()
+        )
+    by_id = {manifest.id: manifest for manifest in manifests if manifest.type == "module"}
+    handed: list[str] = []
+    withheld: list[str] = []
+    unmanifested: list[str] = []
+    files: list[ModuleSqlFile] = []
+    for name in installed:
+        manifest = by_id.get(name)
+        if manifest is None:
+            unmanifested.append(name)
+            handed.append(name)
+            continue
+        clone = server_dir / CLONE_DIRS["module"] / name
+        installed_on = _installed_on(clone)
+        conflicting = False
+        for step in manifest.sql:
+            if step.path is None:
+                continue  # an inline statement is in no file the updater could open
+            for found in _sql_files(clone, step.path) or (step.path,):
+                files.append(
+                    ModuleSqlFile(
+                        module=name,
+                        db=step.db,
+                        path=found,
+                        route=step.applied_by,
+                        when=step.when,
+                        installed_on=installed_on if step.applied_by == "direct" else "",
+                    )
+                )
+                # Decided per RESOLVED FILE and then raised to the module,
+                # because the module is the only granularity the updater has.
+                # `_blocking_files()` re-asks the same question of the same
+                # strings when the report has to name them, so the sentence
+                # cannot name a file the decision was not made on.
+                if step.applied_by == "direct" and _the_updater_would_find_it(found):
+                    conflicting = True
+        (withheld if conflicting else handed).append(name)
+    return ModuleSqlPlan(
+        allowed=",".join(handed) if installed else docker.ALL_MODULES,
+        handed=tuple(handed),
+        withheld=tuple(withheld),
+        unmanifested=tuple(unmanifested),
+        files=tuple(files),
+    )
+
+
+def _the_updater_would_find_it(path: str) -> bool:
+    """Would the core updater open this clone-relative file if it were given the module?
+
+    Asked of ONE FILE, and the caller supplies the other half (`applied_by ==
+    "direct"`): a db-import file under the same prefix is the updater's job and
+    is no reason to withhold anything.
+
+    `IMPORTER_SQL_DIRS`, not `IMPORTER_SQL_ROOT`, and the difference is T78 round
+    3. `data/sql/` is where the updater is POINTED; the three directories under
+    it are what it walks. A direct file anywhere else under `data/sql/` --
+    City Bots' `data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql` is
+    the shipped one -- is as invisible to it as Battle Pass's `sql/`, so
+    withholding a module over it takes that module's REAL db-import work down
+    with it and leaves the world unable to start. See `IMPORTER_DB_DIRS`.
+
+    `.sql`, because the updater applies nothing else: `npc-teleporter` keeps two
+    `data/sql/db-world/*.dist` files, which sit inside a walked directory and
+    are not update files.
+
+    The step's `when` is deliberately not read by the caller. A `remove` step's
+    file is one this app runs itself too, and a Down script applied by the
+    updater on an install that still wants the module is a worse outcome than a
+    skipped update.
+    """
+    return path.endswith(".sql") and path.startswith(IMPORTER_SQL_DIRS)
+
+
+def _blocking_files(plan: ModuleSqlPlan, module: str) -> tuple[str, ...]:
+    """The files of `module` that are the reason it was withheld, in plan order.
+
+    Derived from the plan rather than carried beside it, and asked with the same
+    predicate `module_sql_plan()` decided with, over the same resolved strings.
+    A second field would be a second answer to "which file cost this module its
+    updates", and the sentence could then name a file the decision was not made
+    on -- which is exactly the shape of the bug being fixed, one level up.
+    """
+    return tuple(
+        entry.path
+        for entry in plan.files
+        if entry.module == module
+        and entry.route == "direct"
+        and _the_updater_would_find_it(entry.path)
+    )
+
+
+def _and_list(items: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c` -- for a sentence a person reads, not a log grep."""
+    if len(items) == 1:
+        return items[0]
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _installed_on(clone: Path) -> str:
+    """The date on this app's own claim for `clone`, or `""` when there is none.
+
+    The claim and nothing else. A directory mtime was the fallback for one round
+    of review and is not a date this app did anything: it moves when a `git
+    pull`, an editor or a compile writes inside the checkout, and for a clone
+    this app never made it would put OUR name on a stranger's timestamp. No
+    claim is no record, and the sentence then carries no date at all.
+    """
+    try:
+        return date.fromtimestamp((clone / CLAIM_FILE).stat().st_mtime).isoformat()
+    except (OSError, ValueError, OverflowError):
+        return ""
+
+
+def applied_updates(lines: Sequence[str]) -> frozenset[str]:
+    """The file names the importer said it applied, as base names.
+
+    Base names, because that is what upstream prints and what `UpdateFetcher`
+    keys its ledger on -- not the clone-relative path this app tracks a step by.
+    Two modules shipping a file of the same name would therefore both read as
+    applied; that is the direction that cannot invent an application which did
+    not happen.
+    """
+    found: set[str] = set()
+    for line in lines:
+        match = _APPLIED_UPDATE.search(line)
+        if match:
+            found.add(PurePosixPath(match.group(1)).name)
+    return frozenset(found)
+
+
+def module_sql_report(
+    plan: ModuleSqlPlan,
+    *,
+    service: str,
+    applied: frozenset[str],
+    refusal: str = "",
+) -> tuple[str, ...]:
+    """One sentence per SQL file: what this press did with it, and what it did not.
+
+    The report T78 owes. Three verdicts were asked for and there are five, and
+    the two that were added are the two that would otherwise have been lies:
+
+    * a db-import file the importer did not name is not "applied" (nothing ran)
+      and not "refused" (nothing complained) -- it is a file already in the
+      updater's own ledger, which is what every press after the first looks
+      like;
+    * a db-import file inside a WITHHELD module was not offered to the updater
+      at all, so no verdict of this run belongs to it.
+
+    **The withheld module's sentence names the file that cost it.** It used to
+    say "this app runs that folder's SQL itself", which is true of ARAC -- whose
+    one SQL step IS the direct one -- and false of every module with more than
+    one. The 2026-09-17 gate read that sentence over `mod-city-bots`, where the
+    app runs one of four SQL groups; saying which file is what makes it true of
+    a mixed module, and it is the sentence a user needs to act on.
+
+    **Nothing here says a direct file was applied**, and that is the whole
+    discipline of this function rather than a nicety. This app keeps no record
+    that a direct file reached a database -- exactly the gap T78 is about -- so
+    the only honest report of one is which route owns it, plus the date of this
+    app's own claim where there is one. See `ModuleSqlFile.installed_on`.
+
+    `refusal` is the updater's words, empty when it exited 0. It is printed
+    against every db-import file the run did not name, because an importer that
+    stopped part-way cannot say which of the files it had not reached it would
+    have applied -- and naming them all is the only reading that does not
+    promise one of them was fine.
+    """
+    lines: list[str] = []
+    for name in plan.withheld:
+        blocking = _blocking_files(plan, name)
+        what = _and_list(blocking) if blocking else "that folder's SQL"
+        lines.append(
+            f"{name}: not given to {service} -- this app runs {what} itself, and "
+            f"the updater refuses a file it holds no ledger row for."
+        )
+    for name in plan.unmanifested:
+        lines.append(
+            f"{name}: given to {service} -- this app has no manifest for it and runs none of "
+            f"its SQL, so the updater is its only route."
+        )
+    for entry in plan.files:
+        where = f"sql {entry.path} -> {entry.db}"
+        if entry.route == "direct":
+            # NEVER "applied". This app keeps no record that a direct file
+            # reached a database -- that absence IS T78 -- and the claim it does
+            # keep is written before the SQL runs (`install()`, apply.py:1366
+            # ahead of :1386), so an install whose `_run_sql()` raised leaves a
+            # clone and a claim behind with nothing in the world database. What
+            # is known is the route and, if this app made the clone, the date it
+            # installed the module; the sentence says exactly those two.
+            when = "at install" if entry.when == "install" else f"on {entry.when}"
+            on = f" (module installed here on {entry.installed_on})" if entry.installed_on else ""
+            lines.append(
+                f"{where}: not handed to the updater: this app applies it itself {when}{on}"
+            )
+        elif entry.module in plan.withheld:
+            # The module went nowhere, so neither did this file. Reporting it as
+            # already-ledgered would be the T78 defect upside down: a promise
+            # that a file is in the database because nothing complained about a
+            # run it was never part of.
+            lines.append(
+                f"{where}: not applied: {entry.module} was not given to {service}, so the "
+                f"updater was not offered this file either"
+            )
+        elif PurePosixPath(entry.path).name in applied:
+            lines.append(f"{where}: applied")
+        elif refusal:
+            lines.append(f"{where}: refused: {refusal}")
+        else:
+            lines.append(
+                f"{where}: not applied now: {service} did not name it, which is what a file "
+                f"already in its updates ledger looks like"
+            )
+    return tuple(lines)

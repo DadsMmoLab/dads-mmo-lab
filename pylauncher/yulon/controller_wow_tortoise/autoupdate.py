@@ -491,6 +491,7 @@ class GuardedApplier(Applier):
         *,
         folder: FolderSource | None = None,
         complete: Completer | None = None,
+        replacing: bool = False,
     ) -> ApplyReport:
         # `folder` and `complete` are the base class's second way to fill
         # `modules/<id>` (a module from a link or a folder). Passed THROUGH,
@@ -500,7 +501,12 @@ class GuardedApplier(Applier):
         # nothing for. The guard still runs first, whichever route fills the
         # folder -- the restart a C++ module asks for is the same restart.
         note = self._guard(manifest, "install")
-        return _with_note(super().install(manifest, values, folder=folder, complete=complete), note)
+        return _with_note(
+            super().install(
+                manifest, values, folder=folder, complete=complete, replacing=replacing
+            ),
+            note,
+        )
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "configure")

@@ -297,6 +297,34 @@ class ChannelSetup(Protocol):
     def setup_state(self) -> object: ...
 
 
+@dataclass(frozen=True)
+class DatabaseAlone:
+    """Bring this install's database up on its own, and put it back down (T76).
+
+    One object rather than two callables, for `ChannelSetup`'s reason: the two
+    halves are one decision seen from both ends, and a tab wired with a `start`
+    and no `stop` would leave a database running that nobody asked to run.
+
+    `bring_up` answers whether it HAD to start the container -- `docker.
+    start_database()`'s own return -- and that answer is the only thing that
+    may make `take_down` run. A backup on a server the user had running must
+    not stop it; a backup on a stopped server must not leave it up.
+
+    `bring_up`/`take_down` rather than `start`/`stop`, for `ChannelSetup.
+    setup_state()`'s reason: `test_every_seam_for_wotlk_builds_says_which_
+    daemon_it_means` flags any call in this file to a name that is declared
+    somewhere with a `wsl_distro` parameter and does not pass one, and both of
+    those names are. A method here that shared one would have to be excused by
+    hand, and a guard with an exemption for a name collision is a guard one
+    step nearer to useless.
+    """
+
+    bring_up: Callable[[], bool]
+    """Start the database alone and wait for it to be healthy. True if it had to."""
+    take_down: Callable[[], None]
+    """Stop the database again. Called only where `bring_up` answered True."""
+
+
 _ROW_SETTLE_MS = 750
 """How long to leave the server to write what it has already reported.
 
@@ -405,22 +433,35 @@ pickers choose a directory or a file, never either, and a second control for a
 `.zip` doubles the surface for something the user does with one right-click.
 """
 
-CustomModuleInstall = Callable[[Manifest, "Path | None"], ApplyReport]
-"""Install a manifest this app derived rather than shipped; `None` means "clone it".
 
-DEVIATION from the design (§3.3, §3.5), forced and recorded rather than quiet.
-The design has this view call `applier.install(m, None, folder=FolderSource(
-path, copier), complete=...)` — lane B's widened signature, over lane A's
-`copy_folder` and `complete`. Neither lane is on this branch, so the view would
-not type-check against them, and a view that constructs `apply.FolderSource`
-knows one thing more about the applier than `ui/*_view.py` is allowed to
-(style-guide §3: delegate, never hold the business logic). So the whole call
-sits behind one seam, wired from `controller_<acronym>/modules.py` — the file
-whose job is "binding the shared applier to that game" — and the view hands it
-the two things only the view can know: which manifest, and which folder the
-user chose. Everything the design lists as `module_complete` and
-`module_copy_folder` lives on the far side of it.
-"""
+class CustomModuleInstall(Protocol):
+    """Install a manifest this app derived rather than shipped; `None` means "clone it".
+
+    A `Protocol` rather than the `Callable` alias this was until T47, for the
+    one keyword: `replacing` carries the user's Yes to
+    `ControllerServices.module_replacement_question`'s sentence, and a
+    `Callable[...]` cannot give an argument a default. Every caller that is
+    replacing nothing still calls this with two positional arguments and gets
+    the behaviour it always had.
+
+    DEVIATION from the design (§3.3, §3.5), forced and recorded rather than
+    quiet. The design has this view call `applier.install(m, None,
+    folder=FolderSource(path, copier), complete=...)` — lane B's widened
+    signature, over lane A's `copy_folder` and `complete`. Neither lane was on
+    that branch, so the view would not type-check against them, and a view that
+    constructs `apply.FolderSource` knows one thing more about the applier than
+    `ui/*_view.py` is allowed to (style-guide §3: delegate, never hold the
+    business logic). So the whole call sits behind one seam, wired from
+    `controller_<acronym>/modules.py` — the file whose job is "binding the
+    shared applier to that game" — and the view hands it the two things only
+    the view can know: which manifest, and which folder the user chose.
+    Everything the design lists as `module_complete` and `module_copy_folder`
+    lives on the far side of it.
+    """
+
+    def __call__(
+        self, manifest: Manifest, folder: Path | None, *, replacing: bool = False
+    ) -> ApplyReport: ...
 
 
 def ask_module_link(parent: QWidget, title: str) -> str | None:
@@ -451,6 +492,59 @@ def ask_module_folder(parent: QWidget, title: str) -> Path | None:
     """
     chosen = QFileDialog.getExistingDirectory(parent, title)
     return Path(chosen) if chosen else None
+
+
+SET_CLIENT_DIR_LABEL = "Set client folder…"
+"""The Server tab's own button (T36), and the button the client notice offers (T62).
+
+One constant because the notice tells the user to press something by name and
+that name is a widget's label: a rename that reached only one of them would send
+its reader looking for a control that is not there — the defect `REBUILD_HISTORY`
+records, in miniature."""
+
+
+def client_notice(manifest: Manifest) -> str:
+    """What the user is told before installing a module that also changes the game client.
+
+    Plain words and the files by name, because "client step" is this app's
+    vocabulary and a user knows only what they will or will not see in the
+    game. It says what happens if they carry on without a folder — the server
+    half lands and the game half does not — so that choosing to set the folder
+    is a decision rather than a chore (owner, 2026-09-15: "Before installing
+    any modules that needs a client they should get known about it").
+    """
+    files = ", ".join(Path(step.src).name for step in manifest.client)
+    return (
+        f"{manifest.name} also changes your WoW game client, not only the server: it puts "
+        f"{files} into your game folder. No client folder is set for this install, so that "
+        f"part would be left out and {manifest.name} would not work properly in the game.\n\n"
+        f"Set your client folder first, then press Install again. Nothing has been installed yet."
+    )
+
+
+def ask_to_set_client_dir(parent: QWidget, manifest: Manifest) -> bool:
+    """The client notice as a dialog: True for "Set client folder…", False for Cancel.
+
+    An instance rather than the static `question()` so the button can say what
+    it does, relabelled the way `catalog_view._qt_suggestion_asker` relabels its
+    own. Read through `said_yes()` all the same: `exec()` hands back a plain int
+    on this PySide6, and `is StandardButton.Yes` would read every press as
+    Cancel (T33). Cancel is the default and the escape button, so Enter, Escape
+    and the close button all install nothing.
+    """
+    box = QMessageBox(
+        QMessageBox.Icon.Information,
+        f"{manifest.name} needs your game client",
+        client_notice(manifest),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        parent,
+    )
+    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    set_button = box.button(QMessageBox.StandardButton.Yes)
+    if set_button is not None:
+        set_button.setText(SET_CLIENT_DIR_LABEL)
+    return said_yes(box.exec())
 
 
 ModuleSqlRoute = Callable[[Callable[[str], None]], docker.AttachedRun]
@@ -509,6 +603,14 @@ class ControllerServices:
     A small object rather than two callables because the two questions belong
     together: pressing enable and asking where the setup has got to are the same
     state machine seen from two sides.
+    """
+    database_alone: DatabaseAlone | None = None
+    """How to bring this install's database up for a backup, and put it back (T76).
+
+    `None` leaves `back_up()` doing exactly what it did before -- run the
+    backup, and let it refuse if the database is down. Every shipped entry wires
+    it; a tab that does not is a tab whose backup still works on a running
+    server, which is the behaviour this replaces rather than one it breaks.
     """
     bots: BotBrowser | None = None
     """This install's bots, for a game whose marker is measured (8.5a).
@@ -675,6 +777,20 @@ class ControllerServices:
     See `CustomModuleInstall` for why this is one seam rather than the
     design's `applier.install(..., folder=..., complete=...)`.
     """
+    module_replacement_question: Callable[[Manifest], str | None] | None = None
+    """What the user must agree to before an install replaces the clone already there (T47).
+
+    `None` back from the seam is "nothing to ask about", which is the ordinary
+    answer: no clone at that path, or one of the repository this manifest names.
+    A sentence is the one case only the person can decide — a clean checkout of
+    a DIFFERENT repository under the same `modules/<id>` — and it is asked
+    before any job is queued, because the engine runs off the GUI thread and
+    cannot open a dialog. Every other way an install would destroy something
+    stays a refusal from the engine and never becomes a question.
+
+    `Applier.replacement_question()` is the whole of it; this seam exists so the
+    view can ask without holding an applier (style-guide §3).
+    """
     module_forget: Callable[[Manifest], bool] | None = None
     """Drop this app's record of a custom module, answering whether there was one.
 
@@ -707,6 +823,22 @@ class ControllerServices:
 
     One field holding a pair rather than two optional callables — see
     `native.UpdateRoute` for why the halves must not be able to arrive apart.
+    """
+
+    update_to_latest: native.LatestRoute | None = None
+    """Move this install's sources to upstream's newest code and rebuild; None when it cannot.
+
+    The fourth optional seam, hidden rather than greyed on `None`, and that is
+    the one difference from the three above it. A greyed control says "this
+    exists and is not available now"; for a server adopted from a WSL distro,
+    or an entry whose catalog does not offer the route, this control does not
+    exist at all and never will for that install. `install_wiring.
+    update_to_latest_for_app()` is what answers, and it reads both facts there
+    rather than here.
+
+    One field holding five callables rather than five optional fields -- see
+    `native.LatestRoute` for why the way BACK must not be able to arrive without
+    the way forward.
     """
 
     adopt: native.AdoptRoute | None = None
@@ -924,6 +1056,34 @@ def _mysql_for(
     )
 
 
+def _database_alone(
+    spec: docker.ContainerSpec, server_dir: Path, *, wsl_distro: str | None
+) -> DatabaseAlone:
+    """The two halves of "bring the database up for a backup, then put it back" (T76).
+
+    One factory and four call sites, because the four games must not disagree
+    about this: the reason the backup needed it is identical in all four (a
+    `mysqldump` through `docker exec` needs the container to exist and be
+    running), and so is the reason it is stopped again.
+
+    `because` completes `docker.start_database()`'s timeout sentence, and it
+    says what was not done rather than what was attempted -- a user reading
+    *"…did not report healthy within 180s, so no backup was taken"* knows the
+    state their server is in, which is the whole job of that sentence.
+
+    `stop_containers([spec.db])` and not `stop_staged()`: only the container
+    this started may be stopped. `stop_staged()` takes the compose project down,
+    and a backup that stopped a server somebody was playing on would be a far
+    worse press than one that failed.
+    """
+    return DatabaseAlone(
+        bring_up=lambda: docker.start_database(
+            spec, server_dir, because="no backup was taken", wsl_distro=wsl_distro
+        ),
+        take_down=lambda: docker.stop_containers([spec.db], wsl_distro=wsl_distro),
+    )
+
+
 def _no_manifest_store(entry: CatalogEntry) -> ManifestStore | None:
     """None, and a warning if the catalog has since said otherwise.
 
@@ -990,6 +1150,7 @@ def _assemble(
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
     module_install_custom: CustomModuleInstall | None = None,
+    module_replacement_question: Callable[[Manifest], str | None] | None = None,
     module_forget: Callable[[Manifest], bool] | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
@@ -1014,6 +1175,15 @@ def _assemble(
         network_apply=lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
         create_account=create_account,
         backup=backup,
+        # HERE, in the shared half, for the rebuild's reason one line further
+        # down: bringing a database up for a backup takes no per-game decision
+        # at all -- the container name is `ContainerSpec`'s and the compose
+        # service is the one `docker.start_database()` already reads off it --
+        # and wiring it once is what makes "every game's Backup button works on
+        # a stopped server" true by construction rather than by remembering it
+        # four times. Four copies is how `_for_tortoise` came to be the one
+        # factory that never bound `play`.
+        database_alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
         backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
         plan_restore=plan_restore,
         restore=restore,
@@ -1052,6 +1222,10 @@ def _assemble(
         module_from_link=module_from_link,
         module_from_folder=module_from_folder,
         module_install_custom=module_install_custom,
+        # T47's question, on the same flag as the four above: it is about the
+        # clone an install of a derived manifest would land on, so it belongs
+        # to the games that have such clones and to no other.
+        module_replacement_question=module_replacement_question,
         module_forget=module_forget,
         # HERE, in the shared half, and not in the four per-game factories. A
         # rebuild takes no per-game decision at all — the engine is chosen from
@@ -1071,6 +1245,15 @@ def _assemble(
         # scripts, which carries no marker row and which T14's button therefore
         # cannot reach (T19).
         adopt=_adopt_route(entry, server_dir, wsl_distro=wsl_distro),
+        # HERE for the rebuild's reason -- it takes no per-game decision that is
+        # not already in `catalog.json` -- and wired through `install_wiring`
+        # rather than assembled inline the way `_updates_route()` is, because
+        # both of its refusals are facts about the INSTALL (the entry's flag,
+        # and the WSL distro whose daemon `native.Seams` cannot address) and
+        # that module is where the rebuild's identical refusal already lives.
+        update_to_latest=install_wiring.update_to_latest_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
     )
 
 
@@ -1253,11 +1436,23 @@ def _for_wotlk(
     # `container ... is not running` (T2's press, 2026-09-09). The world is
     # never started here: only the database, alone, which is the state the
     # guard permits.
+    #
+    # `dbc` is T62. Without it every `server_dbc` step -- mod-arac's race/class
+    # DBCs, the SoD keg's spells -- was reported skipped and never reached the
+    # server. Only an entry naming its client-data service can be given one:
+    # that service is the only thing that mounts the data volume read-write.
     module_applier = (
         wotlk_modules.applier(
             server_dir,
             sql=sql,
             client_dir=client_dir,
+            dbc=(
+                wotlk_modules.dbc_copier(
+                    server_dir, service=entry.containers.client_data, wsl_distro=wsl_distro
+                )
+                if entry.containers.client_data
+                else None
+            ),
             world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
@@ -1429,6 +1624,11 @@ def _for_wotlk(
         module_from_folder=wotlk_modules.derive_folder if module_applier is not None else None,
         module_install_custom=(
             wotlk_modules.install_custom(module_applier) if module_applier is not None else None
+        ),
+        module_replacement_question=(
+            wotlk_modules.replacement_question(module_applier)
+            if module_applier is not None
+            else None
         ),
         module_forget=wotlk_modules.forget if module_applier is not None else None,
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
@@ -2192,6 +2392,97 @@ Defined here rather than inline so a test can assert the label and the mode
 together without retyping the string, and placed below `_assemble()` so it does
 not move the `networking.apply(...)` call `test_controller_view.py` pins by line.
 """
+
+UPDATE_TO_LATEST_BUTTON_LABEL = "Update the server to latest…"
+"""The T64 press, in one place because the button and its tests both say it.
+
+The ellipsis is this tab's convention for "this opens a dialog first", and here
+it is carrying more than usual: it is the only thing between a single click and
+a multi-hour compile of code nobody has tested.
+"""
+
+RETURN_TO_PIN_BUTTON_LABEL = "Return to the tested pin…"
+"""The way back off an untested commit, shown only once there is one to go back from."""
+
+
+class UpdateChoice(enum.Enum):
+    """What the one T64 dialog can be answered with. Three, and `CANCEL` is the default.
+
+    An enum rather than a `bool | None`, because the two "yes" answers differ by
+    the most consequential thing in the flow -- whether a backup is taken first
+    -- and a caller that had to remember which of `True`/`False` meant which
+    would be one rename away from starting an update that was asked to back up.
+    """
+
+    BACK_UP_FIRST = "back-up-first"
+    WITHOUT_BACKUP = "without-backup"
+    CANCEL = "cancel"
+
+
+def ask_update_choice(parent: QWidget | None, title: str, text: str) -> UpdateChoice:
+    """Put T64's three-way question, defaulting to Cancel. Never raises.
+
+    **The three buttons are STANDARD buttons with their labels replaced**, which
+    is `catalog_view._qt_suggestion_asker()`'s shape and is chosen for the same
+    two reasons: a relabelled standard button keeps its platform position and
+    its keyboard role, and `box.exec()` then answers with a value this function
+    can map -- a `addButton(text, role)` custom button answers with an opaque id
+    that only `clickedButton()` can resolve, and `clickedButton()` is `None`
+    under the test fixture that stops a modal blocking an offscreen run.
+
+    **`No` is deliberately not one of them, and that is a safety property rather
+    than a spelling.** `tests/conftest._no_modal_dialogs` answers every
+    unpatched `exec()` with `No`, because `No` is the reply that takes no
+    action. If `No` meant "update without a backup" here, every test in the
+    suite that so much as brushed this control would start a compile of
+    untested code. `Yes`, `Save` and `Cancel` are used instead, and anything
+    this function does not recognise -- `No` included, and `NoButton`, which is
+    what Escape and the window's close button answer -- falls through to
+    `CANCEL`. The one answer that cannot be arrived at by accident is the
+    destructive one.
+
+    `Save` for "Update without a backup" is not a description of the button; it
+    is a slot with an `AcceptRole` that is neither `Yes` nor `No`, and the text
+    on it is what the user reads. `Cancel` carries `RejectRole`, which is what
+    makes Escape land on it.
+    """
+    box = QMessageBox(
+        QMessageBox.Icon.Warning,
+        title,
+        text,
+        QMessageBox.StandardButton.Yes
+        | QMessageBox.StandardButton.Save
+        | QMessageBox.StandardButton.Cancel,
+        parent,
+    )
+    _relabel(box, QMessageBox.StandardButton.Yes, "Back up first, then update")
+    _relabel(box, QMessageBox.StandardButton.Save, "Update without a backup")
+    _relabel(box, QMessageBox.StandardButton.Cancel, "Cancel")
+    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+    # And the ESCAPE button by name. `setDefaultButton` decides what Enter does;
+    # this decides what Escape and the title bar's X do, and leaving it to Qt to
+    # infer from the button roles is leaving the least reversible press in this
+    # app to an inference.
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    answer = box.exec()
+    if answer == QMessageBox.StandardButton.Yes:
+        return UpdateChoice.BACK_UP_FIRST
+    if answer == QMessageBox.StandardButton.Save:
+        return UpdateChoice.WITHOUT_BACKUP
+    return UpdateChoice.CANCEL
+
+
+def _relabel(box: QMessageBox, which: QMessageBox.StandardButton, text: str) -> None:
+    """Put `text` on a standard button, if this Qt gave us one to put it on.
+
+    `button()` is typed as returning `QPushButton | None` and the None branch is
+    not decoration: a box built without that standard button answers None, and a
+    crash inside a confirmation dialog is a crash instead of a question.
+    """
+    found = box.button(which)
+    if found is not None:
+        found.setText(text)
+
 
 REBUILD_BUTTON_LABEL = "Rebuild the server…"
 """The rebuild button's label, in one place because two things say it.
@@ -3432,6 +3723,13 @@ before anything was derived, which is exactly what the sentence has to convey.
 
 MODULE_FOLDER_CANCELLED = "install from folder: cancelled — nothing on this machine was changed."
 
+MODULE_REPLACE_TITLE = "Replace the checkout of {id}?"
+"""The title over `Applier.replacement_question()`'s sentence (T47).
+
+The title asks and the body explains, which is how every other Yes/No on this
+tab reads — and the id is in it because a user who reaches this has a folder
+under `modules/` whose name is the only thing the two repositories share."""
+
 _IMPORT_LINE_CHARS = 110
 """How much of the import's output the label carries: the last two lines, trimmed.
 
@@ -3569,6 +3867,11 @@ class ControllerView(QWidget):
         # the panel's success alone would tell a user their module was live
         # because an unrelated SQL run went through.
         self._rebuild_is_compile = False
+        # T64: a `mysqldump` is running off the GUI thread, chained in front of
+        # an update. `_busy` is the LOG PANEL's flag and a backup is not a job in
+        # that panel, so without this nothing on the tab knows -- see
+        # `_update_route_busy()` for what a second press did.
+        self._backup_before_update = False
         self._sql_owed: dict[tuple[str, str], tuple[str, ...]] = {}
         self._behind: dict[tuple[str, str], int] = {}
         self._repair_armed = False
@@ -3695,7 +3998,7 @@ class ControllerView(QWidget):
             # fact and must not be able to disagree the way two separate reads
             # of a value that cannot change without a rebuild never could.
             has_client = self.services.client_dir is not None
-            change_label = "Change client folder…" if has_client else "Set client folder…"
+            change_label = "Change client folder…" if has_client else SET_CLIENT_DIR_LABEL
             self.set_client_dir_button = QPushButton(change_label, tab)
             self.set_client_dir_button.clicked.connect(self.change_client_dir)
             self.forget_client_dir_button = QPushButton("Forget client folder", tab)
@@ -4369,6 +4672,12 @@ class ControllerView(QWidget):
             if self.forget_client_dir_button is not None:
                 self.forget_client_dir_button.setEnabled(False)
             self.rebuild_button.setEnabled(False)
+            # And both T64 presses, for the rebuild's reason exactly: each of
+            # them IS that rebuild with a fetch in front of it. Disabled and not
+            # hidden -- whether they exist at all is `_refresh_source_version()`'s
+            # question and a job of ours must not answer it.
+            self.update_to_latest_button.setEnabled(False)
+            self.return_to_pin_button.setEnabled(False)
             # And the updates press, for the importer's reason above rather than
             # for symmetry: it reaches the same `import` stage against the same
             # databases, so one while another action is live is two writers.
@@ -4458,6 +4767,13 @@ class ControllerView(QWidget):
             if self.forget_client_dir_button is not None:
                 self.forget_client_dir_button.setEnabled(True)
             self.rebuild_button.setEnabled(self.services.rebuild is not None)
+            # Back to what this install can do, never unconditionally, and then
+            # the version line is re-read: the job that just finished may BE the
+            # press that moved this server off its pins, so the line and the
+            # "Return to the tested pin…" button beside it are both stale until
+            # this runs.
+            self._set_update_buttons()
+            self._refresh_source_version()
             # Back to what this install can do, never unconditionally: three of
             # the four games have no such phase and must not be handed a live
             # button by any job of their own finishing.
@@ -6368,11 +6684,56 @@ class ControllerView(QWidget):
     def _forget_done(self, _result: object) -> None:
         self._show_interrupted()
 
+    def _backup_with_the_database(self) -> object:
+        """Take the backup, starting the database alone first if it is down (T76).
+
+        **Runs on the worker thread**, which is the whole reason it is a method
+        and not three lines in `back_up()`: `docker.start_database()` waits up
+        to `_DB_HEALTHY_TIMEOUT_SECONDS` for health, and a GUI thread parked on
+        that is a frozen window.
+
+        The backup is a `mysqldump` through `docker exec` into the database
+        container, so with the stack stopped -- the ordinary state of a server
+        nobody is playing on, and the state a user is in when they press
+        "Update the server to latest…" -- it answered *"<db> is not running, so
+        there is no database to back up"* and nothing was backed up. Measured on
+        the Vanilla box, 2026-09-16 (T64's live gate, `dbdown-*`): the
+        recommended button failed on the first press.
+
+        **The same seam the applier uses for direct SQL** (`apply.Applier.
+        _start_the_database_for_direct_sql`, T7) and for the same reason: the
+        world is never started, only the database, because what is wanted is a
+        database process to talk to and not a server that will write over the
+        rows being dumped.
+
+        **The database is left as it was found.** `start()` answers whether it
+        had to start anything, and only that answer runs `stop()`. Leaving it up
+        would be defensible after an update -- the rebuild recreates the whole
+        stack a few minutes later -- but this is ONE decision for both buttons,
+        and after the plain Backup button there is no rebuild coming: a press
+        that quietly left a stopped server's database running is a press that
+        changed something the user did not ask about. So it is put back, in both
+        places, and the update's own `recreate` stage starts what it needs.
+
+        `finally` and not a tidy line at the end: a backup that fails half way
+        through must not leave the container up either, and `MaintenanceError`
+        is the ordinary way out of here.
+        """
+        alone = self.services.database_alone
+        if alone is None:
+            return self.services.backup()
+        started = alone.bring_up()
+        try:
+            return self.services.backup()
+        finally:
+            if started:
+                alone.take_down()
+
     @Slot()
     def back_up(self) -> None:
         self.backup_button.setEnabled(False)
         self.maintenance_report.setPlainText("Backing up… this can take minutes on a full world.")
-        self._run(self.services.backup, self._backup_done, self._maintenance_failed)
+        self._run(self._backup_with_the_database, self._backup_done, self._maintenance_failed)
 
     @Slot(object)
     def _backup_done(self, result: object) -> None:
@@ -6587,6 +6948,46 @@ class ControllerView(QWidget):
             "install. Asks first, names the one row it writes, and refuses while the server "
             "is running. Yu'lon cannot check the import finished -- you are saying so."
         )
+        # T64, immediately right of Rebuild, which is what the approved design
+        # asks for: the two are the same act -- compile this server again -- and
+        # they differ only in what is compiled. Put anywhere else, a user
+        # looking for "how do I get the newest code" would find the button that
+        # recompiles the same commit.
+        #
+        # ABSENT rather than greyed where there is no route, which is the one
+        # place this tab breaks its own rule (see `ControllerServices.
+        # update_to_latest`): for a WSL-resident server or an entry the catalog
+        # does not offer this for, there is nothing that would ever enable it.
+        self.update_to_latest_button = QPushButton(UPDATE_TO_LATEST_BUTTON_LABEL, tab)
+        self.update_to_latest_button.clicked.connect(self.update_to_latest)
+        self.update_to_latest_button.setToolTip(
+            "Fetch the newest code from the repositories this server was built from and compile "
+            "it. Asks first, and offers a backup: this is code nobody has tested with this app."
+        )
+        self.update_to_latest_button.setVisible(self.services.update_to_latest is not None)
+        # Hidden until this install has actually been moved off its pins, and
+        # that is not the same rule as the button above. There is nothing to
+        # return FROM on a server that is still on the commit the gates ran on,
+        # and a live "Return to the tested pin…" there would offer a multi-hour
+        # compile that ends exactly where it started.
+        self.return_to_pin_button = QPushButton(RETURN_TO_PIN_BUTTON_LABEL, tab)
+        self.return_to_pin_button.clicked.connect(self.return_to_the_tested_pin)
+        self.return_to_pin_button.setToolTip(
+            "Compile the server again from the commit this app was tested against. It does not "
+            "undo anything the newer server wrote into your databases."
+        )
+        self.return_to_pin_button.setVisible(False)
+        # What this install was last built from, in `native.source_revs_line()`'s
+        # words. Blank -- and the whole row hidden -- for a server still on its
+        # pins, which is every install that has never pressed the button above:
+        # a line repeating the catalog would be a reading of `catalog.json`
+        # dressed up as a reading of the folder.
+        self.source_version_label = QLabel("", tab)
+        self.source_version_label.setWordWrap(True)
+        self.source_version_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.source_version_label.setVisible(False)
         # Its own panel, not the report box above it. `module_report` is a
         # `setPlainText` field that shows the LAST action's result, and a
         # multi-hour job written into it would show one line and then look
@@ -6635,6 +7036,8 @@ class ControllerView(QWidget):
         actions.addWidget(self.updates_button)
         actions.addWidget(self.module_sql_button)
         actions.addWidget(self.rebuild_button)
+        actions.addWidget(self.update_to_latest_button)
+        actions.addWidget(self.return_to_pin_button)
         # The banner, hidden until something owes a rebuild. It is above the
         # cards rather than on each owing row because the ACTION is one action
         # for all of them -- one compile covers every module installed since the
@@ -6707,6 +7110,11 @@ class ControllerView(QWidget):
             MODULE_LIST_MIN_HEIGHT,
         )
         self._add_panel_tab(tab, "modules", "Modules")
+        # The first reading, taken once the widgets it writes into exist. One
+        # small file, no daemon and no remote: cheap enough to pay on every tab
+        # the app opens, which is what lets an install that was updated in an
+        # earlier session say so without anybody pressing anything.
+        self._refresh_source_version()
         # Keyed by (FAMILY, id) since round 2, for `modules_panel._rows`'s
         # reason: nothing makes an id unique across families, and an id-keyed
         # dict handed `selected_manifest()` the other family's manifest --
@@ -7135,6 +7543,8 @@ class ControllerView(QWidget):
                 f"Nothing on this machine was changed."
             )
             return
+        if action == "install" and self._stopped_for_the_client(f"install {manifest.id}", manifest):
+            return
         # An update re-runs the INSTALL-time steps -- it is the install over
         # content that has moved -- so it answers the install's prompts.
         go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action])
@@ -7248,6 +7658,16 @@ class ControllerView(QWidget):
         the report is `_format_report`'s — the one that carries the C++ rebuild
         sentence and the pending-SQL lines — and there is no second place for
         that copy to drift.
+
+        **One question can stand between the derive and the job** (T47). A
+        derived id is the name of a folder under `modules/`, so it can already
+        be one this app filled from a DIFFERENT repository, and installing over
+        it is a `git reset --hard` that nobody asked about. The question is put
+        here, on the GUI thread, before anything is queued — the engine runs on
+        a worker and cannot open a dialog — and Cancel starts nothing at all:
+        `route` is never called, so no git runs and the folder is untouched.
+        Every other way this install would destroy something stays a refusal
+        from the engine, arriving through `_module_failed` like any other.
         """
         try:
             manifest = derive()
@@ -7262,10 +7682,120 @@ class ControllerView(QWidget):
             self.module_report.setPlainText(str(exc))
             self.action_failed.emit(str(exc))
             return
+        if self._stopped_for_the_client(f"{what} {manifest.id}", manifest):
+            return
         self._acting_on = manifest
+        question = self._replacement_question(manifest)
+        if question is not None and not self._confirm(
+            MODULE_REPLACE_TITLE.format(id=manifest.id), question
+        ):
+            logger.info(f"{what} {manifest.id} declined at the replace-the-checkout question")
+            self._module_pending = None
+            self._acting_on = None
+            self.module_report.setPlainText(
+                f"{what} {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
         self._module_pending = f"{what} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(lambda: route(manifest, folder), self._module_done, self._module_failed)
+        self._run(
+            lambda: route(manifest, folder, replacing=question is not None),
+            self._module_done,
+            self._module_failed,
+        )
+
+    def _replacement_question(self, manifest: Manifest) -> str | None:
+        """The seam's question about the clone already at this manifest's path, if any.
+
+        Anything the seam raises is swallowed into `None`, and that is safe in
+        one direction only — which is why it is done here rather than left to
+        crash the GUI thread. `None` means no question is asked, and an install
+        that WOULD have been asked about is then refused by the engine's own
+        guard with "Nothing was changed." A failure to ask never becomes a
+        silent reset.
+        """
+        ask = self.services.module_replacement_question
+        if ask is None:
+            return None
+        try:
+            return ask(manifest)
+        except Exception as exc:  # boundary: git or the disk, on the GUI thread
+            logger.warning(f"could not tell what installing {manifest.id} would replace: {exc}")
+            return None
+
+    def _stopped_for_the_client(self, what: str, manifest: Manifest) -> bool:
+        """T62: tell the user before an install whose client half would be skipped.
+
+        `Applier._client()` skips every `client` step when the install has no
+        client folder, and says so only in the report AFTER the server half has
+        landed — so `mod-arac` put its SQL and DBCs in, left `Patch-A.MPQ` out,
+        and the user found out in the game, if at all. Asked here instead,
+        before anything runs, by every route on this tab that installs: the
+        selected row (its button, its menu entry, a chip) through
+        `_module_action()`, and a link or a folder through
+        `_install_custom_module()`.
+
+        True means the install was NOT started. Setting the folder is
+        `change_client_dir()` itself — the Server tab's own press, with its
+        refusals — and not a copy of it; a successful set rebuilds this tab
+        (`client_dir_changed`), which is why the report is written BEFORE it
+        and nothing touches `self` after. The user presses Install again on the
+        rebuilt tab, where the folder is set and this asks nothing.
+        """
+        if not manifest.client or self.services.client_dir is not None:
+            return False
+        self._module_pending = None
+        self._acting_on = None
+        self.module_report.setPlainText(
+            f"{what}: not started — {manifest.name} also changes your game client, and no "
+            "client folder is set for this install. Nothing on this machine was changed."
+        )
+        if self.services.set_client_dir is None:
+            # No write seam, so no button to offer: say it, and stop.
+            QMessageBox.information(
+                self, f"{manifest.name} needs your game client", client_notice(manifest)
+            )
+            return True
+        if ask_to_set_client_dir(self, manifest):
+            self.change_client_dir()
+        return True
+
+    def _stopped_for_the_client(self, what: str, manifest: Manifest) -> bool:
+        """T62: tell the user before an install whose client half would be skipped.
+
+        `Applier._client()` skips every `client` step when the install has no
+        client folder, and says so only in the report AFTER the server half has
+        landed — so `mod-arac` put its SQL and DBCs in, left `Patch-A.MPQ` out,
+        and the user found out in the game, if at all. Asked here instead,
+        before anything runs, by every route on this tab that installs: the
+        selected row (its button, its menu entry, a chip) through
+        `_module_action()`, and a link or a folder through
+        `_install_custom_module()`.
+
+        True means the install was NOT started. Setting the folder is
+        `change_client_dir()` itself — the Server tab's own press, with its
+        refusals — and not a copy of it; a successful set rebuilds this tab
+        (`client_dir_changed`), which is why the report is written BEFORE it
+        and nothing touches `self` after. The user presses Install again on the
+        rebuilt tab, where the folder is set and this asks nothing.
+        """
+        if not manifest.client or self.services.client_dir is not None:
+            return False
+        self._module_pending = None
+        self._acting_on = None
+        self.module_report.setPlainText(
+            f"{what}: not started — {manifest.name} also changes your game client, and no "
+            "client folder is set for this install. Nothing on this machine was changed."
+        )
+        if self.services.set_client_dir is None:
+            # No write seam, so no button to offer: say it, and stop.
+            QMessageBox.information(
+                self, f"{manifest.name} needs your game client", client_notice(manifest)
+            )
+            return True
+        if ask_to_set_client_dir(self, manifest):
+            self.change_client_dir()
+        return True
 
     @Slot(object)
     def _module_done(self, result: object) -> None:
@@ -7605,6 +8135,293 @@ class ControllerView(QWidget):
         return self.rebuild_log.run(
             lambda: source(cancel),
             title=f"Rebuilding {self.entry.name}",
+            cancel=cancel,
+        )
+
+    def _set_update_buttons(self) -> None:
+        """Both T64 presses, back to what this install can do and what is running.
+
+        Its own method for `_set_adopt_button()`'s reason: three places hand
+        these buttons back — a job finishing, a chained backup finishing, and a
+        chained backup failing — and a rule spelled three times is a rule that
+        drifts. A backup in flight keeps them dead, because `_busy` cannot see
+        one.
+        """
+        offered = self.services.update_to_latest is not None and not self._backup_before_update
+        self.update_to_latest_button.setEnabled(offered)
+        self.return_to_pin_button.setEnabled(offered)
+
+    def _refresh_source_version(self) -> None:
+        """Redraw the version line and decide whether there is a pin to return to.
+
+        Both from ONE reading, taken here: `LatestRoute.source_version()`
+        answers the line and the button from a single read of the state file.
+        Asking twice would be two readings of one file that can disagree -- a
+        press finishing between them is all it would take -- and the
+        disagreement's shape is a live "Return to the tested pin…" over a line
+        that says the server IS on it.
+
+        **The two are no longer the same question, and conflating them is what
+        T77 is.** The line is drawn whenever there is something to say, which
+        includes an install that has just RETURNED to its pins; the button is
+        offered only while some source is still off its pin. Shown on the
+        content's own terms rather than on the line's emptiness, this control
+        disappears after a successful return and comes back after an update --
+        instead of offering a ~36-minute compile that ends exactly where it
+        started (live gate, 2026-09-16, press 6).
+
+        Never raises. It is called from the reload path and from every job
+        finishing, and an exception on either would take the tab down over a
+        line of text; the seam's own contract is that it reads rather than
+        raising, and this holds it to that. The fallback hides the button as
+        well as the line: a read that failed knows nothing about where the
+        sources stand, and offering an hour of compiling off that is worse than
+        offering nothing.
+        """
+        route = self.services.update_to_latest
+        if route is None:
+            self.source_version_label.setVisible(False)
+            self.return_to_pin_button.setVisible(False)
+            return
+        try:
+            said = route.source_version()
+        except OSError as exc:
+            logger.warning(f"could not read what {self.entry.id} was built from: {exc}")
+            said = native.SourceVersion(line="", past_the_pin=False)
+        self.source_version_label.setText(said.line)
+        self.source_version_label.setVisible(bool(said.line))
+        self.return_to_pin_button.setVisible(said.past_the_pin)
+
+    def _update_route_busy(self) -> bool:
+        """The two gates both T64 presses share, put to the user and answered True when hit.
+
+        `rebuild_server()`'s pair, in its words: this press ENDS in that rebuild,
+        so anything that refuses one has to refuse the other. Factored rather
+        than copied because there are two presses here and a third copy of a
+        guard is the copy that drifts.
+
+        **THREE, since the cold review of 2026-09-16, and the third is the one
+        neither `_busy` nor the panel can see.** The backup this control chains
+        runs through `_run()` -- off the GUI thread, for minutes -- and nothing
+        else on this tab knows it is happening: `_busy` is the LOG PANEL's flag,
+        set by a job in that panel, and a `mysqldump` is not one. So a second
+        press during it passed both gates, and "Update without a backup" then
+        tore the database container down underneath the dump that was still
+        running, after which the first press's own handler reported "Backup
+        failed — the update was not started" about a backup the user was
+        watching succeed.
+        """
+        if self._backup_before_update:
+            QMessageBox.information(
+                self,
+                "A backup is running",
+                "This server is being backed up before an update. Wait for the backup to "
+                "finish — it will ask whether to go ahead. Nothing was started.",
+            )
+            return True
+        if self.rebuild_log.running:
+            QMessageBox.information(
+                self,
+                "Already running",
+                "This server already has a job running on this tab. Wait for it to finish.",
+            )
+            return True
+        if self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish on the "
+                "Server tab, then press this again. Nothing was started.",
+            )
+            return True
+        return False
+
+    @Slot()
+    def update_to_latest(self) -> bool:
+        """Ask, optionally back up, then move the sources and rebuild (T64). False if nothing ran.
+
+        The owner's ask of 2026-09-15 -- "a update server to latest, with a
+        warning and recommendation to take a backup before updating" -- as ONE
+        question with three answers rather than a warning followed by a separate
+        "back up first?". Two dialogs in a row is how a user learns to click
+        through the first, and the first is the one carrying the warning.
+
+        **The backup is chained, not awaited.** `services.backup` runs off the
+        GUI thread through `_run()` -- it is a `mysqldump` of a live world and
+        takes minutes -- so this method returns as soon as it is started and the
+        update begins in `_backup_before_update_done()`. What that costs is that
+        the return value means "a press started something", not "the update
+        started"; what it buys is a window that is not frozen for the length of
+        a dump.
+
+        **The backup starts the database if it is down** (T76), through
+        `_backup_with_the_database()` and not `services.backup` directly. An
+        update is what somebody does to a server nobody is playing on, so the
+        stack is normally stopped when this is pressed -- and the backup is a
+        `docker exec` into the database container, which refused. The
+        recommended button therefore failed on the first press of every stopped
+        server until 2026-09-16.
+
+        **A failed backup STOPS**, which is `dml wow update`'s rule
+        (`BACKUP_FAILED "Safety backup failed -- update not started"`) and not
+        wow-manage's, which offered a backup and continued regardless. Somebody
+        who asked for a backup first asked for it because they want one before
+        this runs, and "we could not take one, so we did the dangerous thing
+        anyway" is the opposite of the answer they gave.
+
+        **And it asks again afterwards.** `Backup saved to {path}. Update now?`,
+        No by default. Minutes have passed, the answer is on screen, and the
+        person is at a point where saying no costs nothing at all.
+
+        Every answer is read through `said_yes()`/`ask_update_choice()`, never by
+        identity: PySide6 6.11's static `question()` returns a plain `int` (T33),
+        and `is` against the enum member was always False.
+        """
+        route = self.services.update_to_latest
+        if route is None:
+            return False
+        if self._update_route_busy():
+            # FALSE, like every other refusal on this tab and like
+            # `_start_update_to_latest()` and `return_to_the_tested_pin()`: the
+            # return value answers "was anything started?", and a press that was
+            # refused started nothing. It answered True here until the cold
+            # review of 2026-09-16, which made the one press with three exits
+            # the one whose answer meant something different from the other two.
+            return False
+        # The module function, not a seam on this class: a test that wants to
+        # answer this drives the real dialog through `QMessageBox.exec`, which
+        # is what `conftest._no_modal_dialogs` already disarms. A seam here
+        # would let a test answer a question whose buttons nothing checked --
+        # and the buttons are half of what this control is.
+        choice = ask_update_choice(
+            self, f"Update {self.entry.name} to the newest code?", route.confirmation()
+        )
+        if choice is UpdateChoice.CANCEL:
+            logger.info(f"update to latest of {self.entry.id} declined at the confirmation")
+            return False
+        if choice is UpdateChoice.WITHOUT_BACKUP:
+            return self._start_update_to_latest()
+        # SET BEFORE the worker starts, and cleared in BOTH handlers: it is the
+        # only thing on this tab that knows a `mysqldump` is in flight, and
+        # `_update_route_busy()` holds what a second press does without it.
+        self._backup_before_update = True
+        self.backup_button.setEnabled(False)
+        self.update_to_latest_button.setEnabled(False)
+        self.return_to_pin_button.setEnabled(False)
+        self.maintenance_report.setPlainText(
+            "Backing up before the update… this can take minutes on a full world."
+        )
+        self._run(
+            self._backup_with_the_database,
+            self._backup_before_update_done,
+            self._backup_before_update_failed,
+        )
+        return True
+
+    @Slot(object)
+    def _backup_before_update_done(self, result: object) -> None:
+        """The backup finished: report it, ask once more, and only then start the update.
+
+        A result that is not a `BackupReport` is treated as a FAILED backup and
+        stops, rather than being ignored the way `_backup_done()` ignores it.
+        The two are looking at the same value with different stakes: there,
+        "nothing to draw" costs a report line; here, carrying on would mean
+        updating without the backup somebody asked for and without anybody
+        having said the backup did not happen.
+        """
+        # FIRST, before anything that can put a modal on screen: the flag is a
+        # lock, and a lock still held while its own handler blocks on a dialog
+        # would refuse the very press that dialog is asking for.
+        self._backup_before_update = False
+        self.backup_button.setEnabled(True)
+        self._set_update_buttons()
+        if not isinstance(result, wotlk_maintenance.BackupReport):
+            self._backup_before_update_failed("the backup did not say what it wrote")
+            return
+        self._backup_done(result)
+        if not said_yes(
+            QMessageBox.question(
+                self,
+                f"Update {self.entry.name} now?",
+                f"Backup saved to {result.directory}. Update now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        ):
+            logger.info(f"update to latest of {self.entry.id} declined after the backup")
+            self.maintenance_report.setPlainText(
+                f"Backup saved to {result.directory}. The update was not started."
+            )
+            return
+        self._start_update_to_latest()
+
+    @Slot(object)
+    def _backup_before_update_failed(self, exc: object) -> None:
+        """A backup that did not happen stops the update, and says so in `dml`'s own words."""
+        message = f"Backup failed — the update was not started: {exc}"
+        self._backup_before_update = False
+        self.backup_button.setEnabled(True)
+        self._set_update_buttons()
+        self.maintenance_report.setPlainText(message)
+        self.action_failed.emit(message)
+        QMessageBox.warning(self, f"{self.entry.name}", message)
+        self._show_interrupted()
+
+    def _start_update_to_latest(self) -> bool:
+        """Run the update in the shared panel. The one place either answer ends up.
+
+        The gates are asked AGAIN here and not trusted from the press, for
+        `forget_install()`'s reason one size larger: on the backup path minutes
+        of `mysqldump` have gone by since they were last true, and this is the
+        last point at which nothing has been fetched.
+        """
+        route = self.services.update_to_latest
+        if route is None or self._update_route_busy():
+            return False
+        cancel = threading.Event()
+        self._rebuild_is_compile = True
+        return self.rebuild_log.run(
+            lambda: route.press(cancel),
+            title=f"Updating {self.entry.name} to the newest code",
+            cancel=cancel,
+        )
+
+    @Slot()
+    def return_to_the_tested_pin(self) -> bool:
+        """Ask, then compile this server again from the commit the gates ran on. False if not run.
+
+        No backup is offered here and that is deliberate rather than an
+        omission. The thing a backup protects against is a NEW server writing
+        into an old database, and that has already happened by the time anybody
+        wants this button: the offer belongs to the press that caused it, which
+        is where it is made. Offering one here would suggest this undoes those
+        writes, which it does not -- `native.return_to_pin_confirmation()` says
+        so in as many words.
+
+        Yes/No with No as the default, read through `said_yes()`, exactly as
+        `rebuild_server()` does: it is the same compile and the same hour.
+        """
+        route = self.services.update_to_latest
+        if route is None:
+            return False
+        if self._update_route_busy():
+            return False
+        if not said_yes(
+            QMessageBox.question(
+                self,
+                f"Put {self.entry.name} back on the tested commit?",
+                route.pin_confirmation(),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        ):
+            logger.info(f"return to the tested pin of {self.entry.id} declined")
+            return False
+        cancel = threading.Event()
+        self._rebuild_is_compile = True
+        return self.rebuild_log.run(
+            lambda: route.to_pin(cancel),
+            title=f"Returning {self.entry.name} to the tested commit",
             cancel=cancel,
         )
 
@@ -8641,7 +9458,7 @@ def _pending_sql_lines(pending: Sequence[PendingSql]) -> list[str]:
     Three shapes because `PendingSql.files` has three answers — but all three
     say NOT applied, and the empty one earned that the hard way. The first live
     run of this code (yulon-ubuntu, 2026-09-07, the real applier against
-    `/home/pk/wowserver`) installed `mod-aoe-loot` and resolved its manifest
+    `/home/user/wowserver`) installed `mod-aoe-loot` and resolved its manifest
     glob `data/sql/db-world/*.sql` to nothing at all. The draft line here read
     "nothing to apply", and it was false: that clone carries
     `data/sql/db-world/base/aoe_loot_module_string.sql`, one directory deeper —
@@ -8726,6 +9543,13 @@ def _format_report(report: ApplyReport) -> str:
     lines += [f"  ✓ {step}" for step in report.done]
     lines += [f"  – skipped: {step}" for step in report.skipped]
     lines += _pending_sql_lines(report.pending_sql)
+    if report.left_behind:
+        # T62. `rm -r modules/mod-arac` alone reads as a clean uninstall of a
+        # module whose DBCs, client patch and rows are all still in place.
+        lines.append(
+            f"  ⚠ Removing {item} did not undo everything it installed. Still in place: "
+            f"{'; '.join(report.left_behind)}. Yu'lon cannot take these back for you."
+        )
     if report.rebuild_required:
         if report.action == "remove":
             lines.append(

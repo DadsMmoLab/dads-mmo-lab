@@ -24,7 +24,7 @@ from tests.conftest import (
 )
 from yulon import runner
 from yulon.ui import lines
-from yulon.ui.widgets.log_panel import PALETTE, LogPanel, _StreamWorker, tone_colour
+from yulon.ui.widgets.log_panel import PALETTE, LogPanel, Seams, _StreamWorker, tone_colour
 
 STAMP = re.compile(r"^\[(\d\d:\d\d:\d\d)\] ")
 """The wall clock `append()` puts on every line. Elapsed is a header field, not a prefix."""
@@ -35,15 +35,7 @@ DWELL_PROOF = 1.2
 `test_the_elapsed_field_stops_counting_when_the_job_ends_but_keeps_its_total`
 requires the elapsed field NOT to move while this elapses, so a slow or loaded
 box makes it pass more surely rather than less. It is small for the same reason
-`HANG_BOUND` is large. `CLOCK_GAP` is the same shape.
-"""
-
-CLOCK_GAP = 0.05
-"""Also an assertion, also pointing the other way.
-
-`test_the_elapsed_clock_counts_from_this_run_and_not_from_the_last_one` needs
-the second run's zero to be strictly later than the first's; any real delay
-between them proves it, and load only widens the gap.
+`HANG_BOUND` is large.
 """
 
 EXPIRY_PROBE = 0.05
@@ -55,6 +47,26 @@ deadline is meant to fire, and the number is small because the test's whole
 cost is this wait -- at 0.05s it costs about as much as one `process_events`
 slice, and the report it exists to pin says the same thing at any size.
 """
+
+
+class _HandClock:
+    """A monotonic clock a test winds by hand. Never moves on its own.
+
+    Wound rather than stepped-per-call on purpose: the panel reads the clock
+    once for the zero and again on every `_show_elapsed()`, and a ticker that
+    happens to fire on a loaded box adds a reading. A clock that advanced per
+    call would make the expected text depend on how many times it was asked,
+    which is the flake this file is removing rather than a new one to add.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def wind(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def _distance(one: object, two: object) -> int:
@@ -640,7 +652,7 @@ def test_the_status_label_still_says_what_failed(qapp: object) -> None:
     """
     panel = LogPanel()
     message = (
-        "/home/pk is your home folder itself. A server install owns the folder it "
+        "/home/user is your home folder itself. A server install owns the folder it "
         "is given - a reinstall removes it - so pick a dedicated subfolder."
     )
     panel._status.say("FAILED: " + message)
@@ -778,26 +790,78 @@ def test_the_elapsed_clock_counts_from_this_run_and_not_from_the_last_one(qapp: 
     field anchored to the widget's construction would tell somebody four hours
     into a job that started a minute ago -- worse than no field, because it
     reads as a measurement.
+
+    Against the INJECTED clock since T81, and the field rather than
+    `panel._started_at`. The version this replaces slept 50 ms between two runs
+    and required the second `time.time()` stamp to be the larger, which is a
+    statement about the host's wall clock and not about the panel: an NTP
+    correction or a WSL resume made it fail while the code was right (T51), and
+    a re-anchor that took the *wrong* zero would still have passed it. The
+    clock here is wound by hand, so the two totals below are the only two
+    sentences the panel can produce, and they differ by a quarter of an hour.
     """
-    panel = LogPanel()
+    clock = _HandClock()
+    panel = LogPanel(seams=Seams(monotonic=clock))
 
     def source() -> Iterator[str]:
         yield "first"
+        clock.wind(30.0)
 
     panel.run(source)
     wait_for_panel(panel)
-    first_start = panel._started_at
-    assert first_start is not None
-    time.sleep(CLOCK_GAP)
+    assert panel.elapsed_text() == "0:00:30", panel.elapsed_text()
+
+    # Fifteen minutes of console, or of the user reading the finished install.
+    clock.wind(900.0)
 
     def again() -> Iterator[str]:
         yield "second"
+        clock.wind(5.0)
 
     panel.run(again)
     wait_for_panel(panel)
-    assert panel._started_at is not None and panel._started_at > first_start, (
-        "the second run kept the first run's zero, so its elapsed clock is wrong by the gap "
-        "between them"
+    assert panel.elapsed_text() == "0:00:05", (
+        "the second run did not re-stamp its zero: it is counting from the first run's, so the "
+        f"field reads {panel.elapsed_text()} for a job five seconds old"
+    )
+
+
+def test_a_wall_clock_step_backwards_during_a_run_does_not_move_the_elapsed_field(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug T81 exists for, driven rather than argued.
+
+    `time.time()` is stepped backwards an hour WHILE the job is running -- an
+    NTP correction, or the resync WSL2 does when the host comes back from
+    suspend -- and the injected monotonic clock goes on advancing normally,
+    which is what the two clocks really do. The elapsed field must read the
+    minute the monotonic clock measured.
+
+    The wall clock is the real `time.time`, patched, and not a seam: the whole
+    claim is that the panel no longer READS it for this field, and a fake it
+    was handed could not show that. Anchoring `_started_at` back to
+    `time.time()` turns the field into `0:00:00` (or, without the old clamp,
+    a negative hour) and this test says so; the panel's line stamps go on using
+    the wall clock, which is correct -- a line is a moment, not a duration.
+    """
+    clock = _HandClock()
+    panel = LogPanel(seams=Seams(monotonic=clock))
+    wall = _HandClock(start=5_000_000.0)
+    monkeypatch.setattr(time, "time", wall)
+
+    def source() -> Iterator[str]:
+        yield "before the correction"
+        # The step itself: an hour back, mid-run, while the run really has been
+        # going for sixty seconds.
+        wall.wind(-3600.0)
+        clock.wind(60.0)
+        yield "after the correction"
+
+    panel.run(source)
+    wait_for_panel(panel)
+    assert panel.elapsed_text() == "0:01:00", (
+        "the elapsed field followed the wall clock backwards, so it is not measured with a "
+        f"monotonic clock: {panel.elapsed_text()}"
     )
 
 
@@ -816,8 +880,12 @@ def test_elapsed_keeps_its_hours_field_from_the_first_second(qapp: object) -> No
     assert _elapsed(600) == "0:10:00"
     assert _elapsed(3600) == "1:00:00"
     assert _elapsed(16267) == "4:31:07"
-    # Never negative, whatever the clock does underneath.
-    assert _elapsed(-5) == "0:00:00"
+    # No negative case, and its absence is the point: the `max(0, ...)` that
+    # answered `0:00:00` for one went with T81, because the only caller now
+    # subtracts two readings of the same monotonic clock and cannot hand this
+    # a negative. Asserting the old clamp here would pin a guard for an input
+    # that no longer exists, and pinning it is what would let the wall clock
+    # back in quietly.
 
 
 def test_the_panel_follows_the_bottom_while_it_is_already_at_the_bottom(qapp: object) -> None:
@@ -935,13 +1003,12 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
 
     The names are listed individually rather than counted, because they do not
     mean the same thing: `HANG_BOUND` must never be reached, `DWELL_PROOF`,
-    `CLOCK_GAP` and `EXPIRY_PROBE` must be, and `JOB_PACE` is not a deadline at
+    `EXPIRY_PROBE` must be, and `JOB_PACE` is not a deadline at
     all. An audit that only asked "is it a name?" would let a hang bound be
     sized like a dwell one, and one that only counted would let a seventh
     constant with no argument behind it in.
     """
     assert spelled_bounds(__file__) == {
-        "CLOCK_GAP",
         "DWELL_PROOF",
         "EXPIRY_PROBE",
         "HANG_BOUND",
@@ -1204,3 +1271,141 @@ def test_the_strip_does_not_reopen_the_wrap_bug(qapp: object) -> None:
         "the stage strip inflated the panel's minimum width from "
         f"{short}px to {long}px, so a splitter must starve whatever is beside it"
     )
+
+
+# -- Stop must not destroy a cancellable source mid-cleanup (T64 round 2) -----
+
+
+def _route_with_cleanup(cancel: threading.Event, put_back: list[str]) -> Iterator[str]:
+    """A source shaped exactly like `StagedInstaller.update_to_latest()`.
+
+    It yields while working, raises when the cancel is set -- which is what a
+    killed compiler child really produces -- and then YIELDS AGAIN from its own
+    `except` handler while putting things back, before re-raising. Every line
+    after the raise is cleanup, and every statement between those lines is the
+    restore itself.
+
+    That shape is the whole subject: dropping a suspended generator throws
+    `GeneratorExit` at the yield it is parked on, which no `except` clause
+    written for the job's own failures catches, so none of this runs.
+    """
+    try:
+        for n in range(1000):
+            if cancel.is_set():
+                raise RuntimeError("the compile was killed")
+            yield f"compiling {n}"
+            time.sleep(JOB_PACE)
+    except RuntimeError:
+        for name in ("core", "module"):
+            put_back.append(name)
+            yield f"{name} was put back on its old commit."
+        raise
+
+
+def test_stop_lets_a_cancellable_source_finish_putting_things_back(qapp: object) -> None:
+    """The defect: Stop DESTROYED the generator and the restore never ran.
+
+    Read on the code by the cold review's second pass (2026-09-16) and driven
+    here. `_StreamWorker.run()` broke out of its `for` on the first line after
+    Stop and dropped the source; CPython then threw `GeneratorExit` into it at
+    that yield, and `GeneratorExit` is not an `Exception` -- so
+    `update_to_latest()`'s `except InstallerError`, and `rebuild()`'s image
+    rollback beside it, never ran at all. On a WotLK press that meant the core
+    checkout stayed on upstream's tip under the binary that is running, with
+    upstream's compose file in the folder, and nothing on screen saying so.
+
+    Asserted on BOTH halves, because either alone is passed by the broken
+    version on a good day: the restore really happened (`put_back`), and its
+    lines really reached the panel (the user's only evidence of it).
+    """
+    cancel = threading.Event()
+    put_back: list[str] = []
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+
+    panel.run(lambda: _route_with_cleanup(cancel, put_back), cancel=cancel)
+    pump_until(lambda: "compiling 0" in panel.text(), "the job produced its first line")
+    panel.stop()
+    wait_for_panel(panel)
+    process_events()
+
+    assert put_back == ["core", "module"], "the cleanup did not run to the end"
+    assert "core was put back on its old commit." in panel.text()
+    assert "module was put back on its old commit." in panel.text()
+    # Still a stop, not a failure: the job ended because the user pressed the
+    # button, and `_on_finished` reads this to decide it was cancelled.
+    assert finished and finished[0] == (True, "stopped")
+    assert panel.cancelled is True
+
+
+def test_stop_still_abandons_a_source_that_was_given_no_cancel(qapp: object) -> None:
+    """The other half of the rule, and why `drains` is not simply always True.
+
+    A source with no cancel event has undertaken nothing: the Console tab's
+    `docker logs -f` follows a world that may say nothing for ten minutes and
+    never ends on its own. Draining THAT would mean Stop stopped nothing and the
+    panel sat there, which is the 7.10 live FAIL this file already has a test
+    for. So the break stays for exactly that population.
+    """
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+    reached_the_end = threading.Event()
+
+    def endless() -> Iterator[str]:
+        try:
+            n = 0
+            while True:
+                yield f"tick {n}"
+                n += 1
+                time.sleep(JOB_PACE)
+        finally:
+            reached_the_end.set()
+
+    panel.run(endless)
+    pump_until(lambda: "tick 0" in panel.text(), "the endless job produced its first line")
+    panel.stop()
+    wait_for_panel(panel)
+
+    assert finished and finished[0] == (True, "stopped")
+    # It was CLOSED rather than run out: a `finally` fires on `GeneratorExit`
+    # too, so this says the generator ended, and the test above says why that is
+    # the wrong way to end one that had cleanup to do.
+    assert reached_the_end.is_set()
+
+
+def test_a_rebuilds_own_rollback_lines_survive_a_stop_too(qapp: object) -> None:
+    """The hole was `rebuild()`'s as much as the update route's, and it is older.
+
+    `native.rebuild()` yields from `_restore_rollback()` after a failed compile
+    -- the images it puts back and the containers it recreates -- and every one
+    of those yields was being dropped by the same break. It is the same fix and
+    the same seam, so it is the same test with the rollback's own shape: a
+    source that yields several lines from its handler, all of which must arrive.
+    """
+    cancel = threading.Event()
+    steps: list[str] = []
+
+    def rebuild_like() -> Iterator[str]:
+        try:
+            while True:
+                if cancel.is_set():
+                    raise RuntimeError("build stopped")
+                yield "compiling"
+                time.sleep(JOB_PACE)
+        except RuntimeError:
+            for said in ("Putting the build you had back.", "The containers were replaced."):
+                steps.append(said)
+                yield said
+            raise
+
+    panel = LogPanel()
+    panel.run(rebuild_like, cancel=cancel)
+    pump_until(lambda: "compiling" in panel.text(), "the build produced its first line")
+    panel.stop()
+    wait_for_panel(panel)
+    process_events()
+
+    assert steps == ["Putting the build you had back.", "The containers were replaced."]
+    assert "The containers were replaced." in panel.text()
