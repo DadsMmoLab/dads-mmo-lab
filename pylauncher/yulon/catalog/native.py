@@ -215,6 +215,17 @@ is not a state anybody chose, so `_restore_rollback` asks again after its own
 recreate, which is the thing that frees them.
 """
 
+_MUST_BE_FORCED = "must be forced"
+"""The daemon's own words for "the only thing in the way is a stopped container".
+
+Docker says `conflict: unable to delete <id> (must be forced) - container <id>
+is using its referenced image` for a container that has EXITED, and `(cannot be
+forced)` for one that is running -- measured live on the first restore, and
+pinned in `FAILED_TAG_SUFFIX` above. `_let_go()` matches on the first because it
+is the one that a second ask with `-f` answers; the second is a server somebody
+is using, and no name is worth taking an image out from under it.
+"""
+
 COMPOSE_STAGE = "generate-compose"
 """The stage that writes this install's three compose files.
 
