@@ -201,6 +201,116 @@ def test_sql_step_needs_exactly_one_body() -> None:
             parse_manifest({**README_EXAMPLE, "sql": [{"db": "world", **body}]})
 
 
+_ROSTER_PRECONDITION: dict[str, Any] = {
+    "db": "playerbots",
+    "query": "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
+    "missing": "mod-playerbots has not created its tables yet",
+}
+
+
+def test_a_sql_step_check_belongs_only_to_a_direct_step() -> None:
+    """T63's two fields are refused on the route this app does not run itself.
+
+    A `db-import` step is handed to AzerothCore's own updater on a later boot.
+    Nothing here opens the file, and nothing here is watching when it lands, so
+    a `precondition` on one would gate a write this engine never makes and a
+    `verify` would read a database before the program that wrote it had run. A
+    field nobody reads is how `conflicts_with` came to be in the schema, in the
+    catalog and in a passing test while the app installed both modules anyway
+    (T53), and the cheapest place to stop the next one is the parser.
+    """
+    for extra in (
+        {"precondition": _ROSTER_PRECONDITION},
+        {"verify": [_ROSTER_PRECONDITION]},
+    ):
+        with pytest.raises(ValidationError, match="applied_by='direct'"):
+            parse_manifest(
+                {
+                    **README_EXAMPLE,
+                    "sql": [
+                        {
+                            "db": "world",
+                            "path": "a.sql",
+                            "applied_by": "db-import",
+                            **extra,
+                        }
+                    ],
+                }
+            )
+    # The same step on the direct route parses, so the refusal above is about
+    # `applied_by` and not about the field being malformed.
+    ok = parse_manifest(
+        {
+            **README_EXAMPLE,
+            "sql": [
+                {
+                    "db": "world",
+                    "path": "a.sql",
+                    "applied_by": "direct",
+                    "precondition": _ROSTER_PRECONDITION,
+                    "verify": [_ROSTER_PRECONDITION],
+                }
+            ],
+        }
+    )
+    assert ok.sql[0].precondition is not None and len(ok.sql[0].verify) == 1
+
+
+def test_a_sql_step_check_query_must_be_one_select() -> None:
+    """The same fence `Prompt.exists` has, asserted through the new field.
+
+    `ExistsCheck` is one model with three users now, and its `_one_select`
+    validator is the reason a manifest -- content, not code -- cannot reach the
+    write half of the SQL seam through a field whose whole job is to read.
+    Pinned here as well as on the prompt, because a shared validator that stops
+    being reached by one of its users fails silently.
+    """
+    for query in ("DELETE FROM citizen_roster", "SELECT 1; DROP TABLE citizen_roster"):
+        with pytest.raises(ValidationError, match="ExistsCheck.query"):
+            parse_manifest(
+                {
+                    **README_EXAMPLE,
+                    "sql": [
+                        {
+                            "db": "world",
+                            "path": "a.sql",
+                            "precondition": {**_ROSTER_PRECONDITION, "query": query},
+                        }
+                    ],
+                }
+            )
+
+
+def test_no_shipped_sql_step_check_carries_a_template_field() -> None:
+    """A `SqlStep` check is never rendered, so a `{key}` in one would be sent to MySQL raw.
+
+    `Prompt.exists` templates over the user's answers and `Applier._check_exists`
+    renders it. The two `SqlStep` checks are the CATALOG's own sentence about
+    the module's own tables, asked before any value is in hand -- and
+    `Applier._ask_db()` deliberately does not render, so that a `{` in somebody's
+    SQL cannot raise inside a check whose whole job is to answer a question.
+    That decision is only safe while no shipped check carries one.
+
+    Not vacuous: the count of checks it actually read is asserted, so a glob
+    that stopped finding files would fail here rather than pass over nothing.
+    """
+    seen: list[str] = []
+    offenders: list[str] = []
+    for path in sorted(MANIFESTS_DIR.glob("*/*/*.json")):
+        if path.parent.parent.name == "schema":
+            continue
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        for step in raw.get("sql", []):
+            checks = [step["precondition"]] if step.get("precondition") else []
+            checks += list(step.get("verify", []))
+            for check in checks:
+                seen.append(f"{path.name}:{check['query'][:30]}")
+                if "{" in check["query"] or "{" in check["missing"]:
+                    offenders.append(f"{path.relative_to(MANIFESTS_DIR)}: {check['query']!r}")
+    assert offenders == [], offenders
+    assert len(seen) == 3, seen  # mod-city-bots' precondition and its two verify entries
+
+
 def test_prompt_choice_rules() -> None:
     with pytest.raises(ValidationError, match="choices"):
         parse_manifest(
@@ -292,7 +402,7 @@ def test_a_folder_origin_module_needs_no_source_and_a_link_one_still_does() -> N
     folder = parse_manifest(
         {
             **sourceless,
-            "origin": {"kind": "folder", "path": "/home/pk/mod-x", "added": "2026-09-08"},
+            "origin": {"kind": "folder", "path": "/home/user/mod-x", "added": "2026-09-08"},
         }
     )
     assert folder.source is None
@@ -323,6 +433,137 @@ def test_origin_is_optional_and_every_shipped_manifest_has_none() -> None:
         item_dir = index_file.with_suffix("")
         for item_file in sorted(item_dir.glob("*.json")) if item_dir.is_dir() else []:
             assert parse_manifest(json.loads(item_file.read_text(encoding="utf-8"))).origin is None
+
+
+def test_no_shipped_module_manifest_pins_a_revision() -> None:
+    """Every module tracks its repository's latest: the owner's decision, 2026-09-15 (T60).
+
+    Five manifests were pinned (`lootpet`, `sitmeanrest`, `mod-ale`,
+    `tortoise-bots-manager`, `tortoise-gm-manager`), each with a written reason,
+    and the owner removed all five knowing them. So a `rev` in a shipped module
+    manifest is a decision being reversed, and it fails here rather than in
+    review. `rev: null` is refused too: the decision is that the field is not
+    there.
+
+    The files are enumerated from the DISK, every game and every family, and
+    not through the indexes, so an item file an index forgot is still read.
+    `Source.rev` stays in the schema: the catalog's SERVER sources are pinned
+    (`test_catalog.py::GATE_PINS`), and derived user manifests are not shipped.
+    """
+    items = sorted(p for p in MANIFESTS_DIR.glob("*/*/*.json") if p.parent.parent.name != "schema")
+    pinned: list[str] = []
+    cloned: set[str] = set()
+    for path in items:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        source = raw.get("source")
+        if source is None:
+            continue
+        cloned.add(f"{raw['game']}/{raw['id']}")
+        if "rev" in source:
+            pinned.append(f"{path.relative_to(MANIFESTS_DIR)} rev={source['rev']!r}")
+    assert not pinned, (
+        "the owner decided on 2026-09-15 (T60) that no module manifest carries a rev -- every "
+        f"module tracks its repository's latest. Pinned: {pinned}"
+    )
+    # Not vacuous: the glob reached every game, and the five that were pinned.
+    games = {p.name for p in MANIFESTS_DIR.iterdir() if p.is_dir() and p.name != "schema"}
+    assert games == {p.parent.parent.name for p in items}, games
+    assert {
+        "wow-wotlk/lootpet",
+        "wow-wotlk/sitmeanrest",
+        "wow-wotlk/mod-ale",
+        "wow-tortoise/tortoise-bots-manager",
+        "wow-tortoise/tortoise-gm-manager",
+    } <= cloned, sorted(cloned)
+
+
+NOT_MANIFESTS: dict[str, str] = {
+    "mod-playerbots": (
+        "cloned by the SERVER install, not by the Modules tab: "
+        "`catalog.json` lists `mod-playerbots/mod-playerbots` among wow-wotlk's "
+        "emulator sources with `dest: modules/mod-playerbots`, so it is present "
+        "on every Playerbots install and has no manifest of its own"
+    ),
+}
+"""`requires` targets that are real clone directories but not catalog items, and why.
+
+EXACT, not a floor. Written when `requires` was a declaration nothing read
+([[the-mechanism-exists-and-nothing-calls-it]]), against the day something
+enforced it by looking the target up as a catalog id -- which would have
+refused `mod-city-bots` forever, silently, on installs where its requirement is
+in fact present.
+
+T69 is that day, and it took the other route: `apply.missing_requirements()`
+asks the DISK, so a folder under `modules/` answers for a server-cloned module
+exactly as it does for one the Modules tab cloned, and this dict is not
+consulted at runtime at all. It stays a TEST fixture, and the test below now
+checks the excuse rather than taking it -- an entry here has to name something
+`catalog.json` really clones.
+"""
+
+
+def test_every_requires_target_is_a_shipped_item_or_one_of_these() -> None:
+    """A dangling `requires` ships uncaught today; a typo in one would ship too.
+
+    Until T63 every `requires` named a sibling manifest in the same game, which
+    made the invariant true by accident. `mod-city-bots` is the first that names
+    something the catalog does not carry, so the invariant is written down
+    before the exception is added rather than after it is discovered.
+    """
+    ids: dict[str, set[str]] = {}
+    targets: list[tuple[str, str, str]] = []
+    for path in sorted(MANIFESTS_DIR.glob("*/*/*.json")):
+        if path.parent.parent.name == "schema":
+            continue
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        ids.setdefault(raw["game"], set()).add(raw["id"])
+        targets += [(raw["game"], raw["id"], want) for want in raw.get("requires", ())]
+        targets += [(raw["game"], raw["id"], want) for want in raw.get("conflicts_with", ())]
+
+    dangling = [
+        f"{game}/{item} needs {want}"
+        for game, item, want in targets
+        if want not in ids[game] and want not in NOT_MANIFESTS
+    ]
+    assert dangling == [], dangling
+    # Not vacuous, and the exception is USED: a `NOT_MANIFESTS` entry nothing
+    # names is a note about nothing, and would outlive the manifest it excused.
+    assert len(targets) >= 10, targets
+    assert {want for _game, _item, want in targets} >= set(NOT_MANIFESTS)
+
+
+def test_every_excused_requires_target_is_really_cloned_by_a_server_install() -> None:
+    """The exception has to EARN itself against `catalog.json` (T69).
+
+    `NOT_MANIFESTS` used to be a sentence a person wrote. Now that
+    `apply.missing_requirements()` enforces `requires` against the disk, an
+    entry here is a claim that some game's install puts the folder there, and a
+    wrong one is a module permanently uninstallable with the reason *needs X,
+    not installed* on a machine that can never get X.
+
+    So the claim is read back out of the catalog: every excused id must be the
+    last segment of some emulator source's `dest`. The sibling test above
+    cannot catch this -- it only asks whether the name is spelled in this dict.
+    """
+    catalog = json.loads(
+        (Path(__file__).resolve().parents[1] / "yulon" / "catalog" / "catalog.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    cloned = {
+        source["dest"].rstrip("/").rsplit("/", 1)[-1]
+        for game in catalog["games"]
+        for source in game.get("emulator", {}).get("sources", ())
+        # `dest: "."` is the emulator core itself, unpacked over the server
+        # root. It is not a clone DIRECTORY anything can require, and letting
+        # it in would excuse the name `.` against a folder that is always
+        # present -- so it is dropped before the comparison, not after.
+        if source.get("dest") and source["dest"].rstrip("/") not in ("", ".")
+    }
+    assert set(NOT_MANIFESTS) <= cloned, sorted(set(NOT_MANIFESTS) - cloned)
+    # Not vacuous, in both directions: the set is really read (it has the one
+    # entry that matters) and the drop above really drops.
+    assert "mod-playerbots" in cloned and "." not in cloned
 
 
 # -- T43: the tuning fields on a conf key ----------------------------------

@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import date
 from pathlib import Path
+from typing import Protocol
 
 from yulon import docker, module_source, platform, resources
 from yulon.apply import (
@@ -151,7 +152,23 @@ def forget(manifest: Manifest) -> bool:
     return module_source.forget(user_manifests_dir(), manifest)
 
 
-def install_custom(applier: Applier) -> Callable[[Manifest, Path | None], ApplyReport]:
+class CustomInstall(Protocol):
+    """What `install_custom()` hands back: the two-argument call, plus T47's `replacing`.
+
+    Declared here rather than imported from `yulon.ui.controller_view`, which
+    declares the same shape as `CustomModuleInstall`: this package does not
+    import the view (style-guide §3, and nothing under `controller_wow_*/`
+    names `yulon.ui` today). The two are structurally identical, which is what
+    makes the wiring type-check, and a drift between them is a type error at
+    the wiring line rather than a silent widening.
+    """
+
+    def __call__(
+        self, manifest: Manifest, folder: Path | None, *, replacing: bool = False
+    ) -> ApplyReport: ...
+
+
+def install_custom(applier: Applier) -> CustomInstall:
     """The Modules tab's one custom-install seam, over the applier the tab already holds.
 
     Lane C's deviation D1 from the design (§3.3/§3.5): the view hands over the
@@ -168,11 +185,27 @@ def install_custom(applier: Applier) -> Callable[[Manifest, Path | None], ApplyR
     or a client the shipped route is not (style-guide §4).
     """
 
-    def install(manifest: Manifest, folder: Path | None) -> ApplyReport:
+    def install(manifest: Manifest, folder: Path | None, *, replacing: bool = False) -> ApplyReport:
         source = FolderSource(folder, copy_folder) if folder is not None else None
-        return applier.install(manifest, None, folder=source, complete=complete)
+        return applier.install(
+            manifest, None, folder=source, complete=complete, replacing=replacing
+        )
 
     return install
+
+
+def replacement_question(applier: Applier) -> Callable[[Manifest], str | None]:
+    """The tab's seam onto `Applier.replacement_question()`, over the SAME applier.
+
+    Over the same object the install runs through, for `install_custom()`'s
+    reason: a question answered about one server directory and an install
+    carried out against another would be the worst possible version of this.
+    """
+
+    def question(manifest: Manifest) -> str | None:
+        return applier.replacement_question(manifest)
+
+    return question
 
 
 def fetcher(cache_root: Path, http: HttpGet = urllib_get) -> ManifestFetcher:

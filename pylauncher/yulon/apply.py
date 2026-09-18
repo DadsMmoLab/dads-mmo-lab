@@ -38,6 +38,7 @@ from yulon import docker, platform, rmtree, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
+    CLONE_MARKER,
     BehindReader,
     CloneSpec,
     ContainerGit,
@@ -51,7 +52,17 @@ from yulon.git import (
     same_repo,
 )
 from yulon.log import get_logger
-from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, Prompt, SqlStep, When
+from yulon.manifest import (
+    Db,
+    Deploy,
+    ExistsCheck,
+    Manifest,
+    ManifestType,
+    Patch,
+    Prompt,
+    SqlStep,
+    When,
+)
 from yulon.ownership import Ownership
 
 logger = get_logger(__name__)
@@ -158,6 +169,61 @@ def conflicting_installed(
     )
 
 
+def missing_requirements(
+    manifest: Manifest, installed: Mapping[str, frozenset[str]]
+) -> tuple[str, ...]:
+    """Every id in `manifest.requires` with no clone directory here, in declared order.
+
+    `conflicting_installed()`'s mirror, and written beside it for the same
+    reason: one reading, two readers. The Modules tab locks a row's Install on
+    the first answer and `Applier._requires_refusal()` refuses the install on
+    it, so the tab cannot offer a press whose only outcome is a refusal (T69,
+    the T55 shape).
+
+    **A target that is not a catalog item is answered the same way, and that is
+    the whole reason this asks the DISK rather than the catalog.**
+    `mod-playerbots` is cloned by the SERVER install -- `catalog.json` lists it
+    among wow-wotlk's emulator sources with `dest: modules/mod-playerbots` --
+    and has no manifest of its own. Looking `requires` up as a catalog id would
+    refuse `mod-city-bots` forever on the installs where its requirement is in
+    fact present. A folder under `modules/` is the same evidence for a
+    server-cloned module as for one this tab cloned.
+
+    Every family folder is searched, not the manifest's own: `Manifest.requires`
+    names an id and never a family, and an ale script requiring a module
+    (`mod-ale`, nine of the eleven shipped `requires`) is the ordinary case
+    rather than the exotic one.
+
+    **Deliberately WITHOUT `_conflict_refusal()`'s empty-folder reading.** There,
+    opening the folder makes the applier kinder than the tab, which is the safe
+    direction. Here the test is inverted -- a folder means the requirement is
+    MET -- so calling an empty one absent would make the applier refuse what the
+    tab offers, which is exactly the disagreement this function exists to
+    prevent. An empty leftover `modules/mod-ale` lets the install through, and
+    the row above it says installed.
+    """
+    return tuple(
+        needed
+        for needed in manifest.requires
+        if not any(needed in installed.get(str(kind), frozenset()) for kind in CLONE_DIRS)
+    )
+
+
+def requirement_refusal(item_id: str, needed: str) -> str:
+    """Why `item_id` cannot be installed without `needed` — one spelling, two readers (T69).
+
+    The applier raises it and the Modules tab writes it into the row's tooltip
+    and its report line. `needed` is the target's NAME where the catalog knows
+    one and its id otherwise, which is why the caller passes it in rather than
+    this looking it up: the applier has ids and the tab has names, and neither
+    should be made to guess the other's.
+    """
+    return (
+        f"{item_id} needs {needed}, which is not installed here: this manifest names it in "
+        f"`requires`, and {item_id} does nothing without it. Install {needed} first."
+    )
+
+
 # Manifest `db` → MySQL schema name (AzerothCore defaults; acore_ale is Paragon's).
 DB_NAMES: dict[Db, str] = {
     "auth": "acore_auth",
@@ -204,7 +270,7 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
-CLAIM_FILE = ".yulon-clone.json"
+CLAIM_FILE = CLONE_MARKER
 """What this app writes INSIDE a clone it made, so it can recognise it later.
 
 The evidence half of `Ownership`. It is written after a clone succeeds and read
@@ -219,12 +285,54 @@ kind of entry there; `git reset --hard` does not remove untracked files, so the
 claim survives the very update path it authorises; and `remove()` deleting the
 clone deletes the claim with it, with no second place to forget about. It joins
 `include.sh` as the second file this engine writes into a clone.
+
+The name itself is `git.CLONE_MARKER`, because `is_unmodified()` has to know it
+too (T66) and `apply` imports `git`, not the other way round. This is the name
+every OTHER use in the tree reads.
+"""
+
+_NOT_FOR_THE_CLIENT = shutil.ignore_patterns(".git", CLAIM_FILE)
+"""What a `client` copy leaves in the clone: git's own directory, and the claim.
+
+T65, and `Applier._client()` carries the measurement. Both names are this app's
+or git's bookkeeping, neither is ever read by the game, and `.git`'s 0444 pack
+files are what made the second install of a `src: "."` addon die.
+
+A pattern list rather than a top-level name check, so a nested repository
+inside somebody's addon is left behind too — it has the same read-only packs
+and the same nothing to offer a WoW client.
 """
 
 CLAIM_VERSION = 1
 """Bumped only for a change this version could not read. A reader that does not
 recognise the version answers `UNKNOWN`, which refuses — never `UNCLAIMED`,
 which would let a newer app's clone be treated as a stranger's."""
+
+COMPLETED_KEY = "install_completed"
+"""The claim's key for "every step of `install()` ran", written by `install()` twice.
+
+`False` when the claim goes in, right after the clone or the copy; `True` from
+the LAST thing `install()` does. Between those two writes the folder exists and
+the install has not finished, which is the state T68 is about: the T7 direct-SQL
+guard refuses while the world runs, the clone is already at `modules/<id>`, and
+the row read `Remove` with no Install left to press.
+
+**Additive, and deliberately NOT a `CLAIM_VERSION` bump.** A bump makes every
+older claim unreadable, which answers `UNKNOWN`, which refuses both install and
+remove — a permanent lockout on every clone an older build made, for a key that
+says nothing about ownership. So the version stays 1 and this key is read as a
+three-state: `False` is this build saying the install stopped, `True` is this
+build saying it finished, and ABSENT is a claim written before this key existed.
+
+Absent counts as finished (`clone_install_unfinished()` answers False), and that
+is the only reading that cannot make things worse. Older builds wrote the claim
+in the same place this one does — immediately after the clone and before
+`_deploy`/`_sql`/`_conf`/`_client`/`_dbc` — so an older half-install and an
+older whole install leave byte-identical claims and nothing on disk tells them
+apart. Reading absent as UNFINISHED would therefore flip every module installed
+by every previous build back to an Install button; reading it as finished leaves
+those rows exactly as they are today.
+"""
 
 
 def read_clone_claim(clone: Path, *, item_id: str) -> Ownership:
@@ -310,6 +418,68 @@ def claim_written_by_this_app(clone: Path, *, item_id: str) -> bool:
     )
 
 
+def clone_install_completed(clone: Path, *, item_id: str) -> bool | None:
+    """Did THIS app's install of `item_id` into `clone` finish? Three answers (T68).
+
+    `None` is "this app has no claim of its own here" — no file, an unreadable
+    one, another app's, another item's, another folder's — and it is neither of
+    the other two: there is no install of ours to have finished or not.
+
+    `True` for a claim of ours whose `COMPLETED_KEY` is anything but the boolean
+    `False`, which deliberately includes ABSENT (an older build's claim, see
+    `COMPLETED_KEY`) and anything malformed. `False` only for the exact boolean
+    this app writes. The asymmetry is the direction that cannot make things
+    worse: `False` is what puts an Install button back on a row whose folder is
+    on disk, so only this app's own handwriting may produce it.
+    """
+    if read_clone_claim(clone, item_id=item_id) is not Ownership.OWNED:
+        return None
+    parsed = _parse_clone_claim(clone)
+    if parsed is None:
+        return None
+    return parsed.get(COMPLETED_KEY) is not False
+
+
+def clone_install_unfinished(clone: Path, *, item_id: str) -> bool:
+    """Does THIS app's claim in `clone` say the install stopped before it finished? (T68)
+
+    The one state `clone_install_completed()` answers `False` for, under the
+    name the Modules tab asks the question in. `None` — no claim of ours — is
+    not unfinished: a row offering Install for a folder this app did not make
+    is a press `_require_own_clone()` refuses, and the tab must not offer it.
+    """
+    return clone_install_completed(clone, item_id=item_id) is False
+
+
+def unfinished_clones(server_dir: Path) -> dict[str, frozenset[str]]:
+    """Which clones per family have a claim saying their install never finished (T68).
+
+    Shaped like `installed_clones()` and read the same way, one folder per
+    family, so the Modules tab can ask the two questions side by side and key
+    both answers by `(family, id)`. A name here is always a name there: this
+    walks the same directories, and every id it returns is one `installed_clones
+    ()` listed.
+
+    `item_id=name` is the directory name, which is what `Applier.clone_dir()`
+    built the path from (`CLONE_DIRS[type] / manifest.id`) — so a claim that
+    names a different item is a folder some other install put here under a name
+    this one uses, and it answers False rather than offering a press.
+
+    Costs one small JSON read per clone on top of the directory listing, paid on
+    every reload beside `installed_clones()`. That is the same order of work as
+    the listing itself and nothing like `module_updates()`' fetch per checkout,
+    which is why it rides with the cheap half.
+    """
+    return {
+        str(kind): frozenset(
+            name
+            for name in docker.clone_names(server_dir / folder)
+            if clone_install_unfinished(server_dir / folder / name, item_id=name)
+        )
+        for kind, folder in CLONE_DIRS.items()
+    }
+
+
 def server_dir_claim(server_dir: Path) -> Ownership:
     """Did THIS app create THIS server directory? The install engine's own record.
 
@@ -359,11 +529,28 @@ and inside that signature the name is the parameter. This is how the default
 still reaches the function."""
 
 
-def write_clone_claim(clone: Path, *, item_id: str, url: str) -> None:
+def write_clone_claim(clone: Path, *, item_id: str, url: str, completed: bool = False) -> None:
     """Record that this app put `item_id`'s clone here. Raises `OSError` if it cannot.
 
     `url` is written for a human reading the file; it is never what ownership is
     decided on, because a URL is what everybody with the same catalog entry has.
+
+    `completed` is `COMPLETED_KEY`'s value and defaults to the honest answer at
+    the moment a claim is first written for a NEW clone: the folder is filled and
+    none of the install's remaining steps has run. `install()` writes it again
+    with `True` once they all have.
+
+    **EVERY call writes the WHOLE record, so a key this call does not carry is a
+    key the claim loses.** That is the atomic-rename argument below — a
+    read-modify-write would give a torn claim a second chance to exist — and it
+    is the one thing a caller adding a field here has to know. It is why
+    `install()` reads the claim's current `completed` BEFORE the clone and hands
+    it back to the first write (a re-install that fails mid-way must not demote
+    a module that was finished), and why the SECOND write is a single call in
+    `_finish_claim()` rather than one call per fact: two writes, each carrying
+    its own key and defaulting the other's, would leave whichever ran first
+    erased. A new fact belongs in this signature as another keyword with a
+    default, and in `_finish_claim()`'s one call — not in a write of its own.
 
     **Written somewhere else in the same directory and then renamed over the
     real name, never straight into it.** A plain write opens `CLAIM_FILE` for
@@ -389,6 +576,7 @@ def write_clone_claim(clone: Path, *, item_id: str, url: str) -> None:
         "item_id": item_id,
         "clone_id": composegen.install_id(clone),
         "url": url,
+        COMPLETED_KEY: completed,
     }
     fd, name = tempfile.mkstemp(dir=clone, prefix=CLAIM_FILE + ".", suffix=".tmp")
     os.close(fd)
@@ -1105,6 +1293,92 @@ def _no_adoption_message(refusal: _NoAdoption, rel: str, retry: str) -> str:
     return messages[refusal]
 
 
+class _Destroys(Enum):
+    """What a `git fetch` + `git reset --hard` over an existing clone would cost.
+
+    The three questions T44 gave `update()`, lifted out of it so `install()` can
+    ask exactly the same ones over exactly the same folder (T47). One value per
+    fact per answer, for `_NoAdoption`'s reasons — `None` out of a seam is "git
+    could not be asked", which is a different person from "no".
+
+    They are the questions a RESET must answer, not questions about updating, so
+    nothing here names a button: `_destroys_message()` takes the word for what
+    the user pressed and is the only place either route's vocabulary appears.
+    """
+
+    REPO_UNSEEN = "repo-unseen"
+    OTHER_REPO = "other-repo"
+    EDITED = "edited"
+    TREE_UNSEEN = "tree-unseen"
+    COMMITTED = "committed"
+    HISTORY_UNSEEN = "history-unseen"
+
+
+@dataclass(frozen=True)
+class _Reset:
+    """A `_Destroys` and the `origin` that was read while finding it.
+
+    `remote` travels with the fact because two of the six sentences name it and
+    re-reading it to write one would be a second `git remote get-url` whose
+    answer could differ from the one the guard actually decided on.
+    `""` where the fact was found without asking (the tree and HEAD questions
+    are reached only once the repository question has passed, so those carry a
+    real one; `REPO_UNSEEN` is the case where git would not say).
+    """
+
+    fact: _Destroys
+    remote: str
+
+
+def _destroys_message(found: _Reset, rel: str, item_id: str, url: str, doing: str) -> str:
+    """The sentence for one refused reset, in the words of the button that was pressed.
+
+    `doing` is "Updating" or "Installing" — the ONE thing that differs between
+    the two callers, and a parameter rather than two copies of six sentences.
+    T44 wrote these for `update()`; T47 found `install()` reaching the same
+    `reset --hard` over the same folder with none of them, and a copy would have
+    been the third place this vocabulary lives.
+
+    Every one ends "Nothing was changed.", which is true of both routes: the
+    guard runs before the clone seam, before the folder copy, and before this
+    app writes anything into the checkout.
+    """
+    lower = doing.lower()
+    messages = {
+        _Destroys.REPO_UNSEEN: (
+            f"{rel} is a git checkout, but git would not say what it is a checkout of, so "
+            f"{item_id} was not {'updated' if doing == 'Updating' else 'installed'} and "
+            f"nothing was changed."
+        ),
+        _Destroys.OTHER_REPO: (
+            f"{rel} is a checkout of {found.remote}, not of {url}. {doing} {item_id} would "
+            f"reset that folder to {url} and then deploy this module over it. Nothing was "
+            f"changed."
+        ),
+        _Destroys.EDITED: (
+            f"{rel} has changes in it that are not committed. {doing} {item_id} "
+            f"runs `git reset --hard`, which would delete them. Commit them, stash "
+            f"them, or copy them somewhere else first. Nothing was changed."
+        ),
+        _Destroys.TREE_UNSEEN: (
+            f"git could not say whether {rel} has uncommitted changes in it, and {lower} "
+            f"{item_id} would run `git reset --hard` over whatever is there. Nothing "
+            f"was changed."
+        ),
+        _Destroys.COMMITTED: (
+            f"{rel} carries commits of its own that {url} does not have. {doing} "
+            f"{item_id} runs `git reset --hard`, which would move off them and "
+            f"leave them reachable only through git's reflog. Nothing was changed."
+        ),
+        _Destroys.HISTORY_UNSEEN: (
+            f"Yu'lon could not reach {url} to see what {lower} {item_id} would bring "
+            f"in, so it did not touch {rel}. Check this machine's connection and try "
+            f"again. Nothing was changed."
+        ),
+    }
+    return messages[found.fact]
+
+
 # --------------------------------------------------- the answers to prompts
 
 _INT = re.compile(r"[+-]?\d+")
@@ -1362,6 +1636,7 @@ class Applier:
         *,
         folder: FolderSource | None = None,
         complete: Completer | None = None,
+        replacing: bool = False,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
 
@@ -1377,6 +1652,15 @@ class Applier:
         landed; see `Completer`. It runs after the clone or the copy, and
         everything from `_deploy()` onwards reads what it returned.
 
+        `replacing` is the user's answer to `replacement_question()`, and it is
+        the ONLY thing that lets this install reset a clean app-owned checkout
+        of a different repository (T47). Everything else `_costly_reset()`
+        finds is a refusal in the same sentences `update()` uses, over the same
+        folder — `update()` asks its own copy of those questions first and the
+        second pass here is deliberate: this is the method that reaches the
+        clone seam, and a guard that only one of two callers runs is how the
+        asymmetry T47 closes came about.
+
         `_check_values()` is NOT re-run against the completed manifest: it is
         the caller's answers that are being checked, and the fields a completer
         fills (conf files to activate, SQL to report) carry no prompts to
@@ -1389,7 +1673,32 @@ class Applier:
         clash = self._conflict_refusal(manifest)
         if clash:
             raise ApplyError(clash)
+        # After the conflict and before anything is written. The two guards are
+        # independent -- one is about what is here that must not be, the other
+        # about what is not here and must be -- and a row can only be told one
+        # thing at a time, so the conflict keeps the order it had.
+        missing = self._requires_refusal(manifest)
+        if missing:
+            raise ApplyError(missing)
         clone = self.clone_dir(manifest)
+        # Whether a claim of OURS is at `clone`, so the completion mark at the
+        # end knows whether there is a record to update. False for the two
+        # routes that write no claim (a sourceless manifest, a claim whose write
+        # failed), and neither of those may be handed one late: the first never
+        # had this app's handwriting on the folder, and for the second the
+        # report has already said the folder will not be recognised next time.
+        claimed = False
+        url = ""
+        # Read BEFORE the clone or the copy touches that folder, because
+        # `update()` runs this whole method again over a module that is already
+        # installed and finished. The first claim write below carries this value
+        # back, so a re-install or an update that dies half-way leaves the module
+        # as finished as it was — the folder's contents may now be half a version
+        # newer, but the INSTALL it had is not undone by a failed attempt at a
+        # second one, and demoting it would take Remove off a working module's
+        # row. A clone this app has no claim on (`None`) is a fresh install and
+        # starts unfinished.
+        was_completed = clone_install_completed(clone, item_id=manifest.id) is True
         if folder is not None and manifest.source is not None:
             raise ApplyError(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
@@ -1398,6 +1707,7 @@ class Applier:
             )
         if folder is not None:
             self._require_own_clone(manifest, clone, "install")
+            self._costly_reset(manifest, clone, replacing)
             self._copy_folder(folder, clone, log)
         elif manifest.source is None:
             # A manifest with no source never clones, so the guard used to sit
@@ -1413,6 +1723,7 @@ class Applier:
                 self._require_own_clone(manifest, clone, "install")
         else:
             self._require_own_clone(manifest, clone, "install")
+            self._costly_reset(manifest, clone, replacing)
             try:
                 self.git.clone(
                     CloneSpec(
@@ -1448,7 +1759,14 @@ class Applier:
             # stopped finding it would report a write site that had gone.
             url = manifest.source.url if manifest.source is not None else ""
             try:
-                write_clone_claim(clone, item_id=manifest.id, url=url)
+                # `completed` is `False` for a new clone — the folder is filled
+                # and not one of the steps below has run — and whatever it
+                # already was for a clone this app has installed before. The
+                # matching `True` is the last thing this function does, and
+                # between the two writes the claim is what tells the Modules tab
+                # to keep offering Install (T68).
+                write_clone_claim(clone, item_id=manifest.id, url=url, completed=was_completed)
+                claimed = True
             except OSError as exc:
                 # Never fatal — the clone is on disk and the rest of the install
                 # is what the user asked for — but never silent either: without
@@ -1472,7 +1790,50 @@ class Applier:
         self._conf(manifest, clone, vals, log)
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
+        self._finish_claim(manifest, clone, url, claimed, log)
         return self._report("install", manifest, log)
+
+    def _finish_claim(
+        self, manifest: Manifest, clone: Path, url: str, claimed: bool, log: _Log
+    ) -> None:
+        """The ONE claim write that happens after the steps: this install finished (T68).
+
+        LAST, after every step that can raise. `_sql()` is the one T68 was
+        reported for — the T7 direct-SQL guard refuses while the world runs —
+        but deploy, patches, conf, client files and DBCs all leave through the
+        same exception, and each of them leaves the clone on disk with its
+        install unfinished. This is the one point reached only when all of them
+        returned, so what the claim says is "every step ran" and not "the last
+        step I thought of ran".
+
+        **One call, not one call per fact, and that is the whole reason this is a
+        method.** `write_clone_claim()` writes the WHOLE record, so a second
+        after-the-steps write carrying its own key and defaulting this one's
+        would erase whichever ran first. Anything else a step learns and the
+        claim must carry goes into THIS call as another keyword — never into a
+        write of its own.
+
+        `claimed` is False for a manifest this app never wrote a claim for (no
+        source, no folder) and for one whose first write failed. Neither may be
+        handed a record late: the first never had this app's handwriting on the
+        folder, and for the second the report has already told the user the
+        folder will not be recognised next time.
+        """
+        if not claimed:
+            return
+        try:
+            write_clone_claim(clone, item_id=manifest.id, url=url, completed=True)
+        except OSError as exc:
+            # Not fatal for the same reason the first write is not: the install
+            # DID happen and the user is owed the report of it. The cost is one
+            # row that keeps offering Install for an install that finished, and
+            # pressing it re-runs steps this applier already re-runs from the
+            # menu — so the failure is visible and harmless, where raising here
+            # would report a finished install as a failure.
+            log.skipped.append(
+                f"{CLAIM_FILE}: the finished mark could not be written ({exc}), so "
+                f"{_rel(self.server_dir, clone)} will keep offering Install"
+            )
 
     def update(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         """Fast-forward this module's clone and re-apply it — refusing anything a reset destroys.
@@ -1504,7 +1865,14 @@ class Applier:
            and running its SQL over the result. A local read (`git remote
            get-url`), so it is asked first and both names go in the refusal.
         2. **The working tree.** `reset --hard` destroys precisely what `git
-           status` reports. Also a local read.
+           status` reports, minus the two files this app itself put in the
+           checkout: its own `CLAIM_FILE` (T66 — see `git._status_pathspec()`;
+           until it was fixed that one untracked file refused an update on
+           every clone this app had ever made) and an untracked, EMPTY
+           `include.sh` it touched into a C++ module whose upstream ships none
+           (T47 — `git._without_the_generated_include()`, which reads the
+           status CODE so that a tracked `include.sh` somebody changed is still
+           their work). Also a local read.
         3. **HEAD.** `status` compares the tree and the index against HEAD and
            says nothing about what HEAD itself carries, so a user who
            COMMITTED their work passes 1 and 2. `no_local_commits()` counts
@@ -1548,46 +1916,155 @@ class Applier:
                 f"{manifest.id} is not installed here as a git checkout ({rel}), so there is "
                 f"nothing to update. Install it first. Nothing was changed."
             )
-        url = manifest.source.url
-        remote = self.remote_url(clone)
-        if remote is None:
-            return (
-                f"{rel} is a git checkout, but git would not say what it is a checkout of, so "
-                f"{manifest.id} was not updated and nothing was changed."
-            )
-        if not same_repo(remote, url):
-            return (
-                f"{rel} is a checkout of {remote}, not of {url}. Updating {manifest.id} would "
-                f"reset that folder to {url} and then deploy this module over it. Nothing was "
-                f"changed."
-            )
+        found = self._reset_cost(manifest, clone)
+        if found is None:
+            return None
+        return _destroys_message(found, rel, manifest.id, manifest.source.url, "Updating")
+
+    def _reset_cost(
+        self, manifest: Manifest, clone: Path, *, repository: bool = True, history: bool = True
+    ) -> _Reset | None:
+        """What a `git reset --hard` over `clone` would cost, or `None` for nothing.
+
+        The three questions, in one place, for the two callers that run that
+        reset: `update()` through `_update_refusal()`, and `install()` through
+        `_costly_reset()` (T47 — until then only one of them asked, over the
+        very same folder). The order is the order of what costs least and is
+        most certain, and it is argued in `update()`'s docstring.
+
+        `is True` / `is not True` throughout and never truthiness: `None` out of
+        a seam is "git could not be asked", which fails closed under its own
+        name rather than telling an offline user they have uncommitted changes.
+
+        Two questions can be switched off, and both switches belong to
+        `install()`:
+
+        - `repository=False` is "the user has already been shown the two
+          repository names and said replace it anyway". Only that question is
+          dropped; the tree and HEAD are still asked, so an agreement to replace
+          a DIFFERENT repository is never also an agreement to throw away
+          uncommitted work in it.
+        - `history=False` is `replacement_question()`, which runs on the GUI
+          thread before any job is queued and so may not fetch. Dropping the
+          HEAD question there can only make the question ASKED where the
+          install would then refuse — a refusal after a Yes, which changes
+          nothing on disk — never the reverse.
+
+        A manifest with no `source` has no repository to be a checkout of, so
+        the first question and `no_local_commits()`'s branch have nothing to
+        compare against and the folder is judged on its working tree alone.
+        """
+        source = manifest.source
+        url = source.url if source is not None else ""
+        remote = self.remote_url(clone) if url else ""
+        if url and repository:
+            if remote is None:
+                return _Reset(_Destroys.REPO_UNSEEN, "")
+            if not same_repo(remote, url):
+                return _Reset(_Destroys.OTHER_REPO, remote)
+        known = remote or ""
         clean = self.unmodified(clone, ".")
         if clean is not True:
-            if clean is False:
-                return (
-                    f"{rel} has changes in it that are not committed. Updating {manifest.id} "
-                    f"runs `git reset --hard`, which would delete them. Commit them, stash "
-                    f"them, or copy them somewhere else first. Nothing was changed."
-                )
-            return (
-                f"git could not say whether {rel} has uncommitted changes in it, and updating "
-                f"{manifest.id} would run `git reset --hard` over whatever is there. Nothing "
-                f"was changed."
-            )
-        nothing_of_theirs = self.no_local_commits(clone, manifest.source.branch)
+            return _Reset(_Destroys.EDITED if clean is False else _Destroys.TREE_UNSEEN, known)
+        if source is None or not history:
+            return None
+        nothing_of_theirs = self.no_local_commits(clone, source.branch)
         if nothing_of_theirs is not True:
-            if nothing_of_theirs is False:
-                return (
-                    f"{rel} carries commits of its own that {url} does not have. Updating "
-                    f"{manifest.id} runs `git reset --hard`, which would move off them and "
-                    f"leave them reachable only through git's reflog. Nothing was changed."
-                )
-            return (
-                f"Yu'lon could not reach {url} to see what updating {manifest.id} would bring "
-                f"in, so it did not touch {rel}. Check this machine's connection and try "
-                f"again. Nothing was changed."
+            return _Reset(
+                _Destroys.COMMITTED if nothing_of_theirs is False else _Destroys.HISTORY_UNSEEN,
+                known,
             )
         return None
+
+    def _costly_reset(self, manifest: Manifest, clone: Path, replacing: bool) -> None:
+        """Refuse an install that would `reset --hard` over a checkout worth keeping (T47).
+
+        `_require_own_clone()` answers *whose folder is this*; it returns the
+        moment this app's own claim reads `OWNED` and never asks whether there
+        is anything in it worth keeping. For a FIRST install that is right —
+        case 0 has nothing to lose, and this method returns at its first line
+        for it, so the ordinary install grows no question and no round trip.
+        For an install over a checkout that is already there it was a silent
+        `git reset --hard` over somebody's work, which is the one thing T44's
+        ticket says must not happen — and the same folder, one button over,
+        already refused it.
+
+        Reachable and reached: "Install Selected Module" on the Modules tab's
+        context menu is offered for a row whose clone exists (the row BUTTON is
+        not, which is why T44 recorded this as unreachable from there), and both
+        custom-module routes derive an id that may already name a clone.
+
+        `replacing` is the user's own answer to `replacement_question()`, and it
+        buys exactly one of the three questions: the two repository names were
+        put to them and they said go ahead. It never buys the other two —
+        `_reset_cost()` still asks them — so a Yes to "replace this checkout of
+        another repository" is not a Yes to deleting uncommitted work in it.
+        """
+        if not (clone / ".git").is_dir():
+            return
+        found = self._reset_cost(manifest, clone)
+        if replacing and found is not None and found.fact is _Destroys.OTHER_REPO:
+            # **`is OTHER_REPO` is load-bearing, and my first reading of it was
+            # wrong** (review, round 1). The repository question has TWO
+            # refusals, not one: `REPO_UNSEEN` is git declining to say what the
+            # folder is a checkout of, and `repository=False` drops both. So
+            # without this line an agreement to replace a NAMED repository
+            # would also wave through the folder whose name nobody could read —
+            # the fail-closed answer being spent on a question the user was
+            # never shown. Only the fact they were actually asked about is
+            # re-asked without.
+            found = self._reset_cost(manifest, clone, repository=False)
+        if found is None:
+            return
+        url = manifest.source.url if manifest.source is not None else ""
+        raise ApplyError(
+            _destroys_message(found, _rel(self.server_dir, clone), manifest.id, url, "Installing")
+        )
+
+    def replacement_question(self, manifest: Manifest) -> str | None:
+        """What a user must agree to before installing over the clone already at this path.
+
+        `None` means there is nothing to ask about: no clone, a clone this app
+        did not make (which `_require_own_clone()` refuses outright, and a
+        refusal is not a question — T41/T142 are not weakened by anything here),
+        a clone of the repository this manifest names, or one the install is
+        going to refuse anyway.
+
+        A sentence rather than a raised error, because the only honest answer
+        comes from the person: `modules/<id>` is named for an id, two different
+        repositories can carry the same module name, and a clean checkout of
+        another one at that path is either a fork the user has finished with or
+        the one they meant to keep. This app cannot tell, and resetting it
+        unasked is T47.
+
+        **It asks git nothing that leaves this machine.** `history=False`: the
+        caller is a view, on the GUI thread, before any job is queued, and a
+        `git fetch` there would freeze the window for as long as the network
+        takes. The HEAD question is asked by `_costly_reset()` inside the run,
+        so a clone that also carries commits of its own is refused after a Yes
+        rather than replaced — a refusal that changes nothing on disk.
+        """
+        clone = self.clone_dir(manifest)
+        if manifest.source is None or not (clone / ".git").is_dir():
+            return None
+        if read_clone_claim(clone, item_id=manifest.id) is not Ownership.OWNED:
+            return None
+        found = self._reset_cost(manifest, clone, history=False)
+        if found is None or found.fact is not _Destroys.OTHER_REPO:
+            return None
+        if self._reset_cost(manifest, clone, repository=False, history=False) is not None:
+            # The repository is not the only thing wrong with this folder, and a
+            # question whose Yes leads straight to a refusal is worse than the
+            # refusal: it reads as though answering it were enough. The install
+            # says which of the other questions stopped it, in its own words.
+            return None
+        rel = _rel(self.server_dir, clone)
+        return (
+            f"{rel} is a checkout of {found.remote}, not of {manifest.source.url}.\n\n"
+            f"Installing {manifest.id} here runs `git fetch` and `git reset --hard` over that "
+            f"folder to make it a checkout of {manifest.source.url}. Anything in it that "
+            f"{found.remote} does not have is lost.\n\nReplace it?"
+        )
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         """Re-apply the value-bearing steps: configure-time patches/SQL and conf keys.
@@ -1844,6 +2321,30 @@ class Applier:
                 f"here, at {where}. Remove it first, or keep it and leave {manifest.id} "
                 f"out. Nothing was changed."
             )
+        return None
+
+    def _requires_refusal(self, manifest: Manifest) -> str | None:
+        """Why this cannot be installed without something that is not here, or `None`.
+
+        `requires` was `conflicts_with`'s twin in the worst way (T69): in the
+        schema, in the JSON Schema, in eleven shipped manifests and read by
+        NOTHING. Loot Pet and SitMeansRest declare `mod-ale` and installed
+        cleanly without it, which puts a Lua script into a server that has no
+        Lua engine -- an install that reports success and then does nothing at
+        all, with no line anywhere saying why.
+
+        The UI locks the same row for the same reason, and this is the half that
+        is a guarantee: the tab's Install is one route to `install()` and a
+        custom-folder or link install is another, so a lock alone would be a
+        suggestion. `missing_requirements()` is the single reading both use.
+
+        Asked of the DISK and not of the catalog, so a module the SERVER install
+        cloned counts as present; `missing_requirements()` says why that matters.
+        """
+        if not manifest.requires:
+            return None
+        for needed in missing_requirements(manifest, installed_clones(self.server_dir)):
+            return requirement_refusal(manifest.id, needed) + " Nothing was changed."
         return None
 
     def _require_own_clone(self, manifest: Manifest, clone: Path, action: When) -> None:
@@ -2170,13 +2671,30 @@ class Applier:
         module clone this app can point at as the one that matters. That also
         means an UNTRACKED file blocks adoption, which is stricter than the harm
         requires — a hard reset does not delete untracked files — and it is the
-        `include.sh` case above. Deliberate, and NOT allowlisted even for that
-        one generated name: the file this app writes is empty, a user's
-        `include.sh` need not be, so an exact-name allowlist would have to
-        become a content check to be safe, and a content check is the first step
-        of deciding which of somebody's untracked files are innocent. The
-        direction of this error is a re-clone; the direction of that one is lost
-        work.
+        `include.sh` case above.
+
+        **Two names `unmodified()` does not count, and the argument this
+        paragraph used to make against the second one.** `CLAIM_FILE` is the
+        first (T66, `git._status_pathspec()`), and it changes nothing here:
+        this method is reached only for `UNCLAIMED`, and the two ways to be
+        `UNCLAIMED` are no such file at all and one the REPOSITORY tracks —
+        which `status` already reports as unchanged. A claim this app wrote but
+        cannot read as its own is `UNKNOWN`, and `_require_own_clone()` raises
+        on that before ever getting here.
+
+        The second is an untracked, EMPTY `include.sh` (T47,
+        `git._without_the_generated_include()`). This paragraph refused it for
+        years on the grounds that "an exact-name allowlist would have to become
+        a content check to be safe, and a content check is the first step of
+        deciding which of somebody's untracked files are innocent" — and the
+        first half was right, which is why it IS a content check and not a
+        name. Two conditions, both read from the checkout: `?? ` in the status
+        line, so the repository does not track the file, and zero bytes, so
+        there is nothing in it to lose. Nothing decides that somebody's file is
+        innocent; a file with anything at all in it is counted, and so is one
+        the repository tracks, however small. What it buys is the case that
+        made the rule wrong: the app touches that file itself, into a folder it
+        created, and then refused to update it because of what it had done.
         """
         if self.server_dir_claim(self.server_dir) is not Ownership.OWNED:
             return _NoAdoption.NO_RECORD
@@ -2325,7 +2843,14 @@ class Applier:
             if self.sql is None:
                 log.skipped.append(f"sql → {step.db}: no SQL runner configured")
                 continue
+            # T63: between the guard above and the write below, the one question
+            # neither of them asks — is this step's turn yet? Skipping here and
+            # not inside `_run_sql()` keeps that function what it is (it writes),
+            # and keeps the skip in the same list the user already reads.
+            if not self._precondition_met(step, log):
+                continue
             self._run_sql(step, clone, vals, log)
+            self._verify_sql(manifest, step, log)
 
     def _refuse_direct_sql_into_a_running_world(self, manifest: Manifest, when: When) -> None:
         """Checklist 8.7a's guard: no direct SQL into a live world's databases.
@@ -2415,7 +2940,7 @@ class Applier:
         # Named as the manifest spells them, and unrendered for `_pending_sql`'s
         # reason: `_render()` raises for a value this run has not got, and a
         # refusal that dies while composing its own sentence names nothing.
-        steps = ", ".join(f"sql {step.path or 'inline'} → {step.db}" for step in at_risk)
+        steps = ", ".join(_step_name(step) for step in at_risk)
         dbs = ", ".join(sorted({step.db for step in at_risk}))
         if running is None:
             raise ApplyError(
@@ -2480,7 +3005,7 @@ class Applier:
         try:
             started = self._start_database()
         except Exception as exc:  # noqa: BLE001 - any failure to start is one answer here
-            steps = ", ".join(f"sql {step.path or 'inline'} → {step.db}" for step in direct)
+            steps = ", ".join(_step_name(step) for step in direct)
             raise ApplyError(
                 f"{manifest.id}: the database could not be started, so no SQL was run and no "
                 f"rows were written: {steps}. {exc}"
@@ -2530,6 +3055,113 @@ class Applier:
                 raise ApplyError(f"sql file missing in clone: {path}")
             self.sql.run_file(step.db, path)
             log.done.append(f"sql {_rel(clone, path)} → {step.db}")
+
+    def _ask_db(self, check: ExistsCheck) -> tuple[bool | None, str]:
+        """Did a row come back — `True`, `False`, or `None` for *could not ask*, and why.
+
+        Three-valued for `docker._running()`'s reason, and here the third value
+        is not a rare one: the case T63 exists for — `acore_playerbots` before
+        mod-playerbots has ever started — is a schema that does not exist, and a
+        `mysql` told to connect to it fails rather than returning no rows. So
+        *the database is not there yet* and *the table is not there yet* arrive
+        by two different routes and must mean the same thing to both callers.
+
+        The query is sent UNRENDERED. Only `Prompt.exists` templates over the
+        user's answers; a `SqlStep` check is the catalog's own sentence about
+        the module's own tables, `test_manifest.py::test_no_sql_step_check_
+        carries_a_template_field` holds every shipped one to that, and rendering
+        here would mean a `{` in somebody's SQL could raise inside a check whose
+        whole job is to answer a question.
+        """
+        if not isinstance(self.sql, SqlReader):
+            return None, "this install has no database reader"
+        try:
+            rows = self.sql.query(check.db, check.query)
+        except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
+            return None, f"{type(exc).__name__}: {exc}"
+        return bool(rows.strip()), ""
+
+    def _precondition_met(self, step: SqlStep, log: _Log) -> bool:
+        """Whether this step's turn has come — and if not, why, in the report.
+
+        T63. A direct step can be correct and still be too early: `mod-city-bots`
+        writes `playerbots_account_type`, which mod-playerbots creates on the
+        world server's FIRST start, and that start is after the rebuild an
+        install only *reports*. Before this, the step would have been run
+        regardless and `mysql` would have failed on a missing table — an
+        `ApplyError` out of `_run_sql()`, after the clone, the deploy and the
+        patches, for a module that is in fact installed correctly and merely not
+        finished. That is a press reported as broken when the true answer is
+        "come back after the rebuild".
+
+        Three decisions:
+
+        * **Skipped, not refused.** Everything this press did is real and worth
+          keeping, and the remaining work is the user's (rebuild, start once).
+          The sentence goes in `skipped`, which the Modules tab already prints
+          under `– skipped:` (`controller_view.py::_format_apply_report`), so
+          nothing new has to be reached for the user to be told.
+        * **Fails CLOSED.** `None` — no reader, or a query that raised — skips
+          too, carrying the seam's own words. *Could not ask* is not *yes*, and
+          the write on the other side of this question is a `DROP TABLE`.
+        * **Per step, not a pre-pass.** Unlike the running-world guard, a
+          precondition is about ONE step's own tables; a manifest's other steps
+          are not implicated and are not held back by it.
+        """
+        if step.precondition is None:
+            return True
+        found, why = self._ask_db(step.precondition)
+        if found:
+            return True
+        detail = (
+            step.precondition.missing if found is False else f"{why}. {step.precondition.missing}"
+        )
+        log.skipped.append(f"{_step_name(step)}: {detail}")
+        return False
+
+    def _verify_sql(self, manifest: Manifest, step: SqlStep, log: _Log) -> None:
+        """Prove the step produced the state it claims, or raise saying which half did not.
+
+        T63, and the half that is a port rather than an invention:
+        `city_bots_import_roster()` in `guides/wow-wotlk/wow-manage.sh` counts
+        400 roster rows AND 400 city-bot account types after its import and
+        calls anything else a failure, because `mysql` exiting 0 over a file of
+        400 inserts says the statements parsed, not that the cast is there.
+
+        **Each entry is asked separately and says its own sentence**, which is
+        the whole reason `verify` is a list and not one query with two clauses:
+        a single check that both counts are 400 is green for two different
+        reasons and red for two more, and a refusal that cannot say which half
+        failed sends the operator to look in the wrong table.
+
+        It raises, like every other refusal in this engine — but the message is
+        careful not to claim nothing happened, because something did: the file
+        ran. A `skipped` line would be the worse lie of the two (the module
+        would be marked installed with its roster half-written), and a repeat is
+        safe: the roster file drops and recreates its own table, so pressing
+        Install again after fixing the cause is a repair and not a second copy.
+
+        `None` — no reader, or a query that raised — is reported and does NOT
+        refuse, and that is the opposite of `_precondition_met()`'s fail-closed
+        on purpose: there the unknown gates a write, here the write has already
+        happened and an unaskable database is not evidence against it.
+        """
+        for check in step.verify:
+            found, why = self._ask_db(check)
+            if found:
+                continue
+            if found is None:
+                log.skipped.append(
+                    f"{_step_name(step)}: ran, but NOT checked against the database ({why}), "
+                    f"so {check.missing[0].lower() + check.missing[1:]} would not be noticed here"
+                )
+                continue
+            raise ApplyError(
+                f"{manifest.id}: {check.missing}. {_step_name(step)} was run — the file's "
+                f"statements reached the database — so this is the result being wrong and not "
+                f"the step being skipped. Fix the cause and {step.when} again: the import "
+                f"replaces its own rows, so a repeat repairs rather than duplicates."
+            )
 
     def _conf(self, manifest: Manifest, clone: Path, vals: Mapping[str, str], log: _Log) -> None:
         for conf in manifest.conf:
@@ -2582,6 +3214,26 @@ class Applier:
             log.conf_restart = True
 
     def _client(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+        """Copy this manifest's `client` steps into the game client's own folders.
+
+        **Never the checkout's bookkeeping** (T65). Two `wow-tortoise` addons
+        deploy with `src: "."` -- the addon IS the repository root -- so the
+        copy carried `.git` and this app's `CLAIM_FILE` into
+        `Interface/AddOns/<name>`. Git writes its pack and idx files 0444, and
+        `copytree(dirs_exist_ok=True)` cannot open a 0444 destination for
+        writing: the SECOND install of either addon died with a raw
+        `shutil.Error` (Errno 13) before it had landed a single new file, so
+        the addon could be installed once and never updated or reinstalled. A
+        pinned install failed identically, which is why this is not T60's.
+
+        Left out rather than force-overwritten: WoW reads the `.toc` and the
+        files it names, so a copy of somebody's git history in the AddOns
+        folder was never wanted -- it was 20+ MB of what the user's client has
+        to scan, and it is why the manifests' notes claimed the `.git` copy was
+        intended. Those notes are corrected with this change. A user who
+        removes and reinstalls also gets no stale `.git` back, because the
+        clone is where the history lives and it stays there.
+        """
         for step in manifest.client:
             if self.client_dir is None:
                 log.skipped.append(f"client {step.src}: no client dir configured")
@@ -2594,7 +3246,7 @@ class Applier:
             else:
                 target = self.client_dir / "Data"
             if src.is_dir():
-                shutil.copytree(src, target, dirs_exist_ok=True)
+                shutil.copytree(src, target, dirs_exist_ok=True, ignore=_NOT_FOR_THE_CLIENT)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target / src.name)
@@ -2695,6 +3347,17 @@ def _render(template: str, values: Mapping[str, str], what: str) -> str:
 
 def _is_glob(path: str) -> bool:
     return any(ch in path for ch in "*?[")
+
+
+def _step_name(step: SqlStep) -> str:
+    """How a SQL step is named to a human — the manifest's own spelling, unrendered.
+
+    The same shape `_refuse_direct_sql_into_a_running_world()` builds its list
+    from, and for the same reason: a sentence about a step that has not run must
+    not die composing its own subject. One function, so a user who meets the
+    running-world refusal and then a skipped precondition reads one vocabulary.
+    """
+    return f"sql {step.path or 'inline'} → {step.db}"
 
 
 def _apply_patch(path: Path, patch: Patch, replacement: str) -> bool:

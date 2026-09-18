@@ -11,7 +11,7 @@ very first account (roadmap 6.5 item 4, `pyplan/phase6-decisions.md`).
 Where the algorithm comes from
 ------------------------------
 Read out of AzerothCore's own sources on the checkout at
-`/home/pk/wow-server-playerbots` (rev `9fb906bb7296+`, Playerbot branch), not
+`/home/user/wow-server-playerbots` (rev `9fb906bb7296+`, Playerbot branch), not
 from a blog post:
 
 * `src/common/Cryptography/Authentication/SRP6.{h,cpp}` — `g = {7}`,

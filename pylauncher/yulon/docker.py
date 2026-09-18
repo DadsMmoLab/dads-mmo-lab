@@ -3631,7 +3631,7 @@ def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[st
     POPULATED ancestor) and the container is denied it, because `$HOME` is
     `user_home_dir_t` and a confined container may only read `container_file_t`:
 
-        $ docker run --rm --entrypoint ls -v /home/pk:/probe:ro <digest> -A /probe
+        $ docker run --rm --entrypoint ls -v /home/user:/probe:ro <digest> -A /probe
         ls: can't open '/probe': Permission denied
         $ docker run --rm --security-opt label:disable ... -A /probe
         .bash_logout
