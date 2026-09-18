@@ -23,7 +23,7 @@ ENTRY = load_catalog().get("wow-wotlk")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None
 GIB = preflight.GIB
-SERVER_DIR = Path("/home/pk/wow")
+SERVER_DIR = Path("/home/user/wow")
 
 
 def facts(**overrides: object) -> preflight.Facts:

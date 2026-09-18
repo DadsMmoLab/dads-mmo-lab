@@ -404,7 +404,7 @@ def _write(path: Path, text: str) -> None:
     That was false in both directions, and it was the more dangerous kind of false: a
     guarantee written down stops the next reader checking.
 
-    Measured on PKGAME-LAPTOP, Windows 10.0.26200, CPython 3.13.14, 2026-09-01, by K.3
+    Measured on a Windows laptop, Windows 10.0.26200, CPython 3.13.14, 2026-09-01, by K.3
     while writing the sibling `_write_secret`: on **Windows** the POSIX mode is a complete
     no-op. `os.open(..., 0o600)`, `open()` + `os.chmod(0o600)`, and a plain `open()` all
     produce `st_mode & 0o777 == 0o666` with byte-identical `icacls` output, and under a

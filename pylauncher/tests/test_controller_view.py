@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
 import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, pump_until
+from tests.conftest import HANG_BOUND, process_events, pump_until
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -23,6 +25,7 @@ from yulon import (
     dashboard,
     docker,
     logsnap,
+    manifest_store,
     networking,
     party,
     purge,
@@ -54,16 +57,23 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
+from yulon.git import RunnerGit
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
+from yulon.runner import run as _REAL_RUN
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
+    RETURN_TO_PIN_BUTTON_LABEL,
     TUNING_RECREATE_LABEL,
     TUNING_RESTART_LABEL,
+    UPDATE_TO_LATEST_BUTTON_LABEL,
     ControllerServices,
     ControllerView,
+    DatabaseAlone,
+    UpdateChoice,
+    ask_update_choice,
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
 from yulon.ui.widgets.job import run_inline
@@ -692,7 +702,7 @@ def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
 def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> None:
     """Measured live, yulon-ubuntu 2026-09-07, on the first run of this code.
 
-    The real applier installed `mod-aoe-loot` into `/home/pk/wowserver` and its
+    The real applier installed `mod-aoe-loot` into `/home/user/wowserver` and its
     manifest glob `data/sql/db-world/*.sql` resolved to nothing — while that
     clone carries `data/sql/db-world/base/aoe_loot_module_string.sql`, the file
     FACT 1 had watched the importer apply an hour earlier. The draft said
@@ -770,7 +780,13 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
 
 
 def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """39 of the 41 must behave exactly as they did — no new dialog at all."""
+    """Every manifest but the two ah-bots must behave exactly as it did — no new dialog.
+
+    Rows whose Install is LOCKED are left out of the loop rather than counted
+    as installs (T69): eleven shipped manifests declare a `requires`, nothing
+    is on disk in this fixture, so `_module_action()` refuses them before the
+    asker — which is the guard's whole job and is asserted by its own test.
+    """
     asked: list[str] = []
 
     def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
@@ -778,7 +794,13 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
-    catalogued = [r.data.id for r in view.modules_panel.rows() if r.data.catalogued]
+    catalogued = [
+        r.data.id for r in view.modules_panel.rows() if r.data.catalogued and r.data.installable
+    ]
+    locked = [
+        r.data.id for r in view.modules_panel.rows() if r.data.catalogued and not r.data.installable
+    ]
+    assert "mod-ah-bot" in catalogued and "mod-ah-bot-plus" in catalogued, locked
     for item_id in catalogued:
         view.modules_panel.select(item_id)
         view._module_action("install")
@@ -1231,8 +1253,13 @@ class _LayeredStore(ManifestStore):
         super().__init__(root, game)
         self.user: dict[str, Manifest] = {}
 
-    def load_all(self, kind: ManifestType) -> Iterator[Manifest]:
-        shipped = list(super().load_all(kind))
+    def load_all(
+        self, kind: ManifestType, *, skipped: list[str] | None = None
+    ) -> Iterator[Manifest]:
+        # T46's keyword is forwarded rather than swallowed: the real store names
+        # a user manifest it could not load through it, and a fake that dropped
+        # it would make the view look like it reports skips when it never sees any.
+        shipped = list(super().load_all(kind, skipped=skipped))
         yield from shipped
         ids = {m.id for m in shipped}
         for manifest in self.user.values():
@@ -1248,6 +1275,8 @@ class _FakeCustomRoute:
         self.refusal = refusal
         self.derived_from: list[object] = []
         self.installed: list[tuple[str, Path | None]] = []
+        self.replacing: list[bool] = []
+        self.question: str | None = None
         self.forgotten: list[str] = []
         self.custom_ids: set[str] = set()
 
@@ -1266,8 +1295,14 @@ class _FakeCustomRoute:
         self.custom_ids.add(path.name)
         return _custom_manifest(path.name, CUSTOM_FOLDER_DESC)
 
-    def install(self, manifest: Manifest, folder: Path | None) -> ApplyReport:
+    def install(
+        self, manifest: Manifest, folder: Path | None, *, replacing: bool = False
+    ) -> ApplyReport:
+        # `replacing` is recorded, not ignored: it is the user's answer to T47's
+        # question, and an install that dropped it would reset a checkout of
+        # another repository with the question asked and the answer thrown away.
         self.installed.append((manifest.id, folder))
+        self.replacing.append(replacing)
         # Lane A's `complete()` persists inside the install pass, so the row is
         # in the store by the time the report comes back.
         self.store.user[manifest.id] = manifest
@@ -1283,13 +1318,14 @@ class _FakeCustomRoute:
 def _with_custom_route(
     services: ControllerServices, refusal: str | None = None
 ) -> _FakeCustomRoute:
-    """Put a layered store and the five custom-module seams on `services`."""
+    """Put a layered store and the five custom-module seams on `services`, plus T47's question."""
     store = _LayeredStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME)
     route = _FakeCustomRoute(store, refusal=refusal)
     services.store = store
     services.module_from_link = route.derive_link
     services.module_from_folder = route.derive_folder
     services.module_install_custom = route.install
+    services.module_replacement_question = lambda _manifest: route.question
     services.module_forget = route.forget
     return route
 
@@ -7869,13 +7905,18 @@ def test_busy_greys_every_row_button_and_gives_them_back(
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
 
     def presses() -> list[bool]:
+        # Rows the ROW's own answer keeps disabled are left out: the busy gate
+        # never overrides that (`set_enabled_actions`), so a locked Install --
+        # eleven of them here, one per shipped `requires` with nothing on disk
+        # to satisfy it (T69) -- would read as the gate still being on.
         return [
             (row.install_button or row.remove_button).isEnabled()
             for row in view.modules_panel.rows()
-            if row.install_button is not None or row.remove_button is not None
+            if (row.install_button is not None and row.data.installable)
+            or (row.remove_button is not None and row.data.removable)
         ]
 
-    assert all(presses())
+    assert presses() and all(presses())
     view._set_busy(True)
     assert not any(presses())
     view._set_busy(False)
@@ -9204,3 +9245,184 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     which is the review this change would owe.
     """
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
+
+
+def test_a_broken_custom_manifest_costs_its_own_row_and_the_family_still_draws(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The tab keeps every shipped module and names the one file it could not read (T46).
+
+    Driven through `reload_modules()` against a REAL file on disk rather than a
+    `Manifest` handed to the builder: the defect lived in the store, surfaced in
+    `_load_manifests()`, and was only ever visible at this call site -- a test
+    that injected a broken manifest into the panel would have proved nothing
+    about either.
+
+    Before T46 the `!!` line was the ONLY thing this tab drew for the family:
+    `list(store.load_all(kind))` is forced inside one `try`, so ~21 shipped
+    WotLK modules disappeared behind one file the user's own custom-module route
+    had written.
+    """
+    user = tmp_path / "user-manifests"
+    items = user / modules.GAME / "modules"
+    items.mkdir(parents=True)
+    (user / modules.GAME / "modules.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game": modules.GAME,
+                "type": "module",
+                # Both bad ones sort FIRST, so a store that stopped at the raise
+                # stopped before `mod-kept` -- the user row after the bad one is
+                # the half of the family a family-scoped catch never reached.
+                "items": ["mod-broken", "mod-bad-shape", "mod-kept"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (items / "mod-broken.json").write_text("{not json", encoding="utf-8")
+    # Valid JSON that fails the SCHEMA. It is the realistic bad file -- this app
+    # persisted these itself, so an older build's shape is what ages badly -- and
+    # it does not arrive as `ManifestError`: pydantic raises it, straight through
+    # `load_manifest()`, and the skip has to be wide enough to hold it.
+    (items / "mod-bad-shape.json").write_text(
+        json.dumps(
+            {
+                "id": "mod-bad-shape",
+                "name": 5,
+                "type": "module",
+                "game": modules.GAME,
+                "source": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (items / "mod-kept.json").write_text(
+        json.dumps(
+            {
+                "id": "mod-kept",
+                "name": "Kept",
+                "type": "module",
+                "game": modules.GAME,
+                "source": {"repo": "you/mod-kept"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    services = _services(ps, tmp_path, [])
+    services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    # The report box accumulates: constructing the view already reloaded once.
+    # Cleared so what is counted below is ONE reload's worth, not the session's.
+    view.module_report.clear()
+
+    view.reload_modules()
+
+    # The family is still there. Counted, not sampled: a test that looked for one
+    # known id would pass on a tab that drew only that one.
+    shipped = services.store.load_index("module").items
+    drawn = {r.data.id for r in view.modules_panel.rows()}
+    assert set(shipped) <= drawn
+    assert len(shipped) >= 20
+    # And the USER row that comes after the bad one, which is the half of the
+    # loss `module_updates()` used to take silently: the skip has to continue
+    # the pass, not merely survive the rows already yielded.
+    assert "mod-kept" in drawn
+    assert "mod-broken" not in drawn
+    assert "mod-bad-shape" not in drawn
+
+    # And the file that would not read is named, once, where every other refusal
+    # on this tab is read.
+    report = view.module_report.toPlainText()
+    # Counted by LINE, not by substring: the id appears twice in its own sentence
+    # -- once as the id and once inside the filename -- so `report.count(...)`
+    # measures the sentence's shape rather than how many times it was written.
+    named = [line for line in report.splitlines() if "mod-broken" in line]
+    assert len(named) == 1, report
+    assert "is not valid JSON" in named[0]
+    # The schema failure gets ONE line too, which is the assertion that fails if
+    # the skip is narrowed: a `ValidationError` reaching the report unflattened
+    # is five lines, and reaching `_load_manifests()` uncaught is none of them
+    # and the family-wide line instead.
+    shaped = [line for line in report.splitlines() if "mod-bad-shape" in line]
+    assert len(shaped) == 1, report
+    assert "name" in shaped[0]
+    # Not as the family-wide failure, which is what it used to be.
+    assert "could not load modules" not in report
+
+    # And the skips outlive the one thing on this tab that CLEARS the box rather
+    # than appending to it. `check_module_updates()` `setPlainText`s its result,
+    # which would erase the lines above -- except that `_module_updates_done()`
+    # ends in `reload_modules()`, which re-reads the store and appends them
+    # again. Asserted rather than reasoned, because the order of those two
+    # statements is the whole of it and nothing else pins it.
+    view._module_updates_done(())
+    after = view.module_report.toPlainText()
+    assert "mod-broken" in after and "mod-bad-shape" in after
+
+
+def test_a_foreign_game_manifest_is_a_reported_skip_and_never_a_row(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Why `Not for this game` is declined, as a test rather than as a comment (T46 item 4).
+
+    T44 item 5 asked for the badge and T46 item 4 carried the ask; the owner
+    declined it on 2026-09-15 because every `ManifestStore` path is
+    `<root>/<game>/...` and the game is the store's. The only file this tab can
+    read already lives in THIS game's directory, so one declaring another game is
+    a mis-declared file, not a module that belongs somewhere else -- the badge
+    would have labelled the row with something untrue of it.
+
+    What the file gets instead is the skip T46 built: named, with the path and
+    what it declared, and no row. The assertion is on the ROW SET, not on the
+    absence of a badge string: a test that only checked the badge text would pass
+    on a tab that drew the row with any other badge on it.
+
+    The fixture is a real file written to a real user root. T44's round 1 proved
+    this row by handing `build_module_rows()` a `Manifest` it built in memory --
+    coverage of a row nothing on disk can produce, which is what this replaces.
+    """
+    user = tmp_path / "user-manifests"
+    items = user / modules.GAME / "modules"
+    items.mkdir(parents=True)
+    (user / modules.GAME / "modules.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "game": modules.GAME, "type": "module", "items": ["mod-foreign"]}
+        ),
+        encoding="utf-8",
+    )
+    # Valid JSON and a valid manifest -- the ONE thing wrong with it is the game,
+    # so nothing but the game check can be what refuses it.
+    (items / "mod-foreign.json").write_text(
+        json.dumps(
+            {
+                "id": "mod-foreign",
+                "name": "Foreign",
+                "type": "module",
+                "game": "wow-tbc",
+                "source": {"repo": "you/mod-foreign"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    services = _services(ps, tmp_path, [])
+    services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.module_report.clear()
+
+    view.reload_modules()
+
+    drawn = {r.data.id for r in view.modules_panel.rows()}
+    assert "mod-foreign" not in drawn
+    # The family it would have replaced is drawn, which is the T46 half of this.
+    assert set(services.store.load_index("module").items) <= drawn
+
+    report = view.module_report.toPlainText()
+    named = [line for line in report.splitlines() if "mod-foreign" in line]
+    assert len(named) == 1, report
+    # The sentence says what it declared and what was expected, so a reader can
+    # tell a mis-declared game from an unparseable file without opening either.
+    assert "wow-tbc" in named[0] and modules.GAME in named[0]
+    assert "could not load modules" not in report

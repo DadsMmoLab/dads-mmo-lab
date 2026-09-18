@@ -18,7 +18,16 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPalette, QResizeEvent, QTextCharFormat, QTextCursor
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QKeyEvent,
+    QMouseEvent,
+    QPalette,
+    QResizeEvent,
+    QTextCharFormat,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -38,6 +47,32 @@ from yulon.ui.widgets.job import in_flight
 logger = get_logger(__name__)
 
 LineSource = Callable[[], Iterator[str]]
+
+
+@dataclass(frozen=True)
+class Seams:
+    """The clock this panel measures a run's duration with. Real by default.
+
+    `native.Seams`' shape, and `native.Seams.monotonic`'s argument in a second
+    place: measuring needs a clock, and a clock a test can hand over needs a
+    seam. A class with one field rather than a bare callable keyword, so the
+    next clock this panel needs is a field here rather than a second
+    constructor argument nobody groups with this one.
+    """
+
+    monotonic: Callable[[], float] = time.monotonic
+    """How long has this run been going -- a DURATION, so a monotonic clock.
+
+    `time.time()` was the anchor until T81, and it is not monotonic: an NTP
+    correction or a WSL2 resync after the host suspends steps it, and both the
+    zero and the reading move with it. That is not only a flaky test (T51,
+    where a second run's stamp landed 1.05 s EARLIER than the first's with a
+    `sleep` between them) -- it is a user two hours into an install being shown
+    a jumped or negative elapsed time at the moment they most want to trust the
+    field. The wall clock stays where it belongs: `_clock()`, which stamps a
+    line with the MOMENT it arrived.
+    """
+
 
 _MAX_BLOCKS = 5000
 
@@ -162,6 +197,15 @@ def _bar_style(palette: QPalette) -> str:
 _BAR_WIDTH_PX = 120
 _STEP_WIDTH_PX = 200
 _PROGRESS_WIDTH_PX = 230
+_STATUS_WIDTH_PX = 16777215
+"""And the status field's, which is `QWIDGETSIZE_MAX`: no cap at all.
+
+Spelled rather than left out because `_StripLabel` takes a cap and this field is
+the one that must not have one -- it carries the refusals, it is the widest share
+of the header (`addWidget(self._status, 3)`), and on a 2560px window a cap would
+elide a sentence there was room for. What it needs from `_StripLabel` is the
+other half: `Ignored` width, so it demands nothing, and one line rather than four.
+"""
 """How much of the header row the strip may ever ask for.
 
 Every one of the three is bounded, and for the measured reason the status label
@@ -248,8 +292,15 @@ def _elapsed(seconds: float) -> str:
     hours (`build`, `mmaps`), so the same field has to carry both without
     changing shape. `0:00:04` and `4:31:07` line up in a monospace panel, which
     a `MM:SS` that grew an hours field partway through a run would not.
+
+    **No clamp, and there was one until T81.** `max(0, int(seconds))` sat here
+    because the caller subtracted two `time.time()` readings, which a backwards
+    clock step makes negative; the clamp painted `0:00:00` over the skew rather
+    than removing it, so the field lied quietly instead of loudly. The anchor
+    and the reading are `Seams.monotonic` now and the difference cannot be
+    negative, which leaves the clamp nothing to do.
     """
-    whole = max(0, int(seconds))
+    whole = int(seconds)
     return f"{whole // 3600}:{whole % 3600 // 60:02d}:{whole % 60:02d}"
 
 
@@ -259,10 +310,41 @@ class _StreamWorker(QObject):
     line = Signal(str)
     finished = Signal(bool, str)  # ok, message
 
-    def __init__(self, source: LineSource) -> None:
+    def __init__(self, source: LineSource, *, drains: bool = False) -> None:
         super().__init__()
         self._source = source
         self._stop = False
+        self._drains = drains
+        """Does this source END on its own once Stop is asked for? (T64 round 2.)
+
+        **The `break` below is not a way of leaving a loop; it is a way of
+        DESTROYING a generator, and that is what this flag exists to stop
+        doing.** Dropping the last reference to a suspended generator makes
+        CPython throw `GeneratorExit` at the yield it is parked on, and a
+        `GeneratorExit` is not an `Exception`: it is not caught by
+        `except InstallerError`, or by any `except` clause a route wrote for its
+        own failures. So every line a route yields while cleaning up after a
+        failure -- and every statement between those yields -- was dropped on
+        the floor the instant Stop was pressed.
+
+        What that cost, measured by reading (cold review round 2, 2026-09-16):
+        Stop during a `update_to_latest()` compile kills the build's child, the
+        engine raises, `update_to_latest()`'s handler starts putting the moved
+        sources back, `_put_sources_back()` restores the FIRST of them and
+        yields -- and the worker broke there. The other source stayed on
+        upstream's tip, `_rewrite_what_we_own()` never ran, and the folder was
+        left ahead of the image that is running, which is the one state that
+        whole route is arranged to prevent. `rebuild()`'s own image rollback had
+        the same hole and nobody had noticed, because its cleanup happened to
+        finish inside one yield more often than not.
+
+        True when `LogPanel.run()` was given a `cancel` event, and that is the
+        whole rule: a source with a cancel is one that has undertaken to END
+        when the event is set, so reading it to exhaustion terminates. A source
+        with none -- the Console tab's `docker logs -f` -- has made no such
+        promise and is still abandoned at the break, because draining it would
+        never return and Stop would stop nothing.
+        """
         self._ident: int | None = None
 
     @Slot()
@@ -285,8 +367,14 @@ class _StreamWorker(QObject):
                 self._quit_own_thread()
                 return
             for text in self._source():
-                if self._stop:
+                if self._stop and not self._drains:
                     break
+                # EMITTED even after a stop, when the source drains: the lines
+                # a route yields after Stop are its cleanup saying what it put
+                # back, and they are the half of the report the user most needs
+                # ("the source folders were put back on the commits they were
+                # on"). Suppressing them would keep the mechanism and throw away
+                # the evidence of it.
                 self.line.emit(text)
         except Exception as exc:  # boundary: anything the job raises becomes a UI message
             ok = False
@@ -381,14 +469,96 @@ class _StreamWorker(QObject):
             runner.end_streams_started_on(self._ident)
 
 
+CHEVRON_EXPANDED = "▾"
+"""The glyph on an open handle: a down-pointing triangle, the panel is below it."""
+
+CHEVRON_COLLAPSED = "▸"
+"""And a right-pointing one when what is under the handle has been folded away."""
+
+
+class CollapseHandle(QLabel):
+    """A one-line title that folds the panel under it away when it is clicked.
+
+    A LABEL and not a `QPushButton`, and the reason is measured rather than a
+    matter of taste: the theme gives every `QPushButton` a 50px box (a 32px
+    touch floor, 8px of padding top and bottom, a 1px border), so a button used
+    as the strip over a six-line report box costs the list more height than
+    collapsing that box ever gives it back. This is 20px (T80).
+
+    Not mouse-only, which is the thing a clickable label usually gets wrong: it
+    takes focus in the tab order and answers Space and Return, so the handle is
+    reachable by the same keyboard walk as the buttons beside it. Accessible
+    name and description are set from the title for the same reason.
+    """
+
+    toggled = Signal(bool)
+    """Emitted with True when this handle has just been COLLAPSED."""
+
+    def __init__(self, title: str = "", parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self._title = title
+        self._collapsed = False
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(title or "panel")
+        self.setToolTip(f"Show or hide {title or 'this panel'}")
+        self._say()
+
+    @property
+    def collapsed(self) -> bool:
+        """True while what is under this handle is folded away."""
+        return self._collapsed
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Fold or unfold, and say so — a no-op when it is already that way.
+
+        The no-op matters: `toggled` drives a height cap, and a signal emitted
+        on every re-application of a state that has not changed asks for a
+        layout that asks for the signal again.
+        """
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+        self._say()
+        self.toggled.emit(collapsed)
+
+    def toggle(self) -> None:
+        """The press: whatever it is now, be the other thing."""
+        self.set_collapsed(not self._collapsed)
+
+    def _say(self) -> None:
+        chevron = CHEVRON_COLLAPSED if self._collapsed else CHEVRON_EXPANDED
+        self.setText(f"{chevron}  {self._title}" if self._title else chevron)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.toggle()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class LogPanel(QWidget):
     """A read-only, auto-scrolling text panel fed by a background job."""
 
     run_started = Signal()
     run_finished = Signal(bool, str)
+    collapse_toggled = Signal(bool)
+    """Emitted with True when the text pane has just been folded away (T80)."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, seams: Seams | None = None) -> None:
         super().__init__(parent)
+        # Keyword-only and defaulted, because every caller in the app builds a
+        # panel with the real clock and only a test ever hands one over.
+        self._seams = seams if seams is not None else Seams()
         self._text = QPlainTextEdit(self)
         self._text.setReadOnly(True)
         # Non-focusable on purpose: a read-only log is a D-pad dead-end (arrow
@@ -397,21 +567,35 @@ class LogPanel(QWidget):
         # the mouse.
         self._text.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._text.setMaximumBlockCount(_MAX_BLOCKS)
-        self._status = QLabel("idle", self)
-        # WRAPPED, and the app is unusable without it. This label is handed the
-        # whole of a refusal -- `("finished: " if ok else "FAILED: ") + message`
-        # below -- and an unwrapped QLabel's size hint is as wide as its text.
-        # That hint becomes this panel's minimum width, and the splitter in
-        # `main.py` has to honour it, so the catalog pane next to it is squeezed
-        # to nothing.
-        #
+        # ELIDED to one line, with the whole of it in the tooltip and in
+        # `status_text()` (T83). It used to WRAP, for a measured reason that has
+        # not gone away: this label is handed the whole of a refusal --
+        # `("finished: " if ok else "FAILED: ") + message` below -- and an
+        # unwrapped `QLabel`'s size hint is as wide as its text. That hint
+        # becomes this panel's minimum width, and the splitter in `main.py` has
+        # to honour it, so the catalog pane next to it is squeezed to nothing.
         # Measured 2026-09-02 on yulon-ubuntu, in a 986px window, with the real
         # home-folder refusal (196 characters): the catalog pane went from 684px
-        # to 88px and this panel demanded 1478px -- wider than the window. Game
-        # tiles were clipped mid-word and their Install buttons unreachable, so
-        # the only way out was to resize or restart. Found by the owner during
-        # the 7.2 gate, on the first refusal a real user would ever see.
-        self._status.setWordWrap(True)
+        # to 88px and this panel demanded 1478px -- wider than the window.
+        #
+        # `_StripLabel` closes that the other way and closes T80's half with it.
+        # `Ignored` horizontally says "give me what is left over and never widen
+        # anything for me", which is the same promise `setWordWrap` was standing
+        # in for; and where wrapping answered a long refusal with three or four
+        # LINES, this answers with one. On a FOLDED log the strip is all there
+        # is, so those extra lines were the panel's whole height, and the tab
+        # had nothing spare to give them -- gate A2 caught the third line of a
+        # FAILED sentence drawn cut in half (round 4, 2026-09-17).
+        #
+        # What this costs is the half of T32 below: a selection now copies what
+        # is DRAWN, and the rest of the sentence is a hover away rather than
+        # under the cursor. It is not the only copy of it -- `_rebuild_finished`
+        # says so in its own docstring: every refusal on these tabs also goes to
+        # `action_failed`, which writes it into the report box and into the app
+        # log, and that log is the file a bug report is pasted from. The header
+        # is the glance; those two are the record.
+        self._status = _StripLabel(self, _STATUS_WIDTH_PX)
+        self._status.say("idle")
         # SELECTABLE, so a refusal can be copied instead of screenshotted (T32:
         # a macOS report arrived as a photograph of this label because a QLabel
         # selects nothing by default). Keyboard selection is asked for beside
@@ -438,9 +622,11 @@ class LogPanel(QWidget):
         # (the engine's own `Step N of M` line, parsed), how far the thing
         # inside that stage has got, and what it is doing right now.
         #
-        # Both labels wrap, for the measured reason `self._status` does: git's
-        # progress text runs to `Receiving objects:  42% (420/1000), 12.53 MiB |
-        # 3.21 MiB/s`, and an unwrapped label's size hint is as wide as its text.
+        # The same `_StripLabel` the status is, and since T83 for the same
+        # reason: git's progress text runs to `Receiving objects:  42%
+        # (420/1000), 12.53 MiB | 3.21 MiB/s`, and an unwrapped label's size
+        # hint is as wide as its text. These two are capped as well as ignored,
+        # which the status deliberately is not (`_STATUS_WIDTH_PX`).
         self._step_label = _StripLabel(self, _STEP_WIDTH_PX)
         self._bar = QProgressBar(self)
         self._bar.setMaximumWidth(_BAR_WIDTH_PX)
@@ -448,7 +634,16 @@ class LogPanel(QWidget):
         self._bar.setVisible(False)
         self._progress_label = _StripLabel(self, _PROGRESS_WIDTH_PX)
 
+        # T80: the handle that folds the text pane away and leaves this strip --
+        # status, stage, elapsed and Stop -- where it was. Leftmost, so it reads
+        # as the thing the row belongs to rather than another control on it.
+        self._collapse = CollapseHandle("", self)
+        self._collapse.setAccessibleName("log")
+        self._collapse.setToolTip("Show or hide this job's output")
+        self._collapse.toggled.connect(self._fold)
+
         header = QHBoxLayout()
+        header.addWidget(self._collapse)
         # Stretch, not size hints. The strip's two fields demand no width of
         # their own (`_StripLabel`), so a share of the row is the only way they
         # get any — and a share is what should shrink first when the splitter
@@ -495,13 +690,38 @@ class LogPanel(QWidget):
         """
         return self._stop_requested
 
+    @property
+    def collapsed(self) -> bool:
+        """True while the text pane is folded away and only the strip is drawn."""
+        return self._collapse.collapsed
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Fold the text pane away, or bring it back.
+
+        The panel keeps its lines either way -- `text()` answers the same thing
+        collapsed as open -- because this is a question about height and not
+        about what the job said.
+        """
+        self._collapse.set_collapsed(collapsed)
+
+    def _fold(self, collapsed: bool) -> None:
+        """The handle was used: hide or show the pane and re-state our height.
+
+        `updateGeometry()` and not a size set here: a hidden child is out of the
+        layout's arithmetic already, so the panel's own minimum has moved and
+        the only thing the layout needs is to be told to ask again.
+        """
+        self._text.setVisible(not collapsed)
+        self.updateGeometry()
+        self.collapse_toggled.emit(collapsed)
+
     def text(self) -> str:
         """Everything currently shown."""
         return self._text.toPlainText()
 
     def status_text(self) -> str:
         """What the header says about the job (tests / accessibility)."""
-        return self._status.text()
+        return self._status.said()
 
     def clear(self) -> None:
         """Empty the panel."""
@@ -674,18 +894,21 @@ class LogPanel(QWidget):
         # panel or the first line: the same panel is reused for the next
         # install and for the console, and an elapsed field that kept counting
         # from whenever the window opened would say four hours into a job that
-        # started a minute ago.
-        self._started_at = time.time()
+        # started a minute ago. A MONOTONIC zero since T81 -- see
+        # `Seams.monotonic` for why the wall clock could not hold it.
+        self._started_at = self._seams.monotonic()
         self._show_elapsed()
         self._clear_strip()
         self._ticker.start()
-        self._status.setText(title)
+        self._status.say(title)
         self._stop_button.setEnabled(True)
         # No parent, and held by `in_flight()` until finished: a panel dropped
         # between `start()` and the OS scheduling the thread must not take the
         # worker down with it - see `job.InFlight`.
         thread = QThread()
-        worker = _StreamWorker(source)
+        # `drains=` is exactly "was a cancel given", and `_StreamWorker._drains`
+        # holds why that is the right question rather than a proxy for it.
+        worker = _StreamWorker(source, drains=cancel is not None)
         worker.moveToThread(thread)
         in_flight().hold(thread, worker)
         thread.started.connect(worker.run)
@@ -789,9 +1012,9 @@ class LogPanel(QWidget):
         # panel does not know whether it was following a log or building a
         # server.
         if self._stop_requested:
-            self._status.setText("cancelled")
+            self._status.say("cancelled")
         else:
-            self._status.setText(("finished: " if ok else "FAILED: ") + message)
+            self._status.say(("finished: " if ok else "FAILED: ") + message)
         # Stopped, then shown ONE more time. The ticker is what makes the field
         # live, and a job that has ended must not go on counting; but the last
         # value is the run's total, which is the number somebody wants after a
@@ -813,7 +1036,9 @@ class LogPanel(QWidget):
         if self._started_at is None:
             self._elapsed_label.setText("")
             return
-        self._elapsed_label.setText(_elapsed(time.time() - self._started_at))
+        # The same clock the zero was taken from, necessarily: a difference
+        # between two different clocks is not a duration of anything.
+        self._elapsed_label.setText(_elapsed(self._seams.monotonic() - self._started_at))
 
     def elapsed_text(self) -> str:
         """What the header's elapsed field says (tests / accessibility)."""

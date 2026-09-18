@@ -1459,6 +1459,24 @@ to log out, log back in, click Install, and meet the identical failure with no
 explanation (review, 2026-08-24).
 """
 
+DOCKER_GROUP_JOIN_BLOCKED_STEP = (
+    "You said yes, but there is no docker group to add {user} to yet: an earlier step failed "
+    "and the group is created by the package it never installed. This is the same problem, not "
+    "a second one — fix the first failure above and the join goes with it."
+)
+"""The join failed as a CONSEQUENCE, so it is reported as one and gives no instruction.
+
+`DOCKER_GROUP_JOIN_FAILED_STEP` ends in "To do it yourself: sudo usermod -aG
+docker {user}" — which is the right advice when `usermod` is the only thing
+that failed, and is advice that cannot possibly work when it is not. A Steam
+Deck whose keyring was never initialised installed no package, so it had no
+`docker.service` and no `docker` group, and the one actionable line we printed
+was `sudo usermod -aG docker deck`: it fails again, identically, for the same
+root cause (T57, from a 0.8.65-Public report, 2026-09-13). Which of the two
+sentences is used is decided by `_ensure_docker_linux()` from the position of
+the `usermod` skip in the list, not from the fact that it failed.
+"""
+
 DOCKER_GROUP_UNASKED_STEP = (
     "Skipped joining the docker group: it grants root-equivalent access, and with nobody to "
     "ask Yu'lon never makes that change. To do it yourself: sudo usermod -aG docker {user}, "
@@ -1477,6 +1495,86 @@ padding either: `usermod` does not change a running process's supplementary
 groups, so `docker_ready()` stays false for the rest of this run even when the
 answer was yes. Saying otherwise would promise an install that cannot start.
 """
+
+
+DOCKER_SETUP_FIRST_FAILURE_STEP = "Start here, with the first step that failed — {cause}"
+"""The remedy belongs to the FIRST failure in a chain, never to the last.
+
+The general form of T57, and it is not SteamOS-specific: when provisioning
+reports "Some steps did not run" with three entries, the second and third
+usually failed BECAUSE of the first, and advice aimed at the last one sends the
+user to a command that fails again for the cause nobody named. `usermod` cannot
+add anybody to a group that the package which was never installed would have
+created.
+"""
+
+_PACMAN_KEYRING_CAUSE = (
+    "this machine's package keyring was never set up, so pacman refuses every signed package "
+    "and nothing after it had a docker service or a docker group to work with."
+)
+"""The Steam Deck case from T57's report, and the only remedy here that is not generic.
+
+Sourced from this repo's own SteamOS scripts rather than from a guess:
+`archive/guides/Steam-Update-Fix/fix-after-update.sh` and
+`archive/guides/Maplestory/install-maplestory.sh` both rebuild the keyring with
+`pacman-key --init` followed by `--populate archlinux` and `--populate holo`.
+Nothing beyond those two commands is claimed: reinstalling the keyring by
+deleting `/etc/pacman.d/gnupg`, which both scripts also do, is destructive and
+is not advice to hand a user who told us they are "terrible with linux".
+
+The read-only root filesystem is a SteamOS fact, not an Arch one, so the
+sentence that mentions it is added only when `is_steamos()` said yes —
+`steamos-readonly` is not a command on the other pacman distros, and naming it
+there would be the same defect in a new place.
+"""
+
+_STEAMOS_READONLY_CAUSE = (
+    " On SteamOS the system files are read-only until you unlock them, so sudo "
+    "steamos-readonly disable comes first (SteamOS re-locks itself on the next update)."
+)
+
+_PACMAN_KEYRING_FIX = (
+    " Run sudo pacman-key --init, then sudo pacman-key --populate archlinux holo, then press "
+    "Install again."
+)
+
+_KEYRING_WORDS = ("keyring", "pacman-key", "required key", "signature from")
+"""What pacman says when the keyring is the cause; `_run_steps()` keeps its stderr verbatim."""
+
+
+def _step_command(step: str) -> str:
+    """The command a `skipped` entry is about, without its reason."""
+    return step.split(":", 1)[0].strip()
+
+
+def docker_setup_remedy(step: str, *, steamos: bool) -> str:
+    """Plain words for why `step` — the FIRST failed step — stopped, and what to run.
+
+    `step` is one entry of `ProvisionReport.skipped`, which `_run_steps()`
+    writes as `"<command>: <why>"`. Everything before the first colon is the
+    command as it was shown; commands here are argv lists of package managers
+    and never contain one.
+
+    Only the pacman keyring gets a named cause, because it is the only one this
+    project has a real capture of (T57) and a source for. Every other first
+    failure is reported as itself with its own command to run in a terminal,
+    which is honest and is still an enormous improvement on advice for a step
+    three links further down the chain.
+    """
+    command = _step_command(step)
+    if command.startswith("pacman ") and any(w in step.lower() for w in _KEYRING_WORDS):
+        cause = (
+            _PACMAN_KEYRING_CAUSE
+            + (_STEAMOS_READONLY_CAUSE if steamos else "")
+            + _PACMAN_KEYRING_FIX
+        )
+        return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
+    cause = (
+        f"{command} did not run, and the steps after it needed what it would have installed. "
+        f"Run it in a terminal — sudo {command} — and it will say what stopped it, then press "
+        "Install again."
+    )
+    return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
 
 
 def _explicit_yes(reply: str | None) -> bool:
@@ -1884,14 +1982,14 @@ def label_disable_args(*, enforcing: bool | None) -> list[str]:
     leaves the host label as it found it. Measured on Fedora 44, Enforcing
     (2026-08-30), on an unlabelled checkout:
 
-        $ ls -Zd /home/pk/ownco2
-        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
-        $ docker run --rm -v /home/pk/ownco2:/git ... remote get-url origin
+        $ ls -Zd /home/user/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/user/ownco2
+        $ docker run --rm -v /home/user/ownco2:/git ... remote get-url origin
         fatal: not a git repository (or any parent up to mount point /)
         $ docker run --rm --security-opt label:disable -v ... remote get-url origin
         https://github.com/mod-playerbots/azerothcore-wotlk.git
-        $ ls -Zd /home/pk/ownco2
-        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
+        $ ls -Zd /home/user/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/user/ownco2
 
     Note what the denial LOOKS like, because it is why this was missed: the
     container cannot see `.git` at all, so git does not say "permission denied",
@@ -2925,7 +3023,8 @@ def _ensure_docker_linux(
     if ask is not None and _may_open_a_dialog(dry_run, cancel):
         session = SudoSession(ask, run_input if run_input is not None else _run_with_input)
 
-    commands = docker_engine_commands(pm, steamos=is_steamos())
+    steamos = is_steamos()
+    commands = docker_engine_commands(pm, steamos=steamos)
     done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run, session=session)
     joined_ok = False
     if consent == "granted":
@@ -2955,6 +3054,21 @@ def _ensure_docker_linux(
         "join-failed" if consent == "granted" and not joined_ok else consent
     )
 
+    # A skip is reported by its real cause, not by the likeliest one. `sudo -n`
+    # announces the password case itself ("a password is required"), and
+    # `_run_steps` keeps that stderr in the record — so the two have always been
+    # distinguishable and the guess was never needed. Measured in a container on
+    # yulon-ubuntu (2026-08-24): `systemctl` was simply absent, and the user was
+    # told to re-run it in a terminal with sudo, which fails identically.
+    #
+    # Split before the manual steps are worded, not after, because WHICH step
+    # failed first decides what the docker-group sentence may say: `skipped` is
+    # in execution order (package steps, then `usermod`), so `failed[0]` is the
+    # first link of the chain and everything after it is a consequence (T57).
+    password = [] if dry_run else [s for s in skipped if "password" in s.lower()]
+    failed = [] if dry_run else [s for s in skipped if s not in password]
+    group_blocked = bool(failed) and not _step_command(failed[0]).startswith("usermod ")
+
     manual: list[str] = []
     if outcome == "granted":
         # `already-member` deliberately does NOT append this, though
@@ -2969,25 +3083,30 @@ def _ensure_docker_linux(
         # that report always reaches the sentence, which says it once.
         manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
     elif outcome == "join-failed":
-        manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=user))
+        blocked = DOCKER_GROUP_JOIN_BLOCKED_STEP if group_blocked else DOCKER_GROUP_JOIN_FAILED_STEP
+        manual.append(blocked.format(user=user))
     elif outcome == "declined":
         manual.append(DOCKER_GROUP_DECLINED_STEP.format(user=user))
     elif outcome == "not-asked":
         manual.append(DOCKER_GROUP_UNASKED_STEP.format(user=user))
     if skipped and not dry_run:
-        # A skip is reported by its real cause, not by the likeliest one. `sudo
-        # -n` announces the password case itself ("a password is required"),
-        # and `_run_steps` keeps that stderr in the record — so the two have
-        # always been distinguishable and the guess was never needed. Measured
-        # in a container on yulon-ubuntu (2026-08-24): `systemctl` was simply
-        # absent, and the user was told to re-run it in a terminal with sudo,
-        # which fails identically.
-        password = [s for s in skipped if "password" in s.lower()]
-        other = [s for s in skipped if s not in password]
-        if other:
-            manual.insert(0, "Some steps did not run: " + "; ".join(other))
+        if failed:
+            # The remedy goes in front of the enumeration it is drawn from, so
+            # the first thing read is the thing to do. The list stays because a
+            # support log needs every exit code; it is evidence, not the advice.
+            manual.insert(0, "Some steps did not run: " + "; ".join(failed))
+            if group_blocked or outcome != "join-failed":
+                # A run where the group join is the FIRST failure needs no
+                # second sentence: `DOCKER_GROUP_JOIN_FAILED_STEP` already names
+                # that step and gives the command, and it is the right advice
+                # there. Adding the generic remedy too would print the same
+                # `usermod` twice in one message.
+                manual.insert(0, docker_setup_remedy(failed[0], steamos=steamos))
         if password:
-            failed = "; ".join(s.split(":")[0] for s in password)
+            # Not `failed`, which is now the list of real failures above: this
+            # is the other half of the split, and reusing that name would make
+            # the remedy line's source a string of command names.
+            unrun = "; ".join(_step_command(s) for s in password)
             # The reason, not just the command list. `_run_steps()` writes three
             # different sentences into `skipped` (`_sudo_skip_reason()`) and this
             # line used to keep only the part BEFORE the colon — so a dismissed
@@ -3000,7 +3119,7 @@ def _ensure_docker_linux(
             lead = "Some steps needed a password"
             if session is not None and session.outcome == "refused":
                 lead = "Some steps needed a password and sudo refused the one given"
-            manual.insert(0, f"{lead}; run them in a terminal with sudo: {failed}")
+            manual.insert(0, f"{lead}; run them in a terminal with sudo: {unrun}")
     return ProvisionReport(
         "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, outcome
     )
@@ -3671,8 +3790,8 @@ def _canonical(path: Path) -> Path:
     The install scripts canonicalise with `realpath -m -- "$SERVER_DIR"` BEFORE
     their `case`, so a purely lexical `os.path.normpath` here cannot deliver the
     one guarantee this mirror exists for. On Fedora Atomic `/home` is a symlink
-    to `/var/home`: a picker that returns `/home/pk` and a script that sees
-    `/var/home/pk` disagree about whether the path is `$HOME`, and the user pays
+    to `/var/home`: a picker that returns `/home/user` and a script that sees
+    `/var/home/user` disagree about whether the path is `$HOME`, and the user pays
     for the disagreement with a sudo password and a wait.
 
     `strict=False` never raises for a path that does not exist; the guard is for
@@ -3704,7 +3823,7 @@ def _reserved_dir_reason(server_dir: Path) -> str | None:
 
     The home directory is the one that actually bites: the picker opens there,
     and `server_dir_problem()` used to pass it, so a click-through reached the
-    script and died with "Cannot use '/home/pk' as the install location" only
+    script and died with "Cannot use '/home/user' as the install location" only
     after the sudo password had been entered.
     """
     lexical = Path(os.path.normpath(str(server_dir)))
