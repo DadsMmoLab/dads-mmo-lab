@@ -3723,6 +3723,12 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "built; `git.ContainerGit._capture()`, the app's other `docker run` over a host "
         "bind, resolves `docker_program()` directly for the same reason."
     ),
+    "_pumped": (
+        "it is handed a COMPLETE argv and a complete child environment and starts them: the "
+        "daemon was chosen by `exec_stdin()` and `compose_run_stdin()`, which both take a "
+        "distro, before either called this. A `wsl_distro` here would be a second, silent "
+        "chance to disagree with the argv it is already holding"
+    ),
     "copy_from_image": (
         "only an INSTALL reaches it - the conf stage, pulling `*.conf.dist` out of an image "
         "this run just built - and an install is local by construction: "

@@ -465,6 +465,59 @@ def ask_module_folder(parent: QWidget, title: str) -> Path | None:
     return Path(chosen) if chosen else None
 
 
+SET_CLIENT_DIR_LABEL = "Set client folder…"
+"""The Server tab's own button (T36), and the button the client notice offers (T62).
+
+One constant because the notice tells the user to press something by name and
+that name is a widget's label: a rename that reached only one of them would send
+its reader looking for a control that is not there — the defect `REBUILD_HISTORY`
+records, in miniature."""
+
+
+def client_notice(manifest: Manifest) -> str:
+    """What the user is told before installing a module that also changes the game client.
+
+    Plain words and the files by name, because "client step" is this app's
+    vocabulary and a user knows only what they will or will not see in the
+    game. It says what happens if they carry on without a folder — the server
+    half lands and the game half does not — so that choosing to set the folder
+    is a decision rather than a chore (owner, 2026-09-15: "Before installing
+    any modules that needs a client they should get known about it").
+    """
+    files = ", ".join(Path(step.src).name for step in manifest.client)
+    return (
+        f"{manifest.name} also changes your WoW game client, not only the server: it puts "
+        f"{files} into your game folder. No client folder is set for this install, so that "
+        f"part would be left out and {manifest.name} would not work properly in the game.\n\n"
+        f"Set your client folder first, then press Install again. Nothing has been installed yet."
+    )
+
+
+def ask_to_set_client_dir(parent: QWidget, manifest: Manifest) -> bool:
+    """The client notice as a dialog: True for "Set client folder…", False for Cancel.
+
+    An instance rather than the static `question()` so the button can say what
+    it does, relabelled the way `catalog_view._qt_suggestion_asker` relabels its
+    own. Read through `said_yes()` all the same: `exec()` hands back a plain int
+    on this PySide6, and `is StandardButton.Yes` would read every press as
+    Cancel (T33). Cancel is the default and the escape button, so Enter, Escape
+    and the close button all install nothing.
+    """
+    box = QMessageBox(
+        QMessageBox.Icon.Information,
+        f"{manifest.name} needs your game client",
+        client_notice(manifest),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        parent,
+    )
+    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    set_button = box.button(QMessageBox.StandardButton.Yes)
+    if set_button is not None:
+        set_button.setText(SET_CLIENT_DIR_LABEL)
+    return said_yes(box.exec())
+
+
 ModuleSqlRoute = Callable[[Callable[[str], None]], docker.AttachedRun]
 """Apply the SQL of the modules on disk, reporting the importer's lines to a sink.
 
@@ -1284,11 +1337,23 @@ def _for_wotlk(
     # `container ... is not running` (T2's press, 2026-09-09). The world is
     # never started here: only the database, alone, which is the state the
     # guard permits.
+    #
+    # `dbc` is T62. Without it every `server_dbc` step -- mod-arac's race/class
+    # DBCs, the SoD keg's spells -- was reported skipped and never reached the
+    # server. Only an entry naming its client-data service can be given one:
+    # that service is the only thing that mounts the data volume read-write.
     module_applier = (
         wotlk_modules.applier(
             server_dir,
             sql=sql,
             client_dir=client_dir,
+            dbc=(
+                wotlk_modules.dbc_copier(
+                    server_dir, service=entry.containers.client_data, wsl_distro=wsl_distro
+                )
+                if entry.containers.client_data
+                else None
+            ),
             world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
@@ -3222,7 +3287,7 @@ class ControllerView(QWidget):
             # fact and must not be able to disagree the way two separate reads
             # of a value that cannot change without a rebuild never could.
             has_client = self.services.client_dir is not None
-            change_label = "Change client folder…" if has_client else "Set client folder…"
+            change_label = "Change client folder…" if has_client else SET_CLIENT_DIR_LABEL
             self.set_client_dir_button = QPushButton(change_label, tab)
             self.set_client_dir_button.clicked.connect(self.change_client_dir)
             self.forget_client_dir_button = QPushButton("Forget client folder", tab)
@@ -6640,6 +6705,8 @@ class ControllerView(QWidget):
                 f"Nothing on this machine was changed."
             )
             return
+        if action == "install" and self._stopped_for_the_client(f"install {manifest.id}", manifest):
+            return
         # An update re-runs the INSTALL-time steps -- it is the install over
         # content that has moved -- so it answers the install's prompts.
         go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action])
@@ -6777,6 +6844,8 @@ class ControllerView(QWidget):
             self.module_report.setPlainText(str(exc))
             self.action_failed.emit(str(exc))
             return
+        if self._stopped_for_the_client(f"{what} {manifest.id}", manifest):
+            return
         self._acting_on = manifest
         question = self._replacement_question(manifest)
         if question is not None and not self._confirm(
@@ -6815,6 +6884,43 @@ class ControllerView(QWidget):
         except Exception as exc:  # boundary: git or the disk, on the GUI thread
             logger.warning(f"could not tell what installing {manifest.id} would replace: {exc}")
             return None
+
+    def _stopped_for_the_client(self, what: str, manifest: Manifest) -> bool:
+        """T62: tell the user before an install whose client half would be skipped.
+
+        `Applier._client()` skips every `client` step when the install has no
+        client folder, and says so only in the report AFTER the server half has
+        landed — so `mod-arac` put its SQL and DBCs in, left `Patch-A.MPQ` out,
+        and the user found out in the game, if at all. Asked here instead,
+        before anything runs, by every route on this tab that installs: the
+        selected row (its button, its menu entry, a chip) through
+        `_module_action()`, and a link or a folder through
+        `_install_custom_module()`.
+
+        True means the install was NOT started. Setting the folder is
+        `change_client_dir()` itself — the Server tab's own press, with its
+        refusals — and not a copy of it; a successful set rebuilds this tab
+        (`client_dir_changed`), which is why the report is written BEFORE it
+        and nothing touches `self` after. The user presses Install again on the
+        rebuilt tab, where the folder is set and this asks nothing.
+        """
+        if not manifest.client or self.services.client_dir is not None:
+            return False
+        self._module_pending = None
+        self._acting_on = None
+        self.module_report.setPlainText(
+            f"{what}: not started — {manifest.name} also changes your game client, and no "
+            "client folder is set for this install. Nothing on this machine was changed."
+        )
+        if self.services.set_client_dir is None:
+            # No write seam, so no button to offer: say it, and stop.
+            QMessageBox.information(
+                self, f"{manifest.name} needs your game client", client_notice(manifest)
+            )
+            return True
+        if ask_to_set_client_dir(self, manifest):
+            self.change_client_dir()
+        return True
 
     @Slot(object)
     def _module_done(self, result: object) -> None:
@@ -8275,6 +8381,13 @@ def _format_report(report: ApplyReport) -> str:
     lines += [f"  ✓ {step}" for step in report.done]
     lines += [f"  – skipped: {step}" for step in report.skipped]
     lines += _pending_sql_lines(report.pending_sql)
+    if report.left_behind:
+        # T62. `rm -r modules/mod-arac` alone reads as a clean uninstall of a
+        # module whose DBCs, client patch and rows are all still in place.
+        lines.append(
+            f"  ⚠ Removing {item} did not undo everything it installed. Still in place: "
+            f"{'; '.join(report.left_behind)}. Yu'lon cannot take these back for you."
+        )
     if report.rebuild_required:
         if report.action == "remove":
             lines.append(

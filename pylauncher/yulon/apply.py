@@ -1004,6 +1004,81 @@ class DockerSql:
             ) from None
 
 
+_DBC_WRITE = 'cat > "$1.yulon-part" && mv -f "$1.yulon-part" "$1"'
+"""The shell each DBC file is written with, the destination passed as `$1`.
+
+A positional argument rather than a name spliced into the script, so a file
+name is never parsed as shell. Written beside and then renamed over, so a copy
+that dies part-way leaves the server's own file whole rather than truncated —
+a half-written `CharBaseInfo.dbc` is a worldserver that will not start. No
+`mkdir -p`: a data volume with no `dbc/` folder holds no server data at all, and
+creating one to put three files in would report a copy into a server that
+cannot run."""
+
+
+@dataclass(frozen=True)
+class ComposeDbc:
+    """`DbcCopier` over the compose service that owns the server's data volume (T62).
+
+    Until this existed nothing implemented `DbcCopier`, so every `server_dbc`
+    step — `mod-arac`'s three race/class DBCs and the Season of Discovery keg's
+    — was reported skipped and never reached the server: new race/class
+    combinations started with no gear and the worldserver deleted their skills
+    (`heyitsbench/mod-arac#49`, `#50`).
+
+    The worldserver mounts that volume `:ro`, so the copy goes through the
+    one-shot service that mounts it read-write and filled it in the first place
+    (`ac-client-data-init` for AzerothCore). That service runs as the user that
+    wrote the files already there, so the new ones are owned alike. How the
+    bytes travel is `docker.compose_run_stdin()`'s docstring: over stdin, one
+    short-lived container per file, which is the bash launcher's own shape
+    (`copy_server_dbc`, `wow-manage.sh` on `upstream/main`) without its bind
+    mount or its `alpine` pull.
+
+    The DBCs are read at worldserver start only, so a copy changes nothing
+    until a restart; `ApplyReport.restart_recommended` already says so for any
+    manifest with a `server_dbc` step.
+    """
+
+    server_dir: Path
+    service: str
+    """The compose SERVICE that mounts the data volume read-write."""
+    data_dir: str
+    """Where that service mounts the volume; the DBCs go in `<data_dir>/dbc/`."""
+    wsl_distro: str | None = None
+    """The WSL2 distro this server's docker lives in, if it is not local."""
+
+    def copy_dbc_dir(self, src: Path) -> None:
+        if not src.is_dir():
+            raise ApplyError(f"server DBC folder missing in clone: {src}")
+        files = sorted(p for p in src.iterdir() if p.is_file() and p.suffix == ".dbc")
+        if not files:
+            # Refused, not passed over: `_dbc()` writes a done line after this
+            # returns, and "copied" over a folder holding nothing is the claim
+            # this seam was built to stop the report making.
+            raise ApplyError(f"no .dbc files in {src}, so there was nothing to copy")
+        for path in files:
+            dest = f"{self.data_dir.rstrip('/')}/dbc/{path.name}"
+            try:
+                with path.open("rb") as fh:
+                    proc = docker.compose_run_stdin(
+                        self.server_dir,
+                        self.service,
+                        "sh",
+                        ["-c", _DBC_WRITE, "sh", dest],
+                        fh,
+                        wsl_distro=self.wsl_distro,
+                    )
+            except (docker.DockerCommandError, docker.SourceUnreadableError) as exc:
+                raise ApplyError(str(exc)) from exc
+            if proc.returncode != 0:
+                reason = proc.stderr.strip() or proc.stdout.strip()
+                raise ApplyError(
+                    f"could not copy {path.name} into the server's data volume through "
+                    f"{self.service}: {reason}"
+                )
+
+
 def _check_sql(proc: subprocess.CompletedProcess[str], what: str) -> None:
     """Raise with the reason, wherever the reason happens to be.
 
@@ -1107,6 +1182,17 @@ class ApplyReport:
     rebuild_required: bool = False
     restart_recommended: bool = False
     pending_sql: tuple[PendingSql, ...] = ()
+    left_behind: tuple[str, ...] = ()
+    """What a REMOVE did not take back, one entry per step, each a plain phrase (T62).
+
+    `remove()` deletes the clone and what `deploy` put elsewhere, and runs any
+    remove-time SQL. It never touches the server's data volume or the user's
+    client folder, and it does not undo install-time SQL a manifest gave no
+    remove-time counterpart. A report of `rm -r modules/mod-arac` and nothing
+    else reads as a clean uninstall of a module whose DBCs, client patch and
+    database rows are all still in place — so those are named here. Empty for
+    every other action.
+    """
 
 
 @dataclass
@@ -3215,6 +3301,7 @@ class Applier:
                 or log.conf_restart
             ),
             pending_sql=tuple(log.pending_sql),
+            left_behind=_left_behind(manifest) if action == "remove" else (),
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "
@@ -3225,6 +3312,27 @@ class Applier:
 
 
 # --------------------------------------------------------------- functions
+
+
+def _left_behind(manifest: Manifest) -> tuple[str, ...]:
+    """The steps `remove()` cannot take back, read off the manifest (see `ApplyReport`).
+
+    From the manifest rather than from what this run did, because the files in
+    question were put there by an INSTALL, possibly long ago, and a remove run
+    has no record of that install — only of what the manifest says it does.
+    """
+    out = [
+        f"the server DBC files from {step.src} (in the server's data volume)"
+        for step in manifest.server_dbc
+    ]
+    out += [f"{step.src} (in your game client folder)" for step in manifest.client]
+    if not any(step.when == "remove" for step in manifest.sql):
+        out += [
+            f"what {step.path or 'its SQL'} wrote into the {step.db} database"
+            for step in manifest.sql
+            if step.when == "install" and step.applied_by == "direct"
+        ]
+    return tuple(out)
 
 
 def _render(template: str, values: Mapping[str, str], what: str) -> str:

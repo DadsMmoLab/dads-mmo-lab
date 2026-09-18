@@ -2352,6 +2352,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("ui/gamepad.py", "walk"): (
         "the same generator calling itself on each child widget, for the reason above"
     ),
+    ("apply.py", "copy_dbc_dir"): (
+        "T62. Lists a folder INSIDE the clone this app just made, to find the `*.dbc` files "
+        "a manifest's `server_dbc` step names. It decides nothing about writing to that "
+        "folder -- what is written is a file inside the server's data volume, through a "
+        "container -- and a listing that comes back without a `.dbc` in it is a refusal "
+        "(`no .dbc files in ...`), never a copy reported as done"
+    ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"

@@ -19,6 +19,7 @@ from yulon import docker, module_source, platform, resources
 from yulon.apply import (
     Applier,
     ApplyReport,
+    ComposeDbc,
     DbcCopier,
     DockerSql,
     FolderSource,
@@ -215,6 +216,32 @@ def fetcher(cache_root: Path, http: HttpGet = urllib_get) -> ManifestFetcher:
 def refresh(cache_root: Path, kind: ManifestType, http: HttpGet = urllib_get) -> RefreshResult:
     """Refresh one family of WotLK manifests into `cache_root` (ETag-revalidated)."""
     return fetcher(cache_root, http).refresh(GAME, kind)
+
+
+SERVER_DATA_DIR = "/azerothcore/env/dist/data"
+"""Where AzerothCore's data volume is mounted, in the containers that mount it (T62).
+
+The worldserver reads its DBCs from `<DataDir>/dbc/`, and `DataDir` is this path:
+`AC_DATA_DIR: "/azerothcore/env/dist/data"` on `ac-worldserver`, which mounts
+`client-data:/azerothcore/env/dist/data/:ro`, while `ac-client-data-init` mounts
+the same volume read-write at the same path
+(`catalog/installers/wow-wotlk/native/base.yml.tmpl`). A bash-installer server
+has the identical mounts under the volume name `ac-client-data`
+(`tests/data/wotlk-compose-config-script.json`), and the bash launcher copied
+into `<volume>/dbc/` resolved from the worldserver's mount at this destination
+(`copy_server_dbc`, `guides/wow-wotlk/wow-manage.sh` on `upstream/main`), as did
+the Rust launcher's `client-patch` (`cli/dml` on `origin/rust-main`).
+"""
+
+
+def dbc_copier(server_dir: Path, *, service: str, wsl_distro: str | None = None) -> ComposeDbc:
+    """The WotLK `DbcCopier`: DBC files into this install's data volume through `service`.
+
+    `service` is the catalog's `containers.client_data` — the one-shot that
+    mounts the volume read-write — handed in by the caller that holds the entry,
+    the way `DockerSql` is handed the database container.
+    """
+    return ComposeDbc(server_dir, service, SERVER_DATA_DIR, wsl_distro=wsl_distro)
 
 
 def applier(
