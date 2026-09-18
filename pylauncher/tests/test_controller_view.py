@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -10,11 +11,11 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, pump_until
+from tests.conftest import HANG_BOUND, process_events, pump_until
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -24,6 +25,7 @@ from yulon import (
     dashboard,
     docker,
     logsnap,
+    manifest_store,
     networking,
     party,
     purge,
@@ -55,9 +57,11 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
+from yulon.git import RunnerGit
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
+from yulon.runner import run as _REAL_RUN
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
@@ -698,7 +702,7 @@ def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
 def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> None:
     """Measured live, yulon-ubuntu 2026-09-07, on the first run of this code.
 
-    The real applier installed `mod-aoe-loot` into `/home/pk/wowserver` and its
+    The real applier installed `mod-aoe-loot` into `/home/user/wowserver` and its
     manifest glob `data/sql/db-world/*.sql` resolved to nothing — while that
     clone carries `data/sql/db-world/base/aoe_loot_module_string.sql`, the file
     FACT 1 had watched the importer apply an hour earlier. The draft said
@@ -776,14 +780,26 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
 
 
 def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """39 of the 41 must behave exactly as they did — no new dialog at all."""
+    """Every manifest but the two ah-bots must behave exactly as it did — no new dialog.
+
+    Rows whose Install is LOCKED are left out of the loop rather than counted
+    as installs (T69): eleven shipped manifests declare a `requires`, nothing
+    is on disk in this fixture, so `_module_action()` refuses them before the
+    asker — which is the guard's whole job and is asserted by its own test.
+    """
     asked: list[str] = []
 
     def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
         asked.append(str(manifest.id))  # type: ignore[attr-defined]
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    services = _services(ps, tmp_path, [])
+    # T62: five of these manifests also write into the game client, and with no
+    # client folder on the install each of them now stops at the client notice
+    # before any question is asked. This test is about the PROMPTS, so the
+    # install is given a folder and every row reaches the applier as before.
+    services.client_dir = tmp_path / "client"
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
     catalogued = [r.data.id for r in view.modules_panel.rows() if r.data.catalogued]
     for item_id in catalogued:
         view.modules_panel.select(item_id)
@@ -1254,6 +1270,8 @@ class _FakeCustomRoute:
         self.refusal = refusal
         self.derived_from: list[object] = []
         self.installed: list[tuple[str, Path | None]] = []
+        self.replacing: list[bool] = []
+        self.question: str | None = None
         self.forgotten: list[str] = []
         self.custom_ids: set[str] = set()
 
@@ -1272,8 +1290,14 @@ class _FakeCustomRoute:
         self.custom_ids.add(path.name)
         return _custom_manifest(path.name, CUSTOM_FOLDER_DESC)
 
-    def install(self, manifest: Manifest, folder: Path | None) -> ApplyReport:
+    def install(
+        self, manifest: Manifest, folder: Path | None, *, replacing: bool = False
+    ) -> ApplyReport:
+        # `replacing` is recorded, not ignored: it is the user's answer to T47's
+        # question, and an install that dropped it would reset a checkout of
+        # another repository with the question asked and the answer thrown away.
         self.installed.append((manifest.id, folder))
+        self.replacing.append(replacing)
         # Lane A's `complete()` persists inside the install pass, so the row is
         # in the store by the time the report comes back.
         self.store.user[manifest.id] = manifest
@@ -1289,13 +1313,14 @@ class _FakeCustomRoute:
 def _with_custom_route(
     services: ControllerServices, refusal: str | None = None
 ) -> _FakeCustomRoute:
-    """Put a layered store and the five custom-module seams on `services`."""
+    """Put a layered store and the five custom-module seams on `services`, plus T47's question."""
     store = _LayeredStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME)
     route = _FakeCustomRoute(store, refusal=refusal)
     services.store = store
     services.module_from_link = route.derive_link
     services.module_from_folder = route.derive_folder
     services.module_install_custom = route.install
+    services.module_replacement_question = lambda _manifest: route.question
     services.module_forget = route.forget
     return route
 
@@ -7875,13 +7900,18 @@ def test_busy_greys_every_row_button_and_gives_them_back(
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
 
     def presses() -> list[bool]:
+        # Rows the ROW's own answer keeps disabled are left out: the busy gate
+        # never overrides that (`set_enabled_actions`), so a locked Install --
+        # eleven of them here, one per shipped `requires` with nothing on disk
+        # to satisfy it (T69) -- would read as the gate still being on.
         return [
             (row.install_button or row.remove_button).isEnabled()
             for row in view.modules_panel.rows()
-            if row.install_button is not None or row.remove_button is not None
+            if (row.install_button is not None and row.data.installable)
+            or (row.remove_button is not None and row.data.removable)
         ]
 
-    assert all(presses())
+    assert presses() and all(presses())
     view._set_busy(True)
     assert not any(presses())
     view._set_busy(False)

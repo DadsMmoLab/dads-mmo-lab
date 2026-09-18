@@ -149,7 +149,7 @@ def test_a_caller_may_shorten_the_wait_but_not_misspell_it() -> None:
 
 
 def test_wait_server_ready_polls_this_installs_containers_with_this_games_markers(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, a_world_container_that_answers: None
 ) -> None:
     """The spec and the ready markers both arrive at `docker.wait_ready_for()`.
 

@@ -1884,14 +1884,14 @@ def label_disable_args(*, enforcing: bool | None) -> list[str]:
     leaves the host label as it found it. Measured on Fedora 44, Enforcing
     (2026-08-30), on an unlabelled checkout:
 
-        $ ls -Zd /home/pk/ownco2
-        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
-        $ docker run --rm -v /home/pk/ownco2:/git ... remote get-url origin
+        $ ls -Zd /home/user/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/user/ownco2
+        $ docker run --rm -v /home/user/ownco2:/git ... remote get-url origin
         fatal: not a git repository (or any parent up to mount point /)
         $ docker run --rm --security-opt label:disable -v ... remote get-url origin
         https://github.com/mod-playerbots/azerothcore-wotlk.git
-        $ ls -Zd /home/pk/ownco2
-        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
+        $ ls -Zd /home/user/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/user/ownco2
 
     Note what the denial LOOKS like, because it is why this was missed: the
     container cannot see `.git` at all, so git does not say "permission denied",
@@ -3671,8 +3671,8 @@ def _canonical(path: Path) -> Path:
     The install scripts canonicalise with `realpath -m -- "$SERVER_DIR"` BEFORE
     their `case`, so a purely lexical `os.path.normpath` here cannot deliver the
     one guarantee this mirror exists for. On Fedora Atomic `/home` is a symlink
-    to `/var/home`: a picker that returns `/home/pk` and a script that sees
-    `/var/home/pk` disagree about whether the path is `$HOME`, and the user pays
+    to `/var/home`: a picker that returns `/home/user` and a script that sees
+    `/var/home/user` disagree about whether the path is `$HOME`, and the user pays
     for the disagreement with a sudo password and a wait.
 
     `strict=False` never raises for a path that does not exist; the guard is for
@@ -3704,7 +3704,7 @@ def _reserved_dir_reason(server_dir: Path) -> str | None:
 
     The home directory is the one that actually bites: the picker opens there,
     and `server_dir_problem()` used to pass it, so a click-through reached the
-    script and died with "Cannot use '/home/pk' as the install location" only
+    script and died with "Cannot use '/home/user' as the install location" only
     after the sudo password had been entered.
     """
     lexical = Path(os.path.normpath(str(server_dir)))
