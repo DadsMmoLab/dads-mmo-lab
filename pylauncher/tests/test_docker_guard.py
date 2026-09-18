@@ -97,7 +97,7 @@ def _off_path_docker(host: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(platform, "detect", lambda: host)
     monkeypatch.setattr(platform, "_which", lambda name, path=None: None)
     monkeypatch.setattr(Path, "is_file", lambda self: True)
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\pk\AppData\Local")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\user\AppData\Local")
     monkeypatch.setenv("ProgramW6432", r"C:\Program Files")
 
 
@@ -170,7 +170,7 @@ def test_the_argv0_the_local_route_settles_on_is_one_of_those_candidates(
     monkeypatch.setattr(platform, "detect", lambda: "windows")
     monkeypatch.setattr(platform, "_resolved_docker_cli", None)
     monkeypatch.setattr(Path, "is_file", lambda self: True)
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\pk\AppData\Local")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\user\AppData\Local")
     monkeypatch.setenv("ProgramW6432", r"C:\Program Files")
     monkeypatch.setenv("PATH", "")
     monkeypatch.setattr(

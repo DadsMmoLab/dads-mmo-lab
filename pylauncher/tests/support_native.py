@@ -167,7 +167,9 @@ class Recorder:
     """
 
     world_output: native.WorldOutput = native.WorldOutput(
-        text="mangosd loading", restarts=0, status="running"
+        text="mangosd loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",
+        restarts=0,
+        status="running",
     )
     """What the world container has printed, read BETWEEN ready windows.
 
@@ -178,6 +180,12 @@ class Recorder:
     `world_output` a callable that changes its answer, because a double that
     cannot produce a different second reading cannot produce the failure this
     module exists to make producible (see `tests/test_ready_budget.py`).
+
+    Every family's ready marker is in the text since T71, because the watch that
+    runs after the banner asks whether THIS run's log still holds it — a log
+    without it is a container that restarted since. One double answers for four
+    games, so it carries all four markers; a test that wants the restarted
+    reading hands over its own.
     """
 
     ready_specs: list[docker.ReadySpec] = field(default_factory=list)
@@ -667,6 +675,13 @@ class Recorder:
             wait_db_healthy=lambda spec: self.db_healthy,
             wait_ready=self.wait_ready,
             world_output=lambda spec: self.world_output,
+            # No test may sleep for real. T71's watch after the ready banner is
+            # the engine's only self-timed poll, and at the shipped grace that
+            # is thirty two-second sleeps -- a minute of wall clock added to
+            # every test whose server comes up. The fake grants the time
+            # instead; `test_ready_budget.py`'s `FakeWorld.sleep` is the version
+            # that also advances a clock, for the tests that measure it.
+            sleep=lambda seconds: None,
             tag_image=self.tag_image,
             remove_image=self.remove_image,
             # An INERT SELinux by default: not enforcing, on a filesystem that
@@ -715,9 +730,15 @@ class Recorder:
         self.calls.append(f"tag:{src}->{dst}")
         return self.tag_problem
 
-    def remove_image(self, ref: str) -> str:
-        """`docker.remove_image()`: recorded as `rmi:<ref>`, always allowed here."""
-        self.calls.append(f"rmi:{ref}")
+    def remove_image(self, ref: str, force: bool = False) -> str:
+        """`docker.remove_image()`: recorded as `rmi:<ref>` / `rmi -f:<ref>`, always allowed.
+
+        `force` is recorded under its own name rather than folded in, for the
+        reason `recreate` is not `start`: a run that had to force every removal
+        is a run whose containers are holding images it thinks it is done with,
+        and a double that could not tell the two asks apart could not see it.
+        """
+        self.calls.append(f"rmi -f:{ref}" if force else f"rmi:{ref}")
         return ""
 
     def recreate(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:

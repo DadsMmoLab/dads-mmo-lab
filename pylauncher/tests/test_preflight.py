@@ -23,7 +23,7 @@ ENTRY = load_catalog().get("wow-wotlk")
 NATIVE = ENTRY.install.native
 assert NATIVE is not None
 GIB = preflight.GIB
-SERVER_DIR = Path("/home/pk/wow")
+SERVER_DIR = Path("/home/user/wow")
 
 
 def facts(**overrides: object) -> preflight.Facts:
@@ -86,10 +86,16 @@ def test_too_little_memory_is_a_refusal_not_a_warning() -> None:
     "dies at the same low percentage every retry" with a bare `Killed` — three
     hours to learn. A false refusal costs one settings change.
     """
-    report = preflight.evaluate(ENTRY, SERVER_DIR, facts(vm=_vm(4)))
+    report = preflight.evaluate(ENTRY, SERVER_DIR, facts(platform_id="windows", vm=_vm(4)))
     assert verdict(report, "memory") == "refuse"
     assert not report.ok()
     assert "Resources" in report.message()
+    # Windows because the pane is what that machine has. The Linux box refuses
+    # on the same number and is told about the machine instead (T40), and the
+    # verdict is the part this test is about: it is a refusal on both.
+    engine = preflight.evaluate(ENTRY, SERVER_DIR, facts(vm=_vm(4)))
+    assert verdict(engine, "memory") == "refuse"
+    assert not engine.ok()
 
 
 def test_memory_between_the_floors_warns_and_does_not_block() -> None:
@@ -277,19 +283,24 @@ def test_every_free_space_row_gets_the_remedy_that_can_actually_move_its_bytes()
     One test per row because each names a different action, and the one that was
     wrong was wrong precisely by being shared.
     """
-    # Linux: two daemons answer to `platform_id == "linux"`. `detect()` reports
-    # it inside WSL too, where `docker` is often Docker Desktop's through WSL
-    # integration and never reads the distro's /etc/docker/daemon.json. Naming
-    # only `data-root` there is the same dead end in a new place, so both routes
-    # must be on the line.
-    linux = preflight.evaluate(
-        ENTRY,
-        SERVER_DIR,
-        facts(platform_id="linux", data_root_free=16 * GIB, server_dir_free=1336 * GIB),
-    ).refusals()
+    # A bare Linux MACHINE gets `data-root` alone, and that is what T40 buys
+    # here: before it, this row offered a Docker Desktop menu path to a box with
+    # no Docker Desktop on it.
+    short = dict(data_root_free=16 * GIB, server_dir_free=1336 * GIB)
+    linux = preflight.evaluate(ENTRY, SERVER_DIR, facts(platform_id="linux", **short)).refusals()
     assert [check.name for check in linux] == ["free space on Docker's disk"], linux
     assert "data-root" in linux[0].remedy, linux[0].remedy
-    assert "Disk image location" in linux[0].remedy, linux[0].remedy
+    assert "Disk image location" not in linux[0].remedy, linux[0].remedy
+
+    # A WSL distro keeps T37's hedge, because `in_wsl` does not say WHOSE daemon
+    # this is: Docker Desktop's through integration, or a `docker.io` installed
+    # in the distro, which reads /etc/docker/daemon.json like any Linux daemon.
+    distro = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(platform_id="linux", in_wsl=True, **short)
+    ).refusals()
+    assert [check.name for check in distro] == ["free space on Docker's disk"], distro
+    assert "Disk image location" in distro[0].remedy, distro[0].remedy
+    assert "daemon.json" in distro[0].remedy, distro[0].remedy
 
     # macOS reaches `_space_check_macos_bounded()`, a separate function that
     # carried its own copy of the same wrong sentence.
@@ -1265,9 +1276,9 @@ def test_the_compose_row_stays_quiet_when_docker_itself_never_answered() -> None
 
 def test_the_compose_remedy_names_docker_desktop_off_linux() -> None:
     """Where Docker Desktop IS the answer, it is still the answer."""
-    assert "Docker Desktop" in preflight._compose_remedy("windows")
-    assert "Docker Desktop" in preflight._compose_remedy("darwin")
-    assert "pacman" not in preflight._compose_remedy("windows")
+    for machine in (facts(platform_id="windows"), facts(platform_id="macos")):
+        assert "Docker Desktop" in preflight._compose_remedy(machine)
+        assert "pacman" not in preflight._compose_remedy(machine)
 
 
 def test_the_compose_remedy_names_the_package_our_own_installer_uses() -> None:
@@ -1284,7 +1295,417 @@ def test_the_compose_remedy_names_the_package_our_own_installer_uses() -> None:
     """
     source = Path(platform_module.__file__ or "").read_text(encoding="utf-8")
     assert "docker-compose-v2" in source, "the provisioning package list changed"
-    remedy = preflight._compose_remedy("linux")
+    remedy = preflight._compose_remedy(facts(platform_id="linux"))
     assert "docker-compose-v2" in remedy
     # The upstream-repo alternative is mentioned, not asserted as universal.
     assert "docker-compose-plugin" in remedy
+
+
+# --- T40: every remedy names an action the machine it is printed on can take ---
+#
+# Four rows told a native-Linux user to open Docker Desktop, raise its Resources
+# memory limit, or add a folder to its file-sharing list. None of the three
+# exists on Docker Engine, and the class had already cost a morning once (T37).
+#
+# Three engines, not two platforms, is the whole fix: `platform.detect()` answers
+# "linux" for a Linux machine AND for a WSL distro whose `docker` is Docker
+# Desktop's through WSL integration, and those two are moved by opposite
+# settings. `Facts.in_wsl` is the fact that tells them apart.
+
+ENGINE = "engine"  # a Linux machine running Docker Engine
+WSL = "wsl"  # a WSL distro fed by Docker Desktop's integration
+WINDOWS = "windows"
+MACOS = "macos"
+MACHINES = (ENGINE, WSL, WINDOWS, MACOS)
+
+_MACHINE_FACTS: dict[str, dict[str, object]] = {
+    ENGINE: dict(platform_id="linux", in_wsl=False),
+    WSL: dict(platform_id="linux", in_wsl=True),
+    WINDOWS: dict(platform_id="windows", in_wsl=False),
+    MACOS: dict(platform_id="macos", in_wsl=False),
+}
+
+
+def _machine(kind: str, **overrides: object) -> preflight.Facts:
+    """`facts()` on one of the four engines, minus whatever the row breaks."""
+    return facts(**{**_MACHINE_FACTS[kind], **overrides})
+
+
+def _row(entry: CatalogEntry, machine: preflight.Facts, name: str) -> preflight.Check:
+    """One check by its EXACT name, so no neighbouring row can answer for it."""
+    matched = [c for c in preflight.evaluate(entry, SERVER_DIR, machine).checks if c.name == name]
+    assert len(matched) == 1, (name, [c.name for c in matched])
+    return matched[0]
+
+
+def _assert_fits(remedy: str, says: tuple[str, ...], not_says: tuple[str, ...]) -> None:
+    """The two halves together: it names THIS engine's action and not another's.
+
+    The negative half is what the row was failing; the positive half is what
+    stops the fix from being an empty sentence that passes it.
+    """
+    assert remedy, "an unactionable remedy is not fixed by deleting it"
+    for phrase in says:
+        assert phrase in remedy, (phrase, remedy)
+    for phrase in not_says:
+        assert phrase not in remedy, (phrase, remedy)
+
+
+# The daemon row. `systemctl`/`usermod` name themselves and appear in no other
+# remedy in the module, so a green assertion here cannot be a neighbour's.
+_DAEMON_REMEDIES = {
+    ENGINE: (
+        ("systemctl start docker", "usermod -aG docker", "if Docker runs as a service here"),
+        ("Docker Desktop", "whale"),
+    ),
+    # BOTH routes, because this row refuses precisely when no daemon answered,
+    # so nothing could have told the two apart. `service` not `systemctl`: a WSL
+    # distro usually boots without systemd.
+    # `sudo systemctl`, not bare "systemctl": the sentence names systemctl in
+    # order to steer away from it, which is the opposite of offering it.
+    WSL: (
+        ("Docker Desktop", "whale", "WSL integration", "its own Docker Engine", "service docker"),
+        ("sudo systemctl",),
+    ),
+    WINDOWS: (("Open Docker Desktop", "whale"), ("systemctl", "wslconfig")),
+    MACOS: (("Open Docker Desktop", "whale"), ("systemctl", "wslconfig")),
+}
+
+
+@pytest.mark.parametrize("kind", MACHINES)
+def test_the_dead_daemon_row_names_a_way_to_start_the_daemon_this_machine_has(kind: str) -> None:
+    """`preflight.py:457`: "open Docker Desktop and wait for the whale icon".
+
+    There is no Docker Desktop on a Linux machine and no whale to wait for: the
+    daemon is a service, and the commonest reason it "did not answer" there is
+    that the user is not in the `docker` group at all.
+    """
+    dead = _machine(
+        kind, docker_ready=False, vm=None, data_root=None, data_root_free=None, bind_mount=None
+    )
+    row = _row(ENTRY, dead, "Docker")
+    assert row.verdict == "refuse"
+    _assert_fits(row.remedy, *_DAEMON_REMEDIES[kind])
+
+
+# The memory floor. "no memory limit to raise" and "`memory=`" each belong to
+# exactly one branch of `_memory_floor_remedy()`.
+_MEMORY_FLOOR_REMEDIES = {
+    ENGINE: (("no memory limit to raise", "swap"), ("Docker Desktop", "Resources", "wslconfig")),
+    WSL: ((".wslconfig", "memory=", "wsl --shutdown"), ("Resources settings",)),
+    WINDOWS: (("Docker Desktop's Resources settings",), ("wslconfig", "swap")),
+    MACOS: (("Docker Desktop's Resources settings",), ("wslconfig", "swap")),
+}
+
+
+@pytest.mark.parametrize("kind", MACHINES)
+def test_the_memory_refusal_names_a_memory_setting_this_machine_has(kind: str) -> None:
+    """`preflight.py:482`: "raise Docker Desktop's Resources memory limit".
+
+    Docker Engine has no limit and no pane — a container gets the machine's own
+    memory — and Docker Desktop's WSL2 backend greys that slider out, because it
+    is Windows' `.wslconfig` that sizes the distro. One sentence, three wrong
+    audiences out of four.
+    """
+    row = _row(ENTRY, _machine(kind, vm=_vm(4)), "memory")
+    assert row.verdict == "refuse"
+    _assert_fits(row.remedy, *_MEMORY_FLOOR_REMEDIES[kind])
+    # The consequence survives the split: it is what makes the row read as a
+    # floor rather than a preference.
+    assert "killed part-way through" in row.remedy
+
+
+_MEMORY_HEADROOM_REMEDIES = {
+    ENGINE: (("this machine has at least", "swap"), ("Docker Desktop", "settings", "wslconfig")),
+    WSL: ((".wslconfig", "memory="), ("in its settings",)),
+    WINDOWS: (("Give Docker at least", "in its settings"), ("wslconfig",)),
+    MACOS: (("Give Docker at least", "in its settings"), ("wslconfig",)),
+}
+
+
+@pytest.mark.parametrize("kind", MACHINES)
+def test_the_unmeasured_memory_row_names_a_memory_setting_this_machine_has(kind: str) -> None:
+    """The `unchecked` arm of the same row, which carried the same pane.
+
+    `unchecked` is not a pass, so it still gives advice — and advice printed
+    where nothing could be measured is the one a user is most likely to act on.
+    """
+    row = _row(ENTRY, _machine(kind, vm=None), "memory")
+    assert row.verdict == "unchecked"
+    _assert_fits(row.remedy, *_MEMORY_HEADROOM_REMEDIES[kind])
+
+
+_CLIENT_SHARE_REMEDIES = {
+    ENGINE: (
+        ("read by the user the Docker daemon runs as", "client folder"),
+        ("Docker Desktop", "File sharing", "WSL integration"),
+    ),
+    # Both routes here too: a distro running its own engine has no integration
+    # to tick and no file-sharing list, and fails for the ordinary Linux reason.
+    WSL: (
+        ("WSL integration", "File sharing", "/mnt", "its own Docker Engine", "user the daemon"),
+        (),
+    ),
+    WINDOWS: (
+        ("Docker Desktop's Settings → Resources → File sharing", "the client folder"),
+        ("daemon runs as", "WSL integration"),
+    ),
+    MACOS: (
+        ("Docker Desktop's Settings → Resources → File sharing", "the client folder"),
+        ("daemon runs as", "WSL integration"),
+    ),
+}
+
+
+@needs_client_entry
+@pytest.mark.parametrize("kind", MACHINES)
+def test_the_client_sharing_refusal_names_a_sharing_setting_this_machine_has(kind: str) -> None:
+    """`preflight.py:843`: "set Docker Desktop's file sharing for the client folder".
+
+    The server folder's twin has picked per engine since the Fedora 44 report
+    (`_bind_remedy`); the client's row, added later, was never given the same
+    treatment — a rule with no owner drifting in the copy nobody was looking at.
+    """
+    assert CLIENT_ENTRY is not None
+    ok = (preflight.Check("the client folder", "pass", "fine"),)
+    row = _row(
+        CLIENT_ENTRY,
+        _machine(kind, client_checks=ok, client_bind=False),
+        "sharing the client with Docker",
+    )
+    assert row.verdict == "refuse"
+    _assert_fits(row.remedy, *_CLIENT_SHARE_REMEDIES[kind])
+    assert row.remedy[0].isupper(), "a refusal's remedy is its own sentence"
+
+
+@needs_client_entry
+@pytest.mark.parametrize("kind", MACHINES)
+def test_the_unprobed_client_row_names_a_sharing_setting_this_machine_has(kind: str) -> None:
+    """The `unchecked` arm of the same row — the fourth of T40's four.
+
+    It said "check Docker Desktop's file sharing settings" on every machine, and
+    it is the arm a user reaches when the daemon could not be asked at all.
+    """
+    assert CLIENT_ENTRY is not None
+    ok = (preflight.Check("the client folder", "pass", "fine"),)
+    row = _row(
+        CLIENT_ENTRY,
+        _machine(kind, client_checks=ok, client_bind=None),
+        "sharing the client with Docker",
+    )
+    assert row.verdict == "unchecked"
+    assert row.remedy.startswith("If extraction finds no archives, ")
+    _assert_fits(row.remedy, *_CLIENT_SHARE_REMEDIES[kind])
+
+
+DESKTOP_ONLY_WORDS = (
+    "Docker Desktop",
+    "whale",
+    "Resources",
+    "File sharing",
+    "file sharing",
+    "Disk image location",
+    "wslconfig",
+    "WSL integration",
+)
+"""Words that name a thing a Linux machine running Docker Engine does not have.
+
+`Resources` and `File sharing` are panes, `whale` is a tray icon, `.wslconfig`
+is a Windows file, and none of them is reachable from a Fedora box.
+"""
+
+T40_REMEDY_ROWS = frozenset(
+    {
+        "Docker",
+        preflight.COMPOSE_CHECK,
+        "memory",
+        preflight.JOBS_CHECK,
+        "free space on Docker's disk",
+        "free space on the server folder",
+        f"free space on {preflight.ONE_VOLUME_SPACE}",
+        "the server folder",
+        "sharing the folder with Docker",
+        "SELinux",
+        "the server's ports",
+        "sharing the client with Docker",
+    }
+)
+"""Every row of `evaluate()` that can print a remedy, pinned.
+
+The sweep below is only as good as the branches it reaches, so it asserts it
+reached all of these. A row added later — or a branch of an existing row that
+the matrix stopped covering — fails this set rather than passing silently with
+a Docker Desktop sentence nobody looked at.
+"""
+
+
+def _linux_engine_sweep() -> list[preflight.Check]:
+    """Every row `evaluate()` can produce on a Linux machine, across every verdict.
+
+    One `Facts` per branch rather than one machine, because the remedies live in
+    the branches: a healthy box prints almost none of them.
+    """
+    ok_client = (preflight.Check("the client folder", "pass", "fine"),)
+    broken: list[dict[str, object]] = [
+        dict(
+            docker_ready=False,
+            compose_ready=None,
+            vm=None,
+            data_root=None,
+            data_root_free=None,
+            bind_mount=None,
+            client_bind=None,
+        ),
+        dict(compose_ready=False),
+        dict(vm=None),
+        dict(vm=_vm(4)),
+        dict(vm=_vm(7)),
+        dict(vm=_vm(19.5, cpus=15)),
+        dict(vm=_vm(2.5, cpus=1)),
+        dict(data_root_free=4 * GIB),
+        dict(data_root_free=None),
+        dict(server_dir_free=4 * GIB),
+        dict(server_dir_free=None),
+        dict(data_root_free=4 * GIB, server_dir_free=4 * GIB, same_volume=True),
+        dict(dir_problem="it is inside a cloud-synced folder (onedrive)"),
+        dict(bind_mount=False),
+        dict(bind_mount=False, selinux_enforcing=True),
+        dict(bind_mount=None),
+        dict(selinux_enforcing=None),
+        dict(selinux_enforcing=True, server_fs_type="ntfs"),
+        dict(port_conflicts=("ac-authserver",)),
+        dict(ports_in_use=(3724,)),
+        dict(client_bind=False),
+        dict(client_bind=None),
+    ]
+    entries = [ENTRY] + ([CLIENT_ENTRY] if CLIENT_ENTRY is not None else [])
+    seen: list[preflight.Check] = []
+    for entry in entries:
+        for case in broken:
+            machine = _machine(ENGINE, client_checks=ok_client, **case)
+            seen.extend(preflight.evaluate(entry, SERVER_DIR, machine).checks)
+    return [check for check in seen if check.remedy]
+
+
+def test_no_remedy_on_a_linux_machine_names_something_only_docker_desktop_has() -> None:
+    """The sweep. One rule, every row, no exceptions — which is what T40 asks for.
+
+    The four rows in the ticket were found by reading, and reading is what
+    missed them. This reaches every branch of every row on a
+    `Facts(platform_id="linux", in_wsl=False)` and refuses the vocabulary
+    outright, so the next row written in the wrong voice fails before it ships.
+    """
+    swept = _linux_engine_sweep()
+    assert {check.name for check in swept} == T40_REMEDY_ROWS, sorted(
+        {check.name for check in swept} ^ T40_REMEDY_ROWS
+    )
+    for check in swept:
+        for word in DESKTOP_ONLY_WORDS:
+            assert word not in check.remedy, (check.name, word, check.remedy)
+
+
+def test_the_sweep_is_about_the_engine_and_not_about_the_words() -> None:
+    """The control: the same vocabulary is CORRECT on the machines that have it.
+
+    Without this, the sweep above is satisfied by a module that never mentions
+    Docker Desktop anywhere — which would be the same defect pointed the other
+    way, at the Windows majority the launcher ships to.
+    """
+    for kind in (WSL, WINDOWS, MACOS):
+        dead = _machine(
+            kind, docker_ready=False, vm=None, data_root=None, data_root_free=None, bind_mount=None
+        )
+        said = " ".join(
+            check.remedy for check in preflight.evaluate(ENTRY, SERVER_DIR, dead).checks
+        )
+        assert "Docker Desktop" in said, kind
+
+
+def test_gather_asks_whether_this_linux_is_a_wsl_distro_and_only_on_linux() -> None:
+    """The fact behind all of the above, read through a seam like every other.
+
+    Only on Linux: `detect()` has already answered "windows" or "macos"
+    otherwise, and /proc/version on a Windows box is a question about nothing.
+    Through a seam because the alternative is a suite whose colour depends on
+    whether it is being run inside WSL — which some of this repo's boxes are.
+    """
+    asked: list[str] = []
+
+    def spy() -> bool:
+        asked.append("in_wsl")
+        return True
+
+    linux = _client_gather(ENTRY, SERVER_DIR, in_wsl=spy)
+    assert linux.in_wsl is True
+    assert asked == ["in_wsl"]
+
+    asked.clear()
+    windows = _client_gather(ENTRY, SERVER_DIR, platform_id=lambda: "windows", in_wsl=spy)
+    assert windows.in_wsl is False
+    assert asked == [], "nothing on Windows should be reading /proc/version"
+
+
+def test_a_wsl_distro_is_never_told_only_docker_desktop_can_be_its_docker() -> None:
+    """The round-1 defect, and the mirror image of the one T40 was filed for.
+
+    `in_wsl` separates a bare Linux box from a WSL distro. It does NOT separate
+    Docker Desktop's WSL integration from a Docker Engine installed inside the
+    distro (`apt install docker.io`, integration off) — a supported install with
+    no Docker Desktop anywhere near it. The first T40 draft read `in_wsl=True`
+    as "Docker Desktop" and told that user to start Docker Desktop on Windows,
+    update Docker Desktop for Compose, and move a disk image that does not
+    exist: exactly the unactionable advice the ticket exists to remove, aimed at
+    a new audience.
+
+    The dead-daemon row is the one that can never be rescued by probing — it
+    refuses BECAUSE `docker info` did not answer — so every one of these rows
+    names both routes rather than choosing.
+    """
+    distro = _machine(
+        WSL, docker_ready=False, vm=None, data_root=None, data_root_free=None, bind_mount=None
+    )
+    daemon = _row(ENTRY, distro, "Docker").remedy
+    # The Desktop route…
+    assert "Docker Desktop" in daemon and "WSL integration" in daemon
+    # …and the route a distro running its own engine can actually take. WSL
+    # usually boots without systemd, where `systemctl` answers "System has not
+    # been booted with systemd as init system" and reads as a broken machine.
+    assert "its own Docker Engine" in daemon
+    assert "service docker start" in daemon
+    # It may NAME systemctl — it does, to steer away from it — but it must not
+    # be the command offered.
+    assert "sudo systemctl" not in daemon, "systemd is not what starts a daemon in a WSL distro"
+    assert "not `systemctl`" in daemon
+
+    compose = preflight._compose_remedy(_machine(WSL))
+    assert "Docker Desktop" in compose
+    assert "docker-compose-v2" in compose, "a distro's own engine needs the distro's package"
+    assert "pacman" in compose
+
+    disk = preflight._docker_disk_remedy(_machine(WSL))
+    assert "Disk image location" in disk
+    assert "daemon.json" in disk, "T37's hedge was right and stays"
+
+    share = preflight._client_bind_remedy(_machine(WSL))
+    assert "WSL integration" in share
+    assert "its own Docker Engine" in share and "user the daemon runs as" in share
+
+
+def test_the_linux_daemon_remedy_does_not_assert_docker_is_a_system_service() -> None:
+    """Not every Linux Docker is one: rootless runs under `systemctl --user`,
+    and Fedora's `podman-docker` provides the command with no daemon and no
+    `docker` group at all. The command stays — it is right for the common case —
+    but the sentence stops claiming the shape of the install."""
+    said = preflight._daemon_remedy(preflight.Facts(platform_id="linux", docker_ready=False))
+    assert "if Docker runs as a service here" in said
+    assert "systemctl start docker" in said
+
+
+def test_facts_default_to_a_plain_linux_machine_rather_than_a_docker_desktop() -> None:
+    """Which way the unestablished fact falls, and why that way.
+
+    `in_wsl` defaults to False, so a caller that never asked gets the Engine
+    wording. The wrong default would hand a Fedora box a `.wslconfig` — the same
+    defect in a new coat — and every remedy in this module reads this field.
+    """
+    assert preflight.Facts(platform_id="linux", docker_ready=True).in_wsl is False

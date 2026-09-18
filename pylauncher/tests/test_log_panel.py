@@ -24,7 +24,7 @@ from tests.conftest import (
 )
 from yulon import runner
 from yulon.ui import lines
-from yulon.ui.widgets.log_panel import PALETTE, LogPanel, _StreamWorker, tone_colour
+from yulon.ui.widgets.log_panel import PALETTE, LogPanel, Seams, _StreamWorker, tone_colour
 
 STAMP = re.compile(r"^\[(\d\d:\d\d:\d\d)\] ")
 """The wall clock `append()` puts on every line. Elapsed is a header field, not a prefix."""
@@ -35,15 +35,7 @@ DWELL_PROOF = 1.2
 `test_the_elapsed_field_stops_counting_when_the_job_ends_but_keeps_its_total`
 requires the elapsed field NOT to move while this elapses, so a slow or loaded
 box makes it pass more surely rather than less. It is small for the same reason
-`HANG_BOUND` is large. `CLOCK_GAP` is the same shape.
-"""
-
-CLOCK_GAP = 0.05
-"""Also an assertion, also pointing the other way.
-
-`test_the_elapsed_clock_counts_from_this_run_and_not_from_the_last_one` needs
-the second run's zero to be strictly later than the first's; any real delay
-between them proves it, and load only widens the gap.
+`HANG_BOUND` is large.
 """
 
 EXPIRY_PROBE = 0.05
@@ -55,6 +47,26 @@ deadline is meant to fire, and the number is small because the test's whole
 cost is this wait -- at 0.05s it costs about as much as one `process_events`
 slice, and the report it exists to pin says the same thing at any size.
 """
+
+
+class _HandClock:
+    """A monotonic clock a test winds by hand. Never moves on its own.
+
+    Wound rather than stepped-per-call on purpose: the panel reads the clock
+    once for the zero and again on every `_show_elapsed()`, and a ticker that
+    happens to fire on a loaded box adds a reading. A clock that advanced per
+    call would make the expected text depend on how many times it was asked,
+    which is the flake this file is removing rather than a new one to add.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def wind(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def _distance(one: object, two: object) -> int:
@@ -595,16 +607,16 @@ def test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window(
     back without resizing the window. The owner hit it on the first refusal a
     real user would ever see.
 
-    Asserts the WIDTH THE PANEL DEMANDS rather than `wordWrap()`, which is a
-    declaration and would still pass if the label were replaced by something
-    else that does not wrap. Compares a short status against one twenty times
+    Asserts the WIDTH THE PANEL DEMANDS rather than a declaration about the
+    label, which would still pass if the label were replaced by something else
+    that does not keep the promise. Compares a short status against one twenty times
     longer instead of pinning a pixel count, because the number depends on the
     font the box happens to have.
     """
     panel = LogPanel()
     panel.resize(400, 300)
 
-    panel._status.setText("idle")
+    panel._status.say("idle")
     # `activate()` is load-bearing, and its absence made the first version of
     # this test pass against the bug: a layout that has not been activated
     # returns the size hint it last computed, so both readings below were the
@@ -613,7 +625,7 @@ def test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window(
     panel.layout().activate()
     short = panel.minimumSizeHint().width()
 
-    panel._status.setText(
+    panel._status.say(
         "FAILED: InstallerError: /home/pk is your home folder itself. A server "
         "install owns the folder it is given - a reinstall removes it - so pick a "
         "dedicated subfolder inside your home folder instead. Pick a different "
@@ -629,19 +641,23 @@ def test_a_long_refusal_does_not_make_the_panel_demand_the_whole_window(
 
 
 def test_the_status_label_still_says_what_failed(qapp: object) -> None:
-    """Wrapping must not have been bought by truncating the sentence.
+    """Narrowing must not have been bought by throwing the sentence away.
 
-    The neighbour of the fix above: a label that elides its text would also stop
-    demanding the window's width, and would pass that test while telling the user
-    less than it used to. This asserts the whole refusal is still readable.
+    The neighbour of the fix above: a field that stops demanding the window's
+    width by keeping less of what it was told would pass that test while telling
+    the user less than it used to. Since T83 the field DOES elide -- the strip is
+    one line and a refusal is a paragraph -- so what this asserts is that the
+    eliding is a drawing and not a loss: the whole refusal is still what the
+    panel reports and what a hover shows.
     """
     panel = LogPanel()
     message = (
-        "/home/pk is your home folder itself. A server install owns the folder it "
+        "/home/user is your home folder itself. A server install owns the folder it "
         "is given - a reinstall removes it - so pick a dedicated subfolder."
     )
-    panel._status.setText("FAILED: " + message)
+    panel._status.say("FAILED: " + message)
     assert panel.status_text() == "FAILED: " + message
+    assert panel._status.toolTip() == "FAILED: " + message
 
 
 def test_the_status_label_text_can_be_selected_and_copied(qapp: object) -> None:
@@ -676,20 +692,21 @@ def test_the_selectable_flags_do_not_reopen_the_wrap_bug(qapp: object) -> None:
     that, and pinning it to one would only be pinning a pre-existing,
     unrelated property of `QLabel.sizeHint()` under word wrap.
     `minimumSizeHint()` is the quantity that actually determines what a
-    `QSplitter` demands (see the comment on `setWordWrap(True)` above), which
-    is why the original fix measured it and why this does too. Mutation:
-    comment out `self._status.setWordWrap(True)` and this test fails the
-    same way the original one does, which is the proof this measures the
-    right thing.
+    `QSplitter` demands (see the comment on the status field above), which is why
+    the original fix measured it and why this does too. Mutation: give
+    `self._status` a plain `QLabel` in place of the `_StripLabel` T83 made it
+    -- or take `QSizePolicy.Policy.Ignored` off `_StripLabel` -- and this test
+    fails the same way it did against `setWordWrap`, which is the proof it
+    measures the right thing.
     """
     panel = LogPanel()
     panel.resize(400, 300)
 
-    panel._status.setText("idle")
+    panel._status.say("idle")
     panel.layout().activate()
     short = panel.minimumSizeHint().width()
 
-    panel._status.setText(
+    panel._status.say(
         "FAILED: InstallerError: /home/pk is your home folder itself. A server "
         "install owns the folder it is given - a reinstall removes it - so pick a "
         "dedicated subfolder inside your home folder instead. Pick a different "
@@ -773,26 +790,78 @@ def test_the_elapsed_clock_counts_from_this_run_and_not_from_the_last_one(qapp: 
     field anchored to the widget's construction would tell somebody four hours
     into a job that started a minute ago -- worse than no field, because it
     reads as a measurement.
+
+    Against the INJECTED clock since T81, and the field rather than
+    `panel._started_at`. The version this replaces slept 50 ms between two runs
+    and required the second `time.time()` stamp to be the larger, which is a
+    statement about the host's wall clock and not about the panel: an NTP
+    correction or a WSL resume made it fail while the code was right (T51), and
+    a re-anchor that took the *wrong* zero would still have passed it. The
+    clock here is wound by hand, so the two totals below are the only two
+    sentences the panel can produce, and they differ by a quarter of an hour.
     """
-    panel = LogPanel()
+    clock = _HandClock()
+    panel = LogPanel(seams=Seams(monotonic=clock))
 
     def source() -> Iterator[str]:
         yield "first"
+        clock.wind(30.0)
 
     panel.run(source)
     wait_for_panel(panel)
-    first_start = panel._started_at
-    assert first_start is not None
-    time.sleep(CLOCK_GAP)
+    assert panel.elapsed_text() == "0:00:30", panel.elapsed_text()
+
+    # Fifteen minutes of console, or of the user reading the finished install.
+    clock.wind(900.0)
 
     def again() -> Iterator[str]:
         yield "second"
+        clock.wind(5.0)
 
     panel.run(again)
     wait_for_panel(panel)
-    assert panel._started_at is not None and panel._started_at > first_start, (
-        "the second run kept the first run's zero, so its elapsed clock is wrong by the gap "
-        "between them"
+    assert panel.elapsed_text() == "0:00:05", (
+        "the second run did not re-stamp its zero: it is counting from the first run's, so the "
+        f"field reads {panel.elapsed_text()} for a job five seconds old"
+    )
+
+
+def test_a_wall_clock_step_backwards_during_a_run_does_not_move_the_elapsed_field(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug T81 exists for, driven rather than argued.
+
+    `time.time()` is stepped backwards an hour WHILE the job is running -- an
+    NTP correction, or the resync WSL2 does when the host comes back from
+    suspend -- and the injected monotonic clock goes on advancing normally,
+    which is what the two clocks really do. The elapsed field must read the
+    minute the monotonic clock measured.
+
+    The wall clock is the real `time.time`, patched, and not a seam: the whole
+    claim is that the panel no longer READS it for this field, and a fake it
+    was handed could not show that. Anchoring `_started_at` back to
+    `time.time()` turns the field into `0:00:00` (or, without the old clamp,
+    a negative hour) and this test says so; the panel's line stamps go on using
+    the wall clock, which is correct -- a line is a moment, not a duration.
+    """
+    clock = _HandClock()
+    panel = LogPanel(seams=Seams(monotonic=clock))
+    wall = _HandClock(start=5_000_000.0)
+    monkeypatch.setattr(time, "time", wall)
+
+    def source() -> Iterator[str]:
+        yield "before the correction"
+        # The step itself: an hour back, mid-run, while the run really has been
+        # going for sixty seconds.
+        wall.wind(-3600.0)
+        clock.wind(60.0)
+        yield "after the correction"
+
+    panel.run(source)
+    wait_for_panel(panel)
+    assert panel.elapsed_text() == "0:01:00", (
+        "the elapsed field followed the wall clock backwards, so it is not measured with a "
+        f"monotonic clock: {panel.elapsed_text()}"
     )
 
 
@@ -811,8 +880,12 @@ def test_elapsed_keeps_its_hours_field_from_the_first_second(qapp: object) -> No
     assert _elapsed(600) == "0:10:00"
     assert _elapsed(3600) == "1:00:00"
     assert _elapsed(16267) == "4:31:07"
-    # Never negative, whatever the clock does underneath.
-    assert _elapsed(-5) == "0:00:00"
+    # No negative case, and its absence is the point: the `max(0, ...)` that
+    # answered `0:00:00` for one went with T81, because the only caller now
+    # subtracts two readings of the same monotonic clock and cannot hand this
+    # a negative. Asserting the old clamp here would pin a guard for an input
+    # that no longer exists, and pinning it is what would let the wall clock
+    # back in quietly.
 
 
 def test_the_panel_follows_the_bottom_while_it_is_already_at_the_bottom(qapp: object) -> None:
@@ -930,13 +1003,12 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
 
     The names are listed individually rather than counted, because they do not
     mean the same thing: `HANG_BOUND` must never be reached, `DWELL_PROOF`,
-    `CLOCK_GAP` and `EXPIRY_PROBE` must be, and `JOB_PACE` is not a deadline at
+    `EXPIRY_PROBE` must be, and `JOB_PACE` is not a deadline at
     all. An audit that only asked "is it a name?" would let a hang bound be
     sized like a dwell one, and one that only counted would let a seventh
     constant with no argument behind it in.
     """
     assert spelled_bounds(__file__) == {
-        "CLOCK_GAP",
         "DWELL_PROOF",
         "EXPIRY_PROBE",
         "HANG_BOUND",
@@ -1183,7 +1255,7 @@ def test_the_strip_does_not_reopen_the_wrap_bug(qapp: object) -> None:
     """
     panel = LogPanel()
     panel.resize(400, 300)
-    panel._status.setText("idle")
+    panel._status.say("idle")
     panel.layout().activate()
     short = panel.minimumSizeHint().width()
 

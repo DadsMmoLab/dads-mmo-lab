@@ -73,6 +73,32 @@ TBC_BOOT_S = _stamps_apart("18:59:55", "19:45:58")
 
 2763 s, from the two `docker logs -t` stamps in this file's header."""
 
+BANNER_LINE = "Avg Diff: 15ms"
+"""The ready marker both CMaNGOS entries carry, as a whole log line.
+
+Every `ReadySpec` in this file waits for `Avg Diff:`, so this is the line a
+`FakeWorld` past its `boot_s` must be printing: T71's watch asks whether the
+CURRENT run's log still holds the banner, and a fake that says it is up while
+its log never said so is a fake of a server that restarted.
+"""
+
+ABORT_LINES = (
+    "AC> [1146] Table 'acore_world.city_bot_poi' doesn't exist",
+    "Your database structure is not up to date. Please make sure you've executed all "
+    "queries in the sql/updates folders.",
+    ">> ABORTED",
+    "# Location '/azerothcore/src/server/database/Database/MySQLConnection.cpp:634'",
+)
+"""What the world server printed AFTER `ready...` on 2026-09-16, copied from the gate log.
+
+T71's incident (gate `t63-owed-live-yulon-ubuntu-2026-09-16`, WoW WotLK with
+mod-city-bots): the world initialised in 1 m 21 s, printed its ready banner,
+printed these four lines, and crash-looped three times — while the app said "The
+server is up" and "WoW WotLK was rebuilt and is running". Kept verbatim because
+the shape is the point: the line that says WHY is the FIRST of the four, and the
+last one is a source location.
+"""
+
 
 @dataclass
 class FakeWorld:
@@ -100,6 +126,29 @@ class FakeWorld:
     fatal_after_s: float | None = None
     status: str = "running"
 
+    aborts_after_ready_s: float | None = None
+    """Seconds after `boot_s` at which the world prints `ABORT_LINES` and dies (T71).
+
+    The live shape, measured on 2026-09-16 (`t63-owed-live`): `ready...`, then
+    one line later `[1146] Table 'acore_world.city_bot_poi' doesn't exist`, then
+    `>> ABORTED`, then the container restarts and does it again. `None` is the
+    world every other test in this file drives: it says ready and stays up.
+    """
+
+    dies_by: str = "restart"
+    """How the container goes after it printed the abort. Three, and each is a real docker state.
+
+    `"restart"`: docker brought it back, as `restart: unless-stopped` does — the
+    count has grown and the log is the NEW run's. `"exit"`: it stayed down, so
+    the log still is the run that died. `"backoff"`: docker is waiting to try
+    again, which it reports as `restarting` with the count not yet moved — the
+    seconds between the death and the next start, and the only reading in which
+    the STATUS is the whole evidence.
+    """
+
+    dies_after_abort_s: float = 2.0
+    """How long the abort sits in the log before the container goes. One poll."""
+
     gives_up_after_s: float | None = None
     """How long a window that does NOT find the banner actually lasts. None: all of it.
 
@@ -120,6 +169,21 @@ class FakeWorld:
         """The engine's `monotonic` seam: the time this fake has actually granted."""
         return self.elapsed
 
+    def sleep(self, seconds: float) -> None:
+        """The engine's `sleep` seam: the only time this fake grants outside a window.
+
+        `watch_after_ready()` polls on its own clock after the banner, so its
+        minute is spent here — in microseconds, and visibly: a test can assert
+        how much of the grace was spent, which is how "the watch really ran" is
+        told from "the constant was read".
+        """
+        self.elapsed += seconds
+
+    def _abort_at(self) -> float | None:
+        if self.aborts_after_ready_s is None:
+            return None
+        return self.boot_s + self.aborts_after_ready_s
+
     def wait_ready(
         self, spec: docker.ContainerSpec, ready: docker.ReadySpec, **_kwargs: object
     ) -> bool:
@@ -132,15 +196,36 @@ class FakeWorld:
         return False
 
     def output(self, spec: docker.ContainerSpec, **_kwargs: object) -> native.WorldOutput:
+        abort_at = self._abort_at()
+        gone = abort_at is not None and self.elapsed >= abort_at + self.dies_after_abort_s
+        if gone and self.dies_by == "restart":
+            # What `docker._logs(this_run_only=True)` really answers once the
+            # container has been restarted: the NEW run's log, in which the
+            # abort that ended the old one does not appear. A fake that left the
+            # abort visible here would let an implementation that only ever
+            # reads the current log quote it, and pass.
+            return native.WorldOutput(
+                text=">> Loading something big, 0s in", restarts=1, status="running"
+            )
         printing_until = self.elapsed if self.quiet_after_s is None else self.quiet_after_s
         lines = [
             f">> Loading something big, {int(n * self.print_every_s)}s in"
             for n in range(1, int(min(self.elapsed, printing_until) / self.print_every_s) + 1)
         ]
+        if self.elapsed >= self.boot_s:
+            # The banner itself, in the log of the run that printed it — which
+            # is the invariant T71's watch reads: `docker.wait_ready()` matched
+            # this line in the CURRENT run's log, so a readable log without it
+            # is a different run. A fake whose "up" reading does not carry it
+            # makes every healthy server look restarted.
+            lines.append(BANNER_LINE)
         if self.fatal_after_s is not None and self.elapsed >= self.fatal_after_s:
             lines.append("Correct *.map files not found in data directory.")
+        if abort_at is not None and self.elapsed >= abort_at:
+            lines += list(ABORT_LINES)
         restarts = 0 if self.restart_every_s is None else int(self.elapsed / self.restart_every_s)
-        return native.WorldOutput(text="\n".join(lines), restarts=restarts, status=self.status)
+        status = ("exited" if self.dies_by == "exit" else "restarting") if gone else self.status
+        return native.WorldOutput(text="\n".join(lines), restarts=restarts, status=status)
 
 
 def _installer(
@@ -152,6 +237,7 @@ def _installer(
         "wait_ready": world.wait_ready,
         "world_output": world.output,
         "monotonic": world.clock,
+        "sleep": world.sleep,
         **overrides,
     }
     return CmangosInstaller(
@@ -199,7 +285,9 @@ def test_a_world_server_printing_through_a_46_minute_boot_is_not_a_failed_instal
     lines = _ready(world)
 
     assert lines[-1] == "The server is up."
-    assert world.elapsed == pytest.approx(TBC_BOOT_S)
+    # The boot, plus T71's watch: the wait now keeps looking for a minute after
+    # the banner before it says the server is up.
+    assert world.elapsed == pytest.approx(TBC_BOOT_S + native.READY_GRACE_SECONDS)
     assert len(world.windows) == 2, "one 30-minute window cannot hold a 46-minute boot"
 
 
@@ -225,7 +313,7 @@ def test_a_boot_far_past_any_budget_still_finishes_while_the_server_talks() -> N
     """
     world = FakeWorld(boot_s=5 * 60 * 60)
     assert _ready(world)[-1] == "The server is up."
-    assert world.elapsed == pytest.approx(5 * 60 * 60)
+    assert world.elapsed == pytest.approx(5 * 60 * 60 + native.READY_GRACE_SECONDS)
 
 
 # -- and the failures it must still call failures ---------------------------
@@ -328,6 +416,186 @@ def test_a_server_that_prints_forever_is_stopped_at_the_ceiling() -> None:
     assert "6 hours" in message
     assert "still printing" in message
     assert "stopped printing" not in message
+
+
+# -- T71: the banner is not the verdict -------------------------------------
+
+
+def test_a_world_that_aborts_after_its_ready_banner_is_not_an_install_that_finished() -> None:
+    """The RED for T71, in the shape it was measured in on 2026-09-16.
+
+    Ready at 1 m 21 s, the missing-table abort a second later, the container
+    restarted two seconds after that — and this entry (wow-tbc) declares no
+    `fatal` at all, so nothing but the watch can catch it. Before the watch
+    existed this route ended `The server is up.` and the rebuild that owns it
+    went on to say the server was running.
+    """
+    world = FakeWorld(boot_s=81.0, aborts_after_ready_s=1.0)
+    message = _refusal(world)
+
+    assert "came up and then stopped" in message
+    assert "The server is up." not in message
+    assert ABORT_LINES[0] in message, "the refusal has to name what the server actually said"
+    assert "mangosd" in message, "and the log to read for the rest"
+
+
+def test_a_world_that_stays_up_through_the_grace_window_is_still_up() -> None:
+    """The other half: nothing about a healthy server's verdict changed.
+
+    Only its timing did, and by exactly the watch — asserted here rather than
+    assumed, because a watch that returned early would pass every other test in
+    this file.
+    """
+    world = FakeWorld(boot_s=81.0)
+    lines = _ready(world)
+
+    assert lines[-1] == "The server is up."
+    assert world.elapsed == pytest.approx(81.0 + native.READY_GRACE_SECONDS)
+    assert any("watching it" in line for line in lines), "and the user is told about the minute"
+
+
+def test_a_world_that_exits_after_its_banner_is_quoted_from_its_own_dead_run() -> None:
+    """A container that stays down, where the current log IS the log that aborted."""
+    world = FakeWorld(boot_s=81.0, aborts_after_ready_s=1.0, dies_by="exit")
+    message = _refusal(world)
+
+    assert "came up and then stopped" in message
+    assert ABORT_LINES[0] in message
+
+
+def test_a_world_already_restarted_by_the_time_the_watch_first_looks_is_still_caught() -> None:
+    """The gap between the banner and the first look, which a baseline cannot see.
+
+    Found by cold review, 2026-09-16, with the timings: `docker.wait_ready()`
+    polls every two seconds and then spends `_auth_ready()`'s inspect and log
+    read before returning True, and `restart: unless-stopped` backs off for
+    100 ms — so a world that aborts a second after `ready...` can be down, back
+    up and printing a fresh boot before this watch has looked once. Its FIRST
+    reading is then the new run: the count is already N+1 with nothing to
+    compare it to, the status is `running` again, and every question but one
+    answers "fine". The one is the banner: `wait_ready()` matched it in the
+    current run's log a moment ago, so a log without it is a different run.
+
+    `aborts_after_ready_s` is negative here, which is how the fake says "it was
+    already gone when you arrived" — the same machine as the other T71 tests,
+    driven one poll earlier. Before this was fixed the route ended `The server
+    is up.` and `wait_ready_quietly()` answered True.
+    """
+    world = FakeWorld(boot_s=81.0, aborts_after_ready_s=-3.0)
+    message = _refusal(world)
+
+    assert "came up and then stopped" in message
+    # And it does NOT claim the fresh boot's lines are what the server said as
+    # it died: that run's log is gone with the run, and the sentence says where
+    # to find it instead of quoting the wrong one.
+    assert "Loading something big" not in message
+    assert "log of the run before this one" in message
+
+
+def test_a_container_in_restart_backoff_after_its_banner_is_a_stop_not_a_slow_start() -> None:
+    """`restarting` means the opposite either side of the banner, and this is that test.
+
+    Before the banner it is a container on its way up, which is why it is in
+    `_ALIVE_STATUSES` and why a wait that read it as death was wrong. After the
+    banner the run that printed the banner has ended, and docker reports the
+    seconds before the next start as `restarting` with `RestartCount` not yet
+    moved — so the status is the only evidence there is.
+
+    Its own test because the count is not moving here: with the `restart`
+    reading the crash-loop question answers first and this branch is never
+    reached, which is exactly how `_ALIVE_STATUSES` came to carry an untested
+    entry for a day (see its docstring). Adding `restarting` to
+    `_STILL_UP_STATUSES` left this file green until this test existed.
+    """
+    world = FakeWorld(boot_s=81.0, aborts_after_ready_s=1.0, dies_by="backoff")
+    message = _refusal(world)
+
+    assert "came up and then stopped" in message
+    assert ABORT_LINES[0] in message
+
+
+def test_the_line_that_says_why_is_quoted_even_when_it_is_not_the_last_one() -> None:
+    """Four lines followed the abort; the diagnosis is the first of them.
+
+    A refusal that quoted only the final line would hand the user a C++ source
+    location and nothing about the missing table — which is the whole reason
+    `_DYING_WORDS_LINES` is five and not one.
+    """
+    world = FakeWorld(boot_s=81.0, aborts_after_ready_s=1.0)
+    message = _refusal(world)
+
+    for line in ABORT_LINES:
+        assert line in message
+
+
+def test_a_family_that_declares_a_fatal_line_is_quoted_on_that_line_alone() -> None:
+    """Tortoise's `fatal` already names this abort; after the banner it now fires.
+
+    It could not before: the pattern is only searched while the wait is still
+    looking for the banner, and T63's abort came one line after it.
+    """
+    world = FakeWorld(boot_s=81.0, aborts_after_ready_s=1.0)
+    markers = ReadyMarkers(world="Avg Diff:", fatal="\\[1146\\] Table .* doesn't exist", regex=True)
+    with pytest.raises(InstallerError) as caught:
+        list(_installer(world).wait_for_ready(_ctx(), markers))
+
+    message = str(caught.value)
+    assert ABORT_LINES[0] in message
+    assert ">> ABORTED" not in message, "one line is the whole answer when the family named it"
+
+
+def test_the_bool_half_of_the_wait_answers_no_to_the_same_world() -> None:
+    """`wait_ready_quietly()` and the spine must not disagree about one server.
+
+    The six management waits go through the bool half, and a True there is the
+    same lie in a different place.
+    """
+    world = FakeWorld(boot_s=81.0, aborts_after_ready_s=1.0)
+    spec = ENTRY.container_spec()
+    ready = docker.ReadySpec(world="Avg Diff:", timeout=float(TBC_QUIET_S))
+
+    assert (
+        native.wait_ready_quietly(
+            spec,
+            ready,
+            wait=world.wait_ready,
+            output=world.output,
+            monotonic=world.clock,
+            sleep=world.sleep,
+        )
+        is False
+    )
+    healthy = FakeWorld(boot_s=81.0)
+    assert (
+        native.wait_ready_quietly(
+            spec,
+            ready,
+            wait=healthy.wait_ready,
+            output=healthy.output,
+            monotonic=healthy.clock,
+            sleep=healthy.sleep,
+        )
+        is True
+    ), "and a healthy server is still True"
+    assert healthy.elapsed == pytest.approx(81.0 + native.READY_GRACE_SECONDS)
+
+
+def test_a_docker_that_stops_answering_during_the_watch_is_not_called_a_stop() -> None:
+    """An unreadable `docker inspect` said "up" before this watch existed.
+
+    `WorldOutput("", None, "")` is "could not ask", and reading it as a stop
+    would invent a failure where there was not even a wrong sentence before.
+    """
+    watched = native.watch_after_ready(
+        lambda: native.WorldOutput(text="", restarts=None, status=""),
+        iter([0.0, 10.0, 200.0]).__next__,
+        lambda _seconds: None,
+        interval=2.0,
+        banner="Avg Diff:",
+        fatal=None,
+    )
+
+    assert watched.stopped is False
 
 
 # -- the numbers, and where they come from ----------------------------------
@@ -662,6 +930,7 @@ def test_the_management_wait_gives_a_printing_server_another_window_too() -> Non
         wait=world.wait_ready,
         output=world.output,
         monotonic=world.clock,
+        sleep=world.sleep,
     )
 
     assert got is True
@@ -686,6 +955,7 @@ def test_a_management_wait_that_cannot_see_the_container_spends_one_window() -> 
         wait=world.wait_ready,
         output=lambda spec, **_kwargs: blind,
         monotonic=world.clock,
+        sleep=world.sleep,
     )
 
     assert got is False
@@ -925,7 +1195,12 @@ def test_a_ready_wait_asks_one_daemon_for_the_wait_the_state_and_the_log(
     printing container.
     """
     asked: dict[str, list[object]] = {"wait": [], "state": [], "logs": []}
-    printed = ["loading\n", "loading\nloaded the maps\n"]
+    # Every family's ready marker, because one fake log answers for all eight
+    # sites and T71's watch asks each of them whether THIS run's log still holds
+    # its own banner. A log without them is a container that restarted, which is
+    # a true thing to say about a fake that was never meant to say it.
+    up = "ready...\nAvg Diff: 15ms\nWorld server is up and running\n"
+    printed = [f"loading\n{up}", f"loading\nloaded the maps\n{up}"]
 
     def wait(spec: docker.ContainerSpec, ready: docker.ReadySpec, **kwargs: object) -> bool:
         asked["wait"].append(kwargs.get("wsl_distro"))
@@ -947,13 +1222,22 @@ def test_a_ready_wait_asks_one_daemon_for_the_wait_the_state_and_the_log(
     monkeypatch.setattr(docker, "wait_ready_for", wait)
     monkeypatch.setattr(docker, "container_state", state)
     monkeypatch.setattr(docker, "_logs", logs)
+    # T71's watch after the banner polls on its own clock, and these eight sites
+    # take no `sleep` seam -- it is `wait_ready_quietly()`'s default. Nothing in
+    # this file may sleep for real, and the watch's reads are the subject here
+    # rather than its timing.
+    monkeypatch.setattr(native.time, "sleep", lambda seconds: None)
 
     assert _drive_every_wait(tmp_path, "dml-arch")[site]() is True
-    assert asked == {
-        "wait": ["dml-arch", "dml-arch"],
-        "state": ["dml-arch", "dml-arch"],
-        "logs": ["dml-arch", "dml-arch"],
-    }, "every read this wait makes goes to the daemon it was told to watch, EVERY time"
+    # Two of each before the banner, and then T71's watch, which reads the state
+    # and the log once per poll and never waits again. The DISTRO is the whole
+    # assertion and it is made over every read, watch included: a watch that
+    # asked the host daemon would form its verdict about a container that is not
+    # there, which is this test's defect in a new place.
+    assert asked["wait"] == ["dml-arch", "dml-arch"]
+    assert len(asked["state"]) > 2 and len(asked["logs"]) > 2, "the watch read the world too"
+    assert set(asked["state"]) == {"dml-arch"}, asked["state"]
+    assert set(asked["logs"]) == {"dml-arch"}, asked["logs"]
 
 
 # -- the status list, enumerated ---------------------------------------------
@@ -1175,6 +1459,7 @@ def test_a_boot_slower_than_every_one_measured_is_still_inside_the_margin() -> N
             wait=world.wait_ready,
             output=world.output,
             monotonic=world.clock,
+            sleep=world.sleep,
         )
 
         assert got is True, (
@@ -1213,6 +1498,7 @@ def test_no_boot_this_project_has_measured_is_refused_by_a_management_ceiling(
         wait=world.wait_ready,
         output=world.output,
         monotonic=world.clock,
+        sleep=world.sleep,
     )
 
     assert got is True, (
@@ -1283,6 +1569,7 @@ def test_a_management_wait_spends_more_than_one_window_of_every_budget_in_use() 
             wait=world.wait_ready,
             output=world.output,
             monotonic=world.clock,
+            sleep=world.sleep,
         )
 
         assert got is False
@@ -1332,6 +1619,7 @@ def test_a_management_wait_is_bounded_by_the_ceiling_and_shortens_its_last_windo
         wait=world.wait_ready,
         output=world.output,
         monotonic=world.clock,
+        sleep=world.sleep,
     )
     ceiling = native.management_ceiling(float(TBC_QUIET_S))
 
@@ -1365,6 +1653,7 @@ def test_the_install_wait_and_a_management_wait_stop_in_different_places() -> No
             wait=managed.wait_ready,
             output=managed.output,
             monotonic=managed.clock,
+            sleep=managed.sleep,
         )
         is False
     )
@@ -1467,8 +1756,8 @@ def test_a_container_that_restarted_without_printing_anything_new_is_not_called_
     question and not of the three ahead of it.
     """
     readings = [
-        native.WorldOutput(text="World initialised", restarts=0, status="running"),
-        native.WorldOutput(text="World initialised", restarts=1, status="running"),
+        native.WorldOutput(text=f"World initialised\n{BANNER_LINE}", restarts=0, status="running"),
+        native.WorldOutput(text=f"World initialised\n{BANNER_LINE}", restarts=1, status="running"),
     ]
     windows: list[float] = []
 
@@ -1485,6 +1774,9 @@ def test_a_container_that_restarted_without_printing_anything_new_is_not_called_
         wait=wait,
         output=look,
         monotonic=lambda: 0.0,
+        # A frozen clock, so T71's watch after the banner is ended by its poll
+        # count rather than by time, and nothing here sleeps for real.
+        sleep=lambda seconds: None,
     )
 
     assert got is True, (

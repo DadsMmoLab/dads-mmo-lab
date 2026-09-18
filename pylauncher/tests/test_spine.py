@@ -923,7 +923,7 @@ def test_preflight_refuses_a_reserved_folder_before_it_provisions_anything() -> 
     `gather()` runs after provisioning. Picking the home folder on a clean Linux
     box therefore bought the docker-group consent dialog, a sudo password typed
     into Yu'lon's own dialog and a package install, and only then "Cannot use
-    '/home/pk' as the install location" - measured on Fedora 44, 2026-08-25,
+    '/home/user' as the install location" - measured on Fedora 44, 2026-08-25,
     against the shell installer this engine replaced. The native engine
     inherited that order in 7.1, and F.3 deleted the last test that named it.
 
@@ -1647,9 +1647,9 @@ def test_ready_markers_are_filled_and_escaped_unless_the_catalog_says_regex(
     # The address is open, so the line a FRESH install prints and the line the
     # same install prints after `_advertise_realm()` both match.
     assert re.search(seen[0].auth, filled_auth)
-    assert re.search(seen[0].auth, f"at 100.99.204.5:{ENTRY.ports.world}.")
+    assert re.search(seen[0].auth, f"at 100.64.0.13:{ENTRY.ports.world}.")
     # The port is not: a realm on another port is another realm.
-    assert not re.search(seen[0].auth, f"at 100.99.204.5:{ENTRY.ports.world + 1}.")
+    assert not re.search(seen[0].auth, f"at 100.64.0.13:{ENTRY.ports.world + 1}.")
     # And the WORLD marker is still a literal, dots and all -- A5 unchanged.
     assert not re.search(seen[0].world, markers.world.replace(".", "x"))
     assert seen[0].timeout == float(markers.timeout_s)
@@ -2352,6 +2352,23 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("ui/gamepad.py", "walk"): (
         "the same generator calling itself on each child widget, for the reason above"
     ),
+    ("apply.py", "copy_dbc_dir"): (
+        "T62. Lists a folder INSIDE the clone this app just made, to find the `*.dbc` files "
+        "a manifest's `server_dbc` step names. It decides nothing about writing to that "
+        "folder -- what is written is a file inside the server's data volume, through a "
+        "container -- and a listing that comes back without a `.dbc` in it is a refusal "
+        "(`no .dbc files in ...`), never a copy reported as done"
+    ),
+    ("apply.py", "_receipts"): (
+        "T67. Lists the SOURCE tree inside the clone this app made -- the files a `dest: data` "
+        "client step copies -- and maps each onto its destination, to hash the record "
+        "`remove()` checks before it DELETES anything from the user's game client. It decides "
+        "no write; it decides a later delete, and it is the reason the listing is of the clone "
+        "and not of the destination: round 1 review, 2026-09-16, listing `<client>/Data` "
+        "recorded the user's own archives as this app's and removing the Season of Discovery "
+        "keg emptied the folder. A listing that comes back empty records nothing, which at "
+        "remove time reads as 'no record of copying it' and LEAVES the file alone"
+    ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"
@@ -2392,6 +2409,21 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "and an unreadable or absent folder is the ordinary answer for the three CMaNGOS games, "
         "which have no `modules/` at all, so the OSError is logged and answers an empty tuple "
         "rather than a refusal"
+    ),
+    ("platform.py", "_windows_drive_mounts"): (
+        "T39. Lists `/mnt` inside a WSL distro to find the letters that are mounted Windows "
+        "drives. It decides no write: the answer is a candidate list for the search below, "
+        "and a `/mnt` that cannot be listed - which is every real Linux box, where there is "
+        "no such thing - answers the empty list, i.e. 'could not be established'"
+    ),
+    ("platform.py", "_desktop_wsl_vhdx"): (
+        "T39. Lists `<drive>/Users` to find the profile holding Docker Desktop's "
+        "`docker_data.vhdx`, so preflight measures the drive the images actually land on "
+        "rather than a `/var/lib/docker` that does not exist in the distro. Nothing is "
+        "written anywhere near it - the path is handed to `shutil.disk_usage` and no further "
+        "- and the OSError per drive is skipped because a drive with no `Users` is the "
+        "ordinary case. Anything other than exactly one hit answers None, which the caller "
+        "renders *unchecked*"
     ),
     ("purge.py", "folder_bytes"): (
         "measures the server folder for the uninstall dialog; every OSError per entry is "
@@ -2452,16 +2484,18 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("apply.py", "_run_sql"): (
         "resolves a manifest's `sql path` glob the same way, with the same by-name refusal"
     ),
-    ("apply.py", "_pending_sql"): (
-        "resolves a `db-import` step's glob so the file count on `PendingSql` is one this run "
-        "actually took -- reads the clone this app just made, decides no write anywhere, and "
-        "runs nothing. Its emptiness verdict is deliberate and is NOT a refusal: upstream's "
-        "own updater joins `<module>/data/sql` and skips what is not there "
-        "(`UpdateFetcher.cpp:159-186`), so a module that brought no SQL is normal. The verdict "
-        "it must not give is a confident zero for a path it could not resolve, which is why a "
-        "`{key}` in the path answers `files=None` instead of globbing the literal braces"
+    ("apply.py", "_sql_files"): (
+        "resolves a step's glob so the file count reported is one this run actually took -- "
+        "reads the clone this app just made, decides no write anywhere, and runs nothing. It "
+        "is `_pending_sql()`'s listing, shared since T78 with `module_sql_plan()` so that what "
+        "is waiting and what each route owns cannot be resolved two different ways. Its "
+        "emptiness verdict is deliberate and is NOT a refusal: upstream's own updater joins "
+        "`<module>/data/sql` and skips what is not there (`UpdateFetcher.cpp:159-186`), so a "
+        "module that brought no SQL is normal. The verdict it must not give is a confident "
+        "zero for a path it could not resolve, which is why a `{key}` in the path answers "
+        "`None` instead of globbing the literal braces"
     ),
-    ("docker.py", "_module_dir_names"): (
+    ("docker.py", "module_dir_names"): (
         "lists `<server>/modules` to name the modules the database importer may apply SQL for; "
         "decides no write to that folder and never touches it. Its `except OSError` logs and "
         "answers `all`, which is upstream's own default (the modules COMPILED into the image), "
@@ -2900,12 +2934,12 @@ def test_the_install_ends_by_advertising_the_address_the_seam_detected(
     statement are asserted over the same run.
     """
     rec = Recorder()
-    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "100.78.24.50")
+    said = _advertising(rec, tmp_path / "wow", lan_ip=lambda: "100.64.0.10")
 
-    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.78.24.50", "100.78.24.50")]
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
     assert "127.0.0.1" not in _statements(rec)[0], "the loopback was written as the realm address"
     assert rec.sql_secrets[-1] == "password", "it asked the database with no password"
-    assert [line for line in said if "now advertises 100.78.24.50" in line], said
+    assert [line for line in said if "now advertises 100.64.0.10" in line], said
 
 
 def test_the_line_a_user_reads_names_the_address_they_have_to_type(
@@ -3179,13 +3213,13 @@ def test_an_update_that_fails_says_so_and_leaves_the_install_successful(
     the address that is still owed).
     """
     rec = Recorder(failing_sql="UPDATE")
-    overrides: dict[str, object] = {"lan_ip": lambda: "100.78.24.50"}
+    overrides: dict[str, object] = {"lan_ip": lambda: "100.64.0.10"}
     if how == "unreachable":
         overrides["exec_stdin"] = _no_docker_cli
     said = _advertising(rec, tmp_path / "wow", **overrides)
 
     assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
-    unhappy = [line for line in said if "could not be set to 100.78.24.50" in line]
+    unhappy = [line for line in said if "could not be set to 100.64.0.10" in line]
     assert len(unhappy) == 1, said
     assert "Networking tab" in unhappy[0], unhappy[0]
     recorded = json.loads((tmp_path / "wow" / native.STATE_FILE).read_text(encoding="utf-8"))

@@ -158,6 +158,17 @@ sentence said the ports "are allowed in" zones where no reload had put them
 (measured with the daemon stopped: eight offline writes, no reload, and the
 same word) — it says WRITTEN unless the plan is about to put them in effect.
 
+T72, 2026-09-16, is the first of these found on the shape the product actually
+ships — an ordinary desktop, unprivileged. `os.stat("/proc/1/ns/net")` does not
+have to fail for a caller who may not follow that magic symlink: on Ubuntu
+24.04 at uid 1000 it RETURNED inode 101, the `/proc` entry's own number, where
+root reads 4026531833. The guard compared that with `/proc/self/ns/net`, found
+them unequal, and told every such box "the socket table belongs to another
+network namespace" — a named cause, with a remedy for a namespace that does not
+exist, instead of the "unknown" the same function already had for "could not
+tell". Fixed in `_namespace_ino()`; what makes an answer an answer is now
+`nsfs`'s `st_dev` and `_NAMESPACE_INO_FLOOR`, not the absence of an exception.
+
 `enable_firewall=True` HAS NO CALLER as of 2026-09-04. The only production path
 into `plan()` is `ui/controller_view.py`'s `network_plan=lambda mode:
 networking.plan(entry, mode, bindings=...)`, which does not pass it, and no UI
@@ -611,6 +622,65 @@ def in_initial_pid_namespace() -> bool | None:
         return None
 
 
+_NAMESPACE_INO_FLOOR = 0xEFFFFFF0
+"""Below this, a `stat` of `/proc/<pid>/ns/<kind>` did not answer about a namespace.
+
+Every namespace inode the kernel can hand out is at or above 0xEFFFFFF7:
+`include/uapi/linux/nsfs.h` reserves `0xEFFFFFFF`…`0xEFFFFFF7` for the initial
+namespaces (`IPC_NS_INIT_INO` down through `MNT_NS_ANON_INO`, with
+`NET_NS_INIT_INO` = 0xEFFFFFF9 and `PID_NS_INIT_INO` = 0xEFFFFFFC), and every
+other one is allocated by `proc_alloc_inum()` from `PROC_DYNAMIC_FIRST`
+(`0xF0000000`, `fs/proc/generic.c`) upward. Both measured initial net
+namespaces are in that set and neither is a guess: 4026531833 is 0xEFFFFFF9 —
+the constant itself, read on yulon-ubuntu 2026-09-04 and on this laptop's WSL2
+kernel 6.18 2026-09-16 — and m910q's 4026531840 is 0xF0000000, the first
+allocation, on a kernel old enough to have had no constant for `net`.
+
+What is below the floor is the PROC entry's OWN inode. `/proc/1/ns/net` is a
+magic symlink, and a caller who may not follow it does not always get an error:
+measured on yulon-ubuntu (Ubuntu 24.04) at uid 1000 on 2026-09-16,
+`os.stat("/proc/1/ns/net")` RETURNED, with `st_ino` 101 — a procfs pid-entry
+inode, in the same range as `/proc/1` (1316 on this laptop), and not a
+namespace at all. Which entry's it is was not measured and is not relied on;
+what was measured is that it is not the number root reads. Comparing it with
+`/proc/self/ns/net` says "different namespace" about a question never asked;
+that is T72, and this floor plus the `st_dev` test in `_namespace_ino()` is
+what turns it back into "could not tell". The floor sits just under the
+reserved block rather than at it so that a kernel adding one more
+initial-namespace constant downward does not make this refuse a real reading.
+"""
+
+
+def _namespace_ino(path: str, nsfs_dev: int) -> int | None:
+    """The namespace inode `path` names, or None when this caller may not follow it.
+
+    `nsfs_dev` is the `st_dev` of a namespace link this process CAN follow
+    (`/proc/self/ns/<kind>`), which is `nsfs`'s — one kernel-internal
+    filesystem, one superblock, the same `st_dev` for every namespace of every
+    kind. Measured on WSL2 6.18 at uid 1000, 2026-09-16: `/proc/self/ns/net`
+    stats as dev 4, ino 4026531833, while `/proc/1` and the `/proc/1/ns` links
+    themselves are dev 61. So an answer carrying `/proc`'s `st_dev`, or an
+    inode below `_NAMESPACE_INO_FLOOR`, is the symlink's own entry rather than
+    the thing it points at, and the only honest answer is None.
+
+    Two field tests and not one: the measured placeholder breaks both (dev 61,
+    ino 101), so either alone would look sufficient while a kernel that changed
+    only the other one — a placeholder inode allocated high, or an nsfs entry
+    reached without following — went back to being read as a namespace. The
+    third shape needs neither: this laptop and m910q refuse the follow with
+    EACCES and `os.stat` raises.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        # EACCES at uid 1000 on m910q, on yulon-ubuntu (2026-09-04) and on this
+        # laptop's WSL2 kernel. The elevated read is the caller's business.
+        return None
+    if st.st_dev != nsfs_dev or st.st_ino < _NAMESPACE_INO_FLOOR:
+        return None
+    return st.st_ino
+
+
 def _same_namespace_as_pid1(kind: str, run: Runner | None, prefix: tuple[str, ...]) -> bool | None:
     """Is `/proc/self/ns/<kind>` pid 1's? True, False, or None for "could not tell".
 
@@ -618,22 +688,25 @@ def _same_namespace_as_pid1(kind: str, run: Runner | None, prefix: tuple[str, ..
     read of the same directory with the same failure modes, and a second
     spelling of it is a second place for the uid-1000 EACCES fallback to be
     wrong.
+
+    "Not permitted to look" is None here and never False — T72, measured on
+    yulon-ubuntu as an unprivileged user, which is the shape every shipped
+    Linux desktop install has. See `_namespace_ino()` for how the two ways of
+    not being permitted are told from an answer.
     """
     try:
         pid_ns = os.stat("/proc/self/ns/pid").st_ino
-        mine = os.stat(f"/proc/self/ns/{kind}").st_ino
+        ours = os.stat(f"/proc/self/ns/{kind}")
     except OSError:
         # No `/proc/self/ns` at all: not Linux, or a `/proc` mounted without
         # it. Nothing is known, so nothing is claimed.
         return None
+    mine = ours.st_ino
     if pid_ns != _INITIAL_PID_NAMESPACE_INO:
         return False
-    try:
-        return mine == os.stat(f"/proc/1/ns/{kind}").st_ino
-    except OSError:
-        # EACCES at uid 1000 on both boxes, measured. The elevated read below
-        # is the same read `apply()`'s writes will have the authority for.
-        pass
+    theirs = _namespace_ino(f"/proc/1/ns/{kind}", ours.st_dev)
+    if theirs is not None:
+        return mine == theirs
     if not prefix:
         return None
     do = (
@@ -648,9 +721,15 @@ def _same_namespace_as_pid1(kind: str, run: Runner | None, prefix: tuple[str, ..
     if proc.returncode != 0:
         return None
     try:
-        return mine == int(proc.stdout.strip())
+        answered = int(proc.stdout.strip())
     except ValueError:
         return None
+    if answered < _NAMESPACE_INO_FLOOR:
+        # `stat -L` follows the link, so a number this small is not a namespace
+        # either — the same placeholder the unelevated read can return, and the
+        # same answer: could not tell, not "different".
+        return None
+    return mine == answered
 
 
 THIS_MACHINE = "this-machine"
@@ -707,9 +786,10 @@ READ_ELSEWHERE = {
     ),
     "unknown": (
         "whether the socket table came from this machine could not be established — pid 1's "
-        "namespaces are unreadable to an unprivileged probe (EACCES on m910q and on "
-        "yulon-ubuntu, measured 2026-09-04) and no elevation prefix was available to ask "
-        "with. Give the launcher a passwordless `sudo` (or run it as root) so the probe can "
+        "namespaces are unreadable to an unprivileged probe (EACCES on m910q, measured "
+        "2026-09-04; on yulon-ubuntu 2026-09-16 the same read answered a placeholder inode "
+        "that names no namespace) and no elevation prefix was available to ask with. Give "
+        "the launcher a passwordless `sudo` (or run it as root) so the probe can "
         "read `/proc/1/ns/net`, or open the ports by hand with the commands below"
     ),
 }

@@ -21,6 +21,7 @@ reached servers that have none of them.
 from __future__ import annotations
 
 import enum
+import math
 import re
 import threading
 from collections import deque
@@ -29,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -50,6 +51,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -119,8 +121,9 @@ from yulon.ui.theme import (
     COLOR_TEXT_WARNING,
 )
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
+from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
-from yulon.ui.widgets.log_panel import LogPanel
+from yulon.ui.widgets.log_panel import CollapseHandle, LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
 from yulon.ui.widgets.modules_panel import (
     ModulesPanel,
@@ -431,22 +434,35 @@ pickers choose a directory or a file, never either, and a second control for a
 `.zip` doubles the surface for something the user does with one right-click.
 """
 
-CustomModuleInstall = Callable[[Manifest, "Path | None"], ApplyReport]
-"""Install a manifest this app derived rather than shipped; `None` means "clone it".
 
-DEVIATION from the design (§3.3, §3.5), forced and recorded rather than quiet.
-The design has this view call `applier.install(m, None, folder=FolderSource(
-path, copier), complete=...)` — lane B's widened signature, over lane A's
-`copy_folder` and `complete`. Neither lane is on this branch, so the view would
-not type-check against them, and a view that constructs `apply.FolderSource`
-knows one thing more about the applier than `ui/*_view.py` is allowed to
-(style-guide §3: delegate, never hold the business logic). So the whole call
-sits behind one seam, wired from `controller_<acronym>/modules.py` — the file
-whose job is "binding the shared applier to that game" — and the view hands it
-the two things only the view can know: which manifest, and which folder the
-user chose. Everything the design lists as `module_complete` and
-`module_copy_folder` lives on the far side of it.
-"""
+class CustomModuleInstall(Protocol):
+    """Install a manifest this app derived rather than shipped; `None` means "clone it".
+
+    A `Protocol` rather than the `Callable` alias this was until T47, for the
+    one keyword: `replacing` carries the user's Yes to
+    `ControllerServices.module_replacement_question`'s sentence, and a
+    `Callable[...]` cannot give an argument a default. Every caller that is
+    replacing nothing still calls this with two positional arguments and gets
+    the behaviour it always had.
+
+    DEVIATION from the design (§3.3, §3.5), forced and recorded rather than
+    quiet. The design has this view call `applier.install(m, None,
+    folder=FolderSource(path, copier), complete=...)` — lane B's widened
+    signature, over lane A's `copy_folder` and `complete`. Neither lane was on
+    that branch, so the view would not type-check against them, and a view that
+    constructs `apply.FolderSource` knows one thing more about the applier than
+    `ui/*_view.py` is allowed to (style-guide §3: delegate, never hold the
+    business logic). So the whole call sits behind one seam, wired from
+    `controller_<acronym>/modules.py` — the file whose job is "binding the
+    shared applier to that game" — and the view hands it the two things only
+    the view can know: which manifest, and which folder the user chose.
+    Everything the design lists as `module_complete` and `module_copy_folder`
+    lives on the far side of it.
+    """
+
+    def __call__(
+        self, manifest: Manifest, folder: Path | None, *, replacing: bool = False
+    ) -> ApplyReport: ...
 
 
 def ask_module_link(parent: QWidget, title: str) -> str | None:
@@ -477,6 +493,59 @@ def ask_module_folder(parent: QWidget, title: str) -> Path | None:
     """
     chosen = QFileDialog.getExistingDirectory(parent, title)
     return Path(chosen) if chosen else None
+
+
+SET_CLIENT_DIR_LABEL = "Set client folder…"
+"""The Server tab's own button (T36), and the button the client notice offers (T62).
+
+One constant because the notice tells the user to press something by name and
+that name is a widget's label: a rename that reached only one of them would send
+its reader looking for a control that is not there — the defect `REBUILD_HISTORY`
+records, in miniature."""
+
+
+def client_notice(manifest: Manifest) -> str:
+    """What the user is told before installing a module that also changes the game client.
+
+    Plain words and the files by name, because "client step" is this app's
+    vocabulary and a user knows only what they will or will not see in the
+    game. It says what happens if they carry on without a folder — the server
+    half lands and the game half does not — so that choosing to set the folder
+    is a decision rather than a chore (owner, 2026-09-15: "Before installing
+    any modules that needs a client they should get known about it").
+    """
+    files = ", ".join(Path(step.src).name for step in manifest.client)
+    return (
+        f"{manifest.name} also changes your WoW game client, not only the server: it puts "
+        f"{files} into your game folder. No client folder is set for this install, so that "
+        f"part would be left out and {manifest.name} would not work properly in the game.\n\n"
+        f"Set your client folder first, then press Install again. Nothing has been installed yet."
+    )
+
+
+def ask_to_set_client_dir(parent: QWidget, manifest: Manifest) -> bool:
+    """The client notice as a dialog: True for "Set client folder…", False for Cancel.
+
+    An instance rather than the static `question()` so the button can say what
+    it does, relabelled the way `catalog_view._qt_suggestion_asker` relabels its
+    own. Read through `said_yes()` all the same: `exec()` hands back a plain int
+    on this PySide6, and `is StandardButton.Yes` would read every press as
+    Cancel (T33). Cancel is the default and the escape button, so Enter, Escape
+    and the close button all install nothing.
+    """
+    box = QMessageBox(
+        QMessageBox.Icon.Information,
+        f"{manifest.name} needs your game client",
+        client_notice(manifest),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        parent,
+    )
+    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+    box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+    set_button = box.button(QMessageBox.StandardButton.Yes)
+    if set_button is not None:
+        set_button.setText(SET_CLIENT_DIR_LABEL)
+    return said_yes(box.exec())
 
 
 ModuleSqlRoute = Callable[[Callable[[str], None]], docker.AttachedRun]
@@ -667,6 +736,23 @@ class ControllerServices:
     `modules/` for all four marked an ale installed because a module of the
     same id was, and never marked a real ale at all (review, 2026-09-12).
     """
+    unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None
+    """Which of those clones have an install that never finished, per family (T68).
+
+    The same shape and the same folders as `installed_modules`, and always a
+    SUBSET of its answer: it reads the claim this app wrote inside each clone
+    and returns the ones marked `install_completed: false`. A row in this set
+    keeps its Install button although the folder is on disk, because the state
+    it names is exactly "the clone landed and the steps after it did not run" —
+    what the T7 direct-SQL guard leaves behind when it refuses an install while
+    the world is up.
+
+    A separate seam from `installed_modules` rather than a richer return from
+    it, because that answer is shared with the Tuning tab and with
+    `_forget_what_is_no_longer_installed()`, and both of them mean "the folder
+    is there" — the one thing this fact does not change. `None` for a game with
+    no clone folders, which is the same gate `installed_modules` rides on.
+    """
     module_from_link: Callable[[str], Manifest] | None = None
     """Derive a manifest from a link the user pasted, or raise with the refusal.
 
@@ -691,6 +777,20 @@ class ControllerServices:
 
     See `CustomModuleInstall` for why this is one seam rather than the
     design's `applier.install(..., folder=..., complete=...)`.
+    """
+    module_replacement_question: Callable[[Manifest], str | None] | None = None
+    """What the user must agree to before an install replaces the clone already there (T47).
+
+    `None` back from the seam is "nothing to ask about", which is the ordinary
+    answer: no clone at that path, or one of the repository this manifest names.
+    A sentence is the one case only the person can decide — a clean checkout of
+    a DIFFERENT repository under the same `modules/<id>` — and it is asked
+    before any job is queued, because the engine runs off the GUI thread and
+    cannot open a dialog. Every other way an install would destroy something
+    stays a refusal from the engine and never becomes a question.
+
+    `Applier.replacement_question()` is the whole of it; this seam exists so the
+    view can ask without holding an applier (style-guide §3).
     """
     module_forget: Callable[[Manifest], bool] | None = None
     """Drop this app's record of a custom module, answering whether there was one.
@@ -1046,10 +1146,12 @@ def _assemble(
     module_sql: ModuleSqlRoute | None = None,
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
+    unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     module_version: Callable[[Path], str | None] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
     module_install_custom: CustomModuleInstall | None = None,
+    module_replacement_question: Callable[[Manifest], str | None] | None = None,
     module_forget: Callable[[Manifest], bool] | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
@@ -1109,6 +1211,9 @@ def _assemble(
         # T41's cheap twin of the line above, and conditional on the same
         # flag: a game with no `modules/` folder has nothing to mark.
         installed_modules=installed_modules,
+        # T68's reading of the same folders, on the same flag once more: it
+        # opens the claim inside each clone the line above listed.
+        unfinished_modules=unfinished_modules,
         # T44's version line, on the same flag again: it reads a clone's own
         # `.git`, and a game with no clones has none to read.
         module_version=module_version,
@@ -1118,6 +1223,10 @@ def _assemble(
         module_from_link=module_from_link,
         module_from_folder=module_from_folder,
         module_install_custom=module_install_custom,
+        # T47's question, on the same flag as the four above: it is about the
+        # clone an install of a derived manifest would land on, so it belongs
+        # to the games that have such clones and to no other.
+        module_replacement_question=module_replacement_question,
         module_forget=module_forget,
         # HERE, in the shared half, and not in the four per-game factories. A
         # rebuild takes no per-game decision at all — the engine is chosen from
@@ -1328,11 +1437,23 @@ def _for_wotlk(
     # `container ... is not running` (T2's press, 2026-09-09). The world is
     # never started here: only the database, alone, which is the state the
     # guard permits.
+    #
+    # `dbc` is T62. Without it every `server_dbc` step -- mod-arac's race/class
+    # DBCs, the SoD keg's spells -- was reported skipped and never reached the
+    # server. Only an entry naming its client-data service can be given one:
+    # that service is the only thing that mounts the data volume read-write.
     module_applier = (
         wotlk_modules.applier(
             server_dir,
             sql=sql,
             client_dir=client_dir,
+            dbc=(
+                wotlk_modules.dbc_copier(
+                    server_dir, service=entry.containers.client_data, wsl_distro=wsl_distro
+                )
+                if entry.containers.client_data
+                else None
+            ),
             world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
             start_database=lambda: docker.start_database(
                 spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
@@ -1478,6 +1599,12 @@ def _for_wotlk(
         installed_modules=(
             (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
         ),
+        # T68: which of those clones stopped part-way through their install,
+        # read from the claim this app writes inside each one. Bound to the same
+        # flag for the same reason -- there is no folder to open otherwise.
+        unfinished_modules=(
+            (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
+        ),
         # T44 item 1. `RunnerGit` and not the containerized git: this is a
         # local read of a folder the user can see, it runs once per clone, and
         # a `docker run` per module to print a sha would cost more than the
@@ -1498,6 +1625,11 @@ def _for_wotlk(
         module_from_folder=wotlk_modules.derive_folder if module_applier is not None else None,
         module_install_custom=(
             wotlk_modules.install_custom(module_applier) if module_applier is not None else None
+        ),
+        module_replacement_question=(
+            wotlk_modules.replacement_question(module_applier)
+            if module_applier is not None
+            else None
         ),
         module_forget=wotlk_modules.forget if module_applier is not None else None,
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
@@ -2515,6 +2647,848 @@ here would be the same defect 8.7a's other half was opened for — a module
 reported as done while nothing ran.
 """
 
+REPORT_LINES = 6
+"""The most lines of a report box that are on screen at once, before it scrolls.
+
+A `QPlainTextEdit` asks for 12 lines whatever is in it, and the Modules tab has
+two text boxes under its list, so the default was ~230px of mostly empty text
+fields over a module list that had 311 -- two whole rows of forty, measured in
+the themed window at 1920x1080, where T44's approved mockup shows ten. Six lines
+is what these boxes say: every sentence in the `MODULE_*`/`TUNING_*` constants
+above fits, and the outputs with no length limit at all -- a rebuild's, a
+database update's -- go to the `LogPanel` beside them and not here.
+
+A CEILING, not a height: `_ReportBox` is as tall as it has something to say, one
+line to six. It is empty on every start, which is when the list needs the room.
+"""
+
+MODULE_LIST_MIN_HEIGHT = 74
+"""The floor under the Modules tab's list of cards, in pixels.
+
+Below this the list is a scrollbar with the top of a family card beside it and
+nothing that can be read or pressed. It is the second line of defence and not
+the first: what keeps the boxes below from taking the tab is their own ceilings
+(`REPORT_LINES`, and `_IdleLogPanel`'s cap), and this is what is left if one of
+them is ever wrong again -- an error message wrapped into a report box did
+exactly that during T73's own review.
+
+Deliberately SHORTER than one row (85px plus its card's header under this
+theme): a floor is paid for by whatever is under it, in clipped text, at the
+sizes where the tab is already over-subscribed, and the LIST is the one widget
+here that is complete at any height because it scrolls. That rule is what sets
+the number, and T83 re-applied it at the smaller of the two window sizes the app
+allows: 100 was the largest that left the 1280x800 the app OPENS at fitting with
+nothing cut, and 74 is the largest that leaves the 960x600 it can be DRAGGED to
+fitting too, now that the action bar above takes a second line there (measured
+themed: the tab's layout asked for 452px of a 426px tab at 100, and Qt shares a
+shortfall like that across every widget -- five pixels off the bottom of
+`Rebuild the server…` and twenty-one off the custom-module card).
+"""
+
+_LIST_FLOOR_FLOOR = 40
+"""The list's floor when even `MODULE_LIST_MIN_HEIGHT` is more than the tab has.
+
+Step 3 of `_TabFit`'s order, and a floor under the floor rather than nothing: a
+list drawn at zero is a tab with a gap in it, and the honest answer below this
+is a tab that scrolls as a whole -- which it does not do today, and which is a
+ticket rather than something to fake here. Forty is a scrollbar's length: enough
+that what is there reads as a list somebody can drag.
+"""
+
+_NO_HEIGHT_CAP = 16777215
+"""Qt's `QWIDGETSIZE_MAX`, which PySide6 does not re-export under any name.
+
+`setMaximumHeight()` takes it to mean "no cap"; it is how `_IdleLogPanel` gives
+its height back when a job finally needs it.
+"""
+
+
+class _ReportBox(QPlainTextEdit):
+    """A report box as tall as its own text, to a ceiling of `REPORT_LINES`.
+
+    Two things a plain `QPlainTextEdit` gets wrong under a list that wants the
+    height: it asks for twelve lines when it is empty, and it asks for them in
+    pixels measured once. This asks for what it holds, in lines converted through
+    its own `fontMetrics()` on every layout -- so it is still right after the
+    theme regenerates its stylesheet at a new font scale, which it does whenever
+    the window is resized to a width it has not been styled for.
+
+    `Maximum` vertically: the hint is a ceiling the box will not grow past, and
+    it may still be shrunk under it on a small window. The floor stays the one
+    the theme sets -- its stylesheet gives every `QPlainTextEdit` a 90px
+    min-height so a report reads as a panel rather than a stray line, and that
+    is not this ticket's to overrule (T45: the sizes are `theme.py`'s). A floor
+    pinned HERE instead, at six lines, is what clipped the report by 21px at the
+    size the app opens at (measured 2026-09-16, themed).
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        # The document's layout knows its own height in lines, wrapped ones
+        # included, and says so when it changes. Without this the box keeps the
+        # height it was given before the text arrived.
+        self.document().documentLayout().documentSizeChanged.connect(
+            lambda _size: self.updateGeometry()
+        )
+
+    def _lines_tall(self, count: int) -> int:
+        """`count` lines as this box really draws them, plus its own chrome.
+
+        The chrome is MEASURED -- the gap between this widget and its viewport --
+        rather than added up from `frameWidth()`. The theme's stylesheet gives
+        every text box `padding: 7px 10px`, and padding on a scroll area is
+        spent on the viewport's margins, which no property this class can name
+        accounts for: a height built from the frame alone is 14px short, most of
+        a line, and the box then scrolls the last of the six it was sized for.
+
+        The trailing pixel is not a rounding fudge either: `QPlainTextEdit`
+        offers a scrollbar as soon as the document is as tall as the viewport,
+        not taller than it.
+        """
+        chrome = max(0, self.height() - self.viewport().height())
+        return (
+            math.ceil(self._line_height() * count)
+            + int(self.document().documentMargin()) * 2
+            + chrome
+            + 1
+        )
+
+    def _line_height(self) -> float:
+        """ONE line as the DOCUMENT lays it out, not as the font describes it.
+
+        `fontMetrics().lineSpacing()` is a rounded integer and the text layout's
+        own line height is not: at this theme's size the two differ by a pixel,
+        and a pixel a line is a whole line lost over six of them -- measured, as
+        a six-line box that scrolled.
+
+        Divided by the block's own line count, which is the correction this
+        needed: `blockBoundingRect` is the height of a whole PARAGRAPH, wrapped
+        lines and all, and `_lines_held()` counts wrapped lines too. Multiplying
+        the two asked 967px for one 120-word paragraph in a 600px-wide box and
+        left the list above it nothing at all (review, round 2).
+        """
+        block = self.document().firstBlock()
+        drawn = self.document().documentLayout().blockBoundingRect(block).height()
+        block_layout = block.layout()
+        wrapped = block_layout.lineCount() if block_layout is not None else 0
+        if drawn > 0 and wrapped > 0:
+            return drawn / wrapped
+        return float(self.fontMetrics().lineSpacing())
+
+    def _lines_held(self) -> int:
+        """Lines of text in the box right now, at least one and at most the cap."""
+        held = math.ceil(self.document().documentLayout().documentSize().height())
+        return max(1, min(REPORT_LINES, int(held)))
+
+    def sizeHint(self) -> QSize:
+        return QSize(super().sizeHint().width(), self._lines_tall(self._lines_held()))
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        return QSize(hint.width(), max(hint.height(), self._lines_tall(1)))
+
+
+REPORT_STRIP_TITLE = "Last action"
+"""The title on a report box's strip, and the first one those boxes have had.
+
+A `_ReportBox` is the answer to the press the user just made, and until T80 it
+was an unlabelled field that was 106px of nothing until it had one. The strip
+names it AND folds it away, which is why the title arrives with the handle.
+"""
+
+
+class _ReportStrip(CollapseHandle):
+    """The strip over a `_ReportBox`: it names the box and folds it away.
+
+    Not part of `_ReportBox` itself, deliberately. `module_report` and
+    `tuning_report` are `QPlainTextEdit`s that a dozen call sites write with
+    `setPlainText()` and the tests read with `toPlainText()`; wrapping them in a
+    container would have moved every one of those onto an inner widget for a
+    strip that is one label. The strip OWNS the box instead, and the box is the
+    same object it always was.
+
+    **It follows the text rather than remembering a preference**, which is the
+    same rule the log's handle follows: open when there is a report, folded when
+    there is not. The box is empty on every start -- which is when the list needs
+    the room -- and an empty box still costs the 90px min-height the theme gives
+    every text field (T45: that floor is not this ticket's to overrule). A user
+    who folds a long report away gets the rows back; the next press unfolds it,
+    because a press whose answer is hidden is a press that looks like it did
+    nothing.
+    """
+
+    wants_changed = Signal(bool)
+    """What this strip is asked for has moved, and whether a PERSON asked.
+
+    `_TabFit` listens: the room it hands back depends on what is asked for, and
+    the `bool` is the difference between the tab folding something for itself and
+    a user's press, which outranks the published order (T85).
+    """
+
+    def __init__(self, box: QPlainTextEdit, parent: QWidget | None = None) -> None:
+        super().__init__(REPORT_STRIP_TITLE, parent)
+        self._box = box
+        # What was last ASKED for, and whether the tab has the height for it.
+        # The fold on screen is derived from the pair -- see `_apply()`.
+        self._wants_open = bool(box.toPlainText())
+        self._has_room = True
+        self._adjusting = False
+        self.toggled.connect(self._someone_used_the_handle)
+        box.textChanged.connect(self._follow_the_text)
+        self._apply()
+
+    def box(self) -> QPlainTextEdit:
+        """The box this strip folds, so `_TabFit` can pick it out of the tab."""
+        return self._box
+
+    def wants_open(self) -> bool:
+        """Whether a report is asked for here, whatever the tab can afford."""
+        return self._wants_open
+
+    def box_minimum(self) -> int:
+        """What the box under this strip needs, whether it is showing or not.
+
+        Asked while the box is HIDDEN -- that is when `_TabFit` is deciding
+        whether to bring it back -- and both halves answer for a hidden widget,
+        which is the one thing that makes this two lines rather than a trial
+        layout.
+
+        BOTH halves, and the second is the one `_owed()` was missing: a layout
+        item's minimum is the larger of the widget's hint and any explicit
+        `minimumHeight()` on it, and the theme gives every text field one (T45).
+        Reading the hint alone under-counted an open report by 16px -- 90 against
+        the 106 the layout really holds back -- so between 1030 and 1080 wide the
+        sum came to 522 against a tab of 525 while the tab's real minimum was
+        538, the report stayed open, and the custom-module card was drawn 108 of
+        its 122. It was invisible at every other width only because the card's
+        own wrapped sentence over-claims by about the same amount.
+        """
+        return int(max(self._box.minimumSizeHint().height(), self._box.minimumHeight()))
+
+    def set_room(self, has_room: bool) -> None:
+        """Say whether the tab can hold the box open (`_TabFit` decides, T83)."""
+        if has_room == self._has_room:
+            return
+        self._has_room = has_room
+        self._apply()
+
+    def _follow_the_text(self) -> None:
+        """A report arrived, or the box was emptied: that is what is asked for now.
+
+        T80's rule, and the reason the user's fold is remembered only until
+        here: a user who folds a long report away gets the rows back, and the
+        NEXT press unfolds it again, because a press whose answer is hidden is a
+        press that looks like it did nothing.
+        """
+        self._wants_open = bool(self._box.toPlainText())
+        self.wants_changed.emit(False)
+        self._apply()
+
+    def _someone_used_the_handle(self, folded: bool) -> None:
+        """A press by a person is what this strip is asked for from now on.
+
+        Only when `_adjusting` is clear: the same signal is raised by this
+        strip's OWN fold, and reading that as consent is how a report box gives
+        the height up once and never asks for it again -- the defect this
+        object's twin (`_IdleLogPanel`) was caught with at 1280x800.
+
+        And the press is ASKED FOR rather than done: `_apply()` is what puts it
+        on screen, and it refuses where the height is not there. Showing the box
+        here instead -- which is what this did until round 3 -- opens it at a
+        size `_TabFit` has already decided cannot hold it, and nothing puts it
+        back, because `set_room(False)` is a no-op when the answer has not
+        changed. Measured at 960x600 with a refusal in the box: one click on
+        this strip drew the action bar at 76px of its 106 with `Rebuild the
+        server…` sliced through, and the card's own label at 9px of 28.
+        """
+        if self._adjusting:
+            return
+        self._wants_open = not folded
+        # BEFORE `_apply()`: the press is what the room is decided from, and
+        # `_TabFit` answers this signal synchronously. Applying first would draw
+        # the refusal this press is meant to overturn (T85).
+        self.wants_changed.emit(True)
+        self._apply()
+
+    def _apply(self) -> None:
+        """Open iff a report is wanted there AND the tab has room for it.
+
+        The text half is T80's. The room half is T83's, and it is the second
+        thing the Modules tab gives up when it cannot hold everything: below the
+        width where the action bar wraps to two lines, a populated report box and
+        every other widget's minimum do not fit, and `QBoxLayout` resolves that
+        by cutting all of them -- measured at 960x600 with a refusal in the box,
+        the action bar was drawn 74px of the 106 its two lines take, with its
+        second line of buttons sliced in half. `_TabFit` owns the order in which
+        things give and the reason the report goes before the list.
+
+        `set_collapsed` is a no-op when the state already holds, so this does not
+        fight the user on every keystroke of a report being written into the box
+        a line at a time -- only an edge moves anything.
+        """
+        if self._adjusting:
+            return
+        self._adjusting = True
+        try:
+            self.set_collapsed(not (self._wants_open and self._has_room))
+            self._box.setVisible(not self.collapsed)
+        finally:
+            self._adjusting = False
+
+
+_WHEN_A_MINIMUM_MOVES = (
+    QEvent.Type.Polish,
+    QEvent.Type.PolishRequest,
+    QEvent.Type.Show,
+    QEvent.Type.FontChange,
+    QEvent.Type.StyleChange,
+    QEvent.Type.LayoutRequest,
+)
+"""The events after which a widget's `minimumSizeHint()` may be a new number.
+
+`Polish` is the one that matters and the one a `changeEvent` handler does not
+see: a widget is polished -- given its stylesheet's fonts, margins and borders --
+on its way to being shown, which is AFTER every line of the tab that built it has
+run. The rest are the ways it can change again afterwards.
+"""
+
+
+LOG_SHARE_OF_THE_TAB = 4
+"""The most of its tab a log with a job's output in it may keep, as a divisor.
+
+T80, and it is the whole of what that ticket promises: whatever a rebuild
+writes, three quarters of the tab stay with the list above it. T73 lifted the
+idle cap to `_NO_HEIGHT_CAP` the first time a job started and never put anything
+back -- the honest reading of "a job's output is what the panel is for" -- and
+live on a maximised 1080p desktop that was ~400px of log over a list of a row and
+a half. The hand restarted the app to reach the next row.
+
+A QUARTER, and the ticket's own suggestion of a third was measured first: a
+maximised window on a real 1080p desktop is 47px shorter than the screen (GNOME's
+top bar and the title bar), and at that shape a third left the list at 294px and
+FOUR rows -- one under the count this is meant to guarantee. A quarter is 213px
+there, which is the strip and some eight lines of output, and it leaves five.
+
+Floored at the panel's own minimum by `_share_of_the_tab()`, so on a small window
+this can only ever be "as small as the panel is allowed to be" and never a cap
+that clips the strip.
+
+The other half of the fix is that the user can fold the panel away entirely, so
+this is the number that applies while they have NOT said anything; it is not a
+claim that a quarter is always the right amount.
+"""
+
+
+class _TabFit(QObject):
+    """What gives when the Modules tab cannot hold everything on it (T83).
+
+    `QBoxLayout`'s answer to a column whose children's minimums add up to more
+    than it has is to draw every one of them in proportion -- so the shortfall is
+    paid in cut text, spread over whatever happens to be there. Measured at
+    960x600 with a refusal in the report box: the action bar was drawn 74px of
+    the 106 its two lines need, its second row of buttons sliced through, and the
+    custom-module card 74 of 122. Nothing in a layout can prefer one child over
+    another, which is why this object exists: the preference is real, and it is
+    this.
+
+    **The order things give in, and it is the whole of the class:**
+
+    1. the LOG folds to its strip. It is the biggest single thing on the tab and
+       the one designed to fall back -- the strip carries the job's status line,
+       the elapsed clock and Stop, with the output one click away.
+    2. the REPORT BOX folds to its strip. Same shape, less of it, and the strip
+       names what is behind it.
+    3. the LIST's floor gives. It scrolls, so it is complete at any height; every
+       pixel taken from it is a pixel of a row somebody can still scroll to.
+
+    **And what never gives: a toolbar line, and the custom-module card.** Those
+    are the two whose only way of being smaller is to cut the words inside them,
+    which is the defect this whole ticket is about. The list is last rather than
+    first for the same reason the log is first: order by what a shortfall COSTS
+    the reader, not by what is easiest to shrink.
+
+    **One thing reorders it: a press on a handle (T85).** Steps 1 and 2 are a
+    guess at which of the two panels the reader would rather keep, and a user who
+    presses a chevron has just said. That panel goes to the END of the order, so
+    the other one gives for it -- `_give_order()`, and the alternative was a
+    chevron that does nothing at every size where the two do not both fit. The
+    list's place is not up for reordering: it is step 3 whoever pressed what,
+    because the list is the one widget here that is complete at any height.
+
+    **Decided from the width the tab has NOW**, which is the second half of what
+    this class is for. Every height here is a function of the theme, the theme is
+    regenerated at every width the window settles at, and a cached minimum is
+    stale until its widget has been polished -- so a decision read out of
+    `minimumSizeHint()` while a `LayoutRequest` is in flight is taken against
+    half-updated numbers. Measured before `_owed()` asked by width: every themed
+    restyle below the fold unfolded the log and refolded it, TWICE per settle at
+    every width from 940 to 1110, because the action bar's cached minimum still
+    said one line when the log was asked and two by the time it was laid out --
+    a visible flash on every drag. `minimumHeightForWidth()` at the tab's current
+    width is the same question the layout is about to answer, so there is nothing
+    to be stale.
+
+    A zero-interval single-shot timer was written first, to coalesce the decision
+    to after the layout pass, and it is not here because it was measured to do
+    nothing once `_owed()` stopped reading stale numbers: replacing it with a
+    direct call left every test green, including the one that counts folds per
+    restyle. `_settling` is the guard that remains, and it is a different job --
+    telling the log to fold asks for a layout, and the layout asks here again.
+    """
+
+    def __init__(
+        self,
+        tab: QWidget,
+        log: _IdleLogPanel,
+        report: _ReportStrip,
+        listing: QWidget,
+        floor: int,
+    ) -> None:
+        super().__init__(tab)
+        self._tab = tab
+        self._log = log
+        self._report = report
+        self._listing = listing
+        self._floor = floor
+        self._settling = False
+        # The panel a PERSON last asked to see, and the whole of T85's second
+        # half. It is not a flag about a fold -- the bug T83's round 3 was
+        # caught by -- but a record of a press, and the only thing it does is
+        # move that panel to the END of the give order below.
+        self._asked_for: _IdleLogPanel | _ReportStrip | None = None
+        log.wants_changed.connect(lambda by_hand: self._asked(log, by_hand))
+        report.wants_changed.connect(lambda by_hand: self._asked(report, by_hand))
+        tab.installEventFilter(self)
+
+    def _asked(self, panel: _IdleLogPanel | _ReportStrip, by_hand: bool) -> None:
+        """What is asked for on this tab has moved: decide again.
+
+        `by_hand` is the user's press, and it is what makes a one-way fold
+        impossible: at 1280x800 with the rebuild banner up, the log and a
+        populated report do not both fit, the published order folds the log, and
+        the chevron the user then presses used to do nothing at all --
+        `_apply()` derives the fold from `_has_room` and `set_room(False)` is a
+        no-op when the answer has not changed. The press moves the log behind the
+        report in the order, the report gives instead, and the log opens. Pressing
+        the report's own strip puts it back, so neither is privileged: whichever
+        one the user last asked to see is the one that stays.
+        """
+        if by_hand and panel is not self._asked_for:
+            self._asked_for = panel
+        self.settle()
+
+    def _give_order(self) -> list[QObject]:
+        """The panels in the order they give, cheapest to the reader first.
+
+        `LOG, REPORT` is the published order and the one that holds until a
+        person says otherwise; the panel they last pressed open goes last.
+        """
+        order: list[QObject] = [self._log, self._report]
+        if self._asked_for is self._log:
+            order.reverse()
+        return order
+
+    def _fold_until_it_fits(self, list_floor: int) -> dict[QObject, bool]:
+        """Everything that is ASKED FOR, minus the rungs that had to go, in order.
+
+        Asked for and not "open": a log the user folded by hand costs this tab
+        nothing, and counting it would fold the report to make room for a panel
+        nobody wants.
+
+        `list_floor` is what to bill the list at while deciding. `settle()` runs
+        this at the list's ordinary floor first, because the list is step 3 and
+        nothing may spend it in advance.
+        """
+        open_now: dict[QObject, bool] = {
+            self._log: self._log.wants_open(),
+            self._report: self._report.wants_open(),
+        }
+        for panel in self._give_order():
+            if (
+                self._owed(
+                    log_open=open_now[self._log],
+                    report_open=open_now[self._report],
+                    list_floor=list_floor,
+                )
+                <= self._tab.height()
+            ):
+                break
+            open_now[panel] = False
+        return open_now
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Anything that can move a height on this tab asks for a fresh decision.
+
+        A resize is the tab's own; a layout request is a CHILD's minimum moving,
+        which the tab's size does not report -- the action bar re-states its own
+        whenever a width wraps it (`FlowBar.resizeEvent`), and without that half
+        the log decided it fitted while the bar still claimed one line.
+        """
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
+            self.settle()
+        return bool(super().eventFilter(watched, event))
+
+    def settle(self) -> None:
+        """Apply the order above to the tab as it is now.
+
+        `_settling` keeps the decision out of its own way: telling the log to
+        fold asks for a layout, the layout asks here again, and the answer would
+        be taken from a tab halfway through being re-laid -- and there would be
+        no bottom to the recursion.
+
+        **The order is not fixed**: `_give_order()` puts the panel a person
+        last pressed open at the end of it. Measured themed at 1280x800 with the
+        rebuild banner on screen, which is the state gate round 6 photographed:
+        the tab is 620px, the banner costs it 52, and with an open log AND a
+        populated report the tab's own sum is 668. One of the two has to go, the published
+        order sends the log, and the chevron the user then pressed did nothing at
+        all -- `_apply()` derives the fold from `_has_room`, and
+        `set_room(False)` is a no-op when the answer has not changed. It is the
+        ORDER that answers that press, not the panel: with the log at the end of
+        it the report gives instead, at 556 against the tab's 620.
+        """
+        if self._settling:
+            return
+        self._settling = True
+        try:
+            height = self._tab.height()
+            open_now = self._fold_until_it_fits(self._floor)
+            asked = self._asked_for
+            # And the list's own rows are the last thing a PRESS can spend, which
+            # is where the ticket's sentence ends: the user's unfold wins
+            # whenever the tab can hold that panel at its minimum, and the panel's
+            # minimum is taken with everything below it on the ladder given --
+            # the other panel folded AND the list at `_LIST_FLOOR_FLOOR`.
+            #
+            # Only for a press, and that is the whole reason this is a second
+            # pass rather than the floor the first one uses. Spending the list on
+            # the tab's OWN decision inverts the order: measured at 1000x700 with
+            # a job's log it kept the log open nobody had asked about and took
+            # the list to 47px to do it, which is the shortfall landing on the
+            # widget the published order protects most. Two pixels is what it
+            # buys at a 554px tab, which is a 1252x734 client -- what a 1280x800
+            # window leaves once a window manager's frame is taken off it.
+            if asked is not None and asked.wants_open() and not open_now[asked]:
+                with_the_list = self._fold_until_it_fits(_LIST_FLOOR_FLOOR)
+                if with_the_list[asked]:
+                    open_now = with_the_list
+            log_room = open_now[self._log]
+            report_room = open_now[self._report]
+            self._log.set_room(log_room)
+            self._report.set_room(report_room)
+            spare = height - self._owed(log_open=log_room, report_open=report_room)
+            # Step 3: the list gives what is still missing, and never below a
+            # scrollbar's worth -- under that it is not a list at all, and the
+            # honest end of this ladder is a tab that scrolls (which it does not
+            # today, and which is a ticket rather than a silent cut here).
+            #
+            # `_LIST_FLOOR_FLOOR` flat, and NOT floored at the list's own
+            # `minimumSizeHint()`, which is what this read until T85 on the
+            # belief that Qt ignores a minimum under a widget's hint. It does
+            # not: `qSmartMinSize` takes an explicit `minimumHeight()` over the
+            # hint whenever it is above zero, measured 74/40/20/1 against the
+            # layout item and honoured at every one. The hint was 70 where the
+            # ladder needed 40, and those 30 pixels were the last rung -- so at
+            # the 960x600 the app then allowed, with the banner up, the
+            # shortfall went past the list and was
+            # spread over the two widgets whose only way of being shorter is to
+            # cut the words in them: the wrapped action bar was drawn 82px of
+            # its 106 with `Rebuild the server…` sliced through, and the
+            # custom-module card 82 of 122 with both its buttons below its edge.
+            wanted = self._floor if spare >= 0 else max(_LIST_FLOOR_FLOOR, self._floor + spare)
+            if self._listing.minimumHeight() != wanted:
+                self._listing.setMinimumHeight(wanted)
+        finally:
+            self._settling = False
+
+    def _owed(self, log_open: bool, report_open: bool, list_floor: int | None = None) -> int:
+        """The height this tab needs with the log and the report in those states.
+
+        Arithmetic over the children rather than a trial layout, because a trial
+        layout is a layout: it would move widgets on screen, ask this object to
+        decide again, and be the flicker it exists to remove. Both panels can
+        say what they need in either state whichever they are in now
+        (`open_minimum()`, `folded_minimum()`, `box_minimum()`) for exactly this
+        reason.
+
+        Every visible child is counted, whichever it is and whenever it
+        arrives -- the walk is over the layout and the only widgets it names are
+        the three this object can fold. The rebuild banner is one of the
+        unnamed ones: it is `setVisible(True)` the moment an install says a
+        compile is owed, and it costs this tab 68px at 960 wide (62 of banner
+        and the spacing above it) and 52px at 1280, where the theme's font is
+        smaller.
+
+        `list_floor` is what to bill the LIST at, and it defaults to the floor
+        this tab keeps when it is not short. `settle()` passes the bottom of the
+        ladder instead in the one case where the list may be spent in advance:
+        answering a press.
+        """
+        if list_floor is None:
+            list_floor = self._floor
+        box = self._tab.layout()
+        if box is None:
+            return 0
+        margins = box.contentsMargins()
+        owed = margins.top() + margins.bottom()
+        inner = self._tab.width() - margins.left() - margins.right()
+        shown = 0
+        for index in range(box.count()):
+            item = box.itemAt(index)
+            widget = None if item is None else item.widget()
+            if item is None or widget is None:
+                continue
+            if widget is self._report.box():
+                if not report_open:
+                    continue
+                shown += 1
+                owed += self._report.box_minimum()
+                continue
+            if not widget.isVisible():
+                continue
+            shown += 1
+            if widget is self._log:
+                owed += self._log.open_minimum() if log_open else self._log.folded_minimum()
+            elif widget is self._listing:
+                owed += list_floor
+            else:
+                # The item's minimum at THIS WIDTH, which is the quantity
+                # `QBoxLayout` shares out, and asked for the way it asks:
+                # `minimumHeightForWidth()` where the item has one and
+                # `minimumSize()` where it does not. Neither shortcut works.
+                # `minimumSizeHint()` alone under-counts every widget whose
+                # height is a function of its width -- the custom-module card
+                # says 122 and needs 136 at 1000x700, because the sentence in it
+                # wraps to a third line there, and the sum came out 522 against
+                # a tab of 525 while the layout wanted 538, so nothing folded
+                # and the card was drawn 109. `heightForWidth()` is the other
+                # way wrong: it is the PREFERRED height, which over-counts, and
+                # a tab that thinks it is short folds things it did not need to.
+                need = item.minimumSize().height()
+                if item.hasHeightForWidth():
+                    need = max(need, item.minimumHeightForWidth(inner))
+                owed += need
+        return owed + box.spacing() * max(0, shown - 1)
+
+
+class _IdleLogPanel(LogPanel):
+    """A `LogPanel` that starts folded away and never takes more than its share.
+
+    The Modules tab's log is empty on every start -- it carries a rebuild's or a
+    database update's output, and neither has run -- and an empty panel asking
+    for its full 240px was a quarter of the tab's height spent on nothing.
+
+    Folded rather than hidden: the strip with the handle, the elapsed field and
+    the Stop button stays on screen, so the panel is where it was when a job does
+    start. It unfolds itself the first time a run starts -- a job's output is
+    then worth the height -- and from that point it is capped at
+    `LOG_SHARE_OF_THE_TAB`, so the list above it is never the thing that pays.
+
+    **Nothing here is on a timer.** The panel changes height when a job starts or
+    when the user uses the handle, and at no other moment: a log that folded
+    itself away after a grace period would take the failure line off the screen
+    of the reader who was reading it, and every test of that rule would be a test
+    of a `QTimer` (T80).
+
+    The floor under the cap is this panel's OWN `minimumSizeHint()`, re-read on
+    every event that can change it rather than measured once. A cap taken in
+    `__init__` is taken before the panel has a parent, and the theme it will be
+    styled by is applied to the WINDOW (`apply_dadcraft_theme(window)` in
+    `build_window`) before this object exists: measured 2026-09-16 in that order,
+    the cap came out 152px against a minimum of 180, so the panel was drawn 148
+    -- 32px under its own floor, with the text pane clipped -- and it stayed
+    there, because the next restyle only happens if the window is resized to a
+    NEW width and the app opens at the one the theme was already generated for.
+    """
+
+    wants_changed = Signal(bool)
+    """`_ReportStrip.wants_changed`'s twin, and it carries the same `bool`."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._watching: QWidget | None = None
+        # What was last ASKED for, and whether the tab has the height for it.
+        # The fold on screen is derived from the pair -- see `_apply()`.
+        self._wants_open = False
+        self._has_room = True
+        self._adjusting = False
+        self.set_collapsed(True)
+        self.collapse_toggled.connect(self._someone_used_the_handle)
+        self.run_started.connect(self._give_it_the_room)
+        self._watch_the_tab()
+        self._apply()
+
+    def _share_of_the_tab(self) -> int:
+        """The tallest this panel may be drawn right now, in pixels.
+
+        Folded, that is its own minimum -- the strip and nothing else. Open, it
+        is a quarter of the tab it sits in, floored at that same minimum so the cap
+        can never clip the strip on a small window (the tab is 600px at the
+        smallest the window can be dragged to, and a third of that is less than
+        the strip needs).
+
+        Measured off the PARENT and not off the window: what the list is losing
+        is the tab's height, and the tab is the widget whose layout this panel
+        and that list are both in.
+        """
+        floor = self.minimumSizeHint().height()
+        if self.collapsed:
+            return floor
+        tab = self.parentWidget()
+        if tab is None:
+            return _NO_HEIGHT_CAP
+        return max(floor, tab.height() // LOG_SHARE_OF_THE_TAB)
+
+    def open_minimum(self) -> int:
+        """What this panel needs with its text pane showing, open or not (T83).
+
+        Derived and not remembered. `_TabFit` has to ask this while the panel is
+        FOLDED -- that is the whole question it is deciding -- and a value kept
+        from the last time the panel happened to be open is a value from before
+        the last restyle, on a tab whose every height is a function of the
+        window's width. Folded, `minimumSizeHint()` is the strip's, and what the
+        pane adds back is its own minimum plus the one gap between them.
+        """
+        if not self.collapsed:
+            return int(self.minimumSizeHint().height())
+        return int(self.minimumSizeHint().height() + self._pane_minimum() + self._gap())
+
+    def folded_minimum(self) -> int:
+        """What this panel needs with its text pane away: the strip, and nothing else.
+
+        `open_minimum()`'s mirror, and derived for the same reason: `_TabFit`
+        asks it while the panel is OPEN, which is when the answer is not the one
+        `minimumSizeHint()` gives.
+        """
+        if self.collapsed:
+            return int(self.minimumSizeHint().height())
+        return int(self.minimumSizeHint().height() - self._pane_minimum() - self._gap())
+
+    def _pane_minimum(self) -> int:
+        """What the text pane holds back, and it is BOTH of the numbers it has.
+
+        `_ReportStrip.box_minimum()`'s trap, met a second time in the panel that
+        object was written next to (T85): a layout item's minimum is the larger
+        of the widget's hint and any explicit `minimumHeight()` on it, and the
+        theme gives every `QPlainTextEdit` a 90px min-height while the one on
+        this panel really holds back 106. Reading the hint alone made
+        `open_minimum()` answer 16px light while the panel was FOLDED and the
+        truth while it was open, so `_TabFit` found room, opened the panel, was
+        asked again with the honest number, found none and folded it -- a log
+        that flickered open and shut on one resize, measured themed at 1280x800
+        with the rebuild banner up.
+        """
+        return int(max(self._text.minimumSizeHint().height(), self._text.minimumHeight()))
+
+    def _gap(self) -> int:
+        """The one space between this panel's strip and its text pane."""
+        layout = self.layout()
+        return 0 if layout is None else max(0, layout.spacing())
+
+    def set_room(self, has_room: bool) -> None:
+        """Say whether the tab can hold this panel open (`_TabFit` decides, T83)."""
+        if has_room == self._has_room:
+            return
+        self._has_room = has_room
+        self._apply()
+
+    def _apply(self) -> None:
+        """Put the derived fold on screen, and write the cap T80 sets.
+
+        **The fold is DERIVED and not remembered**: from what was last asked for
+        (`_wants_open`, which is the handle and `run_started`) and whether the
+        tab has the height for it (`_has_room`, which is `_TabFit`'s answer).
+        The first version remembered the DECISION instead, in a flag saying "I
+        folded this myself", and it was wrong on the very screen it was written
+        for -- one missed transition among the signals `set_collapsed()` raises
+        left the flag saying the fold had been the user's, so the log stayed
+        folded at 1280x800 with 312px of room for it and nothing later could put
+        it right. A derived state has no missed transitions to survive.
+
+        Writing the cap only when it CHANGES is what keeps this safe to call
+        from a layout: `setMaximumHeight` asks for another layout, so a cap
+        written unconditionally would ask for one forever. `_adjusting` is the
+        same guard around the fold, and it does a second job:
+        `_someone_used_the_handle()` reads it to tell a press by a PERSON from
+        this method's own `set_collapsed()`.
+        """
+        if self._adjusting:
+            return
+        self._adjusting = True
+        try:
+            self.set_collapsed(not (self._wants_open and self._has_room))
+            wanted = self._share_of_the_tab()
+            if self.maximumHeight() != wanted:
+                self.setMaximumHeight(wanted)
+        finally:
+            self._adjusting = False
+
+    def _someone_used_the_handle(self, folded: bool) -> None:
+        """A press by a person is what this panel is asked for from now on.
+
+        Only when `_adjusting` is clear: the same signal is raised by this
+        panel's OWN fold, and reading that as consent is how a log gives the
+        height up once and never asks for it again.
+        """
+        if not self._adjusting:
+            self._wants_open = not folded
+            # `_ReportStrip._someone_used_the_handle`'s reason for emitting
+            # before the fold is applied: the press is what the room is decided
+            # from (T85).
+            self.wants_changed.emit(True)
+        self._apply()
+
+    def _give_it_the_room(self) -> None:
+        """A job started: ask to be open, and take a quarter of the tab to say it in.
+
+        ASKS rather than unfolds. On a window with the room this is the unfold
+        T80 promises; on one without it an open log would be a cut log, and the
+        strip a `LogPanel` shows while it is folded already carries the line
+        saying a job is running and the Stop button that ends it.
+        """
+        self._wants_open = True
+        self.wants_changed.emit(False)
+        self._apply()
+
+    def wants_open(self) -> bool:
+        """Whether this panel is asked for open, whatever the tab can afford."""
+        return self._wants_open
+
+    def _watch_the_tab(self) -> None:
+        """Follow the parent's resizes, because the cap is a share of them.
+
+        A `QLayout` sends `LayoutRequest` to the widget it lays out -- the tab --
+        and not to the children it moves, and a child whose geometry the layout
+        did not change sees no event at all. So a window dragged taller would
+        leave this panel capped at a third of the size the tab USED to be, which
+        is a cap that only ever shrinks. Watching the parent is the one place
+        that number changes.
+        """
+        tab = self.parentWidget()
+        if tab is self._watching:
+            return
+        if self._watching is not None:
+            self._watching.removeEventFilter(self)
+        self._watching = tab
+        if tab is not None:
+            tab.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """The tab resized: the cap is a share of its height, so re-write it."""
+        if event.type() == QEvent.Type.Resize:
+            self._apply()
+        return bool(super().eventFilter(watched, event))
+
+    def event(self, event: QEvent) -> bool:
+        handled = super().event(event)
+        if event.type() == QEvent.Type.ParentChange:
+            self._watch_the_tab()
+        if event.type() in _WHEN_A_MINIMUM_MOVES:
+            self._apply()
+        return handled
+
+
 TUNING_SAVED = (
     "{module}: wrote {keys} in {file}. A backup of the file as it was is beside it at "
     "{backup}.\n{rule}"
@@ -2749,6 +3723,13 @@ before anything was derived, which is exactly what the sentence has to convey.
 """
 
 MODULE_FOLDER_CANCELLED = "install from folder: cancelled — nothing on this machine was changed."
+
+MODULE_REPLACE_TITLE = "Replace the checkout of {id}?"
+"""The title over `Applier.replacement_question()`'s sentence (T47).
+
+The title asks and the body explains, which is how every other Yes/No on this
+tab reads — and the id is in it because a user who reaches this has a folder
+under `modules/` whose name is the only thing the two repositories share."""
 
 _IMPORT_LINE_CHARS = 110
 """How much of the import's output the label carries: the last two lines, trimmed.
@@ -3018,7 +3999,7 @@ class ControllerView(QWidget):
             # fact and must not be able to disagree the way two separate reads
             # of a value that cannot change without a rebuild never could.
             has_client = self.services.client_dir is not None
-            change_label = "Change client folder…" if has_client else "Set client folder…"
+            change_label = "Change client folder…" if has_client else SET_CLIENT_DIR_LABEL
             self.set_client_dir_button = QPushButton(change_label, tab)
             self.set_client_dir_button.clicked.connect(self.change_client_dir)
             self.forget_client_dir_button = QPushButton("Forget client folder", tab)
@@ -5879,8 +6860,14 @@ class ControllerView(QWidget):
         self.modules_panel.chip_pressed.connect(self._chip_pressed)
         self.modules_panel.chip_action_pressed.connect(self._chip_action_pressed)
         self.modules_panel.context_menu_requested.connect(self._show_module_context_menu)
-        self.module_report = QPlainTextEdit(tab)
+        # T73: six lines, and not the twelve a `QPlainTextEdit` asks for. The
+        # height on this tab belongs to the list above it -- see `REPORT_LINES`.
+        self.module_report = _ReportBox(tab)
         self.module_report.setReadOnly(True)
+        # T80: the strip that names the box above and folds it away when there is
+        # nothing in it -- which is every start, and the moment the list most
+        # wants the 106px an empty text field costs.
+        self.module_report_strip = _ReportStrip(self.module_report, tab)
         # The two buttons that used to act on "the selection" are gone: every
         # row carries its own Install or Remove, so there is no second place for
         # the tab and the user to disagree about what is selected.
@@ -6014,7 +7001,7 @@ class ControllerView(QWidget):
         # want the same containers — and a second panel would have to be locked
         # against the first, registered with `log_panels()` for the exit path,
         # and stopped by it. The panel's own `running` flag is that lock already.
-        self.rebuild_log = LogPanel(tab)
+        self.rebuild_log = _IdleLogPanel(tab)
         # The lock, in both directions. A rebuild replaces the containers the
         # Server tab's Start/Stop/Remove act on, so those go dead for its
         # duration; `rebuild_server()` refuses while `_busy` for the mirror
@@ -6030,10 +7017,22 @@ class ControllerView(QWidget):
         # themselves and the two custom-module presses have moved into their own
         # card, which leaves six and room for them. Read left to right: the two
         # that only READ this install, then the four that change it.
-        actions = QHBoxLayout()
+        #
+        # T83: a FLOW layout and not a `QHBoxLayout`. Six buttons ask for 946px
+        # of hint plus their spacing, and the tab has ~824 at the 960px
+        # `main.MINIMUM_WINDOW_SIZE`; a `QHBoxLayout` answers that by drawing
+        # each of them under its hint, which is a label cut off mid-word --
+        # measured themed at 960 before this change, `Check for updates` in
+        # 114px reading `heck for update`. `FlowLayout`'s docstring owns the
+        # choice between wrapping and an overflow menu.
+        self.module_actions = flow_bar(tab)
+        actions = self.module_actions.flow()
         actions.addWidget(self.module_updates_button)
         actions.addWidget(self.refresh_modules_button)
-        actions.addStretch(1)
+        # Where the `addStretch(1)` was: the gap between the two that only read
+        # this install and the four that change it, drawn while the bar is one
+        # line and spent when it wraps.
+        actions.add_gap()
         actions.addWidget(self.adopt_button)
         actions.addWidget(self.updates_button)
         actions.addWidget(self.module_sql_button)
@@ -6082,11 +7081,37 @@ class ControllerView(QWidget):
 
         box.addLayout(actions)
         box.addWidget(self.source_version_label)
+        # T73: ONE stretching widget on this tab, and it is the list. Everything
+        # under it is as tall as it has something to say -- the report a line
+        # per line to a ceiling of six, the log its strip until a job writes to
+        # it -- and every pixel left over is the list's.
+        #
+        # It used to be 3:1:2 between the list, the report and the log, which
+        # sounds like the list wins and does not: `QVBoxLayout` hands every
+        # widget its `sizeHint` before it shares the SURPLUS by stretch, and
+        # both text boxes' hints are twelve lines of nothing. Measured in the
+        # themed window (the fonts scale with its width, so nothing here can be
+        # measured without the theme on): at 1920x1080 the list had 311px of the
+        # tab's 900 and two whole rows of forty, and at the 1280x800 the app
+        # opens at it had 70 -- a scrollbar and the top of a family card.
+        box.addWidget(self.module_actions)
         box.addWidget(self.rebuild_banner)
-        box.addWidget(self.modules_panel, 3)
+        box.addWidget(self.modules_panel, 1)
         box.addWidget(custom)
-        box.addWidget(self.module_report, 1)
-        box.addWidget(self.rebuild_log, 2)
+        box.addWidget(self.module_report_strip)
+        box.addWidget(self.module_report)
+        box.addWidget(self.rebuild_log)
+        self.modules_panel.setMinimumHeight(MODULE_LIST_MIN_HEIGHT)
+        # T83: the one place that decides what gives when this tab cannot hold
+        # everything on it. Built after every widget above is in `box`, because
+        # it walks that layout.
+        self.modules_fit = _TabFit(
+            tab,
+            self.rebuild_log,
+            self.module_report_strip,
+            self.modules_panel,
+            MODULE_LIST_MIN_HEIGHT,
+        )
         self._add_panel_tab(tab, "modules", "Modules")
         # The first reading, taken once the widgets it writes into exist. One
         # small file, no daemon and no remote: cheap enough to pay on every tab
@@ -6202,6 +7227,25 @@ class ControllerView(QWidget):
             logger.warning(f"could not read which modules are installed: {exc}")
             return {}
 
+    def _unfinished_clones(self) -> Mapping[str, frozenset[str]]:
+        """Which clones here stopped part-way through their install, per family (T68).
+
+        `{}` for a game with no reader, and `{}` again for a reader that raised
+        — and unlike `_installed_clones()` the two do NOT have to be told apart
+        here. Nothing is forgotten on this answer and no row is removed by it:
+        it only decides whether a row that is already drawn offers Install or
+        Remove, and "we could not tell" has to mean "leave the row as it was",
+        which is what an empty mapping produces.
+        """
+        reader = self.services.unfinished_modules
+        if reader is None:
+            return {}
+        try:
+            return reader()
+        except Exception as exc:  # boundary: an unreadable claim must not kill the UI
+            logger.warning(f"could not read which module installs were left unfinished: {exc}")
+            return {}
+
     def _load_manifests(self) -> tuple[list[Manifest], list[str]]:
         """This game's catalog in the store's own order, and what would not parse.
 
@@ -6215,11 +7259,17 @@ class ControllerView(QWidget):
         if store is None:
             return manifests, broken
         for kind in FAMILY_FILES:
+            # T46: one unparseable USER manifest is skipped and named here rather
+            # than raising, so it costs its own row instead of the family's ~20.
+            # The `except` below is still the boundary for what DOES raise: this
+            # app's own catalog, and either index.
+            skipped: list[str] = []
             try:
-                items = list(store.load_all(kind))
+                items = list(store.load_all(kind, skipped=skipped))
             except Exception as exc:  # boundary: a broken manifest tree must not kill the UI
                 broken.append(MODULE_LOAD_FAILED.format(kind=kind, exc=exc))
                 continue
+            broken += skipped
             manifests += items
             for manifest in items:
                 # T42 round 2's key shape, threaded through T43's extraction of
@@ -6257,6 +7307,10 @@ class ControllerView(QWidget):
                 # T44 -- the reads happen afterwards, one event-loop turn at a
                 # time, in `_fill_versions()`.
                 versions=self._known_versions(installed),
+                # T68, read on every reload beside the listing above: the two
+                # answers must come from the same moment, or a row is drawn
+                # from a folder list and a completion mark taken a press apart.
+                unfinished=self._unfinished_clones(),
             )
         )
         if broken:
@@ -6498,6 +7552,8 @@ class ControllerView(QWidget):
                 f"Nothing on this machine was changed."
             )
             return
+        if action == "install" and self._stopped_for_the_client(f"install {manifest.id}", manifest):
+            return
         # An update re-runs the INSTALL-time steps -- it is the install over
         # content that has moved -- so it answers the install's prompts.
         go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action])
@@ -6611,6 +7667,16 @@ class ControllerView(QWidget):
         the report is `_format_report`'s — the one that carries the C++ rebuild
         sentence and the pending-SQL lines — and there is no second place for
         that copy to drift.
+
+        **One question can stand between the derive and the job** (T47). A
+        derived id is the name of a folder under `modules/`, so it can already
+        be one this app filled from a DIFFERENT repository, and installing over
+        it is a `git reset --hard` that nobody asked about. The question is put
+        here, on the GUI thread, before anything is queued — the engine runs on
+        a worker and cannot open a dialog — and Cancel starts nothing at all:
+        `route` is never called, so no git runs and the folder is untouched.
+        Every other way this install would destroy something stays a refusal
+        from the engine, arriving through `_module_failed` like any other.
         """
         try:
             manifest = derive()
@@ -6625,10 +7691,120 @@ class ControllerView(QWidget):
             self.module_report.setPlainText(str(exc))
             self.action_failed.emit(str(exc))
             return
+        if self._stopped_for_the_client(f"{what} {manifest.id}", manifest):
+            return
         self._acting_on = manifest
+        question = self._replacement_question(manifest)
+        if question is not None and not self._confirm(
+            MODULE_REPLACE_TITLE.format(id=manifest.id), question
+        ):
+            logger.info(f"{what} {manifest.id} declined at the replace-the-checkout question")
+            self._module_pending = None
+            self._acting_on = None
+            self.module_report.setPlainText(
+                f"{what} {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
         self._module_pending = f"{what} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(lambda: route(manifest, folder), self._module_done, self._module_failed)
+        self._run(
+            lambda: route(manifest, folder, replacing=question is not None),
+            self._module_done,
+            self._module_failed,
+        )
+
+    def _replacement_question(self, manifest: Manifest) -> str | None:
+        """The seam's question about the clone already at this manifest's path, if any.
+
+        Anything the seam raises is swallowed into `None`, and that is safe in
+        one direction only — which is why it is done here rather than left to
+        crash the GUI thread. `None` means no question is asked, and an install
+        that WOULD have been asked about is then refused by the engine's own
+        guard with "Nothing was changed." A failure to ask never becomes a
+        silent reset.
+        """
+        ask = self.services.module_replacement_question
+        if ask is None:
+            return None
+        try:
+            return ask(manifest)
+        except Exception as exc:  # boundary: git or the disk, on the GUI thread
+            logger.warning(f"could not tell what installing {manifest.id} would replace: {exc}")
+            return None
+
+    def _stopped_for_the_client(self, what: str, manifest: Manifest) -> bool:
+        """T62: tell the user before an install whose client half would be skipped.
+
+        `Applier._client()` skips every `client` step when the install has no
+        client folder, and says so only in the report AFTER the server half has
+        landed — so `mod-arac` put its SQL and DBCs in, left `Patch-A.MPQ` out,
+        and the user found out in the game, if at all. Asked here instead,
+        before anything runs, by every route on this tab that installs: the
+        selected row (its button, its menu entry, a chip) through
+        `_module_action()`, and a link or a folder through
+        `_install_custom_module()`.
+
+        True means the install was NOT started. Setting the folder is
+        `change_client_dir()` itself — the Server tab's own press, with its
+        refusals — and not a copy of it; a successful set rebuilds this tab
+        (`client_dir_changed`), which is why the report is written BEFORE it
+        and nothing touches `self` after. The user presses Install again on the
+        rebuilt tab, where the folder is set and this asks nothing.
+        """
+        if not manifest.client or self.services.client_dir is not None:
+            return False
+        self._module_pending = None
+        self._acting_on = None
+        self.module_report.setPlainText(
+            f"{what}: not started — {manifest.name} also changes your game client, and no "
+            "client folder is set for this install. Nothing on this machine was changed."
+        )
+        if self.services.set_client_dir is None:
+            # No write seam, so no button to offer: say it, and stop.
+            QMessageBox.information(
+                self, f"{manifest.name} needs your game client", client_notice(manifest)
+            )
+            return True
+        if ask_to_set_client_dir(self, manifest):
+            self.change_client_dir()
+        return True
+
+    def _stopped_for_the_client(self, what: str, manifest: Manifest) -> bool:
+        """T62: tell the user before an install whose client half would be skipped.
+
+        `Applier._client()` skips every `client` step when the install has no
+        client folder, and says so only in the report AFTER the server half has
+        landed — so `mod-arac` put its SQL and DBCs in, left `Patch-A.MPQ` out,
+        and the user found out in the game, if at all. Asked here instead,
+        before anything runs, by every route on this tab that installs: the
+        selected row (its button, its menu entry, a chip) through
+        `_module_action()`, and a link or a folder through
+        `_install_custom_module()`.
+
+        True means the install was NOT started. Setting the folder is
+        `change_client_dir()` itself — the Server tab's own press, with its
+        refusals — and not a copy of it; a successful set rebuilds this tab
+        (`client_dir_changed`), which is why the report is written BEFORE it
+        and nothing touches `self` after. The user presses Install again on the
+        rebuilt tab, where the folder is set and this asks nothing.
+        """
+        if not manifest.client or self.services.client_dir is not None:
+            return False
+        self._module_pending = None
+        self._acting_on = None
+        self.module_report.setPlainText(
+            f"{what}: not started — {manifest.name} also changes your game client, and no "
+            "client folder is set for this install. Nothing on this machine was changed."
+        )
+        if self.services.set_client_dir is None:
+            # No write seam, so no button to offer: say it, and stop.
+            QMessageBox.information(
+                self, f"{manifest.name} needs your game client", client_notice(manifest)
+            )
+            return True
+        if ask_to_set_client_dir(self, manifest):
+            self.change_client_dir()
+        return True
 
     @Slot(object)
     def _module_done(self, result: object) -> None:
@@ -7548,12 +8724,22 @@ class ControllerView(QWidget):
             f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
         )
         self.tuning_banner.setVisible(False)
-        self.tuning_report = QPlainTextEdit(tab)
+        # The same shape as the Modules tab, so the same rule (T73): the cards
+        # are what grows, the report is what the last press did and no taller.
+        self.tuning_report = _ReportBox(tab)
         self.tuning_report.setReadOnly(True)
+        # And the same strip (T80), because it is the same box with the same
+        # problem: the cards are what the height is for.
+        self.tuning_report_strip = _ReportStrip(self.tuning_report, tab)
         box.addLayout(actions)
         box.addWidget(self.tuning_banner)
-        box.addWidget(self.tuning_panel, 4)
-        box.addWidget(self.tuning_report, 1)
+        box.addWidget(self.tuning_panel, 1)
+        box.addWidget(self.tuning_report_strip)
+        box.addWidget(self.tuning_report)
+        # No `MODULE_LIST_MIN_HEIGHT` here, deliberately: `TuningPanel` asks for
+        # 288px of its own as a minimum where `ModulesPanel` asks for 70, so a
+        # floor of 100 under it could never be the number that applied. A guard
+        # that cannot fire is a guard nobody can test (measured 2026-09-16).
         # "modules", because `icons.py` is a file T43 must not edit and it has
         # no `tuning` key: the fallback is the SERVER icon, which would collide
         # with the Server tab. Sharing the Modules puzzle is the smaller
@@ -8281,7 +9467,7 @@ def _pending_sql_lines(pending: Sequence[PendingSql]) -> list[str]:
     Three shapes because `PendingSql.files` has three answers — but all three
     say NOT applied, and the empty one earned that the hard way. The first live
     run of this code (yulon-ubuntu, 2026-09-07, the real applier against
-    `/home/pk/wowserver`) installed `mod-aoe-loot` and resolved its manifest
+    `/home/user/wowserver`) installed `mod-aoe-loot` and resolved its manifest
     glob `data/sql/db-world/*.sql` to nothing at all. The draft line here read
     "nothing to apply", and it was false: that clone carries
     `data/sql/db-world/base/aoe_loot_module_string.sql`, one directory deeper —
@@ -8366,6 +9552,13 @@ def _format_report(report: ApplyReport) -> str:
     lines += [f"  ✓ {step}" for step in report.done]
     lines += [f"  – skipped: {step}" for step in report.skipped]
     lines += _pending_sql_lines(report.pending_sql)
+    if report.left_behind:
+        # T62. `rm -r modules/mod-arac` alone reads as a clean uninstall of a
+        # module whose DBCs, client patch and rows are all still in place.
+        lines.append(
+            f"  ⚠ Removing {item} did not undo everything it installed. Still in place: "
+            f"{'; '.join(report.left_behind)}. Yu'lon cannot take these back for you."
+        )
     if report.rebuild_required:
         if report.action == "remove":
             lines.append(

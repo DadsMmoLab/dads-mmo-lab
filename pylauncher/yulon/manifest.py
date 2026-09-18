@@ -119,6 +119,48 @@ class Build(_Strict):
     )
 
 
+class ExistsCheck(_Strict):
+    """A read run against the server's own database, whose answer decides something.
+
+    Declared here rather than coded in the applier because it is per-item
+    knowledge (style-guide §4), and it exists because of what the AH bot modules
+    do with a wrong answer: `AuctionHouseBot.GUID` naming no character is not an
+    error inside the module, it is a module that quietly posts nothing — which
+    from the outside is indistinguishable from "this module does not work"
+    (measured on the owner's own install, 2026-09-07).
+
+    Three fields, three users, and the model is shared on purpose: all three ask
+    one SELECT and read "did a row come back". What DIFFERS is what the answer
+    means, and that lives at the field, not here:
+
+    * `Prompt.exists` — no row REFUSES the action (a bad answer);
+    * `SqlStep.precondition` — no row SKIPS that one step, with `missing` said
+      and nothing written (T63);
+    * `SqlStep.verify` — no row REFUSES after the fact: the file ran and the
+      database is not in the state it claims to produce (T63).
+
+    `query` and `missing` are templates over the manifest's prompt keys for
+    `Prompt.exists`; a `SqlStep` check is never rendered and must carry no
+    `{field}` at all (`test_manifest.py`). `query` must be a single SELECT: the
+    applier hands it to the READ half of the SQL seam, and a manifest is content
+    rather than code, so the one thing it must not be able to do through this
+    field is write.
+    """
+
+    db: Db
+    query: str = Field(min_length=1)
+    missing: str = Field(min_length=1, description="What to tell the user when no row came back.")
+
+    @field_validator("query")
+    @classmethod
+    def _one_select(cls, value: str) -> str:
+        if not value.strip().upper().startswith("SELECT "):
+            raise ValueError(f"ExistsCheck.query must be a SELECT: {value!r}")
+        if ";" in value.strip().rstrip(";"):
+            raise ValueError(f"ExistsCheck.query must be ONE statement: {value!r}")
+        return value
+
+
 class SqlStep(_Strict):
     """One SQL application: a file/glob from the clone, or an inline statement.
 
@@ -127,6 +169,29 @@ class SqlStep(_Strict):
     for C++ modules — applying those by hand breaks that tracking). `"direct"`
     means the app runs it via `mysql` itself (ALE mods, SQL mods). Inline
     `statement` templates may reference prompt keys as `{key}`.
+
+    `precondition` and `verify` are T63's two halves of one problem: a direct
+    step whose ORDER cannot be satisfied inside a single press. `mod-city-bots`
+    imports its 400-citizen roster into `acore_playerbots`, and that file writes
+    `playerbots_account_type` — a table mod-playerbots creates on the world
+    server's FIRST start, which is necessarily after the rebuild this install
+    only reports. So the step can be right and still be too early, and the two
+    honest answers to that are *say so and do nothing* and *prove it worked*:
+
+    * `precondition` — asked before the file is opened. No row (or a database
+      that cannot be asked at all, which is what a schema that does not exist
+      yet looks like) means the step is SKIPPED with `missing` in the report and
+      not one row written. Install again after the missing thing exists; the
+      import is idempotent by construction (the roster file drops and recreates
+      its own table), so a repeat is a repair.
+    * `verify` — asked after, once per entry, and each entry says its own
+      sentence. No row RAISES: the file ran, so "skipped" would be a lie, and a
+      module reported installed whose roster is half there is exactly the defect
+      wow-manage's `city_bots_import_roster` verified 400/400 to catch.
+
+    Both are `direct`-only. A `db-import` step is handed to another program on a
+    later boot and nothing here is in a position to check either end of it, so
+    declaring one there would be a field nothing reads.
     """
 
     db: Db
@@ -135,11 +200,24 @@ class SqlStep(_Strict):
     when: When = "install"
     applied_by: Literal["db-import", "direct"] = "direct"
     note: str | None = None
+    precondition: ExistsCheck | None = Field(
+        default=None,
+        description="Must return a row or this step is skipped, unrun, with `missing` said.",
+    )
+    verify: tuple[ExistsCheck, ...] = Field(
+        default=(),
+        description="Read after the step; an entry returning no row is a failure, by its own name.",
+    )
 
     @model_validator(mode="after")
     def _exactly_one_body(self) -> SqlStep:
         if (self.path is None) == (self.statement is None):
             raise ValueError("SqlStep needs exactly one of `path` or `statement`")
+        if self.applied_by != "direct" and (self.precondition is not None or self.verify):
+            raise ValueError(
+                "SqlStep.precondition/verify need `applied_by='direct'`: a db-import step is run "
+                "by the core updater on a later boot, and this app checks neither end of it"
+            )
         return self
 
 
@@ -297,36 +375,6 @@ class Npc(_Strict):
     name: str = Field(min_length=1)
     auto_spawned: bool = False
     note: str | None = None
-
-
-class ExistsCheck(_Strict):
-    """A read run against the server's own database before an answer is accepted.
-
-    Declared here rather than coded in the applier because it is per-item
-    knowledge (style-guide §4), and it exists because of what the AH bot modules
-    do with a wrong answer: `AuctionHouseBot.GUID` naming no character is not an
-    error inside the module, it is a module that quietly posts nothing — which
-    from the outside is indistinguishable from "this module does not work"
-    (measured on the owner's own install, 2026-09-07).
-
-    `query` and `missing` are templates over the manifest's prompt keys.
-    `query` must be a single SELECT: the applier hands it to the READ half of
-    the SQL seam, and a manifest is content rather than code, so the one thing
-    it must not be able to do through this field is write.
-    """
-
-    db: Db
-    query: str = Field(min_length=1)
-    missing: str = Field(min_length=1, description="What to tell the user when no row came back.")
-
-    @field_validator("query")
-    @classmethod
-    def _one_select(cls, value: str) -> str:
-        if not value.strip().upper().startswith("SELECT "):
-            raise ValueError(f"ExistsCheck.query must be a SELECT: {value!r}")
-        if ";" in value.strip().rstrip(";"):
-            raise ValueError(f"ExistsCheck.query must be ONE statement: {value!r}")
-        return value
 
 
 class Prompt(_Strict):

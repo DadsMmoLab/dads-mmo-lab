@@ -734,7 +734,7 @@ class RunnerGit:
         except GitError as exc:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
-        return not proc.stdout.strip()
+        return not _without_the_generated_include(dest, relative_path, proc.stdout).strip()
 
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
         """Is every commit on HEAD already on what the update would reset to? None = cannot ask.
@@ -1369,7 +1369,195 @@ class ContainerGit:
         except GitError as exc:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
-        return not proc.stdout.strip()
+        return not _without_the_generated_include(dest, relative_path, proc.stdout).strip()
+
+    def head_version(self, dest: Path) -> str | None:
+        """`RunnerGit.head_version()`, containerised: what this checkout is at, or None.
+
+        T44 wired the modules panel to `RunnerGit.head_version` directly and
+        this class had no such method, which was right there -- that panel reads
+        clones the APP made on a machine that has already run host git. T64 asks
+        the same question about a SERVER source, from an engine whose every
+        other git call goes through this class, and a question answered by a
+        different transport from the write beside it is the split §27 of the bug
+        checklist is about. So it is answered here too, and `RunnerGit`'s
+        docstring holds the reasoning for the format and for never guessing.
+
+        `writes=False`: one local `git log -1`, no remote, no working tree.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["log", "-1", f"--format={VERSION_FORMAT}"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read what {dest} is at: {exc}")
+            return None
+        parts = proc.stdout.strip().split()
+        if len(parts) != 2:
+            logger.debug(f"git log -1 in {dest} did not answer with a sha and a date: {parts!r}")
+            return None
+        return VERSION_SEPARATOR.join(parts)
+
+    def head_sha(self, dest: Path) -> str | None:
+        """`git rev-parse HEAD`, containerised; see `RunnerGit.head_sha()` for why it is full."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["rev-parse", "HEAD"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read what {dest} is on: {exc}")
+            return None
+        said = proc.stdout.strip()
+        return said or None
+
+    def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
+        """`RunnerGit.local_edits()`, containerised. Both must answer identically.
+
+        A caller narrowing to neither class never learns which it got, and this
+        is a guard's input: a disagreement would be a refusal that means one
+        thing on a machine with host git and another on a Mac without Xcode's
+        command line tools. The flags and the parse are therefore shared
+        constants (`_STATUS_ARGS`, `parse_status()`) rather than two spellings.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, _STATUS_ARGS, writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask git what is changed in {dest}: {exc}")
+            return None
+        skip = set(ignoring)
+        return tuple(path for path in parse_status(proc.stdout) if path not in skip)
+
+    def commits_since(self, dest: Path, rev: str) -> int | None:
+        """`RunnerGit.commits_since()`, containerised. `writes=False`: nothing is fetched.
+
+        The shallow refusal is asked here too, and this is the transport it was
+        MEASURED against: `clone()` above passes `_pull_depth_args(spec.depth)`
+        on its update fetch, so a `depth: 1` source stays grafted and the count
+        would answer 1 for any distance. Both bodies must answer identically --
+        a caller never learns which it got, and the figure is read by a person.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            shallow = self._capture(dest, ["rev-parse", "--is-shallow-repository"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask whether {dest} is a shallow clone: {exc}")
+            return None
+        if shallow.stdout.strip() != "false":
+            logger.debug(f"{dest} is a shallow clone; the distance from {rev} cannot be counted")
+            return None
+        try:
+            proc = self._capture(dest, ["rev-list", "--count", f"{rev}..HEAD"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not count what {dest} carries past {rev}: {exc}")
+            return None
+        return _parse_count(proc.stdout)
+
+    def restore_rev(self, dest: Path, rev: str) -> None:
+        """`RunnerGit.restore_rev()`, containerised: a checkout is a write, and no fetch.
+
+        `--force` for its reason there, which is a fact about git and not about
+        the transport: without it the checkout refuses whenever a tracked file
+        differs in the working tree and between the two commits, which on
+        AzerothCore is always true of `docker-compose.yml`.
+        """
+        self._capture(dest, ["checkout", "--detach", "--force", rev], writes=True)
+
+    def head_version(self, dest: Path) -> str | None:
+        """`RunnerGit.head_version()`, containerised: what this checkout is at, or None.
+
+        T44 wired the modules panel to `RunnerGit.head_version` directly and
+        this class had no such method, which was right there -- that panel reads
+        clones the APP made on a machine that has already run host git. T64 asks
+        the same question about a SERVER source, from an engine whose every
+        other git call goes through this class, and a question answered by a
+        different transport from the write beside it is the split §27 of the bug
+        checklist is about. So it is answered here too, and `RunnerGit`'s
+        docstring holds the reasoning for the format and for never guessing.
+
+        `writes=False`: one local `git log -1`, no remote, no working tree.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["log", "-1", f"--format={VERSION_FORMAT}"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read what {dest} is at: {exc}")
+            return None
+        parts = proc.stdout.strip().split()
+        if len(parts) != 2:
+            logger.debug(f"git log -1 in {dest} did not answer with a sha and a date: {parts!r}")
+            return None
+        return VERSION_SEPARATOR.join(parts)
+
+    def head_sha(self, dest: Path) -> str | None:
+        """`git rev-parse HEAD`, containerised; see `RunnerGit.head_sha()` for why it is full."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["rev-parse", "HEAD"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read what {dest} is on: {exc}")
+            return None
+        said = proc.stdout.strip()
+        return said or None
+
+    def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
+        """`RunnerGit.local_edits()`, containerised. Both must answer identically.
+
+        A caller narrowing to neither class never learns which it got, and this
+        is a guard's input: a disagreement would be a refusal that means one
+        thing on a machine with host git and another on a Mac without Xcode's
+        command line tools. The flags and the parse are therefore shared
+        constants (`_STATUS_ARGS`, `parse_status()`) rather than two spellings.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, _STATUS_ARGS, writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask git what is changed in {dest}: {exc}")
+            return None
+        skip = set(ignoring)
+        return tuple(path for path in parse_status(proc.stdout) if path not in skip)
+
+    def commits_since(self, dest: Path, rev: str) -> int | None:
+        """`RunnerGit.commits_since()`, containerised. `writes=False`: nothing is fetched.
+
+        The shallow refusal is asked here too, and this is the transport it was
+        MEASURED against: `clone()` above passes `_pull_depth_args(spec.depth)`
+        on its update fetch, so a `depth: 1` source stays grafted and the count
+        would answer 1 for any distance. Both bodies must answer identically --
+        a caller never learns which it got, and the figure is read by a person.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            shallow = self._capture(dest, ["rev-parse", "--is-shallow-repository"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask whether {dest} is a shallow clone: {exc}")
+            return None
+        if shallow.stdout.strip() != "false":
+            logger.debug(f"{dest} is a shallow clone; the distance from {rev} cannot be counted")
+            return None
+        try:
+            proc = self._capture(dest, ["rev-list", "--count", f"{rev}..HEAD"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not count what {dest} carries past {rev}: {exc}")
+            return None
+        return _parse_count(proc.stdout)
+
+    def restore_rev(self, dest: Path, rev: str) -> None:
+        """`RunnerGit.restore_rev()`, containerised: a checkout is a write, and no fetch.
+
+        `--force` for its reason there, which is a fact about git and not about
+        the transport: without it the checkout refuses whenever a tracked file
+        differs in the working tree and between the two commits, which on
+        AzerothCore is always true of `docker-compose.yml`.
+        """
+        self._capture(dest, ["checkout", "--detach", "--force", rev], writes=True)
 
     def head_version(self, dest: Path) -> str | None:
         """`RunnerGit.head_version()`, containerised: what this checkout is at, or None.
@@ -1724,10 +1912,10 @@ class ContainerGit:
         # far:
         #
         #     $ ls -Zd ~/labtest
-        #     unconfined_u:object_r:user_home_t:s0 /home/pk/labtest
-        #     $ docker run --rm -v /home/pk/labtest:/git ... -c "touch /git/x"
+        #     unconfined_u:object_r:user_home_t:s0 /home/user/labtest
+        #     $ docker run --rm -v /home/user/labtest:/git ... -c "touch /git/x"
         #     touch: /git/x: Permission denied
-        #     $ docker run --rm -v /home/pk/labtest:/git:z ... -c "touch /git/y"
+        #     $ docker run --rm -v /home/user/labtest:/git:z ... -c "touch /git/y"
         #     (succeeded, and the folder is now container_file_t)
         #
         # **`:z` for a write, `--security-opt label:disable` for a read, and the
@@ -1758,7 +1946,7 @@ class ContainerGit:
         # Fedora 44, Enforcing, against a user's own unlabelled checkout
         # (`unconfined_u:object_r:user_home_t:s0`):
         #
-        #     $ docker run --rm -v /home/pk/ownco:/git ... remote get-url origin
+        #     $ docker run --rm -v /home/user/ownco:/git ... remote get-url origin
         #     fatal: not a git repository (or any parent up to mount point /)
         #     $ docker run --rm --security-opt label:disable -v ... get-url origin
         #     https://github.com/mod-playerbots/azerothcore-wotlk.git

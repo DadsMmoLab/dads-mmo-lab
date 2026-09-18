@@ -2239,7 +2239,7 @@ def _write_secret(path: Path, value: str) -> None:
     `.strip()` (A8), and a file the user opened in Notepad and saved gets one
     whether we write it or not.
 
-    **What the mode buys, measured rather than assumed** (PKGAME-LAPTOP,
+    **What the mode buys, measured rather than assumed** (a Windows laptop,
     Windows 11 26200, CPython 3.13.14, 2026-09-01): on POSIX the mode is
     applied by `open(2)` itself, so the file is owner-only from its first byte
     and never has a window at 0644. On Windows it does nothing at all — the
