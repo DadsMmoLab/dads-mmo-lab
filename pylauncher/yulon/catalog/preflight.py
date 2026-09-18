@@ -99,6 +99,25 @@ class Facts:
 
     platform_id: str
     docker_ready: bool
+    in_wsl: bool = False
+    """Is this "linux" a WSL distro rather than a Linux machine? (T40)
+
+    `platform.detect()` answers "linux" for both — its own docstring says so —
+    and a WSL distro is sized by Windows (`%UserProfile%\\.wslconfig`) whoever
+    runs the daemon inside it, while a Linux machine is sized by itself. Every
+    remedy below that names a place to click reads THIS rather than
+    `platform_id`, because naming the other one is advice the user cannot carry
+    out — which is the whole of T40.
+
+    **It answers "which Linux is this", not "whose daemon is this."** A distro's
+    `docker` may be Docker Desktop's through WSL integration or a Docker Engine
+    installed inside the distro, and nothing here separates those two — see
+    `Flavour` and `_WSL_IS_TWO_SHAPES`, which is why the `wsl` arms name both
+    routes rather than picking one.
+
+    Defaults to False, the plain Linux box, so a fact nobody established can
+    never invent a Docker Desktop on a machine that has none.
+    """
     compose_ready: bool | None = None
     """Whether `docker compose` works. `None` = not asked, because with no
     daemon there is nothing to ask (T56)."""
@@ -172,6 +191,7 @@ def gather(
     probe_port: Callable[[str, int], platform.PortProbe] = platform.probe_tcp,
     selinux: Callable[[], bool | None] | None = None,
     fs_type: Callable[[Path], str | None] | None = None,
+    in_wsl: Callable[[], bool] | None = None,
 ) -> Facts:
     """Ask the machine everything `evaluate()` needs, refusing to invent an answer.
 
@@ -185,8 +205,8 @@ def gather(
     them is how this suite once went red on every Python 3.12+ Linux box while
     CI stayed green.
 
-    SELinux and the server folder's filesystem are asked only on Linux, where
-    they exist.
+    SELinux, the server folder's filesystem and "is this a WSL distro" are
+    asked only on Linux, where they exist.
 
     `client_dir` arrived from the spine in 7.1 (A9) and is read here from 7.3
     on: entries whose family block carries a `ClientSpec` get the folder rules
@@ -247,6 +267,12 @@ def gather(
     ask_fs = fs_type if fs_type is not None else platform.filesystem_type
     enforcing = ask_selinux() if here == "linux" else None
     server_fs = ask_fs(server_dir) if here == "linux" else None
+    # A third Linux-only question, asked and resolved the same way (T40). Off
+    # Linux it is False rather than unasked: `detect()` already answered
+    # "windows" or "macos", and a Windows box IS the host a WSL distro would be
+    # inside — asking /proc/version there would answer about nothing.
+    ask_wsl = in_wsl if in_wsl is not None else platform.in_wsl
+    wsl = ask_wsl() if here == "linux" else False
     # The server folder is probed here rather than inside the `Facts(...)` call
     # below, so that the two bind probes run in the order they are reported.
     # Left inline it would be the client that goes first: the client block sits
@@ -282,6 +308,7 @@ def gather(
     return Facts(
         platform_id=here,
         docker_ready=ready,
+        in_wsl=wsl,
         compose_ready=compose,
         vm=facts_vm,
         data_root=root,
@@ -460,6 +487,71 @@ def evaluate(entry: CatalogEntry, server_dir: Path, facts: Facts) -> Report:
     return Report(tuple(checks))
 
 
+Flavour = Literal["engine", "desktop", "wsl"]
+"""Which Docker a remedy has to be written for. NOT the platform (T40).
+
+Three cases, and `platform_id` names only two of them. `desktop` is Windows and
+macOS, where Docker Desktop is the only supported engine. `engine` is a Linux
+machine, where the daemon is a service. `wsl` is a WSL distro — and it is a
+PLACE, not an engine.
+
+**`wsl` is deliberately the ambiguous one, and naming it after the place rather
+than the engine is the point.** A distro's `docker` may be Docker Desktop's
+through WSL integration, or a Docker Engine installed inside the distro with
+`apt install docker.io`. Nothing in `Facts` separates those two, so every `wsl`
+arm below either names BOTH routes or says something true of both. A `wsl` arm
+that names only Docker Desktop is the T40 defect pointed at a new audience: the
+first draft of this fix did exactly that on three rows, and a distro running its
+own engine has no Desktop to start, no integration tick and no disk image.
+
+What is true of both: WSL's memory and CPU count come from Windows'
+`%UserProfile%\\.wslconfig` whoever runs the daemon inside, because Windows
+sizes the distro. Those arms name one action and are right.
+"""
+
+
+def _flavour(facts: Facts) -> Flavour:
+    """The one place that decides which words a machine's remedies are written in.
+
+    Named rather than re-derived at each remedy, because the rule T40 is about
+    is a single rule applied in nine places, and nine copies of
+    `platform_id != "linux"` are nine chances for one of them to drift back to
+    naming a pane the user does not have.
+
+    Windows and macOS are folded together on purpose: Docker Desktop is the only
+    engine either of them is supported on (see `platform.ensure_docker`), and
+    where their wording genuinely differs — the free-space rows' macOS cap — the
+    caller branches on `platform_id` itself rather than asking here.
+
+    `in_wsl` answers "which Linux is this", not "whose daemon is this": see
+    `Flavour`, and `_WSL_IS_TWO_SHAPES` for why no arm resolves it.
+    """
+    if facts.platform_id != "linux":
+        return "desktop"
+    return "wsl" if facts.in_wsl else "engine"
+
+
+_WSL_IS_TWO_SHAPES = """Why no `wsl` arm picks one of the two daemons (T40, review round 1).
+
+`docker info` would tell them apart — it prints `OperatingSystem: Docker
+Desktop` for the integration and the distro's own name for an engine installed
+inside it — but there is no seam in this codebase that surfaces that string
+today. `platform.vm_resources()` is the only caller that parses that JSON and it
+keeps `MemTotal` and `NCPU` only.
+
+Building one was weighed and refused for this ticket. It cannot help the row
+that needs it most: the dead-daemon row refuses precisely because `docker info`
+did not answer, so that arm must name both routes whatever else exists. Adding
+a mechanism that fixes two of the three rows would leave the file carrying two
+ways of answering one question — which is the shape T40 exists to remove — and
+the discriminator itself would be an unverified claim about output this project
+has never captured from a Docker Desktop box.
+
+So all three hedge, Desktop first because it is the commoner of the two, and the
+fact stays unestablished rather than guessed at. If a live capture of `docker
+info` on Desktop ever lands, this is the note to come back to."""
+
+
 def _docker_check(facts: Facts) -> Check:
     if facts.docker_ready:
         return Check("Docker", "pass", "the daemon answered")
@@ -467,7 +559,54 @@ def _docker_check(facts: Facts) -> Check:
         "Docker",
         "refuse",
         "no Docker daemon answered, and it could not be started automatically",
-        "Open Docker Desktop, wait for the whale icon to stop animating, then try again.",
+        _daemon_remedy(facts),
+    )
+
+
+def _daemon_remedy(facts: Facts) -> str:
+    """How to start the daemon this machine actually has (T40).
+
+    "Open Docker Desktop, wait for the whale icon" was printed on every
+    platform, and on a Linux machine there is no Docker Desktop to open and no
+    whale to watch: the daemon is a service, and the commonest reason it
+    "did not answer" there is not that it is stopped at all but that the user is
+    not in the `docker` group — the socket is there and refuses them. Both are
+    on the line because this check cannot tell them apart: it knows only that
+    nothing answered.
+
+    **This is the row that can never resolve the WSL ambiguity**, and it is the
+    reason `_WSL_IS_TWO_SHAPES` applies to the whole file rather than to two
+    rows. Whatever probe might separate Docker Desktop from an engine installed
+    inside the distro, it would have to ask the daemon — and this row exists
+    because the daemon did not answer. So the `wsl` arm names both, Desktop
+    first, and `service` rather than `systemctl` in the second: a WSL distro
+    usually boots without systemd, where `systemctl` answers "System has not
+    been booted with systemd as init system" and reads as a broken machine
+    rather than as the wrong command.
+
+    The Linux arm hedges its own first clause for the same class of reason. Not
+    every Linux Docker is a system service: rootless Docker runs under
+    `systemctl --user`, and Fedora's `podman-docker` provides the `docker`
+    command with no daemon and no `docker` group at all. "If Docker runs as a
+    service here" costs five words and stops the sentence asserting a shape of
+    install the user may not have.
+    """
+    flavour = _flavour(facts)
+    if flavour == "desktop":
+        return "Open Docker Desktop, wait for the whale icon to stop animating, then try again."
+    if flavour == "wsl":
+        return (
+            "A WSL distro's Docker comes from one of two places and this check cannot tell "
+            "which, because the daemon did not answer. If Docker Desktop provides it: start "
+            "Docker Desktop on Windows, wait for the whale icon to stop animating, and check "
+            "that this distro is ticked under Settings → Resources → WSL integration. Or, if "
+            "this distro runs its own Docker Engine, start it with `sudo service docker start` "
+            "— WSL usually has no systemd, so `service` and not `systemctl`. Then try again."
+        )
+    return (
+        "Start the Docker service, if Docker runs as a service here — `sudo systemctl start "
+        "docker` — and try again. If it is already running, your user may not be allowed to "
+        "talk to it: `sudo usermod -aG docker $USER`, then log out and back in."
     )
 
 
@@ -498,31 +637,59 @@ def _compose_check(facts: Facts) -> Check:
         COMPOSE_CHECK,
         "refuse",
         "Docker is running, but the Docker Compose plugin is missing",
-        _compose_remedy(facts.platform_id),
+        _compose_remedy(facts),
     )
 
 
-def _compose_remedy(platform_id: str) -> str:
+def _compose_remedy(facts: Facts) -> str:
     """What to install, in the words of THIS machine's package manager.
 
-    Named per platform because "install the compose plugin" is not an
-    instruction anyone can follow, and because pointing a Steam Deck at Docker
-    Desktop is the mistake T40 is about.
+    Named per engine because "install the compose plugin" is not an instruction
+    anyone can follow, and because pointing a Steam Deck at Docker Desktop is
+    the mistake T40 is about.
+
+    A WSL distro gets BOTH sentences, and getting that wrong in each direction
+    is the whole history of this row. `platform_id` is "linux" inside WSL, so a
+    distro fed by Docker Desktop through WSL integration was told to `apt
+    install docker-compose-v2` — a plugin for a distro CLI that is not the one
+    running, leaving `docker compose` exactly as missing. The first T40 draft
+    corrected that by giving WSL the Desktop sentence alone, which is the same
+    error facing the other way: `apt install docker.io` inside a distro is a
+    supported install with no Docker Desktop anywhere near it, and "update
+    Docker Desktop" is nothing that user can do. Neither route is the one to
+    drop; see `_WSL_IS_TWO_SHAPES` for why the fact is not established instead.
     """
-    if platform_id == "linux":
+    flavour = _flavour(facts)
+    if flavour == "engine":
+        return f"Install Docker Compose v2 and try again. {_COMPOSE_IN_THE_DISTRO} {_COMPOSE_SPACE}"
+    if flavour == "wsl":
         return (
-            "Install Docker Compose v2 and try again. On Arch or SteamOS: "
-            "`sudo pacman -S docker-compose`. On Debian or Ubuntu: "
-            "`sudo apt install docker-compose-v2` -- which is the package Yu'lon's own "
-            "installer uses there; if your Docker came from Docker's own apt repository "
-            "instead, that package is called `docker-compose-plugin`. Check it with "
-            "`docker compose version` -- note the SPACE: `docker-compose` with a hyphen is the "
-            "old v1 and is not what Yu'lon runs."
+            f"{_COMPOSE_FROM_DESKTOP} If instead this distro runs its own Docker Engine "
+            f"(`docker.io` installed inside it, no WSL integration), install the plugin in the "
+            f"distro. {_COMPOSE_IN_THE_DISTRO} {_COMPOSE_SPACE}"
         )
-    return (
-        "Docker Desktop ships Compose. Update Docker Desktop to a current version, then check "
-        "with `docker compose version` in a terminal and try again."
-    )
+    return f"{_COMPOSE_FROM_DESKTOP} Then check with `docker compose version` and try again."
+
+
+_COMPOSE_FROM_DESKTOP = "Docker Desktop ships Compose, so update it to a current version."
+"""The Desktop half of the Compose remedy, spelled once for its two callers."""
+
+_COMPOSE_IN_THE_DISTRO = (
+    "On Arch or SteamOS: `sudo pacman -S docker-compose`. On Debian or Ubuntu: "
+    "`sudo apt install docker-compose-v2` -- which is the package Yu'lon's own "
+    "installer uses there; if your Docker came from Docker's own apt repository "
+    "instead, that package is called `docker-compose-plugin`."
+)
+"""The package half, which is right on a Linux machine AND inside a WSL distro
+whose Docker is its own. Its Debian package must stay the one
+`platform._ensure_docker_linux()` installs, or the refusal and the provisioning
+name different packages -- see the test that reads it out of `platform.py`."""
+
+_COMPOSE_SPACE = (
+    "Check it with `docker compose version` -- note the SPACE: `docker-compose` with a hyphen "
+    "is the old v1 and is not what Yu'lon runs."
+)
+"""The v1/v2 warning, which belongs to every route that ends in a check."""
 
 
 def _ram_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
@@ -538,7 +705,7 @@ def _ram_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
             "memory",
             "unchecked",
             "Docker would not say how much memory its VM has — that is not a pass",
-            f"Give Docker at least {warn_gb:.0f} GB in its settings before a long build.",
+            _memory_headroom_remedy(facts, warn_gb),
         )
     gigabytes = facts.vm.memory_bytes / GIB
     if gigabytes < refuse_gb:
@@ -546,8 +713,7 @@ def _ram_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
             "memory",
             "refuse",
             f"Docker's VM has {gigabytes:.1f} GB, and the build needs {refuse_gb:.0f} GB",
-            "Raise the memory limit in Docker Desktop's Resources settings and try again. "
-            "Below this the compiler is killed part-way through, every time.",
+            _memory_floor_remedy(facts),
         )
     if gigabytes < warn_gb:
         return Check(
@@ -557,6 +723,70 @@ def _ram_check(facts: Facts, refuse_gb: float, warn_gb: float) -> Check:
             f"{warn_gb:.0f} GB makes the build markedly less likely to be killed.",
         )
     return Check("memory", "pass", f"Docker's VM has {gigabytes:.1f} GB")
+
+
+WSLCONFIG = "%UserProfile%\\.wslconfig"
+"""Where a WSL2 Docker Desktop's memory really comes from.
+
+Spelled once because both memory remedies name it, and because the Resources →
+Advanced memory slider a user would otherwise be sent to is greyed out on the
+WSL2 backend: it is Windows that sizes the distro, and Docker Desktop that
+lives inside it.
+"""
+
+
+def _memory_floor_remedy(facts: Facts) -> str:
+    """What to do about a build that will be OOM-killed, on the engine the user has (T40).
+
+    "Raise the memory limit in Docker Desktop's Resources settings" was printed
+    on every platform. On a Linux machine there is no limit and no pane: the
+    containers get the machine's own memory, so the lever is the machine —
+    closing what is running, or giving it swap the compiler can fall back on.
+    Telling that user to raise a limit sends them looking for a setting that
+    does not exist while the build is still failing.
+
+    The consequence sentence is kept on all three, because it is what makes the
+    refusal read as a floor rather than a preference.
+    """
+    killed = "Below this the compiler is killed part-way through, every time."
+    flavour = _flavour(facts)
+    if flavour == "desktop":
+        return (
+            f"Raise the memory limit in Docker Desktop's Resources settings and try again. {killed}"
+        )
+    if flavour == "wsl":
+        return (
+            "Docker Desktop's WSL2 backend takes its memory from Windows, not from its own "
+            f"Resources pane: set `memory=` in {WSLCONFIG}, run `wsl --shutdown`, start Docker "
+            f"Desktop again, then try again. {killed}"
+        )
+    return (
+        "Docker Engine has no memory limit to raise — a container gets this machine's own "
+        "memory — so the lever is the machine: close what else is running, or give it swap the "
+        f"compiler can fall back on, then try again. {killed}"
+    )
+
+
+def _memory_headroom_remedy(facts: Facts, warn_gb: float) -> str:
+    """The same rule for the row that could not measure anything (T40).
+
+    `unchecked` is not a pass, so it still carries advice — and "give Docker at
+    least N GB in its settings" named the same absent pane the refusal above
+    did. On a Linux machine the number is a fact about the box, not a field to
+    fill in.
+    """
+    flavour = _flavour(facts)
+    if flavour == "desktop":
+        return f"Give Docker at least {warn_gb:.0f} GB in its settings before a long build."
+    if flavour == "wsl":
+        return (
+            f"Give the distro at least {warn_gb:.0f} GB with `memory=` in {WSLCONFIG} before a "
+            "long build."
+        )
+    return (
+        f"Make sure this machine has at least {warn_gb:.0f} GB of memory, or swap to fall back "
+        "on, before a long build."
+    )
 
 
 COMPOSE_CHECK = "Docker Compose"
@@ -656,16 +886,33 @@ def _jobs_remedy(facts: Facts, affordable: int, *, from_cpus: bool) -> str:
     like abandoning the install.
     """
     outran = "A build this far ahead of its memory has finished before, so this is a caution."
+    flavour = _flavour(facts)
     if not from_cpus:
+        # "Give Docker more memory" is itself a pane on two of the three (T40):
+        # on a Linux machine the memory is the box's and there is nothing to
+        # give. Only the lever changes; the diagnosis above it is the same.
+        lever = {
+            "desktop": "give Docker more memory in its Resources settings",
+            "wsl": f"give the distro more memory with `memory=` in {WSLCONFIG}",
+            "engine": "free memory on this machine, or give it swap to fall back on",
+        }[flavour]
         return (
-            "This game's Dockerfile fixes the job count, so the CPU count is not the lever: give "
-            f"Docker more memory before a long build. {outran}"
+            f"This game's Dockerfile fixes the job count, so the CPU count is not the lever: "
+            f"{lever} before a long build. {outran}"
         )
-    if facts.platform_id == "linux":
+    if flavour == "engine":
         return (
             "Docker Engine has no CPU setting to lower — the build sees every CPU on this "
             "machine — so more memory, or swap it can fall back on, is the lever here. "
             f"{outran}"
+        )
+    if flavour == "wsl":
+        # The Resources pane's CPU slider is greyed out on the WSL2 backend for
+        # the same reason its memory slider is: Windows sizes the distro.
+        return (
+            f"Either raise the memory, or give the distro {max(affordable - 1, 1)} CPUs with "
+            f"`processors=` in {WSLCONFIG} and run `wsl --shutdown` — this build takes its job "
+            f"count from the CPU count and it cannot be set any other way. {outran}"
         )
     return (
         f"Either raise the memory, or set Docker Desktop to {max(affordable - 1, 1)} CPUs — this "
@@ -768,28 +1015,34 @@ def _docker_disk_remedy(facts: Facts) -> str:
     user with 1336 GB free on `E:` was refused over 16 GB free on `C:` and told
     to install to a drive with room, which is what he had already done.
 
-    Where the bytes actually move is per-platform, so the sentence names the
-    real setting rather than "free some space somewhere": Docker Desktop's
-    "Disk image location" on Windows and macOS, `data-root` on a Linux daemon.
+    Where the bytes actually move is per-engine, so the sentence names the real
+    setting rather than "free some space somewhere": Docker Desktop's "Disk
+    image location" on Windows and macOS, `data-root` on a Linux daemon.
+
+    T37 named BOTH routes on `platform_id == "linux"` because `detect()` answers
+    "linux" inside WSL too and it could not tell the two daemons apart. T40's
+    first draft read that as a hedge to be resolved and gave WSL the Disk image
+    location alone — but `in_wsl` separates a bare Linux box from a WSL distro,
+    NOT Docker Desktop's integration from a `docker.io` installed inside the
+    distro, and that second shape reads `/etc/docker/daemon.json` like any other
+    Linux daemon. So T37's hedge was right and is restored, Desktop first as the
+    commoner case; what T40 legitimately gains here is that a bare Linux box no
+    longer sees the Docker Desktop menu path at all. See `_WSL_IS_TWO_SHAPES`.
     """
-    if facts.platform_id == "linux":
-        # Two daemons answer to `platform_id == "linux"` and they are moved by
-        # different settings. `detect()` reports "linux" inside WSL as well as
-        # on a real Linux box (its own docstring says so), so this branch is
-        # reached by a launcher running in a WSL distro whose `docker` is Docker
-        # Desktop's through WSL integration — and that daemon never reads the
-        # distro's /etc/docker/daemon.json. Naming only `data-root` here sent
-        # that user to edit a file with no effect (review, 2026-09-12). Both
-        # routes are named rather than guessed between, because this module
-        # cannot tell the two daemons apart today: `docker_desktop_data_root()`
-        # answers `/var/lib/docker` for either, which is its own defect and is
-        # recorded on T37 rather than fixed behind this sentence.
+    flavour = _flavour(facts)
+    if flavour == "engine":
         return (
             "This is Docker's own disk, not the install folder — moving the install will not "
-            "help. Free space on the drive Docker stores on; for a Docker Engine installed on "
-            'this machine that drive is set by "data-root" in /etc/docker/daemon.json, and if '
-            "Docker Desktop provides the daemon (WSL integration) it is Docker Desktop → "
-            "Settings → Resources → Advanced → Disk image location. Then try again."
+            "help. Free space on the drive Docker stores on; that drive is set by "
+            '"data-root" in /etc/docker/daemon.json. Then try again.'
+        )
+    if flavour == "wsl":
+        return (
+            "This is Docker's own disk, not the install folder — moving the install will not "
+            "help. Free space on the drive Docker stores on. If Docker Desktop provides this "
+            "daemon (WSL integration) that drive is set in Docker Desktop → Settings → "
+            "Resources → Advanced → Disk image location; if this distro runs its own Docker "
+            'Engine it is "data-root" in /etc/docker/daemon.json. Then try again.'
         )
     return (
         "This is Docker's own disk, not the install folder — moving the install will not "
@@ -936,7 +1189,7 @@ def _client_bind_check(facts: Facts) -> Check:
             "sharing the client with Docker",
             "unchecked",
             "the client folder could not be tested inside a container — that is not a pass",
-            "If extraction finds no archives, check Docker Desktop's file sharing settings.",
+            f"If extraction finds no archives, {_client_bind_remedy(facts)}",
         )
     if facts.client_bind:
         return Check(
@@ -946,8 +1199,7 @@ def _client_bind_check(facts: Facts) -> Check:
         "sharing the client with Docker",
         "refuse",
         "a container could not see the client folder, so its archives would be invisible to it",
-        "Add the client folder (or its parent) to Docker Desktop's Settings → Resources → File "
-        "sharing, then try again.",
+        _sentence(_client_bind_remedy(facts)),
     )
 
 
@@ -993,10 +1245,54 @@ def _bind_remedy(facts: Facts, server_dir: Path) -> str:
     — `None` is falsy — and it stops reading the same the moment this becomes
     "say something when we could not tell".
     """
-    if facts.platform_id != "linux":
+    return _share_remedy(facts, desktop="this folder", engine=str(server_dir))
+
+
+def _client_bind_remedy(facts: Facts) -> str:
+    """The client folder's twin, and the second half of T40.
+
+    Both of `_client_bind_check()`'s sentences named Docker Desktop's file
+    sharing on every platform, while the server folder's twin directly above
+    them had been picking per engine since the Fedora 44 report. The client is
+    the folder a CMaNGOS install reads its archives out of, and on a Linux box
+    it fails for the same reasons the server folder does: a directory the
+    daemon's user cannot traverse, or a mount it cannot follow.
+
+    The client's path is not in `Facts` — only the probe's answer is — so the
+    sentence names the folder rather than spelling it. That is a real loss
+    against the server row, which can print the path, and it is the honest one:
+    inventing a path here would be a sentence about a folder this function
+    cannot see.
+    """
+    return _share_remedy(facts, desktop="the client folder", engine="the client folder")
+
+
+def _share_remedy(facts: Facts, *, desktop: str, engine: str) -> str:
+    """One folder-not-visible remedy, per engine, for both bind rows (T40).
+
+    The two callers differ only in how they name the folder, so they share the
+    rule and not the sentence: the whole defect class this closes is one rule
+    copied into N places and drifting in one of them.
+    """
+    flavour = _flavour(facts)
+    if flavour == "desktop":
         return (
-            "add this folder (or its parent) to Docker Desktop's Settings → Resources → File "
+            f"add {desktop} (or its parent) to Docker Desktop's Settings → Resources → File "
             "sharing, or pick a folder under your home directory, then try again."
+        )
+    if flavour == "wsl":
+        # Two routes, named rather than chosen between, for the reason in
+        # `_WSL_IS_TWO_SHAPES`: a distro running its OWN Docker Engine has no
+        # integration to tick and no file-sharing list, and fails here for the
+        # ordinary Linux reasons instead. The /mnt clause is inside the Desktop
+        # half because that is where it belongs — a Windows folder reached
+        # through /mnt is Docker Desktop's to share.
+        return (
+            f"check whether Docker Desktop provides this distro's Docker. If it does: that this "
+            f"distro is ticked under Settings → Resources → WSL integration, and — if {desktop} "
+            "is a Windows folder reached through /mnt — that it is in Settings → Resources → "
+            f"File sharing. If this distro runs its own Docker Engine instead: that {engine} and "
+            "every folder above it can be read by the user the daemon runs as. Then try again."
         )
     label = (
         " SELinux is enforcing here, but it is not what refused this: the check runs unconfined "
@@ -1005,7 +1301,7 @@ def _bind_remedy(facts: Facts, server_dir: Path) -> str:
         else ""
     )
     return (
-        f"check that {server_dir} and every folder above it can be read by the user the Docker "
+        f"check that {engine} and every folder above it can be read by the user the Docker "
         "daemon runs as, and that it is not on a mount the daemon cannot follow (a network "
         f"share, or an automounted home).{label}"
     )
