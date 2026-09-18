@@ -38,6 +38,7 @@ from yulon import docker, platform, rmtree, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
+    CLONE_MARKER,
     BehindReader,
     CloneSpec,
     ContainerGit,
@@ -204,7 +205,7 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
-CLAIM_FILE = ".yulon-clone.json"
+CLAIM_FILE = CLONE_MARKER
 """What this app writes INSIDE a clone it made, so it can recognise it later.
 
 The evidence half of `Ownership`. It is written after a clone succeeds and read
@@ -219,6 +220,22 @@ kind of entry there; `git reset --hard` does not remove untracked files, so the
 claim survives the very update path it authorises; and `remove()` deleting the
 clone deletes the claim with it, with no second place to forget about. It joins
 `include.sh` as the second file this engine writes into a clone.
+
+The name itself is `git.CLONE_MARKER`, because `is_unmodified()` has to know it
+too (T66) and `apply` imports `git`, not the other way round. This is the name
+every OTHER use in the tree reads.
+"""
+
+_NOT_FOR_THE_CLIENT = shutil.ignore_patterns(".git", CLAIM_FILE)
+"""What a `client` copy leaves in the clone: git's own directory, and the claim.
+
+T65, and `Applier._client()` carries the measurement. Both names are this app's
+or git's bookkeeping, neither is ever read by the game, and `.git`'s 0444 pack
+files are what made the second install of a `src: "."` addon die.
+
+A pattern list rather than a top-level name check, so a nested repository
+inside somebody's addon is left behind too — it has the same read-only packs
+and the same nothing to offer a WoW client.
 """
 
 CLAIM_VERSION = 1
@@ -1418,7 +1435,10 @@ class Applier:
            and running its SQL over the result. A local read (`git remote
            get-url`), so it is asked first and both names go in the refusal.
         2. **The working tree.** `reset --hard` destroys precisely what `git
-           status` reports. Also a local read.
+           status` reports, minus this app's own `CLAIM_FILE`, which it wrote
+           and rewrites (T66 — see `git._status_pathspec()`; until it was fixed
+           that one untracked file refused an update on every clone this app
+           had ever made). Also a local read.
         3. **HEAD.** `status` compares the tree and the index against HEAD and
            says nothing about what HEAD itself carries, so a user who
            COMMITTED their work passes 1 and 2. `no_local_commits()` counts
@@ -2084,7 +2104,14 @@ class Applier:
         module clone this app can point at as the one that matters. That also
         means an UNTRACKED file blocks adoption, which is stricter than the harm
         requires — a hard reset does not delete untracked files — and it is the
-        `include.sh` case above. Deliberate, and NOT allowlisted even for that
+        `include.sh` case above. `CLAIM_FILE` is the one name `unmodified()`
+        does not count (T66, `git._status_pathspec()`), and it changes nothing
+        here: this method is reached only for `UNCLAIMED`, and the two ways to
+        be `UNCLAIMED` are no such file at all and one the REPOSITORY tracks —
+        which `status` already reports as unchanged. A claim this app wrote but
+        cannot read as its own is `UNKNOWN`, and `_require_own_clone()` raises
+        on that before ever getting here.
+        Deliberate, and NOT allowlisted even for that
         one generated name: the file this app writes is empty, a user's
         `include.sh` need not be, so an exact-name allowlist would have to
         become a content check to be safe, and a content check is the first step
@@ -2496,6 +2523,26 @@ class Applier:
             log.conf_restart = True
 
     def _client(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+        """Copy this manifest's `client` steps into the game client's own folders.
+
+        **Never the checkout's bookkeeping** (T65). Two `wow-tortoise` addons
+        deploy with `src: "."` -- the addon IS the repository root -- so the
+        copy carried `.git` and this app's `CLAIM_FILE` into
+        `Interface/AddOns/<name>`. Git writes its pack and idx files 0444, and
+        `copytree(dirs_exist_ok=True)` cannot open a 0444 destination for
+        writing: the SECOND install of either addon died with a raw
+        `shutil.Error` (Errno 13) before it had landed a single new file, so
+        the addon could be installed once and never updated or reinstalled. A
+        pinned install failed identically, which is why this is not T60's.
+
+        Left out rather than force-overwritten: WoW reads the `.toc` and the
+        files it names, so a copy of somebody's git history in the AddOns
+        folder was never wanted -- it was 20+ MB of what the user's client has
+        to scan, and it is why the manifests' notes claimed the `.git` copy was
+        intended. Those notes are corrected with this change. A user who
+        removes and reinstalls also gets no stale `.git` back, because the
+        clone is where the history lives and it stays there.
+        """
         for step in manifest.client:
             if self.client_dir is None:
                 log.skipped.append(f"client {step.src}: no client dir configured")
@@ -2508,7 +2555,7 @@ class Applier:
             else:
                 target = self.client_dir / "Data"
             if src.is_dir():
-                shutil.copytree(src, target, dirs_exist_ok=True)
+                shutil.copytree(src, target, dirs_exist_ok=True, ignore=_NOT_FOR_THE_CLIENT)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target / src.name)

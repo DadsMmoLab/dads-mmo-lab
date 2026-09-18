@@ -134,6 +134,98 @@ _READ_ONLY_CONTAINER_ARGS = [
 # both questions with `--attr-source` pointed at it).
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+CLONE_MARKER = ".yulon-clone.json"
+"""The bookkeeping file this app writes into every clone it makes.
+
+Named here rather than only in `yulon.apply` (which re-exports it as
+`CLAIM_FILE`, and is where every other use of it lives) because
+`is_unmodified()` has to know it: `apply` imports `git`, so the constant cannot
+travel the other way.
+"""
+
+_EXCLUDE_MARKER = f":(exclude,top){CLONE_MARKER}"
+"""`git status` pathspec that hides the app's own marker; see `is_unmodified()`.
+
+`top` anchors it at the repository root, so it hides the ONE file this app
+writes and not a same-named file somewhere inside the module's own tree.
+"""
+
+
+def _status_pathspec(relative_path: str) -> list[str]:
+    """`--` and the pathspec for a `git status` that ignores this app's marker.
+
+    T66: every clone this app makes carries an untracked `CLONE_MARKER`, so
+    `status --porcelain -- .` answered `?? .yulon-clone.json` for a checkout
+    nobody had touched and `Applier._update_refusal()` told the user their
+    clone had uncommitted changes in it. The Update button therefore did not
+    work on any module the app had installed.
+
+    Excluded rather than `--untracked-files=no`, which would also hide a file
+    the USER left in the checkout -- a real signal, and one `reset --hard`
+    destroys -- and rather than writing the name into `.git/info/exclude` at
+    clone time, which would leave every clone made before that day still
+    refused.
+
+    **The exclusion is dropped when the marker is the path being asked about**,
+    because that is a different question with a caller that depends on the
+    answer: `Applier._require_own_clone()` reads a True for `CLONE_MARKER` as
+    "the repository itself tracks a file at this name" and would otherwise
+    treat this app's own claim as upstream content.
+    """
+    if Path(relative_path).name == CLONE_MARKER:
+        return ["--", relative_path]
+    return ["--", relative_path, _EXCLUDE_MARKER]
+
+
+def _shallow_roots(dest: Path) -> frozenset[str]:
+    """The commits git grafted when it made this checkout shallow, from `.git/shallow`.
+
+    Read from disk rather than asked of git: there is no plumbing command that
+    lists the grafts, and both `Git` implementations already read `dest/.git`
+    from the host (`is_dir()` guards every method here), so the containerized
+    one needs no second answer.
+
+    Empty for a full clone, and empty when the file is unreadable — a caller
+    that gets nothing back falls through to the plain graph answer, which is
+    the strict one.
+    """
+    path = dest / ".git" / "shallow"
+    try:
+        return frozenset(path.read_text(encoding="utf-8").split())
+    except OSError:
+        return frozenset()
+
+
+def _only_grafts(ahead: str, dest: Path) -> bool:
+    """Is every commit `rev-list FETCH_HEAD..HEAD` listed a shallow graft?
+
+    T66's second layer. `no_local_commits()` counts `FETCH_HEAD..HEAD` and
+    reads a non-zero count as "HEAD carries work of the user's own". In a
+    depth-1 clone that is only true when the history is connected, and
+    `_pin()`'s `fetch --depth 1 <rev>` on a pin that was ALREADY behind the tip
+    leaves the checkout holding the tip and the pin as two grafted roots with
+    no edge between them. The pin then counts as one commit ahead, and the user
+    is refused an update over a commit the remote handed them.
+
+    Measured against git 2.43 before this was written: on that shape `git
+    merge-base --is-ancestor HEAD FETCH_HEAD` answers no as well, so the
+    obvious ancestry check does not fix it either -- the graft cuts the edge
+    both questions walk. Deepening would fix it and costs an unbounded download
+    inside a guard.
+
+    What separates the two cases without the network is WHERE the commits came
+    from: a graft is a commit git received from a remote with its parents
+    truncated, so it is never work somebody committed here. A commit of the
+    user's own is not in `.git/shallow`, which is why "HEAD, plus a commit of
+    their own, on an old pin" still counts as local work and is still refused.
+    """
+    commits = ahead.split()
+    if not commits:
+        return True
+    roots = _shallow_roots(dest)
+    return bool(roots) and all(commit in roots for commit in commits)
+
+
 # Git honours REPOSITORY configuration, and two of its keys name a program git
 # then EXECUTES. The repository being asked is by construction one this app did
 # not make, and after `label:disable` the container asking is unconfined — so
@@ -588,11 +680,17 @@ class RunnerGit:
         return proc.stdout.strip() or None
 
     def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
-        """Is `relative_path` exactly what this checkout's HEAD committed? None = cannot ask."""
+        """Is `relative_path` exactly what this checkout's HEAD committed? None = cannot ask.
+
+        The app's own `CLONE_MARKER` does not count as a change to the tree;
+        `_status_pathspec()` carries why, and why only there.
+        """
         if not (dest / ".git").is_dir():
             return None
         try:
-            proc = _run_git(["git", "status", "--porcelain", "--", relative_path], cwd=dest)
+            proc = _run_git(
+                ["git", "status", "--porcelain", *_status_pathspec(relative_path)], cwd=dest
+            )
         except GitError as exc:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
@@ -608,9 +706,12 @@ class RunnerGit:
         FETCH_HEAD` then moves HEAD, and those commits are only reachable
         through the reflog.
 
-        `rev-list --count <target>..HEAD` is the whole answer: it counts the
-        commits reachable from HEAD and not from the target, so zero means
-        moving HEAD onto it discards no history.
+        `rev-list <target>..HEAD` is most of the answer: it lists the commits
+        reachable from HEAD and not from the target, so an empty list means
+        moving HEAD onto it discards no history. The rest is `_only_grafts()`,
+        which is what makes the list right in a SHALLOW checkout — see it for
+        the measurement and for why the obvious `merge-base --is-ancestor`
+        does not answer this either.
 
         **The target is `FETCH_HEAD`, after this method does the fetch itself,
         and NOT a remote-tracking ref.** The obvious-looking
@@ -677,11 +778,11 @@ class RunnerGit:
             logger.debug(f"could not fetch origin {ref} in {dest} to compare HEAD against: {exc}")
             return None
         try:
-            proc = _run_git(["git", "rev-list", "--count", "FETCH_HEAD..HEAD"], cwd=dest)
+            proc = _run_git(["git", "rev-list", "FETCH_HEAD..HEAD"], cwd=dest)
         except GitError as exc:
             logger.debug(f"could not ask git what {dest} has that the update would not: {exc}")
             return None
-        return proc.stdout.strip() == "0"
+        return _only_grafts(proc.stdout, dest)
 
     def head_version(self, dest: Path) -> str | None:
         """What this checkout is at, as `7c02b1d · 2026-09-01`. `None` = cannot say.
@@ -1087,7 +1188,12 @@ class ContainerGit:
         try:
             proc = self._capture(
                 dest,
-                ["status", "--ignore-submodules=all", "--porcelain", "--", relative_path],
+                [
+                    "status",
+                    "--ignore-submodules=all",
+                    "--porcelain",
+                    *_status_pathspec(relative_path),
+                ],
                 writes=False,
             )
         except GitError as exc:
@@ -1139,11 +1245,11 @@ class ContainerGit:
             logger.debug(f"could not fetch origin {ref} in {dest} to compare HEAD against: {exc}")
             return None
         try:
-            proc = self._capture(dest, ["rev-list", "--count", "FETCH_HEAD..HEAD"], writes=False)
+            proc = self._capture(dest, ["rev-list", "FETCH_HEAD..HEAD"], writes=False)
         except GitError as exc:
             logger.debug(f"could not ask git what {dest} has that the update would not: {exc}")
             return None
-        return proc.stdout.strip() == "0"
+        return _only_grafts(proc.stdout, dest)
 
     def commits_behind(self, dest: Path, branch: str | None) -> int | None:
         """How many commits an update would bring into `dest`. None = cannot ask.
