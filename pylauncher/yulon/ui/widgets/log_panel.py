@@ -197,6 +197,15 @@ def _bar_style(palette: QPalette) -> str:
 _BAR_WIDTH_PX = 120
 _STEP_WIDTH_PX = 200
 _PROGRESS_WIDTH_PX = 230
+_STATUS_WIDTH_PX = 16777215
+"""And the status field's, which is `QWIDGETSIZE_MAX`: no cap at all.
+
+Spelled rather than left out because `_StripLabel` takes a cap and this field is
+the one that must not have one -- it carries the refusals, it is the widest share
+of the header (`addWidget(self._status, 3)`), and on a 2560px window a cap would
+elide a sentence there was room for. What it needs from `_StripLabel` is the
+other half: `Ignored` width, so it demands nothing, and one line rather than four.
+"""
 """How much of the header row the strip may ever ask for.
 
 Every one of the three is bounded, and for the measured reason the status label
@@ -558,21 +567,35 @@ class LogPanel(QWidget):
         # the mouse.
         self._text.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._text.setMaximumBlockCount(_MAX_BLOCKS)
-        self._status = QLabel("idle", self)
-        # WRAPPED, and the app is unusable without it. This label is handed the
-        # whole of a refusal -- `("finished: " if ok else "FAILED: ") + message`
-        # below -- and an unwrapped QLabel's size hint is as wide as its text.
-        # That hint becomes this panel's minimum width, and the splitter in
-        # `main.py` has to honour it, so the catalog pane next to it is squeezed
-        # to nothing.
-        #
+        # ELIDED to one line, with the whole of it in the tooltip and in
+        # `status_text()` (T83). It used to WRAP, for a measured reason that has
+        # not gone away: this label is handed the whole of a refusal --
+        # `("finished: " if ok else "FAILED: ") + message` below -- and an
+        # unwrapped `QLabel`'s size hint is as wide as its text. That hint
+        # becomes this panel's minimum width, and the splitter in `main.py` has
+        # to honour it, so the catalog pane next to it is squeezed to nothing.
         # Measured 2026-09-02 on yulon-ubuntu, in a 986px window, with the real
         # home-folder refusal (196 characters): the catalog pane went from 684px
-        # to 88px and this panel demanded 1478px -- wider than the window. Game
-        # tiles were clipped mid-word and their Install buttons unreachable, so
-        # the only way out was to resize or restart. Found by the owner during
-        # the 7.2 gate, on the first refusal a real user would ever see.
-        self._status.setWordWrap(True)
+        # to 88px and this panel demanded 1478px -- wider than the window.
+        #
+        # `_StripLabel` closes that the other way and closes T80's half with it.
+        # `Ignored` horizontally says "give me what is left over and never widen
+        # anything for me", which is the same promise `setWordWrap` was standing
+        # in for; and where wrapping answered a long refusal with three or four
+        # LINES, this answers with one. On a FOLDED log the strip is all there
+        # is, so those extra lines were the panel's whole height, and the tab
+        # had nothing spare to give them -- gate A2 caught the third line of a
+        # FAILED sentence drawn cut in half (round 4, 2026-09-17).
+        #
+        # What this costs is the half of T32 below: a selection now copies what
+        # is DRAWN, and the rest of the sentence is a hover away rather than
+        # under the cursor. It is not the only copy of it -- `_rebuild_finished`
+        # says so in its own docstring: every refusal on these tabs also goes to
+        # `action_failed`, which writes it into the report box and into the app
+        # log, and that log is the file a bug report is pasted from. The header
+        # is the glance; those two are the record.
+        self._status = _StripLabel(self, _STATUS_WIDTH_PX)
+        self._status.say("idle")
         # SELECTABLE, so a refusal can be copied instead of screenshotted (T32:
         # a macOS report arrived as a photograph of this label because a QLabel
         # selects nothing by default). Keyboard selection is asked for beside
@@ -599,9 +622,11 @@ class LogPanel(QWidget):
         # (the engine's own `Step N of M` line, parsed), how far the thing
         # inside that stage has got, and what it is doing right now.
         #
-        # Both labels wrap, for the measured reason `self._status` does: git's
-        # progress text runs to `Receiving objects:  42% (420/1000), 12.53 MiB |
-        # 3.21 MiB/s`, and an unwrapped label's size hint is as wide as its text.
+        # The same `_StripLabel` the status is, and since T83 for the same
+        # reason: git's progress text runs to `Receiving objects:  42%
+        # (420/1000), 12.53 MiB | 3.21 MiB/s`, and an unwrapped label's size
+        # hint is as wide as its text. These two are capped as well as ignored,
+        # which the status deliberately is not (`_STATUS_WIDTH_PX`).
         self._step_label = _StripLabel(self, _STEP_WIDTH_PX)
         self._bar = QProgressBar(self)
         self._bar.setMaximumWidth(_BAR_WIDTH_PX)
@@ -696,7 +721,7 @@ class LogPanel(QWidget):
 
     def status_text(self) -> str:
         """What the header says about the job (tests / accessibility)."""
-        return self._status.text()
+        return self._status.said()
 
     def clear(self) -> None:
         """Empty the panel."""
@@ -875,7 +900,7 @@ class LogPanel(QWidget):
         self._show_elapsed()
         self._clear_strip()
         self._ticker.start()
-        self._status.setText(title)
+        self._status.say(title)
         self._stop_button.setEnabled(True)
         # No parent, and held by `in_flight()` until finished: a panel dropped
         # between `start()` and the OS scheduling the thread must not take the
@@ -987,9 +1012,9 @@ class LogPanel(QWidget):
         # panel does not know whether it was following a log or building a
         # server.
         if self._stop_requested:
-            self._status.setText("cancelled")
+            self._status.say("cancelled")
         else:
-            self._status.setText(("finished: " if ok else "FAILED: ") + message)
+            self._status.say(("finished: " if ok else "FAILED: ") + message)
         # Stopped, then shown ONE more time. The ticker is what makes the field
         # live, and a job that has ended must not go on counting; but the last
         # value is the run's total, which is the number somebody wants after a

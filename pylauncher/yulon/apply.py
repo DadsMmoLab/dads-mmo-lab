@@ -432,6 +432,32 @@ by every previous build back to an Install button; reading it as finished leaves
 those rows exactly as they are today.
 """
 
+COMPLETED_KEY = "install_completed"
+"""The claim's key for "every step of `install()` ran", written by `install()` twice.
+
+`False` when the claim goes in, right after the clone or the copy; `True` from
+the LAST thing `install()` does. Between those two writes the folder exists and
+the install has not finished, which is the state T68 is about: the T7 direct-SQL
+guard refuses while the world runs, the clone is already at `modules/<id>`, and
+the row read `Remove` with no Install left to press.
+
+**Additive, and deliberately NOT a `CLAIM_VERSION` bump.** A bump makes every
+older claim unreadable, which answers `UNKNOWN`, which refuses both install and
+remove — a permanent lockout on every clone an older build made, for a key that
+says nothing about ownership. So the version stays 1 and this key is read as a
+three-state: `False` is this build saying the install stopped, `True` is this
+build saying it finished, and ABSENT is a claim written before this key existed.
+
+Absent counts as finished (`clone_install_unfinished()` answers False), and that
+is the only reading that cannot make things worse. Older builds wrote the claim
+in the same place this one does — immediately after the clone and before
+`_deploy`/`_sql`/`_conf`/`_client`/`_dbc` — so an older half-install and an
+older whole install leave byte-identical claims and nothing on disk tells them
+apart. Reading absent as UNFINISHED would therefore flip every module installed
+by every previous build back to an Install button; reading it as finished leaves
+those rows exactly as they are today.
+"""
+
 
 def read_clone_claim(clone: Path, *, item_id: str) -> Ownership:
     """Did THIS app clone THIS item into THIS folder? The three-answer version.

@@ -120,6 +120,7 @@ from yulon.ui.theme import (
     COLOR_TEXT_WARNING,
 )
 from yulon.ui.widgets.dadcraft_decorations import DadcraftRealmBadge
+from yulon.ui.widgets.flow_layout import flow_bar
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import CollapseHandle, LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
@@ -2660,7 +2661,7 @@ A CEILING, not a height: `_ReportBox` is as tall as it has something to say, one
 line to six. It is empty on every start, which is when the list needs the room.
 """
 
-MODULE_LIST_MIN_HEIGHT = 100
+MODULE_LIST_MIN_HEIGHT = 74
 """The floor under the Modules tab's list of cards, in pixels.
 
 Below this the list is a scrollbar with the top of a family card beside it and
@@ -2672,8 +2673,25 @@ exactly that during T73's own review.
 
 Deliberately SHORTER than one row (85px plus its card's header under this
 theme): a floor is paid for by whatever is under it, in clipped text, at the
-sizes where the tab is already over-subscribed. 100 is the largest that still
-leaves the 1280x800 the app opens at fitting with nothing cut.
+sizes where the tab is already over-subscribed, and the LIST is the one widget
+here that is complete at any height because it scrolls. That rule is what sets
+the number, and T83 re-applied it at the smaller of the two window sizes the app
+allows: 100 was the largest that left the 1280x800 the app OPENS at fitting with
+nothing cut, and 74 is the largest that leaves the 960x600 it can be DRAGGED to
+fitting too, now that the action bar above takes a second line there (measured
+themed: the tab's layout asked for 452px of a 426px tab at 100, and Qt shares a
+shortfall like that across every widget -- five pixels off the bottom of
+`Rebuild the server…` and twenty-one off the custom-module card).
+"""
+
+_LIST_FLOOR_FLOOR = 40
+"""The list's floor when even `MODULE_LIST_MIN_HEIGHT` is more than the tab has.
+
+Step 3 of `_TabFit`'s order, and a floor under the floor rather than nothing: a
+list drawn at zero is a tab with a gap in it, and the honest answer below this
+is a tab that scrolls as a whole -- which it does not do today, and which is a
+ticket rather than something to fake here. Forty is a scrollbar's length: enough
+that what is there reads as a list somebody can drag.
 """
 
 _NO_HEIGHT_CAP = 16777215
@@ -2799,24 +2817,123 @@ class _ReportStrip(CollapseHandle):
     nothing.
     """
 
+    wants_changed = Signal(bool)
+    """What this strip is asked for has moved, and whether a PERSON asked.
+
+    `_TabFit` listens: the room it hands back depends on what is asked for, and
+    the `bool` is the difference between the tab folding something for itself and
+    a user's press, which outranks the published order (T85).
+    """
+
     def __init__(self, box: QPlainTextEdit, parent: QWidget | None = None) -> None:
         super().__init__(REPORT_STRIP_TITLE, parent)
         self._box = box
-        self.toggled.connect(self._fold)
+        # What was last ASKED for, and whether the tab has the height for it.
+        # The fold on screen is derived from the pair -- see `_apply()`.
+        self._wants_open = bool(box.toPlainText())
+        self._has_room = True
+        self._adjusting = False
+        self.toggled.connect(self._someone_used_the_handle)
         box.textChanged.connect(self._follow_the_text)
-        self._follow_the_text()
+        self._apply()
 
-    def _fold(self, collapsed: bool) -> None:
-        self._box.setVisible(not collapsed)
+    def box(self) -> QPlainTextEdit:
+        """The box this strip folds, so `_TabFit` can pick it out of the tab."""
+        return self._box
+
+    def wants_open(self) -> bool:
+        """Whether a report is asked for here, whatever the tab can afford."""
+        return self._wants_open
+
+    def box_minimum(self) -> int:
+        """What the box under this strip needs, whether it is showing or not.
+
+        Asked while the box is HIDDEN -- that is when `_TabFit` is deciding
+        whether to bring it back -- and both halves answer for a hidden widget,
+        which is the one thing that makes this two lines rather than a trial
+        layout.
+
+        BOTH halves, and the second is the one `_owed()` was missing: a layout
+        item's minimum is the larger of the widget's hint and any explicit
+        `minimumHeight()` on it, and the theme gives every text field one (T45).
+        Reading the hint alone under-counted an open report by 16px -- 90 against
+        the 106 the layout really holds back -- so between 1030 and 1080 wide the
+        sum came to 522 against a tab of 525 while the tab's real minimum was
+        538, the report stayed open, and the custom-module card was drawn 108 of
+        its 122. It was invisible at every other width only because the card's
+        own wrapped sentence over-claims by about the same amount.
+        """
+        return int(max(self._box.minimumSizeHint().height(), self._box.minimumHeight()))
+
+    def set_room(self, has_room: bool) -> None:
+        """Say whether the tab can hold the box open (`_TabFit` decides, T83)."""
+        if has_room == self._has_room:
+            return
+        self._has_room = has_room
+        self._apply()
 
     def _follow_the_text(self) -> None:
-        """Open iff the box has something to say.
+        """A report arrived, or the box was emptied: that is what is asked for now.
+
+        T80's rule, and the reason the user's fold is remembered only until
+        here: a user who folds a long report away gets the rows back, and the
+        NEXT press unfolds it again, because a press whose answer is hidden is a
+        press that looks like it did nothing.
+        """
+        self._wants_open = bool(self._box.toPlainText())
+        self.wants_changed.emit(False)
+        self._apply()
+
+    def _someone_used_the_handle(self, folded: bool) -> None:
+        """A press by a person is what this strip is asked for from now on.
+
+        Only when `_adjusting` is clear: the same signal is raised by this
+        strip's OWN fold, and reading that as consent is how a report box gives
+        the height up once and never asks for it again -- the defect this
+        object's twin (`_IdleLogPanel`) was caught with at 1280x800.
+
+        And the press is ASKED FOR rather than done: `_apply()` is what puts it
+        on screen, and it refuses where the height is not there. Showing the box
+        here instead -- which is what this did until round 3 -- opens it at a
+        size `_TabFit` has already decided cannot hold it, and nothing puts it
+        back, because `set_room(False)` is a no-op when the answer has not
+        changed. Measured at 960x600 with a refusal in the box: one click on
+        this strip drew the action bar at 76px of its 106 with `Rebuild the
+        server…` sliced through, and the card's own label at 9px of 28.
+        """
+        if self._adjusting:
+            return
+        self._wants_open = not folded
+        # BEFORE `_apply()`: the press is what the room is decided from, and
+        # `_TabFit` answers this signal synchronously. Applying first would draw
+        # the refusal this press is meant to overturn (T85).
+        self.wants_changed.emit(True)
+        self._apply()
+
+    def _apply(self) -> None:
+        """Open iff a report is wanted there AND the tab has room for it.
+
+        The text half is T80's. The room half is T83's, and it is the second
+        thing the Modules tab gives up when it cannot hold everything: below the
+        width where the action bar wraps to two lines, a populated report box and
+        every other widget's minimum do not fit, and `QBoxLayout` resolves that
+        by cutting all of them -- measured at 960x600 with a refusal in the box,
+        the action bar was drawn 74px of the 106 its two lines take, with its
+        second line of buttons sliced in half. `_TabFit` owns the order in which
+        things give and the reason the report goes before the list.
 
         `set_collapsed` is a no-op when the state already holds, so this does not
         fight the user on every keystroke of a report being written into the box
-        a line at a time -- only the empty-to-something edge moves anything.
+        a line at a time -- only an edge moves anything.
         """
-        self.set_collapsed(not self._box.toPlainText())
+        if self._adjusting:
+            return
+        self._adjusting = True
+        try:
+            self.set_collapsed(not (self._wants_open and self._has_room))
+            self._box.setVisible(not self.collapsed)
+        finally:
+            self._adjusting = False
 
 
 _WHEN_A_MINIMUM_MOVES = (
@@ -2862,6 +2979,298 @@ claim that a quarter is always the right amount.
 """
 
 
+class _TabFit(QObject):
+    """What gives when the Modules tab cannot hold everything on it (T83).
+
+    `QBoxLayout`'s answer to a column whose children's minimums add up to more
+    than it has is to draw every one of them in proportion -- so the shortfall is
+    paid in cut text, spread over whatever happens to be there. Measured at
+    960x600 with a refusal in the report box: the action bar was drawn 74px of
+    the 106 its two lines need, its second row of buttons sliced through, and the
+    custom-module card 74 of 122. Nothing in a layout can prefer one child over
+    another, which is why this object exists: the preference is real, and it is
+    this.
+
+    **The order things give in, and it is the whole of the class:**
+
+    1. the LOG folds to its strip. It is the biggest single thing on the tab and
+       the one designed to fall back -- the strip carries the job's status line,
+       the elapsed clock and Stop, with the output one click away.
+    2. the REPORT BOX folds to its strip. Same shape, less of it, and the strip
+       names what is behind it.
+    3. the LIST's floor gives. It scrolls, so it is complete at any height; every
+       pixel taken from it is a pixel of a row somebody can still scroll to.
+
+    **And what never gives: a toolbar line, and the custom-module card.** Those
+    are the two whose only way of being smaller is to cut the words inside them,
+    which is the defect this whole ticket is about. The list is last rather than
+    first for the same reason the log is first: order by what a shortfall COSTS
+    the reader, not by what is easiest to shrink.
+
+    **One thing reorders it: a press on a handle (T85).** Steps 1 and 2 are a
+    guess at which of the two panels the reader would rather keep, and a user who
+    presses a chevron has just said. That panel goes to the END of the order, so
+    the other one gives for it -- `_give_order()`, and the alternative was a
+    chevron that does nothing at every size where the two do not both fit. The
+    list's place is not up for reordering: it is step 3 whoever pressed what,
+    because the list is the one widget here that is complete at any height.
+
+    **Decided from the width the tab has NOW**, which is the second half of what
+    this class is for. Every height here is a function of the theme, the theme is
+    regenerated at every width the window settles at, and a cached minimum is
+    stale until its widget has been polished -- so a decision read out of
+    `minimumSizeHint()` while a `LayoutRequest` is in flight is taken against
+    half-updated numbers. Measured before `_owed()` asked by width: every themed
+    restyle below the fold unfolded the log and refolded it, TWICE per settle at
+    every width from 940 to 1110, because the action bar's cached minimum still
+    said one line when the log was asked and two by the time it was laid out --
+    a visible flash on every drag. `minimumHeightForWidth()` at the tab's current
+    width is the same question the layout is about to answer, so there is nothing
+    to be stale.
+
+    A zero-interval single-shot timer was written first, to coalesce the decision
+    to after the layout pass, and it is not here because it was measured to do
+    nothing once `_owed()` stopped reading stale numbers: replacing it with a
+    direct call left every test green, including the one that counts folds per
+    restyle. `_settling` is the guard that remains, and it is a different job --
+    telling the log to fold asks for a layout, and the layout asks here again.
+    """
+
+    def __init__(
+        self,
+        tab: QWidget,
+        log: _IdleLogPanel,
+        report: _ReportStrip,
+        listing: QWidget,
+        floor: int,
+    ) -> None:
+        super().__init__(tab)
+        self._tab = tab
+        self._log = log
+        self._report = report
+        self._listing = listing
+        self._floor = floor
+        self._settling = False
+        # The panel a PERSON last asked to see, and the whole of T85's second
+        # half. It is not a flag about a fold -- the bug T83's round 3 was
+        # caught by -- but a record of a press, and the only thing it does is
+        # move that panel to the END of the give order below.
+        self._asked_for: _IdleLogPanel | _ReportStrip | None = None
+        log.wants_changed.connect(lambda by_hand: self._asked(log, by_hand))
+        report.wants_changed.connect(lambda by_hand: self._asked(report, by_hand))
+        tab.installEventFilter(self)
+
+    def _asked(self, panel: _IdleLogPanel | _ReportStrip, by_hand: bool) -> None:
+        """What is asked for on this tab has moved: decide again.
+
+        `by_hand` is the user's press, and it is what makes a one-way fold
+        impossible: at 1280x800 with the rebuild banner up, the log and a
+        populated report do not both fit, the published order folds the log, and
+        the chevron the user then presses used to do nothing at all --
+        `_apply()` derives the fold from `_has_room` and `set_room(False)` is a
+        no-op when the answer has not changed. The press moves the log behind the
+        report in the order, the report gives instead, and the log opens. Pressing
+        the report's own strip puts it back, so neither is privileged: whichever
+        one the user last asked to see is the one that stays.
+        """
+        if by_hand and panel is not self._asked_for:
+            self._asked_for = panel
+        self.settle()
+
+    def _give_order(self) -> list[QObject]:
+        """The panels in the order they give, cheapest to the reader first.
+
+        `LOG, REPORT` is the published order and the one that holds until a
+        person says otherwise; the panel they last pressed open goes last.
+        """
+        order: list[QObject] = [self._log, self._report]
+        if self._asked_for is self._log:
+            order.reverse()
+        return order
+
+    def _fold_until_it_fits(self, list_floor: int) -> dict[QObject, bool]:
+        """Everything that is ASKED FOR, minus the rungs that had to go, in order.
+
+        Asked for and not "open": a log the user folded by hand costs this tab
+        nothing, and counting it would fold the report to make room for a panel
+        nobody wants.
+
+        `list_floor` is what to bill the list at while deciding. `settle()` runs
+        this at the list's ordinary floor first, because the list is step 3 and
+        nothing may spend it in advance.
+        """
+        open_now: dict[QObject, bool] = {
+            self._log: self._log.wants_open(),
+            self._report: self._report.wants_open(),
+        }
+        for panel in self._give_order():
+            if (
+                self._owed(
+                    log_open=open_now[self._log],
+                    report_open=open_now[self._report],
+                    list_floor=list_floor,
+                )
+                <= self._tab.height()
+            ):
+                break
+            open_now[panel] = False
+        return open_now
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Anything that can move a height on this tab asks for a fresh decision.
+
+        A resize is the tab's own; a layout request is a CHILD's minimum moving,
+        which the tab's size does not report -- the action bar re-states its own
+        whenever a width wraps it (`FlowBar.resizeEvent`), and without that half
+        the log decided it fitted while the bar still claimed one line.
+        """
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
+            self.settle()
+        return bool(super().eventFilter(watched, event))
+
+    def settle(self) -> None:
+        """Apply the order above to the tab as it is now.
+
+        `_settling` keeps the decision out of its own way: telling the log to
+        fold asks for a layout, the layout asks here again, and the answer would
+        be taken from a tab halfway through being re-laid -- and there would be
+        no bottom to the recursion.
+
+        **The order is not fixed**: `_give_order()` puts the panel a person
+        last pressed open at the end of it. Measured themed at 1280x800 with the
+        rebuild banner on screen, which is the state gate round 6 photographed:
+        the tab is 620px, the banner costs it 52, and with an open log AND a
+        populated report the tab's own sum is 668. One of the two has to go, the published
+        order sends the log, and the chevron the user then pressed did nothing at
+        all -- `_apply()` derives the fold from `_has_room`, and
+        `set_room(False)` is a no-op when the answer has not changed. It is the
+        ORDER that answers that press, not the panel: with the log at the end of
+        it the report gives instead, at 556 against the tab's 620.
+        """
+        if self._settling:
+            return
+        self._settling = True
+        try:
+            height = self._tab.height()
+            open_now = self._fold_until_it_fits(self._floor)
+            asked = self._asked_for
+            # And the list's own rows are the last thing a PRESS can spend, which
+            # is where the ticket's sentence ends: the user's unfold wins
+            # whenever the tab can hold that panel at its minimum, and the panel's
+            # minimum is taken with everything below it on the ladder given --
+            # the other panel folded AND the list at `_LIST_FLOOR_FLOOR`.
+            #
+            # Only for a press, and that is the whole reason this is a second
+            # pass rather than the floor the first one uses. Spending the list on
+            # the tab's OWN decision inverts the order: measured at 1000x700 with
+            # a job's log it kept the log open nobody had asked about and took
+            # the list to 47px to do it, which is the shortfall landing on the
+            # widget the published order protects most. Two pixels is what it
+            # buys at a 554px tab, which is a 1252x734 client -- what a 1280x800
+            # window leaves once a window manager's frame is taken off it.
+            if asked is not None and asked.wants_open() and not open_now[asked]:
+                with_the_list = self._fold_until_it_fits(_LIST_FLOOR_FLOOR)
+                if with_the_list[asked]:
+                    open_now = with_the_list
+            log_room = open_now[self._log]
+            report_room = open_now[self._report]
+            self._log.set_room(log_room)
+            self._report.set_room(report_room)
+            spare = height - self._owed(log_open=log_room, report_open=report_room)
+            # Step 3: the list gives what is still missing, and never below a
+            # scrollbar's worth -- under that it is not a list at all, and the
+            # honest end of this ladder is a tab that scrolls (which it does not
+            # today, and which is a ticket rather than a silent cut here).
+            #
+            # `_LIST_FLOOR_FLOOR` flat, and NOT floored at the list's own
+            # `minimumSizeHint()`, which is what this read until T85 on the
+            # belief that Qt ignores a minimum under a widget's hint. It does
+            # not: `qSmartMinSize` takes an explicit `minimumHeight()` over the
+            # hint whenever it is above zero, measured 74/40/20/1 against the
+            # layout item and honoured at every one. The hint was 70 where the
+            # ladder needed 40, and those 30 pixels were the last rung -- so at
+            # the 960x600 the app then allowed, with the banner up, the
+            # shortfall went past the list and was
+            # spread over the two widgets whose only way of being shorter is to
+            # cut the words in them: the wrapped action bar was drawn 82px of
+            # its 106 with `Rebuild the server…` sliced through, and the
+            # custom-module card 82 of 122 with both its buttons below its edge.
+            wanted = self._floor if spare >= 0 else max(_LIST_FLOOR_FLOOR, self._floor + spare)
+            if self._listing.minimumHeight() != wanted:
+                self._listing.setMinimumHeight(wanted)
+        finally:
+            self._settling = False
+
+    def _owed(self, log_open: bool, report_open: bool, list_floor: int | None = None) -> int:
+        """The height this tab needs with the log and the report in those states.
+
+        Arithmetic over the children rather than a trial layout, because a trial
+        layout is a layout: it would move widgets on screen, ask this object to
+        decide again, and be the flicker it exists to remove. Both panels can
+        say what they need in either state whichever they are in now
+        (`open_minimum()`, `folded_minimum()`, `box_minimum()`) for exactly this
+        reason.
+
+        Every visible child is counted, whichever it is and whenever it
+        arrives -- the walk is over the layout and the only widgets it names are
+        the three this object can fold. The rebuild banner is one of the
+        unnamed ones: it is `setVisible(True)` the moment an install says a
+        compile is owed, and it costs this tab 68px at 960 wide (62 of banner
+        and the spacing above it) and 52px at 1280, where the theme's font is
+        smaller.
+
+        `list_floor` is what to bill the LIST at, and it defaults to the floor
+        this tab keeps when it is not short. `settle()` passes the bottom of the
+        ladder instead in the one case where the list may be spent in advance:
+        answering a press.
+        """
+        if list_floor is None:
+            list_floor = self._floor
+        box = self._tab.layout()
+        if box is None:
+            return 0
+        margins = box.contentsMargins()
+        owed = margins.top() + margins.bottom()
+        inner = self._tab.width() - margins.left() - margins.right()
+        shown = 0
+        for index in range(box.count()):
+            item = box.itemAt(index)
+            widget = None if item is None else item.widget()
+            if item is None or widget is None:
+                continue
+            if widget is self._report.box():
+                if not report_open:
+                    continue
+                shown += 1
+                owed += self._report.box_minimum()
+                continue
+            if not widget.isVisible():
+                continue
+            shown += 1
+            if widget is self._log:
+                owed += self._log.open_minimum() if log_open else self._log.folded_minimum()
+            elif widget is self._listing:
+                owed += list_floor
+            else:
+                # The item's minimum at THIS WIDTH, which is the quantity
+                # `QBoxLayout` shares out, and asked for the way it asks:
+                # `minimumHeightForWidth()` where the item has one and
+                # `minimumSize()` where it does not. Neither shortcut works.
+                # `minimumSizeHint()` alone under-counts every widget whose
+                # height is a function of its width -- the custom-module card
+                # says 122 and needs 136 at 1000x700, because the sentence in it
+                # wraps to a third line there, and the sum came out 522 against
+                # a tab of 525 while the layout wanted 538, so nothing folded
+                # and the card was drawn 109. `heightForWidth()` is the other
+                # way wrong: it is the PREFERRED height, which over-counts, and
+                # a tab that thinks it is short folds things it did not need to.
+                need = item.minimumSize().height()
+                if item.hasHeightForWidth():
+                    need = max(need, item.minimumHeightForWidth(inner))
+                owed += need
+        return owed + box.spacing() * max(0, shown - 1)
+
+
 class _IdleLogPanel(LogPanel):
     """A `LogPanel` that starts folded away and never takes more than its share.
 
@@ -2892,14 +3301,22 @@ class _IdleLogPanel(LogPanel):
     NEW width and the app opens at the one the theme was already generated for.
     """
 
+    wants_changed = Signal(bool)
+    """`_ReportStrip.wants_changed`'s twin, and it carries the same `bool`."""
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._watching: QWidget | None = None
+        # What was last ASKED for, and whether the tab has the height for it.
+        # The fold on screen is derived from the pair -- see `_apply()`.
+        self._wants_open = False
+        self._has_room = True
+        self._adjusting = False
         self.set_collapsed(True)
-        self.collapse_toggled.connect(lambda _folded: self._hold_its_share())
+        self.collapse_toggled.connect(self._someone_used_the_handle)
         self.run_started.connect(self._give_it_the_room)
         self._watch_the_tab()
-        self._hold_its_share()
+        self._apply()
 
     def _share_of_the_tab(self) -> int:
         """The tallest this panel may be drawn right now, in pixels.
@@ -2922,21 +3339,120 @@ class _IdleLogPanel(LogPanel):
             return _NO_HEIGHT_CAP
         return max(floor, tab.height() // LOG_SHARE_OF_THE_TAB)
 
-    def _hold_its_share(self) -> None:
-        """Write the cap, if it is not already what it should be.
+    def open_minimum(self) -> int:
+        """What this panel needs with its text pane showing, open or not (T83).
 
-        The "if" is what keeps this safe to call from `LayoutRequest` and from a
-        resize: `setMaximumHeight` asks for another layout, so a cap written
-        unconditionally would ask for one forever.
+        Derived and not remembered. `_TabFit` has to ask this while the panel is
+        FOLDED -- that is the whole question it is deciding -- and a value kept
+        from the last time the panel happened to be open is a value from before
+        the last restyle, on a tab whose every height is a function of the
+        window's width. Folded, `minimumSizeHint()` is the strip's, and what the
+        pane adds back is its own minimum plus the one gap between them.
         """
-        wanted = self._share_of_the_tab()
-        if self.maximumHeight() != wanted:
-            self.setMaximumHeight(wanted)
+        if not self.collapsed:
+            return int(self.minimumSizeHint().height())
+        return int(self.minimumSizeHint().height() + self._pane_minimum() + self._gap())
+
+    def folded_minimum(self) -> int:
+        """What this panel needs with its text pane away: the strip, and nothing else.
+
+        `open_minimum()`'s mirror, and derived for the same reason: `_TabFit`
+        asks it while the panel is OPEN, which is when the answer is not the one
+        `minimumSizeHint()` gives.
+        """
+        if self.collapsed:
+            return int(self.minimumSizeHint().height())
+        return int(self.minimumSizeHint().height() - self._pane_minimum() - self._gap())
+
+    def _pane_minimum(self) -> int:
+        """What the text pane holds back, and it is BOTH of the numbers it has.
+
+        `_ReportStrip.box_minimum()`'s trap, met a second time in the panel that
+        object was written next to (T85): a layout item's minimum is the larger
+        of the widget's hint and any explicit `minimumHeight()` on it, and the
+        theme gives every `QPlainTextEdit` a 90px min-height while the one on
+        this panel really holds back 106. Reading the hint alone made
+        `open_minimum()` answer 16px light while the panel was FOLDED and the
+        truth while it was open, so `_TabFit` found room, opened the panel, was
+        asked again with the honest number, found none and folded it -- a log
+        that flickered open and shut on one resize, measured themed at 1280x800
+        with the rebuild banner up.
+        """
+        return int(max(self._text.minimumSizeHint().height(), self._text.minimumHeight()))
+
+    def _gap(self) -> int:
+        """The one space between this panel's strip and its text pane."""
+        layout = self.layout()
+        return 0 if layout is None else max(0, layout.spacing())
+
+    def set_room(self, has_room: bool) -> None:
+        """Say whether the tab can hold this panel open (`_TabFit` decides, T83)."""
+        if has_room == self._has_room:
+            return
+        self._has_room = has_room
+        self._apply()
+
+    def _apply(self) -> None:
+        """Put the derived fold on screen, and write the cap T80 sets.
+
+        **The fold is DERIVED and not remembered**: from what was last asked for
+        (`_wants_open`, which is the handle and `run_started`) and whether the
+        tab has the height for it (`_has_room`, which is `_TabFit`'s answer).
+        The first version remembered the DECISION instead, in a flag saying "I
+        folded this myself", and it was wrong on the very screen it was written
+        for -- one missed transition among the signals `set_collapsed()` raises
+        left the flag saying the fold had been the user's, so the log stayed
+        folded at 1280x800 with 312px of room for it and nothing later could put
+        it right. A derived state has no missed transitions to survive.
+
+        Writing the cap only when it CHANGES is what keeps this safe to call
+        from a layout: `setMaximumHeight` asks for another layout, so a cap
+        written unconditionally would ask for one forever. `_adjusting` is the
+        same guard around the fold, and it does a second job:
+        `_someone_used_the_handle()` reads it to tell a press by a PERSON from
+        this method's own `set_collapsed()`.
+        """
+        if self._adjusting:
+            return
+        self._adjusting = True
+        try:
+            self.set_collapsed(not (self._wants_open and self._has_room))
+            wanted = self._share_of_the_tab()
+            if self.maximumHeight() != wanted:
+                self.setMaximumHeight(wanted)
+        finally:
+            self._adjusting = False
+
+    def _someone_used_the_handle(self, folded: bool) -> None:
+        """A press by a person is what this panel is asked for from now on.
+
+        Only when `_adjusting` is clear: the same signal is raised by this
+        panel's OWN fold, and reading that as consent is how a log gives the
+        height up once and never asks for it again.
+        """
+        if not self._adjusting:
+            self._wants_open = not folded
+            # `_ReportStrip._someone_used_the_handle`'s reason for emitting
+            # before the fold is applied: the press is what the room is decided
+            # from (T85).
+            self.wants_changed.emit(True)
+        self._apply()
 
     def _give_it_the_room(self) -> None:
-        """A job started: unfold, and take a quarter of the tab to say it in."""
-        self.set_collapsed(False)
-        self._hold_its_share()
+        """A job started: ask to be open, and take a quarter of the tab to say it in.
+
+        ASKS rather than unfolds. On a window with the room this is the unfold
+        T80 promises; on one without it an open log would be a cut log, and the
+        strip a `LogPanel` shows while it is folded already carries the line
+        saying a job is running and the Stop button that ends it.
+        """
+        self._wants_open = True
+        self.wants_changed.emit(False)
+        self._apply()
+
+    def wants_open(self) -> bool:
+        """Whether this panel is asked for open, whatever the tab can afford."""
+        return self._wants_open
 
     def _watch_the_tab(self) -> None:
         """Follow the parent's resizes, because the cap is a share of them.
@@ -2958,8 +3474,9 @@ class _IdleLogPanel(LogPanel):
             tab.installEventFilter(self)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """The tab resized: the cap is a share of its height, so re-write it."""
         if event.type() == QEvent.Type.Resize:
-            self._hold_its_share()
+            self._apply()
         return bool(super().eventFilter(watched, event))
 
     def event(self, event: QEvent) -> bool:
@@ -2967,7 +3484,7 @@ class _IdleLogPanel(LogPanel):
         if event.type() == QEvent.Type.ParentChange:
             self._watch_the_tab()
         if event.type() in _WHEN_A_MINIMUM_MOVES:
-            self._hold_its_share()
+            self._apply()
         return handled
 
 
@@ -6499,10 +7016,22 @@ class ControllerView(QWidget):
         # themselves and the two custom-module presses have moved into their own
         # card, which leaves six and room for them. Read left to right: the two
         # that only READ this install, then the four that change it.
-        actions = QHBoxLayout()
+        #
+        # T83: a FLOW layout and not a `QHBoxLayout`. Six buttons ask for 946px
+        # of hint plus their spacing, and the tab has ~824 at the 960px
+        # `main.MINIMUM_WINDOW_SIZE`; a `QHBoxLayout` answers that by drawing
+        # each of them under its hint, which is a label cut off mid-word --
+        # measured themed at 960 before this change, `Check for updates` in
+        # 114px reading `heck for update`. `FlowLayout`'s docstring owns the
+        # choice between wrapping and an overflow menu.
+        self.module_actions = flow_bar(tab)
+        actions = self.module_actions.flow()
         actions.addWidget(self.module_updates_button)
         actions.addWidget(self.refresh_modules_button)
-        actions.addStretch(1)
+        # Where the `addStretch(1)` was: the gap between the two that only read
+        # this install and the four that change it, drawn while the bar is one
+        # line and spent when it wraps.
+        actions.add_gap()
         actions.addWidget(self.adopt_button)
         actions.addWidget(self.updates_button)
         actions.addWidget(self.module_sql_button)
@@ -6562,8 +7091,7 @@ class ControllerView(QWidget):
         # measured without the theme on): at 1920x1080 the list had 311px of the
         # tab's 900 and two whole rows of forty, and at the 1280x800 the app
         # opens at it had 70 -- a scrollbar and the top of a family card.
-        box.addLayout(actions)
-        box.addWidget(self.source_version_label)
+        box.addWidget(self.module_actions)
         box.addWidget(self.rebuild_banner)
         box.addWidget(self.modules_panel, 1)
         box.addWidget(custom)
@@ -6571,6 +7099,16 @@ class ControllerView(QWidget):
         box.addWidget(self.module_report)
         box.addWidget(self.rebuild_log)
         self.modules_panel.setMinimumHeight(MODULE_LIST_MIN_HEIGHT)
+        # T83: the one place that decides what gives when this tab cannot hold
+        # everything on it. Built after every widget above is in `box`, because
+        # it walks that layout.
+        self.modules_fit = _TabFit(
+            tab,
+            self.rebuild_log,
+            self.module_report_strip,
+            self.modules_panel,
+            MODULE_LIST_MIN_HEIGHT,
+        )
         self._add_panel_tab(tab, "modules", "Modules")
         # The first reading, taken once the widgets it writes into exist. One
         # small file, no daemon and no remote: cheap enough to pay on every tab
