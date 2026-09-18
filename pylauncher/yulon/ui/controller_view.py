@@ -296,6 +296,34 @@ class ChannelSetup(Protocol):
     def setup_state(self) -> object: ...
 
 
+@dataclass(frozen=True)
+class DatabaseAlone:
+    """Bring this install's database up on its own, and put it back down (T76).
+
+    One object rather than two callables, for `ChannelSetup`'s reason: the two
+    halves are one decision seen from both ends, and a tab wired with a `start`
+    and no `stop` would leave a database running that nobody asked to run.
+
+    `bring_up` answers whether it HAD to start the container -- `docker.
+    start_database()`'s own return -- and that answer is the only thing that
+    may make `take_down` run. A backup on a server the user had running must
+    not stop it; a backup on a stopped server must not leave it up.
+
+    `bring_up`/`take_down` rather than `start`/`stop`, for `ChannelSetup.
+    setup_state()`'s reason: `test_every_seam_for_wotlk_builds_says_which_
+    daemon_it_means` flags any call in this file to a name that is declared
+    somewhere with a `wsl_distro` parameter and does not pass one, and both of
+    those names are. A method here that shared one would have to be excused by
+    hand, and a guard with an exemption for a name collision is a guard one
+    step nearer to useless.
+    """
+
+    bring_up: Callable[[], bool]
+    """Start the database alone and wait for it to be healthy. True if it had to."""
+    take_down: Callable[[], None]
+    """Stop the database again. Called only where `bring_up` answered True."""
+
+
 _ROW_SETTLE_MS = 750
 """How long to leave the server to write what it has already reported.
 
@@ -574,6 +602,14 @@ class ControllerServices:
     A small object rather than two callables because the two questions belong
     together: pressing enable and asking where the setup has got to are the same
     state machine seen from two sides.
+    """
+    database_alone: DatabaseAlone | None = None
+    """How to bring this install's database up for a backup, and put it back (T76).
+
+    `None` leaves `back_up()` doing exactly what it did before -- run the
+    backup, and let it refuse if the database is down. Every shipped entry wires
+    it; a tab that does not is a tab whose backup still works on a running
+    server, which is the behaviour this replaces rather than one it breaks.
     """
     bots: BotBrowser | None = None
     """This install's bots, for a game whose marker is measured (8.5a).
@@ -1019,6 +1055,34 @@ def _mysql_for(
     )
 
 
+def _database_alone(
+    spec: docker.ContainerSpec, server_dir: Path, *, wsl_distro: str | None
+) -> DatabaseAlone:
+    """The two halves of "bring the database up for a backup, then put it back" (T76).
+
+    One factory and four call sites, because the four games must not disagree
+    about this: the reason the backup needed it is identical in all four (a
+    `mysqldump` through `docker exec` needs the container to exist and be
+    running), and so is the reason it is stopped again.
+
+    `because` completes `docker.start_database()`'s timeout sentence, and it
+    says what was not done rather than what was attempted -- a user reading
+    *"…did not report healthy within 180s, so no backup was taken"* knows the
+    state their server is in, which is the whole job of that sentence.
+
+    `stop_containers([spec.db])` and not `stop_staged()`: only the container
+    this started may be stopped. `stop_staged()` takes the compose project down,
+    and a backup that stopped a server somebody was playing on would be a far
+    worse press than one that failed.
+    """
+    return DatabaseAlone(
+        bring_up=lambda: docker.start_database(
+            spec, server_dir, because="no backup was taken", wsl_distro=wsl_distro
+        ),
+        take_down=lambda: docker.stop_containers([spec.db], wsl_distro=wsl_distro),
+    )
+
+
 def _no_manifest_store(entry: CatalogEntry) -> ManifestStore | None:
     """None, and a warning if the catalog has since said otherwise.
 
@@ -1110,6 +1174,15 @@ def _assemble(
         network_apply=lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
         create_account=create_account,
         backup=backup,
+        # HERE, in the shared half, for the rebuild's reason one line further
+        # down: bringing a database up for a backup takes no per-game decision
+        # at all -- the container name is `ContainerSpec`'s and the compose
+        # service is the one `docker.start_database()` already reads off it --
+        # and wiring it once is what makes "every game's Backup button works on
+        # a stopped server" true by construction rather than by remembering it
+        # four times. Four copies is how `_for_tortoise` came to be the one
+        # factory that never bound `play`.
+        database_alone=_database_alone(spec, server_dir, wsl_distro=wsl_distro),
         backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
         plan_restore=plan_restore,
         restore=restore,
@@ -6094,11 +6167,56 @@ class ControllerView(QWidget):
     def _forget_done(self, _result: object) -> None:
         self._show_interrupted()
 
+    def _backup_with_the_database(self) -> object:
+        """Take the backup, starting the database alone first if it is down (T76).
+
+        **Runs on the worker thread**, which is the whole reason it is a method
+        and not three lines in `back_up()`: `docker.start_database()` waits up
+        to `_DB_HEALTHY_TIMEOUT_SECONDS` for health, and a GUI thread parked on
+        that is a frozen window.
+
+        The backup is a `mysqldump` through `docker exec` into the database
+        container, so with the stack stopped -- the ordinary state of a server
+        nobody is playing on, and the state a user is in when they press
+        "Update the server to latest…" -- it answered *"<db> is not running, so
+        there is no database to back up"* and nothing was backed up. Measured on
+        the Vanilla box, 2026-09-16 (T64's live gate, `dbdown-*`): the
+        recommended button failed on the first press.
+
+        **The same seam the applier uses for direct SQL** (`apply.Applier.
+        _start_the_database_for_direct_sql`, T7) and for the same reason: the
+        world is never started, only the database, because what is wanted is a
+        database process to talk to and not a server that will write over the
+        rows being dumped.
+
+        **The database is left as it was found.** `start()` answers whether it
+        had to start anything, and only that answer runs `stop()`. Leaving it up
+        would be defensible after an update -- the rebuild recreates the whole
+        stack a few minutes later -- but this is ONE decision for both buttons,
+        and after the plain Backup button there is no rebuild coming: a press
+        that quietly left a stopped server's database running is a press that
+        changed something the user did not ask about. So it is put back, in both
+        places, and the update's own `recreate` stage starts what it needs.
+
+        `finally` and not a tidy line at the end: a backup that fails half way
+        through must not leave the container up either, and `MaintenanceError`
+        is the ordinary way out of here.
+        """
+        alone = self.services.database_alone
+        if alone is None:
+            return self.services.backup()
+        started = alone.bring_up()
+        try:
+            return self.services.backup()
+        finally:
+            if started:
+                alone.take_down()
+
     @Slot()
     def back_up(self) -> None:
         self.backup_button.setEnabled(False)
         self.maintenance_report.setPlainText("Backing up… this can take minutes on a full world.")
-        self._run(self.services.backup, self._backup_done, self._maintenance_failed)
+        self._run(self._backup_with_the_database, self._backup_done, self._maintenance_failed)
 
     @Slot(object)
     def _backup_done(self, result: object) -> None:
@@ -7498,17 +7616,29 @@ class ControllerView(QWidget):
     def _refresh_source_version(self) -> None:
         """Redraw the version line and decide whether there is a pin to return to.
 
-        Both from ONE reading, taken here: `LatestRoute.version_line()` is empty
-        exactly when this install is still on its catalog pins, which is exactly
-        when there is nothing to return from. Asking twice would be two readings
-        of one file that can disagree -- a press finishing between them is all it
-        would take -- and the disagreement's shape is a live "Return to the
-        tested pin…" over a line that says the server IS on it.
+        Both from ONE reading, taken here: `LatestRoute.source_version()`
+        answers the line and the button from a single read of the state file.
+        Asking twice would be two readings of one file that can disagree -- a
+        press finishing between them is all it would take -- and the
+        disagreement's shape is a live "Return to the tested pin…" over a line
+        that says the server IS on it.
+
+        **The two are no longer the same question, and conflating them is what
+        T77 is.** The line is drawn whenever there is something to say, which
+        includes an install that has just RETURNED to its pins; the button is
+        offered only while some source is still off its pin. Shown on the
+        content's own terms rather than on the line's emptiness, this control
+        disappears after a successful return and comes back after an update --
+        instead of offering a ~36-minute compile that ends exactly where it
+        started (live gate, 2026-09-16, press 6).
 
         Never raises. It is called from the reload path and from every job
         finishing, and an exception on either would take the tab down over a
-        line of text; the seam's own contract is that it answers `""` rather
-        than raising, and this holds it to that.
+        line of text; the seam's own contract is that it reads rather than
+        raising, and this holds it to that. The fallback hides the button as
+        well as the line: a read that failed knows nothing about where the
+        sources stand, and offering an hour of compiling off that is worse than
+        offering nothing.
         """
         route = self.services.update_to_latest
         if route is None:
@@ -7516,13 +7646,13 @@ class ControllerView(QWidget):
             self.return_to_pin_button.setVisible(False)
             return
         try:
-            said = route.version_line()
-        except OSError as exc:  # pragma: no cover - the seam reads and never raises
+            said = route.source_version()
+        except OSError as exc:
             logger.warning(f"could not read what {self.entry.id} was built from: {exc}")
-            said = ""
-        self.source_version_label.setText(said)
-        self.source_version_label.setVisible(bool(said))
-        self.return_to_pin_button.setVisible(bool(said))
+            said = native.SourceVersion(line="", past_the_pin=False)
+        self.source_version_label.setText(said.line)
+        self.source_version_label.setVisible(bool(said.line))
+        self.return_to_pin_button.setVisible(said.past_the_pin)
 
     def _update_route_busy(self) -> bool:
         """The two gates both T64 presses share, put to the user and answered True when hit.
@@ -7586,6 +7716,14 @@ class ControllerView(QWidget):
         started"; what it buys is a window that is not frozen for the length of
         a dump.
 
+        **The backup starts the database if it is down** (T76), through
+        `_backup_with_the_database()` and not `services.backup` directly. An
+        update is what somebody does to a server nobody is playing on, so the
+        stack is normally stopped when this is pressed -- and the backup is a
+        `docker exec` into the database container, which refused. The
+        recommended button therefore failed on the first press of every stopped
+        server until 2026-09-16.
+
         **A failed backup STOPS**, which is `dml wow update`'s rule
         (`BACKUP_FAILED "Safety backup failed -- update not started"`) and not
         wow-manage's, which offered a backup and continued regardless. Somebody
@@ -7636,7 +7774,9 @@ class ControllerView(QWidget):
             "Backing up before the update… this can take minutes on a full world."
         )
         self._run(
-            self.services.backup, self._backup_before_update_done, self._backup_before_update_failed
+            self._backup_with_the_database,
+            self._backup_before_update_done,
+            self._backup_before_update_failed,
         )
         return True
 

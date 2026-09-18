@@ -47,7 +47,7 @@ from yulon.catalog.native import (
     LatestRoute,
     read_state,
     return_to_pin_confirmation,
-    source_revs_line,
+    source_version,
     update_to_latest_confirmation,
 )
 from yulon.log import configure, get_logger, use_utf8_streams
@@ -248,7 +248,7 @@ def update_to_latest_for_app(
       through here.
 
     The engine is built inside each callable, per press, for `rebuild_for_app()`'s
-    reason — except `version_line`, which is called on every tab reload and
+    reason — except `source_version`, which is called on every tab reload and
     therefore builds nothing at all: it reads one small JSON file. `valid=()` is
     what says so, and `catalog.native._parse_state()` documents it as "the caller is not
     asking about stages", which this one is not.
@@ -277,7 +277,7 @@ def update_to_latest_for_app(
         press=press,
         pin_confirmation=lambda: return_to_pin_confirmation(entry, server_dir, repo),
         to_pin=to_pin,
-        version_line=lambda: source_revs_line(read_state(server_dir, valid=())),
+        source_version=lambda: source_version(read_state(server_dir, valid=())),
     )
 
 

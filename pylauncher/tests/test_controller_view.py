@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -70,6 +71,7 @@ from yulon.ui.controller_view import (
     UPDATE_TO_LATEST_BUTTON_LABEL,
     ControllerServices,
     ControllerView,
+    DatabaseAlone,
     UpdateChoice,
     ask_update_choice,
 )
@@ -9243,6 +9245,10 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
 # -- T64: "Update the server to latest…" --------------------------------------
 
 
+_PIN = "993f18094e2f3d38e0f0e6b0a2b4c1d9e8f7a6b5"
+"""A catalog `rev`, spelled as the catalog spells one: all forty characters."""
+
+
 class _LatestSpy:
     """Everything `LatestRoute` is asked, and what it answers.
 
@@ -9255,16 +9261,35 @@ class _LatestSpy:
     def __init__(self) -> None:
         self.presses: list[object] = []
         self.pin_presses: list[object] = []
-        self.line = ""
+        self.revs: tuple[native.SourceRev, ...] = ()
+
+    def version(self) -> native.SourceVersion:
+        """The REAL rule, over whatever rows this install's record holds.
+
+        Not a line and a flag the test chose: `native.source_version()` is half
+        of what T77 fixed, and a spy that answered a boolean would let the view
+        test agree with a view that read the record's EXISTENCE -- which is the
+        bug (live gate, 2026-09-16, press 6).
+        """
+        return native.source_version(
+            native.InstallState(game_id="wow-wotlk", install_id="x", source_revs=self.revs)
+        )
 
     def route(self) -> native.LatestRoute:
         def press(cancel: object = None) -> Iterator[str]:
             self.presses.append(cancel)
+            # What `_record_source_revs()` writes after an update: the checkout
+            # is somewhere upstream, the pin is where the gates were.
+            self.revs = (native.SourceRev("x/y", "7bcee96 · 2026-09-15", pin=_PIN),)
             yield "--- update-sources"
             yield "moved"
 
         def to_pin(cancel: object = None) -> Iterator[str]:
             self.pin_presses.append(cancel)
+            # And after a return: built == pin, which is what the button's rule
+            # has to read. `ahead` stays None because every shipped source but
+            # one is a shallow clone and cannot be counted.
+            self.revs = (native.SourceRev("x/y", f"{_PIN[:7]} · 2026-09-02", pin=_PIN),)
             yield "back on the pin"
 
         return native.LatestRoute(
@@ -9278,7 +9303,7 @@ class _LatestSpy:
                 "server already wrote into your databases."
             ),
             to_pin=to_pin,
-            version_line=lambda: self.line,
+            source_version=self.version,
         )
 
 
@@ -9575,29 +9600,128 @@ def test_the_update_is_refused_while_another_job_is_running_on_this_tab(
     assert view.update_to_latest_button.isEnabled() is False
 
 
-def test_the_update_version_line_and_the_way_back_appear_together_or_not_at_all(
+def test_the_version_line_and_the_way_back_are_drawn_from_one_reading(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
     """ONE reading decides both, and that is the point of asking once.
 
-    `version_line()` is empty exactly when this install is still on its catalog
-    pins, which is exactly when there is nothing to return from. Two readings
-    could disagree -- a press finishing between them is all it would take -- and
-    the disagreement's shape is a live "Return to the tested pin…" over a line
-    saying the server IS on it.
+    Two readings could disagree -- a press finishing between them is all it
+    would take -- and the disagreement's shape is a live "Return to the tested
+    pin…" over a line saying the server IS on it.
+
+    They are not the same ANSWER, though, and that is T77: the line is drawn
+    whenever there is something to say, the button only while something is off
+    its pin. This is the first state, where both are absent.
     """
     services, spy = _latest(ps, tmp_path)
     view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert spy.revs == ()
     assert view.source_version_label.text() == ""
     assert view.source_version_label.isHidden()
     assert view.return_to_pin_button.isHidden()
 
-    spy.line = "Built from a1b2c3d (2026-09-16), 12 commits past the tested pin f82e7d6"
+    spy.revs = (native.SourceRev("x/y", "a1b2c3d · 2026-09-16", pin=_PIN, ahead=12),)
     view._refresh_source_version()
-    assert view.source_version_label.text() == spy.line
+    assert view.source_version_label.text() == (
+        f"Built from a1b2c3d (2026-09-16), 12 commits past the tested pin {_PIN[:7]}"
+    )
     assert not view.source_version_label.isHidden()
     assert not view.return_to_pin_button.isHidden()
     assert view.return_to_pin_button.text() == RETURN_TO_PIN_BUTTON_LABEL
+
+
+def test_the_way_back_is_hidden_after_a_return_and_offered_again_after_an_update(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T77's finding, driven as the two transitions rather than asserted as a rule.
+
+    The live gate's press 6 (2026-09-16): after a successful return the button
+    was still shown and enabled, because `_refresh_source_version()` offered it
+    whenever the version line was non-empty and `_record_source_revs()` writes
+    `source_revs` after a `to_pin=True` press exactly as it does after an
+    update. Pressing it there fetches, moves nothing, and recompiles for the
+    better part of an hour to arrive where it already is -- the state the design
+    says the control must not be in.
+
+    Both presses go through the real panel and the real dialogs, and the line
+    is asserted alongside the button each time: hiding the row entirely after a
+    return would also hide the one sentence that says where the server stands.
+    """
+    qmb = controller_view_module.QMessageBox
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: qmb.StandardButton.Yes
+    )
+    _answer(monkeypatch, qmb.StandardButton.Save)
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.return_to_pin_button.isHidden(), "the way back was offered")
+    assert view.source_version_label.text() == (
+        f"Built from 7bcee96 (2026-09-15); the tested pin is {_PIN[:7]}"
+    )
+
+    assert view.return_to_the_tested_pin() is True
+    pump_until(lambda: view.return_to_pin_button.isHidden(), "the way back was withdrawn")
+    # The LINE stays: the server has been moved and moved back, and that is
+    # still a fact about this folder the catalog does not carry.
+    assert view.source_version_label.text() == f"On the tested pin {_PIN[:7]} (2026-09-02)"
+    assert not view.source_version_label.isHidden()
+
+    # And an update offers it again, which is what says the rule reads the
+    # record rather than latching once.
+    assert view.update_to_latest() is True
+    pump_until(lambda: not view.return_to_pin_button.isHidden(), "the way back came back")
+
+
+def test_a_mixed_record_still_offers_the_way_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """One row home and one not is not "returned", and the press that finishes it must stay.
+
+    WotLK moves two sources. A return whose second source failed, or a record
+    written where only one repository had moved in the first place, leaves an
+    install whose core is on the pin and whose module checkout is not. `any` and
+    not `all` is what keeps the control there; the test exists because `all`
+    reads just as plausibly in the source.
+    """
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    spy.revs = (
+        native.SourceRev("a/b", f"{_PIN[:7]} · 2026-09-02", pin=_PIN),
+        native.SourceRev("c/d", "7bcee96 · 2026-09-15", pin=_PIN),
+    )
+    view._refresh_source_version()
+
+    assert not view.return_to_pin_button.isHidden()
+    said = view.source_version_label.text().splitlines()
+    assert said[0] == f"a/b: on the tested pin {_PIN[:7]} (2026-09-02)"
+    assert said[1] == f"c/d: built from 7bcee96 (2026-09-15); the tested pin is {_PIN[:7]}"
+
+
+def test_a_read_that_failed_draws_nothing_and_offers_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The fallback is a decision, not a formality, and it goes the careful way.
+
+    `_refresh_source_version()` runs on the reload path and after every job, so
+    an exception there takes the tab down over a line of text. What it does with
+    the failure is the part worth a test: a read that did not happen knows
+    nothing about where the sources stand, and offering an hour of compiling off
+    that is worse than offering nothing. Both halves hidden, not just the line.
+    """
+    services, spy = _latest(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    spy.revs = (native.SourceRev("x/y", "7bcee96 · 2026-09-15", pin=_PIN),)
+    view._refresh_source_version()
+    assert not view.return_to_pin_button.isHidden()
+
+    def unreadable() -> native.SourceVersion:
+        raise OSError("the state file could not be read")
+
+    services.update_to_latest = replace(spy.route(), source_version=unreadable)
+    view._refresh_source_version()
+    assert view.source_version_label.isHidden()
+    assert view.source_version_label.text() == ""
+    assert view.return_to_pin_button.isHidden()
 
 
 def test_returning_to_the_pin_asks_yes_no_defaulting_to_no_and_offers_no_backup(
@@ -9701,3 +9825,246 @@ def test_a_second_update_press_while_the_backup_runs_is_refused(
     # And it is released: the lock is not a one-way door.
     assert view._backup_before_update is False
     assert view.update_to_latest_button.isEnabled() is True
+
+
+# -- T76: the backup starts the database when it is down ----------------------
+
+
+class _FakeDatabase:
+    """This install's database container, as the two T76 seams see it.
+
+    A recorder with STATE rather than two counters, because the assertions that
+    matter are about the state the backup ran IN and the state the press left
+    behind -- "start was called" is also true of a press that started the
+    container after the dump, or one that left it running afterwards.
+    """
+
+    def __init__(self, *, running: bool, refuses: str = "") -> None:
+        self.running = running
+        self.refuses = refuses
+        self.starts = 0
+        self.stops = 0
+
+    def start(self) -> bool:
+        """`docker.start_database()`'s contract: True only where it had to start it."""
+        self.starts += 1
+        if self.refuses:
+            raise MaintenanceError(self.refuses)
+        if self.running:
+            return False
+        self.running = True
+        return True
+
+    def stop(self) -> None:
+        self.stops += 1
+        self.running = False
+
+    def alone(self) -> DatabaseAlone:
+        return DatabaseAlone(bring_up=self.start, take_down=self.stop)
+
+
+def _with_database(
+    ps: _Ps, tmp_path: Path, db: _FakeDatabase
+) -> tuple[ControllerServices, _LatestSpy, _FakeMaintenance]:
+    """Services whose backup REFUSES while `db` is down, the way the real one does.
+
+    The fixture is the point. `maintenance.backup()` is a `mysqldump` through
+    `docker exec`, and with the container stopped it raises rather than
+    returning an empty report. A fake that succeeded either way could not tell
+    a press that started the database from one that did not: it would have
+    passed before this fix exactly as it passes after it.
+    """
+    made = _FakeMaintenance()
+    real = made.back_up
+
+    def back_up() -> BackupReport:
+        if not db.running:
+            raise MaintenanceError("ac-database is not running, so there is no database to back up")
+        return real()
+
+    made.back_up = back_up  # type: ignore[method-assign]
+    services, spy = _latest(ps, tmp_path, made)
+    services.database_alone = db.alone()
+    return services, spy, made
+
+
+def test_backing_up_before_an_update_starts_the_stopped_database_and_the_update_proceeds(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T76, through the real dialog: the press a stopped server gets is the one that works.
+
+    Measured on the Vanilla box 2026-09-16 (T64's live gate, `dbdown-*`): with
+    every container stopped -- which is how a server nobody is playing on is
+    found, and the state somebody is in when they decide to update it -- "Back
+    up first, then update" answered *"Backup failed -- the update was not
+    started: vanilla-db is not running, so there is no database to back up"* and
+    fetched nothing.
+
+    Asserted in the order the fix claims. The backup fake refuses exactly as
+    `maintenance.backup()` does, so a route that skipped the start cannot reach
+    `spy.presses` at all -- and the last two lines are what say the server was
+    left as it was found rather than with a database nobody asked to run.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: qmb.StandardButton.Yes
+    )
+    db = _FakeDatabase(running=False)
+    services, spy, made = _with_database(ps, tmp_path, db)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: len(spy.presses) == 1, "the update started after the backup")
+    assert db.starts == 1, "nothing asked the database to start"
+    assert made.backups == 1, "the backup did not run"
+    assert db.stops == 1, "the database this press started was left running"
+    assert db.running is False, "the server was not left as it was found"
+
+
+def test_a_database_that_cannot_start_stops_the_update_and_fetches_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure sentence is unchanged, and it now carries docker's own reason.
+
+    `dml wow update`'s rule is untouched by T76: a backup that did not happen
+    stops the update. What changed is only what can fail -- the database was
+    down and could not be brought up, rather than the database was down.
+
+    The neighbour is asserted too, and it is the half that matters: nothing was
+    fetched. A route that reported the failure and pressed anyway would satisfy
+    the sentence on its own.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    warned: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "warning",
+        lambda parent, title, text, *a, **k: warned.append(text),
+    )
+    db = _FakeDatabase(
+        running=False,
+        refuses="ac-database did not report healthy within 180s, so no backup was taken",
+    )
+    services, spy, made = _with_database(ps, tmp_path, db)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.update_to_latest()
+    pump_until(lambda: bool(warned), "the failed start was reported")
+
+    assert warned[0].startswith("Backup failed — the update was not started")
+    assert "did not report healthy" in warned[0], "docker's own reason was dropped"
+    assert spy.presses == [], "the update fetched after the database could not be started"
+    assert made.backups == 0
+    assert db.stops == 0, "a container that was never started was stopped"
+
+
+def test_a_database_that_is_already_up_is_not_started_and_not_stopped(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half that would cost somebody their evening if it were wrong.
+
+    Back up now is pressed on servers people are playing on. `start()` answers
+    False there -- it started nothing -- and only that answer may run `stop()`.
+    A fix that stopped the container unconditionally would take a live server's
+    database away underneath its worldserver.
+    """
+    qmb = controller_view_module.QMessageBox
+    _answer(monkeypatch, qmb.StandardButton.Yes)
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox, "question", lambda *a, **k: qmb.StandardButton.Yes
+    )
+    db = _FakeDatabase(running=True)
+    services, spy, made = _with_database(ps, tmp_path, db)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.update_to_latest() is True
+    pump_until(lambda: len(spy.presses) == 1, "the update started after the backup")
+    assert made.backups == 1
+    assert db.stops == 0, "a database the user had running was stopped by a backup"
+    assert db.running is True
+
+
+def test_the_plain_backup_button_starts_the_database_the_same_way(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """One decision, both places -- T76's own open question, answered yes.
+
+    The plain Backup button failed on a stopped server for exactly the reason
+    the update's chained one did, and a user pressing the two an hour apart
+    would otherwise get two different answers to "is the database up?". Both go
+    through `_backup_with_the_database()`; this is the test that says the second
+    button was not forgotten, which is this project's commonest defect shape.
+    """
+    db = _FakeDatabase(running=False)
+    services, _, made = _with_database(ps, tmp_path, db)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.back_up()
+    pump_until(lambda: made.backups == 1, "the backup ran")
+    assert db.starts == 1 and db.stops == 1
+    assert db.running is False
+    assert "Backed up to backups" in view.maintenance_report.toPlainText()
+
+
+def test_a_tab_with_no_database_seam_backs_up_exactly_as_it_did_before(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`database_alone=None` is a real state and it must not be a crash.
+
+    It is what a `ControllerServices` built by hand carries -- a test, a future
+    game whose wiring is not written yet. The backup still runs; it simply has
+    nothing to start, which is what every build before 2026-09-16 did.
+    """
+    made = _FakeMaintenance()
+    services, _ = _latest(ps, tmp_path, made)
+    assert services.database_alone is None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    view.back_up()
+    pump_until(lambda: made.backups == 1, "the backup ran without a database seam")
+
+
+def test_every_game_wires_the_database_seam_to_its_own_container_and_daemon(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam reaches docker, for the right container, on the right daemon.
+
+    "The mechanism exists and nothing calls it" is this project's most expensive
+    defect shape, and a `DatabaseAlone` whose halves were never bound to
+    `docker.start_database` / `docker.stop_containers` would pass every test
+    above -- they all supply their own. So both halves are driven here, through
+    the object each game factory really builds, for all four games rather than
+    for the one that was being thought about.
+    """
+    started: list[tuple[str, object]] = []
+    stopped: list[tuple[list[str], object]] = []
+    reasons: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module.docker,
+        "start_database",
+        lambda spec, server_dir, because="", wsl_distro=None: (
+            started.append((spec.db, wsl_distro)) or reasons.append(because) or True
+        ),
+    )
+    monkeypatch.setattr(
+        controller_view_module.docker,
+        "stop_containers",
+        lambda names, wsl_distro=None: stopped.append((list(names), wsl_distro)),
+    )
+    catalog = load_catalog()
+    for game in controller_view_module._FACTORIES:
+        entry = catalog.get(game)
+        services = ControllerServices.for_entry(entry, tmp_path, None, "dml-arch")
+        alone = services.database_alone
+        assert alone is not None, f"{game} has no database seam"
+        assert alone.bring_up() is True
+        alone.take_down()
+        assert started[-1] == (entry.container_spec().db, "dml-arch"), game
+        assert stopped[-1] == ([entry.container_spec().db], "dml-arch"), game
+        # `because` completes the timeout sentence `start_database()` raises
+        # with, and it must say what was NOT done: a user reading "…did not
+        # report healthy within 180s, so no backup was taken" knows the state
+        # their server is in, which is the whole job of that sentence.
+        assert reasons[-1] == "no backup was taken", game

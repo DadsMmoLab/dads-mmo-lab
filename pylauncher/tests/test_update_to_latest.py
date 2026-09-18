@@ -1243,3 +1243,131 @@ def test_a_git_that_is_not_there_answers_none_rather_than_raising(tmp_path: Path
         assert real.commits_since(dest, OLD) is None
     finally:
         runner.run = saved  # type: ignore[assignment]
+
+
+# -- T77: what is on the pin, and what each direction says about it ----------
+
+
+def _rev(sha: str, *, ahead: int | None = None, repo: str = "x/y") -> native.SourceRev:
+    return native.SourceRev(repo, f"{sha[:7]} · 2026-09-02", pin=PINNED, ahead=ahead)
+
+
+def test_a_shallow_clone_back_on_its_pin_reads_as_being_on_it(tmp_path: Path) -> None:
+    """The case the whole fix is for, and the one an `ahead == 0` rule would miss.
+
+    Seven of the nine shipped sources are `depth: 1`, where `commits_since()`
+    cannot count and records `None` -- so on the install this button exists for,
+    "how far past the pin" has no answer and the SHA is the only evidence there
+    is. The live gate's record after a return is exactly this shape:
+    `{"built": "993f180 · 2026-09-02", "pin": "993f1809…", "ahead": null}`.
+    """
+    assert native.on_its_pin(_rev(PINNED)) is True
+    assert native.past_the_tested_pin(_state(_rev(PINNED))) is False
+
+
+def test_a_counted_distance_refutes_the_sha_rather_than_being_ignored(tmp_path: Path) -> None:
+    """`ahead` can only say no, and a record that says both is not to be trusted.
+
+    A non-zero count is a measurement of the same two commits, so a record whose
+    sha matches the pin and whose count says twelve is damaged. Answering "not
+    on the pin" there keeps the way back on screen: the failure that costs an
+    hour of compiling is better than the one that strands somebody on untested
+    code with no control that returns them.
+    """
+    assert native.on_its_pin(_rev(PINNED, ahead=12)) is False
+    assert native.on_its_pin(_rev(PINNED, ahead=0)) is True
+    # And a `built` nothing can read against a pin is not on it either.
+    assert native.on_its_pin(native.SourceRev("x/y", "unknown", pin=PINNED)) is False
+    # Nor is one with no pin at all -- an entry that does not pin its sources
+    # has no tested commit to be on.
+    assert native.on_its_pin(native.SourceRev("x/y", f"{PINNED[:7]} · 2026-09-02")) is False
+
+
+def _state(*revs: native.SourceRev) -> native.InstallState:
+    return native.InstallState(game_id="wow-wotlk", install_id="x", source_revs=revs)
+
+
+def test_the_version_line_has_three_shapes_and_only_one_of_them_offers_the_way_back() -> None:
+    """Moved, on the pin, and mixed -- the sentence and the button in one table.
+
+    The middle shape is T77's third item. After a return the line read *"built
+    from 993f180 (2026-09-02); the tested pin is 993f180"* -- the same sha
+    twice, and the reader had to compare them character by character to learn
+    the one thing the line existed to say (live gate, 2026-09-16).
+
+    The mixed row is why the rule is `any` and not `all`: one source home and
+    one not is not a returned install, and the press that finishes the job has
+    to stay offered.
+    """
+    moved = _state(_rev(NEW))
+    assert native.source_revs_line(moved) == (
+        f"Built from {NEW[:7]} (2026-09-02); the tested pin is {PINNED[:7]}"
+    )
+    assert native.past_the_tested_pin(moved) is True
+
+    home = _state(_rev(PINNED))
+    assert native.source_revs_line(home) == f"On the tested pin {PINNED[:7]} (2026-09-02)"
+    assert native.past_the_tested_pin(home) is False
+
+    mixed = _state(_rev(PINNED, repo="a/b"), _rev(NEW, repo="c/d"))
+    assert native.source_revs_line(mixed).splitlines() == [
+        f"a/b: on the tested pin {PINNED[:7]} (2026-09-02)",
+        f"c/d: built from {NEW[:7]} (2026-09-02); the tested pin is {PINNED[:7]}",
+    ]
+    assert native.past_the_tested_pin(mixed) is True
+
+
+def test_an_install_with_no_record_says_nothing_and_offers_no_way_back() -> None:
+    """Every install that has never pressed the button, and the `None` a bad read gives."""
+    assert native.source_version(None) == native.SourceVersion(line="", past_the_pin=False)
+    assert native.source_version(_state()) == native.SourceVersion(line="", past_the_pin=False)
+
+
+def test_each_direction_opens_with_the_fact_that_is_true_of_it(tmp_path: Path) -> None:
+    """The route's first note is the opposite claim in the two directions.
+
+    The way out is *"code nobody has tested with this app"*; the way back is
+    the commit the gates ran on. Sharing one sentence told a user returning to
+    the tested commit that it was untested (live gate, 2026-09-16, press 6).
+
+    Driven through the real route in both directions, not asserted against the
+    constants: a route that yielded the right constant from the wrong branch is
+    the defect, and only the press can tell them apart. The last two assertions
+    are the ones that fail if the two ever become the same string again.
+    """
+    rec, server_dir = _ready(tmp_path)
+    out = _press(rec, server_dir)
+    rec.clones.clear()
+    back = _press(rec, server_dir, to_pin=True)
+
+    assert native.UPDATE_TO_LATEST_OPENING_NOTE in out
+    assert native.RETURN_TO_PIN_OPENING_NOTE in back
+    assert native.UPDATE_TO_LATEST_OPENING_NOTE not in back
+    assert native.RETURN_TO_PIN_OPENING_NOTE not in out
+
+    forwards = native.UPDATE_TO_LATEST_OPENING_NOTE.split(".")[0]
+    backwards = native.RETURN_TO_PIN_OPENING_NOTE.split(".")[0]
+    assert forwards != backwards
+    assert forwards == "This is code nobody has tested with this app"
+    assert backwards.startswith("This is the commit this app was tested against")
+    # True of the way back and the reason somebody might press it by mistake:
+    # it is not a quick undo. The dialog says so too; this is the note they see
+    # after pressing, which is where the wait becomes real.
+    assert "still a full build" in native.RETURN_TO_PIN_OPENING_NOTE
+    # Both keep the promise the restore actually makes.
+    for note in (native.UPDATE_TO_LATEST_OPENING_NOTE, native.RETURN_TO_PIN_OPENING_NOTE):
+        assert "the build you have keeps running" in note
+
+
+def test_the_two_confirmations_open_differently_and_neither_claims_an_undo() -> None:
+    """The dialogs, which are the sentence BEFORE the press, on the same rule as the notes."""
+    entry = ENTRY
+    forwards = native.update_to_latest_confirmation(entry, Path("/srv"), "x/y")
+    backwards = native.return_to_pin_confirmation(entry, Path("/srv"), "x/y")
+
+    assert forwards.split("\n\n")[0] != backwards.split("\n\n")[0]
+    assert "newest x/y code" in forwards.split("\n\n")[0]
+    assert "commit this app was tested against" in backwards.split("\n\n")[0]
+    # Neither offers the return as a fix for what the newer server wrote.
+    assert "is not put back" in forwards
+    assert "does NOT undo" in backwards
