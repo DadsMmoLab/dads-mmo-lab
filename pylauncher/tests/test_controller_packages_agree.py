@@ -445,8 +445,22 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # absence is the module surface too -- and a day when it is offered
         # without the two above would be a game reading a version out of
         # folders it has just said it cannot list.
+        # T68's `unfinished_modules` rides with them for the fourth size of the
+        # same fact: which of those folders has a claim saying its install never
+        # finished. A game with no `modules/` folder has no clone and no claim,
+        # so its absence is the module surface too -- and offering it without
+        # `installed_modules` would be a game reading completion marks out of
+        # folders it has just said it cannot list.
         uncounted = (
-            set() if counted else {"module_updates", "installed_modules", "module_version"} | custom
+            set()
+            if counted
+            else {
+                "module_updates",
+                "installed_modules",
+                "unfinished_modules",
+                "module_version",
+            }
+            | custom
         )
         # 8.6's My Party, and the one seam whose absence is decided by the
         # ENGINE rather than by a measurement. The route is `mod-ale`, an

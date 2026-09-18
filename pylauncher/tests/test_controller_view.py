@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -9234,227 +9235,261 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
 
 
-# --------------------------------------------------------------------------
-# T47: the question that stands between a custom install and a `reset --hard`
-# over a checkout this app already owns. The dialog is the view's; every
-# refusal stays the engine's.
-# --------------------------------------------------------------------------
-
-_REPLACE_QUESTION = (
-    "modules/mod-my-thing is a checkout of https://github.com/them/mod-my-thing.git, not of "
-    "https://github.com/you/mod-my-thing.git.\n\nReplace it?"
-)
+# ------------------------------- T68: a clone whose install never finished keeps Install
 
 
-def _asked(monkeypatch: pytest.MonkeyPatch, answer: object) -> list[tuple[str, str]]:
-    """Record every `QMessageBox.question` this view opens and answer them all the same.
+class _ClonesFromNothing:
+    """A `Git` that fills the destination with `files` instead of cloning.
 
-    The answer is a plain `int` where a caller passes the enum member, because
-    that is what this PySide6's static `question()` really returns (T33) and a
-    fake handing back the member hides a comparison made with `is`.
+    The real `Applier` runs here, over a real server directory, so the claim
+    these tests read is the one `install()` wrote and not a fixture's idea of
+    one. Only the network is faked.
     """
-    seen: list[tuple[str, str]] = []
 
-    def question(_parent: object, title: str, text: str, *_a: object, **_k: object) -> object:
-        seen.append((title, text))
-        return answer
+    def __init__(self, files: dict[str, str]) -> None:
+        self.files = files
+        self.clones: list[Path] = []
 
-    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
-    return seen
+    def clone(self, spec: object) -> None:
+        dest = cast(Path, spec.dest)  # type: ignore[attr-defined]
+        self.clones.append(dest)
+        for name, text in self.files.items():
+            path = dest / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        return None
+
+    def has_no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        return None
+
+    def remote_url(self, dest: Path) -> str | None:
+        return None
 
 
-def test_cancelling_the_replace_question_installs_nothing(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The default answer starts no job at all -- `route` is never called.
+class _RecordingSql:
+    def __init__(self) -> None:
+        self.files: list[tuple[str, str]] = []
+        self.statements: list[tuple[str, str]] = []
 
-    Cancel, Escape and the window's close button all arrive as `NoButton`, and
-    `said_yes()` is what makes all three mean no; the `int` below is the No
-    button itself, which is the one a mis-spelled comparison would read as yes.
+    def run_file(self, db: str, path: Path) -> None:
+        self.files.append((db, path.name))
+
+    def run_statement(self, db: str, statement: str) -> None:
+        self.statements.append((db, statement))
+
+
+# `mod-arac` is the shipped module this is measured on: family `module`, no
+# prompts, nothing in `requires`, and one install-time `direct` world SQL file —
+# which is exactly what the T7 guard refuses while the world is up.
+ARAC = "mod-arac"
+ARAC_SQL = "data/sql/db-world/arac.sql"
+
+
+def _arac_view(
+    ps: _Ps, tmp_path: Path, *, world_running: bool
+) -> tuple[ControllerView, _ClonesFromNothing, _RecordingSql]:
+    """The real Modules tab over a real applier and a real server directory.
+
+    Both readings come from `yulon.apply` itself rather than from a mapping this
+    test holds: the row is drawn from what the install really left on disk,
+    which is the whole question T68 asks.
     """
+    git = _ClonesFromNothing({ARAC_SQL: "UPDATE creature_template SET name = 'x';\n"})
+    sql = _RecordingSql()
     services = _services(ps, tmp_path, [])
-    route = _with_custom_route(services)
-    route.question = _REPLACE_QUESTION
-    seen = _asked(monkeypatch, int(controller_view_module.QMessageBox.StandardButton.No))
-    view = ControllerView(
-        WOTLK,
+    object.__setattr__(
         services,
-        status_poll_ms=0,
-        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+        "applier",
+        Applier(tmp_path, git=git, sql=sql, world_running=lambda: world_running),
     )
-
-    view.install_module_from_link()
-
-    assert [title for title, _text in seen] == ["Replace the checkout of mod-my-thing?"]
-    assert seen[0][1] == _REPLACE_QUESTION, "the engine's sentence, not one written here"
-    assert route.installed == [], "the install seam was never reached"
-    assert view.module_report.toPlainText() == (
-        "install from link mod-my-thing: cancelled — nothing on this machine was changed."
+    object.__setattr__(
+        services, "installed_modules", lambda: apply_module.installed_clones(tmp_path)
     )
+    object.__setattr__(
+        services, "unfinished_modules", lambda: apply_module.unfinished_clones(tmp_path)
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0), git, sql
 
 
-def test_answering_the_replace_question_installs_with_the_agreement_carried(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_an_install_the_running_world_refused_keeps_the_rows_install_button(
+    qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Yes reaches the engine as `replacing=True`, which is the only thing it buys.
+    """T68, measured on the tab: press Install with the world up, and press it again.
 
-    The flag is asserted on the seam rather than on the report: an install that
-    ran with `replacing=False` after the user said yes would be refused by the
-    engine, and the tab would show a refusal for a question they had answered.
+    Before this the clone was on disk by the time the guard refused, so the row
+    redrew as `Remove` and the refusal's own *"Press Stop, then install again"*
+    named a press that was not on the row at all — only in the context menu.
+
+    Three assertions, and the second is the one that keeps the first honest:
+    the button says Install, the folder is STILL listed as installed (nothing
+    here pretends the clone left), and pressing the button reaches the applier's
+    `install()` a second time — read off the clone seam, which is the artefact
+    that route leaves behind, not off the report sentence.
     """
-    services = _services(ps, tmp_path, [])
-    route = _with_custom_route(services)
-    route.question = _REPLACE_QUESTION
-    _asked(monkeypatch, int(controller_view_module.QMessageBox.StandardButton.Yes))
-    view = ControllerView(
-        WOTLK,
-        services,
-        status_poll_ms=0,
-        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
-    )
+    view, git, sql = _arac_view(ps, tmp_path, world_running=True)
 
-    view.install_module_from_link()
+    view.modules_panel.row(ARAC).install_button.click()
 
-    assert route.installed == [("mod-my-thing", None)]
-    assert route.replacing == [True]
+    assert "the world server is running" in view.module_report.toPlainText()
+    assert sql.files == []
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is True
+    assert row.remove_button is None
+    assert row.install_button is not None and row.install_button.text() == "Install"
+    assert row.install_button.isEnabled()
+
+    row.install_button.click()
+
+    assert git.clones == [tmp_path / "modules" / ARAC] * 2
 
 
-def test_an_ordinary_custom_install_opens_no_dialog_and_agrees_to_nothing(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_an_install_that_finished_leaves_the_row_offering_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Nothing at the clone path means no question -- asserted by making one fatal.
+    """The control for the test above: same tab, same module, world stopped.
 
-    The commonest press must not grow a dialog, and the way to prove that is
-    not to check a message: `QMessageBox.question` itself raises here, so a
-    guard that asked anyway fails this test rather than changing its wording.
+    Only `world_running` differs, so a rule that put Install on every installed
+    row — or one that never wrote the finished mark — fails here while the test
+    above still passes.
     """
-    services = _services(ps, tmp_path, [])
-    route = _with_custom_route(services)
-    assert route.question is None
+    view, _git, sql = _arac_view(ps, tmp_path, world_running=False)
 
-    def never(*_a: object, **_k: object) -> NoReturn:
-        raise AssertionError("an install with nothing to replace must ask nothing")
+    view.modules_panel.row(ARAC).install_button.click()
 
-    monkeypatch.setattr(controller_view_module.QMessageBox, "question", never)
-    view = ControllerView(
-        WOTLK,
-        services,
-        status_poll_ms=0,
-        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
-    )
-
-    view.install_module_from_link()
-
-    assert route.installed == [("mod-my-thing", None)]
-    assert route.replacing == [False]
+    assert sql.files == [("world", "arac.sql")]
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is False
+    assert row.install_button is None
+    assert row.remove_button is not None and row.remove_button.text() == "Remove"
 
 
-def test_a_seam_that_cannot_answer_asks_nothing_and_leaves_the_refusal_to_the_engine(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_clone_from_a_build_before_the_mark_still_offers_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """A question that cannot be computed must not crash the GUI thread.
+    """An older build's clone must not flip to Install the day this ships.
 
-    `replacement_question()` reads a claim file and asks git what a checkout is
-    a checkout of, and both can fail. The press goes ahead without the question
-    -- which is safe in one direction only, and it is this one: the install
-    runs with `replacing=False`, so the engine's own guard refuses anything it
-    would have asked about and says "Nothing was changed."
+    Every previous build wrote the claim right after the clone and nothing
+    else, so its record carries no completion key at all. The fixture is this
+    app's own writer with that one key removed — the older record rather than a
+    guess at it — and the row it produces is the one the user had yesterday.
     """
-    services = _services(ps, tmp_path, [])
-    route = _with_custom_route(services)
+    clone = tmp_path / "modules" / ARAC
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(clone, item_id=ARAC, url="https://github.com/x/mod-arac.git")
+    claim = clone / apply_module.CLAIM_FILE
+    old = json.loads(claim.read_text(encoding="utf-8"))
+    del old[apply_module.COMPLETED_KEY]
+    claim.write_text(json.dumps(old), encoding="utf-8")
 
-    def boom(_manifest: object) -> NoReturn:
-        raise OSError("git went away")
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=True)
 
-    services.module_replacement_question = boom
-    monkeypatch.setattr(
-        controller_view_module.QMessageBox,
-        "question",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("nothing to ask")),
-    )
-    view = ControllerView(
-        WOTLK,
-        services,
-        status_poll_ms=0,
-        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
-    )
-
-    view.install_module_from_link()
-
-    assert route.replacing == [False]
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is False
+    assert row.install_button is None
+    assert row.remove_button is not None and row.remove_button.text() == "Remove"
 
 
-def _tree(root: Path) -> dict[str, bytes]:
-    """Every file under `root`, by relative path, as bytes. `.git` included."""
-    return {
-        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
-    }
+def _half_installed(server_dir: Path, folder: str, item_id: str) -> Path:
+    """A clone whose claim says this app's install of it never finished.
 
-
-@pytest.mark.skipif(
-    not apply_module.git_available(), reason="needs a host git to make a real checkout"
-)
-def test_cancelling_leaves_a_real_clone_of_another_repository_byte_for_byte(
-    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The whole route with no fake in the middle: a real checkout, and Cancel.
-
-    `modules/mod-my-thing` here is a real git clone with this app's own claim
-    inside it, of a repository that is not the one the pasted link names -- the
-    shape a user reaches by installing two forks of the same module. The seams
-    are the real `controller_wow_wotlk.modules` bindings over a real `Applier`
-    and a real `RunnerGit`, so the question comes from `Applier.
-    replacement_question()` and the id from `module_source.derive_link()`.
-
-    What it asserts is the only thing a user cares about: the folder is
-    byte-identical afterwards, `.git` included. A `git fetch` + `reset --hard`
-    rewrites `.git/FETCH_HEAD` even when it lands on the same commit, so this
-    fails for a run that reached the clone seam at all.
+    Written with the app's own writer rather than hand-rolled JSON, so it is the
+    record `install()` leaves behind when a step raises and not a guess at one.
     """
-    server_dir = tmp_path / "server"
-    theirs = tmp_path / "theirs"
-    theirs.mkdir(parents=True)
-    (theirs / "src").mkdir()
-    (theirs / "src" / "Thing.cpp").write_text("// theirs\n", encoding="utf-8")
-    author = ["-c", "user.email=t@example.invalid", "-c", "user.name=t"]
-    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=theirs, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=theirs, check=True)
-    subprocess.run([*["git", *author], "commit", "-qm", "v1"], cwd=theirs, check=True)
-    clone = server_dir / "modules" / "mod-my-thing"
-    clone.parent.mkdir(parents=True)
-    subprocess.run(["git", "clone", "-q", str(theirs), str(clone)], check=True)
+    clone = server_dir / folder / item_id
+    clone.mkdir(parents=True)
     apply_module.write_clone_claim(
-        clone, item_id="mod-my-thing", url="https://github.com/them/mod-my-thing.git"
+        clone, item_id=item_id, url=f"https://github.com/x/{item_id}.git", completed=False
     )
-    applier = Applier(
-        server_dir,
-        git=RunnerGit(),
-        remote_url=lambda _dest: "https://github.com/them/mod-my-thing.git",
-    )
-    services = _services(ps, tmp_path, [])
-    services.store = modules.store()
-    services.module_from_link = modules.derive_link
-    services.module_install_custom = modules.install_custom(applier)
-    services.module_replacement_question = modules.replacement_question(applier)
-    seen = _asked(monkeypatch, int(controller_view_module.QMessageBox.StandardButton.No))
-    view = ControllerView(
-        WOTLK,
-        services,
-        status_poll_ms=0,
-        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
-    )
-    # The `ps` fixture fakes `runner.run` so a `Controller` works without
-    # Docker, and a real `RunnerGit` runs through the same seam. Put the real
-    # one back now that the view is built: from here on the only subprocess this
-    # test starts is git, against a repository on this disk.
-    monkeypatch.setattr(runner, "run", _REAL_RUN)
-    before = _tree(clone)
-    assert before, "the fixture must be a real checkout"
+    return clone
 
-    view.install_module_from_link()
 
-    assert len(seen) == 1, "the real seam found the clone and asked about it"
-    assert "https://github.com/them/mod-my-thing.git" in seen[0][1]
-    assert "https://github.com/you/mod-my-thing" in seen[0][1]
-    assert _tree(clone) == before, "the checkout was not touched"
-    assert "cancelled" in view.module_report.toPlainText()
+def test_an_unfinished_clone_whose_requirement_is_gone_offers_a_locked_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 1's must-fix: T68's Install is still T69's Install, locks and all.
+
+    `mod-city-bots` names `mod-playerbots` in `requires`. A clone of it whose
+    install never finished, on a server where that requirement is no longer
+    there, now offers Install again — and the applier would refuse that press in
+    `_requires_refusal()`. The row therefore has to lock it and say why, which is
+    the invariant T55 and T69 established and which the first version of T68
+    broke by asking the locks of `not here` rows alone.
+
+    The last assertion is the half that keeps the first honest: the very press
+    this row offers is put to the REAL applier, and it refuses. A locked button
+    whose applier would have allowed the press would be a different defect.
+    """
+    _half_installed(tmp_path, "modules", "mod-city-bots")
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    row = view.modules_panel.row("mod-city-bots")
+    assert row.data.installed is True and row.data.install_incomplete is True
+    assert row.install_button is not None and row.install_button.text() == "Install"
+    assert row.install_button.isEnabled() is False
+    assert row.data.installable is False
+    assert row.data.install_reason == apply_module.requirement_refusal(
+        "mod-city-bots", "mod-playerbots"
+    )
+    assert [b.text() for b in row.chip_buttons if "mod-playerbots" in b.text()] == [
+        modules_panel.chip_needs_label("mod-playerbots")
+    ]
+
+    applier = view.services.applier
+    assert isinstance(applier, Applier)
+    with pytest.raises(apply_module.ApplyError, match="mod-playerbots"):
+        applier.install(view._manifests[("module", "mod-city-bots")])
+
+
+def test_an_unfinished_clone_that_conflicts_with_an_installed_module_locks_its_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The other lock, on the other family, and refused by the other guard.
+
+    `buff-mobs` and `nerf-mobs` are declared alternatives. A half-installed
+    `buff-mobs` beside a finished `nerf-mobs` offers Install — which
+    `_conflict_refusal()` refuses — so the row locks it in the conflict's own
+    words.
+    """
+    clones = "sql_scripts/clones"
+    _half_installed(tmp_path, clones, "buff-mobs")
+    nerf = tmp_path / clones / "nerf-mobs"
+    nerf.mkdir(parents=True)
+    apply_module.write_clone_claim(
+        nerf, item_id="nerf-mobs", url="https://github.com/x/nerf.git", completed=True
+    )
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    nerf_name = view._manifests[("mod", "nerf-mobs")].name
+    row = view.modules_panel.row("buff-mobs")
+    assert row.data.install_incomplete is True
+    assert row.install_button is not None and row.install_button.isEnabled() is False
+    assert row.data.install_reason == modules_panel.conflict_reason(nerf_name)
+    assert [b.text() for b in row.chip_buttons if nerf_name in b.text()] == [
+        modules_panel.chip_conflicts_with_label(nerf_name)
+    ]
+
+    applier = view.services.applier
+    assert isinstance(applier, Applier)
+    with pytest.raises(apply_module.ApplyError, match="nerf-mobs"):
+        applier.install(view._manifests[("mod", "buff-mobs")])
+
+
+def test_an_unfinished_clone_with_nothing_in_its_way_offers_a_live_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The control for the two above: the lock is the exception, not the rule.
+
+    `mod-arac` declares neither a requirement nor a conflict, so its
+    half-installed row offers the press with no reason attached — which is what
+    T68 is for. A lock arm that locked every unfinished row would pass both
+    tests above and fail here.
+    """
+    _half_installed(tmp_path, "modules", ARAC)
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    row = view.modules_panel.row(ARAC)
+    assert row.data.install_incomplete is True
+    assert row.data.installable is True and row.data.install_reason is None
+    assert row.install_button is not None and row.install_button.isEnabled() is True

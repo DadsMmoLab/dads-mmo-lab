@@ -280,6 +280,22 @@ class ModuleRow:
     install_reason: str | None = None
     """The sentence behind `installable=False`, or `None` when Install is open."""
 
+    install_incomplete: bool = False
+    """This clone is on disk and its install never finished, so the row keeps Install (T68).
+
+    `apply.unfinished_clones()`'s answer for this `(family, id)`: the claim this
+    app wrote into the clone says `install_completed: false`, which is the state
+    between the clone landing and the last of the install's steps returning.
+
+    It changes the row's BUTTON and nothing else. `installed` stays True, so the
+    badge, the sort order, the version line, the chips and `catalogued`'s
+    `NOT_IN_CATALOG` reading are all untouched: the folder IS there, and a row
+    that claimed otherwise would be lying about the disk to make a button
+    appear. What is wrong is only that the one press on offer was Remove, when
+    the applier's own refusal had just said "Press Stop, then install again"
+    (T68, measured 2026-09-16).
+    """
+
 
 @dataclass(frozen=True)
 class SessionState:
@@ -500,7 +516,14 @@ def _chips_for(
                 "removing it would break them. Remove them first.",
             )
         )
-    if blocked_by is not None and not installed:
+    # The two lock chips follow the CALLER's decision and no longer re-derive
+    # half of it from `installed` (T68). `build_module_rows()` passes a name
+    # here only for a row that offers Install, which since T68 includes a clone
+    # whose install never finished -- and on that row `and not installed` would
+    # have dropped the one sentence saying why the button is locked, leaving the
+    # reason in the tooltip alone. The condition was never a second opinion; it
+    # was the same one spelled twice, and the copy that went stale is this one.
+    if blocked_by is not None:
         chips.append(
             Chip(
                 "fact",
@@ -508,7 +531,7 @@ def _chips_for(
                 conflict_reason(blocked_by),
             )
         )
-    if needs is not None and not installed:
+    if needs is not None:
         chips.append(
             Chip(
                 "fact",
@@ -533,6 +556,7 @@ def build_module_rows(
     session: SessionState,
     client_dir: Path | None,
     versions: Mapping[tuple[str, str], str] | None = None,
+    unfinished: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[ModuleRow, ...]:
     """Every row the Modules tab draws, in the order it draws them.
 
@@ -545,8 +569,15 @@ def build_module_rows(
     then the clones no manifest matched. "Installed first" is the whole of T42's
     first line -- a user who adopted a server he already ran reads the top of
     each card and sees what he has.
+
+    `unfinished` is `apply.unfinished_clones()`'s answer, in the same shape and
+    read from the same folders (T68). It is a SUBSET of `installed` -- both
+    walk the clone directories -- and it is passed separately rather than folded
+    in because the two facts are different questions with different remedies,
+    and every reader of `installed` today means "the folder is there".
     """
     catalog: list[Manifest] = list(manifests)
+    half_installed = unfinished or {}
     # What is ALREADY known, keyed the way the rows are. Handed in rather than
     # read here: this function is pure and stays pure, and the reading is the
     # one part of the version line that costs a subprocess (`VersionCache`).
@@ -612,14 +643,28 @@ def build_module_rows(
 
     def _row(manifest: Manifest) -> ModuleRow:
         here = (manifest.type, manifest.id) in installed_keys
+        # T68. `unfinished` is a subset of `installed` by construction, so this
+        # is asked only where the folder is here -- a row with no clone has no
+        # claim to have been read.
+        halfway = here and manifest.id in half_installed.get(manifest.type, frozenset())
+        # The two locks are asked of every row that OFFERS Install, which since
+        # T68 includes a clone whose install never finished (review round 1).
+        # They were asked of `not here` alone, which was the same set until this
+        # ticket put Install back on a half-installed row: a module whose
+        # requirement has since been removed, or one whose declared alternative
+        # is installed, would have shown an ENABLED Install with no reason on it,
+        # and the applier would have refused the press after the fact
+        # (`_conflict_refusal()`, `_requires_refusal()`) -- the exact invariant
+        # T55 and T69 exist to keep.
+        offers_install = not here or halfway
         needed_by = dependants.get(manifest.id, [])
-        blocked_by = None if here else _blocked_by(manifest)
+        blocked_by = _blocked_by(manifest) if offers_install else None
         # One lock and one reason. A conflict is about what is HERE and a
         # missing requirement about what is not, and a row told both at once
         # would have the user remove one module in order to be told to install
         # another. The conflict wins because it is the older answer and the one
         # whose remedy is on this machine already.
-        needs = None if here or blocked_by is not None else _needs(manifest)
+        needs = _needs(manifest) if offers_install and blocked_by is None else None
         lock_reason = (
             conflict_reason(blocked_by)
             if blocked_by is not None
@@ -660,6 +705,7 @@ def build_module_rows(
             version=seen_versions.get((manifest.type, manifest.id)) if here else None,
             installable=lock_reason is None,
             install_reason=lock_reason,
+            install_incomplete=halfway,
         )
 
     # T41's per-FOLDER accounting, moved here from `reload_modules()`. `ale` and
@@ -849,7 +895,13 @@ class RowWidget(QFrame):
         self.install_button: QPushButton | None = None
         self.remove_button: QPushButton | None = None
         column = QVBoxLayout()
-        if data.catalogued and not data.installed:
+        # T68: a clone whose install never finished keeps Install, even though
+        # the folder is there. The refusal that produced that state says "Press
+        # Stop, then install again", and before this the only "again" on offer
+        # was the context menu's -- the row itself read Remove. Remove is still
+        # reachable there, which is the same trade the other way round and the
+        # one the owner decided on (2026-09-16).
+        if data.catalogued and (not data.installed or data.install_incomplete):
             self.install_button = QPushButton("Install", self)
             self.install_button.clicked.connect(lambda: self.pressed_install.emit(self.data.id))
             if not data.installable:
