@@ -6,8 +6,7 @@
   "game": "wow-tortoise",
   "description": "The in-game panel for the bots this server compiles in: /tbm opens it, and it drives the same .bot commands from a window instead of the chat box. Client-side only - it is copied into your WoW client's Interface/AddOns, nothing is written to the server.",
   "source": {
-    "repo": "Sagiroth/TortoiseBotsManager",
-    "rev": "65ef0b2f6531652de990bba7bfc3d4f70a9e9bb3"
+    "repo": "Sagiroth/TortoiseBotsManager"
   },
   "build": {
     "rebuild": false,
@@ -33,9 +32,12 @@
     "surface that HAS one.",
     "Interface 11200 (Vanilla 1.12) against the 1.18.1 / build 7272 Turtle client, which is",
     "what this entry's `client` block declares and what the client reports.",
-    "The whole pinned checkout is copied, `.git` and README and `tests/` included: `client`",
-    "steps take a path in the clone and this addon IS the repository root. WoW reads the",
-    "`.toc` and the files it lists and ignores the rest.",
+    "The whole checkout is copied, README and `tests/` included: `client` steps take a path",
+    "in the clone and this addon IS the repository root. WoW reads the `.toc` and the files",
+    "it lists and ignores the rest. Two names are left behind (T65): `.git`, whose 0444 pack",
+    "files made every SECOND install of this addon die with Errno 13 before it had landed a",
+    "file, and this app's own `.yulon-clone.json`. Both are bookkeeping, the history stays in",
+    "the clone, and the client never reads either.",
     "WRITTEN AT INSTALL, not at Play. `_ApplyEngine._client()` (apply.py:2173-2192) is the one",
     "writer into a client folder in this app, and it runs from the Modules tab's Install press;",
     "Play launches the client it finds. The tab has to have been given a client dir for the",

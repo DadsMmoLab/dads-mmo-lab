@@ -368,11 +368,16 @@ def test_persist_is_atomic_and_a_torn_write_leaves_the_previous_file(
 ) -> None:
     """A half-written user manifest is a list entry nothing in the app can remove.
 
-    It does not parse; the store raises `ManifestError`; the tab draws
-    `!! could not load modules: …` and every module — shipped ones included —
-    disappears from the list behind one broken custom file. So the file appears at
-    its name whole or not at all: written beside it, then renamed over.
+    It does not parse, so it is a row the user asked for and cannot have. Since
+    T46 that costs the row and not the family — the store skips a user item it
+    cannot load and names it — but the row is still gone, and a torn file is
+    still a list entry nothing in the app can remove. So the file appears at its
+    name whole or not at all: written beside it, then renamed over.
     `write_clone_claim()` made this argument first and this is the same shape.
+
+    Before T46 the cost was the whole family: the store raised, and the tab drew
+    `!! could not load modules: …` with every shipped module gone behind one
+    broken custom file. That is what this atomicity was originally defending.
     """
     module_source.persist(tmp_path, _link("you/mod-my-thing"), shipped_ids=())
     items = tmp_path / GAME / "modules"

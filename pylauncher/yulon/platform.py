@@ -1459,6 +1459,24 @@ to log out, log back in, click Install, and meet the identical failure with no
 explanation (review, 2026-08-24).
 """
 
+DOCKER_GROUP_JOIN_BLOCKED_STEP = (
+    "You said yes, but there is no docker group to add {user} to yet: an earlier step failed "
+    "and the group is created by the package it never installed. This is the same problem, not "
+    "a second one — fix the first failure above and the join goes with it."
+)
+"""The join failed as a CONSEQUENCE, so it is reported as one and gives no instruction.
+
+`DOCKER_GROUP_JOIN_FAILED_STEP` ends in "To do it yourself: sudo usermod -aG
+docker {user}" — which is the right advice when `usermod` is the only thing
+that failed, and is advice that cannot possibly work when it is not. A Steam
+Deck whose keyring was never initialised installed no package, so it had no
+`docker.service` and no `docker` group, and the one actionable line we printed
+was `sudo usermod -aG docker deck`: it fails again, identically, for the same
+root cause (T57, from a 0.8.65-Public report, 2026-09-13). Which of the two
+sentences is used is decided by `_ensure_docker_linux()` from the position of
+the `usermod` skip in the list, not from the fact that it failed.
+"""
+
 DOCKER_GROUP_UNASKED_STEP = (
     "Skipped joining the docker group: it grants root-equivalent access, and with nobody to "
     "ask Yu'lon never makes that change. To do it yourself: sudo usermod -aG docker {user}, "
@@ -1477,6 +1495,86 @@ padding either: `usermod` does not change a running process's supplementary
 groups, so `docker_ready()` stays false for the rest of this run even when the
 answer was yes. Saying otherwise would promise an install that cannot start.
 """
+
+
+DOCKER_SETUP_FIRST_FAILURE_STEP = "Start here, with the first step that failed — {cause}"
+"""The remedy belongs to the FIRST failure in a chain, never to the last.
+
+The general form of T57, and it is not SteamOS-specific: when provisioning
+reports "Some steps did not run" with three entries, the second and third
+usually failed BECAUSE of the first, and advice aimed at the last one sends the
+user to a command that fails again for the cause nobody named. `usermod` cannot
+add anybody to a group that the package which was never installed would have
+created.
+"""
+
+_PACMAN_KEYRING_CAUSE = (
+    "this machine's package keyring was never set up, so pacman refuses every signed package "
+    "and nothing after it had a docker service or a docker group to work with."
+)
+"""The Steam Deck case from T57's report, and the only remedy here that is not generic.
+
+Sourced from this repo's own SteamOS scripts rather than from a guess:
+`archive/guides/Steam-Update-Fix/fix-after-update.sh` and
+`archive/guides/Maplestory/install-maplestory.sh` both rebuild the keyring with
+`pacman-key --init` followed by `--populate archlinux` and `--populate holo`.
+Nothing beyond those two commands is claimed: reinstalling the keyring by
+deleting `/etc/pacman.d/gnupg`, which both scripts also do, is destructive and
+is not advice to hand a user who told us they are "terrible with linux".
+
+The read-only root filesystem is a SteamOS fact, not an Arch one, so the
+sentence that mentions it is added only when `is_steamos()` said yes —
+`steamos-readonly` is not a command on the other pacman distros, and naming it
+there would be the same defect in a new place.
+"""
+
+_STEAMOS_READONLY_CAUSE = (
+    " On SteamOS the system files are read-only until you unlock them, so sudo "
+    "steamos-readonly disable comes first (SteamOS re-locks itself on the next update)."
+)
+
+_PACMAN_KEYRING_FIX = (
+    " Run sudo pacman-key --init, then sudo pacman-key --populate archlinux holo, then press "
+    "Install again."
+)
+
+_KEYRING_WORDS = ("keyring", "pacman-key", "required key", "signature from")
+"""What pacman says when the keyring is the cause; `_run_steps()` keeps its stderr verbatim."""
+
+
+def _step_command(step: str) -> str:
+    """The command a `skipped` entry is about, without its reason."""
+    return step.split(":", 1)[0].strip()
+
+
+def docker_setup_remedy(step: str, *, steamos: bool) -> str:
+    """Plain words for why `step` — the FIRST failed step — stopped, and what to run.
+
+    `step` is one entry of `ProvisionReport.skipped`, which `_run_steps()`
+    writes as `"<command>: <why>"`. Everything before the first colon is the
+    command as it was shown; commands here are argv lists of package managers
+    and never contain one.
+
+    Only the pacman keyring gets a named cause, because it is the only one this
+    project has a real capture of (T57) and a source for. Every other first
+    failure is reported as itself with its own command to run in a terminal,
+    which is honest and is still an enormous improvement on advice for a step
+    three links further down the chain.
+    """
+    command = _step_command(step)
+    if command.startswith("pacman ") and any(w in step.lower() for w in _KEYRING_WORDS):
+        cause = (
+            _PACMAN_KEYRING_CAUSE
+            + (_STEAMOS_READONLY_CAUSE if steamos else "")
+            + _PACMAN_KEYRING_FIX
+        )
+        return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
+    cause = (
+        f"{command} did not run, and the steps after it needed what it would have installed. "
+        f"Run it in a terminal — sudo {command} — and it will say what stopped it, then press "
+        "Install again."
+    )
+    return DOCKER_SETUP_FIRST_FAILURE_STEP.format(cause=cause)
 
 
 def _explicit_yes(reply: str | None) -> bool:
@@ -1884,14 +1982,14 @@ def label_disable_args(*, enforcing: bool | None) -> list[str]:
     leaves the host label as it found it. Measured on Fedora 44, Enforcing
     (2026-08-30), on an unlabelled checkout:
 
-        $ ls -Zd /home/pk/ownco2
-        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
-        $ docker run --rm -v /home/pk/ownco2:/git ... remote get-url origin
+        $ ls -Zd /home/user/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/user/ownco2
+        $ docker run --rm -v /home/user/ownco2:/git ... remote get-url origin
         fatal: not a git repository (or any parent up to mount point /)
         $ docker run --rm --security-opt label:disable -v ... remote get-url origin
         https://github.com/mod-playerbots/azerothcore-wotlk.git
-        $ ls -Zd /home/pk/ownco2
-        unconfined_u:object_r:user_home_t:s0 /home/pk/ownco2
+        $ ls -Zd /home/user/ownco2
+        unconfined_u:object_r:user_home_t:s0 /home/user/ownco2
 
     Note what the denial LOOKS like, because it is why this was missed: the
     container cannot see `.git` at all, so git does not say "permission denied",
@@ -2925,7 +3023,8 @@ def _ensure_docker_linux(
     if ask is not None and _may_open_a_dialog(dry_run, cancel):
         session = SudoSession(ask, run_input if run_input is not None else _run_with_input)
 
-    commands = docker_engine_commands(pm, steamos=is_steamos())
+    steamos = is_steamos()
+    commands = docker_engine_commands(pm, steamos=steamos)
     done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run, session=session)
     joined_ok = False
     if consent == "granted":
@@ -2955,6 +3054,21 @@ def _ensure_docker_linux(
         "join-failed" if consent == "granted" and not joined_ok else consent
     )
 
+    # A skip is reported by its real cause, not by the likeliest one. `sudo -n`
+    # announces the password case itself ("a password is required"), and
+    # `_run_steps` keeps that stderr in the record — so the two have always been
+    # distinguishable and the guess was never needed. Measured in a container on
+    # yulon-ubuntu (2026-08-24): `systemctl` was simply absent, and the user was
+    # told to re-run it in a terminal with sudo, which fails identically.
+    #
+    # Split before the manual steps are worded, not after, because WHICH step
+    # failed first decides what the docker-group sentence may say: `skipped` is
+    # in execution order (package steps, then `usermod`), so `failed[0]` is the
+    # first link of the chain and everything after it is a consequence (T57).
+    password = [] if dry_run else [s for s in skipped if "password" in s.lower()]
+    failed = [] if dry_run else [s for s in skipped if s not in password]
+    group_blocked = bool(failed) and not _step_command(failed[0]).startswith("usermod ")
+
     manual: list[str] = []
     if outcome == "granted":
         # `already-member` deliberately does NOT append this, though
@@ -2969,25 +3083,30 @@ def _ensure_docker_linux(
         # that report always reaches the sentence, which says it once.
         manual.append(DOCKER_GROUP_RELOGIN_STEP.format(user=user))
     elif outcome == "join-failed":
-        manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=user))
+        blocked = DOCKER_GROUP_JOIN_BLOCKED_STEP if group_blocked else DOCKER_GROUP_JOIN_FAILED_STEP
+        manual.append(blocked.format(user=user))
     elif outcome == "declined":
         manual.append(DOCKER_GROUP_DECLINED_STEP.format(user=user))
     elif outcome == "not-asked":
         manual.append(DOCKER_GROUP_UNASKED_STEP.format(user=user))
     if skipped and not dry_run:
-        # A skip is reported by its real cause, not by the likeliest one. `sudo
-        # -n` announces the password case itself ("a password is required"),
-        # and `_run_steps` keeps that stderr in the record — so the two have
-        # always been distinguishable and the guess was never needed. Measured
-        # in a container on yulon-ubuntu (2026-08-24): `systemctl` was simply
-        # absent, and the user was told to re-run it in a terminal with sudo,
-        # which fails identically.
-        password = [s for s in skipped if "password" in s.lower()]
-        other = [s for s in skipped if s not in password]
-        if other:
-            manual.insert(0, "Some steps did not run: " + "; ".join(other))
+        if failed:
+            # The remedy goes in front of the enumeration it is drawn from, so
+            # the first thing read is the thing to do. The list stays because a
+            # support log needs every exit code; it is evidence, not the advice.
+            manual.insert(0, "Some steps did not run: " + "; ".join(failed))
+            if group_blocked or outcome != "join-failed":
+                # A run where the group join is the FIRST failure needs no
+                # second sentence: `DOCKER_GROUP_JOIN_FAILED_STEP` already names
+                # that step and gives the command, and it is the right advice
+                # there. Adding the generic remedy too would print the same
+                # `usermod` twice in one message.
+                manual.insert(0, docker_setup_remedy(failed[0], steamos=steamos))
         if password:
-            failed = "; ".join(s.split(":")[0] for s in password)
+            # Not `failed`, which is now the list of real failures above: this
+            # is the other half of the split, and reusing that name would make
+            # the remedy line's source a string of command names.
+            unrun = "; ".join(_step_command(s) for s in password)
             # The reason, not just the command list. `_run_steps()` writes three
             # different sentences into `skipped` (`_sudo_skip_reason()`) and this
             # line used to keep only the part BEFORE the colon — so a dismissed
@@ -3000,7 +3119,7 @@ def _ensure_docker_linux(
             lead = "Some steps needed a password"
             if session is not None and session.outcome == "refused":
                 lead = "Some steps needed a password and sudo refused the one given"
-            manual.insert(0, f"{lead}; run them in a terminal with sudo: {failed}")
+            manual.insert(0, f"{lead}; run them in a terminal with sudo: {unrun}")
     return ProvisionReport(
         "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, outcome
     )
@@ -3448,6 +3567,45 @@ class VmResources:
     cpus: int
 
 
+def docker_info(run: RunCmd | None = None) -> dict[str, object] | None:
+    """Everything `docker info` reports, as a dict. None = the daemon did not answer.
+
+    The one function in this module that asks the daemon about itself, so the
+    two questions below it — how big the VM is, and where the images land —
+    parse one shape rather than two.
+
+    It is NOT one probe. `preflight.gather()` calls `vm_resources()` and then
+    `data_root()`, and each calls this, so a real preflight runs `docker info`
+    twice and the two answers can still disagree if the daemon stops in
+    between. Threading one dict through `gather()` would fix that and belongs
+    to whoever owns `catalog/preflight.py`.
+
+    Bounded like every other probe here: a CLI that never returns has to arrive
+    at the caller as "unknown", which each caller already knows how to say,
+    rather than as a preflight that never finishes.
+    """
+    do = run if run is not None else _DefaultRunner()
+    program = docker_program()
+    if program is None:
+        return None
+    try:
+        proc = _bounded(do, _DOCKER_PROBE_SECONDS)([program, "info", "--format", "{{json .}}"])
+    except OSError as exc:
+        logger.debug(f"could not start {program}: {exc}")
+        return None
+    if proc.returncode != 0:
+        logger.info(f"docker info would not answer: {proc.stderr}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.info("docker info did not return JSON")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
 def vm_resources(run: RunCmd | None = None) -> VmResources | None:
     """Memory and CPU count the container engine reports, or None if it did not answer.
 
@@ -3460,28 +3618,8 @@ def vm_resources(run: RunCmd | None = None) -> VmResources | None:
     it would refuse every install on the machine with "0 GB of RAM" — the exact
     fabricated refusal the tri-state discipline exists to prevent.
     """
-    do = run if run is not None else _DefaultRunner()
-    program = docker_program()
-    if program is None:
-        return None
-    try:
-        # The other `docker info` in this module, and bounded for the same
-        # reason: a CLI that never returns must arrive here as "unknown", which
-        # this function already knows how to say, rather than as a preflight
-        # that never finishes.
-        proc = _bounded(do, _DOCKER_PROBE_SECONDS)([program, "info", "--format", "{{json .}}"])
-    except OSError as exc:
-        logger.debug(f"could not start {program}: {exc}")
-        return None
-    if proc.returncode != 0:
-        logger.info(f"docker info would not answer, so the VM's size is unknown: {proc.stderr}")
-        return None
-    try:
-        parsed = json.loads(proc.stdout)
-    except ValueError:
-        logger.info("docker info did not return JSON, so the VM's size is unknown")
-        return None
-    if not isinstance(parsed, dict):
+    parsed = docker_info(run)
+    if parsed is None:
         return None
     memory = parsed.get("MemTotal")
     cpus = parsed.get("NCPU")
@@ -3564,7 +3702,124 @@ def _macos_default_data_root() -> Path:
     return Path.home().joinpath(*_MACOS_DOCKER_RAW)
 
 
-def docker_desktop_data_root() -> Path | None:
+_DOCKER_DESKTOP_OPERATING_SYSTEM = "Docker Desktop"
+"""What `docker info` calls its `OperatingSystem` when Docker Desktop is the daemon.
+
+Measured on a Windows 11 gate box (Docker Desktop 29.7.2, 2026-09-16) from
+inside a WSL distro on Desktop's WSL integration: `OperatingSystem=Docker
+Desktop`, `Name=docker-desktop`. The same distro with a native `docker.io`
+engine answered `OperatingSystem=Ubuntu 26.04.1 LTS` and its own hostname.
+`OperatingSystem` is the field that separates them; `DockerRootDir` does NOT —
+both said `/var/lib/docker` (see `_desktop_wsl_vhdx()`).
+"""
+
+_DESKTOP_WSL_VHDX = ("AppData", "Local", "Docker", "wsl", "disk", "docker_data.vhdx")
+"""Docker Desktop's WSL2 data disk, relative to a Windows user profile.
+
+Measured at `/mnt/c/Users/<user>/AppData/Local/Docker/wsl/disk/docker_data.vhdx`
+on the same box, 2026-09-16: pulling 3.3 GB of images through Desktop's WSL
+integration grew that file 23,048,749,056 -> 24,803,016,704 bytes and dropped
+C:'s free space by 1,766,502,400, while the distro's own `/` moved 8 MB. Read
+with the VHDX still open it does not move at all — the directory entry is stale
+until `wsl --shutdown` — which is why the drive's free space is what preflight
+measures, not the file's length.
+"""
+
+
+_WSL_MOUNT_ROOT = Path("/mnt")
+"""Where a WSL distro mounts the Windows drives. A constant so a test can move it."""
+
+
+def _windows_drive_mounts() -> list[Path]:
+    """Every `/mnt/<letter>` that is a mounted Windows drive, as seen from a WSL distro.
+
+    Single-letter names only, so the distro's own `/mnt/wsl` and Desktop's
+    `/mnt/host` are not mistaken for drives.
+    """
+    try:
+        entries = sorted(_WSL_MOUNT_ROOT.iterdir())
+    except OSError as exc:
+        logger.debug(f"could not list {_WSL_MOUNT_ROOT}: {exc}")
+        return []
+    return [entry for entry in entries if len(entry.name) == 1 and entry.name.isalpha()]
+
+
+def _desktop_wsl_vhdx() -> Path | None:
+    """Docker Desktop's data VHDX on the Windows drive, or None if it cannot be pinned down.
+
+    Reached over the WSL interop mount, because the path `docker info` reports
+    is no use here: under Desktop's WSL integration the daemon answers
+    `DockerRootDir=/var/lib/docker`, and that is a path inside Desktop's OWN
+    utility VM. The distro the launcher runs in has no `/var/lib/docker` at all
+    — `df` on it fails outright — so the old answer sent `free_bytes()` walking
+    up to `/var/lib` and reporting the distro's 954 GiB for a Docker whose real
+    budget was 32 GiB of room on C: (measured on the gate box, 2026-09-16).
+
+    Exactly one match is an answer. None, or several Windows profiles each with
+    their own Desktop install, is "could not be established" — the caller
+    renders that *unchecked*, which is the honest reading. Guessing which
+    profile owns the running daemon would put a number under a refusal that
+    nothing measured.
+
+    Unbounded, and the only unbounded reach `preflight.gather()` makes: every
+    `docker` probe in this module goes through `_bounded()`, but `iterdir()`
+    and `is_file()` here cross drvfs into Windows, and a mapped network drive
+    whose server is gone can sit there for tens of seconds per letter. Not
+    measured — the gate box had two local drives and the whole search was
+    instant — so it is recorded rather than fixed behind a number nobody took.
+    """
+    found: list[Path] = []
+    for mount in _windows_drive_mounts():
+        try:
+            profiles = sorted((mount / "Users").iterdir())
+        except OSError:
+            # Not every drive has a Users directory, and an unreadable one is
+            # not an error worth a log line per drive per preflight.
+            continue
+        for profile in profiles:
+            candidate = profile.joinpath(*_DESKTOP_WSL_VHDX)
+            try:
+                if candidate.is_file():
+                    found.append(candidate)
+            except OSError:
+                continue
+    if len(found) == 1:
+        return found[0]
+    logger.info(
+        f"Docker Desktop provides the daemon, but its data disk could not be pinned down "
+        f"on a Windows drive ({len(found)} candidates); its free space stays unchecked"
+    )
+    return None
+
+
+def _linux_data_root(run: RunCmd | None) -> Path | None:
+    """Where a daemon reached from a Linux (or WSL) launcher actually keeps its images.
+
+    Asked of the daemon rather than assumed, because `detect()` answers "linux"
+    inside WSL too and two very different daemons arrive here: a Docker Engine
+    installed in this filesystem, and Docker Desktop's, reached through WSL
+    integration. The old constant `/var/lib/docker` was right for the first and
+    measured the wrong filesystem for the second.
+    """
+    info = docker_info(run)
+    if info is None:
+        return None
+    operating_system = info.get("OperatingSystem")
+    if not isinstance(operating_system, str) or not operating_system.strip():
+        logger.info(
+            f"docker info reported OperatingSystem={operating_system!r}; treating as unknown"
+        )
+        return None
+    if operating_system.strip() == _DOCKER_DESKTOP_OPERATING_SYSTEM:
+        return _desktop_wsl_vhdx()
+    root = info.get("DockerRootDir")
+    if not isinstance(root, str) or not root.strip():
+        logger.info(f"docker info reported DockerRootDir={root!r}; treating as unknown")
+        return None
+    return Path(root)
+
+
+def docker_desktop_data_root(run: RunCmd | None = None) -> Path | None:
     """The path whose free space decides whether the build fits. None = unknown.
 
     This is NOT the server directory. On Windows and macOS the images and the
@@ -3572,10 +3827,19 @@ def docker_desktop_data_root() -> Path | None:
     user picked answers for the wrong drive entirely (`rust-prior-art.md` §3) —
     what has to be measured is the host file that backs the VM.
 
-    * Linux: `/var/lib/docker`, which really is a host directory.
+    * Linux: whatever the daemon says, via `_linux_data_root()`. It used to be
+      the constant `/var/lib/docker`, which is only true of an engine installed
+      in this filesystem; under Docker Desktop's WSL integration it named a
+      directory that does not exist in the distro at all (T39).
     * Windows: the `dataFolder`/`diskPath` in Docker Desktop's settings store,
       falling back to `%LOCALAPPDATA%\\Docker\\wsl` — the WSL2 backend's default
-      home for `docker_data`. Believed, not measured on a real box.
+      home for `docker_data`. The fallback stopped being merely believed on
+      2026-09-16: on a Windows 11 box with Docker Desktop 29.7.2 and no
+      `dataFolder` key set at all, the disk was
+      `%LOCALAPPDATA%\\Docker\\wsl\\disk\\docker_data.vhdx`. That is one level
+      below what this returns, which does not matter to the caller — free space
+      is a property of the volume, and both are on it — but the directory is
+      the one that exists whether or not Desktop has created the disk yet.
     * macOS: the settings store's `diskPath`/`DataFolder`, falling back to
       Docker Desktop's default sparse disk (`Docker.raw`). `preflight` measures
       HOST free space on the volume holding that file — the answer to "can the
@@ -3590,7 +3854,7 @@ def docker_desktop_data_root() -> Path | None:
     """
     here = detect()
     if here == "linux":
-        return Path("/var/lib/docker")
+        return _linux_data_root(run)
     if here == "macos":
         store = docker_desktop_settings_file()
         configured = _settings_data_folder(store) if store is not None else None
@@ -3671,8 +3935,8 @@ def _canonical(path: Path) -> Path:
     The install scripts canonicalise with `realpath -m -- "$SERVER_DIR"` BEFORE
     their `case`, so a purely lexical `os.path.normpath` here cannot deliver the
     one guarantee this mirror exists for. On Fedora Atomic `/home` is a symlink
-    to `/var/home`: a picker that returns `/home/pk` and a script that sees
-    `/var/home/pk` disagree about whether the path is `$HOME`, and the user pays
+    to `/var/home`: a picker that returns `/home/user` and a script that sees
+    `/var/home/user` disagree about whether the path is `$HOME`, and the user pays
     for the disagreement with a sudo password and a wait.
 
     `strict=False` never raises for a path that does not exist; the guard is for
@@ -3704,7 +3968,7 @@ def _reserved_dir_reason(server_dir: Path) -> str | None:
 
     The home directory is the one that actually bites: the picker opens there,
     and `server_dir_problem()` used to pass it, so a click-through reached the
-    script and died with "Cannot use '/home/pk' as the install location" only
+    script and died with "Cannot use '/home/user' as the install location" only
     after the sudo password had been entered.
     """
     lexical = Path(os.path.normpath(str(server_dir)))

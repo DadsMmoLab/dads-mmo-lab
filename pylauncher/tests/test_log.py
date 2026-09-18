@@ -262,7 +262,7 @@ def test_the_suite_cannot_write_the_users_own_log(tmp_path: Path) -> None:
     """The guard `conftest` puts under every test, driven against the real directory.
 
     RED for it, measured on m910q 2026-09-05 with `pytest -q tests/test_spine.py`
-    at `d18fcc31`: `/home/pk/.local/share/yulon/yulon.log` grew 2,876,987 ->
+    at `d18fcc31`: `/home/user/.local/share/yulon/yulon.log` grew 2,876,987 ->
     2,931,487 bytes, 54,500 of them fabricated installs, and the run left a
     `RotatingFileHandler` on that file attached to the root logger. The file a
     user sends to support is not a scratch pad.
@@ -325,7 +325,7 @@ def test_a_pinned_stderr_level_and_a_leaked_file_handler_are_both_put_back(
     `tests/test_spine.py` and run in the same process:
 
         stderr handler pinned at WARNING
-        leaked file handlers: ['/home/pk/.local/share/yulon/yulon.log']
+        leaked file handlers: ['/home/user/.local/share/yulon/yulon.log']
 
     Both come from ONE call: `install_wiring.main()` does
     `configure(config_dir=..., stderr_level=WARNING)`, and `configure()` is
@@ -606,7 +606,7 @@ def test_a_child_handed_a_partial_env_gets_all_four_routes_pointed_at_the_scratc
 
         routes      {'XDG_DATA_HOME': None, 'APPDATA': None,
                      'HOME': None, 'USERPROFILE': None}
-        config_dir  /home/pk/.local/share/yulon        <- the user's own
+        config_dir  /home/user/.local/share/yulon        <- the user's own
 
     The census asks what ARRIVED, not whether anything did. Each of the four
     values the child reports is compared against the scratch home this process
@@ -616,7 +616,7 @@ def test_a_child_handed_a_partial_env_gets_all_four_routes_pointed_at_the_scratc
     miniature: the message said the guard "blocked no route" while the
     predicate only asked whether a variable existed. Measured on m910q
     2026-09-05, with `conftest`'s rewrite line replaced by `given[var] =
-    "/home/pk" if var == "HOME" else str(CHILD_SCRATCH_HOME)` -- every child
+    "/home/user" if var == "HOME" else str(CHILD_SCRATCH_HOME)` -- every child
     handed the box user's own home, which is what an inherited `HOME` is in a
     run started by a person, and on macOS is the only input `config_dir()`
     reads:
@@ -627,7 +627,7 @@ def test_a_child_handed_a_partial_env_gets_all_four_routes_pointed_at_the_scratc
                           2575 passed, 9 skipped
         arrival census    1 failed, 24 passed, on `assert not
                           arrived_elsewhere`: `reached the OS with
-                          {'HOME': '/home/pk'}`
+                          {'HOME': '/home/user'}`
 
     `config_dir()` could not have caught that one on the box it was measured
     on: `XDG_DATA_HOME` still held the scratch, so the child landed in the
@@ -639,7 +639,7 @@ def test_a_child_handed_a_partial_env_gets_all_four_routes_pointed_at_the_scratc
     four (`{'APPDATA': None, 'HOME': None, 'USERPROFILE': None,
     'XDG_DATA_HOME': None}`), and, with the census assertion softened to
     `assert True` on the remote copy only, `config_dir()` red on its own
-    (`/home/pk/.local/share/yulon, which is the user's own`).
+    (`/home/user/.local/share/yulon, which is the user's own`).
 
     Before the premise below was set explicitly, this was red only under
     `xdist`: serially the box's own `XDG_DATA_HOME` was unset, so that single

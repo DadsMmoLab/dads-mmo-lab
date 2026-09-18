@@ -6,8 +6,7 @@
   "game": "wow-tortoise",
   "description": "A GM command panel for your own server: /tgmm opens a searchable palette over the ordinary GM chat commands. Client-side only - it is copied into your WoW client's Interface/AddOns, nothing is written to the server, and the world still decides what your account is allowed to do.",
   "source": {
-    "repo": "Sagiroth/TortoiseGMManager",
-    "rev": "ec11dd23e1cbf89f5171cf8c964df8354903bf43"
+    "repo": "Sagiroth/TortoiseGMManager"
   },
   "build": {
     "rebuild": false,
@@ -29,9 +28,12 @@
     "-- this entry's `accounts.level` scale runs to 4 and the Accounts tab is where a rank is",
     "set.",
     "Interface 11200 (Vanilla 1.12) against the 1.18.1 / build 7272 Turtle client.",
-    "The whole pinned checkout is copied, `assets/` included -- the UI reads it. That is also",
+    "The whole checkout is copied, `assets/` included -- the UI reads it. That is also",
     "why the step copies the repository root rather than a list of files: this addon has a",
     "subdirectory, and a file list would be a thing to keep in step with somebody else's repo.",
+    "`.git` and this app's `.yulon-clone.json` are the two exceptions, left behind since T65:",
+    "git's 0444 pack files cannot be overwritten, so copying them made the second install of",
+    "either Tortoise addon fail. See the sibling manifest.",
     "WRITTEN AT INSTALL, not at Play, for the reason spelled in the sibling manifest."
   ]
 }

@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import IO, BinaryIO, Literal
+from typing import IO, Any, BinaryIO, Literal
 
 from yulon import platform, runner, wsl
 from yulon.log import get_logger
@@ -1028,7 +1028,7 @@ def remove_volume(name: str, *, wsl_distro: str | None = None) -> None:
     logger.info(f"removed volume {name}")
 
 
-def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
+def remove_image(ref: str, *, force: bool = False, wsl_distro: str | None = None) -> str:
     """Delete one image by its exact reference. Returns why it could not be, or `""`.
 
     One ref at a time, and never a compose flag. Measured on yulon-ubuntu
@@ -1046,8 +1046,24 @@ def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
     or a running title is holding a layer, and that is not this uninstall's
     business. The Rust prior art reached the same conclusion from the other end
     (`destructive.rs:574-602`).
+
+    `force` is `docker image rm -f`, and it exists for T79. A name whose image
+    no OTHER name points at cannot be removed while any container references
+    that image, *including a container that has exited*: the daemon answers
+    `conflict: unable to delete <id> (must be forced) - container <id> is using
+    its referenced image` (measured live 2026-09-09). The rebuild's
+    recreate deliberately never selects the one-shot services
+    (`staged_up_argv()`'s `--no-deps` over `spec.compose_services()`), so their
+    EXITED containers still hold the pre-rebuild `db-import` and `client-data`
+    images when the rollback names are let go -- and a refusal there leaves a
+    `-rollback` tag on the daemon for ever, which is exactly what the round-3
+    gate found. Forcing removes the NAME; the image it last pointed at becomes
+    dangling and the exited container keeps running on the layers it already
+    has until compose next recreates it from the live tag. `(cannot be forced)`
+    -- a RUNNING container -- is a different answer, and this function passes
+    both back for the caller to tell apart rather than retrying blind.
     """
-    proc = _docker(["image", "rm", ref], wsl_distro=wsl_distro)
+    proc = _docker(["image", "rm", *(["-f"] if force else []), ref], wsl_distro=wsl_distro)
     if proc.returncode == 0:
         logger.info(f"removed image {ref}")
         return ""
@@ -1847,21 +1863,27 @@ def allowed_modules(server_dir: Path) -> str:
     `UpdateFetcher` skips them — and only one of them is safe when the folder
     could not be read.
     """
-    names = _module_dir_names(server_dir)
+    names = module_dir_names(server_dir)
     if names is None:
         return ALL_MODULES
     return ",".join(names) if names else ALL_MODULES
 
 
-def _module_dir_names(server_dir: Path) -> list[str] | None:
+def module_dir_names(server_dir: Path) -> list[str] | None:
     """The module folder names in this install, sorted. `None` means unreadable.
 
-    The listing `allowed_modules()` and `installed_module_names()` share. They
-    do NOT share the empty case: an unreadable folder and an empty one are the
-    same answer to the list on screen (nothing to mark) and two different
-    answers to the importer, where `ALL_MODULES` is upstream's default and `""`
-    would switch module updates off. Hence `None` rather than `[]` here, so
-    each caller decides for itself.
+    The listing `allowed_modules()` and `apply.module_sql_plan()` share. They do
+    NOT share the empty case: an unreadable folder and an empty one are the same
+    answer to the list on screen (nothing to mark) and two different answers to
+    the importer, where `ALL_MODULES` is upstream's default and `""` would switch
+    module updates off. Hence `None` rather than `[]` here, so each caller
+    decides for itself.
+
+    Public since T78, and the name is the whole of what changed: the second
+    caller is in `apply.py`, which has to tell "could not read the folder" from
+    "there is nothing in it" before it decides which modules the core updater may
+    be given, and a private helper reached across a module boundary is a worse
+    answer than a listing with two readers.
     """
     modules = server_dir / MODULES_DIR_NAME
     try:
@@ -1886,7 +1908,7 @@ def clone_names(folder: Path) -> frozenset[str]:
     An unreadable or missing folder answers the empty set: the list then marks
     nothing, which is what it did before this existed, rather than claiming
     every module is missing. That is the opposite of `allowed_modules()`, which
-    must answer `all` for the same folder — see `_module_dir_names()`.
+    must answer `all` for the same folder — see `module_dir_names()`.
 
     Takes the folder rather than the server directory because the four manifest
     families do NOT share one: `apply.CLONE_DIRS` puts a module in `modules/`,
@@ -2051,6 +2073,7 @@ def apply_module_sql(
     *,
     output: OutputSink | None = None,
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
+    modules: str | None = None,
     wsl_distro: str | None = None,
 ) -> AttachedRun:
     """Run the one-shot importer for the modules on disk. The route nothing else takes.
@@ -2090,6 +2113,16 @@ def apply_module_sql(
     the caller rather than a bool, and a caller that wants to tell the user what
     was applied reads the lines through `output` (the tail on the result is
     bounded; see `KEEP_OUTPUT_LINES`).
+
+    `modules` is what `AC_UPDATES_ALLOWED_MODULES` is set to, and `None` --
+    every caller until T78 -- means `allowed_modules(server_dir)`: every folder
+    on disk. A caller that knows some of those folders hold SQL THIS app already
+    applied with its own client passes the rest, because the updater refuses a
+    file it has no ledger row for and exits 1 over it
+    (`apply.module_sql_plan()` is that caller, and its docstring is the
+    measurement). The three meanings of the value, `""` among them, are on
+    `ALL_MODULES`; nothing is validated here, because upstream's own reading is
+    the only one that counts.
 
     Raises:
         DockerCommandError: any of the refusals above, the database never became
@@ -2165,10 +2198,10 @@ def apply_module_sql(
         wsl_distro=wsl_distro,
     )
 
-    modules = allowed_modules(server_dir)
-    logger.warning(f"apply_module_sql(): running {service} for modules: {modules}")
+    allowed = allowed_modules(server_dir) if modules is None else modules
+    logger.warning(f"apply_module_sql(): running {service} for modules: {allowed!r}")
     run = run_one_shot(
-        service, server_dir, allowed_modules=modules, wsl_distro=wsl_distro, sink=output
+        service, server_dir, allowed_modules=allowed, wsl_distro=wsl_distro, sink=output
     )
     if run.returncode != 0:
         raise DockerCommandError(
@@ -3184,6 +3217,220 @@ line starting with `>`. Two rules and a `>` alone was enough to make an
 unrelated tool's output be read as a build (review, 2026-09-12).
 """
 
+_BUILD_FAILED = re.compile(r"^(?:ERROR:|#\d+ ERROR:)|failed to solve:")
+"""The line that says a build failed, in every spelling a front end prints it.
+
+Three shapes, measured rather than guessed:
+
+* `ERROR: failed to build: failed to solve: …` — the classic `docker build`
+  epilogue, all T38 was measured on (an Ubuntu test box, Docker 29.7.2, 2026-09-12);
+* `#17 ERROR: process "/bin/sh -c …" …` — BuildKit's step-numbered line, which
+  `docker compose build` prints and which `startswith("ERROR:")` rejects;
+* `failed to solve: …`, and through this app's panel `target ac-worldserver:
+  failed to solve: …` — how `docker compose build` ENDS, with no `ERROR:`
+  anywhere on the line.
+
+The third is why T38 shipped and changed nothing for the user who reported it:
+this app builds with `docker compose build` (`build_staged()`), so the only
+shape T38 could match was the one shape this app never produces (T70, measured
+live 2026-09-16, Compose 2.40.3 / Engine 29.1.3).
+
+`failed to solve:` is matched anywhere on the line because the prefix is the
+front end's to choose; the two `ERROR:` spellings are anchored because `ERROR:`
+alone, unanchored, is a word an import or a map extractor can print in passing.
+"""
+
+_BUILDKIT_PREFIX = re.compile(r"^(?:#\d+ )?(?:\d+\.\d+ )?")
+"""BuildKit's `#25 7.331 ` stamp on a line of a step's own output.
+
+Two independent parts, both optional. `--progress plain` prefixes every line
+with the step number so concurrent steps can be told apart, and the container's
+own output keeps the elapsed-seconds stamp that the fenced replay also carries.
+Neither is the compiler's, and a diagnostic has to LEAD with its file and line
+or the 400-character cap spends itself on bookkeeping.
+"""
+
+_COMPILER_DIAGNOSTIC = re.compile(
+    r"^(?:"
+    r"[^\s\"'`]+:\d+:\d+: (?:fatal error|error): \S"
+    r"|[\w.+-]+: (?:fatal error|error): \S"
+    r"|[^\s\"'`]+: .*undefined reference to"
+    r"|CMake Error\b"
+    r")"
+)
+"""A toolchain naming what went wrong, at the start of a line.
+
+Four shapes, and the last three are here because they are the ones that land
+ABOVE BuildKit's ten-line replay just as readily as the first:
+
+* `path:line:column: error: …` / `fatal error:` — clang and gcc on a source
+  file, the live capture of 2026-09-16;
+* `<tool>: error: …` — the driver and the linker, which have no source
+  position to give. `c++: fatal error: Killed signal terminated program
+  cc1plus` and `clang++: error: unable to execute command: Killed` are the
+  out-of-memory kill this project warns about before the build even starts:
+  `-j $(nproc)+1` on a 16 GB VM, the same event the `exited with code: 137`
+  path was added for. Also `ld.lld: error: undefined symbol: …` and
+  `collect2: error: ld returned 1 exit status`;
+* GNU ld's ``Main.cpp:(.text+0x28): undefined reference to `Foo::bar()'``, which
+  carries a section offset where the others carry a line and column;
+* `CMake Error at CMakeLists.txt:5 (message):` — a configure that never
+  reached a compiler at all, and the shape a module with a broken
+  `CMakeLists.txt` produces.
+
+Anchored after `_BUILDKIT_PREFIX` is stripped, and that anchoring is the whole
+rule rather than a tidiness: the same text appears inside BuildKit's step
+header (` > [3/3] RUN sh -c "echo "…Transmog.cpp:212:9: error:…"`), inside the
+Dockerfile context (`   3 | >>> RUN …`) and inside the final `ERROR:` line
+whenever the failing `RUN` is a shell that echoes a diagnostic — T38's own
+fixture has it in all three. Only the toolchain puts it at column zero.
+
+The `^` is the anchor's only home, and it is searched rather than matched for
+exactly that reason: `_COMPILER_DIAGNOSTIC.match()` would anchor a second time
+on its own, and a rule written down twice is a rule no single mutation can
+remove — measured while mutating this fix, where dropping the `^` AND swapping
+`match` for `search` each left the suite green because the other still held.
+Every pattern here carries its own anchor and every call site searches.
+
+Anything else is still the fence's: a `RUN` that exits non-zero with no
+diagnostic of any kind falls through to the replay exactly as before.
+"""
+
+_NINJA_FAILED = re.compile(r"^FAILED: ")
+"""ninja's own line, printed BEFORE the command and the diagnostic it belongs to."""
+
+_NINJA_PROGRESS = re.compile(r"^\[\d+/\d+\] ")
+"""ninja's `[151/1838] Building CXX object …`.
+
+The line the whole ticket is about: `cmake --build -j` lets the jobs already
+in flight finish after one fails, so fifteen of these separate the diagnostic
+from ninja giving up — and ten of them are all BuildKit's fenced replay holds.
+"""
+
+_DIAGNOSTIC_CONTEXT = 3
+"""How many lines after a diagnostic are quoted with it.
+
+Clang prints the offending source line, a caret column marker and `N errors
+generated.` — three, measured on the live capture of 2026-09-16.
+"""
+
+_DIAGNOSTIC_KEEP = 2
+"""How many diagnostics are quoted when several jobs failed at once.
+
+`cmake --build -j $(nproc)+1` runs dozens of compiles in parallel and ninja
+lets the in-flight ones finish, so more than one can fail in a single step.
+Two fills the cap; the rest are counted rather than dropped silently.
+"""
+
+
+def _diagnostic_stops(line: str) -> bool:
+    """Is this line the end of a diagnostic's context rather than part of it?"""
+    return (
+        not line
+        or line == _BUILDKIT_FENCE
+        or line.startswith("ninja: ")
+        or bool(_NINJA_FAILED.search(line))
+        or bool(_NINJA_PROGRESS.search(line))
+        or bool(_COMPILER_DIAGNOSTIC.search(line))
+        or bool(_BUILD_FAILED.search(line))
+    )
+
+
+def _inline_diagnostics(said: list[str], skip: range) -> list[str]:
+    """Every compiler diagnostic in the WHOLE stream, first `_DIAGNOSTIC_KEEP` quoted.
+
+    T70 round 2, and the reason a perfect fence parser was not enough. BuildKit
+    replays only the LAST TEN lines of the failed step between its `------`
+    rules. On the live capture of 2026-09-16 the compiler's `fatal error:` sat
+    fifteen ninja jobs above that window — ninja lets the in-flight parallel
+    compiles finish before it stops — so the fenced block held ten lines of
+    `Building CXX object …` progress and no diagnostic at all.
+
+    The diagnostic is therefore taken from the whole retained tail, whatever
+    `#<n>` step printed it. Which step that is cannot be relied on either: three
+    compose services (`ac-worldserver`, `ac-authserver`, `ac-db-import`) build
+    the SAME image concurrently, all three fail, and which one's epilogue gets
+    replayed is a race — the same capture's fence header read `[ac-db-import
+    build 8/8]`, its final line `target ac-authserver: failed to solve:`, and
+    the panel above both said `ac-worldserver`.
+
+    `skip` is the fenced block's own indices. Excluding them is what keeps
+    T38's classic-builder shape on the fence path it was measured on, where the
+    only diagnostic IS the replay, and it stops one error being quoted twice.
+
+    Identical diagnostics are collapsed: three services failing on one bad
+    header print one error, not "+2 more".
+
+    Context lines are left-stripped. Clang indents the offending source line
+    and its caret marker to align the `^` under the column it names, and that
+    alignment is already gone by the time anybody reads this: the lines are
+    joined with ` / ` into one paragraph of a proportional-font `QLabel`, where
+    no two columns line up anyway. So the indentation buys nothing and costs
+    characters against the 400-character cap — `/     6 |` becomes `/ 6 |`.
+    """
+    blocks: list[list[str]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(said):
+        if index in skip:
+            continue
+        line = _BUILDKIT_PREFIX.sub("", raw)
+        if not _COMPILER_DIAGNOSTIC.search(line) or line in seen:
+            continue
+        seen.add(line)
+        block = [line]
+        for after in said[index + 1 : index + 1 + _DIAGNOSTIC_CONTEXT]:
+            context = _BUILDKIT_PREFIX.sub("", after).lstrip()
+            if _diagnostic_stops(context):
+                break
+            block.append(context)
+        blocks.append(block)
+    if not blocks:
+        return []
+    return _fitted(blocks)
+
+
+def _fitted(blocks: list[list[str]]) -> list[str]:
+    """`blocks` cut to `_LAST_WORDS_LINES`, every dropped diagnostic counted.
+
+    The count is derived from the diagnostics that actually SURVIVE the cut,
+    never from `_DIAGNOSTIC_KEEP`, and that is the whole reason this is a
+    function of its own. Counting `found - _DIAGNOSTIC_KEEP` is right only when
+    the quoted diagnostics carry no context: three real clang diagnostics with
+    three context lines each are eleven lines competing for five, the second
+    diagnostic is cut for space, and the sentence then says "and 1 more" while
+    two broken files have gone unnamed. A user told one file is broken fixes
+    one file and runs the build again (review, 2026-09-16).
+
+    So the heads are placed first, the spare lines are handed out as context
+    round-robin — each diagnostic gets its source line before any gets its
+    caret — and whatever is left over is counted. What the sentence claims and
+    what it shows cannot drift, because the claim is computed from the showing.
+    """
+    total = len(blocks)
+    shown = min(total, _DIAGNOSTIC_KEEP)
+    # A count line costs one of the five, so its room is taken before the heads
+    # are placed rather than after — otherwise a head is quoted and then evicted
+    # by the very line that was meant to account for it.
+    shown = min(shown, _LAST_WORDS_LINES - 1 if total > shown else _LAST_WORDS_LINES)
+    spare = _LAST_WORDS_LINES - shown - (1 if total > shown else 0)
+    context = [0] * shown
+    for rank in range(_DIAGNOSTIC_CONTEXT):
+        for which in range(shown):
+            if spare <= 0:
+                break
+            if len(blocks[which]) > rank + 1:
+                context[which] += 1
+                spare -= 1
+    lines: list[str] = []
+    for which in range(shown):
+        lines.append(blocks[which][0])
+        lines.extend(blocks[which][1 : 1 + context[which]])
+    missing = total - shown
+    if missing:
+        lines.append(f"(and {missing} more compiler error{'s' if missing > 1 else ''})")
+    return lines
+
+
 _ERROR_KEEP = 70
 """How much of each end of BuildKit's `ERROR:` line survives the elision.
 
@@ -3232,19 +3479,32 @@ def _buildkit_failure(said: list[str]) -> tuple[list[str], str]:
     sign anything went wrong. Returning the block alone hid it (review,
     2026-09-12).
 
-    Fences are paired structurally rather than by taking the last two: the
-    opening one is the last that carries a `_BUILDKIT_STEP_HEADER`, and the
-    closing one is the first fence after it. An odd count, a stray rule in some
-    tool's output, or a `------` inside the step's own lines then costs at most
-    a short block instead of silently choosing two unrelated rules.
+    Fences are paired structurally rather than by taking the last two, and
+    independently of where the marker sits — see `_step_fences()`. The marker
+    is then the last `_BUILD_FAILED` line OUTSIDE the block, which is both
+    halves of T70: this app builds with `docker compose build`, whose epilogue
+    says `failed to solve:` with no `ERROR:` prefix and whose only `ERROR:`
+    line is step-numbered and printed ABOVE the opening fence.
+
+    Requiring the marker to sit outside the block is not tidiness. A compiler
+    may print a line of its own beginning `ERROR:`, and counting that would let
+    a step block from a build that SUCCEEDED be reported as the failure of
+    whatever ran after it — the case the no-marker fallback already pins.
 
     An empty block with a non-empty `ERROR:` line, or both empty, tells the
     caller to fall back — a silent failing step must not come out worse than
     it did before.
     """
+    opened, closed = _step_fences(said)
+    # The block is located FIRST and the marker is then read from outside it.
+    # Searching back from the marker, which is what T38 did, cannot work on the
+    # compose route at all: BuildKit's `#17 ERROR:` line is printed ABOVE the
+    # opening fence there, so a marker widened to match it would still find no
+    # block behind it (T70).
+    inside = range(opened, closed + 1) if opened is not None and closed is not None else range(0)
     error_at: int | None = None
     for index in range(len(said) - 1, -1, -1):
-        if said[index].startswith("ERROR:"):
+        if index not in inside and _BUILD_FAILED.search(said[index]):
             error_at = index
             break
     if error_at is None:
@@ -3252,24 +3512,43 @@ def _buildkit_failure(said: list[str]) -> tuple[list[str], str]:
         # a map extractor reaches here too, and none of them is parsed.
         return [], ""
     error_line = said[error_at]
-
-    opened: int | None = None
-    for index in range(error_at - 1, 0, -1):
-        if said[index - 1] == _BUILDKIT_FENCE and _BUILDKIT_STEP_HEADER.match(said[index]):
-            opened = index - 1
-            break
-    if opened is None:
-        return [], error_line
-    closed: int | None = None
-    for index in range(opened + 2, error_at):
-        if said[index] == _BUILDKIT_FENCE:
-            closed = index
-            break
-    if closed is None:
+    # The compiler's own words FIRST, from anywhere in the stream. BuildKit's
+    # fenced replay is only the last ten lines of the failed step, and a
+    # diagnostic fifteen parallel ninja jobs above it is outside that window —
+    # T70 round 2, measured live 2026-09-16. The fence is the fallback, not the
+    # source, and it is still the whole answer for the shapes that have no
+    # inline diagnostic: T38's classic builder, and any `RUN` that simply exits
+    # non-zero.
+    inline = _inline_diagnostics(said, inside)
+    if inline:
+        return inline, error_line
+    if opened is None or closed is None:
         return [], error_line
     # `opened + 2` drops the header: naming the command is what this ticket
     # exists to stop doing.
     return said[opened + 2 : closed], error_line
+
+
+def _step_fences(said: list[str]) -> tuple[int | None, int | None]:
+    """The last `------`/step-header pair and the first rule after it, or `(None, None)`.
+
+    Paired structurally rather than by taking the last two rules in the output:
+    the opening one is the last that carries a `_BUILDKIT_STEP_HEADER`, and the
+    closing one is the first fence after it. An odd count, a stray rule in some
+    tool's output, or a `------` inside the step's own lines then costs at most
+    a short block instead of silently choosing two unrelated rules (review,
+    2026-09-12).
+
+    Searched over the WHOLE tail rather than up to the failure marker, which is
+    T70's half of the fix — see `_buildkit_failure()`.
+    """
+    for index in range(len(said) - 1, 0, -1):
+        if said[index - 1] == _BUILDKIT_FENCE and _BUILDKIT_STEP_HEADER.match(said[index]):
+            for after in range(index + 1, len(said)):
+                if said[after] == _BUILDKIT_FENCE:
+                    return index - 1, after
+            return index - 1, None
+    return None, None
 
 
 _BUILD_DETAILS = re.compile(r"View build details:\s*(\S+)")
@@ -3631,7 +3910,7 @@ def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[st
     POPULATED ancestor) and the container is denied it, because `$HOME` is
     `user_home_dir_t` and a confined container may only read `container_file_t`:
 
-        $ docker run --rm --entrypoint ls -v /home/pk:/probe:ro <digest> -A /probe
+        $ docker run --rm --entrypoint ls -v /home/user:/probe:ro <digest> -A /probe
         ls: can't open '/probe': Permission denied
         $ docker run --rm --security-opt label:disable ... -A /probe
         .bash_logout
@@ -4294,17 +4573,118 @@ def exec_stdin(
     # something users attach to bug reports.
     logger.debug(f"exec_stdin(): {' '.join(command)}")
     child = platform.wsl_env(dict(env)) if wsl_distro is not None else {**os.environ, **env}
+    return _pumped(command, source, child_env=child, label=container)
+
+
+def compose_run_stdin(
+    server_dir: Path,
+    service: str,
+    entrypoint: str,
+    argv: Sequence[str],
+    source: BinaryIO,
+    *,
+    wsl_distro: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """`docker compose run --rm --no-deps -T --entrypoint <e> <service> <argv…>`, fed `source`.
+
+    The route into a named volume that the running server mounts read-only (T62).
+    A compose service is addressed rather than a volume name or a container name,
+    and each of those alternatives is a guess this one does not have to make:
+
+    * the VOLUME is `<project>_client-data` on an install this engine wrote and
+      `<project>_ac-client-data` on one the bash installer built
+      (`tests/data/wotlk-compose-config*.json`), and the project is whatever
+      compose calls it. Compose resolves the mount from the service definition,
+      so the copy lands in THIS install's volume whichever it is.
+    * a CONTAINER name is global to the daemon (`ac-client-data-init` belongs to
+      whichever install ran last), and `run` makes a fresh one inside this
+      project instead (`run_one_shot()` records `container_name` not stopping it).
+
+    `source` goes in on stdin and never as a bind mount, which is what makes the
+    same argv work on all three daemons: a Windows path, a
+    `\\\\wsl.localhost\\...` path Docker Desktop refuses to mount, and a SELinux
+    host all read a pipe the same way. Through `wsl.exe` the bytes cross exactly
+    as `DockerSql.run_file()`'s do.
+
+    `-T` because there is no terminal and the stream is binary; `--no-deps`
+    because nothing else in the project may start for a file copy. The exit
+    status is returned rather than raised, like `exec_stdin()`: the caller owns
+    the sentence.
+
+    Raises:
+        DockerCliMissingError: no docker CLI here (nor `wsl.exe` for a distro).
+        DockerCommandError: `server_dir` is gone, or a distro install's folder
+            has no Linux spelling to run compose in.
+        SourceUnreadableError: `source` could not be read.
+    """
+    inside: str | None = None
+    if wsl_distro is not None:
+        inside = platform.wsl_linux_path(server_dir)
+        if inside is None:
+            # `_docker()` would run compose in the distro's home directory here,
+            # which is some OTHER project or none. A copy into a volume must not
+            # guess which install it is writing to.
+            raise DockerCommandError(
+                f"{server_dir} is not a path inside the {wsl_distro} distro, so there is no "
+                "folder there to run this install's compose project in. Nothing was copied."
+            )
+    elif _cwd_is_missing(server_dir):
+        raise DockerCommandError(
+            f"The server folder {server_dir} no longer exists, so Docker was not asked."
+        )
+    prefix = platform.docker_prefix(wsl_distro, inside=inside)
+    if prefix is None:
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    command = [
+        *prefix,
+        "compose",
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--entrypoint",
+        entrypoint,
+        service,
+        *argv,
+    ]
+    logger.debug(f"compose_run_stdin(): {' '.join(command)} in {server_dir}")
+    child = platform.wsl_env() if wsl_distro is not None else dict(os.environ)
+    return _pumped(
+        command,
+        source,
+        child_env=child,
+        label=service,
+        cwd=None if wsl_distro is not None else server_dir,
+    )
+
+
+def _pumped(
+    command: list[str],
+    source: BinaryIO,
+    *,
+    child_env: dict[str, str],
+    label: str,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Start `command`, pump `source` into its stdin, and reap it on every way out.
+
+    The body `exec_stdin()` documents, shared with `compose_run_stdin()` so the
+    reaping guarantee is written once. `cwd` is passed to `Popen` only when
+    there is one: a WSL route carries its directory in the argv (`wsl --cd`).
+    """
+    extra: dict[str, Any] = {} if cwd is None else {"cwd": cwd}
     try:
         proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=runner.child_env(child),
+            env=runner.child_env(child_env),
             creationflags=runner.creationflags(),
+            **extra,
         )
     except OSError as exc:
-        logger.warning(f"{prefix[0]} could not be started: {exc}")
+        logger.warning(f"{command[0]} could not be started: {exc}")
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP) from exc
     # All three are pipes because all three were asked for as pipes; the
     # asserts are type narrowing, not a check.
@@ -4321,7 +4701,7 @@ def exec_stdin(
     for reader in readers:
         reader.start()
     try:
-        _pump(source, proc.stdin, container)
+        _pump(source, proc.stdin, label)
     finally:
         # Unconditional, and a `finally` rather than a list of clauses,
         # because the pump can end in a way this module does not get to

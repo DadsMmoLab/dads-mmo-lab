@@ -777,7 +777,7 @@ def test_an_address_other_machines_can_dial_survives_and_loses_its_whitespace() 
     is the bug. The trailing newline is what a detector reading a command's
     stdout hands over, and `_sql_literal()` would call that "not an address".
     """
-    assert networking.advertisable("100.78.24.50") == "100.78.24.50"
+    assert networking.advertisable("100.64.0.10") == "100.64.0.10"
     assert networking.advertisable(" 192.168.1.25\n") == "192.168.1.25"
     assert networking.advertisable("wow.example.com") == "wow.example.com"
 
@@ -855,7 +855,7 @@ _M910Q_UNPRIVILEGED = (
     "LISTEN 0      128                      127.0.0.1:5939  0.0.0.0:*\n"
     "LISTEN 0      4096                       0.0.0.0:3724  0.0.0.0:*\n"
     "LISTEN 0      4096                 127.0.0.53%lo:53    0.0.0.0:*\n"
-    "LISTEN 0      4096                  100.78.24.50:45057 0.0.0.0:*\n"
+    "LISTEN 0      4096                  100.64.0.10:45057 0.0.0.0:*\n"
     "LISTEN 0      4096                     127.0.0.1:3306  0.0.0.0:*\n"
     "LISTEN 0      4096                       0.0.0.0:8085  0.0.0.0:*\n"
     "LISTEN 0      128                      127.0.0.1:631   0.0.0.0:*\n"
@@ -897,7 +897,7 @@ _NAMESPACED_ROOT_WITH_ITS_OWN_SSHD = (
     "LISTEN 0 128 127.0.0.1:5939 0.0.0.0:*\n"
     "LISTEN 0 4096 0.0.0.0:3724 0.0.0.0:*\n"
     "LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:*\n"
-    "LISTEN 0 4096 100.78.24.50:45057 0.0.0.0:*\n"
+    "LISTEN 0 4096 100.64.0.10:45057 0.0.0.0:*\n"
     "LISTEN 0 4096 127.0.0.1:3306 0.0.0.0:*\n"
     'LISTEN 0 128 127.0.0.1:2222 0.0.0.0:* users:(("sshd",pid=6,fd=4))\n'
     "LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:*\n"
@@ -954,7 +954,7 @@ _M910Q_ROOT = (
     'LISTEN 0 128 127.0.0.1:5939 0.0.0.0:* users:(("teamviewerd",pid=2754,fd=17))\n'
     'LISTEN 0 4096 0.0.0.0:3724 0.0.0.0:* users:(("docker-proxy",pid=1259133,fd=8))\n'
     'LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=410,fd=14))\n'
-    'LISTEN 0 4096 100.78.24.50:45057 0.0.0.0:* users:(("tailscaled",pid=7526,fd=27))\n'
+    'LISTEN 0 4096 100.64.0.10:45057 0.0.0.0:* users:(("tailscaled",pid=7526,fd=27))\n'
     'LISTEN 0 4096 127.0.0.1:3306 0.0.0.0:* users:(("docker-proxy",pid=1241546,fd=8))\n'
     'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* users:(("docker-proxy",pid=1259161,fd=8))\n'
     'LISTEN 0 128 127.0.0.1:631 0.0.0.0:* users:(("cupsd",pid=843052,fd=7))\n'
@@ -988,7 +988,7 @@ _YULON_UBUNTU_ROOT = (
     'LISTEN 0 4096 127.0.0.1:631 0.0.0.0:* users:(("cupsd",pid=1216,fd=7))\n'
     'LISTEN 0 4096 127.0.0.54:53 0.0.0.0:* users:(("systemd-resolve",pid=805,fd=17))\n'
     'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* users:(("docker-proxy",pid=40565,fd=7))\n'
-    'LISTEN 0 4096 100.71.125.58:40030 0.0.0.0:* users:(("tailscaled",pid=21160,fd=27))\n'
+    'LISTEN 0 4096 100.64.0.11:40030 0.0.0.0:* users:(("tailscaled",pid=21160,fd=27))\n'
     'LISTEN 0 4096 127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=805,fd=15))\n'
     'LISTEN 0 4096 [::]:22 [::]:* users:(("sshd",pid=17501,fd=4),("systemd",pid=1,fd=139))\n'
     'LISTEN 0 4096 [::]:3724 [::]:* users:(("docker-proxy",pid=40596,fd=7))\n'
@@ -2443,7 +2443,7 @@ def test_a_supplied_ssh_port_is_not_a_reading_of_the_socket_table() -> None:
     `SSH_CONNECTION` discarded the flag built to mean "the table did not settle
     this". Measured on m910q as an ordinary desktop uid, 2026-09-04:
 
-        euid=1000  SSH_CONNECTION="100.72.215.6 63739 100.78.24.50 22"
+        euid=1000  SSH_CONNECTION="100.64.0.12 63739 100.64.0.10 22"
         detect_ssh_route() -> SshRoute(True, (22,), listeners_readable=False)
         plan(enable_firewall=True) -> ufw allow 3724/tcp, 8085/tcp, 22/tcp,
                                       ufw --force enable ; refusals ()
@@ -2455,7 +2455,7 @@ def test_a_supplied_ssh_port_is_not_a_reading_of_the_socket_table() -> None:
     port is proof of ONE way in and no evidence at all that it is the only one.
     """
     route = _route(
-        environ={"SSH_CONNECTION": "100.72.215.6 63739 100.78.24.50 22"}, run=_unprivileged_ss
+        environ={"SSH_CONNECTION": "100.64.0.12 63739 100.64.0.10 22"}, run=_unprivileged_ss
     )
     assert route == networking.SshRoute(connected=True, ports=(22,), listeners_readable=False)
     p = _ufw_plan(enable_firewall=True, route=route)
@@ -4462,11 +4462,28 @@ def test_one_zone_is_no_breadth_and_a_machine_that_is_fine_is_still_told_nothing
     assert p.refusals == () and p.warnings == ()
 
 
-class _Ino:
-    """A `stat` result with nothing on it but the inode, which is all this rule reads."""
+_NSFS_DEV = 4
+_PROCFS_DEV = 61
+"""The two `st_dev` values `/proc` hands out, measured on this laptop's WSL2
+kernel 6.18 at uid 1000 on 2026-09-16: `/proc/self/ns/net` stats as dev 4 (the
+`nsfs` superblock, one for the whole kernel), while `/proc`, `/proc/1` and the
+`/proc/1/ns/*` symlinks themselves are dev 61. A stat that lands on 61 did not
+follow the link — see `_namespace_ino()`. The numbers are the kernel's
+anonymous-superblock allocation order, not constants; the rule reads the one it
+gets from `/proc/self/ns/<kind>` and only asks whether pid 1's matches."""
 
-    def __init__(self, ino: int) -> None:
+
+class _Ino:
+    """A `stat` result with the inode and the device, which is all this rule reads.
+
+    Both fields, because reading only the inode is what T72 was: the placeholder
+    an unprivileged `stat` of `/proc/1/ns/net` can return carries `/proc`'s
+    device, and a fake with no device could not tell the two apart.
+    """
+
+    def __init__(self, ino: int, dev: int = _NSFS_DEV) -> None:
         self.st_ino = ino
+        self.st_dev = dev
 
 
 _HOST_PID_NS = 4026531836
@@ -4569,6 +4586,251 @@ def _namespaced(
 
 def _never_asked(path: str) -> bool:
     raise AssertionError(f"asked whether {path} exists for a backend that writes no file")
+
+
+# --- T72: "not permitted to look" is not "a different namespace" -------------
+
+
+_YULON_UBUNTU_NET_NS = 4026531833
+"""`/proc/self/ns/net` on yulon-ubuntu (Ubuntu 24.04) at uid 1000 AND as root,
+and on this laptop's WSL2 kernel 6.18 at uid 1000, 2026-09-16. It is
+`NET_NS_INIT_INO` = 0xEFFFFFF9 from `include/uapi/linux/nsfs.h` — the constant
+for the INITIAL network namespace on kernels that have one. m910q's 4026531840
+is 0xF0000000, `PROC_DYNAMIC_FIRST` (`fs/proc/generic.c`), the first
+allocation, on a kernel that had no constant for `net`."""
+
+_PID_1_NS_PLACEHOLDER_INO = 101
+"""What `os.stat("/proc/1/ns/net").st_ino` ANSWERED on yulon-ubuntu at uid 1000,
+2026-09-16 — no exception, inode 101 — while root on the same box read
+4026531833. It is the `/proc` directory entry's own inode, the symlink the
+caller was not allowed to follow, and it is not a namespace: `/proc/1` itself
+stats as 1316 on this laptop, in the same small range.
+
+This laptop's kernel refuses the same read with `EACCES` instead, which is the
+arm this module already had. Both shapes are "could not tell"; only one of them
+raises, and that is the whole of T72."""
+
+
+def _pid_1_unreadable(
+    kind: str = "net",
+    mine: int = _YULON_UBUNTU_NET_NS,
+    pid1: int | None = _PID_1_NS_PLACEHOLDER_INO,
+    pid1_dev: int = _PROCFS_DEV,
+) -> object:
+    """`os.stat` for the shipped shape: the initial pid namespace, pid 1's link unfollowable.
+
+    `pid1=None` is the OTHER way a kernel refuses the follow — `EACCES`, which
+    is what this laptop and m910q do — against the placeholder yulon-ubuntu
+    returns. Anything outside the three paths this question reads is an error,
+    so a test using this also proves the mount half was never reached.
+    """
+
+    def stat(path: str, *args: object, **kwargs: object) -> object:
+        if path == "/proc/self/ns/pid":
+            return _Ino(_HOST_PID_NS)
+        if path == f"/proc/self/ns/{kind}":
+            return _Ino(mine)
+        if path == f"/proc/1/ns/{kind}":
+            if pid1 is None:
+                raise PermissionError(13, "Permission denied", path)
+            return _Ino(pid1, pid1_dev)
+        raise AssertionError(f"asked about {path}")
+
+    return stat
+
+
+def test_a_pid_1_link_the_caller_may_not_follow_is_unknown_and_not_another_namespace() -> None:
+    """T72: a `stat` that returned the placeholder said nothing, and nothing is what it is worth.
+
+    Measured on yulon-ubuntu as an unprivileged user on 2026-09-16 — the shape
+    every shipped Linux desktop install has, since the launcher is not root:
+
+        os.stat("/proc/1/ns/net").st_ino    101           (uid 1000, no error)
+        os.stat("/proc/1/ns/net").st_ino    4026531833    (root)
+        os.stat("/proc/self/ns/net").st_ino 4026531833    (both)
+
+    101 != 4026531833, so the guard answered False and the user was told the
+    socket table "belongs to another network namespace" — a cause that did not
+    exist, with a remedy (leave `unshare --net`) for a namespace nobody entered.
+    """
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os, "stat", _pid_1_unreadable())
+        assert networking.in_host_network_namespace() is None
+        assert networking.in_host_network_namespace(prefix=()) is None
+
+    # The kernel that refuses the follow with EACCES instead — this laptop's
+    # and m910q's — has always answered None, and still does. Held here as a
+    # fixture and not only by the live read, so it is asserted on a box where
+    # pid 1's namespace IS readable (as root in CI) too.
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os, "stat", _pid_1_unreadable(pid1=None))
+        assert networking.in_host_network_namespace() is None
+
+    # The mount half of the same read is the same read and gets the same answer.
+    # 4026532219 is this laptop's `/proc/self/ns/mnt`, 2026-09-16.
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os, "stat", _pid_1_unreadable(kind="mnt", mine=4026532219))
+        assert networking.in_host_mount_namespace() is None
+
+    # And the cause the user is given is "unknown" — whose remedy is a `sudo`
+    # the launcher can be given — not the network namespace. The fake refuses
+    # every other path, so the mount question was never even asked.
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os, "stat", _pid_1_unreadable())
+        patched.setattr(networking.os.path, "isdir", lambda path: True)
+        assert networking.where_the_reading_came_from("ufw") == "unknown"
+        assert networking.reads_this_machine("ufw") is None
+        said = networking.READ_ELSEWHERE["unknown"]
+        assert "unreadable to an unprivileged probe" in said
+        assert said != networking.READ_ELSEWHERE["other-network-namespace"]
+
+
+def test_the_unfollowable_read_falls_into_the_arm_the_elevated_stat_answers() -> None:
+    """None is the answer only because nothing could ask; with a prefix, something can.
+
+    The placeholder must reach the same elevation fallback `EACCES` reaches —
+    otherwise the fix would have replaced a wrong False with a None no `sudo`
+    can lift. `sudo -n stat -L -c %i /proc/1/ns/net` answers 4026531833 on
+    yulon-ubuntu (measured 2026-09-04), and that answer still decides both ways.
+    """
+    seen: list[list[str]] = []
+
+    def probe(argv: list[str], answer: int) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, f"{answer}\n", "")
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os, "stat", _pid_1_unreadable())
+        assert (
+            networking.in_host_network_namespace(
+                run=lambda argv: probe(argv, _YULON_UBUNTU_NET_NS), prefix=("sudo", "-n")
+            )
+            is True
+        )
+        assert seen == [["sudo", "-n", "stat", "-L", "-c", "%i", "/proc/1/ns/net"]]
+        assert (
+            networking.in_host_network_namespace(
+                run=lambda argv: probe(argv, _UNSHARE_NET_NS), prefix=("sudo", "-n")
+            )
+            is False
+        ), "an elevated read that really did differ is still a different namespace"
+
+
+def test_an_elevated_answer_that_is_not_a_namespace_inode_settles_nothing_either() -> None:
+    """`stat -L` printing a placeholder decides nothing, for the reason the unelevated one does not.
+
+    The elevated read is the same read through another tool; a number below the
+    namespace range means it did not follow the link either, and turning that
+    into `mine != 101` would put the bug back one indirection out.
+    """
+
+    def answers(text: str) -> networking.Runner:
+        return lambda argv: subprocess.CompletedProcess(argv, 0, text, "")
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(networking.os, "stat", _pid_1_unreadable())
+        assert (
+            networking.in_host_network_namespace(
+                run=answers(f"{_PID_1_NS_PLACEHOLDER_INO}\n"), prefix=("sudo", "-n")
+            )
+            is None
+        )
+        assert (
+            networking.in_host_network_namespace(
+                run=answers(f"{_YULON_UBUNTU_NET_NS}\n"), prefix=("sudo", "-n")
+            )
+            is True
+        ), "a real inode through the same path still answers"
+
+
+def test_each_half_of_the_not_a_namespace_test_refuses_on_its_own() -> None:
+    """Two tests, and each fixture here trips exactly one of them.
+
+    A namespace link that WAS followed lands on `nsfs` — one superblock for the
+    whole kernel, so pid 1's `st_dev` is the `st_dev` of the process's own
+    namespace link — and carries an inode at or above 0xEFFFFFF7, the lowest
+    value `include/uapi/linux/nsfs.h` reserves. The measured placeholder breaks
+    both (dev 61, inode 101), which would let either test alone look sufficient
+    while a kernel that broke only the other one went back to answering False.
+    """
+    with pytest.MonkeyPatch.context() as patched:
+        # Device only: a plausible inode, but read from `/proc` rather than `nsfs`.
+        patched.setattr(
+            networking.os,
+            "stat",
+            _pid_1_unreadable(pid1=_YULON_UBUNTU_NET_NS, pid1_dev=_PROCFS_DEV),
+        )
+        assert networking.in_host_network_namespace() is None
+
+        # Inode only: the placeholder number, but carrying `nsfs`'s device.
+        patched.setattr(
+            networking.os,
+            "stat",
+            _pid_1_unreadable(pid1=_PID_1_NS_PLACEHOLDER_INO, pid1_dev=_NSFS_DEV),
+        )
+        assert networking.in_host_network_namespace() is None
+
+        # Neither: root's own reading on yulon-ubuntu, which must still be True.
+        patched.setattr(
+            networking.os,
+            "stat",
+            _pid_1_unreadable(pid1=_YULON_UBUNTU_NET_NS, pid1_dev=_NSFS_DEV),
+        )
+        assert networking.in_host_network_namespace() is True
+
+        # And a namespace that really is another one is still named as one:
+        # `sudo unshare --net` on m910q, self net 4026533509 against pid 1's
+        # 4026531840, both of them real nsfs inodes.
+        patched.setattr(
+            networking.os,
+            "stat",
+            _pid_1_unreadable(mine=_UNSHARE_NET_NS, pid1=_HOST_NET_NS, pid1_dev=_NSFS_DEV),
+        )
+        assert networking.in_host_network_namespace() is False
+
+
+def test_on_this_kernel_a_link_readlink_may_not_follow_is_never_answered_as_different() -> None:
+    """The same claim against the running kernel, asked through a different call.
+
+    `os.readlink("/proc/1/ns/net")` is the independent check: it is not the call
+    the module makes (`os.stat` is), and it is permission-checked the same way,
+    so it says whether THIS user may follow pid 1's namespace links without
+    borrowing the rule under test. Measured 2026-09-16: it raises
+    `PermissionError` at uid 1000 on this laptop, and the ticket's box answered
+    the stat placeholder for the same user — two kernels, one permission.
+
+    The rule is asked directly rather than through
+    `in_host_network_namespace()`, which answers the pid-namespace question
+    first and skips this one on any box that is not in the initial pid
+    namespace — this laptop's WSL2 session is not (`/proc/self/ns/pid`
+    4026532221 on 2026-09-16), so going through the public function would make
+    this test a skip exactly where it was written to run. The public function
+    is asked as well where it can be.
+    """
+    if not sys.platform.startswith("linux"):
+        pytest.skip("/proc/self/ns is Linux's")
+    nsfs_dev = os.stat("/proc/self/ns/net").st_dev
+    try:
+        target = os.readlink("/proc/1/ns/net")
+    except PermissionError:
+        assert networking._namespace_ino("/proc/1/ns/net", nsfs_dev) is None, (
+            "this user may not follow pid 1's namespace link, so whatever the "
+            "stat returned is not an inode to compare anything with"
+        )
+        if os.stat("/proc/self/ns/pid").st_ino == networking._INITIAL_PID_NAMESPACE_INO:
+            assert networking.in_host_network_namespace(prefix=()) is None
+        return
+    except OSError as error:  # pragma: no cover - neither box has produced this
+        pytest.skip(f"/proc/1/ns/net could not be read at all: {error}")
+    # Root, or a kernel that lets an unprivileged caller follow it: then the
+    # answer is a real comparison, and `readlink` carries the same inode the
+    # rule reads — `net:[4026531833]`.
+    pid1_ino = int(target.partition("[")[2].rstrip("]"))
+    assert networking._namespace_ino("/proc/1/ns/net", nsfs_dev) == pid1_ino
+    if os.stat("/proc/self/ns/pid").st_ino == networking._INITIAL_PID_NAMESPACE_INO:
+        assert networking.in_host_network_namespace(prefix=()) is (
+            os.stat("/proc/self/ns/net").st_ino == pid1_ino
+        )
 
 
 def test_a_container_with_the_hosts_network_is_still_not_the_hosts_machine() -> None:
