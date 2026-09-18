@@ -260,7 +260,7 @@ from the test branch, and every shipping branch still says 1600-2000.
 - [x] **Tortoise, Vanilla and TBC have never been run** — Vanilla now HAS, end to end on Arch; TBC is mid-compile; Tortoise still owed. See section 10. — rounds 2, 3 and 4, in that order.
   See [`hunt-rounds.md`](hunt-rounds.md). Tortoise is WSL-only, so Windows is the only box that
   can host it. The Vanilla and TBC clients are downloading to yulon-arch directly from
-  `wow.baerthe.com`; the copies on m910q are unreachable while that box is offline. **Vanilla's
+  the project's client download host; the copies on m910q are unreachable while that box is offline. **Vanilla's
   script refuses under 20 GB on both the target disk and Docker's root**, so prune between
   installs on the same box.
 
@@ -535,7 +535,7 @@ a real Tortoise server was ever started.
 ### 12. Tortoise on m910q, 2026-08-29 — the last game, and a defect in that morning's fix
 
 **Tortoise has been installed and running since 2026-08-26**, on the physical m910q box, at
-`/home/pk/tortoise-wow-server`: all three containers up with RestartCount 0, ports 3724, 8090 and
+`/home/user/tortoise-wow-server`: all three containers up with RestartCount 0, ports 3724, 8090 and
 3306 bound, mangosd running its realm loop. That corrects "Tortoise has never been run" — it had,
 on the one machine nobody had looked at, which is also the only machine that already had the
 Turtle client (9.3 GB, extracted, 172 files).
@@ -1505,7 +1505,7 @@ inertness argument depends on being visible. **Note it in K.8's brief.**
 
 ### 24. The false 0600 guarantee K.3 removed is still live in `conf.py` — 2026-09-01, **FIXED 2026-09-02**
 
-**Measured twice, on PKGAME-LAPTOP, Windows 10.0.26200, CPython 3.13.14, 2026-09-01.** On Windows the
+**Measured twice, on a Windows laptop, Windows 10.0.26200, CPython 3.13.14, 2026-09-01.** On Windows the
 POSIX mode is a **no-op** and the ACL is purely inherited:
 
 - `os.open(p, O_WRONLY|O_CREAT|O_TRUNC, 0o600)`, `open()` + `os.chmod(0o600)`, and a plain `open()`
@@ -2297,7 +2297,7 @@ lesson survives as machinery in two places — `pump_until`'s report, and `run-t
 which until 2026-09-04 chained every step through one `;`-joined ssh command and `exit $?`, so the
 status was the LAST step's and a red suite exited 0. It now accumulates `rc` across the steps and
 prints `=== --checks: RED (see !! lines above) ===`. **That helper lives on the laptop
-(`C:\Users\perzi\run-tests-vm.sh`) and not in this repo**, so this is the one claim in this entry a
+(`C:\Users\user\run-tests-vm.sh`) and not in this repo**, so this is the one claim in this entry a
 reader cannot re-derive from the tree; its reasoning is in the script's own header at lines 203-208.
 
 ---
@@ -2410,8 +2410,8 @@ the player's own PC. It hangs at "Connecting" or drops back to the realm screen 
 useful said.
 
 **Found by driving it (2026-09-02).** WoW TBC on `m910q`, reached over Tailscale at
-`100.78.24.50`. Auth succeeded and the realm `MaNGOS` appeared; the world connect could not.
-One `update realmd.realmlist set address='100.78.24.50'` later, the same client reached a
+`100.64.0.10`. Auth succeeded and the realm `MaNGOS` appeared; the world connect could not.
+One `update realmd.realmlist set address='100.64.0.10'` later, the same client reached a
 character screen, created `Administrato` (guid 901, account 1, Troll warrior) and the world
 server logged `Sessions online: 1`.
 
@@ -3118,8 +3118,8 @@ bounds do not cover is `activity-log-excerpts.txt`, written in rounds 4 and 5 to
 lane's later record-keeping from the boxes' own activity logs; its stamps run to
 `04:06:03` CEST. An earlier draft of this paragraph said 22:57 and 23:38, and neither of
 those two figures had an artifact behind it — on
-**`yulon-ubuntu`**, the live 7.2 install at `/home/pk/wowserver`, against the committed tree at
-`cfb4c04f` (`git rev-parse HEAD` in `/home/pk/p7/checkout`, `git status --short` empty). Command by
+**`yulon-ubuntu`**, the live 7.2 install at `/home/user/wowserver`, against the committed tree at
+`cfb4c04f` (`git rev-parse HEAD` in `/home/user/p7/checkout`, `git status --short` empty). Command by
 command, with every readback, in `.notes/gates/bug39-lan-press-2026-09-05/README.md`.
 
 * **The way back in was proved BEFORE the firewall was touched, with the tools the 7.1 recovery
@@ -3136,7 +3136,7 @@ command, with every readback, in `.notes/gates/bug39-lan-press-2026-09-05/README
   `b39-failsafe.timer` was stopped with 2 min 15 s left, and `systemctl list-units 'b39-*' --all`
   then printed `0 loaded units listed.`
 * **The press went through the real widgets.** `press-driver.py` built the real `ControllerView`
-  over `ControllerServices.for_entry(…, /home/pk/wowserver)` — the object `main.py` builds for a
+  over `ControllerServices.for_entry(…, /home/user/wowserver)` — the object `main.py` builds for a
   real install — offscreen, with `status_poll_ms=0` so no timer could fill what a click did not, and
   pressed `Show plan` and then `Apply` with `QTest.mouseClick`. `Apply` was asserted DISABLED before
   a plan existed and went live only when the plan arrived. The plan the widget rendered was
@@ -3165,7 +3165,7 @@ command, with every readback, in `.notes/gates/bug39-lan-press-2026-09-05/README
   artefact of the route it was made over.
 * **A client on another machine then used those ports.** Account `LANGATE` (id 104, GM 0) was made
   by typing into the Accounts tile and clicking `Create`. A real 3.3.5a client (build 12340) on
-  `vmhost`, the Hyper-V host, with `Data\enUS\realmlist.wtf` = `set realmlist 172.30.55.119` and no
+  the Hyper-V host, with `Data\enUS\realmlist.wtf` = `set realmlist 172.30.55.119` and no
   tunnel, logged in at 01:31:24 CEST: `RESPONSE_CONNECTED result: LOGIN_OK 172.30.55.119:3724`,
   `COP_AUTHENTICATE code=AUTH_OK result=TRUE`, `COP_GET_CHARACTERS code=44 result=TRUE`
   (`client-connection-20260906-0131.log:2,10,12`), and the character-selection screen for realm
@@ -3411,7 +3411,7 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       row is still `127.0.0.1` with a log line saying why it was left alone — while a server whose
       loopback was never chosen still ends up advertising a reachable address. — **Met on
       yulon-ubuntu 2026-09-06**, against the finished AzerothCore WotLK install at
-      `/home/pk/wowserver` (`install_id 243c46e3`, six recorded stages completed, `ac-*` containers
+      `/home/user/wowserver` (`install_id 243c46e3`, six recorded stages completed, `ac-*` containers
       up, 50 GB free), from a checkout of `lane/b41` at `b206ad0c` and, for the second half,
       `96251d57`. Whole record: `.notes/gates/bug41-loopback-2026-09-05/README.md` §"Round 2", with
       the files in `yulon-ubuntu-press/`.
@@ -3420,11 +3420,11 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       (`yulon-ubuntu-press/widget-loopback.log`). `acore_auth.realmlist` id 1 went from
       `172.30.55.119 / 172.30.55.119` to `127.0.0.1 / 127.0.0.1`, read through `docker exec …
       mysql`, and `{"mode": "loopback", "recorded_unix": 1788662602}` was on disk.
-      **Press 1** (`python -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver`):
+      **Press 1** (`python -m yulon.install_wiring wow-wotlk --server-dir /home/user/wowserver`):
       exit 0 in 880 s, `Already finished: clone-core, clone-modules, generate-compose, build,
       client-data, import`, `The server is already built; skipping the compile.` — nothing compiled
       (`press-chosen.log`). The row afterwards was still `127.0.0.1 / 127.0.0.1`, and the sentence
-      below appeared in the press's stdout AND at line 61 of `/home/pk/.local/share/yulon/yulon.log`
+      below appeared in the press's stdout AND at line 61 of `/home/user/.local/share/yulon/yulon.log`
       (`platform.config_dir()` on Linux; the file did not exist before this press), timestamped
       `2026-09-06 04:57:59` (`after-press-chosen.txt`, `yulon-log-press-chosen.txt`).
       **Press 2**, with `.yulon-network.json` removed and the row left on the loopback: exit 0 in
@@ -3545,7 +3545,7 @@ ever produce. Corrected the same day to read the database and the transcript ins
 - [x] `install_wiring` configures file logging the way `main.py` does, or says in its own words why a
       CLI install deliberately does not. — `install_wiring.py` calls `configure(config_dir=platform.config_dir(), stderr_level=logging.WARNING)` after `parse_args`, with the argument for the level and for not adding a second reporter written beside it (`lane/headlesslog`, merged `9254b60a`).
 - [x] A test that fails if one entry point writes a log and the other does not. — `tests/test_install_wiring.py::test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind` runs every module the app can be started as and fails on the disagreement; `test_the_harness_puts_the_stage_lines_it_streamed_into_the_log` pins the stage lines.
-- [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `.notes/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
+- [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\user\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `.notes/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
 
 ### 43. `keep_awake()` refuses the headless harness's own thread — 2026-09-05, **CLOSED 2026-09-05 at `0ad9d99a`**
 
@@ -3606,7 +3606,7 @@ sleeps; a laptop running a scripted Windows install is not held awake, and the l
 - [x] The gate: a headless run on `yulon-win11-gate` whose `yulon.log` carries no `not holding
       this machine awake` line. — Met 2026-09-05: the press at `0ad9d99a` (task `dml-b43`,
       `C:\gate\run-b43.cmd`, into the same `C:\gate\tbc-server`) left thirty-four lines in
-      `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with no such line, and with the positive one
+      `C:\Users\user\AppData\Roaming\Yulon\yulon.log` with no such line, and with the positive one
       the absence alone could not prove: `13:30:21 INFO [yulon.platform] holding this machine awake
       for the build: SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` — this project's
       first execution of that API. Across the whole 1673-line file `not holding this machine awake`
@@ -3898,7 +3898,7 @@ good news in the entry.
   `INSTALL_REALM_HOST` (`127.0.0.1`), and `StagedInstaller._advertise_realm()` — the install's LAST
   act, itself the fix for §35 — rewrites that row to the machine's reachable address. So on every
   install the button can be pressed on, the marker said `127\.0\.0\.1:8085` while the auth server
-  said `Added realm "Yulon ubuntu2" at 100.99.204.5:8085.` Found on the control's first live press,
+  said `Added realm "Yulon ubuntu2" at 100.64.0.13:8085.` Found on the control's first live press,
   `yulon-ubuntu2` 2026-09-09: the compile finished, the containers were replaced, the new
   worldserver came up with `mod-ale` compiled in and answered `dml_bridge_ping` over its own
   channel — and the press sat in "Waiting for the world server". `wait_for_ready()` grants another

@@ -249,7 +249,7 @@
     },
     "ExistsCheck": {
       "additionalProperties": false,
-      "description": "A read run against the server's own database before an answer is accepted.\n\nDeclared here rather than coded in the applier because it is per-item\nknowledge (style-guide \u00a74), and it exists because of what the AH bot modules\ndo with a wrong answer: `AuctionHouseBot.GUID` naming no character is not an\nerror inside the module, it is a module that quietly posts nothing \u2014 which\nfrom the outside is indistinguishable from \"this module does not work\"\n(measured on the owner's own install, 2026-09-07).\n\n`query` and `missing` are templates over the manifest's prompt keys.\n`query` must be a single SELECT: the applier hands it to the READ half of\nthe SQL seam, and a manifest is content rather than code, so the one thing\nit must not be able to do through this field is write.",
+      "description": "A read run against the server's own database, whose answer decides something.\n\nDeclared here rather than coded in the applier because it is per-item\nknowledge (style-guide \u00a74), and it exists because of what the AH bot modules\ndo with a wrong answer: `AuctionHouseBot.GUID` naming no character is not an\nerror inside the module, it is a module that quietly posts nothing \u2014 which\nfrom the outside is indistinguishable from \"this module does not work\"\n(measured on the owner's own install, 2026-09-07).\n\nThree fields, three users, and the model is shared on purpose: all three ask\none SELECT and read \"did a row come back\". What DIFFERS is what the answer\nmeans, and that lives at the field, not here:\n\n* `Prompt.exists` \u2014 no row REFUSES the action (a bad answer);\n* `SqlStep.precondition` \u2014 no row SKIPS that one step, with `missing` said\n  and nothing written (T63);\n* `SqlStep.verify` \u2014 no row REFUSES after the fact: the file ran and the\n  database is not in the state it claims to produce (T63).\n\n`query` and `missing` are templates over the manifest's prompt keys for\n`Prompt.exists`; a `SqlStep` check is never rendered and must carry no\n`{field}` at all (`test_manifest.py`). `query` must be a single SELECT: the\napplier hands it to the READ half of the SQL seam, and a manifest is content\nrather than code, so the one thing it must not be able to do through this\nfield is write.",
       "properties": {
         "db": {
           "enum": [
@@ -572,7 +572,7 @@
     },
     "SqlStep": {
       "additionalProperties": false,
-      "description": "One SQL application: a file/glob from the clone, or an inline statement.\n\n`applied_by=\"db-import\"` means AzerothCore's own `ac-db-import` picks the\nfiles up on next start and ledgers them in the `updates` table (the default\nfor C++ modules \u2014 applying those by hand breaks that tracking). `\"direct\"`\nmeans the app runs it via `mysql` itself (ALE mods, SQL mods). Inline\n`statement` templates may reference prompt keys as `{key}`.",
+      "description": "One SQL application: a file/glob from the clone, or an inline statement.\n\n`applied_by=\"db-import\"` means AzerothCore's own `ac-db-import` picks the\nfiles up on next start and ledgers them in the `updates` table (the default\nfor C++ modules \u2014 applying those by hand breaks that tracking). `\"direct\"`\nmeans the app runs it via `mysql` itself (ALE mods, SQL mods). Inline\n`statement` templates may reference prompt keys as `{key}`.\n\n`precondition` and `verify` are T63's two halves of one problem: a direct\nstep whose ORDER cannot be satisfied inside a single press. `mod-city-bots`\nimports its 400-citizen roster into `acore_playerbots`, and that file writes\n`playerbots_account_type` \u2014 a table mod-playerbots creates on the world\nserver's FIRST start, which is necessarily after the rebuild this install\nonly reports. So the step can be right and still be too early, and the two\nhonest answers to that are *say so and do nothing* and *prove it worked*:\n\n* `precondition` \u2014 asked before the file is opened. No row (or a database\n  that cannot be asked at all, which is what a schema that does not exist\n  yet looks like) means the step is SKIPPED with `missing` in the report and\n  not one row written. Install again after the missing thing exists; the\n  import is idempotent by construction (the roster file drops and recreates\n  its own table), so a repeat is a repair.\n* `verify` \u2014 asked after, once per entry, and each entry says its own\n  sentence. No row RAISES: the file ran, so \"skipped\" would be a lie, and a\n  module reported installed whose roster is half there is exactly the defect\n  wow-manage's `city_bots_import_roster` verified 400/400 to catch.\n\nBoth are `direct`-only. A `db-import` step is handed to another program on a\nlater boot and nothing here is in a position to check either end of it, so\ndeclaring one there would be a field nothing reads.",
       "properties": {
         "applied_by": {
           "default": "direct",
@@ -619,6 +619,18 @@
           "description": "File or glob, relative to the clone.",
           "title": "Path"
         },
+        "precondition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExistsCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Must return a row or this step is skipped, unrun, with `missing` said."
+        },
         "statement": {
           "anyOf": [
             {
@@ -631,6 +643,15 @@
           "default": null,
           "description": "Inline SQL (template).",
           "title": "Statement"
+        },
+        "verify": {
+          "default": [],
+          "description": "Read after the step; an entry returning no row is a failure, by its own name.",
+          "items": {
+            "$ref": "#/$defs/ExistsCheck"
+          },
+          "title": "Verify",
+          "type": "array"
         },
         "when": {
           "default": "install",

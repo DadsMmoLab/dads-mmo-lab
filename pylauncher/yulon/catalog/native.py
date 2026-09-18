@@ -85,6 +85,7 @@ from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
     UnsupportedPlatformError,
+    WorldStoppedAfterReadyError,
     docker_unavailable,
     generated_compose_files,
     provision_lines,
@@ -231,7 +232,7 @@ and `.dockerignore` through a single `dockerfile.write()` that rewrites whicheve
 differs and refuses either that carries no marker. Both user sentences say
 "build recipe" and name the pair, because a `.dockerignore` behind its template
 is rewritten by this press exactly as the Dockerfile is, and a dialog promising
-"nothing else in the folder" was wrong about the second one (Fable, round 1).
+"nothing else in the folder" was wrong about the second one (review, round 1).
 
 Named here because two things select on it: `rebuild_stages()`, which runs it
 again ahead of every compile for the families that have one, and
@@ -377,7 +378,7 @@ ADOPT_CONSEQUENCE = (
 """What adopting COSTS, in the owner's own words, said in the confirmation.
 
 Verbatim from the ticket's spec and not paraphrased, and it is the sentence the
-whole feature turns on: three rounds of an Opus and a Fable hand tried to
+whole feature turns on: three rounds of implementation tried to
 DERIVE "this import finished" from the plan — per-schema table counts, the
 plan's own `verify` rules, then the table set parsed out of every dump file —
 and each round's reviewer found the next layer of inference underneath. The
@@ -916,7 +917,7 @@ REALM_ADDRESS_PATTERN = r"\S+"
 Rebuild control.** `ready.auth` is `{{REALM_HOST}}:{{WORLD_PORT}}`, and filling
 the token with `INSTALL_REALM_HOST` made the marker `127\\.0\\.0\\.1:8085` while
 the auth server's own line said
-`Added realm "Yulon ubuntu2" at 100.99.204.5:8085.` — because
+`Added realm "Yulon ubuntu2" at 100.64.0.13:8085.` — because
 `_advertise_realm()` is the install's LAST act and had replaced that row hours
 earlier. The compile finished, the containers were replaced, the new
 worldserver came up with the module compiled in and answered a command over its
@@ -1722,6 +1723,37 @@ This is the INSTALL ceiling. A management wait gets its own — see
 `MANAGEMENT_CEILING_WINDOWS`.
 """
 
+READY_GRACE_SECONDS = 60.0
+"""How long the world server is WATCHED after it prints its ready banner (T71).
+
+A banner is a promise about a moment, not about a server, and until 2026-09-16
+this app believed it for ever: `wait_ready()` returned True on the first match
+and nothing looked again. Measured live on 2026-09-16 (gate `t63-owed-live`,
+WoW WotLK + mod-city-bots): the world initialised in 1 m 21 s, printed
+`... ready...`, and one line later aborted on `[1146] Table
+'acore_world.city_bot_poi' doesn't exist` — the module's db-world SQL had not
+been applied — then crash-looped three times, while the panel read "The server
+is up" and "WoW WotLK was rebuilt and is running".
+
+Sixty seconds because of what that same log says happens after the banner. The
+line straight after `ready...` is `[mod-city-bots] loaded 219 city POIs`: the
+first database work of the running world starts within a second of the banner,
+and in the failing run that query is the one that aborted. The work that
+follows it — 500 bots logging in, ten to a line — is the rest of the post-banner
+startup, and it is tens of seconds long. A minute covers both with margin.
+
+It is an upper bound, not a wait: `watch_after_ready()` returns the moment the
+world is seen to have gone, so only a server that stays up spends the whole
+minute, and what it costs that server is one extra minute of being watched
+before the app says it is up — said out loud, in `wait_for_ready()`'s own
+announcement, rather than as a pause.
+
+Deliberately NOT long enough to cover the whole second boot of a crash loop
+(1 m 21 s of world init, in that measurement): the first restart is seen within
+one poll, and waiting for the second one would double what a healthy start
+pays to learn nothing new.
+"""
+
 MEASURED_9P_FIRST_BOOTS_SECONDS = (1479, 2763, 3702)
 """Every first boot this project has timed on Docker Desktop's 9p share, in seconds.
 
@@ -2158,6 +2190,219 @@ def _restart_baseline(first_restarts: int | None, now: WorldOutput) -> int | Non
     return now.restarts if first_restarts is None else first_restarts
 
 
+_STILL_UP_STATUSES = ("", "running")
+"""Container statuses that are not "it has stopped since it said it was ready".
+
+Two, where `_ALIVE_STATUSES` has three, and `restarting` is the difference. It
+belongs there and not here because the same word means two things either side of
+the banner: BEFORE it, a container in restart backoff is on its way up and the
+wait must not call it dead; AFTER it, the run that printed the banner has ended,
+which is the whole of what T71 is about.
+
+`""` — a `docker inspect` that would not answer (`docker.ContainerState()`) —
+stays on this list on purpose, and it is the one entry that is not a fact about
+the server. Before this watch existed an unreadable daemon left the app saying
+"up", so reading it as a stop would invent a failure out of a hiccup where there
+was not even a wrong sentence before. The conservative direction here is the
+opposite of the one `_ALIVE_STATUSES` takes, because this watch runs only after
+a server has already been seen to be up.
+"""
+
+
+@dataclass(frozen=True)
+class AfterReady:
+    """What `watch_after_ready()` saw: did the world stay up, and its last words if not.
+
+    A pair rather than `str | None`, because the words can legitimately be `""`
+    — a container that stopped having printed nothing new this run — and a
+    caller testing the string for truth would then report that server as up.
+    """
+
+    stopped: bool
+    words: str
+
+
+_DYING_WORDS_LINES = 5
+"""How many of a stopped world server's last lines are quoted back. `_restore_rollback()`'s number.
+
+Five and not one, for what the T63 log looks like. The line that says WHY is not
+the last line: after `[1146] Table 'acore_world.city_bot_poi' doesn't exist`
+came the advice to run the sql/updates folders, `>> ABORTED`, and a source
+location — so a refusal quoting the final line alone would hand the user
+`# Location '/azerothcore/src/.../MySQLConnection.cpp:634'` and nothing about the
+missing table. Which of a core's dying lines carries the diagnosis is a per-fork
+fact this app has no business guessing (memory
+`upstream-conventions-differ-per-fork`); a short block needs no guess.
+"""
+
+
+def _dying_words(texts: Sequence[str], fatal: str | None) -> str:
+    """What to quote a stopped world server on, from the logs still in hand.
+
+    `texts` is ordered by the caller — the reading likeliest to hold the death
+    first — and asked in that order, twice over. A `fatal` match wins the first
+    pass, because a catalogue `fatal` is this fork's own name for "the server
+    said why" (Tortoise's already carries `\\[1146\\] Table .* doesn't exist`,
+    the very line T63 measured) and one line is then the whole answer; it is
+    widened to that line by `_line_around()` for the reason that function
+    exists. The second pass is for the three entries that declare no `fatal` at
+    all — wow-wotlk and both CMaNGOS games — and quotes the last
+    `_DYING_WORDS_LINES` non-empty lines instead.
+
+    Why more than one text: after a restart, `docker._logs(this_run_only=True)`
+    is the log of the NEW run, and the abort that ended the old one is not in
+    it. The caller keeps the reading from before the stop and hands both over.
+
+    `""` when neither text holds anything — a container that stopped without
+    printing a word this run. The callers say that in words rather than quoting
+    an empty block.
+    """
+    for text in texts:
+        found = re.search(fatal, text) if fatal is not None else None
+        if found is not None:
+            return _line_around(text, found)
+    for text in texts:
+        said = [line.strip() for line in text.splitlines() if line.strip()]
+        if said:
+            return "\n".join(said[-_DYING_WORDS_LINES:])
+    return ""
+
+
+def _still_the_run_that_said_ready(
+    before: WorldOutput | None,
+    now: WorldOutput,
+    baseline: int | None,
+    banner: str,
+    fatal: str | None,
+) -> AfterReady | None:
+    """One reading, judged. `None` to keep watching; an `AfterReady` ends the watch.
+
+    Four questions, and the third is the one the first version of this did not
+    ask. In order:
+
+    * **gone**: a status off `_STILL_UP_STATUSES`. The container's CURRENT log is
+      then the log of the run that died, so it is quoted first.
+    * **restarted**: `restarts` changed at all, against the first readable count
+      this watch took. `!= 0` rather than `> 0`: a count that went DOWN is a
+      container that was replaced rather than restarted, and the run that
+      printed the banner is just as gone either way.
+    * **the banner is not in this run's log any more**. `docker.wait_ready()`
+      matched `banner` in the CURRENT run's log a moment ago — that is what made
+      it answer True — so a readable log without it is a different run, whatever
+      the count says. This is the only question that answers the FIRST reading:
+      `restart: unless-stopped` backs off for 100 ms, and between the banner and
+      this watch's first look sit `_auth_ready()`'s two docker commands and the
+      caller's own, so a container that aborted a second after `ready...` can be
+      up again under a new run before anything here has looked once. The count
+      is then already the new one and there is nothing for "grew" to grow from.
+      (Cold review, 2026-09-16, with the timings.)
+    * **fatal**, for the world that aborts without the container noticing yet.
+
+    An EMPTY log is not an answer to the third question: `docker._logs()` returns
+    `""` both for "this run has printed nothing" and for "the read failed"
+    (`_world_output()`'s docstring has that gap), and calling a failed read a
+    restarted container would refuse a healthy server on a hiccup. The same rule
+    `_read_world()` follows — the unknown value is never a verdict.
+
+    `before` is `None` on the first reading and is what makes the words honest:
+    after a restart the current log is the NEW run's, so quoting it as the dying
+    words would attribute the fresh boot's lines to the crash. With no earlier
+    reading in hand there is nothing to quote, and the caller says so instead.
+    """
+    earlier = (before.text,) if before is not None else ()
+    if now.status not in _STILL_UP_STATUSES:
+        return AfterReady(True, _dying_words((now.text, *earlier), fatal))
+    grew = None if baseline is None or now.restarts is None else now.restarts - baseline
+    if grew is not None and grew != 0:
+        return AfterReady(True, _dying_words((*earlier, now.text), fatal))
+    if now.text and now.status and not re.search(banner, now.text):
+        return AfterReady(True, _dying_words(earlier, fatal))
+    found = re.search(fatal, now.text) if fatal is not None else None
+    if found is not None:
+        return AfterReady(True, _line_around(now.text, found))
+    return None
+
+
+_MISSING_TABLE = re.compile(r"[Tt]able\s+\S*\s*(?:doesn't|does not) exist")
+"""A world server saying a database table it needs is not there.
+
+The T63 shape, and the only one of these the app can name a remedy for:
+`[1146] Table 'acore_world.city_bot_poi' doesn't exist` — a module's db-world
+SQL that was never applied, which the install report had already listed as left
+unapplied. Deliberately narrow (a TABLE, and the two spellings of the verb), and
+deliberately not a per-fork string: MySQL's own wording is what every core
+passes through, while `[1146]` is AzerothCore's prefix and Tortoise's `fatal`
+already spells it its own way.
+"""
+
+MODULE_SQL_HINT = (
+    " That table is created by a module's db-world SQL, which has not been applied to this "
+    "database. Press Apply module SQL on the Modules tab, then Start."
+)
+"""The one remedy this app can hand a user for a missing-table abort (owner, 2026-09-16).
+
+It is the remedy the T63 gate ran by hand and recorded as working: Stop, Apply
+module SQL (12 s), Start, up in 39 s. Named buttons, because "apply the module's
+SQL" is a sentence and `Apply module SQL` is a thing to press.
+"""
+
+
+def _missing_table_hint(words: str) -> str:
+    """`MODULE_SQL_HINT` when the server's dying words name a table that is not there."""
+    return MODULE_SQL_HINT if _MISSING_TABLE.search(words) else ""
+
+
+def watch_after_ready(
+    look: Callable[[], WorldOutput],
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+    *,
+    interval: float,
+    banner: str,
+    fatal: str | None,
+    grace: float = READY_GRACE_SECONDS,
+) -> AfterReady:
+    """Keep watching a world server for `grace` seconds AFTER it said it was ready (T71).
+
+    ONE function for `_read_world()`'s reason: the install spine's
+    `wait_for_ready()` and `wait_ready_quietly()` both call it, and two copies of
+    a rule is two rules the day one of them is edited. What each reading means is
+    `_still_the_run_that_said_ready()`, which holds the order and the argument;
+    this loop is the clock around it.
+
+    EVERY reading is judged, the first one included, and it is the first that
+    costs the most to skip: the banner is up to a poll old by the time the wait
+    returns, and a container that aborts a second later can be restarted and
+    running again before this looks once. A first reading taken only as a
+    baseline is a crash the watch then sits through for a minute and calls
+    healthy.
+
+    Returns as soon as it has an answer. A server that stays up costs the full
+    `grace`; one that dies costs one poll after it died.
+    """
+    deadline = monotonic() + grace
+    baseline: int | None = None
+    before: WorldOutput | None = None
+    # BOTH bounds, and the poll count is the one that guarantees an end. The
+    # clock bound is the honest one — a `look()` is two docker commands and can
+    # take a second of the minute on its own — but it is read off a seam, and a
+    # caller whose clock does not move while this polls (every test that hands
+    # over a fake one) would otherwise never leave. That is not a hypothetical:
+    # it hung two of this file's own management tests before the count was added.
+    # `+ 1` because the first look happens before any sleep.
+    for _ in range(max(1, int(grace / interval)) + 1):
+        now = look()
+        stopped = _still_the_run_that_said_ready(before, now, baseline, banner, fatal)
+        if stopped is not None:
+            return stopped
+        baseline = _restart_baseline(baseline, now)
+        before = now
+        if monotonic() >= deadline:
+            break
+        sleep(interval)
+    return AfterReady(False, "")
+
+
 def wait_ready_quietly(
     spec: docker.ContainerSpec,
     ready: docker.ReadySpec,
@@ -2165,6 +2410,7 @@ def wait_ready_quietly(
     wait: Callable[..., bool] | None = None,
     output: Callable[..., WorldOutput] | None = None,
     monotonic: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
     wsl_distro: str | None = None,
 ) -> bool:
     """`docker.wait_ready_for()` with `ready.timeout` spent as a QUIET budget, not a total.
@@ -2204,7 +2450,9 @@ def wait_ready_quietly(
     `wsl_distro` reaches the WAIT and both READS. It reached only the wait until
     2026-09-05; `_world_output()`'s docstring has what that cost.
 
-    Returns True the moment the world server reports ready. Returns False for
+    Returns True once the world server has reported ready AND stayed up for
+    `READY_GRACE_SECONDS` afterwards — `watch_after_ready()` holds why a banner
+    on its own is not an answer. Returns False for that watch, for
     every one of `_read_world()`'s verdicts and at the ceiling, because a
     caller polling a running server wants a bool — the five sentences are the
     install spine's job, and it keeps its own loop to build them.
@@ -2222,6 +2470,7 @@ def wait_ready_quietly(
     wait = wait or docker.wait_ready_for
     look = output or _world_output
     clock = monotonic or time.monotonic
+    pause = sleep or time.sleep
     ceiling = management_ceiling(ready.timeout)
 
     started = clock()
@@ -2232,7 +2481,26 @@ def wait_ready_quietly(
         if window <= 0:
             return False
         if wait(spec, replace(ready, timeout=window), wsl_distro=wsl_distro):
-            return True
+            # The banner is not the verdict (T71): a world that says `ready...`
+            # and then aborts on a missing table is not a server this may
+            # answer True about. The bool half has nowhere to put the words —
+            # the five sentences are the spine's job — but it logs them, so a
+            # management wait that comes back False is not silent about why.
+            after = watch_after_ready(
+                lambda: look(spec, wsl_distro=wsl_distro),
+                clock,
+                pause,
+                interval=ready.interval,
+                banner=ready.world,
+                fatal=ready.fatal,
+            )
+            if not after.stopped:
+                return True
+            logger.warning(
+                f"{spec.world} reported ready and then stopped within "
+                f"{_spell_seconds(READY_GRACE_SECONDS)}: {after.words!r}"
+            )
+            return False
         now = look(spec, wsl_distro=wsl_distro)
         first_restarts = _restart_baseline(first_restarts, now)
         verdict, _ = _read_world(before, now, first_restarts, ready.restart_loop, ready.fatal)
@@ -2316,8 +2584,16 @@ class Seams:
     to compose.
     """
     tag_image: Callable[[str, str], str] = docker.tag_image
-    remove_image: Callable[[str], str] = docker.remove_image
+    remove_image: Callable[..., str] = docker.remove_image
     """The rebuild's rollback: kept as a second tag before the compile, let go as one after.
+
+    `Callable[...]` because of the second argument, `force=`, which `_let_go()`
+    passes only after the daemon has said in its own words that the removal
+    `must be forced` -- see `docker.remove_image()` for why a name the rebuild
+    made can end up held by a container the rebuild never touches. A double that
+    accepts `ref` alone therefore still answers the first ask and fails loudly on
+    the retry, which is the right way round: a fake that silently swallowed the
+    force would be a fake that cannot see T79's defect.
 
     Two seams and not one `docker` handle, for the reason `recreate` is its
     own: a test that could not see the tag happen BEFORE the build, or the
@@ -2380,6 +2656,16 @@ class Seams:
     minutes, and no test could see it because the fake always consumed its whole
     window (review, m910q 2026-09-05). Measuring needs a clock; a clock a test
     can hand over needs a seam.
+    """
+    sleep: Callable[[float], None] = time.sleep
+    """The only place this engine waits without a docker command waiting for it.
+
+    `wait_ready()` does its own sleeping inside the window it is handed, so the
+    spine never had to; `watch_after_ready()` (T71) polls on its own clock after
+    the banner and does. A seam beside `monotonic` and for the same reason: a
+    test that cannot advance the fake world's clock cannot drive the minute
+    after a server said it was up, and a real `time.sleep` in that test would
+    buy a minute of nothing per case.
     """
     keep_awake: Callable[[], AbstractContextManager[None]] = platform.keep_awake
     lan_ip: Callable[[], str | None] = platform.detect_lan_ip
@@ -3523,6 +3809,37 @@ class StagedInstaller:
            closing line tells the user to look rather than promising it
            happened.
 
+        **Every transient name this makes, and every way out (T79).** Two names
+        per image in `built_image_refs()` -- four images on an AzerothCore
+        install, so up to eight names: `<ref>-rollback` before the compile
+        (`_keep_rollback`), and `<ref>-failed` only if a restore starts
+        (`_restore_rollback`). A `-rollback` name must not outlive the press:
+
+        * **the rebuild finished** -- the `-rollback` names are released here,
+          and no `-failed` name was ever made;
+        * **`_keep_rollback` refuses** -- the names it had already made are
+          released before it raises;
+        * **a stage failed, or was cancelled, before the compile finished** --
+          released; the live tags never moved, so they were duplicates;
+        * **the world came up and then stopped** (`WorldStoppedAfterReadyError`,
+          T71's keep) -- released, and the new build keeps the live names;
+        * **a stage failed after the compile** -- `_restore_rollback` puts the
+          old build back and releases both sets, its `-failed` names after the
+          recreate that frees them (see `FAILED_TAG_SUFFIX`);
+        * **...and the old build did not come up either** -- released too, which
+          is the exit that kept them until T79;
+        * **...and docker refused to NAME or to MOVE a tag** -- the `-rollback`
+          names are KEPT, deliberately: the restore did not happen, so they are
+          the only copy of the old build there is, and the sentence the user
+          reads says exactly that;
+        * **anything that is not an `InstallerError`** -- released if no compile
+          finished, kept and logged if one did.
+
+        A release is `_let_go()`, which reads the daemon's refusal and asks again
+        with `-f` where the only thing in the way is a stopped container -- the
+        leak the round-3 gate found, and the reason the table above was written
+        down rather than assumed.
+
         Raises:
             InstallerError: any refusal (see `_refuse_unless_rebuildable`), any
                 stage that failed, or a cancel. The message is the sentence a
@@ -3647,12 +3964,60 @@ class StagedInstaller:
             if not built:
                 # A compile that failed or was stopped leaves the live tags on
                 # the build that is running: the second name is a duplicate.
-                self._let_go(kept)
+                yield from self._release(kept)
                 raise
+            if isinstance(exc, WorldStoppedAfterReadyError):
+                # The owner's answer, 2026-09-16: keep the new build and report
+                # the abort. The compile finished, the containers were replaced,
+                # and the server that came out of it STARTED — it then stopped
+                # for a reason on the data side of the binary (T63: a module's
+                # db-world SQL that was never applied), and putting an hour of
+                # correct compiling back does not create the missing table. The
+                # rollback tags are let go exactly as the success path lets them
+                # go, so the new images keep the live names.
+                #
+                # Every PRE-banner verdict still rolls back below: a build whose
+                # server never came up at all is a build worth putting back, and
+                # that is the whole of what this subclass separates.
+                yield from self._release(kept)
+                kept_build = (
+                    f"{exc} The build from this rebuild was KEPT and is what the containers "
+                    f"are running: the compile finished and the server it made did start, so "
+                    f"there is nothing wrong with the build to undo. Fix what stopped it and "
+                    f"press Start."
+                )
+                self._record_error(server_dir, ctx.state, kept_build)
+                raise WorldStoppedAfterReadyError(kept_build) from exc
             message = yield from self._restore_rollback(ctx, refs, kept, touched, str(exc))
             self._record_error(server_dir, ctx.state, message)
             raise InstallerError(message) from exc
-        self._let_go(kept)
+        except BaseException:
+            # NOT a refusal this method has an answer for: a bug in a stage, a
+            # `KeyboardInterrupt`, or a consumer that stopped reading (which
+            # arrives here as `GeneratorExit`). Until T79 the rollback names
+            # simply stayed on the daemon, because `except InstallerError` is
+            # the only handler there was and every release lives inside it.
+            #
+            # Nothing may be YIELDED here -- a `GeneratorExit` handler that
+            # yields raises `RuntimeError: generator ignored GeneratorExit` and
+            # would replace the real failure with that one -- so this path is
+            # silent in the log panel and loud in the log file.
+            #
+            # `built` decides, and it decides the same way the branch above
+            # does: with no compile finished the live tags still name the build
+            # that is running and the rollback names are duplicates, so they go.
+            # Once a compile HAS finished, those names are the only copy of the
+            # old build there is, and an unknown failure is the worst moment to
+            # throw it away -- they are kept, and the log says where they are.
+            if not built:
+                self._let_go(kept)
+            else:
+                logger.error(
+                    f"rebuild of {self.entry.id} ended unexpectedly after the compile; the "
+                    f"build from before it is still on the daemon as {', '.join(kept)}"
+                )
+            raise
+        yield from self._release(kept)
         logger.info(f"rebuild of {self.entry.id} finished")
         self._clear_error(server_dir, state)
         yield REBUILD_CLOSING_NOTE
@@ -4267,7 +4632,7 @@ class StagedInstaller:
         for ref, name in zip(refs, failed, strict=True):
             problem = self._seams.tag_image(ref, name)
             if problem:
-                self._let_go(named)
+                yield from self._release(named)
                 return (
                     f"{failure} Putting the build from before this rebuild back was not "
                     f"attempted, because the new build could not be given a name to undo "
@@ -4281,7 +4646,7 @@ class StagedInstaller:
             if problem:
                 undone = [r for r in moved if not self._seams.tag_image(r + FAILED_TAG_SUFFIX, r)]
                 mixed = [r for r in moved if r not in undone]
-                self._let_go(named)
+                yield from self._release(named)
                 if mixed:
                     return (
                         f"{failure} Putting the build from before this rebuild back failed "
@@ -4297,9 +4662,9 @@ class StagedInstaller:
                     f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
                 )
             moved.append(ref)
-        self._let_go(named)
+        yield from self._release(named)
         if not touched:
-            self._let_go(kept)
+            yield from self._release(kept)
             return (
                 f"{failure} The tags were put back to the build that is running, and no "
                 f"container was replaced."
@@ -4333,23 +4698,87 @@ class StagedInstaller:
             # them. Both calls are kept because the failure paths ABOVE this
             # one never reach a recreate, and a name docker already let go is a
             # no-op here (`remove_image` treats "no such image" as done).
-            self._let_go(named)
+            yield from self._release(named)
             yield from self.wait_for_ready(ctx, self._native().ready)
         except InstallerError as second:
+            # T79. Every ref above is back on the old build -- `moved` is all of
+            # them or this line is not reached -- so the `-rollback` names are
+            # now second names for images the live tags already point at, and
+            # letting them go removes a name rather than the last copy of
+            # anything. Until T79 this one exit kept them: a restore whose
+            # server did not come up left four `-rollback` tags on the daemon
+            # and said nothing about them, which is the same leak the success
+            # path had and the harder one to notice, because the press was
+            # already reporting a failure.
+            yield from self._release(named)
+            yield from self._release(kept)
             return (
                 f"{failure} The build from before this rebuild was put back, but it did not "
                 f"report ready either: {second}{said}{database}"
             )
-        self._let_go(kept)
+        yield from self._release(kept)
         return (
             f"{failure} The build from before this rebuild was put back and is running "
             f"again.{said}{database}"
         )
 
-    def _let_go(self, kept: Sequence[str]) -> None:
-        """Remove the rollback names. A refusal is logged by the seam and changes nothing here."""
+    def _let_go(self, kept: Sequence[str]) -> tuple[str, ...]:
+        """Take the transient names off the daemon. Returns the ones still there.
+
+        **T79, and the reason the answer had to stop being `None`.** This asked
+        once and threw the refusal away. `docker.remove_image()` is deliberately
+        soft -- it logs and returns the daemon's words -- so a name docker
+        declined to remove was left on the daemon with nothing said anywhere a
+        user or a gate would look. The round-3 gate then found a stale
+        `ac-wotlk-db-import:...-rollback` after two clean rebuilds, and the
+        earlier failed build had left a `client-data` one the same way.
+
+        It is not luck which two: the rebuild's recreate is `compose up
+        --force-recreate --no-deps` over `spec.compose_services()`, which never
+        selects the one-shot import or the client-data job, so their EXITED
+        containers still reference the pre-rebuild images when these names are
+        let go. `-rollback` is by then the image's only name, so removing it
+        removes the image, and the daemon refuses: `conflict: unable to delete
+        <id> (must be forced) - container <id> is using its referenced image`.
+        Every rebuild of this shape leaks two names, which is what "a leftover,
+        not a rollback" in the gate actually was.
+
+        So the refusal is READ. `must be forced` is the daemon saying the only
+        thing in the way is a container that is not running, and the second ask
+        carries `-f`, which takes the NAME off and leaves the layers the exited
+        container holds. Anything else -- `cannot be forced`, a read-only layer
+        store, a daemon that went away -- is returned to the caller to say out
+        loud, because a name this module documents as transient sitting on the
+        daemon for ever is a thing the user has to be told, not a thing to
+        retry blind.
+        """
+        left: list[str] = []
         for back in kept:
-            self._seams.remove_image(back)
+            problem = self._seams.remove_image(back)
+            if problem and _MUST_BE_FORCED in problem:
+                logger.info(f"{back} is held by a stopped container; asking again with --force")
+                problem = self._seams.remove_image(back, force=True)
+            if problem:
+                logger.warning(f"{back} is still on the daemon: {problem}")
+                left.append(back)
+        return tuple(left)
+
+    def _release(self, kept: Sequence[str]) -> Iterator[str]:
+        """`_let_go()`, with a sentence for whatever the daemon would not take.
+
+        Used on every exit that can still speak. The sentence is not a failure --
+        the rebuild's own verdict is decided elsewhere and is not changed by a
+        name -- it is the one place a leaked tag becomes visible to the person
+        who would otherwise find it in `docker images` months later.
+        """
+        left = self._let_go(kept)
+        if left:
+            yield (
+                f"Docker would not take {len(left)} transient name(s) off the daemon: "
+                f"{', '.join(left)}. They are this rebuild's own bookkeeping and nothing "
+                f"needs them; the log says what docker objected to. `docker image rm -f` "
+                f"each one once this server is stopped."
+            )
 
     def _recipe_ground(self, server_dir: Path) -> dict[str, RecipeGround]:
         """The build-recipe files as found. Bytes, `None` for absent, `UNREADABLE` for neither.
@@ -5728,6 +6157,19 @@ class StagedInstaller:
         one window of six hours instead of one of its own full length. The
         catalogue asking for longer than the ceiling does not raise the ceiling.
 
+        **The banner is not the end of the wait** (T71). `docker.wait_ready()`
+        answers True on the first match and used to end this generator with
+        "The server is up."; `watch_after_ready()` then keeps looking for
+        `READY_GRACE_SECONDS`, and a world that restarts, stops or prints its
+        family's `fatal` line in that minute ends this stage in a failure that
+        quotes what it said. Its constant holds the measurement.
+
+        That failure is a `WorldStoppedAfterReadyError` and the others are not,
+        which is the owner's answer of 2026-09-16 about what a REBUILD does with
+        it: this one keeps the new build (the compile was fine; the server it
+        made started), every pre-banner verdict below still rolls the images
+        back. `rebuild()` is the only reader of the distinction.
+
         Two gaps inherited from `docker.wait_ready()`, recorded in 7.1 and still
         true: its crash-loop latch and its `fatal` search both look at the WORLD
         container only, so an auth container that loops or prints a fatal line
@@ -5763,8 +6205,38 @@ class StagedInstaller:
                 break
             window_started = self._seams.monotonic()
             if self._seams.wait_ready(spec, replace(ready, timeout=window)):
-                yield "The server is up."
-                return
+                yield (
+                    f"The world server reported ready; watching it for "
+                    f"{_spell_seconds(READY_GRACE_SECONDS)} to be sure it stays up."
+                )
+                after = watch_after_ready(
+                    lambda: self._seams.world_output(spec),
+                    self._seams.monotonic,
+                    self._seams.sleep,
+                    interval=ready.interval,
+                    banner=ready.world,
+                    fatal=ready.fatal,
+                )
+                if not after.stopped:
+                    yield "The server is up."
+                    return
+                said = (
+                    f" Its last words were:\n{after.words}"
+                    if after.words
+                    # NOT "it printed nothing": this watch may have seen the
+                    # container only after docker had already restarted it, in
+                    # which case what that run said is not in this run's output
+                    # any more — but it IS in the command above, which prints
+                    # every run the container has had.
+                    else " What it said as it went is in the log of the run before this one."
+                )
+                raise WorldStoppedAfterReadyError(
+                    f"The world server came up and then stopped. {container} printed its "
+                    f"ready marker and was gone again inside "
+                    f"{_spell_seconds(READY_GRACE_SECONDS)}, so the server is not running "
+                    f"even though it started. {logs} has the rest."
+                    f"{_missing_table_hint(after.words)}{said}"
+                )
             now = self._seams.world_output(spec)
             first_restarts = _restart_baseline(first_restarts, now)
             verdict, detail = _read_world(
@@ -5881,7 +6353,7 @@ class StagedInstaller:
         connect could not — `realmd.realmlist.address` was still
         `127.0.0.1`, so the client had been told the world server was on its
         OWN machine and hung at "Connecting" saying nothing. One
-        `UPDATE realmd.realmlist SET address='100.78.24.50' WHERE id=1` later
+        `UPDATE realmd.realmlist SET address='100.64.0.10' WHERE id=1` later
         the same client reached a character screen. Every piece of this existed
         (`networking.realmlist_sql()`, `CatalogEntry.realmlist`,
         `platform.detect_lan_ip()`, the Networking tab) and nothing on the

@@ -18,7 +18,16 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPalette, QResizeEvent, QTextCharFormat, QTextCursor
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QKeyEvent,
+    QMouseEvent,
+    QPalette,
+    QResizeEvent,
+    QTextCharFormat,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -418,11 +427,90 @@ class _StreamWorker(QObject):
             runner.end_streams_started_on(self._ident)
 
 
+CHEVRON_EXPANDED = "▾"
+"""The glyph on an open handle: a down-pointing triangle, the panel is below it."""
+
+CHEVRON_COLLAPSED = "▸"
+"""And a right-pointing one when what is under the handle has been folded away."""
+
+
+class CollapseHandle(QLabel):
+    """A one-line title that folds the panel under it away when it is clicked.
+
+    A LABEL and not a `QPushButton`, and the reason is measured rather than a
+    matter of taste: the theme gives every `QPushButton` a 50px box (a 32px
+    touch floor, 8px of padding top and bottom, a 1px border), so a button used
+    as the strip over a six-line report box costs the list more height than
+    collapsing that box ever gives it back. This is 20px (T80).
+
+    Not mouse-only, which is the thing a clickable label usually gets wrong: it
+    takes focus in the tab order and answers Space and Return, so the handle is
+    reachable by the same keyboard walk as the buttons beside it. Accessible
+    name and description are set from the title for the same reason.
+    """
+
+    toggled = Signal(bool)
+    """Emitted with True when this handle has just been COLLAPSED."""
+
+    def __init__(self, title: str = "", parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self._title = title
+        self._collapsed = False
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(title or "panel")
+        self.setToolTip(f"Show or hide {title or 'this panel'}")
+        self._say()
+
+    @property
+    def collapsed(self) -> bool:
+        """True while what is under this handle is folded away."""
+        return self._collapsed
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Fold or unfold, and say so — a no-op when it is already that way.
+
+        The no-op matters: `toggled` drives a height cap, and a signal emitted
+        on every re-application of a state that has not changed asks for a
+        layout that asks for the signal again.
+        """
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+        self._say()
+        self.toggled.emit(collapsed)
+
+    def toggle(self) -> None:
+        """The press: whatever it is now, be the other thing."""
+        self.set_collapsed(not self._collapsed)
+
+    def _say(self) -> None:
+        chevron = CHEVRON_COLLAPSED if self._collapsed else CHEVRON_EXPANDED
+        self.setText(f"{chevron}  {self._title}" if self._title else chevron)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.toggle()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class LogPanel(QWidget):
     """A read-only, auto-scrolling text panel fed by a background job."""
 
     run_started = Signal()
     run_finished = Signal(bool, str)
+    collapse_toggled = Signal(bool)
+    """Emitted with True when the text pane has just been folded away (T80)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -485,7 +573,16 @@ class LogPanel(QWidget):
         self._bar.setVisible(False)
         self._progress_label = _StripLabel(self, _PROGRESS_WIDTH_PX)
 
+        # T80: the handle that folds the text pane away and leaves this strip --
+        # status, stage, elapsed and Stop -- where it was. Leftmost, so it reads
+        # as the thing the row belongs to rather than another control on it.
+        self._collapse = CollapseHandle("", self)
+        self._collapse.setAccessibleName("log")
+        self._collapse.setToolTip("Show or hide this job's output")
+        self._collapse.toggled.connect(self._fold)
+
         header = QHBoxLayout()
+        header.addWidget(self._collapse)
         # Stretch, not size hints. The strip's two fields demand no width of
         # their own (`_StripLabel`), so a share of the row is the only way they
         # get any — and a share is what should shrink first when the splitter
@@ -531,6 +628,31 @@ class LogPanel(QWidget):
         always describes the current job — see `stop()`.
         """
         return self._stop_requested
+
+    @property
+    def collapsed(self) -> bool:
+        """True while the text pane is folded away and only the strip is drawn."""
+        return self._collapse.collapsed
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Fold the text pane away, or bring it back.
+
+        The panel keeps its lines either way -- `text()` answers the same thing
+        collapsed as open -- because this is a question about height and not
+        about what the job said.
+        """
+        self._collapse.set_collapsed(collapsed)
+
+    def _fold(self, collapsed: bool) -> None:
+        """The handle was used: hide or show the pane and re-state our height.
+
+        `updateGeometry()` and not a size set here: a hidden child is out of the
+        layout's arithmetic already, so the panel's own minimum has moved and
+        the only thing the layout needs is to be told to ask again.
+        """
+        self._text.setVisible(not collapsed)
+        self.updateGeometry()
+        self.collapse_toggled.emit(collapsed)
 
     def text(self) -> str:
         """Everything currently shown."""

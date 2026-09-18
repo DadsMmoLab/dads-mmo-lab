@@ -238,17 +238,17 @@ GATE_PINS = {
 Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 `dest`), never off a branch tip:
 
-* `wow-wotlk`: `/home/pk/wowserver` on `yulon-ubuntu`, the tree gate 7.1's clean
+* `wow-wotlk`: `/home/user/wowserver` on `yulon-ubuntu`, the tree gate 7.1's clean
   2026-09-04 run installed and logged into (`.notes/gates/7.1-ubuntu-2026-09-04-clean/`;
   its `gate71-press2.log` prints `AzerothCore revision : 413bea61a85e+` from the
   build and names no commit for the module, so both were read off that box).
-* `wow-tbc`: `/home/pk/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
+* `wow-tbc`: `/home/user/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
   2026-09-04 (`.notes/gates/7.7-win11-tbc/source-identity.txt`) was on
   `0d2ebc3e`, one commit ahead, and the pin is the LINUX one: 7.4c is the gate
   with the full evidence chain (build, extract, import, boot, login) on the
   primary platform, and that note itself establishes the one commit between
   them touches `src/game` only, so the Windows result stands on either.
-* `wow-vanilla`: `/home/pk/vanilla-75` on `m910q`, gate 7.5; the same core
+* `wow-vanilla`: `/home/user/vanilla-75` on `m910q`, gate 7.5; the same core
   commit the Windows run of 2026-09-04 built (`pyplan/upstream-cmangos-doodad-drop.md`
   §7 read `8ec338a1` out of both boxes).
 

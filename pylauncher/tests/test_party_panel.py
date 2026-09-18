@@ -78,9 +78,9 @@ class _StubParty:
         # recorded the same way: what the panel asked for is the assertion.
         self.picker = picker or party.Picker()
         self.named = named or party.NamedAddition(True, True, "Nore", "Nore joined the party.")
-        self.plan = plan or party.AccountLink(False, "PERZI", "FRIEND", "would link them")
+        self.plan = plan or party.AccountLink(False, "OWNER", "FRIEND", "would link them")
         self.link = link or party.AccountLink(
-            True, "PERZI", "FRIEND", "PERZI and FRIEND are linked."
+            True, "OWNER", "FRIEND", "OWNER and FRIEND are linked."
         )
         self.picked: list[str] = []
         self.added_named: list[tuple[str, str]] = []
@@ -853,7 +853,7 @@ def test_the_press_carries_the_guids_that_were_confirmed_and_not_the_names_on_sc
 
 
 def test_a_party_drawn_for_another_character_cannot_be_armed(qapp: object) -> None:
-    """Round 2 (Fable): a stale list under a new name armed happily.
+    """Round 2 (review): a stale list under a new name armed happily.
 
     Show as Pakka, retype the box as Anmi without pressing Show, press Dismiss
     every bot: nothing was armed, so nothing stood down, and the arm took
@@ -932,7 +932,7 @@ def _candidate(
         name=name,
         level=60,
         klass=8,
-        account_or_guild="PERZI",
+        account_or_guild="OWNER",
         allowed_by=allowed_by,
         refused_because=refused_because,
     )
@@ -1037,7 +1037,7 @@ def test_linking_an_account_asks_first_and_names_both_accounts(qapp: object) -> 
     own gesture (`DISMISS_ALL_IDLE`), not a modal -- the answers here arrive
     from a worker thread."""
     stub = _StubParty(
-        plan=party.AccountLink(False, "PERZI", "FRIEND", "This links the account PERZI to FRIEND")
+        plan=party.AccountLink(False, "OWNER", "FRIEND", "This links the account OWNER to FRIEND")
     )
     panel = _panel(stub)
     panel.character.setText("Pakka")
@@ -1047,12 +1047,12 @@ def test_linking_an_account_asks_first_and_names_both_accounts(qapp: object) -> 
 
     assert stub.planned == [("Pakka", "FRIEND")]
     assert stub.linked == [], "the first press writes nothing"
-    assert "PERZI" in panel.report.text() and "FRIEND" in panel.report.text()
+    assert "OWNER" in panel.report.text() and "FRIEND" in panel.report.text()
 
     panel.link_account()
 
     assert stub.linked == [("Pakka", "FRIEND")]
-    assert panel.report.text() == "PERZI and FRIEND are linked."
+    assert panel.report.text() == "OWNER and FRIEND are linked."
     assert panel.link_button.text() == LINK_IDLE
 
 
@@ -1062,7 +1062,7 @@ def test_a_link_the_seam_refuses_never_arms(qapp: object) -> None:
     that cannot happen."""
     stub = _StubParty(
         plan=party.AccountLink(
-            False, "PERZI", "", "there is no account called NOBODY", blocker="no such account"
+            False, "OWNER", "", "there is no account called NOBODY", blocker="no such account"
         )
     )
     panel = _panel(stub)
