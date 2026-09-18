@@ -1028,7 +1028,7 @@ def remove_volume(name: str, *, wsl_distro: str | None = None) -> None:
     logger.info(f"removed volume {name}")
 
 
-def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
+def remove_image(ref: str, *, force: bool = False, wsl_distro: str | None = None) -> str:
     """Delete one image by its exact reference. Returns why it could not be, or `""`.
 
     One ref at a time, and never a compose flag. Measured on yulon-ubuntu
@@ -1046,8 +1046,24 @@ def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
     or a running title is holding a layer, and that is not this uninstall's
     business. The Rust prior art reached the same conclusion from the other end
     (`destructive.rs:574-602`).
+
+    `force` is `docker image rm -f`, and it exists for T79. A name whose image
+    no OTHER name points at cannot be removed while any container references
+    that image, *including a container that has exited*: the daemon answers
+    `conflict: unable to delete <id> (must be forced) - container <id> is using
+    its referenced image` (measured live 2026-09-09). The rebuild's
+    recreate deliberately never selects the one-shot services
+    (`staged_up_argv()`'s `--no-deps` over `spec.compose_services()`), so their
+    EXITED containers still hold the pre-rebuild `db-import` and `client-data`
+    images when the rollback names are let go -- and a refusal there leaves a
+    `-rollback` tag on the daemon for ever, which is exactly what the round-3
+    gate found. Forcing removes the NAME; the image it last pointed at becomes
+    dangling and the exited container keeps running on the layers it already
+    has until compose next recreates it from the live tag. `(cannot be forced)`
+    -- a RUNNING container -- is a different answer, and this function passes
+    both back for the caller to tell apart rather than retrying blind.
     """
-    proc = _docker(["image", "rm", ref], wsl_distro=wsl_distro)
+    proc = _docker(["image", "rm", *(["-f"] if force else []), ref], wsl_distro=wsl_distro)
     if proc.returncode == 0:
         logger.info(f"removed image {ref}")
         return ""
@@ -1847,21 +1863,27 @@ def allowed_modules(server_dir: Path) -> str:
     `UpdateFetcher` skips them — and only one of them is safe when the folder
     could not be read.
     """
-    names = _module_dir_names(server_dir)
+    names = module_dir_names(server_dir)
     if names is None:
         return ALL_MODULES
     return ",".join(names) if names else ALL_MODULES
 
 
-def _module_dir_names(server_dir: Path) -> list[str] | None:
+def module_dir_names(server_dir: Path) -> list[str] | None:
     """The module folder names in this install, sorted. `None` means unreadable.
 
-    The listing `allowed_modules()` and `installed_module_names()` share. They
-    do NOT share the empty case: an unreadable folder and an empty one are the
-    same answer to the list on screen (nothing to mark) and two different
-    answers to the importer, where `ALL_MODULES` is upstream's default and `""`
-    would switch module updates off. Hence `None` rather than `[]` here, so
-    each caller decides for itself.
+    The listing `allowed_modules()` and `apply.module_sql_plan()` share. They do
+    NOT share the empty case: an unreadable folder and an empty one are the same
+    answer to the list on screen (nothing to mark) and two different answers to
+    the importer, where `ALL_MODULES` is upstream's default and `""` would switch
+    module updates off. Hence `None` rather than `[]` here, so each caller
+    decides for itself.
+
+    Public since T78, and the name is the whole of what changed: the second
+    caller is in `apply.py`, which has to tell "could not read the folder" from
+    "there is nothing in it" before it decides which modules the core updater may
+    be given, and a private helper reached across a module boundary is a worse
+    answer than a listing with two readers.
     """
     modules = server_dir / MODULES_DIR_NAME
     try:
@@ -1886,7 +1908,7 @@ def clone_names(folder: Path) -> frozenset[str]:
     An unreadable or missing folder answers the empty set: the list then marks
     nothing, which is what it did before this existed, rather than claiming
     every module is missing. That is the opposite of `allowed_modules()`, which
-    must answer `all` for the same folder — see `_module_dir_names()`.
+    must answer `all` for the same folder — see `module_dir_names()`.
 
     Takes the folder rather than the server directory because the four manifest
     families do NOT share one: `apply.CLONE_DIRS` puts a module in `modules/`,
@@ -2051,6 +2073,7 @@ def apply_module_sql(
     *,
     output: OutputSink | None = None,
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
+    modules: str | None = None,
     wsl_distro: str | None = None,
 ) -> AttachedRun:
     """Run the one-shot importer for the modules on disk. The route nothing else takes.
@@ -2090,6 +2113,16 @@ def apply_module_sql(
     the caller rather than a bool, and a caller that wants to tell the user what
     was applied reads the lines through `output` (the tail on the result is
     bounded; see `KEEP_OUTPUT_LINES`).
+
+    `modules` is what `AC_UPDATES_ALLOWED_MODULES` is set to, and `None` --
+    every caller until T78 -- means `allowed_modules(server_dir)`: every folder
+    on disk. A caller that knows some of those folders hold SQL THIS app already
+    applied with its own client passes the rest, because the updater refuses a
+    file it has no ledger row for and exits 1 over it
+    (`apply.module_sql_plan()` is that caller, and its docstring is the
+    measurement). The three meanings of the value, `""` among them, are on
+    `ALL_MODULES`; nothing is validated here, because upstream's own reading is
+    the only one that counts.
 
     Raises:
         DockerCommandError: any of the refusals above, the database never became
@@ -2165,10 +2198,10 @@ def apply_module_sql(
         wsl_distro=wsl_distro,
     )
 
-    modules = allowed_modules(server_dir)
-    logger.warning(f"apply_module_sql(): running {service} for modules: {modules}")
+    allowed = allowed_modules(server_dir) if modules is None else modules
+    logger.warning(f"apply_module_sql(): running {service} for modules: {allowed!r}")
     run = run_one_shot(
-        service, server_dir, allowed_modules=modules, wsl_distro=wsl_distro, sink=output
+        service, server_dir, allowed_modules=allowed, wsl_distro=wsl_distro, sink=output
     )
     if run.returncode != 0:
         raise DockerCommandError(

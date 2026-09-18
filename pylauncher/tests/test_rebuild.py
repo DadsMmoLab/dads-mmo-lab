@@ -782,11 +782,14 @@ def test_the_failed_name_is_let_go_once_the_containers_holding_it_are_replaced(
     server_dir = a_finished_install(rec, tmp_path)
     failed = tuple(ref + native.FAILED_TAG_SUFFIX for ref in _refs(server_dir))
 
-    def remove_image(ref: str) -> str:
-        rec.calls.append(f"rmi:{ref}")
+    def remove_image(ref: str, force: bool = False) -> str:
+        rec.calls.append(f"rmi -f:{ref}" if force else f"rmi:{ref}")
         # The broken containers exist until the restore's own recreate replaces
-        # them, which is the second `recreate` of the run.
-        if ref in failed and rec.calls.count("recreate") < 2:
+        # them, which is the second `recreate` of the run. `-f` is what the
+        # daemon's own "(must be forced)" says will work, so this double lets it
+        # (T79); the assertion below is unchanged, because the retry after the
+        # recreate is what has to happen whether or not the force landed.
+        if ref in failed and not force and rec.calls.count("recreate") < 2:
             return (
                 f"Error response from daemon: conflict: unable to delete {ref} (must be "
                 f"forced) - container 31769acad1c4 is using its referenced image"
@@ -856,7 +859,7 @@ def test_a_rebuild_waits_for_a_realm_line_whatever_address_it_advertises(
 
 
 def test_the_ready_wait_still_refuses_a_realm_line_on_another_port(tmp_path: Path) -> None:
-    """The control for the test above, and the reason the marker is not just `\S+`.
+    r"""The control for the test above, and the reason the marker is not just `\S+`.
 
     Opening the ADDRESS is the change; opening the port would make the marker
     match a realm this install is not, which is what the port is in it for. A
@@ -1559,3 +1562,302 @@ def test_a_rebuild_tuple_missing_the_stage_the_rollback_watches_refuses_before_t
     assert "could not be rolled back" in said and "Nothing was started" in said, said
     assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
     assert "build" not in rec.calls, rec.calls
+
+
+# -- T79: no `-rollback` name outlives the press --------------------------------
+#
+# The round-3 live gate found `ac-wotlk-db-import:native-...-rollback` still on
+# the daemon after two clean rebuilds, and the failed build before them had left
+# a `client-data` one. Both are the same mechanism, and it is not a forgotten
+# branch: `_let_go()` asked once and threw the refusal away, and for exactly
+# those two images the daemon refuses, because the rebuild's recreate is
+# `--no-deps` over `spec.compose_services()` and never replaces their containers.
+#
+# The double below is therefore an image REGISTRY rather than a call log:
+# `Recorder.remove_image` answers `""` to everything, which is why the unit side
+# was green while the daemon was refusing. What these tests ask is the question
+# the gate asked -- what does `docker images` hold when the press is over.
+
+
+class _Daemon:
+    """The names, images and container references of a machine a rebuild runs on.
+
+    Three facts, and the defect lives in the relationship between them:
+
+    * a name points at an image, and `docker tag` makes a second name for one;
+    * `docker image rm <name>` removes the NAME, unless it is the last one that
+      image has -- then it removes the image, and a container referencing it
+      makes that a conflict;
+    * a conflict over a container that is not running is `(must be forced)` and
+      `-f` answers it (measured live 2026-09-09, and quoted in
+      `FAILED_TAG_SUFFIX`).
+
+    Containers are created from a name at `recreate` time and hold the image
+    they were created from until they are recreated again -- which, for the
+    one-shot services, is never during a rebuild.
+    """
+
+    def __init__(self, refs: tuple[str, ...], pinned: frozenset[str]) -> None:
+        self.names = dict.fromkeys(refs, "before")
+        self.containers = dict.fromkeys(refs, "before")
+        self.pinned = pinned
+        self.live = refs
+
+    def compiled(self) -> None:
+        """What `docker compose build` does to the tags: they name the new image."""
+        for ref in self.live:
+            self.names[ref] = "after"
+
+    def recreate(self, spec: object, server_dir: Path) -> bool:
+        """`compose up --force-recreate --no-deps <compose_services()>`.
+
+        The pinned refs are the built images of the services that command does
+        not name, so their containers go on holding what they were made from.
+        """
+        for ref in self.live:
+            if ref not in self.pinned and ref in self.names:
+                self.containers[ref] = self.names[ref]
+        return True
+
+    def tag_image(self, src: str, dst: str) -> str:
+        if src not in self.names:
+            return f"Error response from daemon: No such image: {src}"
+        self.names[dst] = self.names[src]
+        return ""
+
+    def remove_image(self, ref: str, force: bool = False) -> str:
+        if ref not in self.names:
+            return ""  # `docker.remove_image()` reads "no such image" as done
+        image = self.names[ref]
+        last = [name for name, held in self.names.items() if held == image] == [ref]
+        if last and image in set(self.containers.values()) and not force:
+            return (
+                f"Error response from daemon: conflict: unable to delete {image} (must be "
+                f"forced) - container 31769acad1c4 is using its referenced image"
+            )
+        del self.names[ref]
+        return ""
+
+    def transient(self) -> list[str]:
+        """Every name `docker images` would show that the rebuild made for itself."""
+        return sorted(
+            name
+            for name in self.names
+            if name.endswith((native.ROLLBACK_TAG_SUFFIX, native.FAILED_TAG_SUFFIX))
+        )
+
+
+def _never_recreated(server_dir: Path) -> frozenset[str]:
+    """The built images whose containers a rebuild's recreate never selects.
+
+    Derived from the two things that decide it rather than listed: the refs
+    `built_image_refs()` names, and the services `staged_up_argv()` passes after
+    `--no-deps`. On AzerothCore that leaves `db-import` and `client-data` -- the
+    two the gate found a stale tag for -- and it stays true if either list moves.
+    """
+    recreated = {name.removeprefix("ac-") for name in ENTRY.container_spec().compose_services()}
+    return frozenset(
+        ref
+        for ref in _refs(server_dir)
+        if ref.rsplit(":", 1)[0].rsplit("-wotlk-", 1)[-1] not in recreated
+    )
+
+
+def _daemon_for(server_dir: Path) -> _Daemon:
+    return _Daemon(_refs(server_dir), _never_recreated(server_dir))
+
+
+def _seams_of(rec: Recorder, daemon: _Daemon, **overrides: object) -> dict[str, object]:
+    def build(
+        server_dir: Path, files: object, *, sink: object = None, cancel: object = None
+    ) -> docker.AttachedRun:
+        rec.calls.append("build")
+        if rec.build_result.returncode == 0:
+            # A compile that FAILED overwrites no tag, which is why its rollback
+            # names are duplicates and come off without a force.
+            daemon.compiled()
+        return rec.build_result
+
+    return {
+        "build": build,
+        "recreate": daemon.recreate,
+        "tag_image": daemon.tag_image,
+        "remove_image": daemon.remove_image,
+        **overrides,
+    }
+
+
+def test_the_one_shot_images_really_are_the_ones_nothing_recreates(tmp_path: Path) -> None:
+    """The fixture's own claim, checked against the two functions that decide it.
+
+    If this ever answers empty, every parametrised case below still passes and
+    proves nothing: with no pinned ref there is no conflict, and `_let_go()`
+    never has to read a refusal at all.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    pinned = _never_recreated(server_dir)
+    assert {ref.rsplit(":", 1)[0].rsplit("/", 1)[-1] for ref in pinned} == {
+        "ac-wotlk-db-import",
+        "ac-wotlk-client-data",
+    }
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "finished",
+        "compile-failed",
+        "cancelled-mid-run",
+        "world-came-up-and-stopped",
+        "world-never-came-up",
+        "the-old-build-did-not-come-up-either",
+        "the-build-stage-raised",
+    ],
+)
+def test_no_rollback_name_is_left_on_the_daemon_by_any_exit(tmp_path: Path, path: str) -> None:
+    """Every way out of `rebuild()`, and `docker images` after each one.
+
+    The gate's finding, asked of every exit rather than of the one it was found
+    on. Two of these were red before T79 for two different reasons -- `finished`
+    and `world-came-up-and-stopped` because the daemon refuses to remove a name
+    held by a stopped one-shot container, and
+    `the-old-build-did-not-come-up-either` because that exit released nothing at
+    all -- and the rest are the controls that say the fix did not break the
+    exits that were already right.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    overrides: dict[str, object] = {}
+    cancel: threading.Event | None = None
+    if path == "compile-failed":
+        rec.build_result = docker.AttachedRun(1, ("cc1plus: error",))
+    elif path == "cancelled-mid-run":
+        cancel = threading.Event()
+        rec.build_result = docker.AttachedRun(0, ("compiled",))
+    elif path == "world-came-up-and-stopped":
+        overrides["world_output"] = lambda spec: ABORTED_AFTER_READY
+    elif path == "world-never-came-up":
+        overrides["wait_ready"] = _answers(False, True)
+    elif path == "the-old-build-did-not-come-up-either":
+        overrides["wait_ready"] = _answers(False, False)
+    seams = _seams_of(rec, daemon, **overrides)
+    if path == "cancelled-mid-run":
+        # Stop pressed while the compiler is running: the stage finishes, and
+        # the cancel is read before the containers are replaced -- T64's window.
+        inner = seams["build"]
+        assert callable(inner)
+        assert cancel is not None
+        pressed = cancel
+
+        def build_then_stop(*args: object, **kw: object) -> docker.AttachedRun:
+            result = inner(*args, **kw)
+            pressed.set()
+            return result
+
+        seams["build"] = build_then_stop
+    if path == "the-build-stage-raised":
+
+        def explode(*args: object, **kw: object) -> docker.AttachedRun:
+            rec.calls.append("build")
+            raise RuntimeError("a bug in the build stage, not a refusal")
+
+        seams["build"] = explode
+
+    run = engine(rec, **seams).rebuild(InstallOptions(server_dir=server_dir), cancel=cancel)
+    if path == "finished":
+        list(run)
+    else:
+        with pytest.raises((InstallerError, RuntimeError)):
+            list(run)
+
+    assert daemon.transient() == [], (
+        f"{path} left names on the daemon that this module documents as transient: "
+        f"{daemon.transient()}"
+    )
+    assert set(daemon.names) == set(_refs(server_dir)), daemon.names
+
+
+def test_a_rollback_kept_because_the_restore_could_not_start_says_so(tmp_path: Path) -> None:
+    """The one exit that keeps a `-rollback` name on purpose, and it must say why.
+
+    Docker refused to give the new build its own name, so no tag moved and the
+    old images exist under nothing but their `-rollback` names. Removing them
+    there would throw the rollback away at the one moment it is the only copy of
+    the working build -- so they stay, and the sentence the user reads is what
+    turns a leak into a rollback they can use by hand.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+    seams = _seams_of(rec, daemon, wait_ready=_answers(False, True))
+    real_tag = daemon.tag_image
+
+    def tag_image(src: str, dst: str) -> str:
+        if dst.endswith(native.FAILED_TAG_SUFFIX):
+            return "Error response from daemon: read-only layer store"
+        return real_tag(src, dst)
+
+    seams["tag_image"] = tag_image
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec, **seams).rebuild(InstallOptions(server_dir=server_dir), cancel=None))
+
+    said = str(raised.value)
+    assert f"under their {native.ROLLBACK_TAG_SUFFIX} tags" in said, said
+    assert daemon.transient() == sorted(_rollback_refs(server_dir)), daemon.transient()
+
+
+def test_a_crash_after_the_compile_keeps_the_rollback_rather_than_deleting_it(
+    tmp_path: Path,
+) -> None:
+    """The other keep, and the reason it is not the same bug in a new place.
+
+    An exception that is not an `InstallerError` has no verdict attached: this
+    code cannot tell whether the old build is wanted back. Once the compile has
+    finished the `-rollback` names are the only copy of it there is, so they are
+    kept and the log says where -- while the same crash before the compile
+    releases them, because then they are duplicates of the live tags.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    daemon = _daemon_for(server_dir)
+
+    def explode(spec: object, server_dir: Path) -> bool:
+        raise RuntimeError("the daemon went away mid-recreate")
+
+    seams = _seams_of(rec, daemon)
+    seams["recreate"] = explode
+    with pytest.raises(RuntimeError):
+        list(engine(rec, **seams).rebuild(InstallOptions(server_dir=server_dir), cancel=None))
+
+    assert daemon.transient() == sorted(_rollback_refs(server_dir)), daemon.transient()
+
+
+def test_a_name_the_daemon_will_not_take_is_said_out_loud(tmp_path: Path) -> None:
+    """A refusal `-f` cannot answer is reported, not logged and forgotten.
+
+    `(cannot be forced)` is a RUNNING container holding the image, and no name
+    is worth taking an image out from under a server somebody is using. What the
+    press owes then is the name, on screen, so the user can deal with it once
+    the server is down -- which is the half of T79 that is not about forcing.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    stuck = _rollback_refs(server_dir)[0]
+
+    def remove_image(ref: str, force: bool = False) -> str:
+        rec.calls.append(f"rmi -f:{ref}" if force else f"rmi:{ref}")
+        if ref == stuck:
+            return (
+                f"Error response from daemon: conflict: unable to delete {ref} (cannot be "
+                f"forced) - image is being used by running container 31769acad1c4"
+            )
+        return ""
+
+    said = list(
+        engine(rec, remove_image=remove_image).rebuild(InstallOptions(server_dir=server_dir))
+    )
+    assert any(stuck in line and "docker image rm -f" in line for line in said), said
+    # And it was not forced: docker said forcing is not the answer.
+    assert f"rmi -f:{stuck}" not in rec.calls, rec.calls

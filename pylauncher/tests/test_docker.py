@@ -6336,7 +6336,7 @@ def test_a_missing_modules_folder_marks_nothing_rather_than_claiming_anything(
     The list then marks nothing, which is what it did before T41 — the opposite
     of `allowed_modules()`, where the same unreadable folder must answer `all`
     so the importer keeps upstream's default. The two callers share the listing
-    and not that rule, which is why `_module_dir_names()` returns `None` and
+    and not that rule, which is why `module_dir_names()` returns `None` and
     lets each decide.
     """
     assert docker.clone_names(tmp_path / "modules") == frozenset()
