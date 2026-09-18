@@ -348,15 +348,14 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     # rest are held to the SHAPE of a full commit id, because an abbreviation
     # is a prefix and a prefix can stop being unique.
     core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
-    assert core.rev == "9980181ce9aa5940b6125a5991cc754148ed9b82", (
+    assert core.rev == "010cdb6d513ae3c29ab685e2ff708fb18d8295c8", (
         f"the core is pinned to {core.rev!r}. It was 7c0fb278, then 3a8472e on the retired "
-        "Shyalya fork, and since T30 it is 9980181c on `tortoise-wow/tortoise-wow` branch "
-        "`bot-helpers` -- a different TREE, not a later commit of the same one, so every "
-        "measurement in this file was taken again against it on `yulon-arch` 2026-09-11: the "
-        "ready banner, the migrations path, the conf keys, the SQL layout, the cmake flags, "
-        "the harmless bot-log line and the module's own startup lines "
-        "(.notes/gates/t30-measure-yulon-arch-2026-09-11/). Moving it again means taking them "
-        "again"
+        "Shyalya fork, 9980181c on `tortoise-wow/tortoise-wow` branch `bot-helpers` since T30 "
+        "(every measurement in this file taken against it on `yulon-arch` 2026-09-11, "
+        ".notes/gates/t30-measure-yulon-arch-2026-09-11/), and since T86 010cdb6d on branch "
+        "`1181dev`: main plus PR #491 (SOAP) and its docs, bot-helpers fully merged in -- the "
+        "same tree with the SOAP subsystem added, built, booted and pressed on `yulon-arch` "
+        "2026-09-17 (.notes/gates/t86-*). Moving it again means taking them again"
     )
     module = next(s for s in sources if s.repo == "Sagiroth/TortoiseBots")
     assert module.rev == "fd7ec9ec7659035cfc3ea75d542c8683005525de", (

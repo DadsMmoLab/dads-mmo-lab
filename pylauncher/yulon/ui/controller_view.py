@@ -2096,51 +2096,45 @@ def _for_tortoise(
         wsl_distro=wsl_distro,
     )
     watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
-    # THE CONSOLE IS THE CHANNEL ON THIS TREE, and it is the second time that has
-    # been true. 8.2e wired `AttachChannel` here because the fork's mangosd
-    # linked neither gsoap nor `RASocket`; the fork re-added SOAP (3f9a062), the
-    # pin moved onto it (3a8472e) and this became Vanilla's `InstallChannel` over
-    # this tree's own account seam. T30 moved the whole entry off that fork and
-    # onto the Penqle core, which has no SOAP at all: the string does not occur
-    # anywhere under its `src/` but in one comment, `mangosd.conf.dist.in` ships
-    # no `SOAP.*` key, and no gsoap is vendored (measured on `yulon-arch`
-    # 2026-09-11, `.notes/gates/t30-measure-yulon-arch-2026-09-11/05-conf-keys.txt`).
-    # So `operations.channel` says `attach` again and this is the transport that
-    # goes with it.
-    #
-    # NOTHING SOAP-SIDE WAS DELETED for that move, deliberately: the owner has
-    # asked the core's maintainer for the subsystem back and expects it. When a
-    # rev lands with it, this block goes back to the `channel_setup.InstallChannel`
-    # over `channel_module.SoapChannel` that stood here between 2026-09-08 and
-    # 2026-09-11, and the entry's `operations` block regains the four keys its
-    # own `notes` list. `SoapChannel`, `InstallChannel`, the `enable_conf` writer
-    # and `tortoise_accounts.reset_own_password` are all still here and still
-    # under test.
-    #
-    # ONE channel object, used three times: the Server tab's probe presses it,
-    # the Accounts tab sends this tree's two commands down it, and the Play tab's
-    # rename/revive go the same way. They are the same console and the same lock
-    # -- two channels over one `docker attach` would interleave two replies in
-    # one window (8.3d).
-    console = channel_module.AttachChannel(
-        send=lambda cmd, **kw: tortoise_console.send(cmd, wsl_distro=wsl_distro, **kw)
+    # THE CHANNEL IS SOAP AGAIN, for the third time on this tree. 8.2e wired
+    # `AttachChannel` here because the fork's mangosd linked neither gsoap nor
+    # `RASocket`; the fork re-added SOAP (3f9a062) and this became Vanilla's
+    # `InstallChannel` over this tree's own account seam; T30 moved the entry
+    # onto the Penqle core, which had no SOAP, and this went back to the console
+    # attach. PR #491 put SOAP into that core (merged into `1181dev` 2026-09-17,
+    # 57abad6f3: `ns1__executeCommand`, `urn:MaNGOS`, rank 4, bans refused, the
+    # rank read per request from the row) and the entry's pin moved onto it, so
+    # this is the `InstallChannel` over `SoapChannel` that stood here between
+    # 2026-09-08 and 2026-09-11 (T86). The image template passes
+    # `-DENABLE_SOAP=ON`; the entry's `operations` block says `soap` and names
+    # the three `SOAP.*` conf keys the `enable_conf` writer sets.
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        db_password=password,
+        create=lambda name, pw, level: tortoise_accounts.create_account(
+            sql, name, pw, gm_level=level
+        ),
+        reset=lambda name, pw: tortoise_accounts.reset_own_password(sql, name, pw),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
     )
-    # There is no credential and nothing to set up on this core, so the channel
-    # is simply always the console: `channel_for_saved` answers it rather than
-    # looking one up, and the `AttachChannel` says "could not ask" by itself when
-    # the world is not there to answer.
     accounts_admin = useraccounts.InstallAccounts(
         entry,
         server_dir,
         sql=sql,
-        channel_for_saved=lambda: console,
+        channel_for_saved=channel.live_channel,
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
     characters_admin = play_module.InstallPlay(
         entry,
         server_dir,
         sql=sql,
-        channel_for_saved=lambda: console,
+        channel_for_saved=channel.live_channel,
     )
     return _assemble(
         entry,
@@ -2149,13 +2143,9 @@ def _for_tortoise(
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
+        channel_setup=channel,
         accounts=accounts_admin,
         play=characters_admin,
-        # The Server tab's probe, and it is the CHANNEL's `send` rather than the
-        # Console tab's own seam below: what that tab shows has to come through
-        # the object every other feature on this tree uses, or it proves the
-        # console works and not the channel (8.2e).
-        console_probe=console.send,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=tortoise_controller.controller_for(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder

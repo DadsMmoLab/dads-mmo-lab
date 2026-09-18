@@ -108,17 +108,26 @@ WORKDIR /src/_build
 # USE_ANTICHEAT=OFF is pointless on a solo offline server and can flag a Proton
 # client.
 #
+# `-DENABLE_SOAP=ON` is what gives this world its command channel. The core's
+# option (root `CMakeLists.txt:51`, since PR #491 on `1181dev`, 2026-09-17)
+# defaults OFF, and a build without it is a server that boots, looks healthy and
+# answers nothing on 7878: the entry's `operations` block says `soap`, so the
+# flag and the block move together. The gsoap runtime is compiled from the
+# core's own `dep/src/gsoap/stdsoap2.cpp` (2.8.135) by that same option; there
+# is no prebuilt archive and no glibc floor beyond the builder's own.
+#
 # Both `FROM` lines are ubuntu:24.04 and they move together. That was decided
 # for the fork on 2026-09-08 because its vendored gsoap archive imposed a
-# glibc 2.38 floor on the RUNTIME stage as well as the builder; this core has no
-# gsoap at all, but the pin was built and booted on 24.04 on 2026-09-11 and a
+# glibc 2.38 floor on the RUNTIME stage as well as the builder; that archive is
+# gone from this core, but the pin was built and booted on 24.04 and a
 # base-image change is a thing to measure, not to tidy.
 RUN cmake .. \
         -DCMAKE_INSTALL_PREFIX={{CORE_DIR}} \
         -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
         -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON \
         -DMODULES=static \
-        -DMODULE_TORTOISEBOTS=static
+        -DMODULE_TORTOISEBOTS=static \
+        -DENABLE_SOAP=ON
 
 RUN make -j{{MAKE_JOBS}} && make install
 

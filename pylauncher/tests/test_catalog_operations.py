@@ -7,6 +7,8 @@ inherits its neighbour's answer.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -111,30 +113,37 @@ def test_every_tree_now_states_its_channel_and_they_are_not_the_same() -> None:
     assert channels["wow-wotlk"].enable_env and not channels["wow-wotlk"].enable_conf
     for game in ("wow-tbc", "wow-vanilla"):
         assert channels[game].enable_conf and not channels[game].enable_env
-    # Tortoise has been round this loop twice. It said `attach` until 2026-09-08,
-    # joined the SOAP trees when the fork re-added the interface (3f9a062) and
-    # the pin moved onto it (3a8472e), and went back to `attach` on 2026-09-11
-    # when T30 moved the whole entry off that fork onto the Penqle core -- which
-    # has no SOAP at all: one comment at `src/game/World.h:799` is the only
-    # occurrence of the string under its `src/`, its `mangosd.conf.dist.in`
-    # ships no `SOAP.*` key and no gsoap is vendored (T30 Half 1, yulon-arch,
-    # `05-conf-keys.txt`).
-    assert channels["wow-tortoise"].channel == "attach"
-    assert not channels["wow-tortoise"].enable_conf and not channels["wow-tortoise"].enable_env
-    # THE WAY BACK IS ONE EDIT, and it is written down in the entry rather than
-    # here, because that is where a hand doing the flip will be looking. The
-    # owner has asked the core's maintainer for the subsystem back; this asserts
-    # the recipe is still beside the block and still names every key, so it
-    # cannot rot into "it used to say something about SOAP".
-    notes = " ".join(channels["wow-tortoise"].notes)
-    assert notes, "the Tortoise channel carries no note saying why it is `attach`"
-    for key in ("channel", "namespace", "port", "gm_level", "enable_conf", "publish"):
-        assert key in notes, f"the restore recipe does not name {key!r}: {notes!r}"
-    for key in ("SOAP.Enabled", "SOAP.IP", "SOAP.Port"):
-        assert key in notes, f"the restore recipe does not name the conf key {key!r}"
-    assert "urn:MaNGOS" in notes and "7878" in notes, (
-        "the restore recipe gives the namespace and the port by value; a recipe that says "
-        "`put the keys back` sends the next hand to measure them again"
+    # Tortoise has been round this loop three times. It said `attach` until
+    # 2026-09-08, joined the SOAP trees when the fork re-added the interface
+    # (3f9a062) and the pin moved onto it (3a8472e), went back to `attach` on
+    # 2026-09-11 when T30 moved the entry onto the Penqle core (no SOAP there),
+    # and is `soap` again since T86: PR #491 put the interface into that core
+    # (merged into `1181dev` 2026-09-17) and the pin moved onto it. The block is
+    # the one T30's note kept as the way back, key for key.
+    tortoise = channels["wow-tortoise"]
+    assert tortoise.channel == "soap"
+    assert tortoise.enable_conf and not tortoise.enable_env
+    assert tortoise.enable_conf.file == "etc/mangosd.conf"
+    assert tortoise.enable_conf.keys == {
+        "SOAP.Enabled": "1",
+        "SOAP.IP": "0.0.0.0",
+        "SOAP.Port": "7878",
+    }, tortoise.enable_conf.keys
+    assert (tortoise.namespace, tortoise.port, tortoise.gm_level, tortoise.publish) == (
+        "urn:MaNGOS",
+        7878,
+        4,
+        True,
+    )
+    # The core's option defaults OFF, so the block is only true if the image
+    # template passes the flag: the two are one fact and this pins them together.
+    template = (
+        Path(__file__).resolve().parents[1]
+        / "catalog/installers/wow-tortoise/native/Dockerfile.tmpl"
+    ).read_text()
+    assert "-DENABLE_SOAP=ON" in template, (
+        "the Tortoise entry says `soap` but its image template does not build it: "
+        "`ENABLE_SOAP` defaults OFF on the core (root CMakeLists.txt:51)"
     )
 
 
@@ -351,34 +360,30 @@ def test_every_tree_says_how_high_its_levels_go() -> None:
         assert level.max_level == ceiling, game
 
 
-def test_tortoise_declares_no_channel_rank_because_its_console_has_no_account() -> None:
-    """The rank that WAS measured, and why the block no longer states it.
+def test_tortoise_states_the_channel_rank_its_core_requires() -> None:
+    """The rank that WAS measured, and is stated again now that SOAP is back.
 
     Measured on the fresh install on yulon-arch, 2026-09-08 19:52Z: the fork's
     SOAP block was first written with `gm_level: 3` copied from Vanilla, and the
     server answered the first `server info` with *the account exists but its GM
-    level is below administrator, which SOAP requires* -- a 401 with the account
-    known. This tree's `accounts.level` scale runs to 4 (`rank`, 8.3d) and its
-    administrator is the top of it, not MaNGOS's 3.
+    level is below administrator, which SOAP requires*. This tree's
+    `accounts.level` scale runs to 4 (`rank`, 8.3d) and its administrator is the
+    top of it, not MaNGOS's 3. The Penqle core's SOAP (PR #491) keeps that:
+    `SOAPThread::MinLevel = SEC_ADMINISTRATOR` = 4 (`src/mangosd/MaNGOSsoap.h`).
 
-    That measurement is still true of the scale and is still asserted, below, on
-    `accounts.level`. What changed on 2026-09-11 is that the channel is the
-    worldserver console again: console commands run at `SEC_CONSOLE` with
-    account id 0 and there is no account to hold a rank, so an `attach` block
-    that named one would be describing something that does not exist -- which
-    the model refuses outright (`Operations._a_soap_channel_says_how_it_is_switched_on`).
-    The rank comes back with the SOAP block, and the entry's notes carry it by
-    value so it does not have to be measured a third time.
+    Between 2026-09-11 and T86 the channel was the console and the block named
+    no rank (console commands run at `SEC_CONSOLE` with account id 0). The rank
+    came back with the SOAP block, by value, from the entry's own notes.
     """
     entry = load_catalog().get("wow-tortoise")
     assert entry.operations is not None and entry.accounts.level is not None
-    assert entry.operations.channel == "attach"
-    assert entry.operations.gm_level is None
+    assert entry.operations.channel == "soap"
+    assert entry.operations.gm_level == 4
     assert entry.accounts.level.max_level == 4, (
-        "this fork's rank scale runs to 4 and its administrator is the top of it; the "
-        "channel's rank comes back from here when SOAP does"
+        "this core's rank scale runs to 4 and its administrator is the top of it; the "
+        "channel's rank is that top"
     )
-    assert "gm_level" in " ".join(entry.operations.notes)
+    assert entry.operations.gm_level == entry.accounts.level.max_level
 
 
 def test_a_channel_rank_above_the_trees_own_level_scale_is_refused() -> None:

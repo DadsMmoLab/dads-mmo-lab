@@ -951,15 +951,15 @@
       "id": "wow-tortoise",
       "name": "WoW Tortoise",
       "status": "beta",
-      "description": "Tortoise on the Penqle core: tortoise-wow/tortoise-wow branch bot-helpers, a MaNGOS Zero lineage, with the TortoiseBots module compiled in statically and the whole thing source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. bot-helpers is the branch the bots module requires -- it carries the headless bot sessions (PR #438) -- and the bots themselves are Sagiroth/TortoiseBots, cloned into modules/TortoiseBots. It replaces the retired Shyalya fork that vendored the cmangos playerbots; a server already installed from that fork goes on opening, starting and being played, and is not migrated. Commands reach this world down the worldserver console the Console tab types at: the core links neither SOAP nor a telnet console (T30 Half 1, yulon-arch 2026-09-11). Driven with a real 1.18.1 client on the test box.",
+      "description": "Tortoise on the Penqle core: tortoise-wow/tortoise-wow branch 1181dev, a MaNGOS Zero lineage, with the TortoiseBots module compiled in statically and the whole thing source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. 1181dev is main plus the SOAP interface (PR #491, merged there 2026-09-17); it carries the headless bot sessions (PR #438, bot-helpers is fully merged into main) the bots module requires, and the bots themselves are Sagiroth/TortoiseBots, cloned into modules/TortoiseBots. It replaces the retired Shyalya fork that vendored the cmangos playerbots; a server already installed from that fork goes on opening, starting and being played, and is not migrated. Commands reach this world over SOAP again: the core builds gsoap from source behind ENABLE_SOAP, which the image template switches on (T86, 2026-09-17). Installed, started and pressed headless through the app's own seams on the test box; no client rendered there (T30, T86).",
       "emulator": {
-        "name": "tortoise-wow/tortoise-wow @ bot-helpers (the Penqle core) + Sagiroth/TortoiseBots",
+        "name": "tortoise-wow/tortoise-wow @ 1181dev (the Penqle core) + Sagiroth/TortoiseBots",
         "sources": [
           {
             "repo": "tortoise-wow/tortoise-wow",
-            "branch": "bot-helpers",
+            "branch": "1181dev",
             "dest": "src/tortoise-wow",
-            "rev": "9980181ce9aa5940b6125a5991cc754148ed9b82"
+            "rev": "010cdb6d513ae3c29ab685e2ff708fb18d8295c8"
           },
           {
             "repo": "Sagiroth/TortoiseBots",
@@ -1255,12 +1255,23 @@
         "prompt_precedes_answer": false
       },
       "operations": {
-        "channel": "attach",
+        "channel": "soap",
+        "namespace": "urn:MaNGOS",
+        "port": 7878,
+        "gm_level": 4,
+        "enable_conf": {
+          "file": "etc/mangosd.conf",
+          "keys": {
+            "SOAP.Enabled": "1",
+            "SOAP.IP": "0.0.0.0",
+            "SOAP.Port": "7878"
+          }
+        },
+        "publish": true,
+        "must_not_listen": [],
         "notes": [
-          "THE PENQLE CORE HAS NO SOAP. Not the keys, not the conf block, not the subsystem: the only occurrence of the string anywhere under src/ at the pinned rev is a comment at src/game/World.h:799, no SOAP.* key is in mangosd.conf.dist.in, and no gsoap is vendored (T30 Half 1, yulon-arch 2026-09-11, 05-conf-keys.txt). What it offers instead is Console.Enable, which is the console the Console tab already types at, and an HttpApi.Enable that is not a channel kind this app knows. So this entry is back on `attach`, which is what it said until 2026-09-08 and what AttachChannel (channel.py:88-105) was written for.",
-          "THE WAY BACK IS ONE EDIT OF THIS BLOCK, and the owner has asked the core's maintainer for the subsystem back. When a rev lands that carries it, restore exactly: \"channel\": \"soap\", \"namespace\": \"urn:MaNGOS\", \"port\": 7878, \"gm_level\": 4, \"publish\": true, and \"enable_conf\": {\"file\": \"etc/mangosd.conf\", \"keys\": {\"SOAP.Enabled\": \"1\", \"SOAP.IP\": \"0.0.0.0\", \"SOAP.Port\": \"7878\"}}. Those four keys plus the three SOAP.* conf keys are the whole of it on this side. Two other edits go with it and nothing else does: `_for_tortoise` in ui/controller_view.py builds a channel_setup.InstallChannel over channel.SoapChannel again instead of channel.AttachChannel, and tests/test_catalog_operations.py's Tortoise expectation flips back. No SOAP code was removed anywhere for this change -- SoapChannel, InstallChannel, the enable_conf writer in channel_setup.py and tortoise accounts' reset_own_password are all still here and still tested.",
-          "The three SOAP.* keys are NOT in this entry's conf table while the channel is `attach`, because a conf key the emulator does not read is a claim that somebody measured something. They come back with the block above, as `enable_conf`, which is the only place they have ever been written from.",
-          "Nothing in ready.world or ready.fatal depends on the channel: both are lines the worldserver prints on its own stdout, read by the install spine before any channel exists."
+          "SOAP IS BACK ON THIS CORE since PR #491 merged into 1181dev on 2026-09-17 (57abad6f3): ns1__executeCommand under urn:MaNGOS, HTTP Basic auth, SEC_ADMINISTRATOR (rank 4) required, banned accounts refused (403), the rank and the ban read from the row per request, 64 KiB request cap. The core's CMake option ENABLE_SOAP defaults OFF, so the image template passes -DENABLE_SOAP=ON; without it this block would install cleanly and answer nothing.",
+          "This block is the same one that stood here between 2026-09-08 and 2026-09-11 (c7e577c7) and that T30's `attach` note kept as the way back; the transport in ui/controller_view.py `_for_tortoise` is channel_setup.InstallChannel over channel.SoapChannel again, and tests/test_catalog_operations.py expects `soap`."
         ]
       },
       "observability": {
