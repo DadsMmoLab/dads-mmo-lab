@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import IO, BinaryIO, Literal
+from typing import IO, Any, BinaryIO, Literal
 
 from yulon import platform, runner, wsl
 from yulon.log import get_logger
@@ -1028,7 +1028,7 @@ def remove_volume(name: str, *, wsl_distro: str | None = None) -> None:
     logger.info(f"removed volume {name}")
 
 
-def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
+def remove_image(ref: str, *, force: bool = False, wsl_distro: str | None = None) -> str:
     """Delete one image by its exact reference. Returns why it could not be, or `""`.
 
     One ref at a time, and never a compose flag. Measured on yulon-ubuntu
@@ -1046,8 +1046,24 @@ def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
     or a running title is holding a layer, and that is not this uninstall's
     business. The Rust prior art reached the same conclusion from the other end
     (`destructive.rs:574-602`).
+
+    `force` is `docker image rm -f`, and it exists for T79. A name whose image
+    no OTHER name points at cannot be removed while any container references
+    that image, *including a container that has exited*: the daemon answers
+    `conflict: unable to delete <id> (must be forced) - container <id> is using
+    its referenced image` (measured live 2026-09-09). The rebuild's
+    recreate deliberately never selects the one-shot services
+    (`staged_up_argv()`'s `--no-deps` over `spec.compose_services()`), so their
+    EXITED containers still hold the pre-rebuild `db-import` and `client-data`
+    images when the rollback names are let go -- and a refusal there leaves a
+    `-rollback` tag on the daemon for ever, which is exactly what the round-3
+    gate found. Forcing removes the NAME; the image it last pointed at becomes
+    dangling and the exited container keeps running on the layers it already
+    has until compose next recreates it from the live tag. `(cannot be forced)`
+    -- a RUNNING container -- is a different answer, and this function passes
+    both back for the caller to tell apart rather than retrying blind.
     """
-    proc = _docker(["image", "rm", ref], wsl_distro=wsl_distro)
+    proc = _docker(["image", "rm", *(["-f"] if force else []), ref], wsl_distro=wsl_distro)
     if proc.returncode == 0:
         logger.info(f"removed image {ref}")
         return ""
@@ -1847,21 +1863,27 @@ def allowed_modules(server_dir: Path) -> str:
     `UpdateFetcher` skips them — and only one of them is safe when the folder
     could not be read.
     """
-    names = _module_dir_names(server_dir)
+    names = module_dir_names(server_dir)
     if names is None:
         return ALL_MODULES
     return ",".join(names) if names else ALL_MODULES
 
 
-def _module_dir_names(server_dir: Path) -> list[str] | None:
+def module_dir_names(server_dir: Path) -> list[str] | None:
     """The module folder names in this install, sorted. `None` means unreadable.
 
-    The listing `allowed_modules()` and `installed_module_names()` share. They
-    do NOT share the empty case: an unreadable folder and an empty one are the
-    same answer to the list on screen (nothing to mark) and two different
-    answers to the importer, where `ALL_MODULES` is upstream's default and `""`
-    would switch module updates off. Hence `None` rather than `[]` here, so
-    each caller decides for itself.
+    The listing `allowed_modules()` and `apply.module_sql_plan()` share. They do
+    NOT share the empty case: an unreadable folder and an empty one are the same
+    answer to the list on screen (nothing to mark) and two different answers to
+    the importer, where `ALL_MODULES` is upstream's default and `""` would switch
+    module updates off. Hence `None` rather than `[]` here, so each caller
+    decides for itself.
+
+    Public since T78, and the name is the whole of what changed: the second
+    caller is in `apply.py`, which has to tell "could not read the folder" from
+    "there is nothing in it" before it decides which modules the core updater may
+    be given, and a private helper reached across a module boundary is a worse
+    answer than a listing with two readers.
     """
     modules = server_dir / MODULES_DIR_NAME
     try:
@@ -1886,7 +1908,7 @@ def clone_names(folder: Path) -> frozenset[str]:
     An unreadable or missing folder answers the empty set: the list then marks
     nothing, which is what it did before this existed, rather than claiming
     every module is missing. That is the opposite of `allowed_modules()`, which
-    must answer `all` for the same folder — see `_module_dir_names()`.
+    must answer `all` for the same folder — see `module_dir_names()`.
 
     Takes the folder rather than the server directory because the four manifest
     families do NOT share one: `apply.CLONE_DIRS` puts a module in `modules/`,
@@ -2051,6 +2073,7 @@ def apply_module_sql(
     *,
     output: OutputSink | None = None,
     db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
+    modules: str | None = None,
     wsl_distro: str | None = None,
 ) -> AttachedRun:
     """Run the one-shot importer for the modules on disk. The route nothing else takes.
@@ -2090,6 +2113,16 @@ def apply_module_sql(
     the caller rather than a bool, and a caller that wants to tell the user what
     was applied reads the lines through `output` (the tail on the result is
     bounded; see `KEEP_OUTPUT_LINES`).
+
+    `modules` is what `AC_UPDATES_ALLOWED_MODULES` is set to, and `None` --
+    every caller until T78 -- means `allowed_modules(server_dir)`: every folder
+    on disk. A caller that knows some of those folders hold SQL THIS app already
+    applied with its own client passes the rest, because the updater refuses a
+    file it has no ledger row for and exits 1 over it
+    (`apply.module_sql_plan()` is that caller, and its docstring is the
+    measurement). The three meanings of the value, `""` among them, are on
+    `ALL_MODULES`; nothing is validated here, because upstream's own reading is
+    the only one that counts.
 
     Raises:
         DockerCommandError: any of the refusals above, the database never became
@@ -2165,10 +2198,10 @@ def apply_module_sql(
         wsl_distro=wsl_distro,
     )
 
-    modules = allowed_modules(server_dir)
-    logger.warning(f"apply_module_sql(): running {service} for modules: {modules}")
+    allowed = allowed_modules(server_dir) if modules is None else modules
+    logger.warning(f"apply_module_sql(): running {service} for modules: {allowed!r}")
     run = run_one_shot(
-        service, server_dir, allowed_modules=modules, wsl_distro=wsl_distro, sink=output
+        service, server_dir, allowed_modules=allowed, wsl_distro=wsl_distro, sink=output
     )
     if run.returncode != 0:
         raise DockerCommandError(
@@ -3877,7 +3910,7 @@ def _probe_selinux_argv(selinux_enforcing: Callable[[], bool | None]) -> list[st
     POPULATED ancestor) and the container is denied it, because `$HOME` is
     `user_home_dir_t` and a confined container may only read `container_file_t`:
 
-        $ docker run --rm --entrypoint ls -v /home/pk:/probe:ro <digest> -A /probe
+        $ docker run --rm --entrypoint ls -v /home/user:/probe:ro <digest> -A /probe
         ls: can't open '/probe': Permission denied
         $ docker run --rm --security-opt label:disable ... -A /probe
         .bash_logout
@@ -4540,17 +4573,118 @@ def exec_stdin(
     # something users attach to bug reports.
     logger.debug(f"exec_stdin(): {' '.join(command)}")
     child = platform.wsl_env(dict(env)) if wsl_distro is not None else {**os.environ, **env}
+    return _pumped(command, source, child_env=child, label=container)
+
+
+def compose_run_stdin(
+    server_dir: Path,
+    service: str,
+    entrypoint: str,
+    argv: Sequence[str],
+    source: BinaryIO,
+    *,
+    wsl_distro: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """`docker compose run --rm --no-deps -T --entrypoint <e> <service> <argv…>`, fed `source`.
+
+    The route into a named volume that the running server mounts read-only (T62).
+    A compose service is addressed rather than a volume name or a container name,
+    and each of those alternatives is a guess this one does not have to make:
+
+    * the VOLUME is `<project>_client-data` on an install this engine wrote and
+      `<project>_ac-client-data` on one the bash installer built
+      (`tests/data/wotlk-compose-config*.json`), and the project is whatever
+      compose calls it. Compose resolves the mount from the service definition,
+      so the copy lands in THIS install's volume whichever it is.
+    * a CONTAINER name is global to the daemon (`ac-client-data-init` belongs to
+      whichever install ran last), and `run` makes a fresh one inside this
+      project instead (`run_one_shot()` records `container_name` not stopping it).
+
+    `source` goes in on stdin and never as a bind mount, which is what makes the
+    same argv work on all three daemons: a Windows path, a
+    `\\\\wsl.localhost\\...` path Docker Desktop refuses to mount, and a SELinux
+    host all read a pipe the same way. Through `wsl.exe` the bytes cross exactly
+    as `DockerSql.run_file()`'s do.
+
+    `-T` because there is no terminal and the stream is binary; `--no-deps`
+    because nothing else in the project may start for a file copy. The exit
+    status is returned rather than raised, like `exec_stdin()`: the caller owns
+    the sentence.
+
+    Raises:
+        DockerCliMissingError: no docker CLI here (nor `wsl.exe` for a distro).
+        DockerCommandError: `server_dir` is gone, or a distro install's folder
+            has no Linux spelling to run compose in.
+        SourceUnreadableError: `source` could not be read.
+    """
+    inside: str | None = None
+    if wsl_distro is not None:
+        inside = platform.wsl_linux_path(server_dir)
+        if inside is None:
+            # `_docker()` would run compose in the distro's home directory here,
+            # which is some OTHER project or none. A copy into a volume must not
+            # guess which install it is writing to.
+            raise DockerCommandError(
+                f"{server_dir} is not a path inside the {wsl_distro} distro, so there is no "
+                "folder there to run this install's compose project in. Nothing was copied."
+            )
+    elif _cwd_is_missing(server_dir):
+        raise DockerCommandError(
+            f"The server folder {server_dir} no longer exists, so Docker was not asked."
+        )
+    prefix = platform.docker_prefix(wsl_distro, inside=inside)
+    if prefix is None:
+        raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+    command = [
+        *prefix,
+        "compose",
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--entrypoint",
+        entrypoint,
+        service,
+        *argv,
+    ]
+    logger.debug(f"compose_run_stdin(): {' '.join(command)} in {server_dir}")
+    child = platform.wsl_env() if wsl_distro is not None else dict(os.environ)
+    return _pumped(
+        command,
+        source,
+        child_env=child,
+        label=service,
+        cwd=None if wsl_distro is not None else server_dir,
+    )
+
+
+def _pumped(
+    command: list[str],
+    source: BinaryIO,
+    *,
+    child_env: dict[str, str],
+    label: str,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Start `command`, pump `source` into its stdin, and reap it on every way out.
+
+    The body `exec_stdin()` documents, shared with `compose_run_stdin()` so the
+    reaping guarantee is written once. `cwd` is passed to `Popen` only when
+    there is one: a WSL route carries its directory in the argv (`wsl --cd`).
+    """
+    extra: dict[str, Any] = {} if cwd is None else {"cwd": cwd}
     try:
         proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=runner.child_env(child),
+            env=runner.child_env(child_env),
             creationflags=runner.creationflags(),
+            **extra,
         )
     except OSError as exc:
-        logger.warning(f"{prefix[0]} could not be started: {exc}")
+        logger.warning(f"{command[0]} could not be started: {exc}")
         raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP) from exc
     # All three are pipes because all three were asked for as pipes; the
     # asserts are type narrowing, not a check.
@@ -4567,7 +4701,7 @@ def exec_stdin(
     for reader in readers:
         reader.start()
     try:
-        _pump(source, proc.stdin, container)
+        _pump(source, proc.stdin, label)
     finally:
         # Unconditional, and a `finally` rather than a list of clauses,
         # because the pump can end in a way this module does not get to

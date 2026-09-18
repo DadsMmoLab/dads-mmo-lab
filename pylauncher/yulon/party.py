@@ -88,13 +88,6 @@ PROBE_COMMAND = "dml_bridge_ping"
 PROBE_TOKEN = "DML-BRIDGE-READY"
 """The word only `dml_bridge_ping.lua` says. See its header for why not "ok"."""
 
-MOD_ALE_REV = "319f43edd58ffa6ed72873ddd68820ab86e4a99b"
-"""`azerothcore/mod-ale` at HEAD of 2026-09-07, the revision whose
-`conf/mod_ale.conf.dist` and `src/LuaEngine/ALEConfig.cpp` this module's facts
-were read from on 2026-09-08. It is a pin rather than a branch because the
-module moved from `c3de7942` (HEAD 2026-09-06, `phase8-delta.md:18`) to this in
-two days, and the manifest names the source a two-hour rebuild compiles."""
-
 ALE_SCRIPT_PATH = "/azerothcore/env/dist/etc/modules/lua_scripts"
 """Where ALE must be told to look: the container-visible path of the same
 directory `dest_dir()` writes on the host. A constant of the compose layout."""

@@ -1776,7 +1776,7 @@ def test_the_unpinned_remedy_warns_about_the_copy_case(tmp_path: Path) -> None:
 # Provisioning succeeded and the next `docker compose up` still died with
 # `[WinError 2] The system cannot find the file specified`.
 
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 @pytest.fixture
@@ -3722,6 +3722,12 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "gives today. Making it WSL-capable is a question about where the mounts are "
         "built; `git.ContainerGit._capture()`, the app's other `docker run` over a host "
         "bind, resolves `docker_program()` directly for the same reason."
+    ),
+    "_pumped": (
+        "it is handed a COMPLETE argv and a complete child environment and starts them: the "
+        "daemon was chosen by `exec_stdin()` and `compose_run_stdin()`, which both take a "
+        "distro, before either called this. A `wsl_distro` here would be a second, silent "
+        "chance to disagree with the argv it is already holding"
     ),
     "copy_from_image": (
         "only an INSTALL reaches it - the conf stage, pulling `*.conf.dist` out of an image "
@@ -6836,7 +6842,7 @@ def test_a_missing_modules_folder_marks_nothing_rather_than_claiming_anything(
     The list then marks nothing, which is what it did before T41 — the opposite
     of `allowed_modules()`, where the same unreadable folder must answer `all`
     so the importer keeps upstream's default. The two callers share the listing
-    and not that rule, which is why `_module_dir_names()` returns `None` and
+    and not that rule, which is why `module_dir_names()` returns `None` and
     lets each decide.
     """
     assert docker.clone_names(tmp_path / "modules") == frozenset()

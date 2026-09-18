@@ -238,17 +238,17 @@ GATE_PINS = {
 Read out of the gate boxes' own checkouts (`git rev-parse HEAD` in each source's
 `dest`), never off a branch tip:
 
-* `wow-wotlk`: `/home/pk/wowserver` on `yulon-ubuntu`, the tree gate 7.1's clean
+* `wow-wotlk`: `/home/user/wowserver` on `yulon-ubuntu`, the tree gate 7.1's clean
   2026-09-04 run installed and logged into (`.notes/gates/7.1-ubuntu-2026-09-04-clean/`;
   its `gate71-press2.log` prints `AzerothCore revision : 413bea61a85e+` from the
   build and names no commit for the module, so both were read off that box).
-* `wow-tbc`: `/home/pk/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
+* `wow-tbc`: `/home/user/tbc-7.4c` on `m910q`, gate 7.4c. The Windows run of
   2026-09-04 (`.notes/gates/7.7-win11-tbc/source-identity.txt`) was on
   `0d2ebc3e`, one commit ahead, and the pin is the LINUX one: 7.4c is the gate
   with the full evidence chain (build, extract, import, boot, login) on the
   primary platform, and that note itself establishes the one commit between
   them touches `src/game` only, so the Windows result stands on either.
-* `wow-vanilla`: `/home/pk/vanilla-75` on `m910q`, gate 7.5; the same core
+* `wow-vanilla`: `/home/user/vanilla-75` on `m910q`, gate 7.5; the same core
   commit the Windows run of 2026-09-04 built (`pyplan/upstream-cmangos-doodad-drop.md`
   §7 read `8ec338a1` out of both boxes).
 
@@ -285,6 +285,26 @@ def test_the_pins_are_the_commits_the_gates_ran_on(game_id: str) -> None:
     """By value, because any 40 hex characters satisfy the shape and the loop above."""
     sources = load_catalog().get(game_id).emulator.sources
     assert {s.repo: s.rev for s in sources} == GATE_PINS[game_id]
+
+
+def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> None:
+    """T64's flag, by VALUE and per entry, for `test_the_pins_are_...`'s reason.
+
+    The two facts are the same fact seen from both ends. The pins above say
+    every source is held at the commit the gates ran on; this flag is the one
+    deliberate way past that, and the owner's word of 2026-09-16 was all four
+    families at once. Enumerated rather than spot-checked because the default
+    is `False` and the safety of this control rests on it: an entry gets the
+    button by somebody deciding it does, and an entry that quietly LOST the
+    flag would quietly lose the button with every test still green.
+    """
+    offered = {game.id: game.install.native.update_to_latest for game in load_catalog().games}
+    assert offered == {
+        "wow-wotlk": True,
+        "wow-tbc": True,
+        "wow-vanilla": True,
+        "wow-tortoise": True,
+    }, offered
 
 
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:

@@ -1096,8 +1096,8 @@ def test_a_fixed_password_still_lands_in_the_base_file_and_not_in_env(tmp_path: 
 
 # -- A16: the committed byte snapshot ------------------------------------------
 
-LINUX_SERVER_DIR = Path("/home/pk/wow-server-playerbots")
-LINUX_INSTALL_ID = hashlib.sha256(b"/home/pk/wow-server-playerbots").hexdigest()[
+LINUX_SERVER_DIR = Path("/home/user/wow-server-playerbots")
+LINUX_INSTALL_ID = hashlib.sha256(b"/home/user/wow-server-playerbots").hexdigest()[
     : composegen.INSTALL_ID_LENGTH
 ]
 SNAPSHOT_DIR = Path(__file__).resolve().parent / "data" / "wotlk-rendered"
@@ -1106,7 +1106,7 @@ SNAPSHOT_DIR = Path(__file__).resolve().parent / "data" / "wotlk-rendered"
 def rendered_as_on_linux() -> dict[str, str]:
     """WotLK rendered for the yulon-ubuntu path, platform linux, no SELinux label.
 
-    `install_id()` hashes `os.path.abspath()`, and on Windows `/home/pk/…` grows
+    `install_id()` hashes `os.path.abspath()`, and on Windows `/home/user/…` grows
     a drive letter, so the id is the ONE thing normalised to its Linux value —
     on Linux itself the replace is a no-op and the comparison is literal.
     """

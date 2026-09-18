@@ -175,6 +175,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     "rebuild_confirmation",
     "SUDO_PROMPT_PREFIX",
     "UnsupportedPlatformError",
+    # Added deliberately 2026-09-16 with T71: the one ready-stage failure a
+    # rebuild must NOT roll the images back for. An exception type, not
+    # machinery — this module still runs no subprocess.
+    "WorldStoppedAfterReadyError",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",
@@ -202,6 +206,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     "resources",
     "runner",
     "CatalogEntry",
+    # T64. `InstallEngine.sources_that_move()` answers in this type, so the
+    # Protocol the app drives has to be able to name it — added deliberately,
+    # which is what the docstring below asks for.
+    "EmulatorSource",
     "get_logger",
 }
 
@@ -403,7 +411,7 @@ def test_the_cancel_copy_tells_the_truth_about_resuming(tmp_path: Path) -> None:
     the bash installer found the folder, offered to wipe it, the app declined,
     and it exited 0 having done nothing. 7.2's engine records every finished
     stage in `native.STATE_FILE` and re-checks the disk before skipping one --
-    measured on yulon-ubuntu 2026-09-05, "Using /home/pk/gate72-cycle2
+    measured on yulon-ubuntu 2026-09-05, "Using /home/user/gate72-cycle2
     (resuming)" followed by "Already finished: clone-core, clone-modules,
     generate-compose"
     (`.notes/gates/7.2-ubuntu-2026-09-05/cycle2-pressB.log:26`) -- so the copy
@@ -883,7 +891,7 @@ def test_the_engine_refuses_the_folder_a_cancelled_clone_leaves(tmp_path: Path) 
     the checkout, `preflight()` for the folder with no `.git`.
 
     Driven for real first: `python -m yulon.install_wiring wow-wotlk
-    --server-dir /home/pk/gate72-cancel-install` against the folder the
+    --server-dir /home/user/gate72-cancel-install` against the folder the
     cancelled widget run left, yulon-ubuntu 2026-09-05, exited 1 with "is
     already a git checkout of ... and there is no record here of an install
     this app made"
@@ -992,7 +1000,7 @@ def test_the_gate_sees_a_docker_that_is_only_on_the_registry_path(
     directly since 7.2: it used to be read off a constructor default, and the
     class it was read off is gone.
     """
-    exe = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+    exe = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
     monkeypatch.setattr(platform.sys, "platform", "win32")
     monkeypatch.setattr(platform, "_windows_docker_programs", lambda: (exe,))
     tried: list[str] = []

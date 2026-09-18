@@ -295,3 +295,161 @@ def test_a_missing_user_index_is_an_empty_layer_and_a_broken_one_is_an_error(
     )
     with pytest.raises(ManifestError, match="expected wow-wotlk/module"):
         list(store.load_all("module"))
+
+
+def test_one_bad_user_item_costs_its_own_row_and_never_the_family(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A user manifest that will not load is skipped and named; the shipped rows stay (T46).
+
+    The store already argued this one method up, for the user INDEX:
+
+        raising would draw `!! could not load modules: ...` over the whole tab
+        and take every shipped module down with it.
+
+    It was never applied to the items that index lists. `load_all()` is forced
+    whole by both of its callers and both catch at FAMILY scope, so one
+    unparseable file in the layer this app DERIVES from user input replaced
+    every shipped module of that family with a single `!!` line.
+
+    The line this draws is who wrote the file, not how bad it is: a bundled
+    manifest that will not load is an app bug and stays loud (asserted below),
+    because a shipped catalog that does not parse is not a condition to render
+    politely around.
+    """
+    bundled, user = tmp_path / "bundled", tmp_path / "user"
+    _write_layer(bundled, ["mod-shipped", "mod-other"])
+    # The four bad ones are listed BEFORE `mod-custom`, so a pass that stops at
+    # the first failure loses the good row rather than merely the bad ones.
+    _write_layer(user, ["mod-shape", "mod-undecodable", "mod-foreign", "mod-garbage", "mod-custom"])
+    # A real file on disk for each way a user item goes wrong -- NOT a `Manifest`
+    # injected into a builder, which is coverage of a row nothing can produce.
+    user_items = user / "wow-wotlk" / "modules"
+    # Valid JSON that fails the SCHEMA, which `_read_json()` never wraps: it comes
+    # out of pydantic. This is the likeliest bad file on a real machine, because
+    # the app wrote these itself and an older build's shape is what ages badly.
+    (user_items / "mod-shape.json").write_bytes(
+        json.dumps(
+            {
+                "id": "mod-shape",
+                "name": 5,  # a `str` field given an int
+                "type": "module",
+                "game": "wow-wotlk",
+                "source": {},
+            }
+        ).encode()
+    )
+    # Bytes that are not UTF-8: `open(encoding="utf-8")` raises before `json` sees
+    # them, so this one is a `UnicodeDecodeError` and not a `ManifestError` either.
+    (user_items / "mod-undecodable.json").write_bytes(b'{"id": "\xff\xfe"}')
+    (user_items / "mod-foreign.json").write_bytes(
+        json.dumps(
+            {
+                "id": "mod-foreign",
+                "name": "MOD-FOREIGN",
+                "type": "module",
+                "game": "wow-tbc",  # a manifest for a different game
+                "source": {"repo": "azerothcore/mod-x"},
+            }
+        ).encode()
+    )
+    (user_items / "mod-garbage.json").write_text("{not json", encoding="utf-8")
+
+    store = ManifestStore(bundled, "wow-wotlk", user_root=user)
+    skipped: list[str] = []
+    with caplog.at_level("WARNING"):
+        got = [m.id for m in store.load_all("module", skipped=skipped)]
+
+    # The family survives: every shipped row, plus the user row that does load.
+    assert got == ["mod-shipped", "mod-other", "mod-custom"]
+    # Every failure is named, each in its own sentence, each naming its id, and
+    # each on ONE line -- a `ValidationError` spells itself over five, and the
+    # report box this feeds is read a refusal per line.
+    assert len(skipped) == 4
+    assert all("\n" not in line for line in skipped)
+    assert any("mod-foreign" in line and "wow-tbc" in line for line in skipped)
+    assert any("mod-garbage" in line and "JSON" in line for line in skipped)
+    # Each reason is the one only ITS failure produces, not a phrase they share:
+    # the schema complaint names the field, the decode failure names the codec.
+    assert any("mod-shape" in line and "name" in line for line in skipped)
+    assert any("mod-undecodable" in line and "utf-8" in line for line in skipped)
+    # And every one names the file, which a bare `ValidationError` does not.
+    for item_id in ("mod-shape", "mod-undecodable", "mod-foreign", "mod-garbage"):
+        path = str(user_items / f"{item_id}.json")
+        assert any(path in line for line in skipped), item_id
+    # And logged, because a silently ignored file is a bug report nobody can answer.
+    assert "mod-garbage" in caplog.text
+
+    # A caller that does not ask for the skips still gets the surviving family
+    # rather than an exception -- the panel and `module_updates()` differ only
+    # in whether they have somewhere to print them.
+    assert [m.id for m in store.load_all("module")] == ["mod-shipped", "mod-other", "mod-custom"]
+
+    # The bundled pass is NOT softened, and not for one exception type either:
+    # this app's own file failing is an app bug however it fails.
+    bundled_items = bundled / "wow-wotlk" / "modules"
+    (bundled_items / "mod-other.json").write_bytes(
+        json.dumps({"id": "mod-other", "name": 5, "type": "module", "game": "wow-wotlk"}).encode()
+    )
+    with pytest.raises(ValidationError):
+        list(store.load_all("module", skipped=[]))
+    (bundled_items / "mod-other.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ManifestError, match="valid JSON"):
+        list(store.load_all("module", skipped=[]))
+
+
+class _AskedBehind:
+    """A `BehindReader` that records the (folder, branch) pair it was asked about."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, str | None]] = []
+
+    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+        self.asked.append((dest.name, branch))
+        return 0
+
+
+def test_a_bad_user_manifest_no_longer_costs_the_branches_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`module_updates()` keeps reading branches past a manifest that will not load (T46).
+
+    This is the claim item 1 makes "for free", proved on the real seam rather
+    than asserted: `modules.module_updates()` builds its branch table by forcing
+    `store().load_all("module")` inside one `try`. The dict is built OUTSIDE that
+    try, so entries added before a raise always survived -- the loss was the
+    user items AFTER the bad one, silently, with no error drawn anywhere. The
+    branch matters because it is the ref an update fetches, and a module counted
+    against the wrong ref reads as up to date when it is not.
+    """
+    bundled, user = tmp_path / "bundled", tmp_path / "user"
+    server = tmp_path / "server"
+    _write_layer(bundled, ["mod-shipped"])
+    _write_layer(user, ["mod-aaa-bad", "mod-zzz-good"])
+    items = user / "wow-wotlk" / "modules"
+    (items / "mod-aaa-bad.json").write_text("{not json", encoding="utf-8")
+    (items / "mod-zzz-good.json").write_bytes(
+        json.dumps(
+            {
+                "id": "mod-zzz-good",
+                "name": "Z",
+                "type": "module",
+                "game": "wow-wotlk",
+                "source": {"repo": "azerothcore/mod-x", "branch": "wotlk"},
+            }
+        ).encode()
+    )
+    # Both are installed on disk; the enumeration is directory names, not the catalog.
+    for name in ("mod-shipped", "mod-zzz-good"):
+        (server / "modules" / name / ".git").mkdir(parents=True)
+
+    monkeypatch.setattr(
+        modules, "store", lambda *a, **k: ManifestStore(bundled, "wow-wotlk", user_root=user)
+    )
+    git = _AskedBehind()
+    modules.module_updates(server, git=git)
+
+    # The bad file sorts FIRST in the user index, so before T46 its raise ended the
+    # loop and `mod-zzz-good` was counted against `origin HEAD` instead of `wotlk`.
+    assert ("mod-zzz-good", "wotlk") in git.asked
+    assert ("mod-shipped", None) in git.asked
