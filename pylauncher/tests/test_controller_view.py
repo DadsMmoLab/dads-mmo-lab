@@ -10,11 +10,11 @@ import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, pump_until
+from tests.conftest import HANG_BOUND, process_events, pump_until
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -9235,6 +9235,422 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
 
 
+# ---------------------------------------------------------------------------
+# T73: who gets the height on the Modules tab.
+#
+# Measured live on 2026-09-16, maximised at 1920x1080: the module list showed
+# about two and a half rows of forty while the report box and the rebuild log
+# under it took the rest; reaching City Bots from the top took eleven
+# page-downs. T44's approved mockup shows ten rows at once.
+#
+# EVERY measurement here is made with the theme applied and re-applied at the
+# window's width, because that is the only way these numbers mean anything:
+# `apply_dadcraft_theme(width=...)` regenerates the stylesheet at a font scale
+# derived from the width (`main._Window._restyle_for_width`), and the fonts,
+# paddings and `min-height`s it sets are most of what the tab spends. An
+# unthemed window says the list has 42% and 5 rows where the themed one says
+# 35% and 2 -- the first version of these tests measured the unthemed one and
+# was wrong about every number in it.
+#
+# And through `main.build_catalog_tab()` -- the SAME function `build_window()`
+# calls -- with the controller view added to the tab bar the way
+# `build_window()` adds it, for the reason `test_catalog_view.py`'s width matrix
+# does the same (T28 round 2): the tab bar's frame and the central widget's
+# `QVBoxLayout` eat into the budget before a single row is measured.
+
+MODULE_LIST_SHARE_AT_1080P = 0.42
+"""How much of the Modules tab's height the list must have, maximised at 1080p.
+
+Measured themed: 311px of the tab's 900 (35%) when T73 was filed, 397 (44%)
+now. The tab is exactly full at this size -- every widget is at its own hint or
+minimum and there is no surplus for a stretch factor to share -- so the whole
+difference is the empty rebuild log no longer asking for 266px to say nothing.
+"""
+
+ROWS_VISIBLE_AT_1080P = 3
+"""Whole module rows on screen at once, maximised at 1920x1080. Two before.
+
+Not T44's ten, and this is where the rest of that gap lives: a row is 85px
+under this theme, so ten rows want 850 of a tab that is 900 tall in a 1080p
+window and has an action bar, a custom-module card, a report and a log to place
+as well. Getting to ten needs a shorter row (`modules_panel.py`) or fewer boxes
+under the list, and neither is a stretch factor. What IS this ticket's is that
+nothing under the list takes a pixel it has nothing to say in.
+"""
+
+MODULE_LIST_SHARE_WITH_ROOM_TO_SPARE = 0.58
+"""And the share on a window big enough to have a surplus (2560x1440).
+
+This is the size at which the stretch factor is the thing being tested: at 1080p
+the tab is full and the factor has nothing to share, at 1440p there are ~360
+spare pixels and the question is who gets them. The list: 522px/41% and 5 whole
+rows before, 757/60% and 7 now. Drop the `1` from `addWidget(self.modules_panel,
+1)` and the spare pixels go to the expanding widgets instead.
+"""
+
+ROWS_VISIBLE_WITH_ROOM_TO_SPARE = 7
+"""Whole rows at 2560x1440, against five before."""
+
+TUNING_CARDS_SHARE_AT_1080P = 0.76
+"""The Tuning tab's share of its own tab, maximised at 1080p: 73% before, 79%.
+
+Smaller than the Modules tab's gain because there is only one box under the
+cards, and it is the box that gained the most from being sized to its text: 164
+px of twelve-line hint for a sentence, against the 106 the theme's floor under
+any report box gives it.
+"""
+
+READABLE_REPORT_LINES = 6
+"""The lines a report box must show without scrolling once it holds that many.
+
+Spelled here and NOT read back out of `controller_view.REPORT_LINES`: an
+assertion that takes its line count from the constant that sizes the box agrees
+with itself whatever that constant says, and three lines would pass it.
+"""
+
+A_BOX_THAT_GAVE_NOTHING_BACK = 12
+"""What an unsized `QPlainTextEdit` shows -- and so what a report must NOT.
+
+The other half of the same assertion, and the half that says the six is a
+CEILING: without it, a box that grows to whatever it holds satisfies "six lines
+are readable" by showing twelve, and a report pasted into the tab takes the
+rows with it. Twelve because that is the default `sizeHint`, which is what the
+boxes here were before.
+"""
+
+
+def _themed_window() -> Any:
+    """A window styled the way `build_window()` styles it, before anything is in it."""
+    from PySide6.QtWidgets import QMainWindow
+
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    window = QMainWindow()
+    apply_dadcraft_theme(window)
+    return window
+
+
+def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tuple[Any, Any]:
+    """Lay `view` out inside the window `build_window()` builds, and show it.
+
+    Returns the window -- so the caller can drive it across the range a user can
+    drag it to -- and `view`'s now-current sub-tab.
+    """
+    import main
+    from yulon.ui.catalog_view import CatalogView
+    from yulon.ui.widgets.log_panel import LogPanel
+
+    window = _themed_window()
+    panel = LogPanel()
+    catalog_view = CatalogView(load_catalog(), lambda _entry: None, panel, pick_dir=lambda *_: None)
+    tabs, _banner, _splitter = main.build_catalog_tab(window, catalog_view, panel)
+    tabs.addTab(view, WOTLK.name)
+    tabs.setCurrentWidget(view)
+    index = next(i for i in range(view._tabs.count()) if view._tabs.tabText(i) == tab_title)
+    view._tabs.setCurrentIndex(index)
+    window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
+    window.show()
+    return window, view._tabs.widget(index)
+
+
+def _at(window: Any, size: tuple[int, int]) -> None:
+    """Put the window at `size`, restyle as the app does, and let it settle."""
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    window.resize(*size)
+    # `main._Window._restyle_for_width`, which is what makes the fonts -- and so
+    # every height measured here -- a function of the window's width.
+    apply_dadcraft_theme(window, width=window.width())
+    process_events()
+
+
+def _whole_rows_on_screen(panel: modules_panel.ModulesPanel) -> int:
+    """How many module rows are completely inside the list's viewport."""
+    from PySide6.QtWidgets import QScrollArea
+
+    area = panel.findChild(QScrollArea)
+    assert isinstance(area, QScrollArea)
+    viewport = area.viewport()
+    whole = 0
+    for row in panel.rows():
+        top = row.mapTo(viewport, row.rect().topLeft()).y()
+        if top >= 0 and top + row.height() <= viewport.height():
+            whole += 1
+    return whole
+
+
+def _lines_readable_without_scrolling(box: Any, count: int) -> bool:
+    """Put `count` lines in `box` and answer whether all of them are on screen.
+
+    Measured against the box's own laid-out viewport rather than recomputed from
+    the font: the height under test is itself computed from the font, so a check
+    that did the same arithmetic would agree with itself whatever the box did.
+    """
+    from PySide6.QtGui import QTextCursor
+
+    was = box.toPlainText()
+    box.setPlainText("\n".join(f"line {n}" for n in range(1, count + 1)))
+    process_events()
+    cursor = box.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    bottom_of_the_last_line = box.cursorRect(cursor).bottom()
+    nothing_to_scroll = box.verticalScrollBar().maximum() == 0
+    box.setPlainText(was)
+    return bool(bottom_of_the_last_line <= box.viewport().height() and nothing_to_scroll)
+
+
+def _a_sentence_wrapping_to(box: Any, lines: int) -> str:
+    """ONE paragraph, long enough to wrap to exactly `lines` lines in `box`.
+
+    Built by asking the box's own document how many lines it has made of the
+    text so far, because that number depends on the box's width and the theme's
+    font and cannot be written down here. One paragraph and not `lines` of them:
+    the whole point is a sentence that wraps, which is what every refusal and
+    every `TUNING_SAVED` on these tabs is.
+    """
+    words = ["word"]
+    while True:
+        box.setPlainText(" ".join(words))
+        process_events()
+        made = round(box.document().documentLayout().documentSize().height())
+        if made >= lines or len(words) > 2000:
+            return " ".join(words)
+        words.append("word")
+
+
+def _squeezed(tab: Any) -> list[str]:
+    """Everything on `tab` drawn shorter than it says it needs -- i.e. clipped."""
+    from PySide6.QtWidgets import QVBoxLayout
+
+    box = tab.layout()
+    assert isinstance(box, QVBoxLayout)
+    return [
+        f"{type(w).__name__}: {w.height()} < {w.minimumSizeHint().height()}"
+        for w in (box.itemAt(i).widget() for i in range(box.count()))
+        if w is not None and w.isVisible() and w.height() < w.minimumSizeHint().height()
+    ]
+
+
+def test_the_module_list_gets_the_height_on_a_maximised_1080p_window(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The list, not the two boxes under it, is what the tab's height is for.
+
+    The defect this pins: `QVBoxLayout` hands every widget its `sizeHint` before
+    it shares anything by stretch factor, so the 3:1:2 this tab was written with
+    -- which reads as "the list wins" -- was decided entirely by what the two
+    boxes asked for, and an empty `LogPanel` asks for 266px.
+
+    Three assertions, because each on its own is satisfied by the wrong thing: a
+    share is met by a list of shorter rows, a row count by a taller window, and
+    both by a log that has quietly been made unusable rather than small.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1920, 1080))
+
+    share = view.modules_panel.height() / tab.height()
+    assert share >= MODULE_LIST_SHARE_AT_1080P, (
+        f"the list has {view.modules_panel.height()}px of the tab's {tab.height()} "
+        f"({share:.0%}); the report has {view.module_report.height()} and the log "
+        f"{view.rebuild_log.height()}"
+    )
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert (
+        whole >= ROWS_VISIBLE_AT_1080P
+    ), f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen"
+    assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
+        f"the idle log is CLIPPED at {view.rebuild_log.height()}px, not merely small: "
+        f"it says it needs {view.rebuild_log.minimumSizeHint().height()}"
+    )
+    assert _lines_readable_without_scrolling(view.module_report, READABLE_REPORT_LINES), (
+        f"the report cannot show {READABLE_REPORT_LINES} lines: "
+        f"it is {view.module_report.height()}px"
+    )
+    assert not _lines_readable_without_scrolling(
+        view.module_report, A_BOX_THAT_GAVE_NOTHING_BACK
+    ), f"a long report takes the rows with it: the box grew to {view.module_report.height()}px"
+
+
+def test_a_bigger_screens_spare_height_goes_to_the_module_list(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """At 2560x1440 the tab has pixels to spare, and the list is what spends them.
+
+    The other half of the 1080p test and the half that tests the stretch factor:
+    at 1080p this tab is exactly full, every widget on its own hint, and a
+    stretch factor decides nothing. Here there are some 360 spare pixels. They
+    used to be split with the report and the log -- which have nothing to put in
+    them -- and the list came out at 41%.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (2560, 1440))
+
+    share = view.modules_panel.height() / tab.height()
+    assert share >= MODULE_LIST_SHARE_WITH_ROOM_TO_SPARE, (
+        f"the list has {view.modules_panel.height()}px of the tab's {tab.height()} "
+        f"({share:.0%}); the report has {view.module_report.height()} and the log "
+        f"{view.rebuild_log.height()}"
+    )
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert (
+        whole >= ROWS_VISIBLE_WITH_ROOM_TO_SPARE
+    ), f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen"
+
+
+def test_the_modules_tab_fits_at_the_size_the_app_opens_at(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """1280x800 is the hard case, not 1920x1080: there is nothing spare at all.
+
+    A height given to the list at the top of the range is taken from somewhere at
+    the bottom of it, and the way that is paid for is silent -- Qt draws the
+    widgets it cannot fit shorter than their own minimum, and the text inside
+    them is simply cut off. Met once already: a report box pinned to six lines
+    as a MINIMUM (rather than as a ceiling) clipped itself by 21px here, in the
+    window the app opens at, while the 1080p test stayed green.
+
+    Then again at 960x600, the smallest the window can be dragged to, where this
+    tab has been over-subscribed since long before T73: the assertion there is
+    the narrower one that the report box in particular is not the widget being
+    cut.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+    assert (
+        _squeezed(tab) == []
+    ), f"clipped at the size the app opens at {main.DEFAULT_WINDOW_SIZE}: {_squeezed(tab)}"
+
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    report = view.module_report
+    assert report.height() >= report.minimumSizeHint().height(), (
+        f"the report is clipped at the smallest window: {report.height()}px against the "
+        f"{report.minimumSizeHint().height()} it says it needs"
+    )
+    # And the floor is doing something here rather than merely being declared:
+    # the list's own minimum is 70px -- a scrollbar and the top of a card -- and
+    # this is the one size at which what it gets is the floor and nothing else.
+    assert view.modules_panel.height() > view.modules_panel.minimumSizeHint().height(), (
+        f"the list is down to its own bare minimum ({view.modules_panel.height()}px) at the "
+        f"smallest window: the floor under it is not being applied"
+    )
+
+
+def test_a_report_that_wraps_does_not_take_the_list_with_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """What the report box holds is a paragraph, not a tidy list of short lines.
+
+    A refusal on this tab is `str(exc)` -- one long sentence that wraps to
+    whatever the box's width makes of it, and the narrower the window the more
+    lines that is. The cap has to be counted in LINES ON SCREEN for that, and
+    the first version of it was not: it multiplied a whole paragraph's height by
+    the number of wrapped lines in it, so one 120-word sentence asked for 967px
+    and the list above it was laid out at nothing at all. Every value in the
+    `TUNING_SAVED` and `MODULE_SQL_FINISHED` family wraps like this.
+
+    At the size the app OPENS at, because that is where the box is narrow enough
+    to wrap and the tab has nothing spare to absorb it.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+    was = view.modules_panel.height()
+
+    view.module_report.setPlainText("word " * 120)
+    process_events()
+
+    assert view.module_report.height() <= was, (
+        f"one wrapped paragraph took {view.module_report.height()}px, more than the list "
+        f"had to start with ({was})"
+    )
+    assert view.modules_panel.height() >= controller_view_module.MODULE_LIST_MIN_HEIGHT, (
+        f"the list is down to {view.modules_panel.height()}px with one sentence in the "
+        f"report box, which is {view.module_report.height()}px tall"
+    )
+    assert _squeezed(tab) == [], f"clipped once the report had something in it: {_squeezed(tab)}"
+    assert not _lines_readable_without_scrolling(
+        view.module_report, A_BOX_THAT_GAVE_NOTHING_BACK
+    ), "the wrapped report is over the ceiling the short-line one is held to"
+
+    # And the other direction, at the size where the tab can afford the box its
+    # whole ceiling: a sentence wrapping to exactly the number of lines the box
+    # is allowed is a sentence that must be READ, not scrolled. Counting
+    # paragraphs instead of the lines they wrap to gets this wrong the quiet
+    # way -- the box asks for one line, the theme's floor gives it five, and the
+    # sixth is behind a scrollbar nobody looks for.
+    _at(window, (1920, 1080))
+    view.module_report.setPlainText(
+        _a_sentence_wrapping_to(view.module_report, READABLE_REPORT_LINES)
+    )
+    process_events()
+    assert view.module_report.verticalScrollBar().maximum() == 0, (
+        f"a sentence wrapping to six lines is scrolled in a box sized for six: "
+        f"{view.module_report.height()}px, {view.module_report.verticalScrollBar().maximum()} "
+        f"lines of travel"
+    )
+
+
+def test_the_rebuild_log_takes_its_height_back_when_a_job_starts(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The log is small because it is empty, not because it was made small.
+
+    The list's height comes out of a log with nothing in it, which is only honest
+    while that stays true: the moment a rebuild or a database update writes to
+    the panel, its output is the thing worth the pixels. Driven through
+    `LogPanel.run()` -- the call `rebuild_server()` itself makes -- rather than by
+    setting the flag, so the cap is lifted by the same signal the app raises.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1920, 1080))
+    idle = view.rebuild_log.height()
+    assert (
+        idle == view.rebuild_log.minimumSizeHint().height()
+    ), f"an empty log is not at its smallest: {idle}px"
+
+    assert view.rebuild_log.run(lambda: iter(["compiling"]), title="rebuild") is True
+    pump_until(lambda: not view.rebuild_log.running, "the job finished")
+    process_events()
+
+    assert (
+        view.rebuild_log.height() > idle
+    ), f"the log is still capped at {view.rebuild_log.height()}px with a job's output in it"
+
+
+def test_the_tuning_cards_get_the_height_their_report_used_to_take(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The Tuning tab is the same shape, so it gets the same rule.
+
+    One list of cards over one report box, and that box asked for twelve lines of
+    a sentence. It is the clearest case of the two: there is no log here, so the
+    whole difference between 73% and 79% is the report being as tall as its text.
+    """
+    view = _tuning_view(ps, tmp_path)
+    window, tab = _controller_in_the_real_window(view, "Tuning")
+    _at(window, (1920, 1080))
+
+    share = view.tuning_panel.height() / tab.height()
+    assert share >= TUNING_CARDS_SHARE_AT_1080P, (
+        f"the cards have {view.tuning_panel.height()}px of the tab's {tab.height()} "
+        f"({share:.0%}); the report has {view.tuning_report.height()}"
+    )
+    assert _lines_readable_without_scrolling(view.tuning_report, READABLE_REPORT_LINES), (
+        f"the report cannot show {READABLE_REPORT_LINES} lines: "
+        f"it is {view.tuning_report.height()}px"
+    )
+    assert not _lines_readable_without_scrolling(
+        view.tuning_report, A_BOX_THAT_GAVE_NOTHING_BACK
+    ), f"a long report takes the cards with it: the box grew to {view.tuning_report.height()}px"
 # ------------------------------- T68: a clone whose install never finished keeps Install
 
 

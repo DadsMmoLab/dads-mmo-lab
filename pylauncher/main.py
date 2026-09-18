@@ -42,6 +42,17 @@ shrank the window.
 """
 
 
+MINIMUM_WINDOW_SIZE = (960, 600)
+"""The smallest the window can be dragged to, and the hardest case for any tab.
+
+Named for `DEFAULT_WINDOW_SIZE`'s reason and T73's: the Modules tab's layout is
+asserted at BOTH ends of the range a user can put the window in, and a test
+carrying its own copy of this pair would keep passing if someone lowered the
+floor -- the size at which a stretch factor stops mattering and the minimum
+heights are all there is.
+"""
+
+
 _CATALOG_MIN_WIDTH = 420
 """Narrowest the catalog pane may become, in pixels.
 
@@ -701,7 +712,7 @@ def build_window() -> object:
     window.setProperty("update_worker", update_worker)
     update_thread.start()
     window.resize(*DEFAULT_WINDOW_SIZE)
-    window.setMinimumSize(960, 600)
+    window.setMinimumSize(*MINIMUM_WINDOW_SIZE)
     window.setProperty("tabs", tabs)
     # The live lists themselves, not a copy of either - see `_Window`.
     window.yulon_log_panels = panels
