@@ -157,7 +157,7 @@ Measured on m910q 2026-09-05 against a one-line test module whose BODY called
     guard installed here, at import          1 error during collection   +0
 
 and the 98 bytes were `INFO [tests.test_zzz_import_time] a module body wrote
-this at collection time`, in `/home/pk/.local/share/yulon/yulon.log`. The
+this at collection time`, in `/home/user/.local/share/yulon/yulon.log`. The
 redirect below stays per-test, because it hands out a FRESH directory and a
 session-wide one would let each test read the last one's log.
 """
@@ -261,7 +261,7 @@ def child_env_with_the_users_own_log_out_of_reach(
     Measured on m910q 2026-09-05, a probe child spawned the way the suite
     spawns one and handed `{"EXIT_CODE": "3", "PYTHONPATH": ...}`: under
     `-n 2 --dist loadfile` it reached the OS with all four unset and
-    answered `/home/pk/.local/share/yulon`, the user's own; serially only
+    answered `/home/user/.local/share/yulon`, the user's own; serially only
     `HOME` was dropped (the box's own `XDG_DATA_HOME` was unset, so that
     one compared equal to the omission and was rewritten) and the child
     landed on the scratch. Green on the spelling CI runs, open on the
@@ -348,7 +348,7 @@ def restore_root_logging(levels: dict[logging.Handler, int]) -> None:
       the process. Every handler that was there before the test gets its level
       back.
     * `leaked file handlers:
-      ['/home/pk/.local/share/yulon/yulon.log']`. A `RotatingFileHandler` a
+      ['/home/user/.local/share/yulon/yulon.log']`. A `RotatingFileHandler` a
       test opened stays on the root logger, writing every record the remaining
       ~2,450 tests emit into a directory that is usually deleted underneath
       it. Those are removed and closed, and `_file_configured` is recomputed

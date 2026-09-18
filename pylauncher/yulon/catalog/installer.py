@@ -388,7 +388,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
       named: `_write_dockerfile()` renders `Dockerfile` and `.dockerignore`
       through one `dockerfile.write()`, so a clause that named the first and
       added "nothing else in the folder is rewritten" was wrong about the
-      second (Fable, round 1). And what it costs to stop is stated with it,
+      second (review, round 1). And what it costs to stop is stated with it,
       because `native._put_recipe_back()` is what makes that true rather than
       the sentence.
 
@@ -620,7 +620,7 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     `test_no_folder_shape_is_offered_adoption_and_deletion_at_once`.
 
     With the record there the resume is real and was measured the same night:
-    "Using /home/pk/gate72-cycle2 (resuming)", "Already finished: clone-core,
+    "Using /home/user/gate72-cycle2 (resuming)", "Already finished: clone-core,
     clone-modules, generate-compose" (`cycle2-pressB.log:26`).
 
     The pre-7.2 wording is gone for good and must not come back. The bash

@@ -6,8 +6,7 @@
   "game": "wow-tortoise",
   "description": "The in-game panel for the bots this server compiles in: /tbm opens it, and it drives the same .bot commands from a window instead of the chat box. Client-side only - it is copied into your WoW client's Interface/AddOns, nothing is written to the server.",
   "source": {
-    "repo": "Sagiroth/TortoiseBotsManager",
-    "rev": "65ef0b2f6531652de990bba7bfc3d4f70a9e9bb3"
+    "repo": "Sagiroth/TortoiseBotsManager"
   },
   "build": {
     "rebuild": false,
@@ -33,7 +32,7 @@
     "surface that HAS one.",
     "Interface 11200 (Vanilla 1.12) against the 1.18.1 / build 7272 Turtle client, which is",
     "what this entry's `client` block declares and what the client reports.",
-    "The whole pinned checkout is copied, `.git` and README and `tests/` included: `client`",
+    "The whole checkout is copied, `.git` and README and `tests/` included: `client`",
     "steps take a path in the clone and this addon IS the repository root. WoW reads the",
     "`.toc` and the files it lists and ignores the rest.",
     "WRITTEN AT INSTALL, not at Play. `_ApplyEngine._client()` (apply.py:2173-2192) is the one",

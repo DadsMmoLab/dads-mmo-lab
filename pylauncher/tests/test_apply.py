@@ -11,6 +11,7 @@ every step that could not run appears in `ApplyReport.skipped`.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -76,6 +77,28 @@ class _FakeGit:
         (spec.dest / ".git").mkdir(exist_ok=True)
 
 
+def _untouched(applier: Applier, manifest: Any) -> Applier:
+    """Answer T47's three reset questions as git would for a clone nobody has touched.
+
+    `install()` over a checkout that is already there IS a `git fetch` + `reset
+    --hard`, and since T47 it asks the same three questions `update()` does
+    before running one: what repository the folder is a checkout of, whether
+    anything in it is uncommitted, and whether HEAD carries commits the reset
+    would move off. A `_FakeGit`'s `.git` is an empty directory, so a real
+    `RunnerGit` answers `None` — "could not be asked" — to all three and the
+    guard fails closed. That is the designed behaviour and it is not what the
+    tests using this are about, so this says "asked, and untouched".
+
+    Only for a FAKE clone. The real-clone tests answer these from git.
+    """
+    assert manifest.source is not None
+    url = manifest.source.url
+    applier.remote_url = lambda _dest: url
+    applier.unmodified = lambda _dest, _path: True
+    applier.no_local_commits = lambda _dest, _branch: True
+    return applier
+
+
 class _FakeSql:
     def __init__(self) -> None:
         self.files: list[tuple[str, str]] = []
@@ -117,6 +140,24 @@ ALE: dict[str, Any] = {
     "prompts": [{"key": "duration", "question": "seconds", "kind": "int", "default": "20"}],
 }
 
+
+def _have_requirements(server_dir: Path, manifest: Any) -> None:
+    """Put every id a manifest `requires` on disk, the way a server install leaves it.
+
+    T69 turned `requires` into a refusal, so a fixture that installs a manifest
+    declaring one now has to supply it: `mod-ale` for the nine shipped ale
+    scripts and kegs, `mod-playerbots` for the two bot modules. A folder under
+    a clone directory is the whole of it -- `missing_requirements()` asks the
+    disk -- and the tests calling this are about something else entirely.
+
+    Called with the MANIFEST rather than a hard-coded id so that a fixture
+    whose manifest requires nothing gets nothing, and one that grows a
+    requirement is carried without an edit here.
+    """
+    for needed in manifest.requires:
+        (server_dir / "modules" / needed / ".git").mkdir(parents=True, exist_ok=True)
+
+
 MODULE: dict[str, Any] = {
     "id": "mod-ah-bot",
     "name": "AH Bot",
@@ -145,6 +186,7 @@ def test_ale_install_deploys_patches_on_configure_and_removes(tmp_path: Path) ->
     sql = _FakeSql()
     applier = Applier(tmp_path, git=git, sql=sql)
     m = parse_manifest(ALE)
+    _have_requirements(tmp_path, m)
 
     report = applier.install(m)
     assert git.calls[0].url == "https://github.com/Brytenwally/SitMeansRest.git"
@@ -229,7 +271,9 @@ def test_a_caller_tells_applied_from_not_applied_without_reading_a_sentence(
     be the same defect one layer up — the report's own English is not an API.
     """
     ale_git = _FakeGit({"SitMeansRest.lua": "x\n", "sql/tables.sql": "C"})
-    direct = Applier(tmp_path / "ale", git=ale_git, sql=_FakeSql()).install(parse_manifest(ALE))
+    ale = parse_manifest(ALE)
+    _have_requirements(tmp_path / "ale", ale)
+    direct = Applier(tmp_path / "ale", git=ale_git, sql=_FakeSql()).install(ale)
     assert direct.pending_sql == ()
 
     deferred = Applier(
@@ -351,7 +395,7 @@ def test_steps_without_a_seam_are_reported_skipped_never_silent(tmp_path: Path) 
     client = tmp_path / "client"
     dbc = _FakeDbc()
     sql = _FakeSql()
-    full = Applier(tmp_path, git=git, sql=sql, client_dir=client, dbc=dbc).install(m)
+    full = _untouched(Applier(tmp_path, git=git, sql=sql, client_dir=client, dbc=dbc), m).install(m)
     assert full.skipped == ()
     assert (client / "Data" / "p.MPQ").exists()
     assert dbc.dirs == [tmp_path / "ale_scripts" / "sod" / "kegs/sod/Server Files/dbc"]
@@ -594,7 +638,6 @@ def test_remove_of_a_shared_dir_deploy_leaves_other_scripts_alone(tmp_path: Path
 
     # Clone already gone: a directory deploy cannot be undone safely → skipped, not guessed.
     applier.install(m)
-    import shutil
 
     shutil.rmtree(applier.clone_dir(m))
     report = applier.remove(m)
@@ -649,7 +692,7 @@ def test_generated_files_are_lf_even_on_windows(tmp_path: Path) -> None:
 # `platform.docker_program()`). `docker exec` here had the same hardcoded name
 # as everything else.
 
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 def test_docker_sql_execs_through_the_cli_this_host_can_start(
@@ -1171,7 +1214,7 @@ def test_a_first_install_needs_no_folder_and_the_second_updates_this_apps_own(
     tmp_path: Path,
 ) -> None:
     """The two cases that must keep working: nothing there, and this app's own clone."""
-    git = _FakeGit({"README.md": "upstream\n"})
+    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True, no_local_commits=True)
     origins = _Origins(OWNED_URL)
     applier = Applier(tmp_path, git=git, remote_url=origins)
     m = parse_manifest(OWNED_ITEM)
@@ -1184,7 +1227,12 @@ def test_a_first_install_needs_no_folder_and_the_second_updates_this_apps_own(
 
     applier.install(m)  # the update path, over a clone this app made
     assert len(git.calls) == 2
-    assert origins.asked == []  # the per-clone claim IS the corroboration
+    # The claim is still the whole of the OWNERSHIP question -- `_require_own_clone()`
+    # returns on it without asking anything -- and since T47 the same install
+    # asks `origin` once more, for a different question: this folder is about to
+    # be `reset --hard`, and what it is a checkout of decides whether that is
+    # this module's own update or somebody else's repository being overwritten.
+    assert origins.asked == [applier.clone_dir(m)]
 
 
 def test_remove_refuses_to_delete_a_module_folder_this_app_did_not_clone(tmp_path: Path) -> None:
@@ -1602,7 +1650,11 @@ def test_the_commit_question_is_asked_about_the_branch_the_update_would_reset_to
 
     applier.install(parse_manifest(branched))
 
-    assert git.branches_asked == ["wotlk"]
+    # Twice since T47: the adoption rule asks, and then `_costly_reset()` asks
+    # the same question again on the install's own destructive path. Both must
+    # name the MANIFEST's branch, which is what this test is about -- a caller
+    # that asked about the checkout's current branch would show up here.
+    assert git.branches_asked == ["wotlk", "wotlk"]
 
 
 def test_a_copied_server_folder_does_not_adopt_the_clones_in_the_copy(tmp_path: Path) -> None:
@@ -2005,9 +2057,8 @@ def test_a_guid_that_names_no_character_is_refused_by_name(tmp_path: Path) -> No
 def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Path) -> None:
     """ "I could not check" is said out loud, never spelled like "I checked"."""
     git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
-    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(
-        _shipped("mod-ah-bot-plus"), {"bot_guid": "42"}
-    )
+    plus = _shipped("mod-ah-bot-plus")
+    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(plus, {"bot_guid": "42"})
     assert any(
         "not checked" in s.lower() and "bot_guid" in s for s in report.skipped
     ), report.skipped
@@ -2015,8 +2066,10 @@ def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Pat
     # A reader that RAISED is the same answer, not "the character is missing":
     # a stopped database must not make a module uninstallable.
     stopped = _FakeReader(fail="Error response from daemon: container not running")
-    second = Applier(tmp_path, git=_FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST}), sql=stopped)
-    report2 = second.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "42"})
+    second = _untouched(
+        Applier(tmp_path, git=_FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST}), sql=stopped), plus
+    )
+    report2 = second.install(plus, {"bot_guid": "42"})
     assert any("not checked" in s.lower() for s in report2.skipped), report2.skipped
 
 
@@ -3469,14 +3522,20 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
 
     The brief for the press called `mod-arac` *the only shipped manifest with a
     direct world-SQL step*. `SqlStep.applied_by` DEFAULTS to `"direct"`
-    (`manifest.py:136`), so every step that names no route is one: 43 steps
-    across 18 manifests in all four games. `mod-arac` is the only `module`-type
-    one, which is the narrower true statement.
+    (`manifest.py:136`), so every step that names no route is one: 44 steps
+    across 19 manifests in all four games. `mod-arac` and `mod-city-bots` are
+    the only `module`-type ones, which is the narrower true statement.
 
-    The 44th direct step in the tree is `wow-wotlk/ale/paragon.json`'s, into
-    `ale` -- outside `WORLD_HELD_DBS`, which is what makes the two numbers
-    differ and why this counts the set the guard names rather than every direct
-    step.
+    One direct step in the tree is outside these numbers:
+    `wow-wotlk/ale/paragon.json`'s, into `ale` -- outside `WORLD_HELD_DBS`,
+    which is what makes the two numbers differ and why this counts the set the
+    guard names rather than every direct step.
+
+    It was 43 across 18 until T63 added `mod-city-bots`, whose citizen-roster
+    import is a direct step into `playerbots`. That is not an incidental bump:
+    `playerbots` is in `WORLD_HELD_DBS`, so the roster import is the second
+    module-type write this guard stands in front of, and the count moving is
+    what says the new step joined the guarded set rather than slipping past it.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -3497,8 +3556,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        43,
-        18,
+        44,
+        19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
 
@@ -3774,6 +3833,90 @@ def test_a_conflict_is_found_in_another_familys_clone_folder(tmp_path: Path) -> 
     assert "some-ale-script" in str(caught.value)
     assert "ale_scripts" in str(caught.value), str(caught.value)
     assert not applier.clone_dir(module).exists()
+
+
+def test_install_refuses_a_module_whose_requirement_is_not_installed(tmp_path: Path) -> None:
+    """`requires` is enforced at install, not merely parsed (T69).
+
+    The twin of `conflicts_with`'s defect, and worse in one way: a conflict
+    fails loudly, at the linker, twenty minutes in. A missing requirement fails
+    SILENTLY. Loot Pet and SitMeansRest declare `mod-ale`, installed cleanly on
+    a server with no Lua engine, reported success -- and then the script never
+    ran, with no line anywhere saying why.
+
+    The Modules tab locks the row for the same reason, and this is the half
+    that is a guarantee: the context menu and a custom-folder install reach
+    `install()` without the button.
+
+    Exactly one rule can refuse this fixture. It declares no `conflicts_with`,
+    nothing else is on disk for a conflict to find, and the refusal is matched
+    against `requirement_refusal()`'s own sentence rather than against a phrase
+    the neighbouring guards also contain.
+    """
+    from yulon.apply import requirement_refusal
+
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL))
+    needy = parse_manifest({**OWNED_ITEM, "id": "mod-thing", "requires": ["mod-ale"]})
+
+    with pytest.raises(ApplyError) as caught:
+        applier.install(needy)
+
+    assert str(caught.value) == (
+        requirement_refusal("mod-thing", "mod-ale") + " Nothing was changed."
+    )
+    # And it really changed nothing: the refusal is raised before the clone.
+    assert not applier.clone_dir(needy).exists(), "the refused install still cloned"
+
+
+def test_a_requirement_the_server_install_cloned_lets_the_install_through(
+    tmp_path: Path,
+) -> None:
+    """A folder under `modules/` is the requirement, whoever put it there (T69).
+
+    `mod-city-bots` requires `mod-playerbots`, which has no manifest at all:
+    `catalog.json` lists it among wow-wotlk's emulator sources with `dest:
+    modules/mod-playerbots`, so the server install clones it. A guard that
+    resolved `requires` against the catalog would refuse City Bots forever on
+    every machine that in fact has its requirement.
+
+    The fixture answers differently on the second read and only the DISK moves
+    between them, so this cannot pass by the guard being absent: the first half
+    refuses, the second allows, with one identical manifest.
+    """
+    git = _FakeGit({"README.md": "upstream\n"})
+    needy = parse_manifest({**OWNED_ITEM, "id": "mod-city-bots", "requires": ["mod-playerbots"]})
+
+    with pytest.raises(ApplyError):
+        Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL)).install(needy)
+
+    (tmp_path / "modules" / "mod-playerbots" / ".git").mkdir(parents=True)
+    report = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL)).install(needy)
+    assert report.item_id == "mod-city-bots"
+    assert (Applier(tmp_path).clone_dir(needy) / "README.md").is_file()
+
+
+def test_a_requirement_is_found_in_another_familys_clone_folder(tmp_path: Path) -> None:
+    """The search is every family's folder, and here that is the ORDINARY case (T69).
+
+    Nine of the eleven shipped `requires` are an ale script or a keg naming
+    `mod-ale`, which is a MODULE: the requirer lands in `ale_scripts/` and the
+    requirement in `modules/`. A check that looked only where the manifest
+    being installed will land reads correctly, is one line shorter, and refuses
+    every one of them forever.
+    """
+    ale = parse_manifest(
+        {**OWNED_ITEM, "id": "some-ale-script", "type": "ale", "requires": ["mod-ale"]}
+    )
+    git = _FakeGit({"LootPet.lua": "-- pet\n"})
+
+    with pytest.raises(ApplyError) as caught:
+        Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL)).install(ale)
+    assert "mod-ale" in str(caught.value)
+
+    (tmp_path / "modules" / "mod-ale" / ".git").mkdir(parents=True)
+    report = Applier(tmp_path, git=git, remote_url=_Origins(OWNED_URL)).install(ale)
+    assert report.item_id == "some-ale-script"
 
 
 def test_a_module_installs_on_a_machine_with_no_host_git(tmp_path: Path, monkeypatch) -> None:

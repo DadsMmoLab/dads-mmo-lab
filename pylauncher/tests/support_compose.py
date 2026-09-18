@@ -36,9 +36,9 @@ still caught:
   so a bind where a managed volume belongs is still reported, and so does READ-ONLY: only the
   SELinux label characters are dropped from the mode column (below), never `ro`.
 * bind source → relative to the install dir, always with forward slashes. It is an absolute host
-  path that is `/home/pk/...` on the proven box, `C:\\...` on the Windows gate and a pytest tmp
+  path that is `/home/user/...` on the proven box, `C:\\...` on the Windows gate and a pytest tmp
   dir here, and ONE committed fixture has to serve all three. Only paths actually under the
-  install dir are stripped, so a sibling `/home/pk/srv-backup` stays absolute rather than
+  install dir are stripped, so a sibling `/home/user/srv-backup` stays absolute rather than
   becoming `./-backup`. `_under()` carries that comparison and the Windows rules: `\\` is a
   separator and case is folded only for a path SHAPED like a Windows one, never because of the
   host the reduction happens to run on.
@@ -332,7 +332,7 @@ def _under(source: str, base: str) -> str | None:
     """`source`'s path below the install dir `base`, `""` when it IS it, `None` when it is neither.
 
     Segment by segment, never by characters: a plain `startswith` rewrites a sibling
-    `/home/pk/srv-backup` mount into this install's own `./-backup` and hides a mount of the
+    `/home/user/srv-backup` mount into this install's own `./-backup` and hides a mount of the
     wrong tree, and `C:\\gate\\wotlk-server-backup` against `C:\\gate\\wotlk-server` is the same
     trap on the other separator.
 
@@ -344,7 +344,7 @@ def _under(source: str, base: str) -> str | None:
     * `\\` is a separator as well as `/`. On POSIX it is a legal filename character and stays one.
     * Case is folded, drive letter included: `c:\\GATE` and `C:\\gate` are one directory on
       Windows and no tool reporting them agrees on the case. POSIX paths are NOT folded —
-      `/home/pk/SRV` and `/home/pk/srv` are two directories, and lowercasing them to make the
+      `/home/user/SRV` and `/home/user/srv` are two directories, and lowercasing them to make the
       Windows case work would BE the sibling bug this function exists to avoid.
 
     A UNC root needs no special case: it has no drive letter, and a comparison that never reads
