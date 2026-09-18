@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -3501,14 +3502,20 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
 
     The brief for the press called `mod-arac` *the only shipped manifest with a
     direct world-SQL step*. `SqlStep.applied_by` DEFAULTS to `"direct"`
-    (`manifest.py:136`), so every step that names no route is one: 43 steps
-    across 18 manifests in all four games. `mod-arac` is the only `module`-type
-    one, which is the narrower true statement.
+    (`manifest.py:136`), so every step that names no route is one: 44 steps
+    across 19 manifests in all four games. `mod-arac` and `mod-city-bots` are
+    the only `module`-type ones, which is the narrower true statement.
 
-    The 44th direct step in the tree is `wow-wotlk/ale/paragon.json`'s, into
-    `ale` -- outside `WORLD_HELD_DBS`, which is what makes the two numbers
-    differ and why this counts the set the guard names rather than every direct
-    step.
+    One direct step in the tree is outside these numbers:
+    `wow-wotlk/ale/paragon.json`'s, into `ale` -- outside `WORLD_HELD_DBS`,
+    which is what makes the two numbers differ and why this counts the set the
+    guard names rather than every direct step.
+
+    It was 43 across 18 until T63 added `mod-city-bots`, whose citizen-roster
+    import is a direct step into `playerbots`. That is not an incidental bump:
+    `playerbots` is in `WORLD_HELD_DBS`, so the roster import is the second
+    module-type write this guard stands in front of, and the count moving is
+    what says the new step joined the guarded set rather than slipping past it.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -3529,8 +3536,8 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        43,
-        18,
+        44,
+        19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )
 
@@ -4044,14 +4051,41 @@ def _unpinned_applier(tmp_path: Path, origin: Path) -> tuple[Applier, _LocalOrig
     return Applier(tmp_path / "server", git=git, client_dir=client), git
 
 
-def _reinstall(applier: Applier, manifest: Any, item_id: str) -> None:
-    """The second install.
+_T65 = (
+    "T65, found by T60 and independent of any rev: a `client` step whose `src` is the checkout "
+    "copytrees `.git` into AddOns, and the SECOND copy cannot overwrite git's read-only pack "
+    "files (Errno 13). A pinned reinstall fails identically."
+)
 
-    A wrapper with nothing left in it, kept only so the three call sites read
-    as one action. It caught a `shutil.Error` for `tortoise-bots-manager`
-    until T65 was fixed: `client: [{src: "."}]` copied the checkout's `.git`
-    into AddOns and the second copy could not overwrite git's 0444 pack files.
+_RECOPY_FAILS = frozenset({"tortoise-bots-manager"})
+"""Items whose second install raises before `_client()` lands anything (T65)."""
+
+
+def _recopy_fails(item_id: str) -> bool:
+    """Will this item's second install die in `_client()` on this machine?
+
+    Root writes straight through a 0444 file, so there the copy succeeds and
+    nothing raises. Everywhere this suite actually runs -- CI's `runner` user,
+    and Windows, where the read-only attribute refuses the open -- it raises.
     """
+    return item_id in _RECOPY_FAILS and getattr(os, "geteuid", lambda: 1)() != 0
+
+
+def _reinstall(applier: Applier, manifest: Any, item_id: str) -> None:
+    """The second install, with T65's crash caught for the one item that hits it.
+
+    Caught HERE rather than marked on the parameter, because an `xfail` ends
+    the test at the raise: the clone assertions that follow -- the ones this
+    file exists for -- never ran for the addon, and a `reset --hard` removed
+    from `_update()` left that parameter reporting `xfailed` while the other
+    two went red (review round 1). The addon's own landing is asserted by
+    `test_a_client_addon_reinstall_lands_the_new_files`, which is where T65
+    is allowed to fail.
+    """
+    if _recopy_fails(item_id):
+        with pytest.raises(shutil.Error):
+            applier.install(manifest)
+        return
     applier.install(manifest)
 
 
@@ -4083,14 +4117,16 @@ def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
     from the first: a seam that cloned once and then did nothing, or that
     checked out a remembered commit, leaves `v1` where `v2` is asserted.
 
-    Every parameter reaches every assertion, the addon included.
+    Every parameter reaches the clone assertions, the addon included: its
+    second install raises T65 in `_client()`, which `_reinstall()` catches so
+    that what this test is about -- where HEAD ends up -- is still asserted
+    for all three.
     """
     _family, _game, files, lands = _UNPINNED[item_id]
     origin = _origin(tmp_path)
     first = _publish(origin, files, "v1")
     manifest = _unpinned_shipped(item_id)
     applier, git = _unpinned_applier(tmp_path, origin)
-    _origin_answers_as_the_manifest(applier, manifest)
     clone = applier.clone_dir(manifest)
 
     report = applier.install(manifest)
@@ -4105,7 +4141,8 @@ def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
 
     assert _git(clone, "rev-parse", "HEAD") == second, "the reinstall did not follow the tip"
     assert _git(clone, "show", "-s", "--format=%s") == "v2"
-    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    if not _recopy_fails(item_id):
+        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
     assert (clone / ".git" / "shallow").is_file(), "a module clone stays shallow"
 
 
@@ -4121,7 +4158,7 @@ def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_
     as two unconnected shallow commits. The unpinned install must still move
     HEAD to the tip and the tip's content to where it is used.
 
-    The addon parameter reaches those assertions too.
+    The addon parameter reaches those assertions too; see `_reinstall()`.
     """
     _family, _game, files, lands = _UNPINNED[item_id]
     origin = _origin(tmp_path)
@@ -4131,7 +4168,6 @@ def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_
     assert manifest.source is not None
     pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
     applier, git = _unpinned_applier(tmp_path, origin)
-    _origin_answers_as_the_manifest(applier, manifest)
     clone = applier.clone_dir(manifest)
 
     applier.install(pinned)
@@ -4144,24 +4180,21 @@ def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_
     assert [spec.rev for spec in git.specs] == [old, None]
     assert _git(clone, "rev-parse", "HEAD") == tip
     assert _git(clone, "show", "-s", "--format=%s") == "v2"
-    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    if not _recopy_fails(item_id):
+        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
 
 
 @pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.xfail(
+    getattr(os, "geteuid", lambda: 1)() != 0, strict=True, raises=shutil.Error, reason=_T65
+)
 def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
-    """The half of the addon's reinstall that T65 broke, in a test of its own.
+    """The half of the addon's reinstall that T65 breaks, in a test of its own.
 
     The two tests above assert where the CHECKOUT ends up, which is what
     removing the pins changed. This asserts what the user gets: the moved
-    upstream's files in their own AddOns folder.
-
-    It also asserts what must NOT be there, and that is the whole of T65: the
-    checkout's `.git` used to be copied in with everything else, and git's
-    0444 pack files cannot be overwritten, so this second install raised a
-    raw `shutil.Error` (Errno 13) having landed nothing. Asserting the absence
-    as well as the landing is what separates the fix from a reinstall that
-    happens to succeed because the user is root, which can overwrite a 0444
-    file and left this passing on a root-run suite either way.
+    upstream's files in their own AddOns folder. It fails today, strictly, so
+    the day T65 is fixed this test says so instead of passing in silence.
     """
     item_id = "tortoise-bots-manager"
     _family, _game, files, lands = _UNPINNED[item_id]
@@ -4169,472 +4202,339 @@ def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
     _publish(origin, files, "v1")
     manifest = _unpinned_shipped(item_id)
     applier, _git_seam = _unpinned_applier(tmp_path, origin)
-    _origin_answers_as_the_manifest(applier, manifest)
 
     applier.install(manifest)
-    addon = (tmp_path / lands).parent
     assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
-    # The FIRST install is where the exclusion has to hold: nothing to
-    # overwrite yet, so a copy that still brought `.git` would land it here in
-    # silence and only fail on the next press.
-    assert not (addon / ".git").exists(), "the checkout's history was copied into the client"
-    assert not (addon / apply_module.CLAIM_FILE).exists(), "so was this app's own claim"
-    assert (addon / "TortoiseBotsManager.toc").is_file(), "and the addon itself did not land"
-    assert (applier.clone_dir(manifest) / ".git").is_dir(), "the history belongs in the clone"
 
     _publish(origin, files, "v2")
     applier.install(manifest)
 
     assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
-    assert not (addon / ".git").exists()
 
 
-# --------------------------------------------------------------------------
-# T66: the Modules tab's Update button, against real git. Every clone this app
-# makes carries an untracked `.yulon-clone.json`, and every such clone was
-# refused as dirty; the second layer refused the same clone again for carrying
-# "commits of its own" when the only thing it carried was a shallow graft.
-# --------------------------------------------------------------------------
+# ------------------------------------------------- T63: the City Bots roster
+#
+# The one file AzerothCore never applies for a module. The core updater reads a
+# module's `data/sql/db-auth|db-characters|db-world` from `AC_MODULES_LIST`;
+# mod-playerbots then builds its OWN `DatabaseLoader` for `acore_playerbots`
+# with no modules list at all, so `data/sql/playerbots/` is scanned by nobody
+# (verified against the AC playerbots-branch source, 2026-08-22).
+#
+# That makes the roster a direct step, and a direct step whose ORDER cannot be
+# satisfied inside one press: the tables it writes are created by the world
+# server's first start, which is after the rebuild an install only reports. The
+# three tests that matter are therefore about time, not about SQL — refused
+# under a live world, skipped before the tables exist, imported on the press
+# after — and each of them drives the real `Applier.install()` over the real
+# shipped manifest, because a synthetic manifest would prove the engine works
+# on a manifest nobody ships.
+
+CITY_BOTS_ID = "mod-city-bots"
+ROSTER_REL = "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql"
+_PRECONDITION_MARK = "information_schema"
+_ROSTER_COUNT_MARK = "FROM citizen_roster"
+_ACCOUNT_TYPE_MARK = "FROM playerbots_account_type"
 
 
-@pytest.mark.skipif(not git_available(), reason="needs a host git to ask about a real checkout")
+def _city_bots_clone() -> dict[str, str]:
+    """What the repository puts at `modules/mod-city-bots`, as far as this engine reads it."""
+    return {
+        "conf/mod_city_bots.conf.dist": "CitizenBots.Enable = 1\n",
+        ROSTER_REL: "DROP TABLE IF EXISTS `citizen_roster`;\n",
+        "data/sql/db-auth/updates/2026_07_16_03_stage_cast_one_account_per_bot.sql": "-- auth\n",
+        "data/sql/db-characters/updates/2026_08_22_00_stage_cast_characters.sql": "-- chars\n",
+        "data/sql/db-characters/updates/2026_08_22_01_stage_cast_outfits.sql": "-- outfits\n",
+        "data/sql/db-world/updates/2026_07_13_01_city_bot_poi.sql": "-- world\n",
+    }
+
+
+class _ScriptedDb(_FakeSql):
+    """A reader whose answer depends on WHICH question was asked, and a shared event log.
+
+    Two things no existing fake in this file can do, and the tests below need
+    both.
+
+    **Per-query answers.** `_FakeReader` returns one `rows` for every `query()`,
+    so a fixture built on it cannot tell the precondition apart from either
+    verify entry — and a test whose fixture answers every check the same way
+    cannot fail for the reason its name claims (mechanism 1 of
+    `nine-ways-a-test-proves-nothing`). `answers` maps a substring of the query
+    to what that one question gets: a string of rows, `""` for no row, or an
+    exception instance to raise.
+
+    **A per-call answer.** A value may be a LIST, popped left to right, which is
+    what makes "skipped now, imported on the next press" testable at all: a
+    fixture that answers the same thing twice cannot detect a repeat
+    (mechanism 2). `_ScriptedDb` also records `world_running` in the same log as
+    the queries and the files, so a test can assert the guard was consulted
+    BEFORE the first read and the read before the write, rather than merely that
+    all three happened.
+    """
+
+    def __init__(self, answers: dict[str, Any], *, world: bool | None = False) -> None:
+        super().__init__()
+        self.answers = answers
+        self.world = world
+        self.log: list[str] = []
+        self.queries: list[tuple[str, str]] = []
+        self.started_db = 0
+
+    def world_running(self) -> bool | None:
+        self.log.append("world_running?")
+        return self.world
+
+    def start_database(self) -> bool:
+        self.started_db += 1
+        self.log.append("start_database")
+        return True
+
+    def run_file(self, db: str, path: Path) -> None:
+        self.log.append(f"run_file {db}:{path.name}")
+        super().run_file(db, path)
+
+    def run_statement(self, db: str, statement: str) -> None:
+        self.log.append(f"run_statement {db}")
+        super().run_statement(db, statement)
+
+    def query(self, db: str, statement: str) -> str:
+        self.queries.append((db, statement))
+        for mark, answer in self.answers.items():
+            if mark in statement:
+                self.log.append(f"query {db}:{mark}")
+                if isinstance(answer, list):
+                    answer = answer.pop(0)
+                if isinstance(answer, BaseException):
+                    raise answer
+                assert isinstance(answer, str)
+                return answer
+        raise AssertionError(f"the fixture has no answer for {statement!r}")
+
+
+def _city_bots_applier(tmp_path: Path, db: _ScriptedDb) -> Applier:
+    return Applier(
+        tmp_path,
+        git=_FakeGit(_city_bots_clone()),
+        sql=db,
+        world_running=db.world_running,
+        start_database=db.start_database,
+    )
+
+
+def _ready() -> dict[str, Any]:
+    """Every check answered yes: the tables are there and the import produced 400/400."""
+    return {_PRECONDITION_MARK: "1\n", _ROSTER_COUNT_MARK: "1\n", _ACCOUNT_TYPE_MARK: "1\n"}
+
+
+def test_the_shipped_city_bots_manifest_imports_only_the_roster_itself() -> None:
+    """The routing, by value, off the file the app actually ships.
+
+    Four SQL steps and only one of them is this app's work. Asserted as a whole
+    tuple rather than "the roster is direct", because the defect this entry is
+    guarding against is the opposite one too: applying a module's
+    `db-auth`/`db-characters`/`db-world` by hand breaks the core's own `updates`
+    ledger, which is why `applied_by="db-import"` exists.
+    """
+    manifest = _shipped(CITY_BOTS_ID)
+
+    assert [(s.db, s.applied_by) for s in manifest.sql] == [
+        ("auth", "db-import"),
+        ("characters", "db-import"),
+        ("world", "db-import"),
+        ("playerbots", "direct"),
+    ]
+    roster = manifest.sql[-1]
+    assert roster.path == ROSTER_REL
+    assert roster.when == "install"
+    assert roster.precondition is not None and len(roster.verify) == 2
+    assert manifest.build.rebuild is True
+    assert manifest.requires == ("mod-playerbots",)
+    assert manifest.source is not None and manifest.source.rev is None
+    # The conf template the entry names is the one the repository ships, spelled
+    # as the module spells it -- a typo here activates nothing and says nothing.
+    assert manifest.conf[0].template == "conf/mod_city_bots.conf.dist"
+
+
+def test_the_city_bots_roster_is_issued_against_the_playerbots_database(tmp_path: Path) -> None:
+    """The whole sequence of one successful press, in order, as one assertion.
+
+    ORDER is the claim, and it is asserted as a list because every individual
+    member of it was already true before T63 of a step that ran at the wrong
+    time. The running-world guard is consulted before anything is read or
+    written; the database is started alone; the guard is re-read after that
+    start (the window T7 round 2 is about); the precondition is asked before the
+    file is opened; and only then does the roster reach `playerbots`.
+    """
+    db = _ScriptedDb(_ready())
+
+    report = _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    assert db.log == [
+        "world_running?",
+        "start_database",
+        "world_running?",
+        f"query playerbots:{_PRECONDITION_MARK}",
+        "run_file playerbots:2026_07_15_00_citizen_roster.sql",
+        f"query playerbots:{_ROSTER_COUNT_MARK}",
+        f"query playerbots:{_ACCOUNT_TYPE_MARK}",
+    ]
+    # Nothing else was run by hand: the other three steps are the core's.
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+    assert db.statements == []
+    assert {p.db for p in report.pending_sql} == {"auth", "characters", "world"}
+    assert any("citizen_roster" in line for line in report.done)
+    assert report.rebuild_required is True
+
+
+def test_the_city_bots_roster_is_refused_while_the_world_server_runs(tmp_path: Path) -> None:
+    """T7's guard stands in front of the roster, and nothing is read or written behind it.
+
+    `playerbots` is in `WORLD_HELD_DBS`, so this is the guard's own rule and not
+    a second one -- and the assertion that matters is the second half: the
+    precondition was never even ASKED. A refusal that had already read the
+    database would mean the pre-pass had been replaced by a per-step check, and
+    a per-step check is what lets a multi-step manifest half-apply.
+    """
+    db = _ScriptedDb(_ready(), world=True)
+
+    with pytest.raises(ApplyError) as refusal:
+        _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    message = str(refusal.value)
+    assert "the world server is running" in message
+    assert "playerbots" in message and ROSTER_REL in message
+    assert "Press Stop" in message
+    assert db.queries == [], "it read the database behind a refusal"
+    assert db.files == [] and db.statements == []
+
+
+def test_the_roster_waits_for_the_tables_and_imports_on_the_next_press(tmp_path: Path) -> None:
+    """The ordering problem itself: too early is skipped and said, and the repeat works.
+
+    One test for both halves on purpose. The first press is the state every
+    fresh install is in -- mod-playerbots cloned, never started, so its tables
+    do not exist -- and the second is the same press after the rebuild and one
+    start. The fixture answers NO to the precondition once and YES afterwards,
+    because a fixture that answers the same thing twice cannot tell a deferral
+    from a step that never runs at all.
+
+    What the first press must NOT do is fail: everything it did (the clone, the
+    conf) is real and worth keeping, and the module is not broken -- it is
+    unfinished, and the remaining work is the user's.
+    """
+    db = _ScriptedDb({**_ready(), _PRECONDITION_MARK: ["", "1\n"]})
+    applier = _city_bots_applier(tmp_path, db)
+
+    first = applier.install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == [], "it imported the roster before the tables existed"
+    skipped = [s for s in first.skipped if ROSTER_REL in s]
+    assert len(skipped) == 1, first.skipped
+    assert "mod-playerbots has not created its tables yet" in skipped[0]
+    assert "no rows were written" in skipped[0]
+    assert "install City Bots again" in skipped[0]
+    assert (tmp_path / "modules" / CITY_BOTS_ID / ROSTER_REL).is_file(), "the clone is still there"
+
+    second = applier.install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+    assert any(ROSTER_REL.rsplit("/", 1)[-1] in line for line in second.done)
+    assert not [s for s in second.skipped if ROSTER_REL in s]
+
+
+def test_a_precondition_that_cannot_be_asked_skips_and_carries_the_reason(tmp_path: Path) -> None:
+    """Fail closed, and the seam's own words with it.
+
+    The case the precondition was written for is not a missing TABLE, it is a
+    missing SCHEMA: before mod-playerbots has ever started, `acore_playerbots`
+    does not exist, and a `mysql` told to connect to it exits non-zero rather
+    than returning no rows. So *could not ask* has to mean the same as *no* --
+    the write on the other side of this question starts with `DROP TABLE` -- and
+    the sentence has to carry why, because "not yet" and "your database is
+    unreachable" send the user to two different places.
+    """
+    db = _ScriptedDb(
+        {**_ready(), _PRECONDITION_MARK: RuntimeError("Unknown database 'acore_playerbots'")}
+    )
+
+    report = _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == []
+    skipped = [s for s in report.skipped if ROSTER_REL in s]
+    assert len(skipped) == 1, report.skipped
+    assert "Unknown database 'acore_playerbots'" in skipped[0]
+    assert "mod-playerbots has not created its tables yet" in skipped[0]
+
+
+def test_a_precondition_is_never_asked_without_a_reader(tmp_path: Path) -> None:
+    """A runner that cannot be read is the same answer as a database that will not say.
+
+    `_FakeSql` is a `SqlRunner` and nothing more, which is exactly what a caller
+    that passes its own write-only seam hands the engine. The step must not run
+    on the strength of a question that was never put.
+    """
+    plain = _FakeSql()
+    applier = Applier(
+        tmp_path,
+        git=_FakeGit(_city_bots_clone()),
+        sql=plain,
+        world_running=lambda: False,
+    )
+
+    report = applier.install(_shipped(CITY_BOTS_ID))
+
+    assert plain.files == []
+    skipped = [s for s in report.skipped if ROSTER_REL in s]
+    assert len(skipped) == 1 and "no database reader" in skipped[0]
+
+
 @pytest.mark.parametrize(
-    ("make", "asked_about", "expected"),
+    ("mark", "names", "not_named"),
     [
-        # Exactly one thing is present in each tree, so exactly one rule can
-        # decide the answer. The first row is the whole of T66's first layer:
-        # an app-made clone, untouched, holding nothing but the app's marker.
-        ("marker", ".", True),
-        ("nothing", ".", True),
-        # ... and these three prove the exclusion is not a blanket "ignore
-        # untracked files". Each is the marker's neighbour, not the marker.
-        ("other_untracked", ".", False),
-        ("edited_tracked", ".", False),
-        ("deleted_tracked", ".", False),
-        # Asked about the marker BY NAME the answer must not change: that is a
-        # different question, and `_require_own_clone()` (apply.py:1903) reads
-        # a True there as "the repository itself tracks a file at this name",
-        # which is how a module that commits one stays installable.
-        ("marker", apply_module.CLAIM_FILE, False),
-        ("nothing", apply_module.CLAIM_FILE, True),
-        # T47's half of the same rule, and the reason it needs a SIZE and not a
-        # name: `install()` touches an empty `include.sh` into every C++ module
-        # whose upstream ships none, so `mod-ale`'s own clone answered
-        # "?? include.sh" for a checkout nobody had touched and both destructive
-        # paths refused it. A file somebody has written in is their work and
-        # still counts, which is what the second row here is.
-        ("empty_include", ".", True),
-        ("written_include", ".", False),
-        ("empty_include", "include.sh", False),
-        # And the row round 1 of the review asked for. A pathspec exclusion
-        # hides the PATH, so a repository that ships an `include.sh` and a user
-        # who emptied it read as "unmodified" -- zero bytes, and the exclusion
-        # never looked at whose file it was. Only `?? ` is ever this app's
-        # doing; ` M ` is somebody changing a file the module ships, and a
-        # `reset --hard` really does destroy it.
-        ("truncated_tracked_include", ".", False),
+        (_ROSTER_COUNT_MARK, "citizen_roster does not hold the 400", "account type 3"),
+        (_ACCOUNT_TYPE_MARK, "not all marked playerbots account type 3", "does not hold the 400"),
     ],
 )
-def test_is_unmodified_ignores_the_apps_own_marker_and_only_that(
-    make: str, asked_about: str, expected: bool, tmp_path: Path
+def test_a_verify_entry_refuses_and_names_the_half_that_failed(
+    tmp_path: Path, mark: str, names: str, not_named: str
 ) -> None:
-    """`git status` over a clone this app made reports the app's own bookkeeping.
+    """wow-manage's 400/400, and the reason it is two checks rather than one.
 
-    `.yulon-clone.json` is written by `_claim_clone()` into the checkout and is
-    never committed, so `status --porcelain` says `?? .yulon-clone.json` and
-    `Applier._update_refusal()` told every user that their clone "has changes
-    in it that are not committed". The file is this app's, the app knows it
-    wrote it, and a `reset --hard` that removes it destroys nothing of theirs.
+    `city_bots_import_roster()` counts the roster rows AND the city-bot account
+    types, and calls anything else a failure: `mysql` exiting 0 over a file of
+    400 inserts says the statements parsed, not that the cast is there.
 
-    Nothing else is forgiven: a file the USER left in the checkout, a tracked
-    file they edited and a tracked file they deleted each still answer False,
-    and each is here on its own so that the row cannot pass because a
-    neighbouring difference was there to be found.
+    Each case answers NO to exactly ONE of the two, and asserts the OTHER's
+    sentence is absent. A refusal that named both -- or a single query with two
+    clauses -- is green for two different reasons and red for two more, and
+    sends the operator to look in the wrong table. `not_named` is the assertion
+    people skip, and the only one that proves which check fired.
     """
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q", "-b", "main")
-    (repo / "tracked.txt").write_text("upstream\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "v1")
-    if make == "truncated_tracked_include":
-        # Committed with content FIRST, so the repository tracks it, and then
-        # emptied: the one shape both of this file's conditions disagree about.
-        (repo / "include.sh").write_text("# shipped by the module\n", encoding="utf-8")
-        _git(repo, "add", "-A")
-        _git(repo, "commit", "-qm", "ships an include.sh")
-        (repo / "include.sh").write_text("", encoding="utf-8")
-    elif make == "empty_include":
-        (repo / "include.sh").touch()
-    elif make == "written_include":
-        (repo / "include.sh").write_text("# mine\n", encoding="utf-8")
-    elif make in {"marker", "other_untracked", "edited_tracked", "deleted_tracked"}:
-        if make == "marker":
-            (repo / apply_module.CLAIM_FILE).write_text('{"item_id": "x"}\n', encoding="utf-8")
-        elif make == "other_untracked":
-            (repo / "notes-of-mine.txt").write_text("mine\n", encoding="utf-8")
-        elif make == "edited_tracked":
-            (repo / "tracked.txt").write_text("edited by hand\n", encoding="utf-8")
-        else:
-            (repo / "tracked.txt").unlink()
+    db = _ScriptedDb({**_ready(), mark: ""})
 
-    assert RunnerGit().is_unmodified(repo, asked_about) is expected
+    with pytest.raises(ApplyError) as refusal:
+        _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    message = str(refusal.value)
+    assert names in message
+    assert not_named not in message
+    # It does not claim nothing happened: the file ran, and that is the point.
+    assert "was run" in message and "repeat repairs rather than duplicates" in message
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
 
 
-def _origin_answers_as_the_manifest(applier: Applier, manifest: Any) -> Applier:
-    """Answer `remote_url` with the manifest's own URL, for the whole fixture family.
+def test_a_verify_that_cannot_be_asked_is_reported_and_does_not_refuse(tmp_path: Path) -> None:
+    """The opposite of the precondition's fail-closed, and deliberately so.
 
-    The repository question -- `same_repo(remote, url)` -- is asked by
-    `update()` (T44) and, since T47, by every `install()` that would reset a
-    checkout already at the clone path. The checkout's real `origin` here is the
-    local `file://` fixture standing in for the manifest's github.com URL, so
-    without this the guard refuses at that question and every test below would
-    be green over a rule it is not about.
-
-    The other two questions are NOT answered here: the tree and HEAD are real in
-    these tests, read by a real `RunnerGit` from a real checkout, which is the
-    whole point of this family.
+    There the unknown gates a write that has not happened; here the write has
+    already happened, and a database that cannot be asked is not evidence
+    against it. Refusing would report a failed install over a successful import.
     """
-    assert manifest.source is not None
-    url = manifest.source.url
-    applier.remote_url = lambda _dest: url
-    return applier
-
-
-def _update_applier(tmp_path: Path, origin: Path, manifest: Any) -> Applier:
-    """`_unpinned_applier()`, with `origin` answered as the manifest's own URL."""
-    applier, _git_seam = _unpinned_applier(tmp_path, origin)
-    return _origin_answers_as_the_manifest(applier, manifest)
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-def test_update_fast_forwards_a_clone_this_app_installed(tmp_path: Path) -> None:
-    """T66's first layer, end to end: install, upstream moves, press Update.
-
-    The clone is the one `install()` made, marker and all, and nobody has
-    touched it. Before the fix this raised `ApplyError` saying the folder "has
-    changes in it that are not committed" -- the app's own marker -- so the
-    Update button did not work on any module anybody had installed.
-    """
-    item_id = "lootpet"
-    _family, _game, files, lands = _UNPINNED[item_id]
-    origin = _origin(tmp_path)
-    _publish(origin, files, "v1")
-    manifest = _unpinned_shipped(item_id)
-    applier = _update_applier(tmp_path, origin, manifest)
-    clone = applier.clone_dir(manifest)
-
-    applier.install(manifest)
-    assert (clone / apply_module.CLAIM_FILE).is_file(), "the fixture must carry the app's marker"
-
-    tip = _publish(origin, files, "v2")
-    report = applier.update(manifest)
-
-    assert _git(clone, "rev-parse", "HEAD") == tip
-    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
-    assert report.action == "install"
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-def test_update_fast_forwards_a_clone_pinned_behind_the_tip(tmp_path: Path) -> None:
-    """T66's second layer: a depth-1 clone whose two commits are not connected.
-
-    Somebody installed while the module was pinned (T60's five old pins) and
-    the pin was ALREADY behind the tip, so `_pin()`'s `fetch --depth 1 <rev>`
-    left the checkout holding the tip and the pin as two grafted roots with no
-    edge between them. `rev-list --count FETCH_HEAD..HEAD` then counts the pin
-    as a commit HEAD carries and FETCH_HEAD does not, and the update refused
-    for work the user never did.
-
-    Measured, not assumed: on git 2.43 `merge-base --is-ancestor HEAD
-    FETCH_HEAD` also answers no here, because the graft cuts the same edge.
-    """
-    item_id = "lootpet"
-    _family, _game, files, lands = _UNPINNED[item_id]
-    origin = _origin(tmp_path)
-    old = _publish(origin, files, "v1")
-    _publish(origin, files, "v2")
-    manifest = _unpinned_shipped(item_id)
-    assert manifest.source is not None
-    pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
-    applier = _update_applier(tmp_path, origin, manifest)
-    clone = applier.clone_dir(manifest)
-
-    applier.install(pinned)
-    assert _git(clone, "rev-parse", "HEAD") == old, "the fixture did not reproduce the old pin"
-    roots = (clone / ".git" / "shallow").read_text(encoding="utf-8").split()
-    assert old in roots and len(roots) == 2, "the fixture must be the disconnected shallow shape"
-
-    tip = _publish(origin, files, "v3")
-    applier.update(manifest)
-
-    assert _git(clone, "rev-parse", "HEAD") == tip
-    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v3")
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-def test_update_still_refuses_a_shallow_clone_carrying_a_commit_of_the_users_own(
-    tmp_path: Path,
-) -> None:
-    """The other half of the second layer, and the reason it is not `--untracked-files=no`.
-
-    Same shallow, disconnected checkout as above, plus one commit the user
-    made on top. `reset --hard FETCH_HEAD` would move off it, so the update
-    must still refuse -- and it must refuse for THAT reason, not for a dirty
-    tree: the working tree here is clean, and the marker is committed away.
-    """
-    item_id = "lootpet"
-    _family, _game, files, _lands = _UNPINNED[item_id]
-    origin = _origin(tmp_path)
-    old = _publish(origin, files, "v1")
-    _publish(origin, files, "v2")
-    manifest = _unpinned_shipped(item_id)
-    assert manifest.source is not None
-    pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
-    applier = _update_applier(tmp_path, origin, manifest)
-    clone = applier.clone_dir(manifest)
-
-    applier.install(pinned)
-    (clone / "MyOwn.lua").write_text("-- mine\n", encoding="utf-8")
-    _git(clone, "add", "MyOwn.lua")  # not `-A`: the app's marker stays untracked, as it is live
-    _git(clone, "commit", "-qm", "mine")
-    mine = _git(clone, "rev-parse", "HEAD")
-    assert RunnerGit().is_unmodified(clone, ".") is True, "the tree itself must be clean"
-
-    _publish(origin, files, "v3")
-    with pytest.raises(ApplyError, match="commits of its own"):
-        applier.update(manifest)
-
-    assert _git(clone, "rev-parse", "HEAD") == mine, "nothing was changed"
-
-
-# --------------------------------------------------------------------------
-# T47: Install over a checkout that is already there asks the three questions
-# Update asks. It is the same folder and the same `git fetch` + `reset --hard`;
-# until this, one of the two buttons refused and the other went ahead in
-# silence. Real clones throughout -- a fake `.git` cannot answer these.
-# --------------------------------------------------------------------------
-
-
-def _installed_clone(tmp_path: Path, item_id: str = "mod-ale") -> tuple[Applier, Any, Path]:
-    """A real clone of a real local origin, installed by this app, at its tip.
-
-    `mod-ale` on purpose: it is a C++ module, so `install()` also touches an
-    `include.sh` into the checkout, which is the second file this engine writes
-    there and the one that made every question about the tree answer "modified"
-    until `git._status_pathspec()` learned to size it.
-    """
-    _family, _game, files, _lands = _UNPINNED[item_id]
-    origin = _origin(tmp_path)
-    _publish(origin, files, "v1")
-    manifest = _unpinned_shipped(item_id)
-    applier, _git_seam = _unpinned_applier(tmp_path, origin)
-    _origin_answers_as_the_manifest(applier, manifest)
-    applier.install(manifest)
-    clone = applier.clone_dir(manifest)
-    assert (clone / apply_module.CLAIM_FILE).is_file(), "the fixture must be a clone this app owns"
-    assert RunnerGit().is_unmodified(clone, ".") is True, "and one nothing has touched yet"
-    return applier, manifest, clone
-
-
-def _history_question_is_fatal(applier: Applier) -> None:
-    """Make the HEAD question fatal, so a test can show the TREE question fired.
-
-    "It raised" is not "it raised here": with this in place a guard that stopped
-    asking about the working tree reaches a question that cannot be answered at
-    all, and the test errors instead of passing on its neighbour's refusal.
-    """
-
-    def never(_dest: Path, _branch: str | None) -> NoReturn:
-        raise AssertionError("the tree question must refuse before the history is fetched")
-
-    applier.no_local_commits = never
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-def test_install_refuses_to_reset_a_clone_with_an_uncommitted_edit(tmp_path: Path) -> None:
-    """The second of the three questions, on the install path, in update's own words.
-
-    One tracked file is edited and nothing else is touched, so exactly one
-    question can refuse this: the tree is dirty, the repository matches, and
-    the history question is wired to raise if it is reached at all.
-    """
-    applier, manifest, clone = _installed_clone(tmp_path)
-    edited = clone / "src" / "LuaEngine" / "ALEConfig.cpp"
-    edited.write_text("// mine, uncommitted\n", encoding="utf-8")
-    head = _git(clone, "rev-parse", "HEAD")
-    _history_question_is_fatal(applier)
-
-    with pytest.raises(ApplyError) as raised:
-        applier.install(manifest)
-
-    assert "has changes in it that are not committed" in str(raised.value)
-    assert "Installing mod-ale runs `git reset --hard`" in str(raised.value)
-    assert str(raised.value).endswith("Nothing was changed.")
-    assert edited.read_text(encoding="utf-8") == "// mine, uncommitted\n", "the edit survived"
-    assert _git(clone, "rev-parse", "HEAD") == head
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-def test_install_refuses_to_move_off_a_commit_of_the_users_own(tmp_path: Path) -> None:
-    """The third question. The tree is CLEAN, which is what `status` cannot see past.
-
-    Exactly one question can refuse here too, and the assertion that the tree
-    is clean is what proves it: a guard that only looked at `git status` lets
-    this through and the commit is reachable only through the reflog afterwards.
-    """
-    applier, manifest, clone = _installed_clone(tmp_path)
-    (clone / "src" / "LuaEngine" / "Mine.cpp").write_text("// mine\n", encoding="utf-8")
-    _git(clone, "add", "src/LuaEngine/Mine.cpp")  # not `-A`: the app's own files stay untracked
-    _git(clone, "commit", "-qm", "mine")
-    mine = _git(clone, "rev-parse", "HEAD")
-    assert RunnerGit().is_unmodified(clone, ".") is True, "the tree itself must be clean"
-
-    with pytest.raises(ApplyError) as raised:
-        applier.install(manifest)
-
-    assert "carries commits of its own" in str(raised.value)
-    assert "Installing mod-ale runs `git reset --hard`" in str(raised.value)
-    assert _git(clone, "rev-parse", "HEAD") == mine, "nothing was changed"
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-def test_a_clean_clone_of_another_repository_is_asked_about_and_never_reset_unasked(
-    tmp_path: Path,
-) -> None:
-    """The one case that is a question rather than a refusal, and its default.
-
-    The folder is this app's own, the tree is clean and the history carries
-    nothing of the user's -- so the only thing wrong with resetting it is that
-    it is a checkout of a DIFFERENT repository, and which fork the user wants
-    under `modules/mod-ale` is not a fact this app holds. Without the answer
-    the install refuses and the checkout is byte-identical afterwards; with it
-    the install proceeds.
-    """
-    applier, manifest, clone = _installed_clone(tmp_path)
-    assert manifest.source is not None
-    applier.remote_url = lambda _dest: "https://github.com/somebody-else/mod-ale.git"
-    before = _git(clone, "rev-parse", "HEAD")
-    bytes_before = (clone / "src" / "LuaEngine" / "ALEConfig.cpp").read_bytes()
-
-    question = applier.replacement_question(manifest)
-    assert question is not None
-    assert "https://github.com/somebody-else/mod-ale.git" in question
-    assert manifest.source.url in question
-    assert question.endswith("Replace it?")
-
-    with pytest.raises(ApplyError) as raised:
-        applier.install(manifest)
-    assert "is a checkout of https://github.com/somebody-else/mod-ale.git" in str(raised.value)
-    assert _git(clone, "rev-parse", "HEAD") == before
-    assert (clone / "src" / "LuaEngine" / "ALEConfig.cpp").read_bytes() == bytes_before
-
-    report = applier.install(manifest, replacing=True)
-
-    assert report.action == "install"
-    assert _git(clone, "rev-parse", "HEAD") == before, "its own origin is still what it fetches"
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-def test_agreeing_to_replace_is_not_agreeing_to_lose_an_uncommitted_edit(tmp_path: Path) -> None:
-    """A Yes to the repository question buys that question and no other.
-
-    The same different-repository clone as above, with one tracked file edited.
-    `replacement_question()` now says nothing -- there is no question to ask
-    about a folder that is going to be refused -- and the install refuses even
-    though the caller passed the agreement.
-    """
-    applier, manifest, clone = _installed_clone(tmp_path)
-    applier.remote_url = lambda _dest: "https://github.com/somebody-else/mod-ale.git"
-    edited = clone / "src" / "LuaEngine" / "ALEConfig.cpp"
-    edited.write_text("// mine, uncommitted\n", encoding="utf-8")
-
-    assert applier.replacement_question(manifest) is None
-
-    with pytest.raises(ApplyError, match="has changes in it that are not committed"):
-        applier.install(manifest, replacing=True)
-
-    assert edited.read_text(encoding="utf-8") == "// mine, uncommitted\n"
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-def test_agreeing_to_replace_is_not_agreeing_to_reset_a_folder_nobody_could_read(
-    tmp_path: Path,
-) -> None:
-    """The repository question has two refusals, and a Yes answers only one of them.
-
-    `REPO_UNSEEN` is git declining to say what the folder is a checkout of, and
-    the user was shown no repository names to agree to -- so the agreement
-    cannot be spent here. Written after round 1 of the review, which proved the
-    guard let this through the moment `_costly_reset()`'s `is OTHER_REPO` was
-    dropped: with it gone the second pass runs `repository=False`, which drops
-    BOTH refusals, and the install reaches the clone seam.
-    """
-    applier, manifest, clone = _installed_clone(tmp_path)
-    applier.remote_url = lambda _dest: None
-    head = _git(clone, "rev-parse", "HEAD")
-
-    assert applier.replacement_question(manifest) is None, "there are no two names to show"
-    with pytest.raises(ApplyError) as raised:
-        applier.install(manifest, replacing=True)
-
-    assert "git would not say what it is a checkout of" in str(raised.value)
-    assert _git(clone, "rev-parse", "HEAD") == head, "nothing was changed"
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-def test_a_first_install_asks_no_question_and_answers_none(tmp_path: Path) -> None:
-    """The case with nothing to lose must not grow a prompt or a round trip.
-
-    Every seam the guard consults is wired to raise, so this proving that the
-    first install asked nothing is not an assertion about a message -- the test
-    cannot pass if any of the three questions is asked at all.
-    """
-    item_id = "mod-ale"
-    _family, _game, files, lands = _UNPINNED[item_id]
-    origin = _origin(tmp_path)
-    _publish(origin, files, "v1")
-    manifest = _unpinned_shipped(item_id)
-    applier, _git_seam = _unpinned_applier(tmp_path, origin)
-
-    def never(*_args: object) -> NoReturn:
-        raise AssertionError("a first install has nothing to ask about")
-
-    applier.remote_url = never
-    applier.unmodified = never
-    applier.no_local_commits = never
-
-    assert applier.replacement_question(manifest) is None
-    report = applier.install(manifest)
-
-    assert report.action == "install"
-    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
-
-
-@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
-@pytest.mark.parametrize("fact", ["edited", "committed"])
-def test_the_two_buttons_refuse_the_same_clone_in_the_same_sentence(
-    fact: str, tmp_path: Path
-) -> None:
-    """One function, two callers (T47's first condition), asserted between them.
-
-    The two sentences are compared to each other, so a copy of the questions
-    made for either route fails this the day the two are edited apart -- which
-    is how `install()` came to have none of them while `update()` had three.
-    The only difference either may carry is the word for what was pressed.
-    """
-    applier, manifest, clone = _installed_clone(tmp_path)
-    if fact == "edited":
-        (clone / "src" / "LuaEngine" / "ALEConfig.cpp").write_text("// mine\n", encoding="utf-8")
-    else:
-        (clone / "src" / "LuaEngine" / "Mine.cpp").write_text("// mine\n", encoding="utf-8")
-        _git(clone, "add", "src/LuaEngine/Mine.cpp")
-        _git(clone, "commit", "-qm", "mine")
-
-    with pytest.raises(ApplyError) as installing:
-        applier.install(manifest)
-    with pytest.raises(ApplyError) as updating:
-        applier.update(manifest)
-
-    assert str(installing.value) == str(updating.value).replace("Updating", "Installing")
-    assert "Updating" in str(updating.value) and "Installing" in str(installing.value)
+    db = _ScriptedDb({**_ready(), _ROSTER_COUNT_MARK: RuntimeError("database has gone away")})
+
+    report = _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+    unchecked = [s for s in report.skipped if "NOT checked against the database" in s]
+    assert len(unchecked) == 1, report.skipped
+    assert "database has gone away" in unchecked[0]
+    assert "ran, but" in unchecked[0]

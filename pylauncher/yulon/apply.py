@@ -52,7 +52,17 @@ from yulon.git import (
     same_repo,
 )
 from yulon.log import get_logger
-from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, Prompt, SqlStep, When
+from yulon.manifest import (
+    Db,
+    Deploy,
+    ExistsCheck,
+    Manifest,
+    ManifestType,
+    Patch,
+    Prompt,
+    SqlStep,
+    When,
+)
 from yulon.ownership import Ownership
 
 logger = get_logger(__name__)
@@ -2487,7 +2497,14 @@ class Applier:
             if self.sql is None:
                 log.skipped.append(f"sql → {step.db}: no SQL runner configured")
                 continue
+            # T63: between the guard above and the write below, the one question
+            # neither of them asks — is this step's turn yet? Skipping here and
+            # not inside `_run_sql()` keeps that function what it is (it writes),
+            # and keeps the skip in the same list the user already reads.
+            if not self._precondition_met(step, log):
+                continue
             self._run_sql(step, clone, vals, log)
+            self._verify_sql(manifest, step, log)
 
     def _refuse_direct_sql_into_a_running_world(self, manifest: Manifest, when: When) -> None:
         """Checklist 8.7a's guard: no direct SQL into a live world's databases.
@@ -2577,7 +2594,7 @@ class Applier:
         # Named as the manifest spells them, and unrendered for `_pending_sql`'s
         # reason: `_render()` raises for a value this run has not got, and a
         # refusal that dies while composing its own sentence names nothing.
-        steps = ", ".join(f"sql {step.path or 'inline'} → {step.db}" for step in at_risk)
+        steps = ", ".join(_step_name(step) for step in at_risk)
         dbs = ", ".join(sorted({step.db for step in at_risk}))
         if running is None:
             raise ApplyError(
@@ -2642,7 +2659,7 @@ class Applier:
         try:
             started = self._start_database()
         except Exception as exc:  # noqa: BLE001 - any failure to start is one answer here
-            steps = ", ".join(f"sql {step.path or 'inline'} → {step.db}" for step in direct)
+            steps = ", ".join(_step_name(step) for step in direct)
             raise ApplyError(
                 f"{manifest.id}: the database could not be started, so no SQL was run and no "
                 f"rows were written: {steps}. {exc}"
@@ -2692,6 +2709,113 @@ class Applier:
                 raise ApplyError(f"sql file missing in clone: {path}")
             self.sql.run_file(step.db, path)
             log.done.append(f"sql {_rel(clone, path)} → {step.db}")
+
+    def _ask_db(self, check: ExistsCheck) -> tuple[bool | None, str]:
+        """Did a row come back — `True`, `False`, or `None` for *could not ask*, and why.
+
+        Three-valued for `docker._running()`'s reason, and here the third value
+        is not a rare one: the case T63 exists for — `acore_playerbots` before
+        mod-playerbots has ever started — is a schema that does not exist, and a
+        `mysql` told to connect to it fails rather than returning no rows. So
+        *the database is not there yet* and *the table is not there yet* arrive
+        by two different routes and must mean the same thing to both callers.
+
+        The query is sent UNRENDERED. Only `Prompt.exists` templates over the
+        user's answers; a `SqlStep` check is the catalog's own sentence about
+        the module's own tables, `test_manifest.py::test_no_sql_step_check_
+        carries_a_template_field` holds every shipped one to that, and rendering
+        here would mean a `{` in somebody's SQL could raise inside a check whose
+        whole job is to answer a question.
+        """
+        if not isinstance(self.sql, SqlReader):
+            return None, "this install has no database reader"
+        try:
+            rows = self.sql.query(check.db, check.query)
+        except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
+            return None, f"{type(exc).__name__}: {exc}"
+        return bool(rows.strip()), ""
+
+    def _precondition_met(self, step: SqlStep, log: _Log) -> bool:
+        """Whether this step's turn has come — and if not, why, in the report.
+
+        T63. A direct step can be correct and still be too early: `mod-city-bots`
+        writes `playerbots_account_type`, which mod-playerbots creates on the
+        world server's FIRST start, and that start is after the rebuild an
+        install only *reports*. Before this, the step would have been run
+        regardless and `mysql` would have failed on a missing table — an
+        `ApplyError` out of `_run_sql()`, after the clone, the deploy and the
+        patches, for a module that is in fact installed correctly and merely not
+        finished. That is a press reported as broken when the true answer is
+        "come back after the rebuild".
+
+        Three decisions:
+
+        * **Skipped, not refused.** Everything this press did is real and worth
+          keeping, and the remaining work is the user's (rebuild, start once).
+          The sentence goes in `skipped`, which the Modules tab already prints
+          under `– skipped:` (`controller_view.py::_format_apply_report`), so
+          nothing new has to be reached for the user to be told.
+        * **Fails CLOSED.** `None` — no reader, or a query that raised — skips
+          too, carrying the seam's own words. *Could not ask* is not *yes*, and
+          the write on the other side of this question is a `DROP TABLE`.
+        * **Per step, not a pre-pass.** Unlike the running-world guard, a
+          precondition is about ONE step's own tables; a manifest's other steps
+          are not implicated and are not held back by it.
+        """
+        if step.precondition is None:
+            return True
+        found, why = self._ask_db(step.precondition)
+        if found:
+            return True
+        detail = (
+            step.precondition.missing if found is False else f"{why}. {step.precondition.missing}"
+        )
+        log.skipped.append(f"{_step_name(step)}: {detail}")
+        return False
+
+    def _verify_sql(self, manifest: Manifest, step: SqlStep, log: _Log) -> None:
+        """Prove the step produced the state it claims, or raise saying which half did not.
+
+        T63, and the half that is a port rather than an invention:
+        `city_bots_import_roster()` in `guides/wow-wotlk/wow-manage.sh` counts
+        400 roster rows AND 400 city-bot account types after its import and
+        calls anything else a failure, because `mysql` exiting 0 over a file of
+        400 inserts says the statements parsed, not that the cast is there.
+
+        **Each entry is asked separately and says its own sentence**, which is
+        the whole reason `verify` is a list and not one query with two clauses:
+        a single check that both counts are 400 is green for two different
+        reasons and red for two more, and a refusal that cannot say which half
+        failed sends the operator to look in the wrong table.
+
+        It raises, like every other refusal in this engine — but the message is
+        careful not to claim nothing happened, because something did: the file
+        ran. A `skipped` line would be the worse lie of the two (the module
+        would be marked installed with its roster half-written), and a repeat is
+        safe: the roster file drops and recreates its own table, so pressing
+        Install again after fixing the cause is a repair and not a second copy.
+
+        `None` — no reader, or a query that raised — is reported and does NOT
+        refuse, and that is the opposite of `_precondition_met()`'s fail-closed
+        on purpose: there the unknown gates a write, here the write has already
+        happened and an unaskable database is not evidence against it.
+        """
+        for check in step.verify:
+            found, why = self._ask_db(check)
+            if found:
+                continue
+            if found is None:
+                log.skipped.append(
+                    f"{_step_name(step)}: ran, but NOT checked against the database ({why}), "
+                    f"so {check.missing[0].lower() + check.missing[1:]} would not be noticed here"
+                )
+                continue
+            raise ApplyError(
+                f"{manifest.id}: {check.missing}. {_step_name(step)} was run — the file's "
+                f"statements reached the database — so this is the result being wrong and not "
+                f"the step being skipped. Fix the cause and {step.when} again: the import "
+                f"replaces its own rows, so a repeat repairs rather than duplicates."
+            )
 
     def _conf(self, manifest: Manifest, clone: Path, vals: Mapping[str, str], log: _Log) -> None:
         for conf in manifest.conf:
@@ -2855,6 +2979,17 @@ def _render(template: str, values: Mapping[str, str], what: str) -> str:
 
 def _is_glob(path: str) -> bool:
     return any(ch in path for ch in "*?[")
+
+
+def _step_name(step: SqlStep) -> str:
+    """How a SQL step is named to a human — the manifest's own spelling, unrendered.
+
+    The same shape `_refuse_direct_sql_into_a_running_world()` builds its list
+    from, and for the same reason: a sentence about a step that has not run must
+    not die composing its own subject. One function, so a user who meets the
+    running-world refusal and then a skipped precondition reads one vocabulary.
+    """
+    return f"sql {step.path or 'inline'} → {step.db}"
 
 
 def _apply_patch(path: Path, patch: Patch, replacement: str) -> bool:
