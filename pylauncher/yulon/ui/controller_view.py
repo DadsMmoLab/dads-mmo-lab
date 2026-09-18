@@ -6922,6 +6922,43 @@ class ControllerView(QWidget):
             self.change_client_dir()
         return True
 
+    def _stopped_for_the_client(self, what: str, manifest: Manifest) -> bool:
+        """T62: tell the user before an install whose client half would be skipped.
+
+        `Applier._client()` skips every `client` step when the install has no
+        client folder, and says so only in the report AFTER the server half has
+        landed — so `mod-arac` put its SQL and DBCs in, left `Patch-A.MPQ` out,
+        and the user found out in the game, if at all. Asked here instead,
+        before anything runs, by every route on this tab that installs: the
+        selected row (its button, its menu entry, a chip) through
+        `_module_action()`, and a link or a folder through
+        `_install_custom_module()`.
+
+        True means the install was NOT started. Setting the folder is
+        `change_client_dir()` itself — the Server tab's own press, with its
+        refusals — and not a copy of it; a successful set rebuilds this tab
+        (`client_dir_changed`), which is why the report is written BEFORE it
+        and nothing touches `self` after. The user presses Install again on the
+        rebuilt tab, where the folder is set and this asks nothing.
+        """
+        if not manifest.client or self.services.client_dir is not None:
+            return False
+        self._module_pending = None
+        self._acting_on = None
+        self.module_report.setPlainText(
+            f"{what}: not started — {manifest.name} also changes your game client, and no "
+            "client folder is set for this install. Nothing on this machine was changed."
+        )
+        if self.services.set_client_dir is None:
+            # No write seam, so no button to offer: say it, and stop.
+            QMessageBox.information(
+                self, f"{manifest.name} needs your game client", client_notice(manifest)
+            )
+            return True
+        if ask_to_set_client_dir(self, manifest):
+            self.change_client_dir()
+        return True
+
     @Slot(object)
     def _module_done(self, result: object) -> None:
         self._module_pending = None

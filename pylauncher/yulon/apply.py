@@ -21,13 +21,14 @@ that is the controller's call (call down / signal up, §5).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -306,7 +307,77 @@ and the same nothing to offer a WoW client.
 CLAIM_VERSION = 1
 """Bumped only for a change this version could not read. A reader that does not
 recognise the version answers `UNKNOWN`, which refuses — never `UNCLAIMED`,
-which would let a newer app's clone be treated as a stranger's."""
+which would let a newer app's clone be treated as a stranger's.
+
+NOT bumped for `client_files` (T67): the key is additive and every reader of an
+older claim, which simply has no such key, gets the empty tuple and the
+"no record" arm — which leaves the file alone. A bump would have made every
+clone installed by an earlier build read `UNKNOWN`, i.e. unremovable."""
+
+
+@dataclass(frozen=True)
+class ClientCopy:
+    """One file this app copied into the game client's `Data/`, and the bytes it copied.
+
+    The receipt `remove()` needs in order to be allowed to delete anything from a
+    folder full of the user's own game (T67). `path` is the destination as it was
+    written, absolute and in the OS's own spelling; `sha256` is of the bytes that
+    landed there, taken from the DESTINATION after the copy rather than from the
+    source, so a copy that truncated is recorded as what is really on disk.
+
+    `step` is the manifest step's `src`, and `_unclient()` DOES match on it: a
+    step's receipts have to be found per step, because "this step has no record"
+    is the sentence a user gets about a step whose files must be left alone, and
+    it cannot be said by a lookup keyed on path alone. What identifies the FILE
+    is still `path`; `step` only groups.
+    """
+
+    step: str
+    path: str
+    sha256: str
+
+    def as_json(self) -> dict[str, str]:
+        return {"step": self.step, "path": self.path, "sha256": self.sha256}
+
+
+def sha256_of(path: Path) -> str:
+    """The file's SHA-256, read in chunks. An MPQ is hundreds of megabytes."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_client_copies(clone: Path, *, item_id: str) -> tuple[ClientCopy, ...]:
+    """The client-file receipts this app wrote into `clone`'s claim, or `()`.
+
+    `()` for every doubt: no claim, a claim that will not parse, a claim of
+    ANOTHER item, a `client_files` that is not a list, an entry that is not an
+    object of three strings. Every one of those means "this app cannot show that
+    it put that file there", and `remove()`'s rule is that it deletes nothing
+    from the user's game client it cannot show it put there.
+
+    Note what is NOT checked: `clone_id`. A claim written before the server
+    folder was moved names the old location and reads `UNKNOWN` for ownership —
+    but the client path inside it is still a path this app wrote, with the hash
+    of the bytes it wrote, and the hash is what authorises the delete. Ownership
+    of the clone is a separate question, asked separately, before this runs.
+    """
+    parsed = _parse_clone_claim(clone)
+    if parsed is None or parsed.get("item_id") != item_id:
+        return ()
+    raw = parsed.get("client_files")
+    if not isinstance(raw, list):
+        return ()
+    out: list[ClientCopy] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        step, path, digest = entry.get("step"), entry.get("path"), entry.get("sha256")
+        if isinstance(step, str) and isinstance(path, str) and isinstance(digest, str):
+            out.append(ClientCopy(step=step, path=path, sha256=digest))
+    return tuple(out)
 
 COMPLETED_KEY = "install_completed"
 """The claim's key for "every step of `install()` ran", written by `install()` twice.
@@ -529,7 +600,9 @@ and inside that signature the name is the parameter. This is how the default
 still reaches the function."""
 
 
-def write_clone_claim(clone: Path, *, item_id: str, url: str, completed: bool = False) -> None:
+def write_clone_claim(
+    clone: Path, *, item_id: str, url: str, client_files: Sequence[ClientCopy] = ()
+) -> None:
     """Record that this app put `item_id`'s clone here. Raises `OSError` if it cannot.
 
     `url` is written for a human reading the file; it is never what ownership is
@@ -570,14 +643,25 @@ def write_clone_claim(clone: Path, *, item_id: str, url: str, completed: bool = 
     filesystems is a copy, which is exactly the tearing being avoided — and the
     clone directory is where it goes. It is cleaned up on failure so a refusal
     never leaves debris inside a checkout `git status` will report on.
+
+    `client_files` are T67's receipts for what went into the user's game client.
+    They are written by a SECOND call, after the client copy has happened, over
+    the claim the install already wrote — the claim has to exist from the moment
+    the clone does (a killed install leaves a folder this app must still
+    recognise), and the receipts cannot exist until the bytes have landed. The
+    two orders of failure both fail safe: a claim with no receipts leaves the
+    client file alone, and there is no state in which a receipt exists for a copy
+    that did not happen.
     """
-    payload = {
+    payload: dict[str, object] = {
         "version": CLAIM_VERSION,
         "item_id": item_id,
         "clone_id": composegen.install_id(clone),
         "url": url,
         COMPLETED_KEY: completed,
     }
+    if client_files:
+        payload["client_files"] = [copy.as_json() for copy in client_files]
     fd, name = tempfile.mkstemp(dir=clone, prefix=CLAIM_FILE + ".", suffix=".tmp")
     os.close(fd)
     tmp = Path(name)
@@ -1186,12 +1270,18 @@ class ApplyReport:
     """What a REMOVE did not take back, one entry per step, each a plain phrase (T62).
 
     `remove()` deletes the clone and what `deploy` put elsewhere, and runs any
-    remove-time SQL. It never touches the server's data volume or the user's
-    client folder, and it does not undo install-time SQL a manifest gave no
-    remove-time counterpart. A report of `rm -r modules/mod-arac` and nothing
-    else reads as a clean uninstall of a module whose DBCs, client patch and
-    database rows are all still in place — so those are named here. Empty for
-    every other action.
+    remove-time SQL. It never touches the server's data volume, and it does not
+    undo install-time SQL a manifest gave no remove-time counterpart. A report of
+    `rm -r modules/mod-arac` and nothing else reads as a clean uninstall of a
+    module whose DBCs, client patch and database rows are all still in place — so
+    those are named here. Empty for every other action.
+
+    Since T67 the client half of this list is a fact about THIS RUN rather than a
+    reading of the manifest. A `Data/` patch this app can show it copied and
+    that nobody has edited since IS taken back, and says so in `done`; what is
+    named here is what was left and WHY — changed since install, no record of the
+    copy, no game client folder to reach, or an addon folder, which is never
+    deleted because the game can be told to ignore it instead.
     """
 
 
@@ -1205,6 +1295,11 @@ class _Log:
     # found nothing to do (the file already there, or no keyed value to write).
     # See `_report()`: this is the fourth thing `restart_recommended` can now see.
     conf_restart: bool = False
+    # T67. Filled by `_client()` on an install (the receipts that go into the
+    # claim) and by `_unclient()` on a remove (the client lines of `left_behind`,
+    # which on a remove replace the ones `_left_behind()` reads off the manifest).
+    client_copies: list[ClientCopy] = field(default_factory=list)
+    client_left_behind: list[str] = field(default_factory=list)
 
 
 class _NoAdoption(Enum):
@@ -1681,24 +1776,12 @@ class Applier:
         if missing:
             raise ApplyError(missing)
         clone = self.clone_dir(manifest)
-        # Whether a claim of OURS is at `clone`, so the completion mark at the
-        # end knows whether there is a record to update. False for the two
-        # routes that write no claim (a sourceless manifest, a claim whose write
-        # failed), and neither of those may be handed one late: the first never
-        # had this app's handwriting on the folder, and for the second the
-        # report has already said the folder will not be recognised next time.
-        claimed = False
-        url = ""
-        # Read BEFORE the clone or the copy touches that folder, because
-        # `update()` runs this whole method again over a module that is already
-        # installed and finished. The first claim write below carries this value
-        # back, so a re-install or an update that dies half-way leaves the module
-        # as finished as it was — the folder's contents may now be half a version
-        # newer, but the INSTALL it had is not undone by a failed attempt at a
-        # second one, and demoting it would take Remove off a working module's
-        # row. A clone this app has no claim on (`None`) is a fresh install and
-        # starts unfinished.
-        was_completed = clone_install_completed(clone, item_id=manifest.id) is True
+        # Read BEFORE the clone or the copy fills that folder, because `update()`
+        # runs this whole method again and the claim write below would otherwise
+        # drop the receipts of the files ALREADY in the user's client — leaving
+        # them "no record", i.e. never taken back, if any later step raised
+        # before `_record_client_copies()` wrote the new ones (round 1 review).
+        previous_copies = read_client_copies(clone, item_id=manifest.id)
         if folder is not None and manifest.source is not None:
             raise ApplyError(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
@@ -1759,14 +1842,7 @@ class Applier:
             # stopped finding it would report a write site that had gone.
             url = manifest.source.url if manifest.source is not None else ""
             try:
-                # `completed` is `False` for a new clone — the folder is filled
-                # and not one of the steps below has run — and whatever it
-                # already was for a clone this app has installed before. The
-                # matching `True` is the last thing this function does, and
-                # between the two writes the claim is what tells the Modules tab
-                # to keep offering Install (T68).
-                write_clone_claim(clone, item_id=manifest.id, url=url, completed=was_completed)
-                claimed = True
+                write_clone_claim(clone, item_id=manifest.id, url=url, client_files=previous_copies)
             except OSError as exc:
                 # Never fatal — the clone is on disk and the rest of the install
                 # is what the user asked for — but never silent either: without
@@ -1790,49 +1866,36 @@ class Applier:
         self._conf(manifest, clone, vals, log)
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
-        self._finish_claim(manifest, clone, url, claimed, log)
+        self._record_client_copies(manifest, clone, log)
         return self._report("install", manifest, log)
 
-    def _finish_claim(
-        self, manifest: Manifest, clone: Path, url: str, claimed: bool, log: _Log
-    ) -> None:
-        """The ONE claim write that happens after the steps: this install finished (T68).
+    def _record_client_copies(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+        """Write T67's receipts into the claim, now that the client copy has happened.
 
-        LAST, after every step that can raise. `_sql()` is the one T68 was
-        reported for — the T7 direct-SQL guard refuses while the world runs —
-        but deploy, patches, conf, client files and DBCs all leave through the
-        same exception, and each of them leaves the clone on disk with its
-        install unfinished. This is the one point reached only when all of them
-        returned, so what the claim says is "every step ran" and not "the last
-        step I thought of ran".
+        A second write of the same claim rather than a file of its own: the claim
+        is already the one thing this app writes into a clone that `remove()`
+        reads before deleting it, and `CLAIM_FILE`'s docstring gives the three
+        reasons it is there. A fourth file in a checkout would need all three
+        arguments made again.
 
-        **One call, not one call per fact, and that is the whole reason this is a
-        method.** `write_clone_claim()` writes the WHOLE record, so a second
-        after-the-steps write carrying its own key and defaulting this one's
-        would erase whichever ran first. Anything else a step learns and the
-        claim must carry goes into THIS call as another keyword — never into a
-        write of its own.
-
-        `claimed` is False for a manifest this app never wrote a claim for (no
-        source, no folder) and for one whose first write failed. Neither may be
-        handed a record late: the first never had this app's handwriting on the
-        folder, and for the second the report has already told the user the
-        folder will not be recognised next time.
+        `url` is re-derived from the manifest exactly as the first write does.
+        There is no route here that reaches a clone this app did not fill: a
+        manifest with no `source` and no `folder` is never cloned, so it can have
+        no claim to extend — and it gets none, which reads as "no record" at
+        remove time and leaves the user's file alone.
         """
-        if not claimed:
+        if not log.client_copies or not (clone / CLAIM_FILE).is_file():
             return
+        url = manifest.source.url if manifest.source is not None else ""
         try:
-            write_clone_claim(clone, item_id=manifest.id, url=url, completed=True)
+            write_clone_claim(clone, item_id=manifest.id, url=url, client_files=log.client_copies)
         except OSError as exc:
-            # Not fatal for the same reason the first write is not: the install
-            # DID happen and the user is owed the report of it. The cost is one
-            # row that keeps offering Install for an install that finished, and
-            # pressing it re-runs steps this applier already re-runs from the
-            # menu — so the failure is visible and harmless, where raising here
-            # would report a finished install as a failure.
+            # Never fatal: the files ARE in the client and the install is what
+            # the user asked for. But a remove will not take them back, and the
+            # report is the only place that can say so in advance.
             log.skipped.append(
-                f"{CLAIM_FILE}: the finished mark could not be written ({exc}), so "
-                f"{_rel(self.server_dir, clone)} will keep offering Install"
+                f"{CLAIM_FILE}: the record of what went into your game client could not be "
+                f"written ({exc}), so removing {manifest.id} will leave those files in place"
             )
 
     def update(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
@@ -2111,6 +2174,9 @@ class Applier:
         self._sql(manifest, clone, vals, "remove", log)
         for step in manifest.deploy:
             self._undeploy(step, clone, log)
+        # T67, and BEFORE the `rmtree` below: the receipts that say which client
+        # files are this app's own live in the clone's claim file.
+        self._unclient(manifest, clone, log)
         if clone.exists():
             # T49: not `shutil.rmtree`. Git writes packs read-only on Windows and
             # a bare rmtree stops at the first one, having already deleted an
@@ -3246,13 +3312,147 @@ class Applier:
             else:
                 target = self.client_dir / "Data"
             if src.is_dir():
-                shutil.copytree(src, target, dirs_exist_ok=True, ignore=_NOT_FOR_THE_CLIENT)
+                shutil.copytree(src, target, dirs_exist_ok=True)
+                if step.dest == "data":
+                    log.client_copies += self._receipts(step.src, src, target)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target / src.name)
+                if step.dest == "data":
+                    log.client_copies += self._receipts(step.src, src, target)
             else:
                 raise ApplyError(f"client source missing in clone: {src}")
             log.done.append(f"client {step.src} → {step.dest}")
+
+    @staticmethod
+    def _receipts(step: str, src: Path, target: Path) -> list[ClientCopy]:
+        """Hash what a `dest: data` step just put in the client, for `remove()` to check.
+
+        Only `dest: data`. An addon folder is never taken back (the owner's
+        decision, T67: the player disables it in the game's AddOns menu), and
+        `dest: interface` copies INTO the shared `Interface/` folder, where this
+        app cannot tell its own files from the client's — so neither is worth a
+        receipt nobody would act on.
+
+        **WHICH files is read off the SOURCE in the clone, never off a listing of
+        the destination, and that distinction is a whole `Data/` folder.** Round 1
+        review, 2026-09-16: the first version listed `target` — and for a step
+        whose `src` is a DIRECTORY, `_client` copies its contents INTO
+        `<client>/Data`, so `target` IS the user's `Data/` folder. It recorded a
+        receipt for every archive the user's WoW install has ever had, each
+        matching its own hash at remove time, and removing the shipped Season of
+        Discovery keg (`kegs/sod.json`, `src: .../Client Files/data`, `dest:
+        data`) emptied `Data/`. The source names exactly the files this app
+        copied; nothing else can be ours by definition.
+
+        The HASH is still taken from the destination copy, which is a different
+        question from which files to hash: same bytes when all goes well, and
+        when it does not — a short copy, a full disk — the receipt describes the
+        file that is really in the user's game, which is the one `remove()` will
+        be comparing against.
+
+        A source file with nothing at its destination, or a copy that cannot be
+        hashed, yields no receipt — the same state as an older install's: the
+        file stays at remove time and is named. Never fatal: the install itself
+        succeeded.
+        """
+        if src.is_dir():
+            pairs = [(target / p.relative_to(src)) for p in sorted(src.rglob("*")) if p.is_file()]
+        else:
+            pairs = [target / src.name]
+        out: list[ClientCopy] = []
+        for path in pairs:
+            try:
+                out.append(ClientCopy(step=step, path=str(path), sha256=sha256_of(path)))
+            except OSError as exc:
+                logger.warning(
+                    f"could not hash {path} after copying it, so it is not recorded: {exc}"
+                )
+        return out
+
+    def _unclient(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+        """Take back the client patches this app can PROVE it put there; name the rest (T67).
+
+        The owner's rule, 2026-09-16: a module's client MPQ is deleted from the
+        client's `Data/` only if it is still byte-for-byte the file this app
+        copied, and an addon folder is never deleted at all.
+
+        Why an MPQ is deleted and an addon folder is not, when both were copied
+        by the same step: the 3.3.5a client loads EVERY `Patch-*.MPQ` in `Data/`
+        at start and offers what they contain. A left-behind ARAC patch goes on
+        offering race/class pairs the server no longer has DBCs for, which is a
+        character creation screen that lies and a login that fails. An addon does
+        nothing of the kind, the game has a checkbox for turning it off, and the
+        player may have keybinds and saved variables attached to it.
+
+        Why a checksum and not "the app installed this item, so this file is
+        its": the path is `<the user's game>/Data/<a name a catalog entry
+        chose>`. The user may have put their own patch there, or edited ours.
+        `Ownership`'s lesson holds — evidence, and a refusal when there is none.
+
+        Must run BEFORE the clone is deleted: the receipts live in the clone's
+        claim file, which the `rmtree` at the end of `remove()` takes with it.
+        """
+        copies = read_client_copies(clone, item_id=manifest.id) if clone.is_dir() else ()
+        for step in manifest.client:
+            if self.client_dir is None:
+                log.client_left_behind.append(
+                    f"{step.src} (in whatever game client you installed it into — no game "
+                    f"client folder is set here now, so Yu'lon could not reach it)"
+                )
+                continue
+            if step.dest == "addons":
+                name = step.name or Path(step.src).name
+                log.client_left_behind.append(
+                    f"the {name} addon folder in your game client's Interface/AddOns "
+                    f"(Yu'lon does not delete addons — disable it in the game's AddOns menu)"
+                )
+                continue
+            if step.dest == "interface":
+                log.client_left_behind.append(
+                    f"{step.src} (copied into your game client's Interface folder, where "
+                    f"Yu'lon cannot tell its own files from the game's)"
+                )
+                continue
+            mine = [c for c in copies if c.step == step.src]
+            if not mine:
+                log.client_left_behind.append(
+                    f"{step.src} (in your game client's Data folder — Yu'lon has no record of "
+                    f"copying it, so it left it alone)"
+                )
+                continue
+            for copy in mine:
+                self._take_back(copy, log)
+
+    def _take_back(self, copy: ClientCopy, log: _Log) -> None:
+        """One recorded file: delete it if it is still ours byte-for-byte, else say why not."""
+        path = Path(copy.path)
+        if not path.exists():
+            log.skipped.append(f"client {path.name}: already gone from {path.parent}")
+            return
+        try:
+            same = sha256_of(path) == copy.sha256
+        except OSError as exc:
+            log.client_left_behind.append(
+                f"{path.name} in your game client's Data folder (Yu'lon could not read it to "
+                f"check whether it is still the file it copied: {exc})"
+            )
+            return
+        if not same:
+            log.client_left_behind.append(
+                f"{path.name} in your game client's Data folder (it has changed since Yu'lon "
+                f"copied it, so it left it alone)"
+            )
+            return
+        try:
+            path.unlink()
+        except OSError as exc:
+            log.client_left_behind.append(
+                f"{path.name} in your game client's Data folder (Yu'lon could not delete it: "
+                f"{exc} — close the game and delete it by hand)"
+            )
+            return
+        log.done.append(f"took back {path.name} from {path.parent}")
 
     def _dbc(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         for step in manifest.server_dbc:
@@ -3301,7 +3501,9 @@ class Applier:
                 or log.conf_restart
             ),
             pending_sql=tuple(log.pending_sql),
-            left_behind=_left_behind(manifest) if action == "remove" else (),
+            left_behind=(
+                _left_behind(manifest, tuple(log.client_left_behind)) if action == "remove" else ()
+            ),
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "
@@ -3314,18 +3516,25 @@ class Applier:
 # --------------------------------------------------------------- functions
 
 
-def _left_behind(manifest: Manifest) -> tuple[str, ...]:
-    """The steps `remove()` cannot take back, read off the manifest (see `ApplyReport`).
+def _left_behind(manifest: Manifest, client: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """The steps `remove()` did not take back (see `ApplyReport.left_behind`).
 
-    From the manifest rather than from what this run did, because the files in
-    question were put there by an INSTALL, possibly long ago, and a remove run
-    has no record of that install — only of what the manifest says it does.
+    The server DBC and SQL halves are read off the MANIFEST, because the rows and
+    the files in question were put there by an INSTALL, possibly long ago, and a
+    remove run has no record of that install — only of what the manifest says it
+    does.
+
+    The client half is the opposite and is passed IN, because since T67 there is
+    such a record: `_unclient()` has just been through every `client` step with
+    the receipts the install wrote, deleted what it could show was its own, and
+    written a sentence for each one it did not. Reading `manifest.client` here as
+    well would name the file it had just deleted.
     """
     out = [
         f"the server DBC files from {step.src} (in the server's data volume)"
         for step in manifest.server_dbc
     ]
-    out += [f"{step.src} (in your game client folder)" for step in manifest.client]
+    out += client
     if not any(step.when == "remove" for step in manifest.sql):
         out += [
             f"what {step.path or 'its SQL'} wrote into the {step.db} database"
