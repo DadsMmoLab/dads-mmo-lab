@@ -48,6 +48,32 @@ logger = get_logger(__name__)
 
 LineSource = Callable[[], Iterator[str]]
 
+
+@dataclass(frozen=True)
+class Seams:
+    """The clock this panel measures a run's duration with. Real by default.
+
+    `native.Seams`' shape, and `native.Seams.monotonic`'s argument in a second
+    place: measuring needs a clock, and a clock a test can hand over needs a
+    seam. A class with one field rather than a bare callable keyword, so the
+    next clock this panel needs is a field here rather than a second
+    constructor argument nobody groups with this one.
+    """
+
+    monotonic: Callable[[], float] = time.monotonic
+    """How long has this run been going -- a DURATION, so a monotonic clock.
+
+    `time.time()` was the anchor until T81, and it is not monotonic: an NTP
+    correction or a WSL2 resync after the host suspends steps it, and both the
+    zero and the reading move with it. That is not only a flaky test (T51,
+    where a second run's stamp landed 1.05 s EARLIER than the first's with a
+    `sleep` between them) -- it is a user two hours into an install being shown
+    a jumped or negative elapsed time at the moment they most want to trust the
+    field. The wall clock stays where it belongs: `_clock()`, which stamps a
+    line with the MOMENT it arrived.
+    """
+
+
 _MAX_BLOCKS = 5000
 
 _STICK_SLACK_PX = 4
@@ -257,8 +283,15 @@ def _elapsed(seconds: float) -> str:
     hours (`build`, `mmaps`), so the same field has to carry both without
     changing shape. `0:00:04` and `4:31:07` line up in a monospace panel, which
     a `MM:SS` that grew an hours field partway through a run would not.
+
+    **No clamp, and there was one until T81.** `max(0, int(seconds))` sat here
+    because the caller subtracted two `time.time()` readings, which a backwards
+    clock step makes negative; the clamp painted `0:00:00` over the skew rather
+    than removing it, so the field lied quietly instead of loudly. The anchor
+    and the reading are `Seams.monotonic` now and the difference cannot be
+    negative, which leaves the clamp nothing to do.
     """
-    whole = max(0, int(seconds))
+    whole = int(seconds)
     return f"{whole // 3600}:{whole % 3600 // 60:02d}:{whole % 60:02d}"
 
 
@@ -512,8 +545,11 @@ class LogPanel(QWidget):
     collapse_toggled = Signal(bool)
     """Emitted with True when the text pane has just been folded away (T80)."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, seams: Seams | None = None) -> None:
         super().__init__(parent)
+        # Keyword-only and defaulted, because every caller in the app builds a
+        # panel with the real clock and only a test ever hands one over.
+        self._seams = seams if seams is not None else Seams()
         self._text = QPlainTextEdit(self)
         self._text.setReadOnly(True)
         # Non-focusable on purpose: a read-only log is a D-pad dead-end (arrow
@@ -833,8 +869,9 @@ class LogPanel(QWidget):
         # panel or the first line: the same panel is reused for the next
         # install and for the console, and an elapsed field that kept counting
         # from whenever the window opened would say four hours into a job that
-        # started a minute ago.
-        self._started_at = time.time()
+        # started a minute ago. A MONOTONIC zero since T81 -- see
+        # `Seams.monotonic` for why the wall clock could not hold it.
+        self._started_at = self._seams.monotonic()
         self._show_elapsed()
         self._clear_strip()
         self._ticker.start()
@@ -974,7 +1011,9 @@ class LogPanel(QWidget):
         if self._started_at is None:
             self._elapsed_label.setText("")
             return
-        self._elapsed_label.setText(_elapsed(time.time() - self._started_at))
+        # The same clock the zero was taken from, necessarily: a difference
+        # between two different clocks is not a duration of anything.
+        self._elapsed_label.setText(_elapsed(self._seams.monotonic() - self._started_at))
 
     def elapsed_text(self) -> str:
         """What the header's elapsed field says (tests / accessibility)."""

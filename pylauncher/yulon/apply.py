@@ -406,6 +406,32 @@ by every previous build back to an Install button; reading it as finished leaves
 those rows exactly as they are today.
 """
 
+COMPLETED_KEY = "install_completed"
+"""The claim's key for "every step of `install()` ran", written by `install()` twice.
+
+`False` when the claim goes in, right after the clone or the copy; `True` from
+the LAST thing `install()` does. Between those two writes the folder exists and
+the install has not finished, which is the state T68 is about: the T7 direct-SQL
+guard refuses while the world runs, the clone is already at `modules/<id>`, and
+the row read `Remove` with no Install left to press.
+
+**Additive, and deliberately NOT a `CLAIM_VERSION` bump.** A bump makes every
+older claim unreadable, which answers `UNKNOWN`, which refuses both install and
+remove — a permanent lockout on every clone an older build made, for a key that
+says nothing about ownership. So the version stays 1 and this key is read as a
+three-state: `False` is this build saying the install stopped, `True` is this
+build saying it finished, and ABSENT is a claim written before this key existed.
+
+Absent counts as finished (`clone_install_unfinished()` answers False), and that
+is the only reading that cannot make things worse. Older builds wrote the claim
+in the same place this one does — immediately after the clone and before
+`_deploy`/`_sql`/`_conf`/`_client`/`_dbc` — so an older half-install and an
+older whole install leave byte-identical claims and nothing on disk tells them
+apart. Reading absent as UNFINISHED would therefore flip every module installed
+by every previous build back to an Install button; reading it as finished leaves
+those rows exactly as they are today.
+"""
+
 
 def read_clone_claim(clone: Path, *, item_id: str) -> Ownership:
     """Did THIS app clone THIS item into THIS folder? The three-answer version.
@@ -601,9 +627,7 @@ and inside that signature the name is the parameter. This is how the default
 still reaches the function."""
 
 
-def write_clone_claim(
-    clone: Path, *, item_id: str, url: str, client_files: Sequence[ClientCopy] = ()
-) -> None:
+def write_clone_claim(clone: Path, *, item_id: str, url: str, completed: bool = False) -> None:
     """Record that this app put `item_id`'s clone here. Raises `OSError` if it cannot.
 
     `url` is written for a human reading the file; it is never what ownership is
@@ -1777,12 +1801,24 @@ class Applier:
         if missing:
             raise ApplyError(missing)
         clone = self.clone_dir(manifest)
-        # Read BEFORE the clone or the copy fills that folder, because `update()`
-        # runs this whole method again and the claim write below would otherwise
-        # drop the receipts of the files ALREADY in the user's client — leaving
-        # them "no record", i.e. never taken back, if any later step raised
-        # before `_record_client_copies()` wrote the new ones (round 1 review).
-        previous_copies = read_client_copies(clone, item_id=manifest.id)
+        # Whether a claim of OURS is at `clone`, so the completion mark at the
+        # end knows whether there is a record to update. False for the two
+        # routes that write no claim (a sourceless manifest, a claim whose write
+        # failed), and neither of those may be handed one late: the first never
+        # had this app's handwriting on the folder, and for the second the
+        # report has already said the folder will not be recognised next time.
+        claimed = False
+        url = ""
+        # Read BEFORE the clone or the copy touches that folder, because
+        # `update()` runs this whole method again over a module that is already
+        # installed and finished. The first claim write below carries this value
+        # back, so a re-install or an update that dies half-way leaves the module
+        # as finished as it was — the folder's contents may now be half a version
+        # newer, but the INSTALL it had is not undone by a failed attempt at a
+        # second one, and demoting it would take Remove off a working module's
+        # row. A clone this app has no claim on (`None`) is a fresh install and
+        # starts unfinished.
+        was_completed = clone_install_completed(clone, item_id=manifest.id) is True
         if folder is not None and manifest.source is not None:
             raise ApplyError(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
@@ -1843,7 +1879,14 @@ class Applier:
             # stopped finding it would report a write site that had gone.
             url = manifest.source.url if manifest.source is not None else ""
             try:
-                write_clone_claim(clone, item_id=manifest.id, url=url, client_files=previous_copies)
+                # `completed` is `False` for a new clone — the folder is filled
+                # and not one of the steps below has run — and whatever it
+                # already was for a clone this app has installed before. The
+                # matching `True` is the last thing this function does, and
+                # between the two writes the claim is what tells the Modules tab
+                # to keep offering Install (T68).
+                write_clone_claim(clone, item_id=manifest.id, url=url, completed=was_completed)
+                claimed = True
             except OSError as exc:
                 # Never fatal — the clone is on disk and the rest of the install
                 # is what the user asked for — but never silent either: without
@@ -1867,36 +1910,49 @@ class Applier:
         self._conf(manifest, clone, vals, log)
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
-        self._record_client_copies(manifest, clone, log)
+        self._finish_claim(manifest, clone, url, claimed, log)
         return self._report("install", manifest, log)
 
-    def _record_client_copies(self, manifest: Manifest, clone: Path, log: _Log) -> None:
-        """Write T67's receipts into the claim, now that the client copy has happened.
+    def _finish_claim(
+        self, manifest: Manifest, clone: Path, url: str, claimed: bool, log: _Log
+    ) -> None:
+        """The ONE claim write that happens after the steps: this install finished (T68).
 
-        A second write of the same claim rather than a file of its own: the claim
-        is already the one thing this app writes into a clone that `remove()`
-        reads before deleting it, and `CLAIM_FILE`'s docstring gives the three
-        reasons it is there. A fourth file in a checkout would need all three
-        arguments made again.
+        LAST, after every step that can raise. `_sql()` is the one T68 was
+        reported for — the T7 direct-SQL guard refuses while the world runs —
+        but deploy, patches, conf, client files and DBCs all leave through the
+        same exception, and each of them leaves the clone on disk with its
+        install unfinished. This is the one point reached only when all of them
+        returned, so what the claim says is "every step ran" and not "the last
+        step I thought of ran".
 
-        `url` is re-derived from the manifest exactly as the first write does.
-        There is no route here that reaches a clone this app did not fill: a
-        manifest with no `source` and no `folder` is never cloned, so it can have
-        no claim to extend — and it gets none, which reads as "no record" at
-        remove time and leaves the user's file alone.
+        **One call, not one call per fact, and that is the whole reason this is a
+        method.** `write_clone_claim()` writes the WHOLE record, so a second
+        after-the-steps write carrying its own key and defaulting this one's
+        would erase whichever ran first. Anything else a step learns and the
+        claim must carry goes into THIS call as another keyword — never into a
+        write of its own.
+
+        `claimed` is False for a manifest this app never wrote a claim for (no
+        source, no folder) and for one whose first write failed. Neither may be
+        handed a record late: the first never had this app's handwriting on the
+        folder, and for the second the report has already told the user the
+        folder will not be recognised next time.
         """
-        if not log.client_copies or not (clone / CLAIM_FILE).is_file():
+        if not claimed:
             return
-        url = manifest.source.url if manifest.source is not None else ""
         try:
-            write_clone_claim(clone, item_id=manifest.id, url=url, client_files=log.client_copies)
+            write_clone_claim(clone, item_id=manifest.id, url=url, completed=True)
         except OSError as exc:
-            # Never fatal: the files ARE in the client and the install is what
-            # the user asked for. But a remove will not take them back, and the
-            # report is the only place that can say so in advance.
+            # Not fatal for the same reason the first write is not: the install
+            # DID happen and the user is owed the report of it. The cost is one
+            # row that keeps offering Install for an install that finished, and
+            # pressing it re-runs steps this applier already re-runs from the
+            # menu — so the failure is visible and harmless, where raising here
+            # would report a finished install as a failure.
             log.skipped.append(
-                f"{CLAIM_FILE}: the record of what went into your game client could not be "
-                f"written ({exc}), so removing {manifest.id} will leave those files in place"
+                f"{CLAIM_FILE}: the finished mark could not be written ({exc}), so "
+                f"{_rel(self.server_dir, clone)} will keep offering Install"
             )
 
     def update(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:

@@ -14,7 +14,10 @@ import ast
 import dataclasses
 import json
 import os
-from pathlib import Path, PurePosixPath
+import shutil
+import subprocess
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,9 +25,8 @@ import pytest
 from yulon import apply as apply_module
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native
-from yulon.git import CloneSpec, RunnerGit
-from yulon.manifest import Manifest, parse_manifest
-from yulon.manifest_store import ManifestStore
+from yulon.git import CloneSpec, RunnerGit, git_available
+from yulon.manifest import parse_manifest
 from yulon.ownership import Ownership
 from yulon.resources import manifests_dir
 
@@ -4056,515 +4058,811 @@ def test_a_report_names_the_family_of_the_manifest_it_ran(tmp_path: Path) -> Non
     assert applier.remove(ale).family == "ale"
 
 
-# ------------------------------------------- what the core updater may be given
-#
-# T78, from the round-3 live gate (press 9c): ARAC's `data/sql/db-world/arac.sql`
-# is `applied_by="direct"`, this app had run it twice with its own client, and
-# `Apply module SQL` then handed `mod-arac` to the core updater like every other
-# folder under `modules/`. The updater has no `updates` row for a file it did not
-# apply, ran it into a world database that already held its columns, and the
-# press ended `ac-db-import exited 1, so its modules' SQL may be part-applied`.
+# --------------------------------------------------------------------------
+# T60: no module manifest pins a revision, so the install path with `rev=None`
+# is the ONLY path a shipped module takes. Driven against real git.
+# --------------------------------------------------------------------------
 
 
-def _sql_module(item_id: str, steps: list[dict[str, object]]) -> Manifest:
-    return parse_manifest(
+class _LocalOrigin:
+    """`RunnerGit`, with the manifest's https URL answered by a local repository.
+
+    Only the URL is swapped: branch, depth, sparse path and -- the point --
+    `rev` reach the real clone seam exactly as `Applier.install()` built them.
+    `file://` and not a bare path, because git clones a local path by
+    hardlinking and ignores `--depth`, which would quietly test a FULL clone
+    where every real module clone is shallow.
+    """
+
+    def __init__(self, origin: Path) -> None:
+        self.origin = origin
+        self.specs: list[CloneSpec] = []
+
+    def _local(self, spec: CloneSpec) -> CloneSpec:
+        self.specs.append(spec)
+        return dataclasses.replace(spec, url=self.origin.as_uri())
+
+    def clone(self, spec: CloneSpec) -> None:
+        RunnerGit().clone(self._local(spec))
+
+    def clone_lines(self, spec: CloneSpec, *, stage: str = "clone") -> Iterator[str]:
+        return RunnerGit().clone_lines(self._local(spec), stage=stage)
+
+
+def _git(cwd: Path, *argv: str) -> str:
+    author = ["-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    return subprocess.run(
+        ["git", *author, *argv], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _publish(origin: Path, files: dict[str, str], version: str) -> str:
+    """Commit `files` (with `{v}` filled) to `origin`; return the new commit's sha."""
+    for rel, text in files.items():
+        target = origin / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text.replace("{v}", version), encoding="utf-8")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-qm", version)
+    return _git(origin, "rev-parse", "HEAD")
+
+
+_UNPINNED: dict[str, tuple[str, str, dict[str, str], str]] = {
+    # id: (family, game, upstream files, where the content lands under tmp_path)
+    "lootpet": (
+        "ale",
+        "wow-wotlk",
+        {"LootPet.lua": "-- LootPet {v}\n"},
+        f"server/{LUA}/LootPet.lua",
+    ),
+    "mod-ale": (
+        "module",
+        "wow-wotlk",
         {
-            "id": item_id,
-            "name": item_id,
-            "type": "module",
-            "game": "wow-wotlk",
-            "description": "x",
-            "source": {"repo": f"acme/{item_id}"},
-            "sql": steps,
-        }
-    )
+            "conf/mod_ale.conf.dist": 'ALE.ScriptPath = "lua_scripts"\nALE.Enabled = true\n',
+            "src/LuaEngine/ALEConfig.cpp": "// ALE {v}\n",
+        },
+        # A C++ module lands as the clone the rebuild compiles.
+        "server/modules/mod-ale/src/LuaEngine/ALEConfig.cpp",
+    ),
+    "tortoise-bots-manager": (
+        "mod",
+        "wow-tortoise",
+        {
+            "TortoiseBotsManager.toc": "## Interface: 11200\nCore.lua\n",
+            "Core.lua": "-- TBM {v}\n",
+        },
+        "TurtleWoW/Interface/AddOns/TortoiseBotsManager/Core.lua",
+    ),
+}
 
 
-def _clone_with(server_dir: Path, item_id: str, *files: str) -> Path:
-    clone = server_dir / "modules" / item_id
-    for rel in files:
-        path = clone / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("-- x\n", encoding="utf-8")
-    clone.mkdir(parents=True, exist_ok=True)
-    return clone
+def _unpinned_shipped(item_id: str) -> Any:
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
 
-
-ARAC_SQL = "data/sql/db-world/arac.sql"
-CHAR_SQL = "data/sql/db-characters/one.sql"
-
-
-def test_a_module_whose_sql_this_app_applied_itself_is_not_given_to_the_updater(
-    tmp_path: Path,
-) -> None:
-    """The gate's own shape, and the two modules differ in ONE field.
-
-    `mine` and `theirs` declare the same path in the same folder with the same
-    file on disk; the only difference is `applied_by`. So a plan that withheld
-    on anything else -- the folder, the database, the file's existence -- would
-    withhold both and fail here, and the rule under test is the only rule that
-    can tell them apart.
-    """
-    _clone_with(tmp_path, "mine", ARAC_SQL, CHAR_SQL)
-    _clone_with(tmp_path, "theirs", ARAC_SQL)
-    plan = apply_module.module_sql_plan(
-        tmp_path,
-        [
-            _sql_module(
-                "mine",
-                [
-                    {"db": "world", "path": ARAC_SQL, "applied_by": "direct"},
-                    {"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"},
-                ],
-            ),
-            _sql_module("theirs", [{"db": "world", "path": ARAC_SQL, "applied_by": "db-import"}]),
-        ],
-        ["mine", "theirs"],
-    )
-    assert plan.withheld == ("mine",)
-    assert plan.handed == ("theirs",)
-    assert plan.allowed == "theirs"
-
-
-def test_a_direct_file_the_updater_could_never_open_does_not_withhold_its_module(
-    tmp_path: Path,
-) -> None:
-    """Two halves, one fixture each, and each fixture breaks exactly one of them.
-
-    `UpdateFetcher` walks `<module>/data/sql` and applies `.sql` files. A direct
-    step outside that subtree (Battle Pass keeps its SQL in `sql/`) and a direct
-    step inside it that is not an update file (npc-teleporter ships two `.dist`
-    files there) are both invisible to the updater, so neither is a reason to
-    stop handing the module its real db-import work.
-    """
-    _clone_with(tmp_path, "outside", "sql/battlepass_world.sql", CHAR_SQL)
-    _clone_with(tmp_path, "notsql", "data/sql/db-world/teleporter.dist", CHAR_SQL)
-    plan = apply_module.module_sql_plan(
-        tmp_path,
-        [
-            _sql_module(
-                "outside",
-                [
-                    {"db": "world", "path": "sql/battlepass_world.sql", "applied_by": "direct"},
-                    {"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"},
-                ],
-            ),
-            _sql_module(
-                "notsql",
-                [
-                    {
-                        "db": "world",
-                        "path": "data/sql/db-world/teleporter.dist",
-                        "applied_by": "direct",
-                    },
-                    {"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"},
-                ],
-            ),
-        ],
-        ["notsql", "outside"],
-    )
-    assert plan.withheld == ()
-    assert plan.allowed == "notsql,outside"
-
-
-def test_a_folder_that_cannot_be_read_leaves_the_press_exactly_as_it_was(tmp_path: Path) -> None:
-    """`None` is "could not ask", and the answer to it is upstream's own default.
-
-    Not `""`: measured on the real image, an empty value is `Loading modules:
-    none` and switches module updates OFF, so an unreadable folder must not
-    quietly stop applying the SQL it was applying yesterday.
-    """
-    plan = apply_module.module_sql_plan(tmp_path, [], None)
-    assert plan.allowed == "all"
-    assert plan.files == ()
-
-
-def test_every_module_withheld_asks_for_none_and_not_for_all(tmp_path: Path) -> None:
-    """The one case where `""` is the right answer, and `"all"` would be a re-run.
-
-    `"all"` is the list CMake baked into the image, and after a rebuild that list
-    holds the very module whose file this app applied itself -- so collapsing
-    "nothing to allow" into "all" would hand the updater `arac.sql` again by the
-    other door.
-    """
-    _clone_with(tmp_path, "mine", ARAC_SQL)
-    plan = apply_module.module_sql_plan(
-        tmp_path,
-        [_sql_module("mine", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}])],
-        ["mine"],
-    )
-    assert plan.allowed == ""
-    assert plan.allowed != "all"
-
-
-def test_a_module_no_manifest_describes_is_still_the_updaters_to_apply(tmp_path: Path) -> None:
-    """mod-playerbots is on every install here and in no manifest of ours.
-
-    This app has applied none of its SQL, so the updater is its only route and
-    withholding it would stop work that has always happened.
-    """
-    _clone_with(tmp_path, "mod-playerbots", CHAR_SQL)
-    plan = apply_module.module_sql_plan(tmp_path, [], ["mod-playerbots"])
-    assert plan.handed == ("mod-playerbots",)
-    assert plan.unmanifested == ("mod-playerbots",)
-
-
-def test_no_module_on_disk_at_all_is_still_upstreams_default(tmp_path: Path) -> None:
-    """An empty `modules/` answered `all` before T78 and answers `all` after it."""
-    assert apply_module.module_sql_plan(tmp_path, [], []).allowed == "all"
-
-
-def test_the_importers_own_line_is_what_applied_is_read_from() -> None:
-    """Measured live 2026-09-07 while `acore_world.updates` went 2967 -> 2968.
-
-    The colour run is not decoration in a test: the same image wrapped its
-    refusal in `[0m[31;1m` in the round-3 gate capture, so a parser anchored at
-    the start of the line would read nothing on a real terminal.
-    """
-    assert apply_module.applied_updates(
-        [
-            ">> Applying update aoe_loot_module_string.sql",
-            "\x1b[0m>> Applying update \"data/sql/db-world/city_bot_poi.sql\" 'ab12'...",
-            ">> Applied 1 query",
-        ]
-    ) == frozenset({"aoe_loot_module_string.sql", "city_bot_poi.sql"})
-
-
-def _two_route_plan(tmp_path: Path) -> apply_module.ModuleSqlPlan:
-    """`mine`, whose SQL this app applied, beside `theirs`, which is the updater's."""
-    clone = _clone_with(tmp_path, "mine", ARAC_SQL)
-    claim = clone / apply_module.CLAIM_FILE
-    claim.write_text("{}", encoding="utf-8")
-    os.utime(claim, (1_757_980_800, 1_757_980_800))  # 2025-09-16 UTC
-    _clone_with(tmp_path, "theirs", CHAR_SQL)
-    return apply_module.module_sql_plan(
-        tmp_path,
-        [
-            _sql_module("mine", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}]),
-            _sql_module(
-                "theirs", [{"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"}]
-            ),
-        ],
-        ["mine", "theirs"],
-    )
-
-
-def test_the_report_says_per_file_what_was_done_with_it(tmp_path: Path) -> None:
-    """The verdicts, and the date comes off the record this app wrote.
-
-    The date is asserted against a timestamp this test PUT on the claim file, so
-    it cannot be satisfied by any sentence the code builds out of its own
-    arguments: it is a fact from the filesystem or it is wrong. What it is a
-    date OF is the subject of the two tests below.
-    """
-    plan = _two_route_plan(tmp_path)
-    applied = apply_module.module_sql_report(
-        plan, service="ac-db-import", applied=frozenset({"one.sql"})
-    )
+    family, game, _files, _lands = _UNPINNED[item_id]
+    stores = {"wow-wotlk": wotlk_modules.store, "wow-tortoise": tortoise_modules.store}
+    manifest = stores[game]().load(family, item_id)  # type: ignore[arg-type]
     assert (
-        f"sql {ARAC_SQL} -> world: not handed to the updater: this app applies it itself at "
-        f"install (module installed here on 2025-09-16)" in applied
-    )
-    assert f"sql {CHAR_SQL} -> characters: applied" in applied
+        manifest.source is not None and manifest.source.rev is None
+    ), f"{item_id} is supposed to be unpinned (T60); this test proves nothing about a pin"
+    return manifest
 
-    quiet = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
-    assert (
-        f"sql {CHAR_SQL} -> characters: not applied now: ac-db-import did not name it"
-        in " ".join(quiet)
+
+def _unpinned_applier(
+    tmp_path: Path, origin: Path, manifest: Any = None
+) -> tuple[Applier, _LocalOrigin]:
+    client = tmp_path / "TurtleWoW"
+    (client / "Interface" / "AddOns").mkdir(parents=True, exist_ok=True)
+    git = _LocalOrigin(origin)
+    if manifest is not None:
+        # `lootpet` requires `mod-ale` and T69 refuses without it. These tests
+        # are about where HEAD ends up, not about the guard.
+        _have_requirements(tmp_path / "server", manifest)
+    return Applier(tmp_path / "server", git=git, client_dir=client), git
+
+
+_T65 = (
+    "T65, found by T60 and independent of any rev: a `client` step whose `src` is the checkout "
+    "copytrees `.git` into AddOns, and the SECOND copy cannot overwrite git's read-only pack "
+    "files (Errno 13). A pinned reinstall fails identically."
+)
+
+_RECOPY_FAILS = frozenset({"tortoise-bots-manager"})
+"""Items whose second install raises before `_client()` lands anything (T65)."""
+
+
+def _recopy_fails(item_id: str) -> bool:
+    """Will this item's second install die in `_client()` on this machine?
+
+    Root writes straight through a 0444 file, so there the copy succeeds and
+    nothing raises. Everywhere this suite actually runs -- CI's `runner` user,
+    and Windows, where the read-only attribute refuses the open -- it raises.
+    """
+    return item_id in _RECOPY_FAILS and getattr(os, "geteuid", lambda: 1)() != 0
+
+
+def _reinstall(applier: Applier, manifest: Any, item_id: str) -> None:
+    """The second install, with T65's crash caught for the one item that hits it.
+
+    Caught HERE rather than marked on the parameter, because an `xfail` ends
+    the test at the raise: the clone assertions that follow -- the ones this
+    file exists for -- never ran for the addon, and a `reset --hard` removed
+    from `_update()` left that parameter reporting `xfailed` while the other
+    two went red (review round 1). The addon's own landing is asserted by
+    `test_a_client_addon_reinstall_lands_the_new_files`, which is where T65
+    is allowed to fail.
+    """
+    if _recopy_fails(item_id):
+        with pytest.raises(shutil.Error):
+            applier.install(manifest)
+        return
+    applier.install(manifest)
+
+
+_UNPINNED_PARAMS = sorted(_UNPINNED)
+
+
+def _origin(tmp_path: Path) -> Path:
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    return origin
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("item_id", _UNPINNED_PARAMS)
+def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
+    item_id: str, tmp_path: Path
+) -> None:
+    """T60's real path: an ale script, a rebuilt C++ module and a client addon, all `rev=None`.
+
+    The owner removed every module pin, so what has to hold is not the schema
+    but the clone: a fresh install checks out the default branch's tip, and
+    the next install over that checkout -- which IS the pull, `fetch origin
+    HEAD` + `reset --hard FETCH_HEAD` -- lands the tip as it is THEN, and the
+    new content reaches where the module is used (the Lua folder, the module
+    tree the rebuild compiles, the client's AddOns).
+
+    The upstream moves between the two installs, so the second answer differs
+    from the first: a seam that cloned once and then did nothing, or that
+    checked out a remembered commit, leaves `v1` where `v2` is asserted.
+
+    Every parameter reaches the clone assertions, the addon included: its
+    second install raises T65 in `_client()`, which `_reinstall()` catches so
+    that what this test is about -- where HEAD ends up -- is still asserted
+    for all three.
+    """
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    first = _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier, git = _unpinned_applier(tmp_path, origin, manifest)
+    clone = applier.clone_dir(manifest)
+
+    report = applier.install(manifest)
+
+    assert [spec.rev for spec in git.specs] == [None]
+    assert _git(clone, "rev-parse", "HEAD") == first
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+    assert report.rebuild_required is (item_id == "mod-ale"), report
+
+    second = _publish(origin, files, "v2")
+    _reinstall(applier, manifest, item_id)
+
+    assert _git(clone, "rev-parse", "HEAD") == second, "the reinstall did not follow the tip"
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    if not _recopy_fails(item_id):
+        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+    assert (clone / ".git" / "shallow").is_file(), "a module clone stays shallow"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("item_id", _UNPINNED_PARAMS)
+def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_path: Path) -> None:
+    """Somebody installed one of these while it was pinned. The next install unpins it.
+
+    Their checkout is DETACHED at the old revision (`_pin()` checks out
+    `--detach`), a starting state no unpinned clone of this app's produces --
+    and the fixture is the harder of its two shapes: the pin was already behind
+    the tip when it was cloned, so the depth-1 clone holds the tip and the pin
+    as two unconnected shallow commits. The unpinned install must still move
+    HEAD to the tip and the tip's content to where it is used.
+
+    The addon parameter reaches those assertions too; see `_reinstall()`.
+    """
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    old = _publish(origin, files, "v1")
+    tip = _publish(origin, files, "v2")
+    manifest = _unpinned_shipped(item_id)
+    assert manifest.source is not None
+    pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
+    applier, git = _unpinned_applier(tmp_path, origin, manifest)
+    clone = applier.clone_dir(manifest)
+
+    applier.install(pinned)
+    assert _git(clone, "rev-parse", "HEAD") == old, "the fixture did not reproduce the old pin"
+    assert _git(clone, "branch", "--show-current") == "", "a pin checks out detached"
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+
+    _reinstall(applier, manifest, item_id)
+
+    assert [spec.rev for spec in git.specs] == [old, None]
+    assert _git(clone, "rev-parse", "HEAD") == tip
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    if not _recopy_fails(item_id):
+        assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.xfail(
+    getattr(os, "geteuid", lambda: 1)() != 0, strict=True, raises=shutil.Error, reason=_T65
+)
+def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
+    """The half of the addon's reinstall that T65 breaks, in a test of its own.
+
+    The two tests above assert where the CHECKOUT ends up, which is what
+    removing the pins changed. This asserts what the user gets: the moved
+    upstream's files in their own AddOns folder. It fails today, strictly, so
+    the day T65 is fixed this test says so instead of passing in silence.
+    """
+    item_id = "tortoise-bots-manager"
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier, _git_seam = _unpinned_applier(tmp_path, origin, manifest)
+
+    applier.install(manifest)
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+
+    _publish(origin, files, "v2")
+    applier.install(manifest)
+
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v2")
+
+
+# ------------------------------------------------- T63: the City Bots roster
+#
+# The one file AzerothCore never applies for a module. The core updater reads a
+# module's `data/sql/db-auth|db-characters|db-world` from `AC_MODULES_LIST`;
+# mod-playerbots then builds its OWN `DatabaseLoader` for `acore_playerbots`
+# with no modules list at all, so `data/sql/playerbots/` is scanned by nobody
+# (verified against the AC playerbots-branch source, 2026-08-22).
+#
+# That makes the roster a direct step, and a direct step whose ORDER cannot be
+# satisfied inside one press: the tables it writes are created by the world
+# server's first start, which is after the rebuild an install only reports. The
+# three tests that matter are therefore about time, not about SQL — refused
+# under a live world, skipped before the tables exist, imported on the press
+# after — and each of them drives the real `Applier.install()` over the real
+# shipped manifest, because a synthetic manifest would prove the engine works
+# on a manifest nobody ships.
+
+CITY_BOTS_ID = "mod-city-bots"
+ROSTER_REL = "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql"
+_PRECONDITION_MARK = "information_schema"
+_ROSTER_COUNT_MARK = "FROM citizen_roster"
+_ACCOUNT_TYPE_MARK = "FROM playerbots_account_type"
+
+
+def _city_bots_clone() -> dict[str, str]:
+    """What the repository puts at `modules/mod-city-bots`, as far as this engine reads it."""
+    return {
+        "conf/mod_city_bots.conf.dist": "CitizenBots.Enable = 1\n",
+        ROSTER_REL: "DROP TABLE IF EXISTS `citizen_roster`;\n",
+        "data/sql/db-auth/updates/2026_07_16_03_stage_cast_one_account_per_bot.sql": "-- auth\n",
+        "data/sql/db-characters/updates/2026_08_22_00_stage_cast_characters.sql": "-- chars\n",
+        "data/sql/db-characters/updates/2026_08_22_01_stage_cast_outfits.sql": "-- outfits\n",
+        "data/sql/db-world/updates/2026_07_13_01_city_bot_poi.sql": "-- world\n",
+    }
+
+
+class _ScriptedDb(_FakeSql):
+    """A reader whose answer depends on WHICH question was asked, and a shared event log.
+
+    Two things no existing fake in this file can do, and the tests below need
+    both.
+
+    **Per-query answers.** `_FakeReader` returns one `rows` for every `query()`,
+    so a fixture built on it cannot tell the precondition apart from either
+    verify entry — and a test whose fixture answers every check the same way
+    cannot fail for the reason its name claims (mechanism 1 of
+    `nine-ways-a-test-proves-nothing`). `answers` maps a substring of the query
+    to what that one question gets: a string of rows, `""` for no row, or an
+    exception instance to raise.
+
+    **A per-call answer.** A value may be a LIST, popped left to right, which is
+    what makes "skipped now, imported on the next press" testable at all: a
+    fixture that answers the same thing twice cannot detect a repeat
+    (mechanism 2). `_ScriptedDb` also records `world_running` in the same log as
+    the queries and the files, so a test can assert the guard was consulted
+    BEFORE the first read and the read before the write, rather than merely that
+    all three happened.
+    """
+
+    def __init__(self, answers: dict[str, Any], *, world: bool | None = False) -> None:
+        super().__init__()
+        self.answers = answers
+        self.world = world
+        self.log: list[str] = []
+        self.queries: list[tuple[str, str]] = []
+        self.started_db = 0
+
+    def world_running(self) -> bool | None:
+        self.log.append("world_running?")
+        return self.world
+
+    def start_database(self) -> bool:
+        self.started_db += 1
+        self.log.append("start_database")
+        return True
+
+    def run_file(self, db: str, path: Path) -> None:
+        self.log.append(f"run_file {db}:{path.name}")
+        super().run_file(db, path)
+
+    def run_statement(self, db: str, statement: str) -> None:
+        self.log.append(f"run_statement {db}")
+        super().run_statement(db, statement)
+
+    def query(self, db: str, statement: str) -> str:
+        self.queries.append((db, statement))
+        for mark, answer in self.answers.items():
+            if mark in statement:
+                self.log.append(f"query {db}:{mark}")
+                if isinstance(answer, list):
+                    answer = answer.pop(0)
+                if isinstance(answer, BaseException):
+                    raise answer
+                assert isinstance(answer, str)
+                return answer
+        raise AssertionError(f"the fixture has no answer for {statement!r}")
+
+
+def _city_bots_applier(tmp_path: Path, db: _ScriptedDb) -> Applier:
+    # The server install clones `mod-playerbots` (`catalog.json`, `dest:
+    # modules/mod-playerbots`), City Bots requires it, and T69 refuses without
+    # it. Every one of these tests is about the roster import.
+    _have_requirements(tmp_path, _shipped(CITY_BOTS_ID))
+    return Applier(
+        tmp_path,
+        git=_FakeGit(_city_bots_clone()),
+        sql=db,
+        world_running=db.world_running,
+        start_database=db.start_database,
     )
 
-    refused = apply_module.module_sql_report(
-        plan,
-        service="ac-db-import",
-        applied=frozenset(),
-        refusal="Could not update the World database",
-    )
-    assert f"sql {CHAR_SQL} -> characters: refused: Could not update the World database" in refused
-    # The file this app owns reads the same whatever the updater did with the
-    # rest: it was never handed over, so no verdict of the run applies to it.
-    assert [line for line in refused if ARAC_SQL in line] == [
-        line for line in applied if ARAC_SQL in line
+
+def _ready() -> dict[str, Any]:
+    """Every check answered yes: the tables are there and the import produced 400/400."""
+    return {_PRECONDITION_MARK: "1\n", _ROSTER_COUNT_MARK: "1\n", _ACCOUNT_TYPE_MARK: "1\n"}
+
+
+def test_the_shipped_city_bots_manifest_imports_only_the_roster_itself() -> None:
+    """The routing, by value, off the file the app actually ships.
+
+    Four SQL steps and only one of them is this app's work. Asserted as a whole
+    tuple rather than "the roster is direct", because the defect this entry is
+    guarding against is the opposite one too: applying a module's
+    `db-auth`/`db-characters`/`db-world` by hand breaks the core's own `updates`
+    ledger, which is why `applied_by="db-import"` exists.
+    """
+    manifest = _shipped(CITY_BOTS_ID)
+
+    assert [(s.db, s.applied_by) for s in manifest.sql] == [
+        ("auth", "db-import"),
+        ("characters", "db-import"),
+        ("world", "db-import"),
+        ("playerbots", "direct"),
     ]
+    roster = manifest.sql[-1]
+    assert roster.path == ROSTER_REL
+    assert roster.when == "install"
+    assert roster.precondition is not None and len(roster.verify) == 2
+    assert manifest.build.rebuild is True
+    assert manifest.requires == ("mod-playerbots",)
+    assert manifest.source is not None and manifest.source.rev is None
+    # The conf template the entry names is the one the repository ships, spelled
+    # as the module spells it -- a typo here activates nothing and says nothing.
+    assert manifest.conf[0].template == "conf/mod_city_bots.conf.dist"
 
 
-def test_a_claim_is_not_evidence_that_the_direct_sql_ever_ran(tmp_path: Path) -> None:
-    """Review round 1's must-fix, driven through the REAL install that leaves this state.
+def test_the_city_bots_roster_is_issued_against_the_playerbots_database(tmp_path: Path) -> None:
+    """The whole sequence of one successful press, in order, as one assertion.
 
-    `install()` writes the claim (`apply.py:1366`) and runs the SQL
-    (`apply.py:1386`) in that order, so an install whose SQL step raises leaves a
-    clone and a dated claim behind with nothing whatever in the world database.
-    T2 measured that failure on a real box: `DockerSql` refusing with *"container
-    ... is not running"*. The report may therefore never turn a claim into
-    "applied" -- it has no record of an application to turn.
-
-    Driven by letting the real applier fail at its real SQL step rather than by
-    writing a claim by hand, because the fixture that writes the claim itself is
-    free to write the state that makes the sentence true.
+    ORDER is the claim, and it is asserted as a list because every individual
+    member of it was already true before T63 of a step that ran at the wrong
+    time. The running-world guard is consulted before anything is read or
+    written; the database is started alone; the guard is re-read after that
+    start (the window T7 round 2 is about); the precondition is asked before the
+    file is opened; and only then does the roster reach `playerbots`.
     """
-    module = _sql_module("mine", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}])
+    db = _ScriptedDb(_ready())
 
-    class _DeadContainer:
-        def run_file(self, db: str, path: Path) -> None:
-            raise ApplyError("container ac-database is not running")
+    report = _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
 
-        def run_statement(self, db: str, statement: str) -> None:
-            raise AssertionError("not reached")
+    assert db.log == [
+        "world_running?",
+        "start_database",
+        "world_running?",
+        f"query playerbots:{_PRECONDITION_MARK}",
+        "run_file playerbots:2026_07_15_00_citizen_roster.sql",
+        f"query playerbots:{_ROSTER_COUNT_MARK}",
+        f"query playerbots:{_ACCOUNT_TYPE_MARK}",
+    ]
+    # Nothing else was run by hand: the other three steps are the core's.
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+    assert db.statements == []
+    assert {p.db for p in report.pending_sql} == {"auth", "characters", "world"}
+    assert any("citizen_roster" in line for line in report.done)
+    assert report.rebuild_required is True
 
+
+def test_the_city_bots_roster_is_refused_while_the_world_server_runs(tmp_path: Path) -> None:
+    """T7's guard stands in front of the roster, and nothing is read or written behind it.
+
+    `playerbots` is in `WORLD_HELD_DBS`, so this is the guard's own rule and not
+    a second one -- and the assertion that matters is the second half: the
+    precondition was never even ASKED. A refusal that had already read the
+    database would mean the pre-pass had been replaced by a per-step check, and
+    a per-step check is what lets a multi-step manifest half-apply.
+    """
+    db = _ScriptedDb(_ready(), world=True)
+
+    with pytest.raises(ApplyError) as refusal:
+        _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    message = str(refusal.value)
+    assert "the world server is running" in message
+    assert "playerbots" in message and ROSTER_REL in message
+    assert "Press Stop" in message
+    assert db.queries == [], "it read the database behind a refusal"
+    assert db.files == [] and db.statements == []
+
+
+def test_the_roster_waits_for_the_tables_and_imports_on_the_next_press(tmp_path: Path) -> None:
+    """The ordering problem itself: too early is skipped and said, and the repeat works.
+
+    One test for both halves on purpose. The first press is the state every
+    fresh install is in -- mod-playerbots cloned, never started, so its tables
+    do not exist -- and the second is the same press after the rebuild and one
+    start. The fixture answers NO to the precondition once and YES afterwards,
+    because a fixture that answers the same thing twice cannot tell a deferral
+    from a step that never runs at all.
+
+    What the first press must NOT do is fail: everything it did (the clone, the
+    conf) is real and worth keeping, and the module is not broken -- it is
+    unfinished, and the remaining work is the user's.
+    """
+    db = _ScriptedDb({**_ready(), _PRECONDITION_MARK: ["", "1\n"]})
+    applier = _city_bots_applier(tmp_path, db)
+
+    first = applier.install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == [], "it imported the roster before the tables existed"
+    skipped = [s for s in first.skipped if ROSTER_REL in s]
+    assert len(skipped) == 1, first.skipped
+    assert "mod-playerbots has not created its tables yet" in skipped[0]
+    assert "no rows were written" in skipped[0]
+    assert "install City Bots again" in skipped[0]
+    assert (tmp_path / "modules" / CITY_BOTS_ID / ROSTER_REL).is_file(), "the clone is still there"
+
+    second = applier.install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+    assert any(ROSTER_REL.rsplit("/", 1)[-1] in line for line in second.done)
+    assert not [s for s in second.skipped if ROSTER_REL in s]
+
+
+def test_a_precondition_that_cannot_be_asked_skips_and_carries_the_reason(tmp_path: Path) -> None:
+    """Fail closed, and the seam's own words with it.
+
+    The case the precondition was written for is not a missing TABLE, it is a
+    missing SCHEMA: before mod-playerbots has ever started, `acore_playerbots`
+    does not exist, and a `mysql` told to connect to it exits non-zero rather
+    than returning no rows. So *could not ask* has to mean the same as *no* --
+    the write on the other side of this question starts with `DROP TABLE` -- and
+    the sentence has to carry why, because "not yet" and "your database is
+    unreachable" send the user to two different places.
+    """
+    db = _ScriptedDb(
+        {**_ready(), _PRECONDITION_MARK: RuntimeError("Unknown database 'acore_playerbots'")}
+    )
+
+    report = _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == []
+    skipped = [s for s in report.skipped if ROSTER_REL in s]
+    assert len(skipped) == 1, report.skipped
+    assert "Unknown database 'acore_playerbots'" in skipped[0]
+    assert "mod-playerbots has not created its tables yet" in skipped[0]
+
+
+def test_a_precondition_is_never_asked_without_a_reader(tmp_path: Path) -> None:
+    """A runner that cannot be read is the same answer as a database that will not say.
+
+    `_FakeSql` is a `SqlRunner` and nothing more, which is exactly what a caller
+    that passes its own write-only seam hands the engine. The step must not run
+    on the strength of a question that was never put.
+    """
+    plain = _FakeSql()
     applier = Applier(
         tmp_path,
-        git=_FakeGit({ARAC_SQL: "ALTER TABLE x ADD COLUMN y INT;\n"}),
-        sql=_DeadContainer(),
-        remote_url=_Origins("https://github.com/acme/mine.git"),
+        git=_FakeGit(_city_bots_clone()),
+        sql=plain,
         world_running=lambda: False,
     )
-    with pytest.raises(ApplyError, match="not running"):
-        applier.install(module)
-    clone = tmp_path / "modules" / "mine"
-    assert (clone / apply_module.CLAIM_FILE).is_file(), "the install did not get as far as a claim"
+    _have_requirements(tmp_path, _shipped(CITY_BOTS_ID))
 
-    said = apply_module.module_sql_report(
-        apply_module.module_sql_plan(tmp_path, [module], ["mine"]),
-        service="ac-db-import",
-        applied=frozenset(),
-    )
-    arac = [line for line in said if line.startswith(f"sql {ARAC_SQL} ")]
-    assert arac and "applies it itself at install" in arac[0], said
-    assert "applied" not in arac[0], (
-        "the panel claims a file was applied on the strength of a claim written "
-        f"BEFORE the SQL that never ran: {arac[0]}"
-    )
+    report = applier.install(_shipped(CITY_BOTS_ID))
+
+    assert plain.files == []
+    skipped = [s for s in report.skipped if ROSTER_REL in s]
+    assert len(skipped) == 1 and "no database reader" in skipped[0]
 
 
-def test_a_clone_this_app_did_not_make_is_given_no_date_at_all(tmp_path: Path) -> None:
-    """No claim, no date. The directory's own mtime is not a record of ours.
-
-    A checkout somebody else put in `modules/` has no install of this app's to
-    date, and its mtime moves when a `git pull`, an editor or the compile writes
-    inside it. Printing that as the day this app did something would invent the
-    record T78 exists because we do not keep.
-
-    The clone here is given a mtime the assertion would notice if it leaked --
-    the same stamp the test above pins on a claim.
-    """
-    clone = _clone_with(tmp_path, "mine", ARAC_SQL)
-    os.utime(clone, (1_757_980_800, 1_757_980_800))  # 2025-09-16 UTC
-    assert not (clone / apply_module.CLAIM_FILE).exists()
-
-    plan = apply_module.module_sql_plan(
-        tmp_path,
-        [_sql_module("mine", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}])],
-        ["mine"],
-    )
-    assert [entry.installed_on for entry in plan.files] == [""]
-    said = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
-    arac = [line for line in said if line.startswith(f"sql {ARAC_SQL} ")]
-    assert arac == [
-        f"sql {ARAC_SQL} -> world: not handed to the updater: this app applies it itself at install"
-    ], arac
-    assert "2025-09-16" not in " ".join(said), said
-
-
-def test_a_db_import_file_inside_a_withheld_module_is_not_reported_as_ledgered(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("mark", "names", "not_named"),
+    [
+        (_ROSTER_COUNT_MARK, "citizen_roster does not hold the 400", "account type 3"),
+        (_ACCOUNT_TYPE_MARK, "not all marked playerbots account type 3", "does not hold the 400"),
+    ],
+)
+def test_a_verify_entry_refuses_and_names_the_half_that_failed(
+    tmp_path: Path, mark: str, names: str, not_named: str
 ) -> None:
-    """The verdict that would be T78 upside down.
+    """wow-manage's 400/400, and the reason it is two checks rather than one.
 
-    A module withheld for its direct file takes its db-import files with it --
-    `AC_UPDATES_ALLOWED_MODULES` is per module, not per file -- so those files
-    were not offered to the updater at all. Calling them "already in its ledger"
-    because nothing complained would promise a row in the database on the
-    strength of a run they were never part of.
+    `city_bots_import_roster()` counts the roster rows AND the city-bot account
+    types, and calls anything else a failure: `mysql` exiting 0 over a file of
+    400 inserts says the statements parsed, not that the cast is there.
+
+    Each case answers NO to exactly ONE of the two, and asserts the OTHER's
+    sentence is absent. A refusal that named both -- or a single query with two
+    clauses -- is green for two different reasons and red for two more, and
+    sends the operator to look in the wrong table. `not_named` is the assertion
+    people skip, and the only one that proves which check fired.
     """
-    _clone_with(tmp_path, "mine", ARAC_SQL, CHAR_SQL)
-    plan = apply_module.module_sql_plan(
+    db = _ScriptedDb({**_ready(), mark: ""})
+
+    with pytest.raises(ApplyError) as refusal:
+        _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    message = str(refusal.value)
+    assert names in message
+    assert not_named not in message
+    # It does not claim nothing happened: the file ran, and that is the point.
+    assert "was run" in message and "repeat repairs rather than duplicates" in message
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+
+
+def test_a_verify_that_cannot_be_asked_is_reported_and_does_not_refuse(tmp_path: Path) -> None:
+    """The opposite of the precondition's fail-closed, and deliberately so.
+
+    There the unknown gates a write that has not happened; here the write has
+    already happened, and a database that cannot be asked is not evidence
+    against it. Refusing would report a failed install over a successful import.
+    """
+    db = _ScriptedDb({**_ready(), _ROSTER_COUNT_MARK: RuntimeError("database has gone away")})
+
+    report = _city_bots_applier(tmp_path, db).install(_shipped(CITY_BOTS_ID))
+
+    assert db.files == [("playerbots", "2026_07_15_00_citizen_roster.sql")]
+    unchecked = [s for s in report.skipped if "NOT checked against the database" in s]
+    assert len(unchecked) == 1, report.skipped
+    assert "database has gone away" in unchecked[0]
+    assert "ran, but" in unchecked[0]
+
+
+# ------------------------------------------------- T68: the install's finished mark
+
+
+def _claim_of(clone: Path) -> dict[str, Any]:
+    """The claim file as JSON, read the way anything but this app would read it.
+
+    Deliberately not through `_parse_clone_claim()`: the tests below are about
+    what is ON DISK, and asking the module's own reader would let a mark that is
+    never written and a reader that invents one pass together.
+    """
+    parsed = json.loads((clone / apply_module.CLAIM_FILE).read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_a_world_running_refusal_leaves_the_clone_marked_unfinished(tmp_path: Path) -> None:
+    """T68's own state: the clone is on disk and the install did not finish.
+
+    The refusal is the T7 direct-SQL guard's, raised from `_sql()` — after the
+    clone, the claim, the deploy and the patches, and before conf, client files
+    and DBCs. That is the state the Modules tab read as `Remove`.
+
+    Two assertions and not one: the mark on disk is `false`, and the module's
+    own reader says unfinished. Asserting only the reader would pass on a build
+    that wrote no mark at all and answered from a default.
+    """
+    clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
+    applier = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: True)
+
+    with pytest.raises(ApplyError, match="the world server is running"):
+        applier.install(parse_manifest(STACKABLES))
+
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is False
+    assert apply_module.clone_install_unfinished(clone, item_id="all-stackables") is True
+
+
+def test_an_install_that_ran_every_step_marks_the_clone_finished(tmp_path: Path) -> None:
+    """The other half of the pair, over the SAME manifest and the same applier.
+
+    Only `world_running` differs, so nothing but the guard can account for the
+    difference between this and the test above — a second manifest here would
+    leave "unfinished" provable by anything else either input changed.
+    """
+    clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: False)
+
+    applier.install(parse_manifest(STACKABLES))
+
+    assert sql.files == [("world", "up.sql")]  # the steps really ran
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is True
+    assert apply_module.clone_install_unfinished(clone, item_id="all-stackables") is False
+
+
+class _RefusingDbc:
+    """A DBC copier that fails, so the LAST step of `install()` is the one that raises."""
+
+    def copy_dbc_dir(self, src: Path) -> None:
+        raise OSError("data/dbc is read-only")
+
+
+def test_the_finished_mark_waits_for_the_last_step_and_not_for_the_sql(tmp_path: Path) -> None:
+    """The mark is written after `_dbc()`, the last thing `install()` does.
+
+    The T7 guard is the refusal T68 was reported for, but it is not the only
+    one: every step after it can raise too, and each leaves the clone on disk
+    with its install unfinished. So this run gets past the SQL — `sql.statements`
+    proves it — and dies in the DBC copy.
+
+    Mutation: move the completed write to just after `_sql()`, or into the claim
+    write itself, and this clone is marked finished with its DBCs never copied.
+    """
+    m = parse_manifest(
+        {
+            "id": "sod",
+            "name": "SOD",
+            "type": "keg",
+            "game": "wow-wotlk",
+            "source": {"repo": "DadsMmoLab/dads-mmo-lab", "sparse_path": "kegs/sod"},
+            "sql": [{"db": "world", "statement": "SELECT 1"}],
+            "server_dbc": [{"src": "dbc"}],
+        }
+    )
+    clone = tmp_path / "ale_scripts" / "sod"
+    sql = _FakeSql()
+    applier = Applier(
         tmp_path,
-        [
-            _sql_module(
-                "mine",
-                [
-                    {"db": "world", "path": ARAC_SQL, "applied_by": "direct"},
-                    {"db": "characters", "path": CHAR_SQL, "applied_by": "db-import"},
-                ],
-            )
-        ],
-        ["mine"],
-    )
-    said = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
-    assert (
-        f"sql {CHAR_SQL} -> characters: not applied: mine was not given to ac-db-import, so the "
-        f"updater was not offered this file either" in said
-    ), said
-    assert not [line for line in said if "ledger looks like" in line], said
-
-    # Nor is it blamed for a refusal it was not part of, which is the same rule
-    # from the other side: no verdict of the run applies to a file the run never
-    # had. Every line reads the same whatever the updater said.
-    assert (
-        apply_module.module_sql_report(
-            plan, service="ac-db-import", applied=frozenset(), refusal="Could not update the World"
-        )
-        == said
+        git=_FakeGit({"dbc/Spell.dbc": "y"}),
+        sql=sql,
+        dbc=_RefusingDbc(),
+        world_running=lambda: False,
     )
 
+    with pytest.raises(OSError, match="read-only"):
+        applier.install(m)
 
-# ---- T78 round 3: the withholding is decided per FILE, not per `data/sql/`
-#
-# The 2026-09-17 live gate's finding. City Bots keeps THREE `db-import` groups
-# under the three directories the updater walks and ONE `direct` file under
-# `data/sql/playerbots/`, which nothing joins a path for -- and that one file
-# withheld the module whole, so the three groups went unapplied, the world died
-# on `Table 'acore_world.city_bot_poi' doesn't exist`, and the app's own remedy
-# ("Press Apply module SQL") could not be followed by pressing that button.
-# ARAC could not see this: its ONLY SQL step is the direct one, so withholding
-# the module and withholding the file are the same act there.
-
-CITY_AUTH = "data/sql/db-auth/updates/2026_07_16_03_stage_cast_one_account_per_bot.sql"
-CITY_CHAR = "data/sql/db-characters/updates/2026_08_22_01_stage_cast_outfits.sql"
-CITY_WORLD = "data/sql/db-world/updates/2026_07_13_01_city_bot_poi.sql"
-CITY_ROSTER = "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql"
-"""mod-city-bots' four SQL paths, verbatim off the shipped manifest."""
+    assert sql.statements == [("world", "SELECT 1")]  # the SQL step DID run
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is False
+    assert apply_module.clone_install_unfinished(clone, item_id="sod") is True
 
 
-def _city_bots_shape(tmp_path: Path, direct: str) -> apply_module.ModuleSqlPlan:
-    """City Bots' manifest with its one direct file moved to `direct`, and nothing else.
+def test_a_claim_from_a_build_before_the_mark_reads_as_finished(tmp_path: Path) -> None:
+    """No key is an OLDER build's claim, and it must not put Install back on that row.
 
-    The two callers differ in ONE field -- which directory the direct file sits
-    in -- so no other rule can account for a difference between their answers.
-    The three db-import groups are declared as globs, as the shipped manifest
-    declares them, so a rule that read the declared path instead of the resolved
-    one would be visible here.
+    Every build before this one wrote the claim in the same place — right after
+    the clone, before the steps — so a half install and a whole install left
+    byte-identical claims and nothing on disk tells them apart. Reading the
+    absent key as unfinished would therefore flip every module installed by
+    every previous build back to an Install button.
+
+    The fixture is this app's own writer with the one key removed, so it is the
+    older record rather than a hand-typed guess at it.
     """
-    _clone_with(tmp_path, "mod-city-bots", CITY_AUTH, CITY_CHAR, CITY_WORLD, direct)
-    return apply_module.module_sql_plan(
-        tmp_path,
-        [
-            _sql_module(
-                "mod-city-bots",
-                [
-                    {
-                        "db": "auth",
-                        "path": "data/sql/db-auth/updates/*.sql",
-                        "applied_by": "db-import",
-                    },
-                    {
-                        "db": "characters",
-                        "path": "data/sql/db-characters/updates/*.sql",
-                        "applied_by": "db-import",
-                    },
-                    {
-                        "db": "world",
-                        "path": "data/sql/db-world/updates/*.sql",
-                        "applied_by": "db-import",
-                    },
-                    {"db": "playerbots", "path": direct, "applied_by": "direct"},
-                ],
-            )
-        ],
-        ["mod-city-bots"],
-    )
+    clone = tmp_path / "modules" / "mod-ah-bot"
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(clone, item_id="mod-ah-bot", url=OWNED_URL)
+    old = _claim_of(clone)
+    del old[apply_module.COMPLETED_KEY]
+    (clone / apply_module.CLAIM_FILE).write_text(json.dumps(old), encoding="utf-8")
+
+    assert apply_module.read_clone_claim(clone, item_id="mod-ah-bot") is Ownership.OWNED
+    assert apply_module.clone_install_unfinished(clone, item_id="mod-ah-bot") is False
 
 
-def test_a_direct_file_outside_the_updaters_directories_keeps_its_module_in_the_list(
-    tmp_path: Path,
-) -> None:
-    """The gate's finding, as the plan: City Bots is handed over, all three groups with it.
+def test_a_folder_this_app_did_not_claim_is_never_unfinished(tmp_path: Path) -> None:
+    """A stranger's checkout offers no Install, whatever else is true of it.
 
-    `data/sql/playerbots/` is under `data/sql/` and is walked by nobody -- the
-    core updater runs once per `DatabaseLoader` pool and mod-playerbots builds
-    its own with no module list at all. So the roster file is not in the
-    updater's way, and it is not a reason to cost this module the three groups
-    that ARE the updater's work.
+    `unfinished` puts a press back on a row whose folder is on disk, and
+    `_require_own_clone()` refuses that press for a folder this app did not
+    make. The two must agree, so this reads an unclaimed folder and a claim that
+    names another item — both under a name this app uses.
     """
-    plan = _city_bots_shape(tmp_path, CITY_ROSTER)
-    assert plan.withheld == ()
-    assert plan.handed == ("mod-city-bots",)
-    assert plan.allowed == "mod-city-bots"
+    mine = tmp_path / "modules" / "mod-ah-bot"
+    mine.mkdir(parents=True)
+    theirs = tmp_path / "modules" / "mod-transmog"
+    theirs.mkdir(parents=True)
+    apply_module.write_clone_claim(theirs, item_id="something-else", url=OWNED_URL)
 
-    said = apply_module.module_sql_report(
-        plan,
-        service="ac-db-import",
-        applied=frozenset(PurePosixPath(p).name for p in (CITY_AUTH, CITY_CHAR, CITY_WORLD)),
-    )
-    assert f"sql {CITY_AUTH} -> auth: applied" in said, said
-    assert f"sql {CITY_CHAR} -> characters: applied" in said, said
-    assert f"sql {CITY_WORLD} -> world: applied" in said, said
-    assert (
-        f"sql {CITY_ROSTER} -> playerbots: not handed to the updater: this app applies it "
-        f"itself at install" in said
-    ), said
-    # No withholding sentence at all, and in particular not the two the gate
-    # photographed: the panel must not tell the user this module was skipped.
-    assert not [line for line in said if "not given to ac-db-import" in line], said
+    assert apply_module.clone_install_unfinished(mine, item_id="mod-ah-bot") is False
+    assert apply_module.clone_install_unfinished(theirs, item_id="mod-transmog") is False
 
 
-def test_a_direct_file_inside_the_updaters_directories_still_withholds_and_says_which(
-    tmp_path: Path,
-) -> None:
-    """The control for the test above, and the sentence a mixed module needs.
+def test_unfinished_clones_names_only_the_half_installed_one_per_family(tmp_path: Path) -> None:
+    """The tab's reading: the same folders `installed_clones()` walks, filtered.
 
-    Same manifest, same clone, same three db-import groups; the ONE difference
-    is that the direct file now sits in `data/sql/db-world/`, where the updater
-    would open it and exit 1 over a file it holds no ledger row for. Withholding
-    the module is the only lever `AC_UPDATES_ALLOWED_MODULES` has and the three
-    groups are its price -- so the sentence has to say which file cost them.
-    "That folder's SQL" was false here: this app runs one of four.
+    Three clones in two families, one of them unfinished, and the answer is a
+    strict subset of the listing beside it — which is what lets the panel key
+    both by `(family, id)`.
     """
-    inside = "data/sql/db-world/updates/2026_07_15_00_citizen_roster.sql"
-    plan = _city_bots_shape(tmp_path, inside)
-    assert plan.withheld == ("mod-city-bots",)
-    assert plan.allowed == ""
+    finished = tmp_path / "modules" / "mod-ah-bot"
+    halfway = tmp_path / "modules" / "mod-transmog"
+    stranger = tmp_path / "ale_scripts" / "sitmeanrest"
+    for path in (finished, halfway, stranger):
+        path.mkdir(parents=True)
+    apply_module.write_clone_claim(finished, item_id="mod-ah-bot", url=OWNED_URL, completed=True)
+    apply_module.write_clone_claim(halfway, item_id="mod-transmog", url=OWNED_URL, completed=False)
 
-    said = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
-    assert (
-        f"mod-city-bots: not given to ac-db-import -- this app runs {inside} itself, and "
-        f"the updater refuses a file it holds no ledger row for." in said
-    ), said
-    # It names the ONE file: not the folder, and not the three it is not about.
-    reason = [line for line in said if line.startswith("mod-city-bots: not given")][0]
-    assert "that folder's SQL" not in reason, reason
-    assert CITY_WORLD not in reason, reason
+    listed = apply_module.installed_clones(tmp_path)
+    unfinished = apply_module.unfinished_clones(tmp_path)
+
+    assert listed["module"] == frozenset({"mod-ah-bot", "mod-transmog"})
+    assert unfinished["module"] == frozenset({"mod-transmog"})
+    assert unfinished["ale"] == frozenset() and listed["ale"] == frozenset({"sitmeanrest"})
+    for family, names in unfinished.items():
+        assert names <= listed[family], family
 
 
-def test_the_withheld_sentence_names_the_file_for_a_module_with_only_one_step(
-    tmp_path: Path,
-) -> None:
-    """ARAC's shape, which is where the old wording was accidentally true.
+def test_a_reinstall_that_fails_leaves_a_finished_module_finished(tmp_path: Path) -> None:
+    """A failed second install must not take Remove off a module that works.
 
-    Named separately because it is the case the gate PASSED: a one-step module
-    where "that folder's SQL" and `arac.sql` describe the same thing. The new
-    sentence has to stay true here as well as become true of the mixed one.
+    `update()` and the Install press both run `install()` again over a clone
+    that is already here and already finished. The first claim write happens
+    before any step, so writing a flat `False` there would demote a working
+    module the moment anything downstream raised — the user's row would offer
+    Install for an install that had succeeded, and no longer offer Remove.
+
+    Mutation: `completed=False` at the first write and the second half of this
+    fails while every other T68 test still passes.
     """
-    _clone_with(tmp_path, "mod-arac", ARAC_SQL)
-    plan = apply_module.module_sql_plan(
-        tmp_path,
-        [_sql_module("mod-arac", [{"db": "world", "path": ARAC_SQL, "applied_by": "direct"}])],
-        ["mod-arac"],
-    )
-    said = apply_module.module_sql_report(plan, service="ac-db-import", applied=frozenset())
-    assert (
-        f"mod-arac: not given to ac-db-import -- this app runs {ARAC_SQL} itself, and "
-        f"the updater refuses a file it holds no ledger row for." in said
-    ), said
+    clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
+    m = parse_manifest(STACKABLES)
+    Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: False).install(m)
+    assert apply_module.clone_install_completed(clone, item_id="all-stackables") is True
+
+    refused = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: True)
+    with pytest.raises(ApplyError, match="the world server is running"):
+        refused.install(m)
+
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is True
+    assert apply_module.clone_install_unfinished(clone, item_id="all-stackables") is False
 
 
-def test_every_shipped_db_import_step_names_a_directory_the_updater_actually_walks() -> None:
-    """A `db-import` step outside `IMPORTER_DB_DIRS` would be a promise nobody keeps.
+def test_a_refused_install_over_an_unfinished_clone_stays_unfinished(tmp_path: Path) -> None:
+    """The control for the test above: carrying the old value forward is not "always True".
 
-    The catalog's own data, not a fixture. `applied_by: "db-import"` means "this
-    app runs none of it, the core updater will" -- and the core updater walks
-    `data/sql/db-auth`, `data/sql/db-characters` and `data/sql/db-world` and
-    nothing else. A shipped manifest naming, say, `data/sql/playerbots/` as
-    db-import would leave that file applied by no route at all, which is exactly
-    the trap City Bots' manifest avoids by declaring its roster `direct`.
+    The second press of the row's Install — the one T68 exists to offer — hits
+    the same guard again, and the clone must still be the one that keeps the
+    button.
     """
-    store = ManifestStore(manifests_dir(), "wow-wotlk")
-    checked = 0
-    for manifest in store.load_all("module"):
-        for step in manifest.sql:
-            if step.applied_by != "db-import" or step.path is None:
-                continue
-            assert step.path.startswith(
-                apply_module.IMPORTER_SQL_DIRS
-            ), f"{manifest.id} leaves {step.path} to the updater, which never walks it"
-            checked += 1
-    assert checked, "no shipped db-import step was examined, so this asserted nothing"
+    clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
+    m = parse_manifest(STACKABLES)
+    applier = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: True)
+
+    for _ in range(2):
+        with pytest.raises(ApplyError, match="the world server is running"):
+            applier.install(m)
+
+    assert _claim_of(clone)[apply_module.COMPLETED_KEY] is False
+    assert apply_module.clone_install_unfinished(clone, item_id="all-stackables") is True

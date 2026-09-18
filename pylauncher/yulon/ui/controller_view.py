@@ -20,7 +20,7 @@ reached servers that have none of them.
 
 from __future__ import annotations
 
-import enum
+import math
 import re
 import threading
 from collections import deque
