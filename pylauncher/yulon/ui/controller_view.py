@@ -3744,6 +3744,14 @@ def _size_text(size: int) -> str:
     return f"{size} bytes"
 
 
+_POST_INSTALL_RESETTLE_MS = 60_000
+"""How long after an install's first `settle()` the tab asks once more if still `Pending`.
+
+Measured on the T86 gate: a SOAP request 8 s after `World server is up` hit the
+20 s timeout while the world logged in its bots; 40 s after it answered at once.
+"""
+
+
 class ControllerView(QWidget):
     """Per-install tabs; see module docstring."""
 
@@ -4189,6 +4197,7 @@ class ControllerView(QWidget):
 
     def shutdown(self) -> None:
         """Stop this tab's timers and join its background jobs (called before teardown)."""
+        self._closed = True
         self._timer.stop()
         for panel in self.log_panels():
             panel.stop()
@@ -4830,6 +4839,38 @@ class ControllerView(QWidget):
         if setup is None:
             return
         self._run(setup.settle, self._channel_settled, self._channel_settle_failed)
+
+    def settle_channel_after_install(self) -> None:
+        """A fresh install is a press that already wrote the database: settle now.
+
+        Opening a tab only `check()`s (see `_check_the_channel`), because a tab
+        is not permission to write a row. An install is: it just created the
+        databases, the accounts and the server folder, and on the `enable_conf`
+        trees it now writes the channel keys too (T87), so the world that comes
+        up at the end of it is listening. Without this, the first `settle()`
+        waited for the next Start press, and every tab that speaks to the world
+        said "could not ask" until then.
+
+        Asked twice, once now and once after `_POST_INSTALL_RESETTLE_MS`, only
+        if the first answer was still `Pending`: a world that has just said
+        "up" spends its first half minute logging bots in (500 of them on
+        Tortoise) and answers SOAP slowly, so a single ask at that moment can
+        time out. `Pending` keeps the minted password in memory, and `settle()`
+        on it re-verifies rather than re-creates.
+        """
+        self._settle_the_channel()
+        QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self._resettle_if_pending)
+
+    def _resettle_if_pending(self) -> None:
+        # A minute is long enough for the tab to have been torn down (install,
+        # then uninstall): `shutdown()` sets `_closed`, and a job started after
+        # it would connect its `done` to a slot of a deleted widget.
+        if getattr(self, "_closed", False):
+            return
+        setup = self.services.channel_setup
+        if setup is None or not isinstance(setup.setup_state(), channel_setup.Pending):
+            return
+        self._settle_the_channel()
 
     @Slot(object)
     def _channel_settled(self, state: object) -> None:

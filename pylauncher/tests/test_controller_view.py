@@ -3801,6 +3801,91 @@ def test_a_tab_told_not_to_poll_still_shows_the_channel_without_asking_the_serve
     assert "2026-09-07 01:23 UTC" in view.channel_label.text()
 
 
+def test_a_fresh_install_settles_its_channel_without_waiting_for_a_start(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An install is a press that already wrote the database (T87).
+
+    Until then the first `settle()` came with the next Start, so a tab opened
+    straight after an install said "could not ask" on every surface that speaks
+    to the world. The tab-open rule (`check()`, never `settle()`) is unchanged:
+    this is a separate entry point the window calls once, after `installed`.
+    """
+    stub = _StubSetup(state=channel_setup.Idle())
+    stub.settled = channel_setup.Verified(
+        account="YULON_AB", password="pw", at="2026-09-18 08:00 UTC"
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    assert stub.settles == 0, "opening the tab must not settle"
+    monkeypatch.setattr(controller_view_module.QTimer, "singleShot", lambda ms, fn: None)
+
+    view.settle_channel_after_install()
+
+    assert stub.settles == 1
+    assert "2026-09-18 08:00 UTC" in view.channel_label.text()
+
+
+def test_a_fresh_install_asks_again_only_while_the_first_answer_is_pending(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second ask exists for a world still logging its bots in, and only then.
+
+    A first `settle()` that timed out leaves `Pending` with the minted password
+    in memory; the re-ask verifies it. A first answer that is already Verified
+    (or Refused, which has its own button) is not asked again -- a second
+    `settle()` on Refused would be a second refusal for the user to read.
+    """
+    stub = _StubSetup(state=channel_setup.Idle())
+    stub.settled = channel_setup.Pending(account="YULON_AB", password="pw", tries=1)
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    scheduled: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn))
+    )
+
+    view.settle_channel_after_install()
+    assert stub.settles == 1
+    assert [ms for ms, _ in scheduled] == [controller_view_module._POST_INSTALL_RESETTLE_MS]
+
+    scheduled[0][1]()
+    assert stub.settles == 2, "still Pending after the first ask: asked once more"
+
+    stub.settled = channel_setup.Verified(account="YULON_AB", password="pw", at="x")
+    stub.state = stub.settled
+    scheduled[0][1]()
+    assert stub.settles == 2, "Verified is not asked again"
+
+
+def test_a_tab_torn_down_within_the_minute_is_not_asked_again(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Install, then uninstall inside the minute: the deferred ask finds a closed tab.
+
+    `shutdown()` runs before the tab is deleted; a job started after it would
+    connect its `done` to a slot of a deleted widget, or run docker against a
+    server that is gone.
+    """
+    stub = _StubSetup(state=channel_setup.Idle())
+    stub.settled = channel_setup.Pending(account="YULON_AB", password="pw", tries=1)
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    scheduled: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        controller_view_module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn))
+    )
+    view.settle_channel_after_install()
+    assert stub.settles == 1
+
+    view.shutdown()
+    scheduled[0][1]()
+    assert stub.settles == 1, "a closed tab must not start a job"
+
+
 def test_a_finished_start_asks_the_channel_where_it_now_stands(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

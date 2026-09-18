@@ -360,6 +360,36 @@ def test_every_tree_says_how_high_its_levels_go() -> None:
         assert level.max_level == ceiling, game
 
 
+def test_an_enable_conf_tree_installs_with_its_channel_already_on() -> None:
+    """The keys the Enable press writes are in the install's own conf table too (T87).
+
+    Until 2026-09-18 an `enable_conf` tree (Tortoise, Vanilla, TBC) came out of
+    a fresh install with `SOAP.Enabled = 0`: the install wrote the entry's conf
+    table, the channel keys lived only in `operations.enable_conf`, and nothing
+    spoke to the world until the user stopped it, pressed Enable and started it
+    again (measured on the T86 gate: conf `SOAP.Enabled = 0`, no SOAP line in
+    the world log, until the press). WotLK never had that gap because its switch
+    is compose environment written at install.
+
+    Checked as a relationship, key for key and value for value, because it has
+    no other owner: the conf table and the enable block are two dicts in the
+    same entry that can drift apart in either direction, and a fresh install
+    that boots with the port closed looks entirely healthy.
+    """
+    for game in ("wow-tortoise", "wow-vanilla", "wow-tbc"):
+        entry = load_catalog().get(game)
+        operations = entry.operations
+        assert operations is not None and operations.enable_conf is not None, game
+        native = entry.install.native
+        assert native is not None and native.cmangos is not None, game
+        table = native.cmangos.conf.files[operations.enable_conf.file.removeprefix("etc/")].keys
+        for key, value in operations.enable_conf.keys.items():
+            assert table.get(key) == value, (
+                f"{game}: the Enable press writes {key} = {value!r} but the install writes "
+                f"{table.get(key)!r}; a fresh install would boot with its channel off"
+            )
+
+
 def test_tortoise_states_the_channel_rank_its_core_requires() -> None:
     """The rank that WAS measured, and is stated again now that SOAP is back.
 

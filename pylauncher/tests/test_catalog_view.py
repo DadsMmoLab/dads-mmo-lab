@@ -334,6 +334,7 @@ def test_install_asks_for_folders_then_streams_the_installer(
     view.install_started.connect(lambda g: events.append(("started", g)))
     view.install_finished.connect(lambda g, ok, m: events.append(("finished", g, str(ok), m)))
     view.installed.connect(lambda g, sd, cd: events.append(("installed", g, str(sd), str(cd))))
+    view.fresh_install.connect(lambda g, sd, cd: events.append(("fresh", g, str(sd), str(cd))))
 
     # WotLK: only the server folder is asked for.
     assert view.start_install(CATALOG.get("wow-wotlk")) is True
@@ -352,6 +353,10 @@ def test_install_asks_for_folders_then_streams_the_installer(
     assert events[0] == ("started", "wow-wotlk")
     assert events[1] == ("finished", "wow-wotlk", "True", "done")
     assert events[2][:2] == ("installed", "wow-wotlk")
+    # A finished run is the ONE place `fresh_install` fires, after `installed`
+    # and with the same arguments (T87: the window's channel settle hangs off
+    # it, and Use existing... must never reach that).
+    assert events[3] == ("fresh", *events[2][1:])
     assert view.button_for("wow-tbc").isEnabled() is True
 
     # TBC: the client folder is asked for too (README §3a) and passed through.
@@ -537,6 +542,36 @@ def test_use_existing_still_accepts_a_folder_with_no_problem(
     view.installed.connect(lambda *a: got.append(a))
     assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
     assert len(got) == 1
+
+
+def test_use_existing_emits_installed_but_never_fresh_install(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two signals exist so the window can tell "wrote a server" from "was shown one" (T87).
+
+    `fresh_install` is what the post-install channel settle hangs off, and that
+    settle mints an account; a folder the user pointed the app at must not get
+    one. Asserted on the seam that emits, so a refactor that merged the two
+    signals again would fail here and not on a live auth database.
+    """
+    monkeypatch.setattr(
+        runner, "run", lambda cmd, cwd=None, timeout=None: _completed()  # type: ignore[arg-type]
+    )
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        panel,
+        pick_dir=lambda *_: tmp_path,
+        home=tmp_path,
+        dir_problem=lambda _p: None,
+    )
+    seen: list[str] = []
+    view.installed.connect(lambda *a: seen.append("installed"))
+    view.fresh_install.connect(lambda *a: seen.append("fresh"))
+    assert view.attach_existing(CATALOG.get("wow-wotlk")) is True
+    assert seen == ["installed"], seen
 
 
 def test_use_existing_does_not_pin_the_compose_project(
