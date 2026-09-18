@@ -54,9 +54,11 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
+from yulon.git import RunnerGit
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
+from yulon.runner import run as _REAL_RUN
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
@@ -692,7 +694,7 @@ def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
 def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> None:
     """Measured live, yulon-ubuntu 2026-09-07, on the first run of this code.
 
-    The real applier installed `mod-aoe-loot` into `/home/pk/wowserver` and its
+    The real applier installed `mod-aoe-loot` into `/home/user/wowserver` and its
     manifest glob `data/sql/db-world/*.sql` resolved to nothing — while that
     clone carries `data/sql/db-world/base/aoe_loot_module_string.sql`, the file
     FACT 1 had watched the importer apply an hour earlier. The draft said
@@ -1248,6 +1250,8 @@ class _FakeCustomRoute:
         self.refusal = refusal
         self.derived_from: list[object] = []
         self.installed: list[tuple[str, Path | None]] = []
+        self.replacing: list[bool] = []
+        self.question: str | None = None
         self.forgotten: list[str] = []
         self.custom_ids: set[str] = set()
 
@@ -1266,8 +1270,14 @@ class _FakeCustomRoute:
         self.custom_ids.add(path.name)
         return _custom_manifest(path.name, CUSTOM_FOLDER_DESC)
 
-    def install(self, manifest: Manifest, folder: Path | None) -> ApplyReport:
+    def install(
+        self, manifest: Manifest, folder: Path | None, *, replacing: bool = False
+    ) -> ApplyReport:
+        # `replacing` is recorded, not ignored: it is the user's answer to T47's
+        # question, and an install that dropped it would reset a checkout of
+        # another repository with the question asked and the answer thrown away.
         self.installed.append((manifest.id, folder))
+        self.replacing.append(replacing)
         # Lane A's `complete()` persists inside the install pass, so the row is
         # in the store by the time the report comes back.
         self.store.user[manifest.id] = manifest
@@ -1283,13 +1293,14 @@ class _FakeCustomRoute:
 def _with_custom_route(
     services: ControllerServices, refusal: str | None = None
 ) -> _FakeCustomRoute:
-    """Put a layered store and the five custom-module seams on `services`."""
+    """Put a layered store and the five custom-module seams on `services`, plus T47's question."""
     store = _LayeredStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME)
     route = _FakeCustomRoute(store, refusal=refusal)
     services.store = store
     services.module_from_link = route.derive_link
     services.module_from_folder = route.derive_folder
     services.module_install_custom = route.install
+    services.module_replacement_question = lambda _manifest: route.question
     services.module_forget = route.forget
     return route
 
@@ -9204,3 +9215,229 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     which is the review this change would owe.
     """
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
+
+
+# --------------------------------------------------------------------------
+# T47: the question that stands between a custom install and a `reset --hard`
+# over a checkout this app already owns. The dialog is the view's; every
+# refusal stays the engine's.
+# --------------------------------------------------------------------------
+
+_REPLACE_QUESTION = (
+    "modules/mod-my-thing is a checkout of https://github.com/them/mod-my-thing.git, not of "
+    "https://github.com/you/mod-my-thing.git.\n\nReplace it?"
+)
+
+
+def _asked(monkeypatch: pytest.MonkeyPatch, answer: object) -> list[tuple[str, str]]:
+    """Record every `QMessageBox.question` this view opens and answer them all the same.
+
+    The answer is a plain `int` where a caller passes the enum member, because
+    that is what this PySide6's static `question()` really returns (T33) and a
+    fake handing back the member hides a comparison made with `is`.
+    """
+    seen: list[tuple[str, str]] = []
+
+    def question(_parent: object, title: str, text: str, *_a: object, **_k: object) -> object:
+        seen.append((title, text))
+        return answer
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    return seen
+
+
+def test_cancelling_the_replace_question_installs_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default answer starts no job at all -- `route` is never called.
+
+    Cancel, Escape and the window's close button all arrive as `NoButton`, and
+    `said_yes()` is what makes all three mean no; the `int` below is the No
+    button itself, which is the one a mis-spelled comparison would read as yes.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    route.question = _REPLACE_QUESTION
+    seen = _asked(monkeypatch, int(controller_view_module.QMessageBox.StandardButton.No))
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    assert [title for title, _text in seen] == ["Replace the checkout of mod-my-thing?"]
+    assert seen[0][1] == _REPLACE_QUESTION, "the engine's sentence, not one written here"
+    assert route.installed == [], "the install seam was never reached"
+    assert view.module_report.toPlainText() == (
+        "install from link mod-my-thing: cancelled — nothing on this machine was changed."
+    )
+
+
+def test_answering_the_replace_question_installs_with_the_agreement_carried(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Yes reaches the engine as `replacing=True`, which is the only thing it buys.
+
+    The flag is asserted on the seam rather than on the report: an install that
+    ran with `replacing=False` after the user said yes would be refused by the
+    engine, and the tab would show a refusal for a question they had answered.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    route.question = _REPLACE_QUESTION
+    _asked(monkeypatch, int(controller_view_module.QMessageBox.StandardButton.Yes))
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    assert route.installed == [("mod-my-thing", None)]
+    assert route.replacing == [True]
+
+
+def test_an_ordinary_custom_install_opens_no_dialog_and_agrees_to_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing at the clone path means no question -- asserted by making one fatal.
+
+    The commonest press must not grow a dialog, and the way to prove that is
+    not to check a message: `QMessageBox.question` itself raises here, so a
+    guard that asked anyway fails this test rather than changing its wording.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    assert route.question is None
+
+    def never(*_a: object, **_k: object) -> NoReturn:
+        raise AssertionError("an install with nothing to replace must ask nothing")
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", never)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    assert route.installed == [("mod-my-thing", None)]
+    assert route.replacing == [False]
+
+
+def test_a_seam_that_cannot_answer_asks_nothing_and_leaves_the_refusal_to_the_engine(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A question that cannot be computed must not crash the GUI thread.
+
+    `replacement_question()` reads a claim file and asks git what a checkout is
+    a checkout of, and both can fail. The press goes ahead without the question
+    -- which is safe in one direction only, and it is this one: the install
+    runs with `replacing=False`, so the engine's own guard refuses anything it
+    would have asked about and says "Nothing was changed."
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+
+    def boom(_manifest: object) -> NoReturn:
+        raise OSError("git went away")
+
+    services.module_replacement_question = boom
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("nothing to ask")),
+    )
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    assert route.replacing == [False]
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    """Every file under `root`, by relative path, as bytes. `.git` included."""
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+@pytest.mark.skipif(
+    not apply_module.git_available(), reason="needs a host git to make a real checkout"
+)
+def test_cancelling_leaves_a_real_clone_of_another_repository_byte_for_byte(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole route with no fake in the middle: a real checkout, and Cancel.
+
+    `modules/mod-my-thing` here is a real git clone with this app's own claim
+    inside it, of a repository that is not the one the pasted link names -- the
+    shape a user reaches by installing two forks of the same module. The seams
+    are the real `controller_wow_wotlk.modules` bindings over a real `Applier`
+    and a real `RunnerGit`, so the question comes from `Applier.
+    replacement_question()` and the id from `module_source.derive_link()`.
+
+    What it asserts is the only thing a user cares about: the folder is
+    byte-identical afterwards, `.git` included. A `git fetch` + `reset --hard`
+    rewrites `.git/FETCH_HEAD` even when it lands on the same commit, so this
+    fails for a run that reached the clone seam at all.
+    """
+    server_dir = tmp_path / "server"
+    theirs = tmp_path / "theirs"
+    theirs.mkdir(parents=True)
+    (theirs / "src").mkdir()
+    (theirs / "src" / "Thing.cpp").write_text("// theirs\n", encoding="utf-8")
+    author = ["-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=theirs, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=theirs, check=True)
+    subprocess.run([*["git", *author], "commit", "-qm", "v1"], cwd=theirs, check=True)
+    clone = server_dir / "modules" / "mod-my-thing"
+    clone.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", str(theirs), str(clone)], check=True)
+    apply_module.write_clone_claim(
+        clone, item_id="mod-my-thing", url="https://github.com/them/mod-my-thing.git"
+    )
+    applier = Applier(
+        server_dir,
+        git=RunnerGit(),
+        remote_url=lambda _dest: "https://github.com/them/mod-my-thing.git",
+    )
+    services = _services(ps, tmp_path, [])
+    services.store = modules.store()
+    services.module_from_link = modules.derive_link
+    services.module_install_custom = modules.install_custom(applier)
+    services.module_replacement_question = modules.replacement_question(applier)
+    seen = _asked(monkeypatch, int(controller_view_module.QMessageBox.StandardButton.No))
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+    # The `ps` fixture fakes `runner.run` so a `Controller` works without
+    # Docker, and a real `RunnerGit` runs through the same seam. Put the real
+    # one back now that the view is built: from here on the only subprocess this
+    # test starts is git, against a repository on this disk.
+    monkeypatch.setattr(runner, "run", _REAL_RUN)
+    before = _tree(clone)
+    assert before, "the fixture must be a real checkout"
+
+    view.install_module_from_link()
+
+    assert len(seen) == 1, "the real seam found the clone and asked about it"
+    assert "https://github.com/them/mod-my-thing.git" in seen[0][1]
+    assert "https://github.com/you/mod-my-thing" in seen[0][1]
+    assert _tree(clone) == before, "the checkout was not touched"
+    assert "cancelled" in view.module_report.toPlainText()

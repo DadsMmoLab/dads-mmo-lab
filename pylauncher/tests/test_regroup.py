@@ -195,7 +195,7 @@ def test_the_command_survives_a_path_with_a_space_in_it() -> None:
     the result back, so the test states the property (the shell will see these
     exact arguments) instead of restating whatever quoting style `shlex` picked.
     """
-    argv = ["/opt/My Apps/yulon", "--server-dir", "/home/pk/wow server"]
+    argv = ["/opt/My Apps/yulon", "--server-dir", "/home/user/wow server"]
     got = _reexec(orig_argv=argv)
     assert got is not None
     import shlex
