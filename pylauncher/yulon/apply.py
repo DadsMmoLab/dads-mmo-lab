@@ -169,6 +169,61 @@ def conflicting_installed(
     )
 
 
+def missing_requirements(
+    manifest: Manifest, installed: Mapping[str, frozenset[str]]
+) -> tuple[str, ...]:
+    """Every id in `manifest.requires` with no clone directory here, in declared order.
+
+    `conflicting_installed()`'s mirror, and written beside it for the same
+    reason: one reading, two readers. The Modules tab locks a row's Install on
+    the first answer and `Applier._requires_refusal()` refuses the install on
+    it, so the tab cannot offer a press whose only outcome is a refusal (T69,
+    the T55 shape).
+
+    **A target that is not a catalog item is answered the same way, and that is
+    the whole reason this asks the DISK rather than the catalog.**
+    `mod-playerbots` is cloned by the SERVER install -- `catalog.json` lists it
+    among wow-wotlk's emulator sources with `dest: modules/mod-playerbots` --
+    and has no manifest of its own. Looking `requires` up as a catalog id would
+    refuse `mod-city-bots` forever on the installs where its requirement is in
+    fact present. A folder under `modules/` is the same evidence for a
+    server-cloned module as for one this tab cloned.
+
+    Every family folder is searched, not the manifest's own: `Manifest.requires`
+    names an id and never a family, and an ale script requiring a module
+    (`mod-ale`, nine of the eleven shipped `requires`) is the ordinary case
+    rather than the exotic one.
+
+    **Deliberately WITHOUT `_conflict_refusal()`'s empty-folder reading.** There,
+    opening the folder makes the applier kinder than the tab, which is the safe
+    direction. Here the test is inverted -- a folder means the requirement is
+    MET -- so calling an empty one absent would make the applier refuse what the
+    tab offers, which is exactly the disagreement this function exists to
+    prevent. An empty leftover `modules/mod-ale` lets the install through, and
+    the row above it says installed.
+    """
+    return tuple(
+        needed
+        for needed in manifest.requires
+        if not any(needed in installed.get(str(kind), frozenset()) for kind in CLONE_DIRS)
+    )
+
+
+def requirement_refusal(item_id: str, needed: str) -> str:
+    """Why `item_id` cannot be installed without `needed` — one spelling, two readers (T69).
+
+    The applier raises it and the Modules tab writes it into the row's tooltip
+    and its report line. `needed` is the target's NAME where the catalog knows
+    one and its id otherwise, which is why the caller passes it in rather than
+    this looking it up: the applier has ids and the tab has names, and neither
+    should be made to guess the other's.
+    """
+    return (
+        f"{item_id} needs {needed}, which is not installed here: this manifest names it in "
+        f"`requires`, and {item_id} does nothing without it. Install {needed} first."
+    )
+
+
 # Manifest `db` → MySQL schema name (AzerothCore defaults; acore_ale is Paragon's).
 DB_NAMES: dict[Db, str] = {
     "auth": "acore_auth",
@@ -1426,6 +1481,13 @@ class Applier:
         clash = self._conflict_refusal(manifest)
         if clash:
             raise ApplyError(clash)
+        # After the conflict and before anything is written. The two guards are
+        # independent -- one is about what is here that must not be, the other
+        # about what is not here and must be -- and a row can only be told one
+        # thing at a time, so the conflict keeps the order it had.
+        missing = self._requires_refusal(manifest)
+        if missing:
+            raise ApplyError(missing)
         clone = self.clone_dir(manifest)
         if folder is not None and manifest.source is not None:
             raise ApplyError(
@@ -1999,6 +2061,30 @@ class Applier:
                 f"here, at {where}. Remove it first, or keep it and leave {manifest.id} "
                 f"out. Nothing was changed."
             )
+        return None
+
+    def _requires_refusal(self, manifest: Manifest) -> str | None:
+        """Why this cannot be installed without something that is not here, or `None`.
+
+        `requires` was `conflicts_with`'s twin in the worst way (T69): in the
+        schema, in the JSON Schema, in eleven shipped manifests and read by
+        NOTHING. Loot Pet and SitMeansRest declare `mod-ale` and installed
+        cleanly without it, which puts a Lua script into a server that has no
+        Lua engine -- an install that reports success and then does nothing at
+        all, with no line anywhere saying why.
+
+        The UI locks the same row for the same reason, and this is the half that
+        is a guarantee: the tab's Install is one route to `install()` and a
+        custom-folder or link install is another, so a lock alone would be a
+        suggestion. `missing_requirements()` is the single reading both use.
+
+        Asked of the DISK and not of the catalog, so a module the SERVER install
+        cloned counts as present; `missing_requirements()` says why that matters.
+        """
+        if not manifest.requires:
+            return None
+        for needed in missing_requirements(manifest, installed_clones(self.server_dir)):
+            return requirement_refusal(manifest.id, needed) + " Nothing was changed."
         return None
 
     def _require_own_clone(self, manifest: Manifest, clone: Path, action: When) -> None:

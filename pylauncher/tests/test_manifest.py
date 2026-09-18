@@ -487,15 +487,18 @@ NOT_MANIFESTS: dict[str, str] = {
 }
 """`requires` targets that are real clone directories but not catalog items, and why.
 
-EXACT, not a floor, and the reason is [[the-mechanism-exists-and-nothing-calls-it]]:
-`requires` is in the schema, in nine shipped manifests and in the JSON Schema,
-and **nothing in the app reads it** -- grep `requires` across `yulon/` and every
-hit is `manifest.py`'s own field or an unrelated English word. So it is a
-declaration today and not a guard, and the day something enforces it, it will
-almost certainly do so by looking the target up as a catalog id. Every target
-but this one already is one; this one would be refused forever, silently, on
-installs where it is in fact present. Written down here so that enforcement is
-a decision rather than a regression.
+EXACT, not a floor. Written when `requires` was a declaration nothing read
+([[the-mechanism-exists-and-nothing-calls-it]]), against the day something
+enforced it by looking the target up as a catalog id -- which would have
+refused `mod-city-bots` forever, silently, on installs where its requirement is
+in fact present.
+
+T69 is that day, and it took the other route: `apply.missing_requirements()`
+asks the DISK, so a folder under `modules/` answers for a server-cloned module
+exactly as it does for one the Modules tab cloned, and this dict is not
+consulted at runtime at all. It stays a TEST fixture, and the test below now
+checks the excuse rather than taking it -- an entry here has to name something
+`catalog.json` really clones.
 """
 
 
@@ -527,6 +530,40 @@ def test_every_requires_target_is_a_shipped_item_or_one_of_these() -> None:
     # names is a note about nothing, and would outlive the manifest it excused.
     assert len(targets) >= 10, targets
     assert {want for _game, _item, want in targets} >= set(NOT_MANIFESTS)
+
+
+def test_every_excused_requires_target_is_really_cloned_by_a_server_install() -> None:
+    """The exception has to EARN itself against `catalog.json` (T69).
+
+    `NOT_MANIFESTS` used to be a sentence a person wrote. Now that
+    `apply.missing_requirements()` enforces `requires` against the disk, an
+    entry here is a claim that some game's install puts the folder there, and a
+    wrong one is a module permanently uninstallable with the reason *needs X,
+    not installed* on a machine that can never get X.
+
+    So the claim is read back out of the catalog: every excused id must be the
+    last segment of some emulator source's `dest`. The sibling test above
+    cannot catch this -- it only asks whether the name is spelled in this dict.
+    """
+    catalog = json.loads(
+        (Path(__file__).resolve().parents[1] / "yulon" / "catalog" / "catalog.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    cloned = {
+        source["dest"].rstrip("/").rsplit("/", 1)[-1]
+        for game in catalog["games"]
+        for source in game.get("emulator", {}).get("sources", ())
+        # `dest: "."` is the emulator core itself, unpacked over the server
+        # root. It is not a clone DIRECTORY anything can require, and letting
+        # it in would excuse the name `.` against a folder that is always
+        # present -- so it is dropped before the comparison, not after.
+        if source.get("dest") and source["dest"].rstrip("/") not in ("", ".")
+    }
+    assert set(NOT_MANIFESTS) <= cloned, sorted(set(NOT_MANIFESTS) - cloned)
+    # Not vacuous, in both directions: the set is really read (it has the one
+    # entry that matters) and the drop above really drops.
+    assert "mod-playerbots" in cloned and "." not in cloned
 
 
 # -- T43: the tuning fields on a conf key ----------------------------------

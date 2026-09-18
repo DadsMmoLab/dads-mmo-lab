@@ -772,7 +772,13 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
 
 
 def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """39 of the 41 must behave exactly as they did — no new dialog at all."""
+    """Every manifest but the two ah-bots must behave exactly as it did — no new dialog.
+
+    Rows whose Install is LOCKED are left out of the loop rather than counted
+    as installs (T69): eleven shipped manifests declare a `requires`, nothing
+    is on disk in this fixture, so `_module_action()` refuses them before the
+    asker — which is the guard's whole job and is asserted by its own test.
+    """
     asked: list[str] = []
 
     def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
@@ -780,7 +786,13 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
-    catalogued = [r.data.id for r in view.modules_panel.rows() if r.data.catalogued]
+    catalogued = [
+        r.data.id for r in view.modules_panel.rows() if r.data.catalogued and r.data.installable
+    ]
+    locked = [
+        r.data.id for r in view.modules_panel.rows() if r.data.catalogued and not r.data.installable
+    ]
+    assert "mod-ah-bot" in catalogued and "mod-ah-bot-plus" in catalogued, locked
     for item_id in catalogued:
         view.modules_panel.select(item_id)
         view._module_action("install")
@@ -7880,13 +7892,18 @@ def test_busy_greys_every_row_button_and_gives_them_back(
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
 
     def presses() -> list[bool]:
+        # Rows the ROW's own answer keeps disabled are left out: the busy gate
+        # never overrides that (`set_enabled_actions`), so a locked Install --
+        # eleven of them here, one per shipped `requires` with nothing on disk
+        # to satisfy it (T69) -- would read as the gate still being on.
         return [
             (row.install_button or row.remove_button).isEnabled()
             for row in view.modules_panel.rows()
-            if row.install_button is not None or row.remove_button is not None
+            if (row.install_button is not None and row.data.installable)
+            or (row.remove_button is not None and row.data.removable)
         ]
 
-    assert all(presses())
+    assert presses() and all(presses())
     view._set_busy(True)
     assert not any(presses())
     view._set_busy(False)
