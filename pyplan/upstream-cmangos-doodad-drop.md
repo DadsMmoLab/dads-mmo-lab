@@ -443,12 +443,12 @@ The owner decided for B, with the pins first and option C as the gate. Recorded 
 order it happened, with what was measured and where.
 
 **Pins.** Every source of every shipped entry now carries a `rev`, read out of the gate boxes'
-own checkouts rather than a branch tip: Vanilla's three from `/home/pk/vanilla-75` on `m910q`
+own checkouts rather than a branch tip: Vanilla's three from `/home/user/vanilla-75` on `m910q`
 (gate 7.5; core `8ec338a1`, the commit both boxes in §7 were on), TBC's three from
-`/home/pk/tbc-7.4c` on `m910q` (gate 7.4c; core `f82e7d67` — the Linux commit, not the Windows
+`/home/user/tbc-7.4c` on `m910q` (gate 7.4c; core `f82e7d67` — the Linux commit, not the Windows
 run's `0d2ebc3e`, because 7.4c is the gate with the whole evidence chain on the primary platform
 and `gates/7.7-win11-tbc/source-identity.txt` already established that the one commit between
-them touches `src/game` only), WotLK's two from `/home/pk/wowserver` on `yulon-ubuntu` (gate
+them touches `src/game` only), WotLK's two from `/home/user/wowserver` on `yulon-ubuntu` (gate
 7.1's clean 2026-09-04 run; `gate71-press2.log` prints `AzerothCore revision : 413bea61a85e+`
 and names no commit for the module, so both were read off the box). `test_catalog.py` holds the
 values (`GATE_PINS`) and, separately, the rule that no shipped source is unpinned.

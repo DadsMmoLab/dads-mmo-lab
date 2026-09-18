@@ -718,6 +718,19 @@ class NativeInstall(_Strict):
             "catalog/installers/ (CMaNGOS, 7.3). None: the checkout ships its own Dockerfile."
         ),
     )
+    update_to_latest: bool = Field(
+        default=False,
+        description=(
+            "Offer the Server tab's 'Update the server to latest…' control for this game "
+            "(T64). Data rather than a rule about families, because what the control needs "
+            "is per ENTRY and is not derivable from anything else here: every source it "
+            "would move must be one this app cloned and pins, its upstream must be a "
+            "repository a rebuild of this entry can compile, and any patch the entry carries "
+            "must be one somebody is prepared to see refused when upstream moves under it. "
+            "Default false, so a new entry gets the control by somebody deciding it does — "
+            "the safe direction for a button whose whole subject is untested code."
+        ),
+    )
     db: DbFacts
     ready: ReadyMarkers
     azerothcore: AzerothCoreData | None = Field(

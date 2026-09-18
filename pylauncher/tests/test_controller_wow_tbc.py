@@ -156,7 +156,7 @@ def test_wait_server_ready_refuses_an_argument_it_would_otherwise_drop() -> None
 
 
 def test_the_controller_waits_for_this_games_marker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_world_container_that_answers: None
 ) -> None:
     """The base class calls `azerothcore_ready()`; inheriting that is the bug this closes."""
     seen: dict[str, object] = {}
