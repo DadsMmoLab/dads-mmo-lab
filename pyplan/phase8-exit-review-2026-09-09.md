@@ -36,7 +36,7 @@ exit line unticked.**
 From this worktree's `pylauncher/`, at `d8ad7275`:
 
 ```
-YULON_TEST_BOX=yulon-fedora bash /c/Users/perzi/run-tests-vm.sh --checks
+YULON_TEST_BOX=yulon-fedora bash /c/Users/user/run-tests-vm.sh --checks
   3679 passed, 6 skipped in 26.18s
   mypy (this platform / as Windows / as macOS): no issues found in 93 source files
   ruff: All checks passed!   black: 193 files would be left unchanged

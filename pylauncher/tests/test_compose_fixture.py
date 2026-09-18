@@ -237,7 +237,7 @@ def test_dropping_the_build_overlay_drops_build_and_nothing_else(tmp_path: Path)
 
 
 def test_the_fixture_carries_no_machine_identity() -> None:
-    """A fixture that names /home/pk or the folder's install id would drift the first time
+    """A fixture that names /home/user or the folder's install id would drift the first time
     somebody captured it from another box; the capture step strips both. Checked against BOTH
     committed fixtures — the native install's image tags carry a per-install id that had to be
     stripped from everywhere else; the script install's tags are upstream's fixed
@@ -366,8 +366,8 @@ def test_volumes_compare_by_kind_and_target_never_by_volume_name() -> None:
         "ro",
     )
     assert sc.volume_from_config(
-        {"type": "bind", "source": "/home/pk/srv/modules", "target": "/azerothcore/modules"},
-        root="/home/pk/srv",
+        {"type": "bind", "source": "/home/user/srv/modules", "target": "/azerothcore/modules"},
+        root="/home/user/srv",
     ) == ("bind", "./modules", "/azerothcore/modules", "rw")
     assert sc.volume_from_config(
         {"type": "volume", "source": "ac-database", "target": "/var/lib/mysql"}, root=None
@@ -546,7 +546,7 @@ def test_a_changed_image_name_survives_the_prefix_and_tag_rule() -> None:
 def test_the_tag_rule_is_blind_to_a_base_image_version_which_is_its_cost() -> None:
     """PAID-FOR BLIND SPOT, recorded so nobody rediscovers it as a bug.
 
-    Dropping the tag is what lets `yulon.local/ac-wotlk-worldserver:native-056ed20d` compare
+    Dropping the tag is what lets `yulon.local/ac-wotlk-worldserver:native-28500f30` compare
     with `acore/ac-wotlk-worldserver:master`, and there is no version-shaped way to keep one
     and drop the other: the same rule therefore reads `mysql:8.4` and `mysql:5.7` as the same
     database. The database image is pinned in `catalog.json` and asserted by `test_catalog.py`;
@@ -614,18 +614,22 @@ def test_a_mount_that_lost_read_only_is_reported() -> None:
 
 def test_the_install_root_is_stripped_only_from_paths_actually_under_it() -> None:
     """A sibling directory that merely starts with the same characters stays absolute, so a
-    mount of `/home/pk/srv-backup` can never be read as this install's own `./-backup`."""
+    mount of `/home/user/srv-backup` can never be read as this install's own `./-backup`."""
     assert sc.volume_from_config(
-        {"type": "bind", "source": "/home/pk/srv-backup/modules", "target": "/azerothcore/modules"},
-        root="/home/pk/srv",
-    ) == ("bind", "/home/pk/srv-backup/modules", "/azerothcore/modules", "rw")
+        {
+            "type": "bind",
+            "source": "/home/user/srv-backup/modules",
+            "target": "/azerothcore/modules",
+        },
+        root="/home/user/srv",
+    ) == ("bind", "/home/user/srv-backup/modules", "/azerothcore/modules", "rw")
     assert sc.volume_from_config(
-        {"type": "bind", "source": "/home/pk/srv", "target": "/srv"}, root="/home/pk/srv"
+        {"type": "bind", "source": "/home/user/srv", "target": "/srv"}, root="/home/user/srv"
     ) == ("bind", ".", "/srv", "rw")
     # A trailing slash on the install dir is the same install dir.
     assert sc.volume_from_config(
-        {"type": "bind", "source": "/home/pk/srv/modules", "target": "/azerothcore/modules"},
-        root="/home/pk/srv/",
+        {"type": "bind", "source": "/home/user/srv/modules", "target": "/azerothcore/modules"},
+        root="/home/user/srv/",
     ) == ("bind", "./modules", "/azerothcore/modules", "rw")
     # The same property on the other separator, because the Windows capture is read by the same
     # rule: `C:\gate\wotlk-server-backup` is a different tree from `C:\gate\wotlk-server` and a
@@ -656,8 +660,8 @@ def test_the_install_root_is_stripped_only_from_paths_actually_under_it() -> Non
 def test_a_windows_capture_normalises_to_the_same_relative_shape_as_a_linux_one() -> None:
     """`docker compose config --format json` on Windows reports a bind source as a backslashed
     absolute host path — `C:\\gate\\wotlk-server\\env\\dist\\etc` against a `root` of
-    `C:\\gate\\wotlk-server` — where the same install on Linux reports `/home/pk/srv/env/dist/etc`
-    against `/home/pk/srv`. One committed fixture serves all three platforms, so both have to
+    `C:\\gate\\wotlk-server` — where the same install on Linux reports `/home/user/srv/env/dist/etc`
+    against `/home/user/srv`. One committed fixture serves all three platforms, so both have to
     reduce to the SAME `./env/dist/etc`; while they did not, the compose-diff gate reported three
     services as differing purely on the separator and could not be run on Windows at all
     (measured on `yulon-win11-gate`, 2026-08-31).
@@ -669,10 +673,10 @@ def test_a_windows_capture_normalises_to_the_same_relative_shape_as_a_linux_one(
     linux = sc.volume_from_config(
         {
             "type": "bind",
-            "source": "/home/pk/srv/env/dist/etc",
+            "source": "/home/user/srv/env/dist/etc",
             "target": "/azerothcore/env/dist/etc",
         },
-        root="/home/pk/srv",
+        root="/home/user/srv",
     )
     assert linux == ("bind", "./env/dist/etc", "/azerothcore/env/dist/etc", "rw")
     assert (
@@ -692,7 +696,7 @@ def test_a_windows_path_is_compared_case_insensitively_and_a_posix_one_is_not() 
     """`C:\\Gate` and `c:\\gate` are one directory on Windows and the drive letter's case is not
     even stable across the tools that report it, so the Windows-shaped comparison folds case —
     including the drive letter — and a capture whose root came back differently cased still
-    strips. `/home/pk/SRV` and `/home/pk/srv` are two directories on Linux, so the POSIX-shaped
+    strips. `/home/user/SRV` and `/home/user/srv` are two directories on Linux, so the POSIX-shaped
     comparison keeps case and refuses to strip: silently lowercasing there would be the sibling
     bug the strip rule exists to avoid.
 
@@ -708,9 +712,9 @@ def test_a_windows_path_is_compared_case_insensitively_and_a_posix_one_is_not() 
         root=r"C:\gate\wotlk-server",
     ) == ("bind", "./env/dist/etc", "/azerothcore/env/dist/etc", "rw")
     assert sc.volume_from_config(
-        {"type": "bind", "source": "/home/pk/SRV/modules", "target": "/azerothcore/modules"},
-        root="/home/pk/srv",
-    ) == ("bind", "/home/pk/SRV/modules", "/azerothcore/modules", "rw")
+        {"type": "bind", "source": "/home/user/SRV/modules", "target": "/azerothcore/modules"},
+        root="/home/user/srv",
+    ) == ("bind", "/home/user/SRV/modules", "/azerothcore/modules", "rw")
     assert sc.volume_from_config(
         {
             "type": "bind",
@@ -1014,7 +1018,7 @@ def _config(
     `default` is declared alongside `ac-network` because that is what the real capture shows:
     `ac-client-data-init` names no network, so compose materialises the implicit one.
     """
-    project = "yulon-wow-wotlk-056ed20d"
+    project = "yulon-wow-wotlk-28500f30"
     declared: Mapping[str, Mapping[str, object]] = {
         "ac-network": {},
         "default": {},

@@ -56,9 +56,11 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
+from yulon.git import RunnerGit
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
+from yulon.runner import run as _REAL_RUN
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
@@ -694,7 +696,7 @@ def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
 def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> None:
     """Measured live, yulon-ubuntu 2026-09-07, on the first run of this code.
 
-    The real applier installed `mod-aoe-loot` into `/home/pk/wowserver` and its
+    The real applier installed `mod-aoe-loot` into `/home/user/wowserver` and its
     manifest glob `data/sql/db-world/*.sql` resolved to nothing — while that
     clone carries `data/sql/db-world/base/aoe_loot_module_string.sql`, the file
     FACT 1 had watched the importer apply an hour earlier. The draft said
@@ -1262,6 +1264,8 @@ class _FakeCustomRoute:
         self.refusal = refusal
         self.derived_from: list[object] = []
         self.installed: list[tuple[str, Path | None]] = []
+        self.replacing: list[bool] = []
+        self.question: str | None = None
         self.forgotten: list[str] = []
         self.custom_ids: set[str] = set()
 
@@ -1280,8 +1284,14 @@ class _FakeCustomRoute:
         self.custom_ids.add(path.name)
         return _custom_manifest(path.name, CUSTOM_FOLDER_DESC)
 
-    def install(self, manifest: Manifest, folder: Path | None) -> ApplyReport:
+    def install(
+        self, manifest: Manifest, folder: Path | None, *, replacing: bool = False
+    ) -> ApplyReport:
+        # `replacing` is recorded, not ignored: it is the user's answer to T47's
+        # question, and an install that dropped it would reset a checkout of
+        # another repository with the question asked and the answer thrown away.
         self.installed.append((manifest.id, folder))
+        self.replacing.append(replacing)
         # Lane A's `complete()` persists inside the install pass, so the row is
         # in the store by the time the report comes back.
         self.store.user[manifest.id] = manifest
@@ -1297,13 +1307,14 @@ class _FakeCustomRoute:
 def _with_custom_route(
     services: ControllerServices, refusal: str | None = None
 ) -> _FakeCustomRoute:
-    """Put a layered store and the five custom-module seams on `services`."""
+    """Put a layered store and the five custom-module seams on `services`, plus T47's question."""
     store = _LayeredStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME)
     route = _FakeCustomRoute(store, refusal=refusal)
     services.store = store
     services.module_from_link = route.derive_link
     services.module_from_folder = route.derive_folder
     services.module_install_custom = route.install
+    services.module_replacement_question = lambda _manifest: route.question
     services.module_forget = route.forget
     return route
 

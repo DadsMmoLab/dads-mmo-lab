@@ -560,6 +560,29 @@ def _chips_for(
                 "removing it would break them. Remove them first.",
             )
         )
+    # The two lock chips follow the CALLER's decision and no longer re-derive
+    # half of it from `installed` (T68). `build_module_rows()` passes a name
+    # here only for a row that offers Install, which since T68 includes a clone
+    # whose install never finished -- and on that row `and not installed` would
+    # have dropped the one sentence saying why the button is locked, leaving the
+    # reason in the tooltip alone. The condition was never a second opinion; it
+    # was the same one spelled twice, and the copy that went stale is this one.
+    if blocked_by is not None:
+        chips.append(
+            Chip(
+                "fact",
+                chip_conflicts_with_label(blocked_by),
+                conflict_reason(blocked_by),
+            )
+        )
+    if needs is not None:
+        chips.append(
+            Chip(
+                "fact",
+                chip_needs_label(needs),
+                apply_module.requirement_refusal(item_id, needs),
+            )
+        )
     return tuple(chips)
 
 
