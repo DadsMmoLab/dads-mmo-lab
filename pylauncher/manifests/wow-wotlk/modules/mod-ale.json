@@ -6,8 +6,7 @@
   "game": "wow-wotlk",
   "description": "Lua scripting engine (LuaJIT/5.2/5.3/5.4); required by every ALE mod and keg. ALE is not Eluna — scripts are not interchangeable.",
   "source": {
-    "repo": "azerothcore/mod-ale",
-    "rev": "319f43edd58ffa6ed72873ddd68820ab86e4a99b"
+    "repo": "azerothcore/mod-ale"
   },
   "build": {
     "rebuild": true,
