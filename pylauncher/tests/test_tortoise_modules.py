@@ -793,8 +793,9 @@ ADDONS = {
 }
 """Each addon's folder name, its `.toc`, and a few of the files the `.toc` lists.
 
-Read off the two repositories at the revisions this catalog pins, on
-`yulon-arch` 2026-09-11 (T30 Half 1, `10-addons.txt`). `assets/icon.tga` stands
+Read off the two repositories at the revisions this catalog pinned at the time,
+2026-09-11 (T30 Half 1, `10-addons.txt`); the manifests have tracked each
+repository's latest since T60. `assets/icon.tga` stands
 for the one SUBDIRECTORY either addon has, which is why the manifests copy the
 checkout rather than a list of files.
 """
@@ -871,12 +872,17 @@ def test_an_addon_install_on_a_tab_with_no_client_dir_is_refused_by_name(
 
 
 @pytest.mark.parametrize("item", sorted(ADDONS))
-def test_each_addon_is_pinned_and_carries_no_server_side_step(item: str) -> None:
+def test_each_addon_tracks_its_repositorys_latest_and_carries_no_server_side_step(
+    item: str,
+) -> None:
     """What these two manifests may and may not contain, asserted from the data.
 
-    * **Pinned.** The `.toc`, the file list and the protocol the bots addon
-      speaks were all read at one commit; a manifest on a branch tip installs
-      whatever those repositories publish next into somebody's game client.
+    * **Not pinned.** The owner's decision of 2026-09-15 (T60): every module
+      tracks its repository's latest. Until then both were pinned, because the
+      `.toc`, the file list and the bots addon's protocol were read at one
+      commit and a branch tip installs whatever those repositories publish next
+      into somebody's game client. He was given that reason and decided anyway,
+      so this now holds the pin from creeping back.
     * **Nothing server-side.** No `sql`, no `conf`, no `deploy`, no `npcs`.
       These are files for the user's own client, and an addon manifest that
       quietly grew a `sql` step would be running SQL against `tw_world` under a
@@ -887,9 +893,9 @@ def test_each_addon_is_pinned_and_carries_no_server_side_step(item: str) -> None
     """
     manifest = tortoise_modules.store().load("mod", item)
     assert manifest.source is not None, "README §3a: client files come from their own repo"
-    assert manifest.source.rev is not None and len(manifest.source.rev) == 40, (
-        f"{item} is cloned from {manifest.source.rev!r}; a moving ref puts whatever those "
-        "repositories publish next into a user's game client"
+    assert manifest.source.rev is None, (
+        f"{item} is pinned to {manifest.source.rev!r}; the owner's decision of 2026-09-15 "
+        "(T60) is that every module tracks its repository's latest"
     )
     assert manifest.client, f"{item} declares no client files at all"
     assert not manifest.sql and not manifest.conf and not manifest.deploy and not manifest.npcs, (

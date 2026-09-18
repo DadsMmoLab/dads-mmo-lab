@@ -281,8 +281,13 @@ def test_one_patch_of_a_platform_probe_gets_one_answer_out_of_the_whole_install(
         # `docker run` of `alpine/git` over `tmp_path`, which took the whole
         # suite from 50 s to 148 s on m910q (all measured 2026-09-05).
         # T56 added a fourth: `compose_ready` runs `docker compose version`,
-        # which is the same class of reach as the three below it.
+        # which is the same class of reach as the three below it. T39 added a
+        # fifth: `data_root` used to be the constant `/var/lib/docker` and now
+        # asks the daemon which filesystem it writes to, because that constant
+        # was the distro's and the daemon's only on a machine with no Docker
+        # Desktop. It reaches `docker info` exactly like `vm_resources`.
         vm_resources=lambda: None,
+        data_root=lambda: None,
         bind_mount_ok=lambda server_dir: True,
         port_conflicts=lambda: [],
         compose_ready=lambda: True,

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,11 @@ def _completed(returncode: int = 0, stdout: str = "") -> subprocess.CompletedPro
     return subprocess.CompletedProcess([], returncode, stdout, "")
 
 
+def _canned(stdout: str) -> Callable[[list[str]], subprocess.CompletedProcess[str]]:
+    """A runner that answers any argv with one `docker info` document."""
+    return lambda _argv: _completed(stdout=stdout)
+
+
 def test_vm_resources_reads_the_engines_own_numbers(monkeypatch: pytest.MonkeyPatch) -> None:
     """The VM's size, not the host's: a 32 GB Mac can have a 4 GB Docker VM."""
     monkeypatch.setattr(platform, "docker_program", lambda: "docker")
@@ -246,11 +252,156 @@ def test_docker_desktop_settings_file_on_macos_prefers_settings_store_and_falls_
     assert platform.docker_desktop_settings_file() == settings_new
 
 
-def test_the_docker_data_root_on_linux_is_the_host_directory(
+# The shapes `docker info` came back in, measured on a Windows 11 gate box
+# (Docker Desktop 29.7.2) on 2026-09-16 for T39. The two below are the same WSL
+# distro, once on Docker Desktop's WSL integration and once with a native
+# `docker.io` engine; only the `Name` is rewritten here, since a box name does
+# not belong in this repo. Note what they share: `DockerRootDir` is
+# `/var/lib/docker` in BOTH, so that field alone cannot tell the daemons apart
+# and a data root read straight out of it measures the wrong filesystem under
+# Desktop. `OperatingSystem` is what separates them.
+_DESKTOP_INTEGRATION_INFO = (
+    '{"OperatingSystem": "Docker Desktop", "DockerRootDir": "/var/lib/docker", '
+    '"Name": "docker-desktop", "ServerVersion": "29.7.2", "OSType": "linux", '
+    '"Driver": "overlay2", "MemTotal": 16768684032, "NCPU": 7}'
+)
+_NATIVE_ENGINE_INFO = (
+    '{"OperatingSystem": "Ubuntu 26.04.1 LTS", "DockerRootDir": "/var/lib/docker", '
+    '"Name": "a-wsl-distro", "ServerVersion": "29.1.3", "OSType": "linux", '
+    '"Driver": "overlayfs", "MemTotal": 16768684032, "NCPU": 7}'
+)
+
+
+def _windows_profile_with_desktops_vhdx(root: Path, user: str = "a-windows-user") -> Path:
+    """Build the measured `/mnt/<drive>/Users/<user>/AppData/...` tree under `root`."""
+    vhdx = root.joinpath("c", "Users", user, *platform._DESKTOP_WSL_VHDX)
+    vhdx.parent.mkdir(parents=True, exist_ok=True)
+    vhdx.write_bytes(b"not really 23 GB")
+    return vhdx
+
+
+def test_a_native_engine_on_linux_is_measured_where_it_says_it_keeps_its_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Docker Root Dir`, as reported — the daemon is the host's own.
+
+    Measured: a `docker.io` engine inside the WSL distro answered
+    `OperatingSystem=Ubuntu 26.04.1 LTS`, and pulling 3.59 GB of images grew
+    that distro's `/` by 3,591,659,520 bytes. `/var/lib/docker` really is the
+    filesystem that pays here.
+    """
+    monkeypatch.setattr(platform, "detect", lambda: "linux")
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    run = _canned(_NATIVE_ENGINE_INFO)
+    assert platform.docker_desktop_data_root(run) == Path("/var/lib/docker")
+
+
+def test_docker_desktops_wsl_integration_is_measured_on_the_windows_drive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Not the distro's `/var/lib/docker` — that directory does not exist there.
+
+    This is T39. `detect()` answers "linux" inside WSL, so a launcher in a
+    distro using Desktop's WSL integration used to measure the distro's own
+    filesystem: `free_bytes()` walked up the missing `/var/lib/docker` to
+    `/var/lib` and reported 1,024,681,578,496 bytes free for a Docker whose
+    images land in `docker_data.vhdx` on C:, which had 34,857,996,288 free at
+    09:52 that day and 30,476,148,736 at 12:10, after more images (measured on
+    the gate box, 2026-09-16, with the app's own code). 954 GiB against a 40 GB
+    floor passes; 28 GiB refuses.
+    """
+    monkeypatch.setattr(platform, "detect", lambda: "linux")
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    vhdx = _windows_profile_with_desktops_vhdx(tmp_path)
+    monkeypatch.setattr(platform, "_windows_drive_mounts", lambda: [tmp_path / "c"])
+
+    got = platform.docker_desktop_data_root(_canned(_DESKTOP_INTEGRATION_INFO))
+    assert got == vhdx
+    assert got != Path("/var/lib/docker")
+
+
+def test_docker_desktops_data_disk_that_cannot_be_pinned_down_stays_unchecked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No candidate, or several profiles with one each, is unknown — never a guess.
+
+    The alternative is picking a profile and putting its drive's free space
+    under a refusal, which is a number nothing measured.
+    """
+    monkeypatch.setattr(platform, "detect", lambda: "linux")
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    monkeypatch.setattr(platform, "_windows_drive_mounts", lambda: [tmp_path / "c"])
+
+    # Nothing there at all: the interop mount may not exist, or Desktop may
+    # keep its disk somewhere this search does not know about.
+    assert platform.docker_desktop_data_root(_canned(_DESKTOP_INTEGRATION_INFO)) is None
+
+    # Two Windows profiles, each with a Desktop install. Which one belongs to
+    # the daemon that just answered is not something this code can tell.
+    _windows_profile_with_desktops_vhdx(tmp_path, "one-user")
+    _windows_profile_with_desktops_vhdx(tmp_path, "another-user")
+    assert platform.docker_desktop_data_root(_canned(_DESKTOP_INTEGRATION_INFO)) is None
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _completed(returncode=1),
+        _completed(stdout="not json at all"),
+        _completed(stdout='{"DockerRootDir": "/var/lib/docker"}'),
+        _completed(stdout='{"OperatingSystem": "", "DockerRootDir": "/var/lib/docker"}'),
+        _completed(stdout='{"OperatingSystem": "Ubuntu 26.04.1 LTS", "DockerRootDir": ""}'),
+    ],
+)
+def test_a_linux_data_root_that_was_never_established_is_never_var_lib_docker(
+    monkeypatch: pytest.MonkeyPatch, answer: subprocess.CompletedProcess[str]
+) -> None:
+    """A daemon that did not answer leaves the row unchecked.
+
+    `/var/lib/docker` as a default is the defect this ticket is about: it is a
+    real directory on one kind of machine and a fabrication on the other, and
+    nothing in a failed probe says which machine this is.
+    """
+    monkeypatch.setattr(platform, "detect", lambda: "linux")
+    monkeypatch.setattr(platform, "docker_program", lambda: "docker")
+    assert platform.docker_desktop_data_root(lambda _argv: answer) is None
+
+
+def test_no_docker_binary_leaves_the_linux_data_root_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(platform, "detect", lambda: "linux")
-    assert platform.docker_desktop_data_root() == Path("/var/lib/docker")
+    monkeypatch.setattr(platform, "docker_program", lambda: None)
+    assert platform.docker_desktop_data_root() is None
+
+
+def test_windows_drive_mounts_are_single_letters_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`/mnt/wsl` and `/mnt/host` are WSL's own, not drives.
+
+    Measured on the box: a distro on Desktop's WSL integration carries
+    `/mnt/wsl/docker-desktop/...`, and Desktop's utility VM carries
+    `/mnt/host/c`. Treating either as a drive would send the search off
+    looking for `Users` inside Docker's own plumbing.
+    """
+    for name in ("c", "d", "wsl", "host", "docker-desktop-disk"):
+        (tmp_path / name).mkdir()
+    monkeypatch.setattr(platform, "_WSL_MOUNT_ROOT", tmp_path)
+    assert [mount.name for mount in platform._windows_drive_mounts()] == ["c", "d"]
+
+
+def test_a_machine_with_no_mnt_at_all_leaves_the_data_root_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A real Linux box has no `/mnt` to list, and that is an answer, not an error.
+
+    Only the absent case is exercised here. A `/mnt` that exists but refuses to
+    be read raises `PermissionError`, which is an `OSError` and lands in the
+    same `except` — the same branch, not a second one this test also covers.
+    """
+    monkeypatch.setattr(platform, "_WSL_MOUNT_ROOT", tmp_path / "there-is-no-mnt")
+    assert platform._windows_drive_mounts() == []
 
 
 def test_the_windows_data_root_comes_from_docker_desktops_settings(
@@ -271,10 +422,10 @@ def test_the_windows_data_root_comes_from_docker_desktops_settings(
     ("path", "expected"),
     [
         (r"\\fileserver\share\wow", "network path"),
-        ("/Users/pk/OneDrive/wow", "cloud-synced"),
-        ("/Users/pk/Library/Mobile Documents/com~apple~CloudDocs/wow", "iCloud Drive"),
-        ("/Users/pk/Dropbox/wow", "cloud-synced"),
-        ("/Users/pk/games/wow", ""),
+        ("/Users/user/OneDrive/wow", "cloud-synced"),
+        ("/Users/user/Library/Mobile Documents/com~apple~CloudDocs/wow", "iCloud Drive"),
+        ("/Users/user/Dropbox/wow", "cloud-synced"),
+        ("/Users/user/games/wow", ""),
         ("/", "root of a filesystem"),
         ("/etc", "system directory"),
         ("/tmp", "system directory"),
@@ -578,7 +729,7 @@ def test_the_home_directory_itself_is_refused_before_the_installer_sees_it(
 ) -> None:
     """The picker opens on home, so this is the path a click-through actually produces.
 
-    Live gate on clean Fedora 44 (2026-08-25): choosing `/home/pk` passed
+    Live gate on clean Fedora 44 (2026-08-25): choosing `/home/user` passed
     `server_dir_problem()`, reached `install-wow-wotlk-fedora.sh`, and died on
     its `case "$SERVER_DIR" in /|"$HOME"|...` branch - but only AFTER the user
     had typed a sudo password into Yu'lon's own dialog and waited through
@@ -603,7 +754,7 @@ def test_a_symlink_onto_a_reserved_directory_is_refused_too() -> None:
     """The scripts `realpath -m --` before their `case`; a lexical check cannot.
 
     On Fedora Atomic `/home` is a symlink to `/var/home`, so a picker returning
-    `/home/pk` and a script seeing `/var/home/pk` disagree about whether the
+    `/home/user` and a script seeing `/var/home/user` disagree about whether the
     path is the home folder - and the user pays for that disagreement with a
     sudo password and a wait before the script refuses.
     """
@@ -756,7 +907,7 @@ def test_wsl_linux_path_converts_a_unc_path_back_to_the_distro_view() -> None:
 
 def test_wsl_linux_path_is_none_for_a_path_that_is_not_in_wsl() -> None:
     """An ordinary Windows path has no Linux spelling, and guessing one would lie."""
-    assert platform.wsl_linux_path(Path(r"C:\Users\pk\srv")) is None
+    assert platform.wsl_linux_path(Path(r"C:\Users\user\srv")) is None
     assert platform.wsl_linux_path(Path(r"\\nas\share\srv")) is None
 
 

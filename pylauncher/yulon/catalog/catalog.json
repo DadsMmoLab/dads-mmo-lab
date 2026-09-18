@@ -37,6 +37,7 @@
         },
         "native": {
           "family": "azerothcore",
+          "update_to_latest": true,
           "templates": "wow-wotlk/native",
           "images": [
             "worldserver",
@@ -183,6 +184,7 @@
         },
         "native": {
           "family": "cmangos",
+          "update_to_latest": true,
           "templates": "shared/cmangos",
           "dockerfile_dir": "wow-tbc/native",
           "image_prefix": "yulon.local/cmangos-tbc-",
@@ -591,6 +593,7 @@
         },
         "native": {
           "family": "cmangos",
+          "update_to_latest": true,
           "templates": "shared/cmangos",
           "dockerfile_dir": "wow-vanilla/native",
           "image_prefix": "yulon.local/cmangos-vanilla-",
@@ -988,6 +991,7 @@
         },
         "native": {
           "family": "cmangos",
+          "update_to_latest": true,
           "templates": "shared/cmangos",
           "dockerfile_dir": "wow-tortoise/native",
           "image_prefix": "yulon.local/cmangos-tortoise-",

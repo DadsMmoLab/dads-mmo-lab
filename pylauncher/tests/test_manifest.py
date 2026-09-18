@@ -201,6 +201,116 @@ def test_sql_step_needs_exactly_one_body() -> None:
             parse_manifest({**README_EXAMPLE, "sql": [{"db": "world", **body}]})
 
 
+_ROSTER_PRECONDITION: dict[str, Any] = {
+    "db": "playerbots",
+    "query": "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
+    "missing": "mod-playerbots has not created its tables yet",
+}
+
+
+def test_a_sql_step_check_belongs_only_to_a_direct_step() -> None:
+    """T63's two fields are refused on the route this app does not run itself.
+
+    A `db-import` step is handed to AzerothCore's own updater on a later boot.
+    Nothing here opens the file, and nothing here is watching when it lands, so
+    a `precondition` on one would gate a write this engine never makes and a
+    `verify` would read a database before the program that wrote it had run. A
+    field nobody reads is how `conflicts_with` came to be in the schema, in the
+    catalog and in a passing test while the app installed both modules anyway
+    (T53), and the cheapest place to stop the next one is the parser.
+    """
+    for extra in (
+        {"precondition": _ROSTER_PRECONDITION},
+        {"verify": [_ROSTER_PRECONDITION]},
+    ):
+        with pytest.raises(ValidationError, match="applied_by='direct'"):
+            parse_manifest(
+                {
+                    **README_EXAMPLE,
+                    "sql": [
+                        {
+                            "db": "world",
+                            "path": "a.sql",
+                            "applied_by": "db-import",
+                            **extra,
+                        }
+                    ],
+                }
+            )
+    # The same step on the direct route parses, so the refusal above is about
+    # `applied_by` and not about the field being malformed.
+    ok = parse_manifest(
+        {
+            **README_EXAMPLE,
+            "sql": [
+                {
+                    "db": "world",
+                    "path": "a.sql",
+                    "applied_by": "direct",
+                    "precondition": _ROSTER_PRECONDITION,
+                    "verify": [_ROSTER_PRECONDITION],
+                }
+            ],
+        }
+    )
+    assert ok.sql[0].precondition is not None and len(ok.sql[0].verify) == 1
+
+
+def test_a_sql_step_check_query_must_be_one_select() -> None:
+    """The same fence `Prompt.exists` has, asserted through the new field.
+
+    `ExistsCheck` is one model with three users now, and its `_one_select`
+    validator is the reason a manifest -- content, not code -- cannot reach the
+    write half of the SQL seam through a field whose whole job is to read.
+    Pinned here as well as on the prompt, because a shared validator that stops
+    being reached by one of its users fails silently.
+    """
+    for query in ("DELETE FROM citizen_roster", "SELECT 1; DROP TABLE citizen_roster"):
+        with pytest.raises(ValidationError, match="ExistsCheck.query"):
+            parse_manifest(
+                {
+                    **README_EXAMPLE,
+                    "sql": [
+                        {
+                            "db": "world",
+                            "path": "a.sql",
+                            "precondition": {**_ROSTER_PRECONDITION, "query": query},
+                        }
+                    ],
+                }
+            )
+
+
+def test_no_shipped_sql_step_check_carries_a_template_field() -> None:
+    """A `SqlStep` check is never rendered, so a `{key}` in one would be sent to MySQL raw.
+
+    `Prompt.exists` templates over the user's answers and `Applier._check_exists`
+    renders it. The two `SqlStep` checks are the CATALOG's own sentence about
+    the module's own tables, asked before any value is in hand -- and
+    `Applier._ask_db()` deliberately does not render, so that a `{` in somebody's
+    SQL cannot raise inside a check whose whole job is to answer a question.
+    That decision is only safe while no shipped check carries one.
+
+    Not vacuous: the count of checks it actually read is asserted, so a glob
+    that stopped finding files would fail here rather than pass over nothing.
+    """
+    seen: list[str] = []
+    offenders: list[str] = []
+    for path in sorted(MANIFESTS_DIR.glob("*/*/*.json")):
+        if path.parent.parent.name == "schema":
+            continue
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        for step in raw.get("sql", []):
+            checks = [step["precondition"]] if step.get("precondition") else []
+            checks += list(step.get("verify", []))
+            for check in checks:
+                seen.append(f"{path.name}:{check['query'][:30]}")
+                if "{" in check["query"] or "{" in check["missing"]:
+                    offenders.append(f"{path.relative_to(MANIFESTS_DIR)}: {check['query']!r}")
+    assert offenders == [], offenders
+    assert len(seen) == 3, seen  # mod-city-bots' precondition and its two verify entries
+
+
 def test_prompt_choice_rules() -> None:
     with pytest.raises(ValidationError, match="choices"):
         parse_manifest(
@@ -292,7 +402,7 @@ def test_a_folder_origin_module_needs_no_source_and_a_link_one_still_does() -> N
     folder = parse_manifest(
         {
             **sourceless,
-            "origin": {"kind": "folder", "path": "/home/pk/mod-x", "added": "2026-09-08"},
+            "origin": {"kind": "folder", "path": "/home/user/mod-x", "added": "2026-09-08"},
         }
     )
     assert folder.source is None
@@ -323,6 +433,48 @@ def test_origin_is_optional_and_every_shipped_manifest_has_none() -> None:
         item_dir = index_file.with_suffix("")
         for item_file in sorted(item_dir.glob("*.json")) if item_dir.is_dir() else []:
             assert parse_manifest(json.loads(item_file.read_text(encoding="utf-8"))).origin is None
+
+
+def test_no_shipped_module_manifest_pins_a_revision() -> None:
+    """Every module tracks its repository's latest: the owner's decision, 2026-09-15 (T60).
+
+    Five manifests were pinned (`lootpet`, `sitmeanrest`, `mod-ale`,
+    `tortoise-bots-manager`, `tortoise-gm-manager`), each with a written reason,
+    and the owner removed all five knowing them. So a `rev` in a shipped module
+    manifest is a decision being reversed, and it fails here rather than in
+    review. `rev: null` is refused too: the decision is that the field is not
+    there.
+
+    The files are enumerated from the DISK, every game and every family, and
+    not through the indexes, so an item file an index forgot is still read.
+    `Source.rev` stays in the schema: the catalog's SERVER sources are pinned
+    (`test_catalog.py::GATE_PINS`), and derived user manifests are not shipped.
+    """
+    items = sorted(p for p in MANIFESTS_DIR.glob("*/*/*.json") if p.parent.parent.name != "schema")
+    pinned: list[str] = []
+    cloned: set[str] = set()
+    for path in items:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        source = raw.get("source")
+        if source is None:
+            continue
+        cloned.add(f"{raw['game']}/{raw['id']}")
+        if "rev" in source:
+            pinned.append(f"{path.relative_to(MANIFESTS_DIR)} rev={source['rev']!r}")
+    assert not pinned, (
+        "the owner decided on 2026-09-15 (T60) that no module manifest carries a rev -- every "
+        f"module tracks its repository's latest. Pinned: {pinned}"
+    )
+    # Not vacuous: the glob reached every game, and the five that were pinned.
+    games = {p.name for p in MANIFESTS_DIR.iterdir() if p.is_dir() and p.name != "schema"}
+    assert games == {p.parent.parent.name for p in items}, games
+    assert {
+        "wow-wotlk/lootpet",
+        "wow-wotlk/sitmeanrest",
+        "wow-wotlk/mod-ale",
+        "wow-tortoise/tortoise-bots-manager",
+        "wow-tortoise/tortoise-gm-manager",
+    } <= cloned, sorted(cloned)
 
 
 # -- T43: the tuning fields on a conf key ----------------------------------

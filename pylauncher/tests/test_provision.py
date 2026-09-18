@@ -28,7 +28,7 @@ from yulon.catalog import installer
 # The directory the current Docker Desktop installs itself into, and the
 # `docker.exe` inside it. Real strings from a real machine (Windows 11 Pro
 # 26200, 2026-08-23) so the fakes below describe the case that was measured.
-DOCKER_BIN_DIR = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin"
+DOCKER_BIN_DIR = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin"
 DOCKER_EXE = DOCKER_BIN_DIR + r"\docker.EXE"
 
 
@@ -1462,6 +1462,187 @@ def test_a_yes_whose_join_failed_is_not_reported_as_a_join(
     # ...but nothing may claim the group was joined.
     assert not [m for m in report.manual_steps if "Log out and back in" in m]
     assert any("did not work" in m for m in report.manual_steps)
+
+
+class _FailsInOrder(_Run):
+    """`_Run`, but each key that a joined argv contains answers with its own (exit, stderr).
+
+    A chain fake rather than `_Refuses`: the defect under test is about WHICH of
+    several failures the advice is drawn from, so the failures have to be
+    distinguishable from each other. `id -nG` answers a group list without
+    `docker`, so the consent question is asked rather than skipped.
+    """
+
+    def __init__(self, answers: dict[str, tuple[int, str]], groups: str = "deck wheel") -> None:
+        super().__init__()
+        self.answers = answers
+        self.groups = groups
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        if argv[:2] == ["docker", "info"]:
+            return subprocess.CompletedProcess(argv, self.docker_rc, "", "")
+        if argv[0] == "id":
+            return subprocess.CompletedProcess(argv, 0, self.groups, "")
+        shown = " ".join(argv)
+        for key, (code, stderr) in self.answers.items():
+            if key in shown:
+                return subprocess.CompletedProcess(argv, code, "", stderr)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+# The capture from T57, byte for byte off a Steam Deck running 0.8.65-Public.
+# Every line of it is one cause: the keyring was never initialised, so pacman
+# installed nothing, so there was no `docker.service` to enable and no `docker`
+# group to join. Kept as a fixture rather than paraphrased — the branch under
+# test reads pacman's own words, and a paraphrase would be a fixture more
+# convenient than the reality it stands for.
+STEAM_DECK_T57 = {
+    "pacman -Sy": (
+        1,
+        "warning: Public keyring not found; have you run 'pacman-key --init'?\n"
+        "error: keyring is not writable\n"
+        "error: required key missing from keyring\n"
+        "error: failed to commit transaction (unexpected error)",
+    ),
+    "systemctl enable": (1, "Failed to enable unit: Unit docker.service does not exist"),
+    "usermod -aG": (6, "usermod: group 'docker' does not exist"),
+}
+
+
+def test_the_advice_names_the_first_failure_not_the_last(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T57: three steps failed as one chain, and we advised on the end of it.
+
+    The user was told `sudo usermod -aG docker deck`, which fails again with
+    `group 'docker' does not exist` for exactly the reason printed two lines
+    above it — the group is created by the package that never installed. The
+    remedy belongs to the FIRST link.
+    """
+    _linux(monkeypatch, steamos=True)
+    report = platform.ensure_docker(
+        run=_FailsInOrder(STEAM_DECK_T57),
+        which=_which("pacman"),
+        user="deck",
+        wait_seconds=0.0,
+        ask=_answers(group="y", password=None),
+        run_input=_never_feeds,  # nothing here says "a password is required"
+    )
+
+    assert report.docker_group == "join-failed"
+    advice = report.manual_steps[0]
+    # The wording only the keyring branch produces. `pacman-key` appears in no
+    # other remedy in `platform.py`, so this cannot be satisfied by the generic
+    # first-failure sentence standing in for it.
+    assert advice.startswith("Start here"), advice
+    assert "sudo pacman-key --init" in advice
+    assert "sudo pacman-key --populate archlinux holo" in advice
+    # SteamOS, so the read-only root is named too; see the pacman-only test below.
+    assert "sudo steamos-readonly disable" in advice
+    # ...and the step three links down the chain is not what we tell them to run.
+    assert "usermod" not in advice
+
+    # The neighbour that used to do the advising must be visibly out of the way:
+    # `DOCKER_GROUP_JOIN_FAILED_STEP` is the only sentence containing "To do it
+    # yourself", and this run must not produce it anywhere.
+    assert not [m for m in report.manual_steps if "To do it yourself" in m]
+    assert any("same problem, not a second one" in m for m in report.manual_steps)
+
+    # The whole message a user reads, not just the tuple: the keyring has to come
+    # before the group, which is the ticket's minimum bar.
+    shown = str(installer.docker_unavailable(report))
+    assert shown.index("pacman-key") < shown.index("usermod")
+    # The evidence is still all there for a support log.
+    assert "Some steps did not run" in shown
+    assert "Unit docker.service does not exist" in shown
+
+
+def test_a_pacman_keyring_failure_off_steamos_never_names_steamos_readonly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`steamos-readonly` is not a command on Arch, and naming it there is the same defect.
+
+    Same keyring cause, same remedy, minus the one sentence that is only true
+    where the root filesystem is locked.
+    """
+    _linux(monkeypatch, steamos=False)
+    report = platform.ensure_docker(
+        run=_FailsInOrder(STEAM_DECK_T57),
+        which=_which("pacman"),
+        user="deck",
+        wait_seconds=0.0,
+        ask=_answers(group="y", password=None),
+        run_input=_never_feeds,
+    )
+
+    advice = report.manual_steps[0]
+    assert "sudo pacman-key --init" in advice
+    assert "steamos-readonly" not in advice
+
+
+def test_an_apt_box_is_advised_about_the_install_that_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same rule on a distro with no keyring story: first failure, own command.
+
+    `apt-get update` succeeded and `apt-get install` did not, so the advice is
+    about the install — not about `systemctl`, not about `usermod`, and not the
+    pacman keyring sentence, which is the neighbouring branch.
+    """
+    _linux(monkeypatch)
+    report = platform.ensure_docker(
+        run=_FailsInOrder(
+            {
+                "apt-get install": (100, "E: Unable to locate package docker.io"),
+                "systemctl enable": (1, "Unit docker.service does not exist"),
+                "usermod -aG": (6, "usermod: group 'docker' does not exist"),
+            }
+        ),
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=_answers(group="y", password=None),
+        run_input=_never_feeds,
+    )
+
+    advice = report.manual_steps[0]
+    assert advice.startswith("Start here"), advice
+    assert "sudo apt-get install -y docker.io docker-compose-v2 docker-buildx" in advice
+    assert "apt-get update" not in advice  # it ran, and it worked
+    assert "systemctl" not in advice and "usermod" not in advice
+    assert "pacman-key" not in advice  # the keyring branch was not reached
+    assert not [m for m in report.manual_steps if "To do it yourself" in m]
+
+
+def test_a_run_where_only_the_join_failed_still_advises_the_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case the old wording was written for is left exactly as it was.
+
+    Every package step worked, and `usermod` is both the first and the only
+    failure — so it IS the root cause, and "To do it yourself: sudo usermod
+    -aG docker pk" is the correct instruction. The fix must not swap a wrong
+    remedy for a different wrong remedy.
+    """
+    _linux(monkeypatch)
+    report = platform.ensure_docker(
+        run=_FailsInOrder({"usermod -aG": (1, "usermod: Permission denied.")}, groups="pk sudo"),
+        which=_which("apt-get"),
+        user="pk",
+        wait_seconds=0.0,
+        ask=_answers(group="y", password=None),
+        run_input=_never_feeds,
+    )
+
+    assert report.docker_group == "join-failed"
+    assert any(
+        "To do it yourself: sudo usermod -aG docker pk" in m for m in report.manual_steps
+    ), report.manual_steps
+    # ...and the same `usermod` is not also printed as a "start here" line: the
+    # group sentence already names it, and saying it twice is not more helpful.
+    assert not [m for m in report.manual_steps if m.startswith("Start here")]
+    assert not [m for m in report.manual_steps if "same problem, not a second one" in m]
 
 
 def test_declining_does_not_promise_an_engine_that_was_never_installed(

@@ -42,6 +42,36 @@ shrank the window.
 """
 
 
+MINIMUM_WINDOW_SIZE = (960, 640)
+"""The smallest the window can be dragged to, and the hardest case for any tab.
+
+Named for `DEFAULT_WINDOW_SIZE`'s reason and T73's: the Modules tab's layout is
+asserted at BOTH ends of the range a user can put the window in, and a test
+carrying its own copy of this pair would keep passing if someone lowered the
+floor -- the size at which a stretch factor stops mattering and the minimum
+heights are all there is.
+
+**600 until T85, and it was a promise the Modules tab could not keep.** With the
+"A rebuild is owed" banner on screen -- which is the state a user is in for as
+long as it takes them to press Rebuild, and the state gate round 6 photographed
+-- that tab owes 68px more than it does without one, and 600 is short of it by
+more than the whole of `_TabFit`'s ladder: measured themed with a job's log and a
+populated report, the tab had 426px and needed 474 with the log folded, the
+report folded and the list at `_LIST_FLOOR_FLOOR`. Everything past the ladder is
+paid in cut text, and it was paid by the two widgets that have no other way to be
+shorter -- the wrapped action bar drawn 82px of its 106 with `Rebuild the
+server…` sliced through, and the custom-module card 82 of 122 with both its
+buttons below its own edge.
+
+The number is MEASURED and not chosen: swept width by width with the banner up,
+the smallest height at which nothing is cut is 634 at 960 wide and rises to 637
+between 1090 and 1110, where the theme's font is largest among the widths that
+still wrap the bar. 640 is that worst case with three pixels of headroom, so a
+font that grows by a pixel is a red test rather than a clipped toolbar. Above
+1120 the bar is one line again and the whole question goes away.
+"""
+
+
 _CATALOG_MIN_WIDTH = 420
 """Narrowest the catalog pane may become, in pixels.
 
@@ -718,7 +748,7 @@ def build_window() -> object:
     window.setProperty("update_worker", update_worker)
     update_thread.start()
     window.resize(*DEFAULT_WINDOW_SIZE)
-    window.setMinimumSize(960, 600)
+    window.setMinimumSize(*MINIMUM_WINDOW_SIZE)
     window.setProperty("tabs", tabs)
     # The live lists themselves, not a copy of either - see `_Window`.
     window.yulon_log_panels = panels

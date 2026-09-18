@@ -22,7 +22,14 @@ from PySide6.QtWidgets import (
 
 import main
 from main import DEFAULT_WINDOW_SIZE
-from tests.conftest import JOB_PACE, process_events, pump_until, spelled_bounds, wait_for_panel
+from tests.conftest import (
+    JOB_PACE,
+    join_panel_thread,
+    process_events,
+    pump_until,
+    spelled_bounds,
+    wait_for_panel,
+)
 from yulon import platform, runner, wsl
 from yulon.apply import ApplyError
 from yulon.catalog.catalog import CatalogEntry, load_catalog
@@ -1986,8 +1993,14 @@ def test_every_install_button_is_inside_the_default_window(qapp: object) -> None
 # title was 91 characters and the folder name was at the end of it.
 
 
-def _view(tmp_path: Path, *, take_suggestion: bool, picked: Path | None):
-    """A CatalogView whose two folder questions are both answered by the test."""
+def _view(tmp_path: Path, *, take_suggestion: bool, picked: Path | None, installs: bool = True):
+    """A CatalogView whose two folder questions are both answered by the test.
+
+    `installs=False` hands it an engine that writes NOTHING -- no server dir and
+    no compose file. A test that asserts a path was never created needs that:
+    the default double makes the server directory on its worker thread at the
+    end of `run()`, which is a second writer racing the assertion (T74).
+    """
     asked: list[tuple[str, Path]] = []
     titles: list[str] = []
 
@@ -2001,7 +2014,7 @@ def _view(tmp_path: Path, *, take_suggestion: bool, picked: Path | None):
 
     view = CatalogView(
         CATALOG,
-        lambda e: _FakeInstaller(e, []),
+        lambda e: _FakeInstaller(e, [], installs=installs),
         LogPanel(),
         pick_dir=pick,
         ask_suggestion=ask,
@@ -2101,15 +2114,35 @@ def test_the_suggestion_is_never_created_by_asking_about_it(qapp: object, tmp_pa
     has been agreed to -- so it must create even less. The install itself makes
     the directory, and `native._claim_before_writing()` is what records that it
     is ours.
+
+    T74: this test used to race the install it had just started. It said
+    "`_FakeInstaller` runs no stages, so nothing downstream can have made it
+    either", and that was false -- the double's `run()` ends in
+    `server_dir.mkdir(parents=True, exist_ok=True)` whatever its line list, and
+    `run()` is on `LogPanel`'s worker thread. The assertion beat that mkdir by
+    scheduling luck; on a loaded box it lost, once in 30 runs of this file
+    (measured), reading "asking about the folder created it" about a folder the
+    test's own engine had made.
+
+    Both halves of the fix are load-bearing. `installs=False` leaves exactly one
+    candidate creator in the process, the question; and the JOIN below moves the
+    assertion past the end of the worker, so the test now says the folder never
+    appeared at all rather than that it had not appeared YET -- which is the
+    difference between a fact and a stopwatch. The join is `join_panel_thread`
+    and not `wait_for_panel` on purpose: it must not pump, because delivering
+    `run_finished` would run the view's own post-install handling and put THAT
+    between the worker and this assertion. The pump comes after, so the queued
+    signal is spent inside this test rather than in whichever test next pumps
+    the shared `QApplication`.
     """
     entry = CATALOG.get("wow-wotlk")
     suggested = tmp_path / entry.install.default_server_dir
-    view, asked, _titles = _view(tmp_path, take_suggestion=True, picked=None)
+    view, asked, _titles = _view(tmp_path, take_suggestion=True, picked=None, installs=False)
     assert view.start_install(entry) is True
     assert asked[0][1] == suggested
-    # `_FakeInstaller` runs no stages, so nothing downstream can have made it
-    # either: whatever exists here was made by the question.
+    join_panel_thread(view._log)
     assert not suggested.exists(), "asking about the folder created it"
+    wait_for_panel(view._log)
 
 
 def test_a_real_static_ints_yes_still_offers_and_takes_the_restart(

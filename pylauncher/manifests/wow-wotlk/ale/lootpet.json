@@ -6,8 +6,7 @@
   "game": "wow-wotlk",
   "description": "Any summoned vanity pet fetches loot from nearby corpses you or your group tapped. Finds them by sweeping for corpses rather than by a kill hook, so grey mobs and max-level kills count too.",
   "source": {
-    "repo": "pjerra/LootPet2",
-    "rev": "4b1c3ed4bb2f86986c72c4379ddaef0bc980bdc6"
+    "repo": "pjerra/LootPet2"
   },
   "requires": [
     "mod-ale"

@@ -50,6 +50,7 @@ from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import (
     InstallerError,
     InstallOptions,
+    WorldStoppedAfterReadyError,
     installer_for,
     rebuild_confirmation,
 )
@@ -479,6 +480,90 @@ def test_a_rebuild_whose_server_never_comes_up_puts_the_old_build_back(
     assert "put back" in said and "running again" in said, said
 
 
+ABORTED_AFTER_READY = native.WorldOutput(
+    text=(
+        "ready...\n"
+        "Avg Diff: 15ms\n"
+        "AC> [1146] Table 'acore_world.city_bot_poi' doesn't exist\n"
+        "Your database structure is not up to date.\n"
+        ">> ABORTED"
+    ),
+    restarts=0,
+    status="exited",
+)
+"""The T63 world, as `world_output` sees it: it said ready, then aborted, and is down.
+
+Both families' banners are in the text so the reading is the same machine
+whichever entry drives it, and what ends the watch is the STATUS -- an exited
+container, whose current log is the log of the run that died.
+"""
+
+
+def test_a_rebuild_whose_world_aborts_after_its_banner_keeps_the_new_build(
+    tmp_path: Path,
+) -> None:
+    """Owner answer, 2026-09-16: keep the new build and report the abort (T71).
+
+    The compile finished, the containers were replaced, and the server that came
+    out of it DID start -- it then stopped for a reason on the data side of the
+    binary. Rolling an hour of correct compiling back does not create the
+    missing table, so this failure is the one ready-stage failure that does not
+    restore: no `-rollback` tag goes back, no second recreate, and the rollback
+    names are let go exactly as a success lets them go.
+
+    The sentence carries the remedy the T63 gate ran by hand and recorded as
+    working (Stop, Apply module SQL, Start), because a missing TABLE is the one
+    abort this app can name a button for.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    with pytest.raises(WorldStoppedAfterReadyError) as raised:
+        list(
+            engine(rec, world_output=lambda spec: ABORTED_AFTER_READY).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+
+    refs, backs = _refs(server_dir), _rollback_refs(server_dir)
+    restores = [f"tag:{b}->{r}" for r, b in zip(refs, backs, strict=True)]
+    assert not [c for c in rec.calls if c in restores], rec.calls
+    assert [c for c in rec.calls if c.startswith("rmi:")] == [f"rmi:{b}" for b in backs], rec.calls
+    assert len([c for c in rec.calls if c == "recreate"]) == 1, rec.calls
+    said = str(raised.value)
+    assert "came up and then stopped" in said
+    assert "Table 'acore_world.city_bot_poi' doesn't exist" in said
+    assert "Press Apply module SQL on the Modules tab, then Start." in said
+    assert "KEPT" in said
+    assert "put back" not in said, said
+
+
+def test_a_world_that_never_came_up_at_all_still_puts_the_old_build_back(
+    tmp_path: Path,
+) -> None:
+    """The other side of the same decision, so the two cannot be collapsed by accident.
+
+    A rebuild whose server never reaches ready is a build worth restoring, and
+    T71 changed nothing about it. Kept as its own test beside the one above
+    because the distinction is a single `isinstance` in `rebuild()`, and a
+    refactor that widened it would make both of these pass the wrong way if only
+    one existed.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, wait_ready=_answers(False, True)).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+
+    assert not isinstance(raised.value, WorldStoppedAfterReadyError)
+    refs, backs = _refs(server_dir), _rollback_refs(server_dir)
+    for restore in [f"tag:{b}->{r}" for r, b in zip(refs, backs, strict=True)]:
+        assert restore in rec.calls, rec.calls
+    assert "put back" in str(raised.value)
+
+
 def test_a_rebuild_that_comes_up_lets_the_rollback_go(tmp_path: Path) -> None:
     """Success removes the second name, so the old build stops costing disk.
 
@@ -697,11 +782,14 @@ def test_the_failed_name_is_let_go_once_the_containers_holding_it_are_replaced(
     server_dir = a_finished_install(rec, tmp_path)
     failed = tuple(ref + native.FAILED_TAG_SUFFIX for ref in _refs(server_dir))
 
-    def remove_image(ref: str) -> str:
-        rec.calls.append(f"rmi:{ref}")
+    def remove_image(ref: str, force: bool = False) -> str:
+        rec.calls.append(f"rmi -f:{ref}" if force else f"rmi:{ref}")
         # The broken containers exist until the restore's own recreate replaces
-        # them, which is the second `recreate` of the run.
-        if ref in failed and rec.calls.count("recreate") < 2:
+        # them, which is the second `recreate` of the run. `-f` is what the
+        # daemon's own "(must be forced)" says will work, so this double lets it
+        # (T79); the assertion below is unchanged, because the retry after the
+        # recreate is what has to happen whether or not the force landed.
+        if ref in failed and not force and rec.calls.count("recreate") < 2:
             return (
                 f"Error response from daemon: conflict: unable to delete {ref} (must be "
                 f"forced) - container 31769acad1c4 is using its referenced image"
@@ -771,7 +859,7 @@ def test_a_rebuild_waits_for_a_realm_line_whatever_address_it_advertises(
 
 
 def test_the_ready_wait_still_refuses_a_realm_line_on_another_port(tmp_path: Path) -> None:
-    """The control for the test above, and the reason the marker is not just `\S+`.
+    r"""The control for the test above, and the reason the marker is not just `\S+`.
 
     Opening the ADDRESS is the change; opening the port would make the marker
     match a realm this install is not, which is what the port is in it for. A
@@ -998,7 +1086,7 @@ def test_the_confirmation_promises_the_re_render_for_exactly_the_games_that_get_
         # BOTH files, because the stage writes both through one
         # `dockerfile.write()`. The clause named only the first and added
         # "nothing else in the folder is rewritten", which was false of a
-        # `.dockerignore` behind its template (Fable, round 1).
+        # `.dockerignore` behind its template (review, round 1).
         assert (dockerfile.DOCKERIGNORE in text) is renders, (entry.id, text)
         assert "Nothing else in the folder" not in text, (entry.id, text)
         # And it may not claim that editing one of them stops the press. What
@@ -1474,3 +1562,81 @@ def test_a_rebuild_tuple_missing_the_stage_the_rollback_watches_refuses_before_t
     assert "could not be rolled back" in said and "Nothing was started" in said, said
     assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
     assert "build" not in rec.calls, rec.calls
+
+
+# -- T70: what the press actually SAYS when the compile fails ----------------
+
+COMPOSE_CAPTURE = Path(__file__).resolve().parent / "data" / "compose-failed-build-epilogue.txt"
+"""The real epilogue of a failed `docker compose build` — see `test_docker.py`."""
+
+
+def test_a_rebuild_whose_compile_fails_names_the_compiler_error_in_its_refusal(
+    tmp_path: Path,
+) -> None:
+    """T70, at the call site rather than at the function.
+
+    `docker.last_words()` is not what a user reads; this sentence is. T38 was
+    unit-tested on a bare `docker build` epilogue and shipped, and the press
+    that reaches it — Rebuild, through `stage_build()` and `_check_run(…,
+    from_build=True)` — went on printing the cmake command line for another
+    four days, because the builder on this route is `docker compose build` and
+    its epilogue has no `ERROR:` line (measured live 2026-09-16). A test that
+    only ever calls the extractor cannot tell those two apart, so this one
+    drives the real press with the real capture as the build's tail.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    tail = COMPOSE_CAPTURE.read_text(encoding="utf-8").splitlines()[-docker.KEEP_OUTPUT_LINES :]
+    rec.build_result = docker.AttachedRun(1, tuple(tail))
+
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+
+    said = str(raised.value)
+    assert said.startswith("the build failed (exit 1). Its last words were: "), said
+    assert "CbDuelBotUtil.cpp:11:16: fatal error" in said, said
+    assert "use of undeclared identifier" in said, said
+    # Lac's message, which this press printed verbatim on the live gate.
+    assert "-DBoost_USE_STATIC_LIBS" not in said, said
+    assert "$(nproc)" not in said, said
+    assert "build" in rec.calls, rec.calls
+
+
+ABOVE_FENCE_CAPTURE = (
+    Path(__file__).resolve().parent / "data" / "compose-build-error-above-the-fence.txt"
+)
+"""The capture T70's live re-gate failed on — see `test_docker.py`."""
+
+
+def test_a_rebuild_whose_error_is_above_the_fence_still_names_the_file(
+    tmp_path: Path,
+) -> None:
+    """T70 round 2, at the press rather than at the function.
+
+    The re-gate of 2026-09-16 drove this exact path and the panel showed five
+    `[163/1838] Building CXX object …` lines followed by the elided epilogue:
+    round 1's fence parser was correct and the fence held no diagnostic. The
+    unit test above cannot catch that recurrence, because it is fed the tail
+    the app would have held only if the app really hands this one over — so
+    this drives `rebuild()` with the whole re-gate capture behind the same
+    bound the app applies.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    tail = ABOVE_FENCE_CAPTURE.read_text(encoding="utf-8").splitlines()[-docker.KEEP_OUTPUT_LINES :]
+    rec.build_result = docker.AttachedRun(1, tuple(tail))
+
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+
+    said = str(raised.value)
+    assert said.startswith(
+        "the build failed (exit 1). Its last words were: "
+        "/azerothcore/modules/mod-1v1-arena/src/1v1_loader.cpp:6:5: fatal error:"
+    ), said
+    assert "use of undeclared identifier 'GATE_T70_UNDECLARED_IDENTIFIER'" in said, said
+    # The two things the re-gate showed instead.
+    assert "Building CXX object" not in said, said
+    assert "-DCMAKE_INSTALL_PREFIX" not in said, said
+    assert "$(nproc)" not in said, said
+    assert "build" in rec.calls, rec.calls
