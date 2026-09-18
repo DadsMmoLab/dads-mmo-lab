@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from pydantic import ValidationError
+
 from yulon.log import get_logger
 from yulon.manifest import Index, Manifest, ManifestType, parse_index, parse_manifest
 from yulon.platform import verify_context
@@ -148,8 +150,29 @@ class ManifestStore:
             )
         return manifest
 
-    def load_all(self, kind: ManifestType) -> Iterator[Manifest]:
-        """Every bundled item in index order, then every user item that shadows none."""
+    def load_all(
+        self, kind: ManifestType, *, skipped: list[str] | None = None
+    ) -> Iterator[Manifest]:
+        """Every bundled item in index order, then every user item that shadows none.
+
+        A BUNDLED item that will not load raises. It is a file this app ships
+        and tests, so it failing is an app bug, and a shipped catalog that does
+        not parse is not a condition to render politely around.
+
+        A USER item that will not load is skipped, logged, and appended to
+        `skipped` as one sentence naming it. That layer holds manifests this app
+        DERIVED from a link or a folder the user chose, and both callers force
+        this generator whole inside one `try` at FAMILY scope -- so before T46 a
+        single unparseable file there replaced every shipped module of the
+        family with one `!!` line, and in `module_updates()` dropped every
+        branch silently, which reads on the tab as "nothing to update".
+
+        The store already made this argument one method up, in
+        `user_index_items()`, and never applied it to the items the index lists.
+        The user INDEX itself still raises: it is the list of what to load, and
+        answering "absent" for a file that IS there would hide a custom module
+        the user believes in.
+        """
         bundled = self.load_index(kind).items
         for item_id in bundled:
             yield self._load_at(self.item_path(kind, item_id), kind, item_id)
@@ -161,7 +184,14 @@ class ManifestStore:
                     f"{item_id} is a {kind} this app ships, and a user file never replaces one"
                 )
                 continue
-            yield self._load_at(self.user_item_path(kind, item_id), kind, item_id)
+            path = self.user_item_path(kind, item_id)
+            try:
+                yield self._load_at(path, kind, item_id)
+            except USER_ITEM_UNREADABLE as exc:
+                reason = _skip_reason(path, exc)
+                logger.warning(f"skipping {reason}")
+                if skipped is not None:
+                    skipped.append(USER_ITEM_SKIPPED.format(item_id=item_id, reason=reason))
 
     def relative_files(self, kind: ManifestType) -> list[str]:
         """Paths (relative to `<root>`) the fetcher must mirror for a family."""
@@ -169,6 +199,47 @@ class ManifestStore:
         files = [f"{self.game}/{FAMILY_FILES[kind]}.json"]
         files.extend(f"{self.game}/{FAMILY_FILES[kind]}/{item_id}.json" for item_id in index.items)
         return files
+
+
+USER_ITEM_SKIPPED = "{item_id} was skipped: {reason}"
+"""One user manifest that would not load, said where the family is drawn.
+
+Per ITEM, not per family. The id leads because that is what the user typed or
+picked; `_skip_reason()` supplies the file and what was wrong with it.
+"""
+
+USER_ITEM_UNREADABLE = (ManifestError, ValidationError, OSError, UnicodeDecodeError)
+"""Every way reading ONE user manifest fails without the app being at fault.
+
+Caught at the skip site in `load_all()` and deliberately not inside
+`load_manifest()`, whose four `controller_wow_*/modules.py` callers document
+that they get `pydantic.ValidationError` and handle it themselves.
+
+`ManifestError` is this module's own wrapper -- a missing file, JSON that will
+not decode, or a manifest declaring the wrong game/type/id. It is NOT the whole
+list: `_read_json()` wraps `FileNotFoundError` and `json.JSONDecodeError` and
+nothing else, so a permission error or a directory in the file's place arrives
+as a bare `OSError`, a file that is not UTF-8 as a `UnicodeDecodeError`, and --
+the realistic one, because this app persisted these files itself and an older
+build's shape is the likeliest bad file on disk -- valid JSON that fails the
+schema arrives as `ValidationError`. Each of those is one user-derived file,
+and each of them used to cost the whole family.
+"""
+
+
+def _skip_reason(path: Path, exc: Exception) -> str:
+    """One line naming the file and what was wrong with it.
+
+    ONE line because the tab's report box is read a refusal per line, and a
+    `pydantic.ValidationError` spells itself over five or more of them.
+
+    The path is prepended only when it is not in the message already:
+    `ManifestError` and `OSError` both name the file they failed on, and a
+    `ValidationError` names the FIELD and never the file -- which, unprefixed,
+    is a complaint the user cannot trace back to anything.
+    """
+    reason = " ".join(str(exc).split())
+    return reason if str(path) in reason else f"{path}: {reason}"
 
 
 def load_manifest(path: Path) -> Manifest:

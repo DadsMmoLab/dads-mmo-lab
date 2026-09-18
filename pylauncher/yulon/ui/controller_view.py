@@ -7256,11 +7256,17 @@ class ControllerView(QWidget):
         if store is None:
             return manifests, broken
         for kind in FAMILY_FILES:
+            # T46: one unparseable USER manifest is skipped and named here rather
+            # than raising, so it costs its own row instead of the family's ~20.
+            # The `except` below is still the boundary for what DOES raise: this
+            # app's own catalog, and either index.
+            skipped: list[str] = []
             try:
-                items = list(store.load_all(kind))
+                items = list(store.load_all(kind, skipped=skipped))
             except Exception as exc:  # boundary: a broken manifest tree must not kill the UI
                 broken.append(MODULE_LOAD_FAILED.format(kind=kind, exc=exc))
                 continue
+            broken += skipped
             manifests += items
             for manifest in items:
                 # T42 round 2's key shape, threaded through T43's extraction of
