@@ -17,7 +17,7 @@ import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -75,6 +75,28 @@ class _FakeGit:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text, encoding="utf-8")
         (spec.dest / ".git").mkdir(exist_ok=True)
+
+
+def _untouched(applier: Applier, manifest: Any) -> Applier:
+    """Answer T47's three reset questions as git would for a clone nobody has touched.
+
+    `install()` over a checkout that is already there IS a `git fetch` + `reset
+    --hard`, and since T47 it asks the same three questions `update()` does
+    before running one: what repository the folder is a checkout of, whether
+    anything in it is uncommitted, and whether HEAD carries commits the reset
+    would move off. A `_FakeGit`'s `.git` is an empty directory, so a real
+    `RunnerGit` answers `None` — "could not be asked" — to all three and the
+    guard fails closed. That is the designed behaviour and it is not what the
+    tests using this are about, so this says "asked, and untouched".
+
+    Only for a FAKE clone. The real-clone tests answer these from git.
+    """
+    assert manifest.source is not None
+    url = manifest.source.url
+    applier.remote_url = lambda _dest: url
+    applier.unmodified = lambda _dest, _path: True
+    applier.no_local_commits = lambda _dest, _branch: True
+    return applier
 
 
 class _FakeSql:
@@ -352,7 +374,7 @@ def test_steps_without_a_seam_are_reported_skipped_never_silent(tmp_path: Path) 
     client = tmp_path / "client"
     dbc = _FakeDbc()
     sql = _FakeSql()
-    full = Applier(tmp_path, git=git, sql=sql, client_dir=client, dbc=dbc).install(m)
+    full = _untouched(Applier(tmp_path, git=git, sql=sql, client_dir=client, dbc=dbc), m).install(m)
     assert full.skipped == ()
     assert (client / "Data" / "p.MPQ").exists()
     assert dbc.dirs == [tmp_path / "ale_scripts" / "sod" / "kegs/sod/Server Files/dbc"]
@@ -1171,7 +1193,7 @@ def test_a_first_install_needs_no_folder_and_the_second_updates_this_apps_own(
     tmp_path: Path,
 ) -> None:
     """The two cases that must keep working: nothing there, and this app's own clone."""
-    git = _FakeGit({"README.md": "upstream\n"})
+    git = _FakeGit({"README.md": "upstream\n"}, unmodified=True, no_local_commits=True)
     origins = _Origins(OWNED_URL)
     applier = Applier(tmp_path, git=git, remote_url=origins)
     m = parse_manifest(OWNED_ITEM)
@@ -1184,7 +1206,12 @@ def test_a_first_install_needs_no_folder_and_the_second_updates_this_apps_own(
 
     applier.install(m)  # the update path, over a clone this app made
     assert len(git.calls) == 2
-    assert origins.asked == []  # the per-clone claim IS the corroboration
+    # The claim is still the whole of the OWNERSHIP question -- `_require_own_clone()`
+    # returns on it without asking anything -- and since T47 the same install
+    # asks `origin` once more, for a different question: this folder is about to
+    # be `reset --hard`, and what it is a checkout of decides whether that is
+    # this module's own update or somebody else's repository being overwritten.
+    assert origins.asked == [applier.clone_dir(m)]
 
 
 def test_remove_refuses_to_delete_a_module_folder_this_app_did_not_clone(tmp_path: Path) -> None:
@@ -1602,7 +1629,11 @@ def test_the_commit_question_is_asked_about_the_branch_the_update_would_reset_to
 
     applier.install(parse_manifest(branched))
 
-    assert git.branches_asked == ["wotlk"]
+    # Twice since T47: the adoption rule asks, and then `_costly_reset()` asks
+    # the same question again on the install's own destructive path. Both must
+    # name the MANIFEST's branch, which is what this test is about -- a caller
+    # that asked about the checkout's current branch would show up here.
+    assert git.branches_asked == ["wotlk", "wotlk"]
 
 
 def test_a_copied_server_folder_does_not_adopt_the_clones_in_the_copy(tmp_path: Path) -> None:
@@ -2005,9 +2036,8 @@ def test_a_guid_that_names_no_character_is_refused_by_name(tmp_path: Path) -> No
 def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Path) -> None:
     """ "I could not check" is said out loud, never spelled like "I checked"."""
     git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
-    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(
-        _shipped("mod-ah-bot-plus"), {"bot_guid": "42"}
-    )
+    plus = _shipped("mod-ah-bot-plus")
+    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(plus, {"bot_guid": "42"})
     assert any(
         "not checked" in s.lower() and "bot_guid" in s for s in report.skipped
     ), report.skipped
@@ -2015,8 +2045,10 @@ def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Pat
     # A reader that RAISED is the same answer, not "the character is missing":
     # a stopped database must not make a module uninstallable.
     stopped = _FakeReader(fail="Error response from daemon: container not running")
-    second = Applier(tmp_path, git=_FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST}), sql=stopped)
-    report2 = second.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "42"})
+    second = _untouched(
+        Applier(tmp_path, git=_FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST}), sql=stopped), plus
+    )
+    report2 = second.install(plus, {"bot_guid": "42"})
     assert any("not checked" in s.lower() for s in report2.skipped), report2.skipped
 
 
@@ -4058,6 +4090,7 @@ def test_an_unpinned_module_installs_the_tip_and_a_reinstall_follows_it(
     first = _publish(origin, files, "v1")
     manifest = _unpinned_shipped(item_id)
     applier, git = _unpinned_applier(tmp_path, origin)
+    _origin_answers_as_the_manifest(applier, manifest)
     clone = applier.clone_dir(manifest)
 
     report = applier.install(manifest)
@@ -4098,6 +4131,7 @@ def test_a_checkout_installed_at_the_old_pin_moves_to_the_tip(item_id: str, tmp_
     assert manifest.source is not None
     pinned = manifest.model_copy(update={"source": manifest.source.model_copy(update={"rev": old})})
     applier, git = _unpinned_applier(tmp_path, origin)
+    _origin_answers_as_the_manifest(applier, manifest)
     clone = applier.clone_dir(manifest)
 
     applier.install(pinned)
@@ -4135,6 +4169,7 @@ def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
     _publish(origin, files, "v1")
     manifest = _unpinned_shipped(item_id)
     applier, _git_seam = _unpinned_applier(tmp_path, origin)
+    _origin_answers_as_the_manifest(applier, manifest)
 
     applier.install(manifest)
     addon = (tmp_path / lands).parent
@@ -4182,6 +4217,22 @@ def test_a_client_addon_reinstall_lands_the_new_files(tmp_path: Path) -> None:
         # which is how a module that commits one stays installable.
         ("marker", apply_module.CLAIM_FILE, False),
         ("nothing", apply_module.CLAIM_FILE, True),
+        # T47's half of the same rule, and the reason it needs a SIZE and not a
+        # name: `install()` touches an empty `include.sh` into every C++ module
+        # whose upstream ships none, so `mod-ale`'s own clone answered
+        # "?? include.sh" for a checkout nobody had touched and both destructive
+        # paths refused it. A file somebody has written in is their work and
+        # still counts, which is what the second row here is.
+        ("empty_include", ".", True),
+        ("written_include", ".", False),
+        ("empty_include", "include.sh", False),
+        # And the row round 1 of the review asked for. A pathspec exclusion
+        # hides the PATH, so a repository that ships an `include.sh` and a user
+        # who emptied it read as "unmodified" -- zero bytes, and the exclusion
+        # never looked at whose file it was. Only `?? ` is ever this app's
+        # doing; ` M ` is somebody changing a file the module ships, and a
+        # `reset --hard` really does destroy it.
+        ("truncated_tracked_include", ".", False),
     ],
 )
 def test_is_unmodified_ignores_the_apps_own_marker_and_only_that(
@@ -4206,7 +4257,18 @@ def test_is_unmodified_ignores_the_apps_own_marker_and_only_that(
     (repo / "tracked.txt").write_text("upstream\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "v1")
-    if make in {"marker", "other_untracked", "edited_tracked", "deleted_tracked"}:
+    if make == "truncated_tracked_include":
+        # Committed with content FIRST, so the repository tracks it, and then
+        # emptied: the one shape both of this file's conditions disagree about.
+        (repo / "include.sh").write_text("# shipped by the module\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "ships an include.sh")
+        (repo / "include.sh").write_text("", encoding="utf-8")
+    elif make == "empty_include":
+        (repo / "include.sh").touch()
+    elif make == "written_include":
+        (repo / "include.sh").write_text("# mine\n", encoding="utf-8")
+    elif make in {"marker", "other_untracked", "edited_tracked", "deleted_tracked"}:
         if make == "marker":
             (repo / apply_module.CLAIM_FILE).write_text('{"item_id": "x"}\n', encoding="utf-8")
         elif make == "other_untracked":
@@ -4219,19 +4281,30 @@ def test_is_unmodified_ignores_the_apps_own_marker_and_only_that(
     assert RunnerGit().is_unmodified(repo, asked_about) is expected
 
 
-def _update_applier(tmp_path: Path, origin: Path, manifest: Any) -> Applier:
-    """`_unpinned_applier()`, with `origin` answered as the manifest's own URL.
+def _origin_answers_as_the_manifest(applier: Applier, manifest: Any) -> Applier:
+    """Answer `remote_url` with the manifest's own URL, for the whole fixture family.
 
-    `update()` asks four questions and the first is `same_repo(remote, url)`.
-    The checkout's real `origin` is the `file://` fixture, which is not the
-    manifest's github.com URL, so without this the update refuses at question 1
-    and the tests below would be green over a rule they are not about.
+    The repository question -- `same_repo(remote, url)` -- is asked by
+    `update()` (T44) and, since T47, by every `install()` that would reset a
+    checkout already at the clone path. The checkout's real `origin` here is the
+    local `file://` fixture standing in for the manifest's github.com URL, so
+    without this the guard refuses at that question and every test below would
+    be green over a rule it is not about.
+
+    The other two questions are NOT answered here: the tree and HEAD are real in
+    these tests, read by a real `RunnerGit` from a real checkout, which is the
+    whole point of this family.
     """
-    applier, _git_seam = _unpinned_applier(tmp_path, origin)
     assert manifest.source is not None
     url = manifest.source.url
     applier.remote_url = lambda _dest: url
     return applier
+
+
+def _update_applier(tmp_path: Path, origin: Path, manifest: Any) -> Applier:
+    """`_unpinned_applier()`, with `origin` answered as the manifest's own URL."""
+    applier, _git_seam = _unpinned_applier(tmp_path, origin)
+    return _origin_answers_as_the_manifest(applier, manifest)
 
 
 @pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
@@ -4333,3 +4406,235 @@ def test_update_still_refuses_a_shallow_clone_carrying_a_commit_of_the_users_own
         applier.update(manifest)
 
     assert _git(clone, "rev-parse", "HEAD") == mine, "nothing was changed"
+
+
+# --------------------------------------------------------------------------
+# T47: Install over a checkout that is already there asks the three questions
+# Update asks. It is the same folder and the same `git fetch` + `reset --hard`;
+# until this, one of the two buttons refused and the other went ahead in
+# silence. Real clones throughout -- a fake `.git` cannot answer these.
+# --------------------------------------------------------------------------
+
+
+def _installed_clone(tmp_path: Path, item_id: str = "mod-ale") -> tuple[Applier, Any, Path]:
+    """A real clone of a real local origin, installed by this app, at its tip.
+
+    `mod-ale` on purpose: it is a C++ module, so `install()` also touches an
+    `include.sh` into the checkout, which is the second file this engine writes
+    there and the one that made every question about the tree answer "modified"
+    until `git._status_pathspec()` learned to size it.
+    """
+    _family, _game, files, _lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier, _git_seam = _unpinned_applier(tmp_path, origin)
+    _origin_answers_as_the_manifest(applier, manifest)
+    applier.install(manifest)
+    clone = applier.clone_dir(manifest)
+    assert (clone / apply_module.CLAIM_FILE).is_file(), "the fixture must be a clone this app owns"
+    assert RunnerGit().is_unmodified(clone, ".") is True, "and one nothing has touched yet"
+    return applier, manifest, clone
+
+
+def _history_question_is_fatal(applier: Applier) -> None:
+    """Make the HEAD question fatal, so a test can show the TREE question fired.
+
+    "It raised" is not "it raised here": with this in place a guard that stopped
+    asking about the working tree reaches a question that cannot be answered at
+    all, and the test errors instead of passing on its neighbour's refusal.
+    """
+
+    def never(_dest: Path, _branch: str | None) -> NoReturn:
+        raise AssertionError("the tree question must refuse before the history is fetched")
+
+    applier.no_local_commits = never
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_install_refuses_to_reset_a_clone_with_an_uncommitted_edit(tmp_path: Path) -> None:
+    """The second of the three questions, on the install path, in update's own words.
+
+    One tracked file is edited and nothing else is touched, so exactly one
+    question can refuse this: the tree is dirty, the repository matches, and
+    the history question is wired to raise if it is reached at all.
+    """
+    applier, manifest, clone = _installed_clone(tmp_path)
+    edited = clone / "src" / "LuaEngine" / "ALEConfig.cpp"
+    edited.write_text("// mine, uncommitted\n", encoding="utf-8")
+    head = _git(clone, "rev-parse", "HEAD")
+    _history_question_is_fatal(applier)
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(manifest)
+
+    assert "has changes in it that are not committed" in str(raised.value)
+    assert "Installing mod-ale runs `git reset --hard`" in str(raised.value)
+    assert str(raised.value).endswith("Nothing was changed.")
+    assert edited.read_text(encoding="utf-8") == "// mine, uncommitted\n", "the edit survived"
+    assert _git(clone, "rev-parse", "HEAD") == head
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_install_refuses_to_move_off_a_commit_of_the_users_own(tmp_path: Path) -> None:
+    """The third question. The tree is CLEAN, which is what `status` cannot see past.
+
+    Exactly one question can refuse here too, and the assertion that the tree
+    is clean is what proves it: a guard that only looked at `git status` lets
+    this through and the commit is reachable only through the reflog afterwards.
+    """
+    applier, manifest, clone = _installed_clone(tmp_path)
+    (clone / "src" / "LuaEngine" / "Mine.cpp").write_text("// mine\n", encoding="utf-8")
+    _git(clone, "add", "src/LuaEngine/Mine.cpp")  # not `-A`: the app's own files stay untracked
+    _git(clone, "commit", "-qm", "mine")
+    mine = _git(clone, "rev-parse", "HEAD")
+    assert RunnerGit().is_unmodified(clone, ".") is True, "the tree itself must be clean"
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(manifest)
+
+    assert "carries commits of its own" in str(raised.value)
+    assert "Installing mod-ale runs `git reset --hard`" in str(raised.value)
+    assert _git(clone, "rev-parse", "HEAD") == mine, "nothing was changed"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_clean_clone_of_another_repository_is_asked_about_and_never_reset_unasked(
+    tmp_path: Path,
+) -> None:
+    """The one case that is a question rather than a refusal, and its default.
+
+    The folder is this app's own, the tree is clean and the history carries
+    nothing of the user's -- so the only thing wrong with resetting it is that
+    it is a checkout of a DIFFERENT repository, and which fork the user wants
+    under `modules/mod-ale` is not a fact this app holds. Without the answer
+    the install refuses and the checkout is byte-identical afterwards; with it
+    the install proceeds.
+    """
+    applier, manifest, clone = _installed_clone(tmp_path)
+    assert manifest.source is not None
+    applier.remote_url = lambda _dest: "https://github.com/somebody-else/mod-ale.git"
+    before = _git(clone, "rev-parse", "HEAD")
+    bytes_before = (clone / "src" / "LuaEngine" / "ALEConfig.cpp").read_bytes()
+
+    question = applier.replacement_question(manifest)
+    assert question is not None
+    assert "https://github.com/somebody-else/mod-ale.git" in question
+    assert manifest.source.url in question
+    assert question.endswith("Replace it?")
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(manifest)
+    assert "is a checkout of https://github.com/somebody-else/mod-ale.git" in str(raised.value)
+    assert _git(clone, "rev-parse", "HEAD") == before
+    assert (clone / "src" / "LuaEngine" / "ALEConfig.cpp").read_bytes() == bytes_before
+
+    report = applier.install(manifest, replacing=True)
+
+    assert report.action == "install"
+    assert _git(clone, "rev-parse", "HEAD") == before, "its own origin is still what it fetches"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_agreeing_to_replace_is_not_agreeing_to_lose_an_uncommitted_edit(tmp_path: Path) -> None:
+    """A Yes to the repository question buys that question and no other.
+
+    The same different-repository clone as above, with one tracked file edited.
+    `replacement_question()` now says nothing -- there is no question to ask
+    about a folder that is going to be refused -- and the install refuses even
+    though the caller passed the agreement.
+    """
+    applier, manifest, clone = _installed_clone(tmp_path)
+    applier.remote_url = lambda _dest: "https://github.com/somebody-else/mod-ale.git"
+    edited = clone / "src" / "LuaEngine" / "ALEConfig.cpp"
+    edited.write_text("// mine, uncommitted\n", encoding="utf-8")
+
+    assert applier.replacement_question(manifest) is None
+
+    with pytest.raises(ApplyError, match="has changes in it that are not committed"):
+        applier.install(manifest, replacing=True)
+
+    assert edited.read_text(encoding="utf-8") == "// mine, uncommitted\n"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_agreeing_to_replace_is_not_agreeing_to_reset_a_folder_nobody_could_read(
+    tmp_path: Path,
+) -> None:
+    """The repository question has two refusals, and a Yes answers only one of them.
+
+    `REPO_UNSEEN` is git declining to say what the folder is a checkout of, and
+    the user was shown no repository names to agree to -- so the agreement
+    cannot be spent here. Written after round 1 of the review, which proved the
+    guard let this through the moment `_costly_reset()`'s `is OTHER_REPO` was
+    dropped: with it gone the second pass runs `repository=False`, which drops
+    BOTH refusals, and the install reaches the clone seam.
+    """
+    applier, manifest, clone = _installed_clone(tmp_path)
+    applier.remote_url = lambda _dest: None
+    head = _git(clone, "rev-parse", "HEAD")
+
+    assert applier.replacement_question(manifest) is None, "there are no two names to show"
+    with pytest.raises(ApplyError) as raised:
+        applier.install(manifest, replacing=True)
+
+    assert "git would not say what it is a checkout of" in str(raised.value)
+    assert _git(clone, "rev-parse", "HEAD") == head, "nothing was changed"
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_first_install_asks_no_question_and_answers_none(tmp_path: Path) -> None:
+    """The case with nothing to lose must not grow a prompt or a round trip.
+
+    Every seam the guard consults is wired to raise, so this proving that the
+    first install asked nothing is not an assertion about a message -- the test
+    cannot pass if any of the three questions is asked at all.
+    """
+    item_id = "mod-ale"
+    _family, _game, files, lands = _UNPINNED[item_id]
+    origin = _origin(tmp_path)
+    _publish(origin, files, "v1")
+    manifest = _unpinned_shipped(item_id)
+    applier, _git_seam = _unpinned_applier(tmp_path, origin)
+
+    def never(*_args: object) -> NoReturn:
+        raise AssertionError("a first install has nothing to ask about")
+
+    applier.remote_url = never
+    applier.unmodified = never
+    applier.no_local_commits = never
+
+    assert applier.replacement_question(manifest) is None
+    report = applier.install(manifest)
+
+    assert report.action == "install"
+    assert (tmp_path / lands).read_text(encoding="utf-8").strip().endswith("v1")
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+@pytest.mark.parametrize("fact", ["edited", "committed"])
+def test_the_two_buttons_refuse_the_same_clone_in_the_same_sentence(
+    fact: str, tmp_path: Path
+) -> None:
+    """One function, two callers (T47's first condition), asserted between them.
+
+    The two sentences are compared to each other, so a copy of the questions
+    made for either route fails this the day the two are edited apart -- which
+    is how `install()` came to have none of them while `update()` had three.
+    The only difference either may carry is the word for what was pressed.
+    """
+    applier, manifest, clone = _installed_clone(tmp_path)
+    if fact == "edited":
+        (clone / "src" / "LuaEngine" / "ALEConfig.cpp").write_text("// mine\n", encoding="utf-8")
+    else:
+        (clone / "src" / "LuaEngine" / "Mine.cpp").write_text("// mine\n", encoding="utf-8")
+        _git(clone, "add", "src/LuaEngine/Mine.cpp")
+        _git(clone, "commit", "-qm", "mine")
+
+    with pytest.raises(ApplyError) as installing:
+        applier.install(manifest)
+    with pytest.raises(ApplyError) as updating:
+        applier.update(manifest)
+
+    assert str(installing.value) == str(updating.value).replace("Updating", "Installing")
+    assert "Updating" in str(updating.value) and "Installing" in str(installing.value)

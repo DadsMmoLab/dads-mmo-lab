@@ -431,6 +431,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             "module_from_link",
             "module_from_folder",
             "module_install_custom",
+            "module_replacement_question",
             "module_forget",
         }
         # T41's `installed_modules` rides with `module_updates` because it is the
