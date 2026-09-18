@@ -24,6 +24,7 @@ from yulon import (
     dashboard,
     docker,
     logsnap,
+    manifest_store,
     networking,
     party,
     purge,
@@ -9235,6 +9236,266 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
 
 
+# ------------------------------- T68: a clone whose install never finished keeps Install
+
+
+class _ClonesFromNothing:
+    """A `Git` that fills the destination with `files` instead of cloning.
+
+    The real `Applier` runs here, over a real server directory, so the claim
+    these tests read is the one `install()` wrote and not a fixture's idea of
+    one. Only the network is faked.
+    """
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self.files = files
+        self.clones: list[Path] = []
+
+    def clone(self, spec: object) -> None:
+        dest = cast(Path, spec.dest)  # type: ignore[attr-defined]
+        self.clones.append(dest)
+        for name, text in self.files.items():
+            path = dest / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        return None
+
+    def has_no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        return None
+
+    def remote_url(self, dest: Path) -> str | None:
+        return None
+
+
+class _RecordingSql:
+    def __init__(self) -> None:
+        self.files: list[tuple[str, str]] = []
+        self.statements: list[tuple[str, str]] = []
+
+    def run_file(self, db: str, path: Path) -> None:
+        self.files.append((db, path.name))
+
+    def run_statement(self, db: str, statement: str) -> None:
+        self.statements.append((db, statement))
+
+
+# `mod-arac` is the shipped module this is measured on: family `module`, no
+# prompts, nothing in `requires`, and one install-time `direct` world SQL file —
+# which is exactly what the T7 guard refuses while the world is up.
+ARAC = "mod-arac"
+ARAC_SQL = "data/sql/db-world/arac.sql"
+
+
+def _arac_view(
+    ps: _Ps, tmp_path: Path, *, world_running: bool
+) -> tuple[ControllerView, _ClonesFromNothing, _RecordingSql]:
+    """The real Modules tab over a real applier and a real server directory.
+
+    Both readings come from `yulon.apply` itself rather than from a mapping this
+    test holds: the row is drawn from what the install really left on disk,
+    which is the whole question T68 asks.
+    """
+    git = _ClonesFromNothing({ARAC_SQL: "UPDATE creature_template SET name = 'x';\n"})
+    sql = _RecordingSql()
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "applier",
+        Applier(tmp_path, git=git, sql=sql, world_running=lambda: world_running),
+    )
+    object.__setattr__(
+        services, "installed_modules", lambda: apply_module.installed_clones(tmp_path)
+    )
+    object.__setattr__(
+        services, "unfinished_modules", lambda: apply_module.unfinished_clones(tmp_path)
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0), git, sql
+
+
+def test_an_install_the_running_world_refused_keeps_the_rows_install_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T68, measured on the tab: press Install with the world up, and press it again.
+
+    Before this the clone was on disk by the time the guard refused, so the row
+    redrew as `Remove` and the refusal's own *"Press Stop, then install again"*
+    named a press that was not on the row at all — only in the context menu.
+
+    Three assertions, and the second is the one that keeps the first honest:
+    the button says Install, the folder is STILL listed as installed (nothing
+    here pretends the clone left), and pressing the button reaches the applier's
+    `install()` a second time — read off the clone seam, which is the artefact
+    that route leaves behind, not off the report sentence.
+    """
+    view, git, sql = _arac_view(ps, tmp_path, world_running=True)
+
+    view.modules_panel.row(ARAC).install_button.click()
+
+    assert "the world server is running" in view.module_report.toPlainText()
+    assert sql.files == []
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is True
+    assert row.remove_button is None
+    assert row.install_button is not None and row.install_button.text() == "Install"
+    assert row.install_button.isEnabled()
+
+    row.install_button.click()
+
+    assert git.clones == [tmp_path / "modules" / ARAC] * 2
+
+
+def test_an_install_that_finished_leaves_the_row_offering_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The control for the test above: same tab, same module, world stopped.
+
+    Only `world_running` differs, so a rule that put Install on every installed
+    row — or one that never wrote the finished mark — fails here while the test
+    above still passes.
+    """
+    view, _git, sql = _arac_view(ps, tmp_path, world_running=False)
+
+    view.modules_panel.row(ARAC).install_button.click()
+
+    assert sql.files == [("world", "arac.sql")]
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is False
+    assert row.install_button is None
+    assert row.remove_button is not None and row.remove_button.text() == "Remove"
+
+
+def test_a_clone_from_a_build_before_the_mark_still_offers_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An older build's clone must not flip to Install the day this ships.
+
+    Every previous build wrote the claim right after the clone and nothing
+    else, so its record carries no completion key at all. The fixture is this
+    app's own writer with that one key removed — the older record rather than a
+    guess at it — and the row it produces is the one the user had yesterday.
+    """
+    clone = tmp_path / "modules" / ARAC
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(clone, item_id=ARAC, url="https://github.com/x/mod-arac.git")
+    claim = clone / apply_module.CLAIM_FILE
+    old = json.loads(claim.read_text(encoding="utf-8"))
+    del old[apply_module.COMPLETED_KEY]
+    claim.write_text(json.dumps(old), encoding="utf-8")
+
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=True)
+
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is False
+    assert row.install_button is None
+    assert row.remove_button is not None and row.remove_button.text() == "Remove"
+
+
+def _half_installed(server_dir: Path, folder: str, item_id: str) -> Path:
+    """A clone whose claim says this app's install of it never finished.
+
+    Written with the app's own writer rather than hand-rolled JSON, so it is the
+    record `install()` leaves behind when a step raises and not a guess at one.
+    """
+    clone = server_dir / folder / item_id
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(
+        clone, item_id=item_id, url=f"https://github.com/x/{item_id}.git", completed=False
+    )
+    return clone
+
+
+def test_an_unfinished_clone_whose_requirement_is_gone_offers_a_locked_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 1's must-fix: T68's Install is still T69's Install, locks and all.
+
+    `mod-city-bots` names `mod-playerbots` in `requires`. A clone of it whose
+    install never finished, on a server where that requirement is no longer
+    there, now offers Install again — and the applier would refuse that press in
+    `_requires_refusal()`. The row therefore has to lock it and say why, which is
+    the invariant T55 and T69 established and which the first version of T68
+    broke by asking the locks of `not here` rows alone.
+
+    The last assertion is the half that keeps the first honest: the very press
+    this row offers is put to the REAL applier, and it refuses. A locked button
+    whose applier would have allowed the press would be a different defect.
+    """
+    _half_installed(tmp_path, "modules", "mod-city-bots")
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    row = view.modules_panel.row("mod-city-bots")
+    assert row.data.installed is True and row.data.install_incomplete is True
+    assert row.install_button is not None and row.install_button.text() == "Install"
+    assert row.install_button.isEnabled() is False
+    assert row.data.installable is False
+    assert row.data.install_reason == apply_module.requirement_refusal(
+        "mod-city-bots", "mod-playerbots"
+    )
+    assert [b.text() for b in row.chip_buttons if "mod-playerbots" in b.text()] == [
+        modules_panel.chip_needs_label("mod-playerbots")
+    ]
+
+    applier = view.services.applier
+    assert isinstance(applier, Applier)
+    with pytest.raises(apply_module.ApplyError, match="mod-playerbots"):
+        applier.install(view._manifests[("module", "mod-city-bots")])
+
+
+def test_an_unfinished_clone_that_conflicts_with_an_installed_module_locks_its_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The other lock, on the other family, and refused by the other guard.
+
+    `buff-mobs` and `nerf-mobs` are declared alternatives. A half-installed
+    `buff-mobs` beside a finished `nerf-mobs` offers Install — which
+    `_conflict_refusal()` refuses — so the row locks it in the conflict's own
+    words.
+    """
+    clones = "sql_scripts/clones"
+    _half_installed(tmp_path, clones, "buff-mobs")
+    nerf = tmp_path / clones / "nerf-mobs"
+    nerf.mkdir(parents=True)
+    apply_module.write_clone_claim(
+        nerf, item_id="nerf-mobs", url="https://github.com/x/nerf.git", completed=True
+    )
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    nerf_name = view._manifests[("mod", "nerf-mobs")].name
+    row = view.modules_panel.row("buff-mobs")
+    assert row.data.install_incomplete is True
+    assert row.install_button is not None and row.install_button.isEnabled() is False
+    assert row.data.install_reason == modules_panel.conflict_reason(nerf_name)
+    assert [b.text() for b in row.chip_buttons if nerf_name in b.text()] == [
+        modules_panel.chip_conflicts_with_label(nerf_name)
+    ]
+
+    applier = view.services.applier
+    assert isinstance(applier, Applier)
+    with pytest.raises(apply_module.ApplyError, match="nerf-mobs"):
+        applier.install(view._manifests[("mod", "buff-mobs")])
+
+
+def test_an_unfinished_clone_with_nothing_in_its_way_offers_a_live_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The control for the two above: the lock is the exception, not the rule.
+
+    `mod-arac` declares neither a requirement nor a conflict, so its
+    half-installed row offers the press with no reason attached — which is what
+    T68 is for. A lock arm that locked every unfinished row would pass both
+    tests above and fail here.
+    """
+    _half_installed(tmp_path, "modules", ARAC)
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    row = view.modules_panel.row(ARAC)
+    assert row.data.install_incomplete is True
+    assert row.data.installable is True and row.data.install_reason is None
+    assert row.install_button is not None and row.install_button.isEnabled() is True
+
+
 # ---------------------------------------------------------------------------
 # T73: who gets the height on the Modules tab.
 #
@@ -9267,15 +9528,14 @@ minimum and there is no surplus for a stretch factor to share -- so the whole
 difference is the empty rebuild log no longer asking for 266px to say nothing.
 """
 
-ROWS_VISIBLE_AT_1080P = 3
-"""Whole module rows on screen at once, maximised at 1920x1080. Two before.
+ROWS_VISIBLE_AT_1080P = 8
+"""Whole module rows on screen at once, maximised at 1920x1080.
 
-Not T44's ten, and this is where the rest of that gap lives: a row is 85px
-under this theme, so ten rows want 850 of a tab that is 900 tall in a 1080p
-window and has an action bar, a custom-module card, a report and a log to place
-as well. Getting to ten needs a shorter row (`modules_panel.py`) or fewer boxes
-under the list, and neither is a stretch factor. What IS this ticket's is that
-nothing under the list takes a pixel it has nothing to say in.
+Two before T73, three after it, eight after T75. T73 raised this by giving the
+list the height (397px of the tab's 900) and could go no further: a row was
+85px, so the list held three whichever way its 397 were shared. T75 is the other
+half -- the row is 39px now -- and this number is the two tickets multiplied
+rather than either of them alone, which is why both still assert it.
 """
 
 MODULE_LIST_SHARE_WITH_ROOM_TO_SPARE = 0.58
@@ -9288,8 +9548,15 @@ rows before, 757/60% and 7 now. Drop the `1` from `addWidget(self.modules_panel,
 1)` and the spare pixels go to the expanding widgets instead.
 """
 
-ROWS_VISIBLE_WITH_ROOM_TO_SPARE = 7
-"""Whole rows at 2560x1440, against five before."""
+ROWS_VISIBLE_WITH_ROOM_TO_SPARE = 13
+"""Whole rows at 2560x1440: five before T73, seven after it, seventeen after T75.
+
+Thirteen and not seventeen for `ROW_HEIGHT_CEILING`'s reason: the assertion is
+the promise (a 1440p screen shows most of the catalog at once), and pinning the
+measurement would fail on any honest change to a font. Four rows of headroom is
+one card's chrome -- enough that a family growing a header does not turn this
+red, and not enough for the row to go back over 60px unnoticed.
+"""
 
 TUNING_CARDS_SHARE_AT_1080P = 0.76
 """The Tuning tab's share of its own tab, maximised at 1080p: 73% before, 79%.
@@ -9651,261 +9918,520 @@ def test_the_tuning_cards_get_the_height_their_report_used_to_take(
     assert not _lines_readable_without_scrolling(
         view.tuning_report, A_BOX_THAT_GAVE_NOTHING_BACK
     ), f"a long report takes the cards with it: the box grew to {view.tuning_report.height()}px"
-# ------------------------------- T68: a clone whose install never finished keeps Install
 
 
-class _ClonesFromNothing:
-    """A `Git` that fills the destination with `files` instead of cloning.
+# ---------------------------------------------------------------------------
+# T75: the row itself, which is what T73 left behind.
+#
+# T73 gave the list 397px of a 900px tab at 1920x1080 and the list still showed
+# three rows, because a row was 85px. Measured themed, the same way and for the
+# same reason as everything above: through `main.build_catalog_tab()` with
+# `apply_dadcraft_theme(width=...)` re-applied at each width.
+#
+# Where the 85 went (row `mod-1v1-arena`, 1920x1080, themed):
+#
+#   | part                              | before | after |
+#   | --------------------------------- | -----: | ----: |
+#   | outer padding, top + bottom       |     16 |     4 |
+#   | name line (name, version, link)   |     22 |    17 |
+#   | description (wrapped, 1-2 lines)  |     21 |    17 |
+#   | conf paths (one line per file)    |     22 |     0 |
+#   | badge line                        |     17 |     0 |
+#   | chip line                         |     36 |     0 |
+#   | action column (51px button + 18)  |     69 |    35 |
+#   | ROW (the tallest column + padding)|     85 |    39 |
+#
+# The three text lines became two, the badge and the chips moved onto one line
+# BESIDE the name instead of two lines under the badge, and the action column
+# stopped adding a `QVBoxLayout`'s default 9px margin to a button that was
+# already the tallest thing on the row. What is left -- 35px -- is the button,
+# and the button is `theme.TOUCH_TARGET_PX` plus the 3px of bevel
+# `panel_style.py` records as fixed. The row cannot go under that without
+# taking the handheld floor with it, which is why the ceiling below is 60 and
+# the row is 39: there is nothing left to spend.
 
-    The real `Applier` runs here, over a real server directory, so the claim
-    these tests read is the one `install()` wrote and not a fixture's idea of
-    one. Only the network is faked.
+ROW_HEIGHT_CEILING = 60
+"""What a module row's minimum height must not exceed at the 1080p font scale.
+
+The owner's number is "about 55" (T75) and the row measures 39. The ceiling is
+asserted rather than the measurement, because a test that pinned 39 would fail
+on every honest change to a font or a bevel; what must not happen is the row
+going back over ~60, which is the height at which eight rows stop fitting.
+"""
+
+CHIPS_A_ROW_CAN_CARRY = 8
+"""Every chip `_chips_for()` can put on one row, counted from that function.
+
+No install of any catalog produces all eight at once -- `asks a question` and
+`needs the client folder` are for a row that is NOT installed, `required by` is
+for one that is -- and that is exactly why the widget is tested with all eight
+directly. This is a test of the STRIP: the question "what does it do when it is
+handed more than fits" has to be asked with more than fits, and the builder's
+own worst case (five, on a half-installed row) does not overflow at 1920 wide.
+The number is kept in step with `_chips_for()` by
+`test_the_chip_strip_is_handed_every_chip_the_builder_can_make`.
+"""
+
+
+def _every_chip() -> tuple[modules_panel.Chip, ...]:
+    """One of each chip `_chips_for()` can build, in that function's own order."""
+    return (
+        modules_panel.Chip(
+            "owed", modules_panel.CHIP_REBUILD_PENDING, "not compiled since this changed", "rebuild"
+        ),
+        modules_panel.Chip("owed", modules_panel.CHIP_SQL_PENDING, "sql on disk, not run", "sql"),
+        modules_panel.Chip(
+            "owed", modules_panel.chip_update_label(3), "three commits behind", "update"
+        ),
+        modules_panel.Chip(
+            "fact", modules_panel.chip_conflicts_with_label("AH Bot"), "AH Bot is installed here"
+        ),
+        modules_panel.Chip(
+            "fact", modules_panel.chip_needs_label("Playerbots"), "Playerbots is not installed"
+        ),
+        modules_panel.Chip(
+            "fact", modules_panel.CHIP_ASKS_A_QUESTION, "installing opens one dialog first"
+        ),
+        modules_panel.Chip(
+            "fact", modules_panel.CHIP_NEEDS_CLIENT_FOLDER, "no client folder is recorded"
+        ),
+        modules_panel.Chip(
+            "fact", modules_panel.chip_required_by_label(["Solocraft"]), "Solocraft needs this"
+        ),
+    )
+
+
+def _a_row_carrying(chips: tuple[modules_panel.Chip, ...], width: int) -> tuple[Any, Any]:
+    """A themed `RowWidget` with `chips` on it, laid out `width` pixels wide.
+
+    Themed and SHOWN, because both halves of what is under test are functions of
+    the width the widget is really given: a chip's own size hint comes from the
+    theme's font and padding, and the strip decides what fits from the width the
+    layout hands it. An unparented row answers both questions from a size hint
+    nothing has applied.
+
+    The HOST is returned with the row and every caller keeps it in a local, which
+    is not tidiness: the row is a child of a top-level widget nothing else holds,
+    so dropping the host drops the last Python reference to it, Qt deletes the
+    C++ object under the row, and the next line reads
+    `Internal C++ object (_ElidedLabel) already deleted` (met on the first run of
+    these three tests).
     """
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-    def __init__(self, files: dict[str, str]) -> None:
-        self.files = files
-        self.clones: list[Path] = []
+    from yulon.ui.theme import apply_dadcraft_theme
 
-    def clone(self, spec: object) -> None:
-        dest = cast(Path, spec.dest)  # type: ignore[attr-defined]
-        self.clones.append(dest)
-        for name, text in self.files.items():
-            path = dest / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
-
-    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
-        return None
-
-    def has_no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
-        return None
-
-    def remote_url(self, dest: Path) -> str | None:
-        return None
-
-
-class _RecordingSql:
-    def __init__(self) -> None:
-        self.files: list[tuple[str, str]] = []
-        self.statements: list[tuple[str, str]] = []
-
-    def run_file(self, db: str, path: Path) -> None:
-        self.files.append((db, path.name))
-
-    def run_statement(self, db: str, statement: str) -> None:
-        self.statements.append((db, statement))
-
-
-# `mod-arac` is the shipped module this is measured on: family `module`, no
-# prompts, nothing in `requires`, and one install-time `direct` world SQL file —
-# which is exactly what the T7 guard refuses while the world is up.
-ARAC = "mod-arac"
-ARAC_SQL = "data/sql/db-world/arac.sql"
-
-
-def _arac_view(
-    ps: _Ps, tmp_path: Path, *, world_running: bool
-) -> tuple[ControllerView, _ClonesFromNothing, _RecordingSql]:
-    """The real Modules tab over a real applier and a real server directory.
-
-    Both readings come from `yulon.apply` itself rather than from a mapping this
-    test holds: the row is drawn from what the install really left on disk,
-    which is the whole question T68 asks.
-    """
-    git = _ClonesFromNothing({ARAC_SQL: "UPDATE creature_template SET name = 'x';\n"})
-    sql = _RecordingSql()
-    services = _services(ps, tmp_path, [])
-    object.__setattr__(
-        services,
-        "applier",
-        Applier(tmp_path, git=git, sql=sql, world_running=lambda: world_running),
+    host = QWidget()
+    apply_dadcraft_theme(host, width=1920)
+    box = QVBoxLayout(host)
+    row = modules_panel.RowWidget(
+        modules_panel.ModuleRow(
+            id="mod-solocraft",
+            family="module",
+            name="Solocraft",
+            description="Scales dungeons for a small group.",
+            url=None,
+            installed=True,
+            catalogued=True,
+            paths=("env/dist/etc/modules/solocraft.conf",),
+            chips=chips,
+            removable=True,
+            remove_reason=None,
+            badge=BADGE_INSTALLED,
+        ),
+        host,
     )
-    object.__setattr__(
-        services, "installed_modules", lambda: apply_module.installed_clones(tmp_path)
-    )
-    object.__setattr__(
-        services, "unfinished_modules", lambda: apply_module.unfinished_clones(tmp_path)
-    )
-    return ControllerView(WOTLK, services, status_poll_ms=0), git, sql
+    box.addWidget(row)
+    box.addStretch(1)
+    host.resize(width, 400)
+    host.show()
+    process_events()
+    return host, row
 
 
-def test_an_install_the_running_world_refused_keeps_the_rows_install_button(
+def test_a_module_row_is_short_enough_that_a_1080p_screen_shows_eight(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T68, measured on the tab: press Install with the world up, and press it again.
+    """The row's own height, which is the half of T44's ten rows T73 could not reach.
 
-    Before this the clone was on disk by the time the guard refused, so the row
-    redrew as `Remove` and the refusal's own *"Press Stop, then install again"*
-    named a press that was not on the row at all — only in the context menu.
+    Two assertions and they are different questions. The ROW's minimum is what
+    this ticket changed: 85px of layout around a 51px button, measured themed at
+    every width from 960 to 2560 and the same 85 at all of them. The COUNT is
+    what the owner asked for and it is not implied by the first -- the list is
+    397px at this size, and how many rows that holds depends on the card chrome
+    above them as well as on the rows.
 
-    Three assertions, and the second is the one that keeps the first honest:
-    the button says Install, the folder is STILL listed as installed (nothing
-    here pretends the clone left), and pressing the button reaches the applier's
-    `install()` a second time — read off the clone seam, which is the artefact
-    that route leaves behind, not off the report sentence.
+    The count is also asserted in `test_the_module_list_gets_the_height_...`
+    above, through `ROWS_VISIBLE_AT_1080P`, and deliberately so: that test reads
+    it as a share of the tab and this one as a property of the row, and the two
+    fail for different reasons.
     """
-    view, git, sql = _arac_view(ps, tmp_path, world_running=True)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1920, 1080))
 
-    view.modules_panel.row(ARAC).install_button.click()
-
-    assert "the world server is running" in view.module_report.toPlainText()
-    assert sql.files == []
-    row = view.modules_panel.row(ARAC)
-    assert row.data.installed is True and row.data.install_incomplete is True
-    assert row.remove_button is None
-    assert row.install_button is not None and row.install_button.text() == "Install"
-    assert row.install_button.isEnabled()
-
-    row.install_button.click()
-
-    assert git.clones == [tmp_path / "modules" / ARAC] * 2
-
-
-def test_an_install_that_finished_leaves_the_row_offering_remove(
-    qapp: object, ps: _Ps, tmp_path: Path
-) -> None:
-    """The control for the test above: same tab, same module, world stopped.
-
-    Only `world_running` differs, so a rule that put Install on every installed
-    row — or one that never wrote the finished mark — fails here while the test
-    above still passes.
-    """
-    view, _git, sql = _arac_view(ps, tmp_path, world_running=False)
-
-    view.modules_panel.row(ARAC).install_button.click()
-
-    assert sql.files == [("world", "arac.sql")]
-    row = view.modules_panel.row(ARAC)
-    assert row.data.installed is True and row.data.install_incomplete is False
-    assert row.install_button is None
-    assert row.remove_button is not None and row.remove_button.text() == "Remove"
-
-
-def test_a_clone_from_a_build_before_the_mark_still_offers_remove(
-    qapp: object, ps: _Ps, tmp_path: Path
-) -> None:
-    """An older build's clone must not flip to Install the day this ships.
-
-    Every previous build wrote the claim right after the clone and nothing
-    else, so its record carries no completion key at all. The fixture is this
-    app's own writer with that one key removed — the older record rather than a
-    guess at it — and the row it produces is the one the user had yesterday.
-    """
-    clone = tmp_path / "modules" / ARAC
-    clone.mkdir(parents=True)
-    apply_module.write_clone_claim(clone, item_id=ARAC, url="https://github.com/x/mod-arac.git")
-    claim = clone / apply_module.CLAIM_FILE
-    old = json.loads(claim.read_text(encoding="utf-8"))
-    del old[apply_module.COMPLETED_KEY]
-    claim.write_text(json.dumps(old), encoding="utf-8")
-
-    view, _git, _sql = _arac_view(ps, tmp_path, world_running=True)
-
-    row = view.modules_panel.row(ARAC)
-    assert row.data.installed is True and row.data.install_incomplete is False
-    assert row.install_button is None
-    assert row.remove_button is not None and row.remove_button.text() == "Remove"
-
-
-def _half_installed(server_dir: Path, folder: str, item_id: str) -> Path:
-    """A clone whose claim says this app's install of it never finished.
-
-    Written with the app's own writer rather than hand-rolled JSON, so it is the
-    record `install()` leaves behind when a step raises and not a guess at one.
-    """
-    clone = server_dir / folder / item_id
-    clone.mkdir(parents=True)
-    apply_module.write_clone_claim(
-        clone, item_id=item_id, url=f"https://github.com/x/{item_id}.git", completed=False
+    tallest = max(view.modules_panel.rows(), key=lambda row: row.minimumSizeHint().height())
+    assert tallest.minimumSizeHint().height() <= ROW_HEIGHT_CEILING, (
+        f"{tallest.data.id} asks for {tallest.minimumSizeHint().height()}px, over the "
+        f"{ROW_HEIGHT_CEILING} a row may take at this font scale"
     )
-    return clone
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert whole >= ROWS_VISIBLE_AT_1080P, (
+        f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen; the "
+        f"tallest row asks for {tallest.minimumSizeHint().height()}px"
+    )
 
 
-def test_an_unfinished_clone_whose_requirement_is_gone_offers_a_locked_install(
+def test_a_bigger_screen_shows_thirteen_module_rows(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """2560x1440, where the list has 757px and the rows are the only thing spending it.
+
+    Beside the 1080p count rather than instead of it: at 1080p the tab is full
+    and the card chrome above the first row is a fifth of what the list has, so
+    a change that made rows taller and the chrome shorter could hold the 1080p
+    number while losing here, where the chrome is 8% of the list.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (2560, 1440))
+
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert (
+        whole >= ROWS_VISIBLE_WITH_ROOM_TO_SPARE
+    ), f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen"
+
+
+def test_no_module_row_is_drawn_shorter_than_it_needs_at_the_smallest_window(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Round 1's must-fix: T68's Install is still T69's Install, locks and all.
+    """960x600: the row got shorter, and nothing on it may be CUT to make that true.
 
-    `mod-city-bots` names `mod-playerbots` in `requires`. A clone of it whose
-    install never finished, on a server where that requirement is no longer
-    there, now offers Install again — and the applier would refuse that press in
-    `_requires_refusal()`. The row therefore has to lock it and say why, which is
-    the invariant T55 and T69 established and which the first version of T68
-    broke by asking the locks of `not here` rows alone.
-
-    The last assertion is the half that keeps the first honest: the very press
-    this row offers is put to the REAL applier, and it refuses. A locked button
-    whose applier would have allowed the press would be a different defect.
+    The way a compacted row goes wrong is silent. An elided label reports a
+    minimum width of its whole string, so the first version of this row made the
+    card wider than the window and the scroll area grew a horizontal bar; the
+    fix -- `_ElidedLabel.minimumSizeHint` -- can equally hide a row that is being
+    squeezed vertically. So both are asked here: no row is drawn under its own
+    minimum, and no row is drawn under the button it carries, which is the
+    handheld floor `theme.TOUCH_TARGET_PX` sets and the one size on this row
+    that is not this ticket's to spend.
     """
-    _half_installed(tmp_path, "modules", "mod-city-bots")
-    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (960, 600))
 
-    row = view.modules_panel.row("mod-city-bots")
-    assert row.data.installed is True and row.data.install_incomplete is True
-    assert row.install_button is not None and row.install_button.text() == "Install"
-    assert row.install_button.isEnabled() is False
-    assert row.data.installable is False
-    assert row.data.install_reason == apply_module.requirement_refusal(
-        "mod-city-bots", "mod-playerbots"
-    )
-    assert [b.text() for b in row.chip_buttons if "mod-playerbots" in b.text()] == [
-        modules_panel.chip_needs_label("mod-playerbots")
+    squeezed = [
+        f"{row.data.id}: {row.height()} < {row.minimumSizeHint().height()}"
+        for row in view.modules_panel.rows()
+        if row.height() < row.minimumSizeHint().height()
     ]
-
-    applier = view.services.applier
-    assert isinstance(applier, Applier)
-    with pytest.raises(apply_module.ApplyError, match="mod-playerbots"):
-        applier.install(view._manifests[("module", "mod-city-bots")])
-
-
-def test_an_unfinished_clone_that_conflicts_with_an_installed_module_locks_its_install(
-    qapp: object, ps: _Ps, tmp_path: Path
-) -> None:
-    """The other lock, on the other family, and refused by the other guard.
-
-    `buff-mobs` and `nerf-mobs` are declared alternatives. A half-installed
-    `buff-mobs` beside a finished `nerf-mobs` offers Install — which
-    `_conflict_refusal()` refuses — so the row locks it in the conflict's own
-    words.
-    """
-    clones = "sql_scripts/clones"
-    _half_installed(tmp_path, clones, "buff-mobs")
-    nerf = tmp_path / clones / "nerf-mobs"
-    nerf.mkdir(parents=True)
-    apply_module.write_clone_claim(
-        nerf, item_id="nerf-mobs", url="https://github.com/x/nerf.git", completed=True
-    )
-    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
-
-    nerf_name = view._manifests[("mod", "nerf-mobs")].name
-    row = view.modules_panel.row("buff-mobs")
-    assert row.data.install_incomplete is True
-    assert row.install_button is not None and row.install_button.isEnabled() is False
-    assert row.data.install_reason == modules_panel.conflict_reason(nerf_name)
-    assert [b.text() for b in row.chip_buttons if nerf_name in b.text()] == [
-        modules_panel.chip_conflicts_with_label(nerf_name)
+    assert squeezed == [], f"rows drawn shorter than they say they need: {squeezed}"
+    pressable = [
+        row.install_button or row.remove_button
+        for row in view.modules_panel.rows()
+        if row.install_button is not None or row.remove_button is not None
     ]
+    assert pressable, "no row on the shipped WotLK catalog offers a press"
+    from yulon.ui.theme import TOUCH_TARGET_PX
 
-    applier = view.services.applier
-    assert isinstance(applier, Applier)
-    with pytest.raises(apply_module.ApplyError, match="nerf-mobs"):
-        applier.install(view._manifests[("mod", "buff-mobs")])
+    too_small = [b.text() for b in pressable if b.height() < TOUCH_TARGET_PX]
+    assert too_small == [], f"a press under the handheld floor at the smallest window: {too_small}"
 
 
-def test_an_unfinished_clone_with_nothing_in_its_way_offers_a_live_install(
+def test_a_row_carrying_every_chip_shows_them_all_when_the_width_allows(
+    qapp: object,
+) -> None:
+    """Eight chips on one line at a width that fits them, and every one of them drawn.
+
+    The first half of the overflow contract and the half that must not be
+    forgotten: a strip that answered "too many, here is the …" at every width
+    would satisfy the test below and would have hidden the row's whole state on
+    a 4K screen.
+    """
+    _host, row = _a_row_carrying(_every_chip(), width=3000)
+
+    assert len(row.chip_buttons) == CHIPS_A_ROW_CAN_CARRY
+    assert row.chip_strip.visible_chip_labels() == tuple(
+        chip.label for chip in _every_chip()
+    ), f"only {row.chip_strip.visible_chip_labels()} of the eight are drawn at 3000px"
+    assert row.chip_strip.overflow is not None
+    assert (
+        row.chip_strip.overflow.isVisibleTo(row.chip_strip) is False
+    ), "an overflow chip with nothing behind it"
+
+
+def test_the_chips_a_narrow_row_cannot_fit_are_in_the_overflow_chips_tooltip(
+    qapp: object,
+) -> None:
+    """And at a width that fits some of the eight, the rest are reachable rather than gone.
+
+    1200px because that is a width at which the strip really is short of room
+    and really does draw chips -- the assertions below say "some shown, some
+    hidden" rather than naming a number, so the test survives a font change; the
+    width is what makes both halves non-empty and it is checked as such.
+
+    Four things, because dropping any one of them is a row that lies. Chips must
+    still be DRAWN, or "it all fits" and "nothing fits" pass the same test. The
+    mark itself must be drawn, or the row simply reads as having three chips.
+    What it hides must be all of what is not on screen, label AND sentence,
+    because the sentence is the whole of what a fact chip is for. And the chips
+    that SURVIVE must be the first ones -- `_chips_for()` puts the jobs somebody
+    still has to run before the facts that only explain the row, and an overflow
+    that dropped from the front would hide `Rebuild pending` behind a mark while
+    showing `conflicts with AH Bot`.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=1200)
+
+    strip = row.chip_strip
+    shown = strip.visible_chip_labels()
+    hidden = strip.hidden_chips()
+    assert shown, "the strip drew no chip at all at a width meant to fit some of them"
+    assert hidden, f"1200px fitted all eight chips, so nothing overflowed: {shown}"
+    assert (
+        strip.overflow is not None and strip.overflow.isVisibleTo(strip) is True
+    ), f"{len(hidden)} chips are hidden and the '…' that says so is not drawn"
+    assert shown + tuple(chip.label for chip in hidden) == tuple(
+        chip.label for chip in chips
+    ), "the chips on screen are not the FIRST ones, so an owed chip can be the one hidden"
+    tooltip = strip.overflow.toolTip()
+    missing = [
+        chip.label for chip in hidden if chip.label not in tooltip or chip.detail not in tooltip
+    ]
+    assert missing == [], f"hidden with nothing to find them by: {missing}"
+
+
+def test_the_overflow_chip_is_drawn_inside_the_strip_at_every_width(qapp: object) -> None:
+    """Dragged across the whole range, the "…" never hangs off the right edge.
+
+    Written because the mutation it kills SURVIVED the two tests above: drop the
+    overflow chip's own width from the room `_how_many_fit()` shares out and one
+    more real chip fits, which puts the mark past the edge -- where
+    `isVisibleTo()` still answers True, the tooltip is still on it, and the user
+    simply sees a row that has stopped saying it is hiding anything. No single
+    width catches that (at most one extra chip fits, so most widths still have
+    room for the mark); a SWEEP does, because somewhere in the range the slack
+    after that extra chip is narrower than the mark.
+
+    Every 20px from a strip that fits nothing to one that fits all eight, which
+    is also the only assertion here that the strip survives being resized at
+    all: `resizeEvent` is what re-places its children and the row is inside a
+    list a user drags.
+    """
+    _host, row = _a_row_carrying(_every_chip(), width=400)
+    strip = row.chip_strip
+    assert strip.overflow is not None
+
+    hanging = []
+    for width in range(400, 3001, 20):
+        _host.resize(width, 400)
+        process_events()
+        if not strip.overflow.isVisibleTo(strip):
+            continue
+        right = strip.overflow.x() + strip.overflow.width()
+        if right > strip.width():
+            hanging.append(f"{width}: the '…' ends at {right} in a {strip.width()}px strip")
+    assert hanging == [], f"the overflow mark is drawn outside the strip at {hanging[:3]}"
+
+
+def test_a_locked_row_keeps_the_reason_on_screen_on_a_handheld(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """The control for the two above: the lock is the exception, not the rule.
+    """1280x800 is the Steam Deck, and a Steam Deck cannot hover.
 
-    `mod-arac` declares neither a requirement nor a conflict, so its
-    half-installed row offers the press with no reason attached — which is what
-    T68 is for. A lock arm that locked every unfinished row would pass both
-    tests above and fail here.
+    The defect this pins, measured on the shipped WotLK catalog before the chip
+    order was changed: `battlepass` declares a client addon and requires
+    `mod-ale`, so at this size it drew `needs the client folder` and put
+    `needs AzerothCore Lua Engine (ALE), not installed` behind the overflow mark
+    -- the one sentence saying why its Install is dead, in a tooltip a touch
+    user has no way to open. `_chips_for()` now ranks the locks ahead of the
+    other facts, so the lock is the last fact to go.
+
+    The lock chip is found by its DETAIL matching `row.data.install_reason`,
+    which is the sentence the applier would refuse with, rather than by
+    re-spelling a label here: the chip and the refusal are meant to be the same
+    words, and a test that spelled them itself would pass while they drifted.
+
+    Two things were needed and the second is the one that finished it: the chip
+    order alone still left `battlepass` drawing NOTHING at this size, because an
+    even split between the row's text column and its status column gave the strip
+    373px against a 341px lock chip plus the mark. The status column now takes
+    two shares to the text column's one.
+
+    960x600 -- the smallest the window can be DRAGGED to, which is not a device
+    -- still puts every long lock chip behind the mark, and this test does not
+    claim otherwise. The handheld that ships is 1280x800.
+
+    What stops the first assertion from being vacuous is the test below it, which
+    asks the same question of a row carrying all eight chips at a width that
+    really is short of room: this one says the shipped catalog is fine on the
+    Deck, that one says the RULE is what makes it fine.
     """
-    _half_installed(tmp_path, "modules", ARAC)
-    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1280, 800))
 
-    row = view.modules_panel.row(ARAC)
-    assert row.data.install_incomplete is True
-    assert row.data.installable is True and row.data.install_reason is None
-    assert row.install_button is not None and row.install_button.isEnabled() is True
+    locked = [row for row in view.modules_panel.rows() if row.data.install_reason is not None]
+    assert locked, "no row on the shipped WotLK catalog has a locked Install"
+    hidden_reasons = []
+    for row in locked:
+        lock = next(chip for chip in row.data.chips if chip.detail == row.data.install_reason)
+        if lock.label not in row.chip_strip.visible_chip_labels():
+            hidden_reasons.append(f"{row.data.id}: {lock.label}")
+    assert hidden_reasons == [], (
+        "the reason Install is locked is behind a tooltip on a touch screen: " f"{hidden_reasons}"
+    )
+
+    # The row the review was filed about, by name, because a general assertion
+    # over "every locked row" is satisfied by a catalog that happens to have no
+    # long lock chips in it today.
+    battlepass = view.modules_panel.row("battlepass")
+    assert battlepass.data.install_reason is not None, "`battlepass` is no longer a locked row"
+    assert modules_panel.chip_needs_label("AzerothCore Lua Engine (ALE)") in (
+        battlepass.chip_strip.visible_chip_labels()
+    ), (
+        "`battlepass` does not say why its Install is dead: "
+        f"{battlepass.chip_strip.visible_chip_labels()}"
+    )
+
+
+def test_a_row_too_narrow_for_its_chips_drops_the_facts_before_the_locks(qapp: object) -> None:
+    """The RULE behind the test above, asked of a row carrying all eight chips.
+
+    The catalog's own locked rows fit their chips at 1280x800 now, so they cannot
+    say what happens when a row does not fit: this one is narrowed until it does
+    not. What must survive is owed chips first and the two locks after them; what
+    may go is `asks a question`, `needs the client folder` and `required by …`,
+    which explain the row rather than explain a dead button.
+
+    Swept rather than fixed at one width, because a single width proves the rule
+    only for the one number of chips that happens to fit there.
+
+    Half of the claim and not all of it, deliberately: this hands the strip
+    `_every_chip()` and so tests that the strip drops from the END, while the
+    test below is what says the BUILDER's end is the plain facts. Reverting the
+    order in `_chips_for()` leaves this one green and turns that one and the
+    handheld test red -- which is the right split, because the two halves fail
+    for different reasons and a strip that dropped from the front would pass
+    neither.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=600)
+    strip = row.chip_strip
+    locks = {
+        modules_panel.chip_conflicts_with_label("AH Bot"),
+        modules_panel.chip_needs_label("Playerbots"),
+    }
+    plain_facts = {
+        modules_panel.CHIP_ASKS_A_QUESTION,
+        modules_panel.CHIP_NEEDS_CLIENT_FOLDER,
+        modules_panel.chip_required_by_label(["Solocraft"]),
+    }
+
+    squeezed = 0
+    wrong = []
+    for width in range(600, 3001, 20):
+        _host.resize(width, 400)
+        process_events()
+        hidden = {chip.label for chip in strip.hidden_chips()}
+        if not hidden:
+            continue
+        squeezed += 1
+        # A lock may only be hidden once every plain fact already is.
+        if hidden & locks and not plain_facts <= hidden:
+            wrong.append(f"{width}: hid {sorted(hidden & locks)} while keeping a plain fact")
+    assert squeezed, "the row fitted all eight chips at every width in the sweep"
+    assert wrong == [], f"the drop order puts a lock before an ordinary fact: {wrong[:3]}"
+
+
+def test_the_chip_strip_is_handed_every_chip_the_builder_can_make(qapp: object) -> None:
+    """`_every_chip()` is every chip `_chips_for()` really returns, and in its order.
+
+    Run through the BUILDER with the shipped WotLK manifests rather than counting
+    `chips.append(` in its source, which is what the first version of this did: a
+    string count agrees with itself whatever the function returns, and it would
+    have stayed green through the reordering this ticket's review asked for --
+    the one thing about these chips that is load-bearing.
+
+    Three calls and not one, because the eight contradict each other by
+    construction: `asks a question` and `needs the client folder` are only built
+    for a row that is NOT installed and `required by` only for one that is, and
+    no shipped manifest both asks a question and copies into the client. So the
+    reachable cases are asked for separately and unioned, and the ORDER -- which
+    is the row's drop order -- is asserted on each of them.
+
+    The manifests come from the shipped store and are picked by the PROPERTY each
+    chip needs rather than by id: a test pinned to `mod-ah-bot` says nothing the
+    day that module stops asking a question.
+    """
+    store = modules.store()
+    shipped = [m for kind in manifest_store.FAMILY_FILES for m in store.load_all(kind)]
+    asks = next(
+        m
+        for m in shipped
+        if any(p.default is None for p in apply_module.required_prompts(m, "install"))
+    )
+    client_side = next(m for m in shipped if m.client)
+
+    def _built(manifest: Manifest, installed: bool, lock: str) -> tuple[modules_panel.Chip, ...]:
+        key = (manifest.type, manifest.id)
+        return modules_panel._chips_for(
+            manifest,
+            manifest.type,
+            manifest.id,
+            installed,
+            modules_panel.SessionState(
+                rebuild_owed=frozenset({key}), sql_owed={key: ("one.sql",)}, behind={key: 3}
+            ),
+            client_dir=None,
+            dependants=["Solocraft"],
+            blocked_by="AH Bot" if lock == "conflict" else None,
+            needs="Playerbots" if lock == "requires" else None,
+        )
+
+    asking = _built(asks, False, "conflict")  # owed three, conflict lock, question
+    client = _built(client_side, False, "requires")  # owed three, requires lock, client folder
+    here = _built(asks, True, "conflict")  # owed three, conflict lock, required by
+
+    expected = [chip.label for chip in _every_chip()]
+    made = asking + client + here
+    assert {chip.label for chip in made} == set(expected), (
+        f"the builder makes {sorted({chip.label for chip in made})}, "
+        f"_every_chip() says {sorted(expected)}"
+    )
+    assert len(expected) == CHIPS_A_ROW_CAN_CARRY
+    for built in (asking, client, here):
+        labels = [chip.label for chip in built]
+        assert labels == [label for label in expected if label in labels], (
+            f"the builder's order is {labels}, which is not _every_chip()'s "
+            f"({expected}) — and that order is the row's drop order"
+        )
+    # And the promise the order exists for: after the owed chips, a LOCK comes
+    # before any other fact, so the last thing a narrow row hides is the reason
+    # Install cannot be pressed (T55/T69, and there is no tooltip on a touch
+    # screen). Matched on the DETAIL, which is the applier's own refusal, so the
+    # chip and the sentence behind the locked button cannot drift apart.
+    locks = {
+        modules_panel.conflict_reason("AH Bot"),
+        apply_module.requirement_refusal(asks.id, "Playerbots"),
+        apply_module.requirement_refusal(client_side.id, "Playerbots"),
+    }
+    for built in (asking, client, here):
+        first_fact = next(chip for chip in built if chip.kind == "fact")
+        assert (
+            first_fact.detail in locks
+        ), f"the first fact on the row is {first_fact.label}, which is not the lock"
+
+
+def test_a_rows_long_description_and_conf_paths_are_a_hover_away(qapp: object) -> None:
+    """What the row stopped drawing in full is what its tooltips now carry.
+
+    The description was a WRAPPED label -- two lines at 1280x800 -- and the conf
+    files were one line each. Both are one elided line now, which is only honest
+    if the whole text is still reachable; an elided label with no tooltip is
+    text the app has silently thrown away.
+    """
+    _host, row = _a_row_carrying((), width=400)
+
+    assert row.description_label.toolTip() == "Scales dungeons for a small group."
+    assert row.paths_label is not None
+    assert row.paths_label.toolTip() == "env/dist/etc/modules/solocraft.conf"
+    assert row.description_label.full_text == "Scales dungeons for a small group."
