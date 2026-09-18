@@ -404,22 +404,35 @@ pickers choose a directory or a file, never either, and a second control for a
 `.zip` doubles the surface for something the user does with one right-click.
 """
 
-CustomModuleInstall = Callable[[Manifest, "Path | None"], ApplyReport]
-"""Install a manifest this app derived rather than shipped; `None` means "clone it".
 
-DEVIATION from the design (§3.3, §3.5), forced and recorded rather than quiet.
-The design has this view call `applier.install(m, None, folder=FolderSource(
-path, copier), complete=...)` — lane B's widened signature, over lane A's
-`copy_folder` and `complete`. Neither lane is on this branch, so the view would
-not type-check against them, and a view that constructs `apply.FolderSource`
-knows one thing more about the applier than `ui/*_view.py` is allowed to
-(style-guide §3: delegate, never hold the business logic). So the whole call
-sits behind one seam, wired from `controller_<acronym>/modules.py` — the file
-whose job is "binding the shared applier to that game" — and the view hands it
-the two things only the view can know: which manifest, and which folder the
-user chose. Everything the design lists as `module_complete` and
-`module_copy_folder` lives on the far side of it.
-"""
+class CustomModuleInstall(Protocol):
+    """Install a manifest this app derived rather than shipped; `None` means "clone it".
+
+    A `Protocol` rather than the `Callable` alias this was until T47, for the
+    one keyword: `replacing` carries the user's Yes to
+    `ControllerServices.module_replacement_question`'s sentence, and a
+    `Callable[...]` cannot give an argument a default. Every caller that is
+    replacing nothing still calls this with two positional arguments and gets
+    the behaviour it always had.
+
+    DEVIATION from the design (§3.3, §3.5), forced and recorded rather than
+    quiet. The design has this view call `applier.install(m, None,
+    folder=FolderSource(path, copier), complete=...)` — lane B's widened
+    signature, over lane A's `copy_folder` and `complete`. Neither lane was on
+    that branch, so the view would not type-check against them, and a view that
+    constructs `apply.FolderSource` knows one thing more about the applier than
+    `ui/*_view.py` is allowed to (style-guide §3: delegate, never hold the
+    business logic). So the whole call sits behind one seam, wired from
+    `controller_<acronym>/modules.py` — the file whose job is "binding the
+    shared applier to that game" — and the view hands it the two things only
+    the view can know: which manifest, and which folder the user chose.
+    Everything the design lists as `module_complete` and `module_copy_folder`
+    lives on the far side of it.
+    """
+
+    def __call__(
+        self, manifest: Manifest, folder: Path | None, *, replacing: bool = False
+    ) -> ApplyReport: ...
 
 
 def ask_module_link(parent: QWidget, title: str) -> str | None:
@@ -632,6 +645,23 @@ class ControllerServices:
     `modules/` for all four marked an ale installed because a module of the
     same id was, and never marked a real ale at all (review, 2026-09-12).
     """
+    unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None
+    """Which of those clones have an install that never finished, per family (T68).
+
+    The same shape and the same folders as `installed_modules`, and always a
+    SUBSET of its answer: it reads the claim this app wrote inside each clone
+    and returns the ones marked `install_completed: false`. A row in this set
+    keeps its Install button although the folder is on disk, because the state
+    it names is exactly "the clone landed and the steps after it did not run" —
+    what the T7 direct-SQL guard leaves behind when it refuses an install while
+    the world is up.
+
+    A separate seam from `installed_modules` rather than a richer return from
+    it, because that answer is shared with the Tuning tab and with
+    `_forget_what_is_no_longer_installed()`, and both of them mean "the folder
+    is there" — the one thing this fact does not change. `None` for a game with
+    no clone folders, which is the same gate `installed_modules` rides on.
+    """
     module_from_link: Callable[[str], Manifest] | None = None
     """Derive a manifest from a link the user pasted, or raise with the refusal.
 
@@ -656,6 +686,20 @@ class ControllerServices:
 
     See `CustomModuleInstall` for why this is one seam rather than the
     design's `applier.install(..., folder=..., complete=...)`.
+    """
+    module_replacement_question: Callable[[Manifest], str | None] | None = None
+    """What the user must agree to before an install replaces the clone already there (T47).
+
+    `None` back from the seam is "nothing to ask about", which is the ordinary
+    answer: no clone at that path, or one of the repository this manifest names.
+    A sentence is the one case only the person can decide — a clean checkout of
+    a DIFFERENT repository under the same `modules/<id>` — and it is asked
+    before any job is queued, because the engine runs off the GUI thread and
+    cannot open a dialog. Every other way an install would destroy something
+    stays a refusal from the engine and never becomes a question.
+
+    `Applier.replacement_question()` is the whole of it; this seam exists so the
+    view can ask without holding an applier (style-guide §3).
     """
     module_forget: Callable[[Manifest], bool] | None = None
     """Drop this app's record of a custom module, answering whether there was one.
@@ -967,10 +1011,12 @@ def _assemble(
     module_sql: ModuleSqlRoute | None = None,
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
+    unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     module_version: Callable[[Path], str | None] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
     module_install_custom: CustomModuleInstall | None = None,
+    module_replacement_question: Callable[[Manifest], str | None] | None = None,
     module_forget: Callable[[Manifest], bool] | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
@@ -1021,6 +1067,9 @@ def _assemble(
         # T41's cheap twin of the line above, and conditional on the same
         # flag: a game with no `modules/` folder has nothing to mark.
         installed_modules=installed_modules,
+        # T68's reading of the same folders, on the same flag once more: it
+        # opens the claim inside each clone the line above listed.
+        unfinished_modules=unfinished_modules,
         # T44's version line, on the same flag again: it reads a clone's own
         # `.git`, and a game with no clones has none to read.
         module_version=module_version,
@@ -1030,6 +1079,10 @@ def _assemble(
         module_from_link=module_from_link,
         module_from_folder=module_from_folder,
         module_install_custom=module_install_custom,
+        # T47's question, on the same flag as the four above: it is about the
+        # clone an install of a derived manifest would land on, so it belongs
+        # to the games that have such clones and to no other.
+        module_replacement_question=module_replacement_question,
         module_forget=module_forget,
         # HERE, in the shared half, and not in the four per-game factories. A
         # rebuild takes no per-game decision at all — the engine is chosen from
@@ -1381,6 +1434,12 @@ def _for_wotlk(
         installed_modules=(
             (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
         ),
+        # T68: which of those clones stopped part-way through their install,
+        # read from the claim this app writes inside each one. Bound to the same
+        # flag for the same reason -- there is no folder to open otherwise.
+        unfinished_modules=(
+            (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
+        ),
         # T44 item 1. `RunnerGit` and not the containerized git: this is a
         # local read of a folder the user can see, it runs once per clone, and
         # a `docker run` per module to print a sha would cost more than the
@@ -1401,6 +1460,11 @@ def _for_wotlk(
         module_from_folder=wotlk_modules.derive_folder if module_applier is not None else None,
         module_install_custom=(
             wotlk_modules.install_custom(module_applier) if module_applier is not None else None
+        ),
+        module_replacement_question=(
+            wotlk_modules.replacement_question(module_applier)
+            if module_applier is not None
+            else None
         ),
         module_forget=wotlk_modules.forget if module_applier is not None else None,
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
@@ -2758,6 +2822,13 @@ before anything was derived, which is exactly what the sentence has to convey.
 """
 
 MODULE_FOLDER_CANCELLED = "install from folder: cancelled — nothing on this machine was changed."
+
+MODULE_REPLACE_TITLE = "Replace the checkout of {id}?"
+"""The title over `Applier.replacement_question()`'s sentence (T47).
+
+The title asks and the body explains, which is how every other Yes/No on this
+tab reads — and the id is in it because a user who reaches this has a folder
+under `modules/` whose name is the only thing the two repositories share."""
 
 _IMPORT_LINE_CHARS = 110
 """How much of the import's output the label carries: the last two lines, trimmed.
@@ -6116,6 +6187,25 @@ class ControllerView(QWidget):
             logger.warning(f"could not read which modules are installed: {exc}")
             return {}
 
+    def _unfinished_clones(self) -> Mapping[str, frozenset[str]]:
+        """Which clones here stopped part-way through their install, per family (T68).
+
+        `{}` for a game with no reader, and `{}` again for a reader that raised
+        — and unlike `_installed_clones()` the two do NOT have to be told apart
+        here. Nothing is forgotten on this answer and no row is removed by it:
+        it only decides whether a row that is already drawn offers Install or
+        Remove, and "we could not tell" has to mean "leave the row as it was",
+        which is what an empty mapping produces.
+        """
+        reader = self.services.unfinished_modules
+        if reader is None:
+            return {}
+        try:
+            return reader()
+        except Exception as exc:  # boundary: an unreadable claim must not kill the UI
+            logger.warning(f"could not read which module installs were left unfinished: {exc}")
+            return {}
+
     def _load_manifests(self) -> tuple[list[Manifest], list[str]]:
         """This game's catalog in the store's own order, and what would not parse.
 
@@ -6171,6 +6261,10 @@ class ControllerView(QWidget):
                 # T44 -- the reads happen afterwards, one event-loop turn at a
                 # time, in `_fill_versions()`.
                 versions=self._known_versions(installed),
+                # T68, read on every reload beside the listing above: the two
+                # answers must come from the same moment, or a row is drawn
+                # from a folder list and a completion mark taken a press apart.
+                unfinished=self._unfinished_clones(),
             )
         )
         if broken:
@@ -6525,6 +6619,16 @@ class ControllerView(QWidget):
         the report is `_format_report`'s — the one that carries the C++ rebuild
         sentence and the pending-SQL lines — and there is no second place for
         that copy to drift.
+
+        **One question can stand between the derive and the job** (T47). A
+        derived id is the name of a folder under `modules/`, so it can already
+        be one this app filled from a DIFFERENT repository, and installing over
+        it is a `git reset --hard` that nobody asked about. The question is put
+        here, on the GUI thread, before anything is queued — the engine runs on
+        a worker and cannot open a dialog — and Cancel starts nothing at all:
+        `route` is never called, so no git runs and the folder is untouched.
+        Every other way this install would destroy something stays a refusal
+        from the engine, arriving through `_module_failed` like any other.
         """
         try:
             manifest = derive()
@@ -6540,9 +6644,43 @@ class ControllerView(QWidget):
             self.action_failed.emit(str(exc))
             return
         self._acting_on = manifest
+        question = self._replacement_question(manifest)
+        if question is not None and not self._confirm(
+            MODULE_REPLACE_TITLE.format(id=manifest.id), question
+        ):
+            logger.info(f"{what} {manifest.id} declined at the replace-the-checkout question")
+            self._module_pending = None
+            self._acting_on = None
+            self.module_report.setPlainText(
+                f"{what} {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
         self._module_pending = f"{what} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(lambda: route(manifest, folder), self._module_done, self._module_failed)
+        self._run(
+            lambda: route(manifest, folder, replacing=question is not None),
+            self._module_done,
+            self._module_failed,
+        )
+
+    def _replacement_question(self, manifest: Manifest) -> str | None:
+        """The seam's question about the clone already at this manifest's path, if any.
+
+        Anything the seam raises is swallowed into `None`, and that is safe in
+        one direction only — which is why it is done here rather than left to
+        crash the GUI thread. `None` means no question is asked, and an install
+        that WOULD have been asked about is then refused by the engine's own
+        guard with "Nothing was changed." A failure to ask never becomes a
+        silent reset.
+        """
+        ask = self.services.module_replacement_question
+        if ask is None:
+            return None
+        try:
+            return ask(manifest)
+        except Exception as exc:  # boundary: git or the disk, on the GUI thread
+            logger.warning(f"could not tell what installing {manifest.id} would replace: {exc}")
+            return None
 
     @Slot(object)
     def _module_done(self, result: object) -> None:
@@ -7914,7 +8052,7 @@ def _pending_sql_lines(pending: Sequence[PendingSql]) -> list[str]:
     Three shapes because `PendingSql.files` has three answers — but all three
     say NOT applied, and the empty one earned that the hard way. The first live
     run of this code (yulon-ubuntu, 2026-09-07, the real applier against
-    `/home/pk/wowserver`) installed `mod-aoe-loot` and resolved its manifest
+    `/home/user/wowserver`) installed `mod-aoe-loot` and resolved its manifest
     glob `data/sql/db-world/*.sql` to nothing at all. The draft line here read
     "nothing to apply", and it was false: that clone carries
     `data/sql/db-world/base/aoe_loot_module_string.sql`, one directory deeper —

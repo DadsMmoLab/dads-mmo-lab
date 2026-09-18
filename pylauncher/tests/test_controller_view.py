@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -54,9 +55,11 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
+from yulon.git import RunnerGit
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
+from yulon.runner import run as _REAL_RUN
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
@@ -692,7 +695,7 @@ def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
 def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> None:
     """Measured live, yulon-ubuntu 2026-09-07, on the first run of this code.
 
-    The real applier installed `mod-aoe-loot` into `/home/pk/wowserver` and its
+    The real applier installed `mod-aoe-loot` into `/home/user/wowserver` and its
     manifest glob `data/sql/db-world/*.sql` resolved to nothing — while that
     clone carries `data/sql/db-world/base/aoe_loot_module_string.sql`, the file
     FACT 1 had watched the importer apply an hour earlier. The draft said
@@ -770,7 +773,13 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
 
 
 def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """39 of the 41 must behave exactly as they did — no new dialog at all."""
+    """Every manifest but the two ah-bots must behave exactly as it did — no new dialog.
+
+    Rows whose Install is LOCKED are left out of the loop rather than counted
+    as installs (T69): eleven shipped manifests declare a `requires`, nothing
+    is on disk in this fixture, so `_module_action()` refuses them before the
+    asker — which is the guard's whole job and is asserted by its own test.
+    """
     asked: list[str] = []
 
     def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
@@ -778,7 +787,13 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
 
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
-    catalogued = [r.data.id for r in view.modules_panel.rows() if r.data.catalogued]
+    catalogued = [
+        r.data.id for r in view.modules_panel.rows() if r.data.catalogued and r.data.installable
+    ]
+    locked = [
+        r.data.id for r in view.modules_panel.rows() if r.data.catalogued and not r.data.installable
+    ]
+    assert "mod-ah-bot" in catalogued and "mod-ah-bot-plus" in catalogued, locked
     for item_id in catalogued:
         view.modules_panel.select(item_id)
         view._module_action("install")
@@ -1248,6 +1263,8 @@ class _FakeCustomRoute:
         self.refusal = refusal
         self.derived_from: list[object] = []
         self.installed: list[tuple[str, Path | None]] = []
+        self.replacing: list[bool] = []
+        self.question: str | None = None
         self.forgotten: list[str] = []
         self.custom_ids: set[str] = set()
 
@@ -1266,8 +1283,14 @@ class _FakeCustomRoute:
         self.custom_ids.add(path.name)
         return _custom_manifest(path.name, CUSTOM_FOLDER_DESC)
 
-    def install(self, manifest: Manifest, folder: Path | None) -> ApplyReport:
+    def install(
+        self, manifest: Manifest, folder: Path | None, *, replacing: bool = False
+    ) -> ApplyReport:
+        # `replacing` is recorded, not ignored: it is the user's answer to T47's
+        # question, and an install that dropped it would reset a checkout of
+        # another repository with the question asked and the answer thrown away.
         self.installed.append((manifest.id, folder))
+        self.replacing.append(replacing)
         # Lane A's `complete()` persists inside the install pass, so the row is
         # in the store by the time the report comes back.
         self.store.user[manifest.id] = manifest
@@ -1283,13 +1306,14 @@ class _FakeCustomRoute:
 def _with_custom_route(
     services: ControllerServices, refusal: str | None = None
 ) -> _FakeCustomRoute:
-    """Put a layered store and the five custom-module seams on `services`."""
+    """Put a layered store and the five custom-module seams on `services`, plus T47's question."""
     store = _LayeredStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME)
     route = _FakeCustomRoute(store, refusal=refusal)
     services.store = store
     services.module_from_link = route.derive_link
     services.module_from_folder = route.derive_folder
     services.module_install_custom = route.install
+    services.module_replacement_question = lambda _manifest: route.question
     services.module_forget = route.forget
     return route
 
@@ -7869,13 +7893,18 @@ def test_busy_greys_every_row_button_and_gives_them_back(
     view = _wotlk_modules_view(ps, tmp_path, module=frozenset({"mod-transmog"}))
 
     def presses() -> list[bool]:
+        # Rows the ROW's own answer keeps disabled are left out: the busy gate
+        # never overrides that (`set_enabled_actions`), so a locked Install --
+        # eleven of them here, one per shipped `requires` with nothing on disk
+        # to satisfy it (T69) -- would read as the gate still being on.
         return [
             (row.install_button or row.remove_button).isEnabled()
             for row in view.modules_panel.rows()
-            if row.install_button is not None or row.remove_button is not None
+            if (row.install_button is not None and row.data.installable)
+            or (row.remove_button is not None and row.data.removable)
         ]
 
-    assert all(presses())
+    assert presses() and all(presses())
     view._set_busy(True)
     assert not any(presses())
     view._set_busy(False)
@@ -9622,3 +9651,261 @@ def test_the_tuning_cards_get_the_height_their_report_used_to_take(
     assert not _lines_readable_without_scrolling(
         view.tuning_report, A_BOX_THAT_GAVE_NOTHING_BACK
     ), f"a long report takes the cards with it: the box grew to {view.tuning_report.height()}px"
+# ------------------------------- T68: a clone whose install never finished keeps Install
+
+
+class _ClonesFromNothing:
+    """A `Git` that fills the destination with `files` instead of cloning.
+
+    The real `Applier` runs here, over a real server directory, so the claim
+    these tests read is the one `install()` wrote and not a fixture's idea of
+    one. Only the network is faked.
+    """
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self.files = files
+        self.clones: list[Path] = []
+
+    def clone(self, spec: object) -> None:
+        dest = cast(Path, spec.dest)  # type: ignore[attr-defined]
+        self.clones.append(dest)
+        for name, text in self.files.items():
+            path = dest / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        return None
+
+    def has_no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        return None
+
+    def remote_url(self, dest: Path) -> str | None:
+        return None
+
+
+class _RecordingSql:
+    def __init__(self) -> None:
+        self.files: list[tuple[str, str]] = []
+        self.statements: list[tuple[str, str]] = []
+
+    def run_file(self, db: str, path: Path) -> None:
+        self.files.append((db, path.name))
+
+    def run_statement(self, db: str, statement: str) -> None:
+        self.statements.append((db, statement))
+
+
+# `mod-arac` is the shipped module this is measured on: family `module`, no
+# prompts, nothing in `requires`, and one install-time `direct` world SQL file —
+# which is exactly what the T7 guard refuses while the world is up.
+ARAC = "mod-arac"
+ARAC_SQL = "data/sql/db-world/arac.sql"
+
+
+def _arac_view(
+    ps: _Ps, tmp_path: Path, *, world_running: bool
+) -> tuple[ControllerView, _ClonesFromNothing, _RecordingSql]:
+    """The real Modules tab over a real applier and a real server directory.
+
+    Both readings come from `yulon.apply` itself rather than from a mapping this
+    test holds: the row is drawn from what the install really left on disk,
+    which is the whole question T68 asks.
+    """
+    git = _ClonesFromNothing({ARAC_SQL: "UPDATE creature_template SET name = 'x';\n"})
+    sql = _RecordingSql()
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "applier",
+        Applier(tmp_path, git=git, sql=sql, world_running=lambda: world_running),
+    )
+    object.__setattr__(
+        services, "installed_modules", lambda: apply_module.installed_clones(tmp_path)
+    )
+    object.__setattr__(
+        services, "unfinished_modules", lambda: apply_module.unfinished_clones(tmp_path)
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0), git, sql
+
+
+def test_an_install_the_running_world_refused_keeps_the_rows_install_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T68, measured on the tab: press Install with the world up, and press it again.
+
+    Before this the clone was on disk by the time the guard refused, so the row
+    redrew as `Remove` and the refusal's own *"Press Stop, then install again"*
+    named a press that was not on the row at all — only in the context menu.
+
+    Three assertions, and the second is the one that keeps the first honest:
+    the button says Install, the folder is STILL listed as installed (nothing
+    here pretends the clone left), and pressing the button reaches the applier's
+    `install()` a second time — read off the clone seam, which is the artefact
+    that route leaves behind, not off the report sentence.
+    """
+    view, git, sql = _arac_view(ps, tmp_path, world_running=True)
+
+    view.modules_panel.row(ARAC).install_button.click()
+
+    assert "the world server is running" in view.module_report.toPlainText()
+    assert sql.files == []
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is True
+    assert row.remove_button is None
+    assert row.install_button is not None and row.install_button.text() == "Install"
+    assert row.install_button.isEnabled()
+
+    row.install_button.click()
+
+    assert git.clones == [tmp_path / "modules" / ARAC] * 2
+
+
+def test_an_install_that_finished_leaves_the_row_offering_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The control for the test above: same tab, same module, world stopped.
+
+    Only `world_running` differs, so a rule that put Install on every installed
+    row — or one that never wrote the finished mark — fails here while the test
+    above still passes.
+    """
+    view, _git, sql = _arac_view(ps, tmp_path, world_running=False)
+
+    view.modules_panel.row(ARAC).install_button.click()
+
+    assert sql.files == [("world", "arac.sql")]
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is False
+    assert row.install_button is None
+    assert row.remove_button is not None and row.remove_button.text() == "Remove"
+
+
+def test_a_clone_from_a_build_before_the_mark_still_offers_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An older build's clone must not flip to Install the day this ships.
+
+    Every previous build wrote the claim right after the clone and nothing
+    else, so its record carries no completion key at all. The fixture is this
+    app's own writer with that one key removed — the older record rather than a
+    guess at it — and the row it produces is the one the user had yesterday.
+    """
+    clone = tmp_path / "modules" / ARAC
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(clone, item_id=ARAC, url="https://github.com/x/mod-arac.git")
+    claim = clone / apply_module.CLAIM_FILE
+    old = json.loads(claim.read_text(encoding="utf-8"))
+    del old[apply_module.COMPLETED_KEY]
+    claim.write_text(json.dumps(old), encoding="utf-8")
+
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=True)
+
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is False
+    assert row.install_button is None
+    assert row.remove_button is not None and row.remove_button.text() == "Remove"
+
+
+def _half_installed(server_dir: Path, folder: str, item_id: str) -> Path:
+    """A clone whose claim says this app's install of it never finished.
+
+    Written with the app's own writer rather than hand-rolled JSON, so it is the
+    record `install()` leaves behind when a step raises and not a guess at one.
+    """
+    clone = server_dir / folder / item_id
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(
+        clone, item_id=item_id, url=f"https://github.com/x/{item_id}.git", completed=False
+    )
+    return clone
+
+
+def test_an_unfinished_clone_whose_requirement_is_gone_offers_a_locked_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 1's must-fix: T68's Install is still T69's Install, locks and all.
+
+    `mod-city-bots` names `mod-playerbots` in `requires`. A clone of it whose
+    install never finished, on a server where that requirement is no longer
+    there, now offers Install again — and the applier would refuse that press in
+    `_requires_refusal()`. The row therefore has to lock it and say why, which is
+    the invariant T55 and T69 established and which the first version of T68
+    broke by asking the locks of `not here` rows alone.
+
+    The last assertion is the half that keeps the first honest: the very press
+    this row offers is put to the REAL applier, and it refuses. A locked button
+    whose applier would have allowed the press would be a different defect.
+    """
+    _half_installed(tmp_path, "modules", "mod-city-bots")
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    row = view.modules_panel.row("mod-city-bots")
+    assert row.data.installed is True and row.data.install_incomplete is True
+    assert row.install_button is not None and row.install_button.text() == "Install"
+    assert row.install_button.isEnabled() is False
+    assert row.data.installable is False
+    assert row.data.install_reason == apply_module.requirement_refusal(
+        "mod-city-bots", "mod-playerbots"
+    )
+    assert [b.text() for b in row.chip_buttons if "mod-playerbots" in b.text()] == [
+        modules_panel.chip_needs_label("mod-playerbots")
+    ]
+
+    applier = view.services.applier
+    assert isinstance(applier, Applier)
+    with pytest.raises(apply_module.ApplyError, match="mod-playerbots"):
+        applier.install(view._manifests[("module", "mod-city-bots")])
+
+
+def test_an_unfinished_clone_that_conflicts_with_an_installed_module_locks_its_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The other lock, on the other family, and refused by the other guard.
+
+    `buff-mobs` and `nerf-mobs` are declared alternatives. A half-installed
+    `buff-mobs` beside a finished `nerf-mobs` offers Install — which
+    `_conflict_refusal()` refuses — so the row locks it in the conflict's own
+    words.
+    """
+    clones = "sql_scripts/clones"
+    _half_installed(tmp_path, clones, "buff-mobs")
+    nerf = tmp_path / clones / "nerf-mobs"
+    nerf.mkdir(parents=True)
+    apply_module.write_clone_claim(
+        nerf, item_id="nerf-mobs", url="https://github.com/x/nerf.git", completed=True
+    )
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    nerf_name = view._manifests[("mod", "nerf-mobs")].name
+    row = view.modules_panel.row("buff-mobs")
+    assert row.data.install_incomplete is True
+    assert row.install_button is not None and row.install_button.isEnabled() is False
+    assert row.data.install_reason == modules_panel.conflict_reason(nerf_name)
+    assert [b.text() for b in row.chip_buttons if nerf_name in b.text()] == [
+        modules_panel.chip_conflicts_with_label(nerf_name)
+    ]
+
+    applier = view.services.applier
+    assert isinstance(applier, Applier)
+    with pytest.raises(apply_module.ApplyError, match="nerf-mobs"):
+        applier.install(view._manifests[("mod", "buff-mobs")])
+
+
+def test_an_unfinished_clone_with_nothing_in_its_way_offers_a_live_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The control for the two above: the lock is the exception, not the rule.
+
+    `mod-arac` declares neither a requirement nor a conflict, so its
+    half-installed row offers the press with no reason attached — which is what
+    T68 is for. A lock arm that locked every unfinished row would pass both
+    tests above and fail here.
+    """
+    _half_installed(tmp_path, "modules", ARAC)
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    row = view.modules_panel.row(ARAC)
+    assert row.data.install_incomplete is True
+    assert row.data.installable is True and row.data.install_reason is None
+    assert row.install_button is not None and row.install_button.isEnabled() is True
