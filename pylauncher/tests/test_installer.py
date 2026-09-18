@@ -175,6 +175,10 @@ MODULE_SURFACE_AFTER_7_2 = {
     "rebuild_confirmation",
     "SUDO_PROMPT_PREFIX",
     "UnsupportedPlatformError",
+    # Added deliberately 2026-09-16 with T71: the one ready-stage failure a
+    # rebuild must NOT roll the images back for. An exception type, not
+    # machinery — this module still runs no subprocess.
+    "WorldStoppedAfterReadyError",
     "cancelled_install_message",
     "compose_file",
     "docker_unavailable",

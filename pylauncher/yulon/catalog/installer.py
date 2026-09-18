@@ -101,6 +101,24 @@ class InstallerError(RuntimeError):
     """The install could not start or did not finish (message is user-readable)."""
 
 
+class WorldStoppedAfterReadyError(InstallerError):
+    """The world server printed its ready banner and then stopped (T71).
+
+    A subclass rather than a flag because ONE caller treats it differently and
+    every other has no reason to know it exists: `StagedInstaller.rebuild()`
+    rolls the images back when the ready stage fails, and for this failure the
+    owner's answer (2026-09-16) is not to. The compile finished and produced a
+    server that started; what killed it is on the other side of the binary —
+    the T63 shape is a module's db-world SQL that was never applied, and
+    throwing away an hour of correct compiling does not create the missing
+    table. The PRE-banner verdicts keep the rollback: a build that never came
+    up at all is a build worth putting back.
+
+    Everything that only needs to stop, stops: it is an `InstallerError`, and
+    the install spine, the UI and the CLI catch it as one.
+    """
+
+
 class DockerUnavailableError(InstallerError):
     """No Docker daemon is reachable and automatic provisioning is not available yet."""
 
