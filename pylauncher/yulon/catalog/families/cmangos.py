@@ -66,7 +66,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar, cast
@@ -337,6 +337,90 @@ class CmangosInstaller(StagedInstaller):
                 else:
                     yield f"{result.path} already carries the fix in {spec.file}; leaving it."
         yield "Source patches are in place."
+
+    # -- what T64's update route needs from this family ------------------
+
+    def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
+        """Which files in which checkout this app patches itself, for the dirty-tree guard.
+
+        Read out of the patch FILES rather than written down a second time in
+        the catalog, and that is the whole point of the method: the guard's
+        exception list and the thing it is an exception for are then the same
+        bytes, so a patch that grows a hunk in a new file cannot leave the guard
+        behind. (`patch.parse()` is the same parse `patch.apply()` runs.)
+
+        A patch this build does not ship answers with nothing rather than
+        raising. The refusal for that is `_patch_text()`'s and it is a good one;
+        raising it from inside a guard would replace "this checkout has your
+        edits in it" with a catalog error, on a press that had not got as far as
+        looking at the catalog yet. The patch is loaded again, for real, a few
+        steps later -- and it refuses there.
+        """
+        # The spine's own contribution first, and kept: it is the compose files
+        # of a source whose `dest` is the server directory, which no CMaNGOS
+        # entry has -- so today this adds nothing here and a family that gained
+        # one would not silently lose it.
+        found: dict[str, tuple[str, ...]] = dict(super().app_written_paths(server_dir))
+        for spec in self._data().patches:
+            try:
+                text = self._patch_text(spec)
+            except InstallerError as exc:
+                logger.warning(f"could not read {spec.file} to exempt the paths it edits: {exc}")
+                continue
+            try:
+                hunks = patch.parse(text)
+            except patch.PatchError as exc:
+                logger.warning(f"could not parse {spec.file} to exempt the paths it edits: {exc}")
+                continue
+            paths = tuple(dict.fromkeys(hunk.path for hunk in hunks))
+            found[spec.source] = tuple(dict.fromkeys((*found.get(spec.source, ()), *paths)))
+        return found
+
+    def check_carried_patches(self, server_dir: Path) -> Iterator[str]:
+        """Resolve every carried patch against the moved sources, writing nothing (T64).
+
+        `_resolve(..., dry_run=True)` is the existing seam and its refusal is
+        already the sentence a user reads -- `patch.PatchError`'s own, naming the
+        file and the line and saying nothing was changed. The route above turns
+        that into the restore; nothing here needs to know it will.
+
+        It says what it found either way. A dry run that passes silently is a
+        gate nobody can tell ran, and this one is the difference between a build
+        of patched source and a build of unpatched source.
+        """
+        loaded = [(spec, self._patch_text(spec)) for spec in self._data().patches]
+        if not loaded:
+            yield "This server carries no source patches, so there is none to check."
+            return
+        for spec, text in loaded:
+            yield f"Checking {spec.file} still applies to the new {spec.source}."
+            self._resolve(spec, text, server_dir / spec.source, dry_run=True)
+        yield "Every source patch this app carries still applies."
+
+    def apply_carried_patches(self, server_dir: Path) -> Iterator[str]:
+        """Write every carried patch into the moved sources (T64).
+
+        The same loop `_patch_sources()` runs, without the stage context: this
+        is not a stage and must not be recorded as one -- the install's
+        `patch-sources` record is already there, it was already true, and a
+        second write of it would say nothing new.
+
+        `_refuse_to_patch_what_will_not_be_rebuilt()` is deliberately NOT asked
+        here. It refuses a tree whose compile the press is about to skip, and
+        this press cannot skip one: `rebuild()` builds with `force_build=True`.
+        Asking it anyway would be a guard against a state that the caller has
+        already made impossible, and the sentence it raises ("nothing will
+        recompile this") would be false.
+        """
+        for spec in self._data().patches:
+            text = self._patch_text(spec)
+            root = server_dir / spec.source
+            yield f"Applying {spec.file} inside {spec.source}: {spec.reason}"
+            for result in self._resolve(spec, text, root):
+                if result.applied:
+                    yield f"Patched {result.path}."
+                else:
+                    yield f"{result.path} already carries the fix in {spec.file}; leaving it."
 
     def _patch_text(self, spec: SourcePatch) -> str:
         """The patch file's bytes, or the catalog refusal for one this build does not ship."""
@@ -2155,7 +2239,7 @@ def _write_secret(path: Path, value: str) -> None:
     `.strip()` (A8), and a file the user opened in Notepad and saved gets one
     whether we write it or not.
 
-    **What the mode buys, measured rather than assumed** (PKGAME-LAPTOP,
+    **What the mode buys, measured rather than assumed** (a Windows laptop,
     Windows 11 26200, CPython 3.13.14, 2026-09-01): on POSIX the mode is
     applied by `open(2)` itself, so the file is owner-only from its first byte
     and never has a window at 0644. On Windows it does nothing at all — the

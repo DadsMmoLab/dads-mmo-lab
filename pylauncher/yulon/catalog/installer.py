@@ -35,7 +35,7 @@ from typing import Protocol
 
 from yulon import docker, platform, resources, runner
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, EmulatorSource
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -99,6 +99,24 @@ SUDO_PROMPT_PREFIX = "[sudo via Yu'lon "
 
 class InstallerError(RuntimeError):
     """The install could not start or did not finish (message is user-readable)."""
+
+
+class WorldStoppedAfterReadyError(InstallerError):
+    """The world server printed its ready banner and then stopped (T71).
+
+    A subclass rather than a flag because ONE caller treats it differently and
+    every other has no reason to know it exists: `StagedInstaller.rebuild()`
+    rolls the images back when the ready stage fails, and for this failure the
+    owner's answer (2026-09-16) is not to. The compile finished and produced a
+    server that started; what killed it is on the other side of the binary —
+    the T63 shape is a module's db-world SQL that was never applied, and
+    throwing away an hour of correct compiling does not create the missing
+    table. The PRE-banner verdicts keep the rollback: a build that never came
+    up at all is a build worth putting back.
+
+    Everything that only needs to stop, stops: it is an `InstallerError`, and
+    the install spine, the UI and the CLI catch it as one.
+    """
 
 
 class DockerUnavailableError(InstallerError):
@@ -370,7 +388,7 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
       named: `_write_dockerfile()` renders `Dockerfile` and `.dockerignore`
       through one `dockerfile.write()`, so a clause that named the first and
       added "nothing else in the folder is rewritten" was wrong about the
-      second (Fable, round 1). And what it costs to stop is stated with it,
+      second (review, round 1). And what it costs to stop is stated with it,
       because `native._put_recipe_back()` is what makes that true rather than
       the sentence.
 
@@ -602,7 +620,7 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     `test_no_folder_shape_is_offered_adoption_and_deletion_at_once`.
 
     With the record there the resume is real and was measured the same night:
-    "Using /home/pk/gate72-cycle2 (resuming)", "Already finished: clone-core,
+    "Using /home/user/gate72-cycle2 (resuming)", "Already finished: clone-core,
     clone-modules, generate-compose" (`cycle2-pressB.log:26`).
 
     The pre-7.2 wording is gone for good and must not come back. The bash
@@ -825,6 +843,27 @@ class InstallEngine(Protocol):
         *,
         cancel: threading.Event | None = None,
     ) -> Iterator[str]: ...
+
+    def sources_that_move(self) -> tuple[EmulatorSource, ...]: ...
+
+    def update_to_latest(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        to_pin: bool = False,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]: ...
+
+    """Move this install's sources to upstream's tip (or back to their pins) and rebuild (T64).
+
+    Two members and not one, for `adopt_state`'s reason: the wiring has to know
+    WHICH repository the confirmation names before it can compose it, and
+    `sources_that_move()` is the only thing that can say -- a wiring that read
+    `emulator.sources[0]` itself would be a second derivation of the `*-db` rule
+    and the one that would be forgotten when a family gained a fourth source.
+
+    No `ask`, for `rebuild`'s reason: this route provisions nothing.
+    """
 
     def adopt_state(self, options: InstallOptions | None = None) -> docker.ImportState: ...
 

@@ -167,7 +167,9 @@ class Recorder:
     """
 
     world_output: native.WorldOutput = native.WorldOutput(
-        text="mangosd loading", restarts=0, status="running"
+        text="mangosd loading\nready...\nAvg Diff: 15ms\nWorld server is up and running",
+        restarts=0,
+        status="running",
     )
     """What the world container has printed, read BETWEEN ready windows.
 
@@ -178,6 +180,12 @@ class Recorder:
     `world_output` a callable that changes its answer, because a double that
     cannot produce a different second reading cannot produce the failure this
     module exists to make producible (see `tests/test_ready_budget.py`).
+
+    Every family's ready marker is in the text since T71, because the watch that
+    runs after the banner asks whether THIS run's log still holds it — a log
+    without it is a container that restarted since. One double answers for four
+    games, so it carries all four markers; a test that wants the restarted
+    reading hands over its own.
     """
 
     ready_specs: list[docker.ReadySpec] = field(default_factory=list)
@@ -316,6 +324,96 @@ class Recorder:
 
     on_clone: Callable[[Path], None] | None = None
     """Called with the dest after each clone — the CMaNGOS tests lay SQL fixtures with it."""
+
+    # -- what T64's update route asks git, modelled as a machine ------------
+
+    heads: dict[Path, str] = field(default_factory=dict)
+    """What commit each checkout is ON. Moved BY `clone()`, never set by the engine.
+
+    A dict and not a constant because the whole of T64 is about this value
+    changing and changing back: a double that answered one sha for every read
+    could not tell a source that moved from one that did not, could not show a
+    restore happening, and could not produce the "already on the newest commit"
+    line at all.
+    """
+
+    upstream: dict[Path, str] = field(default_factory=dict)
+    """What a fetch would land at each checkout, i.e. what `reset --hard FETCH_HEAD` reaches.
+
+    Separate from `heads` for the reason `realm_row` is separate from
+    `query_answer`: one canned answer for both is a fixture answering itself,
+    and here it would make every update a no-op that still reported success.
+    A dest with no entry here does not move -- which is the ordinary "you are
+    already up to date" machine.
+    """
+
+    edits: dict[Path, tuple[str, ...]] = field(default_factory=dict)
+    """Tracked files the user has changed in each checkout — `local_edits()`'s answer.
+
+    Whatever this holds is returned MINUS the paths the caller says are the
+    app's own, which is the real function's contract: a double that ignored
+    `ignoring` could not tell a guard that subtracts the carried patch from one
+    that does not, and that subtraction is the difference between a working
+    button and one that refuses every CMaNGOS install.
+    """
+
+    git_reads: bool = True
+    """False when git cannot answer at all, which is every T64 read's `None`.
+
+    One flag for all of them rather than five, because the machine it models is
+    one machine: git is not there, or the container will not run. A test about
+    one question answering `None` while the others answer sets the field it
+    means directly.
+    """
+
+    diverged: set[Path] = field(default_factory=set)
+    """Checkouts carrying commits upstream does not — `no_local_commits()` answering False."""
+
+    restore_error: Exception | None = None
+    """What `restore_rev()` RAISES instead of moving the head, or None to move it.
+
+    The real seam raises `git.GitError` for a checkout that will not go back,
+    and that is the ONE outcome of this route that leaves the folder and the
+    running image disagreeing. A double that could only ever succeed could not
+    produce the line that says so.
+    """
+
+    def head_sha(self, dest: Path) -> str | None:
+        self.calls.append(f"head-sha:{dest.name}")
+        if not self.git_reads:
+            return None
+        return self.heads.get(dest, "0" * 40)
+
+    def head_version(self, dest: Path) -> str | None:
+        self.calls.append(f"head-version:{dest.name}")
+        if not self.git_reads:
+            return None
+        return f"{self.heads.get(dest, '0' * 40)[:7]}{git.VERSION_SEPARATOR}2026-09-16"
+
+    def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
+        self.calls.append(f"local-edits:{dest.name}")
+        if not self.git_reads:
+            return None
+        skip = set(ignoring)
+        return tuple(path for path in self.edits.get(dest, ()) if path not in skip)
+
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        self.calls.append(f"no-local-commits:{dest.name}")
+        if not self.git_reads:
+            return None
+        return dest not in self.diverged
+
+    def commits_since(self, dest: Path, rev: str) -> int | None:
+        self.calls.append(f"commits-since:{dest.name}")
+        if not self.git_reads:
+            return None
+        return 0 if self.heads.get(dest) == rev else 12
+
+    def restore_rev(self, dest: Path, rev: str) -> None:
+        self.calls.append(f"restore:{dest.name}->{rev[:7]}")
+        if self.restore_error is not None:
+            raise self.restore_error
+        self.heads[dest] = rev
 
     def probe(self) -> docker.ImportState:
         """What the databases read as — and `unreadable` until one is running.
@@ -496,6 +594,19 @@ class Recorder:
         def clone(spec: git.CloneSpec) -> None:
             self.calls.append(f"clone:{spec.url}")
             self.clones.append(spec)
+            # WHERE THE HEAD MOVES, and it is modelled on `git.RunnerGit.clone()`
+            # rather than on what a caller wants: an existing `.git` gets
+            # `_update()` (fetch, then `reset --hard FETCH_HEAD`, i.e. `upstream`)
+            # and then `_pin()`, which is a no-op for `rev=None` and a detach
+            # onto `rev` otherwise. A double that moved the head only when a rev
+            # was asked for could not show an update happening at all, and one
+            # that moved it unconditionally could not show a re-pin.
+            if (spec.dest / ".git").is_dir():
+                self.heads[spec.dest] = self.upstream.get(
+                    spec.dest, self.heads.get(spec.dest, "0" * 40)
+                )
+            if spec.rev is not None:
+                self.heads[spec.dest] = spec.rev
             (spec.dest / ".git").mkdir(parents=True, exist_ok=True)
             self.remotes[spec.dest] = spec.url
             if self.on_clone is not None:
@@ -541,6 +652,16 @@ class Recorder:
             clone=clone,
             remote_url=lambda dest: self.remotes.get(dest),
             file_unmodified=self.file_unmodified,
+            # T64's six. Bound here rather than left to default, because the
+            # defaults are `git.ContainerGit()` and a test that fell through to
+            # them would shell out to `docker` — which `conftest`'s own guard
+            # fails the run over, and rightly.
+            local_edits=self.local_edits,
+            no_local_commits=self.no_local_commits,
+            head_sha=self.head_sha,
+            head_version=self.head_version,
+            commits_since=self.commits_since,
+            restore_rev=self.restore_rev,
             images_built=lambda refs: self.images,
             build=build,
             one_shot=one_shot,
@@ -554,6 +675,13 @@ class Recorder:
             wait_db_healthy=lambda spec: self.db_healthy,
             wait_ready=self.wait_ready,
             world_output=lambda spec: self.world_output,
+            # No test may sleep for real. T71's watch after the ready banner is
+            # the engine's only self-timed poll, and at the shipped grace that
+            # is thirty two-second sleeps -- a minute of wall clock added to
+            # every test whose server comes up. The fake grants the time
+            # instead; `test_ready_budget.py`'s `FakeWorld.sleep` is the version
+            # that also advances a clock, for the tests that measure it.
+            sleep=lambda seconds: None,
             tag_image=self.tag_image,
             remove_image=self.remove_image,
             # An INERT SELinux by default: not enforcing, on a filesystem that
@@ -602,9 +730,15 @@ class Recorder:
         self.calls.append(f"tag:{src}->{dst}")
         return self.tag_problem
 
-    def remove_image(self, ref: str) -> str:
-        """`docker.remove_image()`: recorded as `rmi:<ref>`, always allowed here."""
-        self.calls.append(f"rmi:{ref}")
+    def remove_image(self, ref: str, force: bool = False) -> str:
+        """`docker.remove_image()`: recorded as `rmi:<ref>` / `rmi -f:<ref>`, always allowed.
+
+        `force` is recorded under its own name rather than folded in, for the
+        reason `recreate` is not `start`: a run that had to force every removal
+        is a run whose containers are holding images it thinks it is done with,
+        and a double that could not tell the two asks apart could not see it.
+        """
+        self.calls.append(f"rmi -f:{ref}" if force else f"rmi:{ref}")
         return ""
 
     def recreate(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:

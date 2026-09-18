@@ -15,7 +15,7 @@
   script needs and the command itself does not carry it.
 
   MEASURED on yulon-ubuntu2, 2026-09-10; the record is
-  pyplan/gates/8.6-altbot-measure-yulon-ubuntu2-2026-09-10/. Over the
+  .notes/gates/8.6-altbot-measure-yulon-ubuntu2-2026-09-10/. Over the
   app's own SOAP seam `.playerbots bot add <name>` came back with the
   USAGE list of the three Console::Yes siblings and the world logged
   nothing at all (04-soap.log); `bot add` and `.bot add` come back

@@ -236,9 +236,9 @@ def test_the_clone_mount_is_labelled_when_selinux_is_enforcing(
     so it is `user_home_t`, and a confined container may only write
     `container_file_t`:
 
-        $ docker run --rm -v /home/pk/labtest:/git ... -c "touch /git/x"
+        $ docker run --rm -v /home/user/labtest:/git ... -c "touch /git/x"
         touch: /git/x: Permission denied
-        $ docker run --rm -v /home/pk/labtest:/git:z ... -c "touch /git/y"
+        $ docker run --rm -v /home/user/labtest:/git:z ... -c "touch /git/y"
         (succeeded)
 
     So with the preflight probe fixed, every Fedora install stopped one stage
@@ -458,7 +458,7 @@ def test_a_read_only_git_question_runs_unconfined_so_it_can_see_an_unlabelled_fo
     Measured on Fedora 44, Enforcing (2026-08-30), against a checkout the user
     made themselves, so `unconfined_u:object_r:user_home_t:s0`:
 
-        $ docker run --rm -v /home/pk/ownco:/git ... remote get-url origin
+        $ docker run --rm -v /home/user/ownco:/git ... remote get-url origin
         fatal: not a git repository (or any parent up to mount point /)
         $ docker run --rm --security-opt label:disable -v ... remote get-url origin
         https://github.com/mod-playerbots/azerothcore-wotlk.git
@@ -654,9 +654,29 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
     ran = len(seen)
     native._git_remote_url(dest)
     assert len(seen) == ran + 1, "the remote-url route reached a container, not an early return"
+    # T64's six, driven for the same reason as the two above rather than
+    # counted: each is a `Seams` default, so each is a production construction
+    # site, and the `.git` created above is what stops them returning early.
+    for route in (
+        native._git_head_sha,
+        native._git_head_version,
+        native._git_local_edits,
+    ):
+        ran = len(seen)
+        route(dest)  # type: ignore[operator]
+        assert len(seen) == ran + 1, f"{route.__name__} reached a container, not an early return"
+    ran = len(seen)
+    native._git_no_local_commits(dest, "main")
+    assert len(seen) == ran + 2, "the local-commits route fetches and then counts"
+    ran = len(seen)
+    native._git_commits_since(dest, "f82e7d6")
+    assert len(seen) == ran + 1, "the commits-since route reached a container"
+    ran = len(seen)
+    native._git_restore_rev(dest, "f82e7d6")
+    assert len(seen) == ran + 1, "the restore route reached a container"
     native.Seams()
 
-    assert made == [{}, {}, {}], "a production ContainerGit that carries a seam is not bare"
+    assert made == [{}] * 9, "a production ContainerGit that carries a seam is not bare"
 
     tree = ast.parse(Path(native.__file__).read_text(encoding="utf-8"))
     calls = [
@@ -819,12 +839,16 @@ def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
     monkeypatch.setattr(runner, "run", fake_run)
     answers.append(_completed(stdout=""))
     assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is True
-    assert seen_argv[-1][-5:] == [
+    assert seen_argv[-1][-6:] == [
         "status",
         "--ignore-submodules=all",
         "--porcelain",
         "--",
         "docker-compose.yml",
+        # T66: the app's own clone marker is never a change to the tree. Asked
+        # about the marker BY NAME the exclusion is dropped — asserted against
+        # real git in `test_is_unmodified_ignores_the_apps_own_marker_and_only_that`.
+        ":(exclude,top).yulon-clone.json",
     ]
     answers.append(_completed(stdout=" M docker-compose.yml\n"))
     assert git.ContainerGit().is_unmodified(dest, "docker-compose.yml") is False
@@ -860,7 +884,7 @@ def test_is_unmodified_tells_upstreams_own_file_from_one_somebody_edited(
 def test_no_local_commits_counts_what_head_has_that_the_update_would_not(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.HistoryReader
 ) -> None:
-    """Zero and only zero means the update's reset discards no history.
+    """An empty list, or nothing but grafts, means the update's reset discards no history.
 
     Both implementations fetch the same ref and count against the same target,
     because a caller narrowing to `HistoryReader` never learns which one it got
@@ -883,25 +907,28 @@ def test_no_local_commits_counts_what_head_has_that_the_update_would_not(
         return answers.pop(0)
 
     monkeypatch.setattr(runner, "run", fake_run)
-    answers += [_completed(), _completed(stdout="0\n")]
+    answers += [_completed(), _completed(stdout="")]
     assert impl.no_local_commits(dest, "wotlk") is True
     # The manifest's branch is fetched — the same ref `_update()` names — and
     # the count is taken against what that fetch actually landed.
     assert seen_argv[-2][-3:] == ["fetch", "origin", "wotlk"]
-    assert seen_argv[-1][-3:] == ["rev-list", "--count", "FETCH_HEAD..HEAD"]
+    assert seen_argv[-1][-2:] == ["rev-list", "FETCH_HEAD..HEAD"]
     # No depth on that fetch: `--depth=1` truncates a full clone in place, and
     # the shape a clone was made with is not this check's to change.
     assert not [arg for arg in seen_argv[-2] if arg.startswith("--depth")]
 
-    answers += [_completed(), _completed(stdout="3\n")]
+    # Three shas rather than a count: T66 made the answer the LIST, because
+    # in a shallow checkout the commits themselves have to be looked at. No
+    # `.git/shallow` here, so none of them is a graft and all three count.
+    answers += [_completed(), _completed(stdout="a1\nb2\nc3\n")]
     assert impl.no_local_commits(dest, "wotlk") is False
 
     # No branch on the manifest — every module in the wow-wotlk catalog — is the
     # literal `HEAD`, exactly as both update paths spell it.
-    answers += [_completed(), _completed(stdout="0\n")]
+    answers += [_completed(), _completed(stdout="")]
     assert impl.no_local_commits(dest, None) is True
     assert seen_argv[-2][-3:] == ["fetch", "origin", "HEAD"]
-    assert seen_argv[-1][-3:] == ["rev-list", "--count", "FETCH_HEAD..HEAD"]
+    assert seen_argv[-1][-2:] == ["rev-list", "FETCH_HEAD..HEAD"]
 
     # A fetch that cannot reach the remote — an offline machine, a repository
     # that has gone private — is None, not True, and asks nothing further:
@@ -934,7 +961,7 @@ def test_the_containerized_history_question_fetches_in_a_container_that_has_a_ne
     """
     dest = tmp_path / "core"
     (dest / ".git").mkdir(parents=True)
-    answers = [_completed(), _completed(stdout="0\n")]
+    answers = [_completed(), _completed(stdout="")]
     seen_argv: list[list[str]] = []
 
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -949,7 +976,7 @@ def test_the_containerized_history_question_fetches_in_a_container_that_has_a_ne
     assert fetch[-3:] == ["fetch", "origin", "HEAD"]
     assert "none" not in fetch, "the fetch container must be able to reach the remote"
     assert f"{dest}:/git" in fetch, "and must mount the clone read-write"
-    assert count[-3:] == ["rev-list", "--count", "FETCH_HEAD..HEAD"]
+    assert count[-2:] == ["rev-list", "FETCH_HEAD..HEAD"]
     assert count[count.index("--network") + 1] == "none"
     assert f"{dest}:/git:ro" in count
 
@@ -1058,6 +1085,66 @@ def test_this_apps_own_update_does_not_make_a_branchless_clone_look_like_the_use
     assert (spec.dest / ".git" / "shallow").is_file()
 
 
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_a_shallow_pin_behind_the_tip_is_not_a_commit_of_the_users(tmp_path: Path) -> None:
+    """T66's second layer, and no mock can settle it: it is a fact about grafts.
+
+    `_pin()` clones at depth 1 and then fetches the pinned revision at depth 1.
+    When the pin was ALREADY behind the tip, the result holds two commits that
+    are both shallow ROOTS with no edge between them, so `rev-list
+    FETCH_HEAD..HEAD` lists the pin — and `no_local_commits()` used to read
+    that as work the user had committed and refuse to update.
+
+    Measured here rather than asserted: the same fixture is checked against
+    `merge-base --is-ancestor`, which ALSO answers no, so the obvious ancestry
+    fix would not have helped.
+
+    The second half is what keeps the fix honest. One commit of the user's own
+    on top of that same grafted pin is not a graft, so the answer goes back to
+    False and the refusal the guard exists for still fires. Neither half can
+    pass because of the other: the only difference between the two checkouts is
+    that one commit.
+
+    Local repositories only — `git init` and a `file://` clone of it.
+    """
+    author = ["-c", "user.email=t@example", "-c", "user.name=t"]
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=upstream, check=True)
+
+    def upstream_commit(name: str) -> str:
+        (upstream / name).write_text(f"{name}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
+        subprocess.run([*["git", *author], "commit", "-qm", name], cwd=upstream, check=True)
+        done = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=upstream, check=True, capture_output=True, text=True
+        )
+        return done.stdout.strip()
+
+    old = upstream_commit("a.txt")
+    upstream_commit("b.txt")
+    impl = git.RunnerGit()
+    dest = tmp_path / "mod-example"
+    impl.clone(git.CloneSpec(url=upstream.as_uri(), dest=dest, rev=old))
+
+    roots = (dest / ".git" / "shallow").read_text(encoding="utf-8").split()
+    assert sorted(roots) == sorted({old, *roots}) and len(roots) == 2, "not the grafted shape"
+    upstream_commit("c.txt")
+    subprocess.run(["git", "fetch", "-q", "origin", "HEAD"], cwd=dest, check=True)
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"], cwd=dest, check=False
+    )
+    assert ancestor.returncode != 0, "if git ever connects these, this fix can be simpler"
+
+    assert impl.no_local_commits(dest, None) is True
+
+    (dest / "mine.txt").write_text("three evenings\n", encoding="utf-8")
+    subprocess.run(["git", "add", "mine.txt"], cwd=dest, check=True)
+    subprocess.run([*["git", *author], "commit", "-qm", "mine"], cwd=dest, check=True)
+
+    assert impl.no_local_commits(dest, None) is False
+
+
 def test_both_git_implementations_check_out_the_same_sparse_tree(
     seen: list[list[str]], tmp_path: Path
 ) -> None:
@@ -1123,7 +1210,7 @@ def test_container_git_reports_a_failure_as_a_git_error(
 # `ensure_docker()` put Docker there. Hardcoding `docker` here made that clone
 # the very next thing to fail after provisioning was fixed.
 
-OFF_PATH_EXE = r"C:\Users\pk\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
+OFF_PATH_EXE = r"C:\Users\user\AppData\Local\Programs\DockerDesktop\resources\bin\docker.EXE"
 
 
 def test_container_git_runs_the_docker_this_host_can_start(
