@@ -34,7 +34,7 @@ import shutil
 import subprocess
 import sys
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -571,6 +571,46 @@ class VersionReader(Protocol):
     def head_version(self, dest: Path) -> str | None: ...
 
 
+def parse_status(raw: str) -> tuple[str, ...]:
+    """The paths in a `git status --porcelain` answer, in the order git printed them.
+
+    `XY path` with a two-character status field and one space, except for a
+    rename or a copy, which git spells `R  old -> new`; the NEW name is what a
+    caller can compare against a path it knows, so that is what is kept.
+
+    A shared helper rather than a comprehension inside the two `local_edits()`
+    below, because the two implementations must answer identically: a caller
+    reads a refusal off this list, and a parser that agreed only for the simple
+    shapes would make the guard mean something different on a machine with no
+    host git (the same argument `no_local_commits()` makes about its two bodies).
+    """
+    paths: list[str] = []
+    for line in raw.splitlines():
+        if len(line) < 4:
+            continue
+        said = line[3:].strip()
+        if " -> " in said:
+            said = said.split(" -> ", 1)[1]
+        paths.append(said.strip('"'))
+    return tuple(paths)
+
+
+_STATUS_ARGS = ["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"]
+"""What both `local_edits()` bodies ask, spelled once so they cannot drift.
+
+`--untracked-files=no` is the load-bearing flag and it is not a tidy. The
+question this feeds is "would `reset --hard` destroy anything of yours?", and
+`reset --hard` does not touch an untracked file: it is still there afterwards,
+byte for byte. Counting untracked files as edits would refuse every update on
+every install this app has ever made -- a CMaNGOS core checkout has its
+playerbots module cloned INSIDE it (`src/mangos-tbc/src/modules/Bots`), which
+`status` reports as untracked -- for files that were never at risk.
+
+`--ignore-submodules=all` is `is_unmodified()`'s, for its reason: without it
+`status` descends into a nested repository, which is a second set of
+repository-chosen programs.
+"""
+
 VERSION_FORMAT = "%h %cs"
 """`git log -1`'s format for the version line: the SHORT sha and the commit date.
 
@@ -888,6 +928,136 @@ class RunnerGit:
             )
             return None
         return VERSION_SEPARATOR.join(parts)
+
+    def head_sha(self, dest: Path) -> str | None:
+        """The full commit id this checkout is on, or `None` if it cannot be read.
+
+        FULL and not `%h`: this is the string T64's update route remembers so it
+        can put a checkout BACK, and an abbreviation is a prefix whose
+        uniqueness is a property of the object store at the moment it was
+        printed. The store grows during the very fetch this route runs, so an
+        abbreviation taken before it can become ambiguous after it. `head_version()`
+        is the short one and is the one a user reads; this one is the one a
+        `checkout` is given.
+
+        Local, like `head_version()`: no remote is asked anything.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", "rev-parse", "HEAD"], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not read what {dest} is on: {exc}")
+            return None
+        said = proc.stdout.strip()
+        return said or None
+
+    def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
+        """Tracked files in `dest` that differ from HEAD, minus `ignoring`. None = cannot ask.
+
+        `is_unmodified()` asked about ONE path and answered yes or no. This asks
+        about the whole checkout and answers with the NAMES, and both halves of
+        that are needed by the one caller: a refusal that cannot list the files
+        it is refusing over sends a user to look for something with no idea what
+        (`native.StagedInstaller.update_to_latest()`).
+
+        **`ignoring` is why this exists at all.** This app PATCHES two of the
+        four shipped source trees itself: `patch-sources` writes
+        `catalog/installers/*.patch` into the CMaNGOS checkouts on every install,
+        so `git status` in `src/mangos-classic` is dirty on every healthy Vanilla
+        install there has ever been. A guard that read that as "the user has
+        changes here" would refuse the update on exactly the installs the feature
+        is for, and the fix is not to loosen the guard but to tell it which
+        paths are the app's own -- those paths are then resolved again, against
+        the NEW code, by the patch dry-run the route runs before it builds.
+
+        Paths are POSIX-spelled, as git prints them, and compared to `ignoring`
+        by exact string. `None` is "could not ask", which every caller fails
+        closed on: not being able to see somebody's work is not evidence that
+        there is none.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = _run_git(["git", *_STATUS_ARGS], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not ask git what is changed in {dest}: {exc}")
+            return None
+        skip = set(ignoring)
+        return tuple(path for path in parse_status(proc.stdout) if path not in skip)
+
+    def commits_since(self, dest: Path, rev: str) -> int | None:
+        """How many commits HEAD carries that `rev` does not. None = cannot ask.
+
+        The figure in the version line -- "N commits past the tested pin" --
+        and a LOCAL count, unlike `commits_behind()`: both ends are commits this
+        checkout already has, so nothing is fetched and nothing is asked of a
+        remote. It is affordable on a tab reload for that reason.
+
+        **A SHALLOW clone is refused outright, and that is what makes the number
+        trustworthy at all.** Nine of the ten sources this app ships are
+        `depth: 1` (`Source.depth` defaults to 1, and only AzerothCore's core
+        overrides it), and `ContainerGit.clone()` -- the production seam --
+        passes that depth on its update fetch, so HEAD's parents are cut at the
+        graft. The old pin's object is still in the store, because the checkout
+        was sitting on it a moment ago, so `rev-list --count <pin>..HEAD` walks
+        HEAD, finds no parent, and answers **1** whatever the real distance is.
+        A version line reading "1 commit past the tested pin" after a year of
+        upstream history is a figure with nothing behind it (cold review,
+        2026-09-16), and it is exactly the class this file has already recorded
+        twice: `None` and a number are different sentences.
+
+        `None` and `0` stay different for the same reason.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            shallow = _run_git(["git", "rev-parse", "--is-shallow-repository"], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not ask whether {dest} is a shallow clone: {exc}")
+            return None
+        if shallow.stdout.strip() != "false":
+            logger.debug(f"{dest} is a shallow clone; the distance from {rev} cannot be counted")
+            return None
+        try:
+            proc = _run_git(["git", "rev-list", "--count", f"{rev}..HEAD"], cwd=dest)
+        except (GitError, OSError) as exc:
+            logger.debug(f"could not count what {dest} carries past {rev}: {exc}")
+            return None
+        return _parse_count(proc.stdout)
+
+    def restore_rev(self, dest: Path, rev: str) -> None:
+        """Put this checkout back on `rev`, detached, discarding what is in the way.
+
+        **No fetch, and that is the whole difference from `_pin()`.** This is the
+        undo half of T64's update route: `rev` is a commit the checkout was
+        sitting on a moment ago, so the object is in the store already, and
+        asking the remote for it again would make the restore depend on a
+        network that has just been shown to be the reason we are restoring.
+        `_pin()` fetches because ITS `rev` may be one this clone has never had.
+
+        **`--force`, and it is the difference between a restore that works and
+        one that fails on the family it matters most for.** Without it `git
+        checkout --detach` refuses whenever a tracked file differs in the
+        working tree AND between the two commits ("Your local changes would be
+        overwritten"), and on AzerothCore there is always such a file: the
+        server directory IS the checkout, that repository tracks its own
+        `docker-compose.yml`, and this app overwrites it. So the plain form
+        would refuse exactly the restore whose failure leaves a folder and a
+        running image disagreeing.
+
+        What `--force` can discard is bounded by WHERE this is called from, and
+        only there: `native._refuse_unless_updatable()` has already refused
+        unless the only modified tracked files are ones this app wrote
+        (`app_written_paths()`), and the caller writes those again immediately
+        afterwards. It is not a general-purpose checkout and there must not be
+        a second caller that has not made that check.
+
+        It does not swallow a failure. A restore that did not happen leaves the
+        source tree ahead of the image that was built from it, and the caller's
+        sentence has to be able to say so.
+        """
+        _run_git(["git", *_LINE_ENDING_ARGS, "checkout", "--detach", "--force", rev], cwd=dest)
 
     def commits_behind(self, dest: Path, branch: str | None) -> int | None:
         """How many commits an update would bring into `dest`. None = cannot ask.
@@ -1268,6 +1438,100 @@ class ContainerGit:
             logger.debug(f"could not ask git about {relative_path} in {dest}: {exc}")
             return None
         return not _without_the_generated_include(dest, relative_path, proc.stdout).strip()
+
+    def head_version(self, dest: Path) -> str | None:
+        """`RunnerGit.head_version()`, containerised: what this checkout is at, or None.
+
+        T44 wired the modules panel to `RunnerGit.head_version` directly and
+        this class had no such method, which was right there -- that panel reads
+        clones the APP made on a machine that has already run host git. T64 asks
+        the same question about a SERVER source, from an engine whose every
+        other git call goes through this class, and a question answered by a
+        different transport from the write beside it is the split §27 of the bug
+        checklist is about. So it is answered here too, and `RunnerGit`'s
+        docstring holds the reasoning for the format and for never guessing.
+
+        `writes=False`: one local `git log -1`, no remote, no working tree.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["log", "-1", f"--format={VERSION_FORMAT}"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read what {dest} is at: {exc}")
+            return None
+        parts = proc.stdout.strip().split()
+        if len(parts) != 2:
+            logger.debug(f"git log -1 in {dest} did not answer with a sha and a date: {parts!r}")
+            return None
+        return VERSION_SEPARATOR.join(parts)
+
+    def head_sha(self, dest: Path) -> str | None:
+        """`git rev-parse HEAD`, containerised; see `RunnerGit.head_sha()` for why it is full."""
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, ["rev-parse", "HEAD"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not read what {dest} is on: {exc}")
+            return None
+        said = proc.stdout.strip()
+        return said or None
+
+    def local_edits(self, dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
+        """`RunnerGit.local_edits()`, containerised. Both must answer identically.
+
+        A caller narrowing to neither class never learns which it got, and this
+        is a guard's input: a disagreement would be a refusal that means one
+        thing on a machine with host git and another on a Mac without Xcode's
+        command line tools. The flags and the parse are therefore shared
+        constants (`_STATUS_ARGS`, `parse_status()`) rather than two spellings.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            proc = self._capture(dest, _STATUS_ARGS, writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask git what is changed in {dest}: {exc}")
+            return None
+        skip = set(ignoring)
+        return tuple(path for path in parse_status(proc.stdout) if path not in skip)
+
+    def commits_since(self, dest: Path, rev: str) -> int | None:
+        """`RunnerGit.commits_since()`, containerised. `writes=False`: nothing is fetched.
+
+        The shallow refusal is asked here too, and this is the transport it was
+        MEASURED against: `clone()` above passes `_pull_depth_args(spec.depth)`
+        on its update fetch, so a `depth: 1` source stays grafted and the count
+        would answer 1 for any distance. Both bodies must answer identically --
+        a caller never learns which it got, and the figure is read by a person.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        try:
+            shallow = self._capture(dest, ["rev-parse", "--is-shallow-repository"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask whether {dest} is a shallow clone: {exc}")
+            return None
+        if shallow.stdout.strip() != "false":
+            logger.debug(f"{dest} is a shallow clone; the distance from {rev} cannot be counted")
+            return None
+        try:
+            proc = self._capture(dest, ["rev-list", "--count", f"{rev}..HEAD"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not count what {dest} carries past {rev}: {exc}")
+            return None
+        return _parse_count(proc.stdout)
+
+    def restore_rev(self, dest: Path, rev: str) -> None:
+        """`RunnerGit.restore_rev()`, containerised: a checkout is a write, and no fetch.
+
+        `--force` for its reason there, which is a fact about git and not about
+        the transport: without it the checkout refuses whenever a tracked file
+        differs in the working tree and between the two commits, which on
+        AzerothCore is always true of `docker-compose.yml`.
+        """
+        self._capture(dest, ["checkout", "--detach", "--force", rev], writes=True)
 
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
         """Is every commit on HEAD already on what the update would reset to? None = cannot ask.

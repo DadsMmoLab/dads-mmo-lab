@@ -1199,3 +1199,141 @@ def test_the_strip_does_not_reopen_the_wrap_bug(qapp: object) -> None:
         "the stage strip inflated the panel's minimum width from "
         f"{short}px to {long}px, so a splitter must starve whatever is beside it"
     )
+
+
+# -- Stop must not destroy a cancellable source mid-cleanup (T64 round 2) -----
+
+
+def _route_with_cleanup(cancel: threading.Event, put_back: list[str]) -> Iterator[str]:
+    """A source shaped exactly like `StagedInstaller.update_to_latest()`.
+
+    It yields while working, raises when the cancel is set -- which is what a
+    killed compiler child really produces -- and then YIELDS AGAIN from its own
+    `except` handler while putting things back, before re-raising. Every line
+    after the raise is cleanup, and every statement between those lines is the
+    restore itself.
+
+    That shape is the whole subject: dropping a suspended generator throws
+    `GeneratorExit` at the yield it is parked on, which no `except` clause
+    written for the job's own failures catches, so none of this runs.
+    """
+    try:
+        for n in range(1000):
+            if cancel.is_set():
+                raise RuntimeError("the compile was killed")
+            yield f"compiling {n}"
+            time.sleep(JOB_PACE)
+    except RuntimeError:
+        for name in ("core", "module"):
+            put_back.append(name)
+            yield f"{name} was put back on its old commit."
+        raise
+
+
+def test_stop_lets_a_cancellable_source_finish_putting_things_back(qapp: object) -> None:
+    """The defect: Stop DESTROYED the generator and the restore never ran.
+
+    Read on the code by the cold review's second pass (2026-09-16) and driven
+    here. `_StreamWorker.run()` broke out of its `for` on the first line after
+    Stop and dropped the source; CPython then threw `GeneratorExit` into it at
+    that yield, and `GeneratorExit` is not an `Exception` -- so
+    `update_to_latest()`'s `except InstallerError`, and `rebuild()`'s image
+    rollback beside it, never ran at all. On a WotLK press that meant the core
+    checkout stayed on upstream's tip under the binary that is running, with
+    upstream's compose file in the folder, and nothing on screen saying so.
+
+    Asserted on BOTH halves, because either alone is passed by the broken
+    version on a good day: the restore really happened (`put_back`), and its
+    lines really reached the panel (the user's only evidence of it).
+    """
+    cancel = threading.Event()
+    put_back: list[str] = []
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+
+    panel.run(lambda: _route_with_cleanup(cancel, put_back), cancel=cancel)
+    pump_until(lambda: "compiling 0" in panel.text(), "the job produced its first line")
+    panel.stop()
+    wait_for_panel(panel)
+    process_events()
+
+    assert put_back == ["core", "module"], "the cleanup did not run to the end"
+    assert "core was put back on its old commit." in panel.text()
+    assert "module was put back on its old commit." in panel.text()
+    # Still a stop, not a failure: the job ended because the user pressed the
+    # button, and `_on_finished` reads this to decide it was cancelled.
+    assert finished and finished[0] == (True, "stopped")
+    assert panel.cancelled is True
+
+
+def test_stop_still_abandons_a_source_that_was_given_no_cancel(qapp: object) -> None:
+    """The other half of the rule, and why `drains` is not simply always True.
+
+    A source with no cancel event has undertaken nothing: the Console tab's
+    `docker logs -f` follows a world that may say nothing for ten minutes and
+    never ends on its own. Draining THAT would mean Stop stopped nothing and the
+    panel sat there, which is the 7.10 live FAIL this file already has a test
+    for. So the break stays for exactly that population.
+    """
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+    reached_the_end = threading.Event()
+
+    def endless() -> Iterator[str]:
+        try:
+            n = 0
+            while True:
+                yield f"tick {n}"
+                n += 1
+                time.sleep(JOB_PACE)
+        finally:
+            reached_the_end.set()
+
+    panel.run(endless)
+    pump_until(lambda: "tick 0" in panel.text(), "the endless job produced its first line")
+    panel.stop()
+    wait_for_panel(panel)
+
+    assert finished and finished[0] == (True, "stopped")
+    # It was CLOSED rather than run out: a `finally` fires on `GeneratorExit`
+    # too, so this says the generator ended, and the test above says why that is
+    # the wrong way to end one that had cleanup to do.
+    assert reached_the_end.is_set()
+
+
+def test_a_rebuilds_own_rollback_lines_survive_a_stop_too(qapp: object) -> None:
+    """The hole was `rebuild()`'s as much as the update route's, and it is older.
+
+    `native.rebuild()` yields from `_restore_rollback()` after a failed compile
+    -- the images it puts back and the containers it recreates -- and every one
+    of those yields was being dropped by the same break. It is the same fix and
+    the same seam, so it is the same test with the rollback's own shape: a
+    source that yields several lines from its handler, all of which must arrive.
+    """
+    cancel = threading.Event()
+    steps: list[str] = []
+
+    def rebuild_like() -> Iterator[str]:
+        try:
+            while True:
+                if cancel.is_set():
+                    raise RuntimeError("build stopped")
+                yield "compiling"
+                time.sleep(JOB_PACE)
+        except RuntimeError:
+            for said in ("Putting the build you had back.", "The containers were replaced."):
+                steps.append(said)
+                yield said
+            raise
+
+    panel = LogPanel()
+    panel.run(rebuild_like, cancel=cancel)
+    pump_until(lambda: "compiling" in panel.text(), "the build produced its first line")
+    panel.stop()
+    wait_for_panel(panel)
+    process_events()
+
+    assert steps == ["Putting the build you had back.", "The containers were replaced."]
+    assert "The containers were replaced." in panel.text()

@@ -80,6 +80,7 @@ from yulon.catalog.catalog import (
     SqlPlan,
 )
 from yulon.catalog.installer import (
+    MEASURED_BUILD_TIMES,
     DockerUnavailableError,
     InstallerError,
     InstallOptions,
@@ -214,15 +215,13 @@ is not a state anybody chose, so `_restore_rollback` asks again after its own
 recreate, which is the thing that frees them.
 """
 
-_MUST_BE_FORCED = "must be forced"
-"""The daemon's own words for "the only thing in the way is a stopped container".
+COMPOSE_STAGE = "generate-compose"
+"""The stage that writes this install's three compose files.
 
-Docker says `conflict: unable to delete <id> (must be forced) - container <id>
-is using its referenced image` for a container that has EXITED, and `(cannot be
-forced)` for one that is running -- measured live on the first restore, and
-pinned in `FAILED_TAG_SUFFIX` above. `_let_go()` matches on the first because it
-is the one that a second ask with `-f` answers; the second is a server somebody
-is using, and no name is worth taking an image out from under it.
+Named here because T64 selects on it: a family whose core checkout IS the
+server directory has its `docker-compose.yml` overwritten by this stage, so
+that path is one the app owns rather than the user, and a route that resets the
+checkout has to write it again (`StagedInstaller.app_written_paths()`).
 """
 
 DOCKERFILE_STAGE = "write-dockerfile"
@@ -494,6 +493,168 @@ class UpdateRoute:
     daemon. The audit is right to be spelling-based (a renamed helper stays
     covered), so the field is what moved.
     """
+
+
+@dataclass(frozen=True)
+class LatestRoute:
+    """The four parts of the "update to latest" control, wired so they cannot arrive apart.
+
+    `UpdateRoute`'s argument, with two presses instead of one: a tab holding a
+    `press` and no `confirmation` moves somebody's server source behind a dialog
+    nobody wrote, and one holding `press` without `to_pin` offers a one-way door
+    -- the way back off an untested commit is the same route aimed at
+    `EmulatorSource.rev`, and a build that shipped one without the other would
+    leave a user on code nobody tested with no control that returns them.
+    `None` for the whole thing is the only other legal state and it hides the
+    controls.
+    """
+
+    confirmation: Callable[[], str]
+    """The update dialog's text for this install. Pure: nothing is fetched to compose it."""
+    press: Callable[[threading.Event | None], Iterator[str]]
+    """Cancel in, lines out: `RebuildSource`'s shape, for the same panel."""
+    pin_confirmation: Callable[[], str]
+    """The "Return to the tested pin" dialog's text."""
+    to_pin: Callable[[threading.Event | None], Iterator[str]]
+    """The same route aimed at each source's `rev` instead of at upstream's tip."""
+    version_line: Callable[[], str]
+    """What this install was last built from, or `""` for one still on its pins.
+
+    A callable rather than a string, for `AdoptRoute.state`'s reason: it is a
+    READING -- of the state file, on the tab's own schedule -- and a value
+    computed when the tab was built would go stale the moment a press finished.
+    It reads one small file and asks no daemon and no remote anything, so it is
+    affordable on a reload; it never raises, for `git.head_version()`'s reason,
+    because an exception here would take a tab down over a decoration.
+    """
+
+
+def update_to_latest_confirmation(entry: CatalogEntry, server_dir: Path, repo: str) -> str:
+    """The one question asked before an update to latest. The approved design's own words.
+
+    Three facts and no fourth, and every one of them is a fact rather than a
+    reassurance -- `installer.rebuild_confirmation()`'s rule, applied to a
+    press that is strictly more dangerous than a rebuild:
+
+    * *what it is* -- code nobody has tested with this app. Said first and said
+      plainly, because it is the whole difference from the Rebuild button beside
+      it, which recompiles the commit the gates ran on.
+    * *what it costs* -- `MEASURED_BUILD_TIMES`, the same citation the rebuild
+      quotes, because it is the same compile.
+    * *how it can fail, and what survives* -- the build is put back; what the new
+      server wrote into the database on its first start is NOT. That second half
+      is the recommendation the owner asked for, stated as the reason the offer
+      of a backup exists rather than as advice with nothing behind it. It is
+      true because `rebuild()`'s rollback covers images and `_put_sources_back()`
+      covers the checkout, and neither of them covers a schema migration a
+      worldserver ran at boot.
+
+    It names the repository being fetched from, because "the newest code" is not
+    a thing a user can look at and the repository is: the sha in the log
+    afterwards belongs to that repo, and so does the issue they will file.
+
+    The sentence lives here rather than in the view for the reason every user
+    sentence in this module does -- `ui/` may not author copy that has to be
+    tested, and this has assertions on it that run without Qt.
+    """
+    return (
+        f"Update {entry.name} in {server_dir} to the newest {repo} code?\n\n"
+        f"This builds code nobody has tested with this app. It takes as long as your first "
+        f"build ({MEASURED_BUILD_TIMES}) and it can fail — a module may no longer compile, or "
+        f"the new server may refuse your database. If the build fails, the build you have now "
+        f"is put back. Anything the new server writes into your database on first start is not "
+        f"put back — that is what the backup is for."
+    )
+
+
+def return_to_pin_confirmation(entry: CatalogEntry, server_dir: Path, repo: str) -> str:
+    """The question asked before going back to the commit this app was tested against.
+
+    The way out of the button above, and it is the SAME press with the target
+    changed -- a full compile, the server down while the containers are
+    replaced, and no undo for what the newer server already wrote into the
+    database. So the copy says all three, in the same order and mostly in the
+    same words, because a user who has read one has read the shape of the other
+    and the differences are what should stand out.
+
+    What it deliberately does not say is that this fixes anything. Going back to
+    the tested commit restores the SERVER; a migration the newer build applied
+    to a character database stays applied, and an older worldserver meeting a
+    newer schema is its own evening. The backup taken before the update is
+    what covers that, and this names it rather than implying the return does.
+    """
+    return (
+        f"Put {entry.name} in {server_dir} back on the {repo} commit this app was tested "
+        f"against?\n\n"
+        f"This compiles the server again from that commit — the same wait as the update "
+        f"({MEASURED_BUILD_TIMES}) — and your server is down while its containers are "
+        f"replaced. It does NOT undo anything the newer server already wrote into your "
+        f"databases; only the backup you took covers that. Say no and nothing happens at all."
+    )
+
+
+def commits_past_pin(rev: SourceRev) -> str:
+    """One source's version line: what it was built from, and how far that is past the pin.
+
+    The sentence the approved design specifies, and its three other shapes,
+    each of which exists because the fact behind it is genuinely different:
+
+    * `ahead` a positive number -- *Built from a1b2c3d (2026-09-16), 12 commits
+      past the tested pin f82e7d6*. The pin is named because the number means
+      nothing without the thing it counts from, and because that sha is what
+      somebody pastes into an issue.
+    * `ahead` zero -- *..., the tested pin*. Saying "0 commits past" of a
+      checkout that is ON the pin is a figure where a plain fact belongs, and
+      this is the line a press of "Return to the tested pin…" produces.
+    * `ahead` `None` -- *...; the tested pin is f82e7d6*. Could not count, which
+      a truncated history can genuinely produce, so the line states what it
+      knows and claims no distance. It must not read as zero; see `SourceRev`.
+    * no pin at all -- the distance clause is dropped entirely rather than
+      written against an empty string.
+
+    `built` is split on `git.VERSION_SEPARATOR` because that is what wrote it
+    (`git.head_version()`), and a value that does not split that way is printed
+    whole: it came off disk, it is somebody's install, and mangling it into
+    "Built from  ()" would be worse than passing it through.
+    """
+    said = rev.built.split(git.VERSION_SEPARATOR)
+    head = f"built from {said[0]} ({said[1]})" if len(said) == 2 else f"built from {rev.built}"
+    if not rev.pin:
+        return head
+    short = rev.pin[:7]
+    if rev.ahead is None:
+        return f"{head}; the tested pin is {short}"
+    if rev.ahead == 0:
+        return f"{head}, the tested pin"
+    plural = "commit" if rev.ahead == 1 else "commits"
+    return f"{head}, {rev.ahead} {plural} past the tested pin {short}"
+
+
+def source_revs_line(state: InstallState | None) -> str:
+    """The Server tab's version line for this install, or `""` when it has none.
+
+    Empty for every install still on its catalog pins, which is every install
+    that has never pressed "Update the server to latest…" -- an install whose
+    sources are where the gates put them has nothing to report that the
+    catalog does not already say, and a line repeating it would be a reading
+    of `catalog.json` dressed up as a reading of the folder.
+
+    The repo is named ONLY when more than one source was moved, and that is not
+    a cosmetic rule: one line beginning "Built from" is a statement about this
+    server, and three of them with nothing to tell them apart would be three
+    statements about an unknown subject. WotLK moves two sources, so its line
+    is two rows; a single-source family reads as the design's sentence exactly.
+    """
+    if state is None or not state.source_revs:
+        return ""
+    if len(state.source_revs) == 1:
+        # Not `.capitalize()`, which lower-cases everything after the first
+        # character: today every character after it happens to be lower case
+        # already, so the two agree, and the day a branch name or a repo slug
+        # with a capital in it reaches this line they would not.
+        said = commits_past_pin(state.source_revs[0])
+        return said[0].upper() + said[1:]
+    return "\n".join(f"{rev.repo}: {commits_past_pin(rev)}" for rev in state.source_revs)
 
 
 def import_reads_as_finished(state: docker.ImportState) -> bool:
@@ -873,6 +1034,117 @@ def loopback_chosen_on_purpose(intent: networking.NetworkIntent) -> str:
     )
 
 
+UPDATE_SOURCES_STAGE = "update-sources"
+"""The stage name T64's fetches report their progress under.
+
+Never recorded in the state file, and it is not in any family's stage tuple: it
+is a label on git's own percentages so the log panel's header strip attributes
+them to something the user can see, exactly as `stage_clone_sources()` passes
+`recorded_as`. A name that WAS in a stage tuple would be a name a resume could
+decide to skip.
+"""
+
+UPDATE_TO_LATEST_OPENING_NOTE = (
+    "This is code nobody has tested with this app. Every source is checked first -- it must be "
+    "the repository this app cloned, with no changes and no commits of your own in it -- and if "
+    "anything after that fails, every source is put back on the commit it is on now and the "
+    "build you have keeps running."
+)
+"""What the route says before it fetches, under `rebuild_opening_note()`'s rule.
+
+Every clause names something this method really does, in the order it does it,
+and nothing here is a reassurance: the checks are `_refuse_unless_updatable()`,
+the restore is `_put_sources_back()`, and "the build you have keeps running" is
+`rebuild()`'s own rollback rather than a promise made on its behalf.
+"""
+
+SOURCES_PUT_BACK_NOTE = (
+    "The source folders were put back on the commits they were on, so what is on disk and what "
+    "your server is running agree again."
+)
+"""Appended to every failure after the first fetch. Says the invariant, not the intent.
+
+It is appended rather than woven in because the sentence in front of it comes
+from somewhere else entirely -- a patch's own refusal, a compiler, a `rebuild()`
+rollback -- and the one thing all of them need to add is the same. What makes it
+true is `_put_sources_back()`, which yields its own line per source, INCLUDING
+when a restore failed: a user who sees that line and this sentence has the
+contradiction in front of them rather than only the comfortable half.
+"""
+
+_DB_REPO_SUFFIX = "-db"
+"""How a world-database repository is spelled, in upstream CMaNGOS's own convention.
+
+`tbc-db`, `classic-db`, `wotlk-db`, `cata-db`. See
+`StagedInstaller.sources_that_move()` for why this is a suffix rule and what it
+costs.
+"""
+
+
+def held_at_its_pin(source: EmulatorSource) -> bool:
+    """Does this source stay on its tested commit when the server is updated to latest?
+
+    A module function rather than a method, so `test_catalog` can enumerate the
+    answer for every shipped source without building an engine -- which is what
+    keeps the suffix rule above from being a rule nobody checked.
+    """
+    name = source.repo.rstrip("/").rsplit("/", 1)[-1]
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    return name.endswith(_DB_REPO_SUFFIX)
+
+
+def _named(paths: Sequence[str], most: int = 5) -> str:
+    """A refusal's file list: the first few, and how many more there are.
+
+    Capped because the list goes into a modal dialog: a user who ran `make` in
+    their server source has thousands of changed files, and a message box
+    holding all of them has no readable sentence in it at all.
+    """
+    if len(paths) <= most:
+        return ", ".join(paths)
+    return f"{', '.join(paths[:most])} and {len(paths) - most} more"
+
+
+def _by_repo(rev: SourceRev) -> str:
+    """Sort key for `source_revs`, so the record's order does not follow the catalog's."""
+    return rev.repo
+
+
+@dataclass(frozen=True)
+class SourceRev:
+    """Where ONE source of this install stands against the commit the gates ran on (T64).
+
+    Written only by `StagedInstaller.update_to_latest()` -- an install leaves
+    this empty, because an install puts every source exactly on its pin and a
+    record saying so would be a record of the catalog rather than of the folder.
+
+    Three facts and no fourth, which is the shape the approved design names:
+
+    * `built` is what the checkout is AT, in `git.head_version()`'s spelling
+      (`a1b2c3d · 2026-09-16`) rather than a bare sha. The version line needs
+      the date as well as the abbreviation, and reusing the one string this app
+      already formats for exactly that purpose is cheaper than a fourth key and
+      cannot drift from the modules panel beside it.
+    * `pin` is `EmulatorSource.rev` as the catalog spelled it at the moment of
+      the update -- the full 40-character sha. Recorded rather than read back
+      off the catalog when the line is drawn, because the two are different
+      questions: "what was this measured against" is a fact about the press,
+      and a later app version that moves the pin must not be able to rewrite
+      what an earlier press did.
+    * `ahead` is how many commits `built` carries that `pin` does not, or
+      `None` for "could not count". `None` and `0` are deliberately different:
+      zero is "you are on the tested pin" and `None` is "nobody could say",
+      and collapsing them is the defect `read_claim()` and `git.BehindReader`
+      each record once already.
+    """
+
+    repo: str
+    built: str
+    pin: str = ""
+    ahead: int | None = None
+
+
 @dataclass(frozen=True)
 class InstallState:
     """`.yulon-install.json`: what a previous run of THIS install got through.
@@ -911,6 +1183,31 @@ class InstallState:
     a stage it cannot interpret. Behaviour reads `completed`; persistence writes
     both. Added 2026-09-02 with bug-checklist section 23.
     """
+
+    source_revs: tuple[SourceRev, ...] = ()
+    """Where each source stands against its tested pin, after an update to latest (T64).
+
+    Empty on every install and on every state file written before T64, which
+    is the one value that means "this folder is on the catalog's pins" -- the
+    version line then says nothing rather than inventing a reading.
+
+    ADDITIVE, so `version` stays 1: an older build reads the file, does not
+    know this key, and `write_state()` would drop it. That is the lossy
+    downgrade `unknown` exists to prevent for stage names, and it is NOT
+    prevented here on purpose -- the cost of losing it is a version line that
+    stops being drawn until the next update press, and the cost of carrying an
+    uninterpretable copy of it would be an older build reporting a reading it
+    cannot check against the catalog it ships. A hint that goes missing is the
+    right failure for a hint.
+
+    A tuple rather than the `dict` the file holds, because `InstallState` is
+    frozen and a mapping field would make it unhashable and comparable by
+    something mutable. `rev_for()` is the lookup.
+    """
+
+    def rev_for(self, repo: str) -> SourceRev | None:
+        """This install's record for `repo`, or None if it has none."""
+        return next((rev for rev in self.source_revs if rev.repo == repo), None)
 
     def with_stage(self, stage: str, order: Sequence[str]) -> InstallState:
         """This state plus `stage`, in `order`, with nothing recorded twice.
@@ -1081,7 +1378,50 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
         updated_unix=updated if isinstance(updated, int) else 0,
         version=version if isinstance(version, int) else STATE_VERSION,
         unknown=unknown,
+        source_revs=_parse_source_revs(parsed.get("source_revs"), path),
     )
+
+
+def _parse_source_revs(raw: object, path: Path) -> tuple[SourceRev, ...]:
+    """The `source_revs` mapping as records, dropping anything that is not one (T64).
+
+    Tolerant in exactly the direction the rest of this parser is: a key that is
+    not a mapping, or a record with no `built`, is DROPPED rather than raised
+    on, because the whole file is a hint and a damaged hint about a version
+    line must not make an install unopenable. What is not tolerated is a
+    plausible-looking wrong value -- an `ahead` that is not an `int` becomes
+    `None` ("could not say") and never `0` ("on the pin").
+
+    Sorted by repo so the file is stable between writes: `json.dumps` preserves
+    insertion order, and a record whose ordering followed the catalog's would
+    produce a different file every time the catalog was reordered, which reads
+    as a change to anything watching the folder.
+    """
+    if not isinstance(raw, dict):
+        if raw is not None:
+            logger.debug(f"{path} has a source_revs that is not a mapping; ignoring it")
+        return ()
+    found: list[SourceRev] = []
+    for repo, record in raw.items():
+        if not isinstance(repo, str) or not isinstance(record, dict):
+            continue
+        built = record.get("built")
+        if not isinstance(built, str) or not built:
+            continue
+        pin = record.get("pin")
+        ahead = record.get("ahead")
+        found.append(
+            SourceRev(
+                repo=repo,
+                built=built,
+                pin=pin if isinstance(pin, str) else "",
+                # `bool` is an `int` in Python and `True` would arrive as 1
+                # commit past the pin -- a number on somebody's screen with
+                # nothing behind it.
+                ahead=ahead if isinstance(ahead, int) and not isinstance(ahead, bool) else None,
+            )
+        )
+    return tuple(sorted(found, key=lambda rev: rev.repo))
 
 
 def write_state(server_dir: Path, state: InstallState) -> None:
@@ -1110,6 +1450,15 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         "last_error": state.last_error,
         "updated_unix": int(time.time()),
     }
+    if state.source_revs:
+        # Only when there is one, so the file an ordinary install writes is byte
+        # for byte what it was before T64: an empty mapping in every state file
+        # in existence would be a change to a file other things read, made for a
+        # feature most installs will never press.
+        payload["source_revs"] = {
+            rev.repo: {"built": rev.built, "pin": rev.pin, "ahead": rev.ahead}
+            for rev in state.source_revs
+        }
     tmp = path.with_name(path.name + ".new")
     try:
         server_dir.mkdir(parents=True, exist_ok=True)
@@ -1309,6 +1658,46 @@ def _git_file_unmodified(dest: Path, relative_path: str) -> bool | None:
     default value, evaluated when the dataclass is created.
     """
     return git.ContainerGit().is_unmodified(dest, relative_path)
+
+
+# T64's four git questions, bound the way `_git_file_unmodified` is: a module
+# function per question, named as a `Seams` default, and NOT a Protocol. The
+# five `runtime_checkable` Protocols in `git.py` exist so that `apply.py` can
+# narrow a real `Git` it was handed and fall back when it was handed a fake;
+# this engine is never handed one -- every external effect it has is already a
+# `Seams` field, and a test fakes the field. Adding Protocols here would be a
+# second way to answer the same question, which is the shape §27 of the bug
+# checklist is about.
+
+
+def _git_local_edits(dest: Path, ignoring: Sequence[str] = ()) -> tuple[str, ...] | None:
+    """`git status --porcelain` inside a container, minus the app's own patch paths."""
+    return git.ContainerGit().local_edits(dest, ignoring)
+
+
+def _git_no_local_commits(dest: Path, branch: str | None) -> bool | None:
+    """Does this checkout carry commits the update would drop? Containerised."""
+    return git.ContainerGit().no_local_commits(dest, branch)
+
+
+def _git_head_sha(dest: Path) -> str | None:
+    """The full commit this checkout is on, containerised."""
+    return git.ContainerGit().head_sha(dest)
+
+
+def _git_head_version(dest: Path) -> str | None:
+    """`a1b2c3d · 2026-09-16` for this checkout, containerised."""
+    return git.ContainerGit().head_version(dest)
+
+
+def _git_commits_since(dest: Path, rev: str) -> int | None:
+    """How many commits this checkout carries past `rev`, containerised."""
+    return git.ContainerGit().commits_since(dest, rev)
+
+
+def _git_restore_rev(dest: Path, rev: str) -> None:
+    """Put this checkout back on `rev`, containerised. Raises `git.GitError`."""
+    git.ContainerGit().restore_rev(dest, rev)
 
 
 READY_CEILING_SECONDS = 6 * 60 * 60
@@ -2143,6 +2532,26 @@ class Seams:
     clone: Callable[[git.CloneSpec], None] = field(default_factory=lambda: git.ContainerGit().clone)
     remote_url: Callable[[Path], str | None] | None = None
     file_unmodified: Callable[[Path, str], bool | None] = _git_file_unmodified
+    # T64's five. Import-bound like every other seam here except the four that
+    # say why they are not: nothing else in this app asks these questions, so
+    # there is no second answerer to split from, and the one caller
+    # (`update_to_latest()`) is reached only from a button a test drives with
+    # its own `Seams`.
+    local_edits: Callable[[Path, Sequence[str]], tuple[str, ...] | None] = _git_local_edits
+    no_local_commits: Callable[[Path, str | None], bool | None] = _git_no_local_commits
+    head_sha: Callable[[Path], str | None] = _git_head_sha
+    head_version: Callable[[Path], str | None] = _git_head_version
+    commits_since: Callable[[Path, str], int | None] = _git_commits_since
+    restore_rev: Callable[[Path, str], None] = _git_restore_rev
+    """Put one source back on the commit it was on before this press moved it.
+
+    A seam and not a `git` call, for `recreate`'s reason one size down: a test
+    that could not see the restore happen -- and could not make it FAIL -- could
+    not see either of the two defects that make the rollback decorative. A
+    source left ahead of the image compiled from it is a folder and an image
+    that disagree, which is the state `update_to_latest()`'s whole failure path
+    exists to prevent, and it is invisible from the outside.
+    """
     images_built: Callable[[Sequence[str]], bool | None] = docker.images_built
     build: Callable[..., docker.AttachedRun] = docker.build_staged
     one_shot: Callable[..., docker.AttachedRun] = docker.run_one_shot
@@ -3613,6 +4022,515 @@ class StagedInstaller:
         self._clear_error(server_dir, state)
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
+
+    # ------------------------------------------------------- update to latest (T64)
+
+    def sources_that_move(self) -> tuple[EmulatorSource, ...]:
+        """Which of this entry's sources an update to latest moves. The `*-db` ones do not.
+
+        **A database repository is not code and must not follow this button.**
+        `src/tbc-db` and `src/classic-db` are the world databases: their
+        contents are IMPORTED into a running server's schemas by the install
+        (`sqlplan`), and they carry migrations that the pinned core was gated
+        against. Moving one of them to upstream's tip would hand a server that
+        was not rebuilt a set of SQL updates written for a core it is not
+        running, and -- unlike the compile, which fails loudly -- the failure
+        shape there is a world that boots and is quietly wrong. The approved
+        design says so in four words ("`*-db` sources stay at their pin"), and
+        this is where those four words live.
+
+        Matched on the repository NAME rather than on a per-source catalog flag,
+        which is a deliberate and stated cost. A flag would be exact; it would
+        also be a fifth thing every future entry has to remember to set, whose
+        default (move it) is the dangerous one. The suffix is upstream CMaNGOS's
+        own convention for every one of these repositories (`tbc-db`,
+        `classic-db`, `wotlk-db`, `cata-db`), and `test_catalog` pins the
+        derivation against every shipped entry so a source this rule reads
+        wrongly is a failing test rather than a live surprise.
+        """
+        return tuple(
+            source for source in self.entry.emulator.sources if not held_at_its_pin(source)
+        )
+
+    def app_written_paths(self, server_dir: Path) -> Mapping[str, tuple[str, ...]]:
+        """Paths inside a source's checkout that THIS APP wrote, per source `dest`.
+
+        What `local_edits()` is told to ignore, and what
+        `_rewrite_what_we_own()` puts back afterwards -- the two always travel
+        together, because a path this app overwrites is a path a `reset --hard`
+        restores to upstream's version.
+
+        **The spine's own contribution is the compose files, and it was found by
+        a test rather than reasoned about.** AzerothCore's core source has
+        `dest: "."` -- the server directory IS the checkout -- and that
+        repository tracks its own `docker-compose.yml`, which
+        `stage_generate_compose()` then overwrites with this app's marked one
+        (its docstring calls that "the one recognised exception"). So every
+        healthy WotLK install has a modified tracked file in its checkout, and
+        the first version of this route did both wrong things with it at once:
+        `local_edits()` reported it, so the update was refused on every WotLK
+        install there has ever been; and with the guard silenced the reset put
+        upstream's compose back, after which `rebuild()`'s own guard refused
+        with "these compose files were not written by Yu'lon" and the press
+        ended having broken the install it was updating.
+
+        CMaNGOS adds the paths its carried patches edit. Its sources all live
+        under `src/`, so it never meets the compose case, and the two
+        contributions have never overlapped -- which is why this is a mapping
+        per `dest` rather than one list.
+        """
+        return {
+            source.dest: composegen.COMPOSE_FILES
+            for source in self.entry.emulator.sources
+            if source.dest == "." and COMPOSE_STAGE in self.stage_names()
+        }
+
+    def _rewrite_what_we_own(
+        self, server_dir: Path, opts: InstallOptions, state: InstallState
+    ) -> Iterator[str]:
+        """Put this app's own files back into a checkout the fetch just reset. Spine: compose.
+
+        `rebuild_stages()` deliberately excludes `generate-compose` because it
+        "rewrites files a running server is using", and that exclusion is right
+        for a rebuild, which re-clones nothing. It is exactly wrong here: the
+        reset has ALREADY replaced this install's compose file with upstream's,
+        so the choice is not "rewrite it or leave it" but "rewrite it or hand
+        `rebuild()` a folder it refuses". Writing it back is restoring what was
+        there, not changing it.
+
+        Nothing is written for a family whose sources all live in
+        subdirectories -- the three CMaNGOS entries -- because a reset inside
+        `src/mangos-tbc` cannot touch a file at the server dir. The condition is
+        `app_written_paths()`'s own, read off the same fact, so the guard's
+        exception and the restore cannot come apart.
+        """
+        if not self.app_written_paths(server_dir):
+            return
+        yield from self.stage_generate_compose(
+            StageContext(
+                server_dir=server_dir,
+                client_dir=opts.client_dir,
+                state=state,
+                # None, and not the press's own event: this write is the
+                # RECOVERY of a file the fetch already replaced, and a Stop
+                # landing inside it would leave the install with upstream's
+                # compose and no route that puts it back.
+                cancel=None,
+                secrets=self.resolve_secrets(server_dir),
+            )
+        )
+
+    def check_carried_patches(self, server_dir: Path) -> Iterator[str]:
+        """Resolve every carried patch against the moved sources WITHOUT writing. Spine: none.
+
+        The gate the approved design puts in front of the compile, and the
+        reason it is a dry run rather than the real apply: the answer is needed
+        while putting the sources back is still free. A `PatchError` here means
+        upstream has moved under a patch this project carries, and the only
+        outcomes then available are "build without the patch" -- which is the
+        one thing the design forbids in as many words, because the patch is
+        there to stop a measured defect -- and "put everything back". This
+        method is what makes the second one possible.
+        """
+        return iter(())
+
+    def apply_carried_patches(self, server_dir: Path) -> Iterator[str]:
+        """Write every carried patch into the moved sources. Spine: none.
+
+        **Not a duplicate of the dry run, and not optional.** `rebuild_stages()`
+        deliberately excludes `patch-sources` -- a rebuild does not re-clone, so
+        there was never anything to re-patch -- and this route DOES re-clone, by
+        `reset --hard` onto upstream's tip, which discards the patch the install
+        wrote. Handing `rebuild()` a tree in that state would compile the
+        unpatched source: exactly the outcome the dry run above was run to
+        prevent, arriving one step later. Measured as a reading of the code
+        rather than of a box: `patch.apply()` writes into `contrib/
+        vmap_extractor/...` inside the core checkout, and `git.RunnerGit._update()`
+        is `fetch` + `reset --hard FETCH_HEAD`.
+
+        It runs AFTER the dry run and not instead of it, because a dry run that
+        has already passed makes this one a formality that cannot refuse -- and
+        if it somehow does, the sources are put back by the same handler.
+        """
+        return iter(())
+
+    def update_to_latest(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        to_pin: bool = False,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
+        """Move this install's sources and rebuild on them. Yields output live (T64).
+
+        The owner's ask of 2026-09-15, in one route for all four families: "a
+        update server to latest, with a warning and recommendation to take a
+        backup before updating". The warning and the backup are the view's
+        (`ui/controller_view.py`) and the copy is `installer.update_to_latest_
+        confirmation()`'s; what is here is the move, its refusals, and putting
+        everything back when the thing it was moved for does not work.
+
+        `to_pin` aims the same route at `EmulatorSource.rev` instead of at
+        upstream's tip -- the way BACK, and the design's reason for it being the
+        same route rather than a second one is that every refusal, every restore
+        and every record above is the same sentence in both directions. A
+        separate "return" path would be a second set of guards to keep in step
+        with these, and the one it would be easiest to forget is the one that
+        matters most: a return that did not check for local commits would
+        discard work somebody did on top of an untested build.
+
+        **The order is the whole design, and each step is where it is because of
+        what is still free at that point.**
+
+        1. `_refuse_unless_rebuildable()` first, because a folder this app does
+           not own, or one with no install record, is a folder nothing here may
+           fetch into. It is the rebuild's own guard, reused: this press ENDS in
+           a rebuild, so a press that would be refused there must be refused
+           before it moves anything rather than after.
+        2. The three source refusals (`_refuse_unless_updatable()`), all of them
+           for every source, BEFORE the first fetch. A route that moved source
+           one and then refused source two would leave a tree half a version
+           ahead of the image, which is the state this whole method is arranged
+           to prevent.
+        3. The moves, one source at a time, each remembered as it happens.
+        4. The carried patches: resolved dry (which can refuse), then written.
+        5. `rebuild()`, unchanged and in full, rollback tags included. This is
+           deliberately NOT a copy of the rebuild with sources bolted on: the
+           image rollback, the recipe restore and the "nothing was touched"
+           promise are that method's, they are hard-won, and a second
+           implementation of them would be a second one to keep correct.
+
+        Every failure from step 3 onward puts every moved source back on the
+        commit it came from, so what is on disk and what the running image was
+        compiled from agree. That is the one invariant a user cannot check for
+        themselves and the one that quietly breaks everything afterwards: a
+        Modules tab reading a source tree that is a hundred commits ahead of the
+        binary answering on the port is a tab telling the truth about the wrong
+        thing.
+
+        Raises:
+            InstallerError: any refusal, any stage that failed, or a cancel. The
+                message is the sentence a user reads, and when sources had
+                already moved it says that they were put back.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        state = self._refuse_unless_rebuildable(server_dir)
+        moving = self.sources_that_move()
+        if not moving:
+            raise InstallerError(
+                f"{self.entry.name} has no source this app may update: every repository it "
+                "installs is a database repository, which stays on the commit its server was "
+                "tested against. Nothing was started."
+            )
+        if to_pin and any(source.rev is None for source in moving):
+            raise InstallerError(
+                f"{self.entry.name} does not pin every source it builds from, so there is no "
+                "tested commit to return to. Nothing was started."
+            )
+        plan = self._refuse_unless_updatable(server_dir, moving)
+        where = "the commit this app was tested against" if to_pin else "the newest upstream code"
+        yield f"Moving {self.entry.name}'s sources in {server_dir} to {where}."
+        yield UPDATE_TO_LATEST_OPENING_NOTE
+        self._check_cancel(cancel)
+        moved: list[tuple[EmulatorSource, Path, str]] = []
+        try:
+            for source, dest, old in plan:
+                self._check_cancel(cancel)
+                yield f"Fetching {source.repo} into {source.dest}."
+                # `rev=None` is what makes this an update rather than a re-pin:
+                # `git.RunnerGit.clone()` sees an existing `.git`, runs
+                # `_update()` -- fetch, then `reset --hard FETCH_HEAD` -- and
+                # `_pin()` then returns immediately. With `rev=source.rev` the
+                # same two calls run and the pin is re-applied on top, which is
+                # the way back. One seam, two directions, no second fetch path.
+                #
+                # APPENDED BEFORE the call and not after: `clone_lines()` can
+                # fail half way through, after the reset has already landed, and
+                # a source that is not in `moved` is a source nothing puts back.
+                moved.append((source, dest, old))
+                yield from self._clone_lines(
+                    git.CloneSpec(
+                        url=source.url,
+                        dest=dest,
+                        branch=source.branch,
+                        sparse_path=source.sparse_path,
+                        depth=source.depth,
+                        rev=source.rev if to_pin else None,
+                    ),
+                    UPDATE_SOURCES_STAGE,
+                )
+                yield self._moved_line(source, dest, old)
+            self._check_cancel(cancel)
+            yield from self.check_carried_patches(server_dir)
+            yield from self._rewrite_what_we_own(server_dir, opts, state)
+            yield from self.apply_carried_patches(server_dir)
+        except (InstallerError, OSError) as exc:
+            # `OSError` as well, and not for symmetry: everything between the
+            # first fetch and the compile WRITES -- `_rewrite_what_we_own()`
+            # renders three compose files, `apply_carried_patches()` writes into
+            # the checkout -- and a full disk or a read-only mount surfaces as a
+            # bare `OSError` that no `InstallerError` wraps. Skipping the
+            # restore on it would leave the folder ahead of the image for the
+            # one failure most likely to happen twice in a row (cold review
+            # round 2, 2026-09-16).
+            yield from self._restore_the_folder(moved, server_dir, opts, state)
+            raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+        try:
+            yield from self.rebuild(opts, cancel=cancel)
+        except InstallerError as exc:
+            # AFTER `rebuild()` has done its own rollback, never instead of it.
+            # It puts the IMAGE back; this puts the SOURCE back; and it is the
+            # pair that makes the folder and the running container agree again.
+            yield from self._restore_the_folder(moved, server_dir, opts, state)
+            raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+        self._record_source_revs(server_dir, state, moved)
+        yield (
+            f"{self.entry.name} is running on "
+            f"{'the commit this app was tested against' if to_pin else 'the newest upstream code'}."
+        )
+
+    def _refuse_unless_updatable(
+        self, server_dir: Path, moving: Sequence[EmulatorSource]
+    ) -> tuple[tuple[EmulatorSource, Path, str], ...]:
+        """The three source refusals, for every source, before anything is fetched.
+
+        Each is the prior art's own gate, read out of `dml wow update`
+        (`cli/dml` 11163-11250) and `wow-manage.sh`'s `update_server_source`
+        (7319-7460) on 2026-09-16, and each is FAIL-CLOSED where those two were
+        not:
+
+        * **origin.** Both prior launchers refuse a checkout whose `origin` is
+          not the fork the server needs -- wow-manage by asking "pull from this
+          remote anyway?", `dml` by making it a hard error with no override,
+          because "pulling upstream AzerothCore here would break the playerbots
+          integration". `dml`'s reading is taken. The question wow-manage asks
+          is one nobody has the information to answer at the moment it is asked.
+        * **a dirty tree.** Both prior launchers keep going: they stash the
+          edits, pull, and pop them back on top, and wow-manage's own comment
+          admits what happens when that conflicts ("the updated file wins").
+          This refuses instead, and the reason is that a stash is a promise this
+          app cannot keep -- `_update()` is `reset --hard`, not `pull --ff-only`,
+          and the pop lands on a tree that may share no history with the one the
+          edit was made against. A refusal that names the files is a worse
+          evening and a better outcome than a silent three-way merge into
+          somebody's server source. `app_written_paths()` is subtracted first;
+          see `git.RunnerGit.local_edits()`.
+        * **local commits.** NEITHER prior launcher checks. `git pull --ff-only`
+          would have refused a diverged branch, which is a third of the case;
+          this route resets, which would discard the commits outright and leave
+          them reachable only through the reflog. `git.HistoryReader`'s own
+          docstring is the argument: a checkout somebody committed their work
+          into is perfectly clean by `status`.
+
+        `None` from any of the three reads refuses, and the sentence says which
+        of the two it is. "We could not ask" is never "there is nothing to
+        lose" -- the rule every `None` in `git.py` is documented under.
+
+        **The closing clause changes half way down the list, and the change is
+        the point.** The refusals above `no_local_commits` end "nothing was
+        fetched and nothing was changed", and that is literally true. The ones
+        below it end "nothing in that folder was changed", because
+        `no_local_commits()` FETCHES -- its own docstring says so, and names the
+        network round trip it pays -- so by then objects and `FETCH_HEAD` have
+        been written into `.git`. Nothing in the working tree has moved, which
+        is what the user is being told and what they can check; saying "nothing
+        was fetched" there would be a sentence this method knows to be false
+        (cold review round 2, 2026-09-16).
+
+        Returns `(source, dest, sha)` per source, with the sha read HERE rather
+        than inside the loop that moves them: the restore path needs a commit
+        that was read before anything fetched, and a read taken after the first
+        source has already moved is a read of a tree this press has changed.
+        """
+        ours = self.app_written_paths(server_dir)
+        plan: list[tuple[EmulatorSource, Path, str]] = []
+        for source in moving:
+            dest = server_dir / source.dest
+            existing = self._remote_of(dest)
+            if existing is None:
+                raise InstallerError(
+                    f"{dest} is not a checkout of {source.url} that Yu'lon can read -- git would "
+                    f"not say what it is a checkout of. Nothing was fetched and nothing was "
+                    f"changed."
+                )
+            if not git.same_repo(existing, source.url):
+                raise InstallerError(
+                    f"{dest} is a checkout of {existing}, not of {source.url}. Updating it would "
+                    f"fetch somebody else's code into your server, so nothing was fetched and "
+                    f"nothing was changed."
+                )
+            edits = self._seams.local_edits(dest, ours.get(source.dest, ()))
+            if edits is None:
+                raise InstallerError(
+                    f"Yu'lon could not ask git whether {dest} has changes of your own in it, and "
+                    f"an update replaces that checkout's files. Nothing was fetched and nothing "
+                    f"was changed."
+                )
+            if edits:
+                raise InstallerError(
+                    f"{dest} has changes of your own in it ({_named(edits)}). An update replaces "
+                    f"that checkout's files with upstream's, which would throw them away, so "
+                    f"nothing was fetched and nothing was changed. Copy them somewhere safe and "
+                    f"put the files back as git has them, then press this again."
+                )
+            unmoved = self._seams.no_local_commits(dest, source.branch)
+            if unmoved is None:
+                raise InstallerError(
+                    f"Yu'lon could not ask git whether {dest} carries commits of its own -- the "
+                    f"fetch that question needs did not answer, so upstream could not be reached "
+                    f"either. Nothing was fetched and nothing was changed."
+                )
+            if not unmoved:
+                raise InstallerError(
+                    f"{dest} carries commits that upstream does not, and an update moves it onto "
+                    f"upstream's newest commit, which would leave them reachable only through "
+                    f"git's reflog. Nothing in that folder was changed."
+                )
+            sha = self._seams.head_sha(dest)
+            if sha is None:
+                raise InstallerError(
+                    f"Yu'lon could not read which commit {dest} is on, so it could not promise to "
+                    f"put that checkout back if the new build failed. Nothing in that folder "
+                    f"was changed."
+                )
+            plan.append((source, dest, sha))
+        return tuple(plan)
+
+    def _moved_line(self, source: EmulatorSource, dest: Path, old: str) -> str:
+        """What one source's move is reported as: the two shas, or that nothing moved."""
+        new = self._seams.head_sha(dest)
+        if new is None:
+            return f"{source.repo} was updated; git would not say what it is on now."
+        if new == old:
+            return f"{source.repo} was already on {new[:7]}; nothing moved."
+        return f"{source.repo}: {old[:7]} -> {new[:7]}."
+
+    def _restore_the_folder(
+        self,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+        server_dir: Path,
+        opts: InstallOptions,
+        state: InstallState,
+    ) -> Iterator[str]:
+        """Put the sources back AND write this app's own files into them again.
+
+        **Two halves, and the second is not tidying.** `restore_rev()` is a
+        `checkout --force`: it puts the checkout on the old commit and, with it,
+        puts UPSTREAM's copy of every tracked file back -- including the ones
+        this app overwrote. On AzerothCore that is `docker-compose.yml`, so a
+        restore that stopped at the first half would leave the folder on the
+        right commit with a compose file this app does not recognise, and the
+        NEXT press of anything -- Rebuild included -- would refuse it with "these
+        compose files were not written by Yu'lon". The press would have fixed
+        the sha and broken the install, which is the same shape as the defect
+        `app_written_paths()` exists for, arriving on the recovery path.
+
+        Never raises, for `_put_sources_back()`'s reason: this runs on a path
+        that is already failing. A second half that could not run is reported
+        rather than thrown, because the sentence in front of it is the one that
+        says what actually went wrong.
+        """
+        yield from self._put_sources_back(moved)
+        if not moved:
+            return
+        try:
+            yield from self._rewrite_what_we_own(server_dir, opts, state)
+            yield from self.apply_carried_patches(server_dir)
+        except (InstallerError, OSError) as exc:
+            logger.warning(f"could not put this app's own files back into {server_dir}: {exc}")
+            yield (
+                f"The source folders are back on their old commits, but Yu'lon's own files "
+                f"inside them could not be written again ({exc}). Press Rebuild once the "
+                f"reason is fixed; nothing was compiled."
+            )
+
+    def _put_sources_back(self, moved: Sequence[tuple[EmulatorSource, Path, str]]) -> Iterator[str]:
+        """Return every source this press moved to the commit it was on. Never raises.
+
+        Never raises because it runs on a path that is ALREADY failing, and a
+        second exception there would replace the sentence that says what went
+        wrong with one about the recovery. What it does instead is say so, per
+        source, in a line the user can act on: a checkout that would not go back
+        is the one state this route can end in where the folder and the running
+        image disagree, and a person who is told which folder and which commit
+        can run two words of git themselves.
+        """
+        for source, dest, old in reversed(moved):
+            try:
+                self._seams.restore_rev(dest, old)
+            except (git.GitError, OSError) as exc:
+                logger.warning(f"could not put {dest} back on {old}: {exc}")
+                yield (
+                    f"{source.repo} in {dest} could NOT be put back on {old[:7]} ({exc}). That "
+                    f"folder is now ahead of the server that is running: put it back with "
+                    f"`git -C {dest} checkout --detach --force {old}`."
+                )
+                continue
+            yield f"{source.repo} was put back on {old[:7]}."
+
+    def _record_source_revs(
+        self,
+        server_dir: Path,
+        state: InstallState,
+        moved: Sequence[tuple[EmulatorSource, Path, str]],
+    ) -> None:
+        """Write where each moved source ended up into the install record.
+
+        LAST, after the rebuild succeeded, and that is the point of it: this key
+        is read by the tab's version line as "what the running server was built
+        from", and a record written before the compile would describe a build
+        that may never have happened. A press that fails writes nothing here at
+        all -- the sources went back, so the record that is already on disk is
+        still true.
+
+        Best-effort like every other write through `write_state()`: a record
+        that could not be written costs a version line, and taking the whole
+        press down at the end of a successful build to report that would be a
+        failure about a decoration.
+
+        **The state is RE-READ here and the caller's copy is not used, and that
+        is not tidiness.** `rebuild()` has just run, and on success it calls
+        `_clear_error()` — which exists because an install record that keeps a
+        stale `last_error` tells a user their working server failed (measured
+        on m910q, 2026-09-02). The caller's `state` was read BEFORE that, so
+        writing `replace(state, ...)` would put the cleared sentence straight
+        back: a press that failed, then a press that succeeded, and a server
+        that is running the new build with a record saying the update failed
+        (cold review, 2026-09-16). A read that will not answer skips the write
+        rather than falling back to the stale copy — losing a version line is
+        the cheaper of the two.
+        """
+        found: list[SourceRev] = []
+        for source, dest, _old in moved:
+            built = self._seams.head_version(dest)
+            if built is None:
+                logger.warning(f"could not read what {dest} was built from; not recording it")
+                continue
+            pin = source.rev or ""
+            found.append(
+                SourceRev(
+                    repo=source.repo,
+                    built=built,
+                    pin=pin,
+                    ahead=self._seams.commits_since(dest, pin) if pin else None,
+                )
+            )
+        if not found:
+            return
+        fresh = read_state(server_dir, valid=self.stage_names())
+        if fresh is None:
+            logger.warning(
+                f"{server_dir} would not say what it is after the rebuild, so what this update "
+                "built from was not recorded; nothing else was changed."
+            )
+            return
+        # Every OTHER source's record survives: a family could gain a source
+        # this press does not move, and dropping its row because this press did
+        # not visit it would delete a true reading.
+        keep = {rev.repo for rev in found}
+        merged = tuple(rev for rev in fresh.source_revs if rev.repo not in keep) + tuple(found)
+        write_state(server_dir, replace(fresh, source_revs=tuple(sorted(merged, key=_by_repo))))
 
     def _keep_rollback(
         self, ctx: StageContext, refs: Sequence[str]

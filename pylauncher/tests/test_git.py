@@ -654,9 +654,29 @@ def test_the_production_container_gits_are_bare_and_there_are_no_others(
     ran = len(seen)
     native._git_remote_url(dest)
     assert len(seen) == ran + 1, "the remote-url route reached a container, not an early return"
+    # T64's six, driven for the same reason as the two above rather than
+    # counted: each is a `Seams` default, so each is a production construction
+    # site, and the `.git` created above is what stops them returning early.
+    for route in (
+        native._git_head_sha,
+        native._git_head_version,
+        native._git_local_edits,
+    ):
+        ran = len(seen)
+        route(dest)  # type: ignore[operator]
+        assert len(seen) == ran + 1, f"{route.__name__} reached a container, not an early return"
+    ran = len(seen)
+    native._git_no_local_commits(dest, "main")
+    assert len(seen) == ran + 2, "the local-commits route fetches and then counts"
+    ran = len(seen)
+    native._git_commits_since(dest, "f82e7d6")
+    assert len(seen) == ran + 1, "the commits-since route reached a container"
+    ran = len(seen)
+    native._git_restore_rev(dest, "f82e7d6")
+    assert len(seen) == ran + 1, "the restore route reached a container"
     native.Seams()
 
-    assert made == [{}, {}, {}], "a production ContainerGit that carries a seam is not bare"
+    assert made == [{}] * 9, "a production ContainerGit that carries a seam is not bare"
 
     tree = ast.parse(Path(native.__file__).read_text(encoding="utf-8"))
     calls = [

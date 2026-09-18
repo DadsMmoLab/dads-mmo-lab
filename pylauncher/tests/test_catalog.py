@@ -287,6 +287,26 @@ def test_the_pins_are_the_commits_the_gates_ran_on(game_id: str) -> None:
     assert {s.repo: s.rev for s in sources} == GATE_PINS[game_id]
 
 
+def test_every_entry_says_whether_it_offers_the_update_to_latest_control() -> None:
+    """T64's flag, by VALUE and per entry, for `test_the_pins_are_...`'s reason.
+
+    The two facts are the same fact seen from both ends. The pins above say
+    every source is held at the commit the gates ran on; this flag is the one
+    deliberate way past that, and the owner's word of 2026-09-16 was all four
+    families at once. Enumerated rather than spot-checked because the default
+    is `False` and the safety of this control rests on it: an entry gets the
+    button by somebody deciding it does, and an entry that quietly LOST the
+    flag would quietly lose the button with every test still green.
+    """
+    offered = {game.id: game.install.native.update_to_latest for game in load_catalog().games}
+    assert offered == {
+        "wow-wotlk": True,
+        "wow-tbc": True,
+        "wow-vanilla": True,
+        "wow-tortoise": True,
+    }, offered
+
+
 def test_only_one_server_runs_at_a_time_is_visible_in_the_data() -> None:
     """Every v1 server publishes the same auth port, so the §12 guard will engage."""
     ports = {g.ports.auth for g in load_catalog().games}
