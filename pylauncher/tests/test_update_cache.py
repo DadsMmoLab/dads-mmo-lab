@@ -166,6 +166,22 @@ def test_a_rate_limit_answer_is_not_cached_over_a_good_feed(tmp_path: Path) -> N
     assert load_update_state(path).feed == FEED
 
 
+def test_a_failed_check_does_not_start_the_day_again(tmp_path: Path) -> None:
+    """Somebody who opened this on a train wants the next launch to try, not tomorrow."""
+    server, clock, path = Server(FEED), Clock(1000.0), tmp_path / "update.json"
+    _check(server, clock, path)
+    clock.t += CHECK_INTERVAL_SECONDS
+
+    def down(url: str, etag: str | None) -> HttpAnswer:
+        raise OSError("dns")
+
+    check_with_cache(current="0.8.66-Public", fetch=down, state_path=path, now=clock)
+
+    assert load_update_state(path).last_checked == 1000.0
+    _check(server, clock, path)
+    assert server.calls == 2, "the next launch asks again rather than waiting another day"
+
+
 def test_a_304_with_no_cached_feed_asks_again_without_the_etag(tmp_path: Path) -> None:
     """An ETag without the body it describes is worse than no ETag at all."""
     path = tmp_path / "update.json"

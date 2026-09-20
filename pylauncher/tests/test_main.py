@@ -502,10 +502,13 @@ def _app_window(qapp: object) -> Iterator[Any]:
     `update.json`. `build_window()` imports `check_with_cache` into its own
     namespace on the way in, so a patch applied after the window exists is
     never seen by it — the window would already have asked GitHub. And this
-    fixture is MODULE-scoped: pytest builds it before the function-scoped
+    fixture is MODULE-scoped, so pytest builds it BEFORE the function-scoped
     autouse fixture in `conftest.py` that points `platform.config_dir()` at a
-    scratch directory, so at the moment the window is built the real config dir
-    is still the answer and an unpatched check would write the developer's own
+    scratch directory. Measured on this box, 2026-09-20, with a probe module
+    that printed both: at module-fixture time `config_dir()` answered
+    `~/.local/share/yulon` — the developer's own — and inside the test body it
+    answered a `tmp_path`. So the redirect every other test relies on is simply
+    not up yet here, and an unpatched check would have written the real
     `update.json`. Both doors are shut before `build_window()` is called.
     """
     import tempfile

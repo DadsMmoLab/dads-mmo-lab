@@ -313,6 +313,14 @@ def check_with_cache(
     `0 <= moment - state.last_checked` and not just `<`: a clock that was wrong
     and has been corrected leaves a stamp in the future, and a check whose
     freshness window opens backwards would never ask again on that machine.
+
+    **A failure does not start the day again.** `last_checked` is written only
+    when GitHub answered — 200 or 304 — so a launch with no network retries at
+    the NEXT launch rather than tomorrow, which is what somebody who opened
+    this on a train and then got home wants. The cost is stated rather than
+    hidden: a run of launches while GitHub is rate-limiting asks once each.
+    Both are bounded by how often the app is started, not by a timer, and the
+    alternative loses a day of update news to one bad minute.
     """
     state = load_update_state(state_path)
     cached = _from_cache(state, current)
