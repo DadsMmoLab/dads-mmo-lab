@@ -331,6 +331,8 @@ def test_a_link_in_the_notes_is_never_navigated_to_by_the_widget(qapp: object) -
         ("file://host/share/x.png", False),
         ("smb://host/share", False),
         ("javascript:alert(1)", False),
+        ("//host/share/x.exe", False),
+        ("", False),
     ],
 )
 def test_only_an_http_link_is_handed_to_the_desktop(qapp: object, href: str, opened: bool) -> None:
