@@ -617,14 +617,19 @@ def update_host(window: Any) -> Iterator[Any]:
 
     One window is shared by this whole module (`_app_window`), so a test that
     skipped a version or left the bar up would be handing the next one a state
-    it never set.
+    it never set. The four injectable attributes are put back too — a stand-in
+    `make_dialog` left on a shared window is how a later test ends up asserting
+    about a dialog this one built.
     """
     host = window.property("update_host")
     assert host is not None
+    seams = {name: getattr(host, name) for name in ("check", "run_job", "make_dialog", "open_url")}
     path = window.update_state_dir / "update.json"
     path.unlink(missing_ok=True)
     yield host
     window.property("update_bar").clear()
+    for name, seam in seams.items():
+        setattr(host, name, seam)
     # The one piece of the host's own state a test can leave behind: which
     # release the dialog would open on.
     host._offered = None
