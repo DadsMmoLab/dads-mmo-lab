@@ -15,8 +15,10 @@ survived review in the first place.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -495,13 +497,30 @@ def _app_window(qapp: object) -> Iterator[Any]:
     neutralised here: it reads the user's real `state.json`, writes it back
     whenever a tab is added, and starts a thread that asks GitHub for the
     latest release.
+
+    **The update check is patched HERE and not in a test**, and so is
+    `update.json`. `build_window()` imports `check_with_cache` into its own
+    namespace on the way in, so a patch applied after the window exists is
+    never seen by it — the window would already have asked GitHub. And this
+    fixture is MODULE-scoped: pytest builds it before the function-scoped
+    autouse fixture in `conftest.py` that points `platform.config_dir()` at a
+    scratch directory, so at the moment the window is built the real config dir
+    is still the answer and an unpatched check would write the developer's own
+    `update.json`. Both doors are shut before `build_window()` is called.
     """
+    import tempfile
+
     from PySide6.QtWidgets import QApplication
 
+    from yulon import update_state
     from yulon.ui.controller_view import ControllerView
 
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(update, "check_for_update", lambda: None)
+    monkeypatch.setattr(update, "check_with_cache", lambda **kwargs: None)
+    scratch = Path(tempfile.mkdtemp(prefix="yulon-test-update-state-"))
+    monkeypatch.setattr(
+        update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
     monkeypatch.setattr(state, "load_state", lambda path=None: state.AppState(installs=[]))
     # Captured here rather than in the test that reads it: `build_window()`
     # imports `save_state` into its own namespace on the way in, so a patch
@@ -521,6 +540,7 @@ def _app_window(qapp: object) -> Iterator[Any]:
 
     window = main.build_window()
     window.saved_states = saved
+    window.update_state_dir = scratch
     yield window
 
     # `_stop_background_threads` itself, not a hand-rolled equivalent: a QThread
@@ -529,6 +549,7 @@ def _app_window(qapp: object) -> Iterator[Any]:
     main._stop_background_threads(window)
     QApplication.processEvents()
     monkeypatch.undo()
+    shutil.rmtree(scratch, ignore_errors=True)
 
 
 @pytest.fixture
@@ -556,6 +577,198 @@ def _tab_for(window: Any, server_dir: Any) -> Any:
         if view.services.controller.server_dir == server_dir:
             return view
     raise AssertionError(f"no tab for {server_dir}")
+
+
+# ------------------------------------------------------------- the update check
+
+A_RELEASE = update.UpdateCheck(
+    "0.8.66-Public",
+    "v0.8.70-Public",
+    True,
+    "https://example.invalid/r",
+    notes_markdown="## v0.8.70-Public\n\n- Ten.\n",
+)
+
+
+class _FakeDialog:
+    """`UpdateDialog` with a non-blocking `exec()`.
+
+    A real one is application-modal, and `conftest.py`'s `_no_modal_dialogs`
+    covers `QMessageBox` only — a `QDialog.exec()` in an offscreen run waits for
+    a click that never comes, at zero CPU, with no failure and no output. The
+    factory is injectable for exactly this.
+    """
+
+    def __init__(self, choice: Any) -> None:
+        self.choice = choice
+        self.shown = 0
+
+    def exec(self) -> int:
+        self.shown += 1
+        return 1
+
+
+@pytest.fixture
+def update_host(window: Any) -> Iterator[Any]:
+    """The window's update host, with its bar and its `update.json` clean at both ends.
+
+    One window is shared by this whole module (`_app_window`), so a test that
+    skipped a version or left the bar up would be handing the next one a state
+    it never set.
+    """
+    host = window.property("update_host")
+    assert host is not None
+    path = window.update_state_dir / "update.json"
+    path.unlink(missing_ok=True)
+    yield host
+    window.property("update_bar").clear()
+    # The one piece of the host's own state a test can leave behind: which
+    # release the dialog would open on.
+    host._offered = None
+    path.unlink(missing_ok=True)
+
+
+def test_a_startup_check_shows_the_bar_for_a_release_that_is_newer(
+    window: Any, update_host: Any
+) -> None:
+    update_host.startup_result(A_RELEASE)
+
+    bar = window.property("update_bar")
+    assert not bar.isHidden()
+    assert "v0.8.70-Public" in bar.text() and "0.8.66-Public" in bar.text()
+
+
+def test_a_skipped_version_is_not_announced_at_startup(window: Any, update_host: Any) -> None:
+    """ "Skip this version" is about the launch after it, which is this one."""
+    update.skip_version("v0.8.70-Public")
+
+    update_host.startup_result(A_RELEASE)
+
+    assert window.property("update_bar").isHidden()
+
+
+def test_a_startup_check_that_failed_says_nothing(window: Any, update_host: Any) -> None:
+    """Offline at launch is the normal case, not news."""
+    update_host.startup_result(dataclasses.replace(A_RELEASE, available=False, error="dns"))
+
+    assert window.property("update_bar").isHidden()
+
+
+def test_a_manual_check_that_failed_says_so(window: Any, update_host: Any) -> None:
+    """The 2026-08-31 post-mortem was a check that failed silently."""
+    update_host.manual_result(dataclasses.replace(A_RELEASE, available=False, error="dns"))
+
+    assert window.property("update_bar").text() == "Could not check for updates: dns"
+
+
+def test_a_manual_check_that_raised_says_so_too(window: Any, update_host: Any) -> None:
+    """`job.py`'s `on_error` carries the exception itself, not a string."""
+    update_host.manual_failed(OSError("no route"))
+
+    assert "no route" in window.property("update_bar").text()
+
+
+def test_a_manual_check_with_nothing_newer_says_which_version_you_have(
+    window: Any, update_host: Any
+) -> None:
+    update_host.manual_result(
+        dataclasses.replace(A_RELEASE, available=False, latest="v0.8.66-Public")
+    )
+
+    assert window.property("update_bar").text() == "You have the newest version (0.8.66-Public)."
+
+
+def test_a_manual_check_shows_a_version_the_player_skipped(window: Any, update_host: Any) -> None:
+    """They pressed the button: hiding the answer to a question just asked is the same bug."""
+    update.skip_version("v0.8.70-Public")
+
+    update_host.manual_result(A_RELEASE)
+
+    assert "v0.8.70-Public" in window.property("update_bar").text()
+
+
+def test_the_button_in_the_header_runs_a_forced_check_and_shows_its_answer(
+    window: Any, update_host: Any
+) -> None:
+    """Through the real button, not the slot: the wiring is what this pins."""
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.widgets.job import run_inline
+
+    asked: list[int] = []
+
+    def check() -> object:
+        asked.append(1)
+        return A_RELEASE
+
+    update_host.check = check
+    update_host.run_job = run_inline
+
+    button = window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    button.click()
+
+    assert asked == [1]
+    assert "v0.8.70-Public" in window.property("update_bar").text()
+
+
+def test_skip_in_the_dialog_is_written_down_and_takes_the_bar_away(
+    window: Any, update_host: Any
+) -> None:
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(A_RELEASE)
+    dialog = _FakeDialog(UpdateChoice.SKIP)
+    update_host.make_dialog = lambda result: dialog
+
+    window.property("update_bar").details_button.click()
+
+    assert dialog.shown == 1
+    assert update.load_update_state().skipped_version == "v0.8.70-Public"
+    assert window.property("update_bar").isHidden()
+
+
+def test_later_in_the_dialog_changes_nothing(window: Any, update_host: Any) -> None:
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(A_RELEASE)
+    update_host.make_dialog = lambda result: _FakeDialog(UpdateChoice.LATER)
+    opened: list[str] = []
+    update_host.open_url = opened.append
+
+    window.property("update_bar").details_button.click()
+
+    assert opened == []
+    assert update.load_update_state().skipped_version is None
+    assert not window.property("update_bar").isHidden()
+
+
+def test_update_now_opens_the_release_page_and_replaces_nothing(
+    window: Any, update_host: Any
+) -> None:
+    """Plan 2 offers the download page; plan 3 is what installs it."""
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(A_RELEASE)
+    update_host.make_dialog = lambda result: _FakeDialog(UpdateChoice.UPDATE)
+    opened: list[str] = []
+    update_host.open_url = opened.append
+
+    window.property("update_bar").details_button.click()
+
+    assert opened == ["https://example.invalid/r"]
+
+
+def test_the_details_button_does_nothing_before_a_check_has_answered(
+    window: Any, update_host: Any
+) -> None:
+    """The bar is hidden then, but a signal is not a guarantee about what raised it."""
+    made: list[int] = []
+    update_host.make_dialog = lambda result: made.append(1) or _FakeDialog(None)
+
+    update_host.open_details()
+
+    assert made == []
 
 
 def test_adopting_a_server_that_already_has_a_tab_rebuilds_it_for_the_new_distro(
@@ -648,9 +861,9 @@ def test_use_existing_on_a_wsl_server_does_not_demote_its_tab_to_the_local_daemo
     assert existing.services.controller.wsl_distro == "Ubuntu-24.04"
     assert window.saved_states, "nothing was written back at all"
     remembered = window.saved_states[-1].find("wow-wotlk", server_dir)
-    assert (
-        remembered is not None and remembered.wsl_distro == "Ubuntu-24.04"
-    ), "the distro was erased from what would be saved"
+    assert remembered is not None and remembered.wsl_distro == "Ubuntu-24.04", (
+        "the distro was erased from what would be saved"
+    )
 
 
 def test_a_tab_that_is_mid_import_is_not_torn_down_to_change_its_distro(

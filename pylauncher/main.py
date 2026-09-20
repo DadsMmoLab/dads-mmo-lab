@@ -19,11 +19,12 @@ from yulon import platform
 from yulon.log import configure, file_log_problem, get_logger, use_utf8_streams
 
 if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay for it.
-    from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QTabWidget
+    from PySide6.QtWidgets import QMainWindow, QSplitter, QTabWidget
 
     from yulon.state import AppState
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.widgets.log_panel import LogPanel
+    from yulon.ui.widgets.update_bar import UpdateBar
 
 logger = get_logger(__name__)
 
@@ -84,7 +85,7 @@ wider, and the user is free to drag it.
 
 def build_catalog_tab(
     window: QMainWindow, catalog_view: CatalogView, log_panel: LogPanel
-) -> tuple[QTabWidget, QLabel, QSplitter]:
+) -> tuple[QTabWidget, UpdateBar, QSplitter]:
     """Wire the window's central widget, tab bar and the Catalog tab's splitter.
 
     Extracted out of `build_window()` (T28 round 2 review) so a test can lay
@@ -98,18 +99,25 @@ def build_catalog_tab(
     does not exist (round 1's mistake — it happened not to matter for the
     first two tests, and there was no reason to expect that to keep holding).
 
-    Returns `(tabs, banner, splitter)`. `build_window()` itself only needs the
-    first two afterwards — `tabs` to add controller tabs and record on the
-    window's `tabs` property, `banner` for the update-check banner host —
-    but a test needs the `splitter` too, to drive it across the width range
-    the user can actually drag it to (`test_catalog_view.py`'s width matrix).
-    `central` and `column` are wiring with nothing left to read once this
-    returns.
+    Returns `(tabs, update_bar, splitter)`. `build_window()` itself only needs
+    the first two afterwards — `tabs` to add controller tabs and record on the
+    window's `tabs` property, `update_bar` for the update host — but a test
+    needs the `splitter` too, to drive it across the width range the user can
+    actually drag it to (`test_catalog_view.py`'s width matrix). `central` and
+    `column` are wiring with nothing left to read once this returns.
+
+    The header goes onto the window as its `header` property rather than into
+    this tuple (T90). `build_window()` is the only caller that wants it — for
+    `add_action()`, the home of the "Check for updates" button — and a fourth
+    element would be a fourth thing for every OTHER caller to name and ignore.
+    A property holds a QObject by pointer, which is safe here for the reason
+    `_Window`'s docstring gives about lists: only a Python container is copied.
     """
     from PySide6.QtCore import QSize, Qt
-    from PySide6.QtWidgets import QLabel, QSplitter, QTabWidget, QVBoxLayout, QWidget
+    from PySide6.QtWidgets import QSplitter, QTabWidget, QVBoxLayout, QWidget
 
     from yulon.ui.icons import get_tab_icon
+    from yulon.ui.widgets.update_bar import UpdateBar
 
     tabs = QTabWidget(window)
     tabs.setObjectName("sidebar-tabs")
@@ -130,10 +138,9 @@ def build_catalog_tab(
 
     header = DadcraftHeader(parent=central)
     column.addWidget(header)
-    banner = QLabel(central)
-    banner.setOpenExternalLinks(True)
-    banner.setVisible(False)
-    column.addWidget(banner)
+    window.setProperty("header", header)
+    update_bar = UpdateBar(central)
+    column.addWidget(update_bar)
     column.addWidget(tabs, 1)
     window.setCentralWidget(central)
 
@@ -173,7 +180,7 @@ def build_catalog_tab(
     catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
     tabs.addTab(splitter, "Catalog")
     tabs.setTabIcon(tabs.indexOf(splitter), get_tab_icon("catalog"))
-    return tabs, banner, splitter
+    return tabs, update_bar, splitter
 
 
 def _warn_about_the_log_file(parent: Any) -> None:
@@ -226,7 +233,7 @@ def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
     from PySide6.QtCore import QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
     from PySide6.QtGui import QDesktopServices, QGuiApplication
-    from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QWidget
+    from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QPushButton, QWidget
 
     from yulon import __version__
     from yulon.catalog.catalog import load_catalog
@@ -237,8 +244,10 @@ def build_window() -> object:
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.tab_titles import retitle_controller_tabs
     from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
-    from yulon.update import UpdateCheck, check_for_update
+    from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog
+    from yulon.update import UpdateCheck, check_with_cache, should_announce, skip_version
 
     class _Window(QMainWindow):
         """The main window, which also carries the two registries the exit path walks.
@@ -348,7 +357,7 @@ def build_window() -> object:
         # about. Same list `add_controller()` just built the tabs from.
         installed_games=state.installed_dirs(),
     )
-    tabs, banner, _splitter = build_catalog_tab(window, catalog_view, log_panel)
+    tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
 
     def _on_tab_bar_context_menu(pos: QPoint) -> None:
         tab_bar = tabs.tabBar()
@@ -694,39 +703,114 @@ def build_window() -> object:
     catalog_view.fresh_install.connect(on_fresh_install)
     catalog_view.adopted.connect(on_adopted)
 
-    # README §10: non-blocking update check on a background thread; banner only if newer.
+    # README §10: non-blocking update check on a background thread; the bar only
+    # if a `-Public` release is newer than this build and has not been skipped.
     class _UpdateWorker(QObject):
         done = Signal(object)
 
         def run(self) -> None:
-            self.done.emit(check_for_update())
+            # `check_with_cache` since T90: at most one request a day, and the
+            # answer in `update.json` is re-judged against THIS version.
+            self.done.emit(check_with_cache())
 
-    class _BannerHost(QObject):
-        """Owns the banner slot ON THE GUI THREAD so the worker's signal is queued.
+    class _UpdateHost(QObject):
+        """Owns the update slots ON THE GUI THREAD so the worker's signal is queued.
 
         A plain function has no thread affinity: connected to a worker-thread
         signal it runs on the WORKER (verified on PySide6 6.11.2 — an explicit
-        QueuedConnection does not change that), touching `banner` off the GUI
+        QueuedConnection does not change that), touching `update_bar` off the GUI
         thread. Only a QObject-bound slot is delivered on this thread
         (review finding, 2026-08-21).
+
+        `check`, `run_job`, `make_dialog` and `open_url` are attributes and not
+        hard-wired calls, because every one of them is something a test must be
+        able to replace: the check talks to GitHub, the runner starts a thread,
+        `QDialog.exec()` blocks an offscreen run forever, and the opener hands a
+        URL to the desktop. The defaults are what the app runs.
         """
 
-        @Slot(object)
-        def show_update(self, result: object) -> None:
-            if isinstance(result, UpdateCheck) and result.available:
-                banner.setText(
-                    f"A newer Yu'lon ({result.latest}) is available — "
-                    f'<a href="{result.url}">download it</a> (you have {result.current}).'
-                )
-                banner.setVisible(True)
+        def __init__(self, parent: QObject) -> None:
+            super().__init__(parent)
+            self.check: Callable[[], object] = lambda: check_with_cache(force=True)
+            self.run_job = threaded_job_runner(window)
+            self.make_dialog: Callable[[UpdateCheck], UpdateDialog] = lambda result: UpdateDialog(
+                result, parent=window
+            )
+            self.open_url: Callable[[str], object] = lambda url: QDesktopServices.openUrl(QUrl(url))
+            self._offered: UpdateCheck | None = None
 
-    banner_host = _BannerHost(window)
+        @Slot(object)
+        def startup_result(self, result: object) -> None:
+            """The launch check, which is quiet: it speaks only to offer an update."""
+            if isinstance(result, UpdateCheck) and should_announce(result):
+                self._offered = result
+                update_bar.show_update(result)
+
+        @Slot(object)
+        def manual_result(self, result: object) -> None:
+            """The button's check, which always answers.
+
+            The 2026-08-31 post-mortem was a check that failed silently, so a
+            failure the user ASKED for is shown. A skipped version is shown too:
+            they pressed the button, and hiding the answer to a question they
+            just asked is the same defect in a smaller box.
+            """
+            if not isinstance(result, UpdateCheck):
+                update_bar.show_message("Could not check for updates.")
+            elif result.available:
+                self._offered = result
+                update_bar.show_update(result)
+            elif result.error:
+                update_bar.show_message(f"Could not check for updates: {result.error}")
+            else:
+                update_bar.show_message(f"You have the newest version ({result.current}).")
+
+        @Slot(object)
+        def manual_failed(self, problem: object) -> None:
+            """`OnError` from `job.py`: the exception the check raised, which it should not."""
+            update_bar.show_message(f"Could not check for updates: {problem}")
+
+        @Slot()
+        def check_now(self) -> None:
+            update_bar.show_message("Checking for updates…")
+            self.run_job(self.check, self.manual_result, self.manual_failed)
+
+        @Slot()
+        def open_details(self) -> None:
+            """Show what is in the release, and do what the player answers.
+
+            "Update now" is `Open download page` in this plan: nothing here
+            replaces the running app (T90 plan 3 does).
+            """
+            offered = self._offered
+            if offered is None:
+                return
+            dialog = self.make_dialog(offered)
+            dialog.exec()
+            if dialog.choice is UpdateChoice.SKIP:
+                skip_version(str(offered.latest))
+                update_bar.clear()
+            elif dialog.choice is UpdateChoice.UPDATE:
+                self.open_url(offered.url)
+
+    update_host = _UpdateHost(window)
+    update_bar.details_requested.connect(update_host.open_details)
+    window.setProperty("update_bar", update_bar)
+    window.setProperty("update_host", update_host)
+
+    check_button = QPushButton("Check for updates", window)
+    check_button.setObjectName("check-for-updates")
+    check_button.setFlat(True)
+    check_button.clicked.connect(update_host.check_now)
+    header = window.property("header")
+    if header is not None:
+        header.add_action(check_button)
 
     update_thread = QThread(window)
     update_worker = _UpdateWorker()
     update_worker.moveToThread(update_thread)
     update_thread.started.connect(update_worker.run)
-    update_worker.done.connect(banner_host.show_update)
+    update_worker.done.connect(update_host.startup_result)
     update_worker.done.connect(update_thread.quit)
     # `setProperty` does NOT keep a Python object alive - a Qt property holds a
     # QObject*, not a reference - so `update_worker` used to die the moment this
