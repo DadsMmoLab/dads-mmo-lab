@@ -16,6 +16,11 @@ overwrites it.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -26,6 +31,23 @@ from yulon.log import get_logger
 logger = get_logger(__name__)
 
 UPDATE_STATE_FILE_NAME = "update.json"
+
+_LOCK = threading.RLock()
+"""Held across every load-modify-save of `update.json`. One file, two writers.
+
+Two of them, and they are not hypothetical: the launch check runs on its own
+`QThread` for up to five seconds, and in that window the player can press
+"Check for updates" or "Skip this version" on a bar an earlier check put up.
+Without this, the losing pattern is a read-modify-write race with the whole
+file as the unit — the check reads the state, the player's skip is written,
+the check writes back the copy it read, and the skip is gone. The app's own
+tests found it before a user did (cold review, 2026-09-21).
+
+An `RLock`, so `remember()` calling `load`/`save` under it is not a deadlock if
+either ever grows a lock of its own. Process-wide only: two COPIES of Yu'lon
+running at once are not serialised by it, and the unique temp name below is
+what keeps that case from corrupting the file rather than merely racing it.
+"""
 
 
 class UpdateState(BaseModel):
@@ -75,14 +97,49 @@ def save_update_state(state: UpdateState, path: Path | None = None) -> bool:
     A failure here costs one more request to GitHub tomorrow, which is not worth
     a dialog and certainly not worth an exception out of a background thread —
     but the caller is told, so nothing reports a save that did not happen.
+
+    The temporary file gets a **unique** name from `mkstemp` rather than the
+    fixed `update.json.tmp` it had until the cold review of 2026-09-21. One
+    name meant two writers filling the same file at once — the launch check on
+    its thread and a Skip on the GUI thread — and then renaming it over the
+    real one twice: the second rename moves a file the first writer had already
+    moved, and what lands is a mixture of two JSON documents, which reads back
+    as an empty state and loses both the skip and the cached feed. Under the
+    lock this cannot happen in one process, and with a unique name it cannot
+    happen between two copies of the app either.
     """
     target = path if path is not None else update_state_path()
+    handle = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + ".tmp")
+        handle, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
+        os.close(handle)
+        handle = None
+        tmp = Path(name)
         tmp.write_text(state.model_dump_json(indent=2) + "\n", encoding="utf-8")
         tmp.replace(target)
     except OSError as exc:
         logger.info(f"update state not saved to {target}: {exc}")
         return False
     return True
+
+
+@contextmanager
+def update_lock() -> Iterator[None]:
+    """Hold the one lock on `update.json` for a whole load-modify-save. See `_LOCK`."""
+    with _LOCK:
+        yield
+
+
+def remember(fields: Mapping[str, object], path: Path | None = None) -> bool:
+    """Write only `fields` onto whatever `update.json` says right now. Never raises.
+
+    The read and the write are one operation, and the state is re-read INSIDE
+    the lock rather than passed in: a caller that loaded the state, went to the
+    network for five seconds and then saved its copy back would erase whatever
+    the player did in between. Every writer of this file goes through here, and
+    each of them names only the fields it owns.
+    """
+    with update_lock():
+        current = load_update_state(path)
+        return save_update_state(current.model_copy(update=dict(fields)), path)

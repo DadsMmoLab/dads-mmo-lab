@@ -102,9 +102,8 @@ def test_after_a_day_it_revalidates_with_the_etag_and_a_304_keeps_the_feed(tmp_p
     assert _check(server, clock, path).available
 
     assert server.sent == [None, 'W/"one"']
-    assert load_update_state(path).last_checked == clock.t, (
-        "a 304 is an answer: the day starts again from it, or every launch asks"
-    )
+    # A 304 is an answer: the day starts again from it, or every launch asks.
+    assert load_update_state(path).last_checked == clock.t
 
 
 def test_force_asks_inside_the_day_and_still_sends_the_etag(tmp_path: Path) -> None:
@@ -264,7 +263,69 @@ def test_a_failed_save_does_not_fail_the_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An unwritable config dir costs one extra request tomorrow, not the answer today."""
-    monkeypatch.setattr(update, "save_update_state", lambda state, path=None: False)
+    monkeypatch.setattr(update, "remember", lambda fields, path=None: False)
     server = Server(FEED)
 
     assert _check(server, Clock(1.0), tmp_path / "update.json").available
+
+
+def test_a_skip_during_a_check_survives_the_checks_own_save(tmp_path: Path) -> None:
+    """The lost update this file exists to stop, driven deterministically.
+
+    The launch check loads the state, spends up to five seconds on the network,
+    and saves. The player can press "Skip this version" in that window — the
+    bar is up from an earlier check — and a check that saved the copy it loaded
+    would write the skip straight back out of existence. The `fetch` here IS
+    that window: it skips a version while the check is mid-flight.
+    """
+    path = tmp_path / "update.json"
+    server = Server(FEED)
+
+    def fetch_and_skip(url: str, if_none_match: str | None) -> HttpAnswer:
+        answer = server(url, if_none_match)
+        skip_version("v0.8.70-Public", path)
+        return answer
+
+    result = check_with_cache(
+        current="0.8.66-Public", fetch=fetch_and_skip, state_path=path, now=Clock(1000.0)
+    )
+
+    state = load_update_state(path)
+    assert state.skipped_version == "v0.8.70-Public", "the player's skip was overwritten"
+    assert state.feed == FEED, "the freshly fetched feed was not kept"
+    assert state.last_checked == 1000.0
+    assert result.available, "the check still answers with what it fetched"
+    assert not should_announce(result, path), "and the bar stays down, because it was skipped"
+
+
+def test_a_hostile_body_that_raises_something_unexpected_still_answers(tmp_path: Path) -> None:
+    """ "Never raises" is the contract `_UpdateWorker` depends on for its `done` signal.
+
+    `RecursionError` is neither an `OSError` nor a `ValueError`, and a deeply
+    nested JSON body produces one from `json.loads`. Injected rather than built:
+    the subject is the boundary, not CPython's recursion limit.
+    """
+
+    def hostile(url: str, if_none_match: str | None) -> HttpAnswer:
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON object")
+
+    result = check_with_cache(
+        current="0.8.66-Public", fetch=hostile, state_path=tmp_path / "u.json", now=Clock(1.0)
+    )
+
+    assert not result.available
+    assert "recursion" in (result.error or "")
+
+
+def test_a_hostile_body_with_a_cache_keeps_the_cached_answer(tmp_path: Path) -> None:
+    server, clock, path = Server(FEED), Clock(1000.0), tmp_path / "update.json"
+    _check(server, clock, path)
+
+    def hostile(url: str, if_none_match: str | None) -> HttpAnswer:
+        raise RecursionError("too deep")
+
+    result = check_with_cache(
+        current="0.8.66-Public", fetch=hostile, state_path=path, now=clock, force=True
+    )
+
+    assert result.available and "too deep" in (result.error or "")

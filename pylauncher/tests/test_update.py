@@ -11,12 +11,15 @@ import pytest
 
 from tests.support_update import FEED, release
 from yulon.update import (
+    RELEASES_API,
     RELEASES_PAGE,
+    RELEASES_REPO,
     check_for_update,
     evaluate_feed,
     is_newer,
     is_public_tag,
     parse_version,
+    safe_release_url,
 )
 
 
@@ -157,6 +160,44 @@ def test_malformed_assets_are_dropped_not_fatal() -> None:
 def test_the_fallback_page_is_one_that_exists() -> None:
     """`/releases/latest` 404s here: every release this project cuts is a prerelease."""
     assert RELEASES_PAGE.endswith("/releases")
+
+
+def test_the_feed_asks_for_as_many_releases_as_the_api_will_give() -> None:
+    """20 meant a week of test tags could push the newest public release off the page."""
+    assert "per_page=100" in RELEASES_API
+
+
+def test_both_urls_name_the_same_repository() -> None:
+    """A gate that repoints the feed must not leave the opener trusting the other repo."""
+    assert RELEASES_REPO in RELEASES_API and RELEASES_REPO in RELEASES_PAGE
+
+
+@pytest.mark.parametrize(
+    ("url", "allowed"),
+    [
+        ("https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v0.8.70-Public", True),
+        ("https://github.com/DadsMmoLab/dads-mmo-lab", True),
+        ("https://github.com/DadsMmoLab/dads-mmo-lab/releases", True),
+        ("http://github.com/DadsMmoLab/dads-mmo-lab/releases", False),
+        ("https://github.com.evil.example/DadsMmoLab/dads-mmo-lab/releases", False),
+        ("https://github.com/DadsMmoLabX/dads-mmo-lab/releases", False),
+        ("https://github.com/DadsMmoLab/dads-mmo-lab-evil/releases", False),
+        ("file:///etc/passwd", False),
+        ("//host/share/x.exe", False),
+        ("", False),
+    ],
+)
+def test_only_this_repositorys_own_pages_are_ever_opened(url: str, allowed: bool) -> None:
+    """`html_url` is a string the feed chose; `QDesktopServices` starts what it says."""
+    assert safe_release_url(url) == (url if allowed else RELEASES_PAGE)
+
+
+def test_the_allowed_prefix_follows_the_configured_repository() -> None:
+    """A fork gate points the feed at pjerra; the opener has to move with it."""
+    fork = "https://github.com/pjerra/dads-mmo-lab/releases"
+
+    assert safe_release_url(f"{fork}/tag/v0.0.1-Public", page=fork).startswith(fork)
+    assert safe_release_url(RELEASES_PAGE, page=fork) == fork
 
 
 def test_a_feed_of_nothing_but_prereleases_still_yields_an_update() -> None:

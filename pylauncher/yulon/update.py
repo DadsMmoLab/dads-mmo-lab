@@ -29,12 +29,29 @@ from pathlib import Path
 from yulon import __version__
 from yulon.log import get_logger
 from yulon.platform import verify_context
-from yulon.update_state import UpdateState, load_update_state, save_update_state
+from yulon.update_state import UpdateState, load_update_state, remember
 
 logger = get_logger(__name__)
 
-RELEASES_API = "https://api.github.com/repos/DadsMmoLab/dads-mmo-lab/releases?per_page=20"
-RELEASES_PAGE = "https://github.com/DadsMmoLab/dads-mmo-lab/releases"
+RELEASES_REPO = "DadsMmoLab/dads-mmo-lab"
+"""The repository the app asks about, written once.
+
+Both URLs below and the rule in `safe_release_url()` are derived from it, so a
+gate that points the check at a fork cannot end up trusting one repo and
+opening another.
+"""
+
+RELEASES_API = f"https://api.github.com/repos/{RELEASES_REPO}/releases?per_page=100"
+"""100, the API's maximum, and not the 20 this asked for until the cold review.
+
+The feed is ordered by creation date, so every test tag cut since the last
+`-Public` release sits in front of it: twenty `-fixtest` builds — a week of
+gate work — would push the newest public release off the end of the page, and
+the check would then answer "no public release" and go on answering it from
+the cached feed for a day at a time. A hundred is one request either way.
+"""
+
+RELEASES_PAGE = f"https://github.com/{RELEASES_REPO}/releases"
 """Where a user is sent when the check has no better link.
 
 `/releases/latest`, which this was until T90, means "latest NON-prerelease" —
@@ -275,9 +292,32 @@ def check_for_update(
     """
     try:
         return evaluate_feed(http_get(api_url), current)
-    except (urllib.error.URLError, OSError, ValueError, AttributeError) as exc:
-        logger.info(f"update check skipped: {exc}")
+    except Exception as exc:  # boundary: "never raises" is the whole contract
+        logger.info(f"update check skipped: {type(exc).__name__}: {exc}")
         return UpdateCheck(current, None, False, RELEASES_PAGE, error=str(exc))
+
+
+def safe_release_url(url: str, *, page: str = RELEASES_PAGE) -> str:
+    """`url` if it is a page of this app's own repository, else the releases page.
+
+    `UpdateCheck.url` is `html_url` **as the feed gave it** — a string this app
+    did not choose — and the dialog's action hands it to `QDesktopServices`,
+    which will start whatever the scheme says: a `file:` path, or on Windows a
+    `\\\\host\\share` that is an SMB connection before it is anything else. The
+    feed arrives over a verified TLS connection from an API this app named, so
+    this is not the first line of defence; it is the one that means a bad
+    answer from that API cannot reach the desktop.
+
+    The allowed prefix is DERIVED from `page` rather than written again, so
+    that a gate build which points `api_url` at the fork points this at the
+    fork too. Exact match, or the prefix followed by `/` — otherwise
+    `…/dads-mmo-lab-evil/x` would pass on a plain `startswith`.
+    """
+    repo = page[: -len("/releases")] if page.endswith("/releases") else page
+    if url == repo or url.startswith(repo + "/"):
+        return url
+    logger.info(f"update: refusing to open {url!r}, which is not under {repo!r}")
+    return page
 
 
 def _from_cache(state: UpdateState, current: str) -> UpdateCheck | None:
@@ -334,14 +374,22 @@ def check_with_cache(
     try:
         # The ETag goes only with the body it describes. Sending one whose feed
         # was lost or unreadable buys a 304 with nothing to read it against.
+        # OUTSIDE the lock: this blocks for up to `_TIMEOUT_SECONDS`, and a
+        # lock held across a network read is a frozen Skip button.
         answer = fetch(api_url, state.etag if cached is not None else None)
         if answer.status == 304 and cached is not None:
-            save_update_state(state.model_copy(update={"last_checked": moment}), state_path)
+            remember({"last_checked": moment}, state_path)
             return cached
         fresh = evaluate_feed(answer.text, current)
-    except (urllib.error.URLError, OSError, ValueError, AttributeError) as exc:
-        # `HTTPError` IS a `URLError`, so a 403 or a 500 lands here too.
-        logger.info(f"update check failed: {exc}")
+    except Exception as exc:
+        # Everything, not the four types this used to name. `HTTPError` IS a
+        # `URLError` so a 403 or a 500 was always covered — but a hostile body
+        # can make `json.loads` raise `RecursionError`, which is neither an
+        # `OSError` nor a `ValueError`, and it would have come out of a worker
+        # thread whose `done` signal then never fires: the app would sit on
+        # "Checking for updates…" for the rest of the session. "Never raises"
+        # is this function's whole contract with `_UpdateWorker`.
+        logger.info(f"update check failed: {type(exc).__name__}: {exc}")
         if cached is not None:
             # Offline with a cache still knows about the update; the error says
             # why the answer might be old, and a manual check shows it.
@@ -351,8 +399,8 @@ def check_with_cache(
         # A rate-limit body parses as JSON and holds no release. Caching it over
         # a good feed would throw away the only answer this app has.
         return cached if cached is not None else fresh
-    save_update_state(
-        state.model_copy(update={"last_checked": moment, "etag": answer.etag, "feed": answer.text}),
+    remember(
+        {"last_checked": moment, "etag": answer.etag, "feed": answer.text},
         state_path,
     )
     return fresh
@@ -361,11 +409,11 @@ def check_with_cache(
 def skip_version(tag: str, state_path: Path | None = None) -> bool:
     """Remember that the player does not want this version. False if it was not written.
 
-    A `model_copy` of what is on disk, so the cached feed and ETag survive: a
-    skip must not cost the next launch a request.
+    Only its own field is written, onto whatever is on disk at that moment, so
+    the cached feed and ETag survive: a skip must not cost the next launch a
+    request.
     """
-    state = load_update_state(state_path)
-    return save_update_state(state.model_copy(update={"skipped_version": tag}), state_path)
+    return remember({"skipped_version": tag}, state_path)
 
 
 def should_announce(result: UpdateCheck, state_path: Path | None = None) -> bool:

@@ -247,7 +247,13 @@ def build_window() -> object:
     from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog
-    from yulon.update import UpdateCheck, check_with_cache, should_announce, skip_version
+    from yulon.update import (
+        UpdateCheck,
+        check_with_cache,
+        safe_release_url,
+        should_announce,
+        skip_version,
+    )
 
     class _Window(QMainWindow):
         """The main window, which also carries the two registries the exit path walks.
@@ -711,7 +717,18 @@ def build_window() -> object:
         def run(self) -> None:
             # `check_with_cache` since T90: at most one request a day, and the
             # answer in `update.json` is re-judged against THIS version.
-            self.done.emit(check_with_cache())
+            #
+            # `done` is emitted whatever happens. The check promises never to
+            # raise, and this is what that promise is FOR — but a promise is an
+            # invitation, and the one thing this thread must not do is exit
+            # without emitting: nothing else ever clears the "Checking for
+            # updates…" the button put on the bar.
+            try:
+                result: object = check_with_cache()
+            except Exception as exc:  # pragma: no cover - the check catches its own
+                logger.warning(f"the update check raised despite its contract: {exc!r}")
+                result = None
+            self.done.emit(result)
 
     class _UpdateHost(QObject):
         """Owns the update slots ON THE GUI THREAD so the worker's signal is queued.
@@ -727,6 +744,12 @@ def build_window() -> object:
         able to replace: the check talks to GitHub, the runner starts a thread,
         `QDialog.exec()` blocks an offscreen run forever, and the opener hands a
         URL to the desktop. The defaults are what the app runs.
+
+        **Only one check at a time**, and that is not tidiness: two checks in
+        flight are two writers of `update.json`, and the loser of that race
+        used to be whatever the player did in between (see `update_state`'s
+        `_LOCK`). The lock makes the file safe; this makes the app honest —
+        one answer per question asked.
         """
 
         def __init__(self, parent: QObject) -> None:
@@ -738,6 +761,9 @@ def build_window() -> object:
             )
             self.open_url: Callable[[str], object] = lambda url: QDesktopServices.openUrl(QUrl(url))
             self._offered: UpdateCheck | None = None
+            self._checking = False
+            self.startup_thread: QThread | None = None
+            """The launch check's thread, set once it exists. A manual check waits for it."""
 
         @Slot(object)
         def startup_result(self, result: object) -> None:
@@ -755,6 +781,7 @@ def build_window() -> object:
             they pressed the button, and hiding the answer to a question they
             just asked is the same defect in a smaller box.
             """
+            self._settle()
             if not isinstance(result, UpdateCheck):
                 update_bar.show_message("Could not check for updates.")
             elif result.available:
@@ -768,10 +795,26 @@ def build_window() -> object:
         @Slot(object)
         def manual_failed(self, problem: object) -> None:
             """`OnError` from `job.py`: the exception the check raised, which it should not."""
+            self._settle()
             update_bar.show_message(f"Could not check for updates: {problem}")
+
+        def _settle(self) -> None:
+            """One check is over: the button works again. Called by BOTH outcomes."""
+            self._checking = False
+            check_button.setEnabled(True)
 
         @Slot()
         def check_now(self) -> None:
+            if self._checking:
+                return
+            startup = self.startup_thread
+            if startup is not None and startup.isRunning():
+                # The launch check is already asking the same question. Saying
+                # so beats a second request and a second writer of update.json.
+                update_bar.show_message("Yu'lon is already checking for updates.")
+                return
+            self._checking = True
+            check_button.setEnabled(False)
             update_bar.show_message("Checking for updates…")
             self.run_job(self.check, self.manual_result, self.manual_failed)
 
@@ -781,17 +824,29 @@ def build_window() -> object:
 
             "Update now" is `Open download page` in this plan: nothing here
             replaces the running app (T90 plan 3 does).
+
+            `deleteLater()` and not simply letting it fall out of scope: the
+            dialog is parented to the window, so Qt owns it for the lifetime of
+            the app, and every click of "See what's new" would leave another
+            one — with its document, its notes and its three buttons — parked
+            on the window until the process exits.
             """
             offered = self._offered
             if offered is None:
                 return
             dialog = self.make_dialog(offered)
-            dialog.exec()
-            if dialog.choice is UpdateChoice.SKIP:
-                skip_version(str(offered.latest))
-                update_bar.clear()
-            elif dialog.choice is UpdateChoice.UPDATE:
-                self.open_url(offered.url)
+            try:
+                dialog.exec()
+                if dialog.choice is UpdateChoice.SKIP:
+                    skip_version(str(offered.latest))
+                    update_bar.clear()
+                elif dialog.choice is UpdateChoice.UPDATE:
+                    # The feed chose this string, not this app: `html_url` is
+                    # handed to the desktop, which starts whatever its scheme
+                    # says. `safe_release_url` is the rule.
+                    self.open_url(safe_release_url(offered.url))
+            finally:
+                dialog.deleteLater()
 
     update_host = _UpdateHost(window)
     update_bar.details_requested.connect(update_host.open_details)
@@ -809,6 +864,8 @@ def build_window() -> object:
     update_thread = QThread(window)
     update_worker = _UpdateWorker()
     update_worker.moveToThread(update_thread)
+    # So a manual check can see that this one is still asking (`check_now`).
+    update_host.startup_thread = update_thread
     update_thread.started.connect(update_worker.run)
     update_worker.done.connect(update_host.startup_result)
     update_worker.done.connect(update_thread.quit)

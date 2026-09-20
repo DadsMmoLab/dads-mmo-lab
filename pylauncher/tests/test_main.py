@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 
 import main
-from tests.conftest import process_events
+from tests.conftest import process_events, pump_until
 from yulon import platform, state, update
 
 
@@ -588,7 +588,7 @@ A_RELEASE = update.UpdateCheck(
     "0.8.66-Public",
     "v0.8.70-Public",
     True,
-    "https://example.invalid/r",
+    "https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v0.8.70-Public",
     notes_markdown="## v0.8.70-Public\n\n- Ten.\n",
 )
 
@@ -600,15 +600,23 @@ class _FakeDialog:
     covers `QMessageBox` only — a `QDialog.exec()` in an offscreen run waits for
     a click that never comes, at zero CPU, with no failure and no output. The
     factory is injectable for exactly this.
+
+    `deleteLater` is here because the host calls it on whatever the factory
+    returned, which is the fix for the dialog that used to be left parented to
+    the window on every click.
     """
 
     def __init__(self, choice: Any) -> None:
         self.choice = choice
         self.shown = 0
+        self.deleted = 0
 
     def exec(self) -> int:
         self.shown += 1
         return 1
+
+    def deleteLater(self) -> None:
+        self.deleted += 1
 
 
 @pytest.fixture
@@ -623,6 +631,12 @@ def update_host(window: Any) -> Iterator[Any]:
     """
     host = window.property("update_host")
     assert host is not None
+    # The launch check has its own QThread and refuses a manual check while it
+    # runs (by design). Every test below is about the settled app, which is the
+    # state a user reaches long before they find the button.
+    startup = host.startup_thread
+    if startup is not None:
+        pump_until(lambda: not startup.isRunning(), "the launch update check finished")
     seams = {name: getattr(host, name) for name in ("check", "run_job", "make_dialog", "open_url")}
     path = window.update_state_dir / "update.json"
     path.unlink(missing_ok=True)
@@ -630,9 +644,12 @@ def update_host(window: Any) -> Iterator[Any]:
     window.property("update_bar").clear()
     for name, seam in seams.items():
         setattr(host, name, seam)
-    # The one piece of the host's own state a test can leave behind: which
-    # release the dialog would open on.
+    # What a test can leave behind on the host itself: the release the dialog
+    # would open on, and a check it never let finish — which would make every
+    # test after it click a dead button.
     host._offered = None
+    host._checking = False
+    _check_button(window).setEnabled(True)
     path.unlink(missing_ok=True)
 
 
@@ -764,7 +781,28 @@ def test_update_now_opens_the_release_page_and_replaces_nothing(
 
     window.property("update_bar").details_button.click()
 
-    assert opened == ["https://example.invalid/r"]
+    assert opened == [A_RELEASE.url]
+
+
+def test_a_release_url_from_somewhere_else_is_never_handed_to_the_desktop(
+    window: Any, update_host: Any
+) -> None:
+    """`html_url` is the feed's string, and the desktop starts whatever its scheme says.
+
+    Driven through the button, not through `safe_release_url` — the rule was
+    already unit-tested, and what this pins is that the click goes through it.
+    """
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    hostile = dataclasses.replace(A_RELEASE, url="file:///etc/passwd")
+    update_host.startup_result(hostile)
+    update_host.make_dialog = lambda result: _FakeDialog(UpdateChoice.UPDATE)
+    opened: list[str] = []
+    update_host.open_url = opened.append
+
+    window.property("update_bar").details_button.click()
+
+    assert opened == [update.RELEASES_PAGE]
 
 
 def test_the_details_button_does_nothing_before_a_check_has_answered(
@@ -777,6 +815,162 @@ def test_the_details_button_does_nothing_before_a_check_has_answered(
     update_host.open_details()
 
     assert made == []
+
+
+def _collect_deleted() -> None:
+    """Deliver the `DeferredDelete` events `deleteLater()` posted.
+
+    `processEvents()` does NOT deliver them, measured on this build: two
+    widgets `deleteLater()`-ed and then pumped were both still children
+    afterwards, and `sendPostedEvents(None, DeferredDelete)` took them. A test
+    that pumped and then asserted "nothing was leaked" would be asserting about
+    Qt's event filter, not about the code.
+    """
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    process_events()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_every_dialog_is_handed_back_when_it_closes(window: Any, update_host: Any) -> None:
+    """A real `UpdateDialog`, parented to the window, on the real path.
+
+    Not the fake: the leak is Qt ownership, and a plain Python object cannot
+    have it. `exec()` is the only thing overridden, because a modal one would
+    block the run forever.
+    """
+    from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog
+
+    class _NoBlockDialog(UpdateDialog):
+        def exec(self) -> int:
+            self.choice = UpdateChoice.LATER
+            return 0
+
+    update_host.startup_result(A_RELEASE)
+    update_host.make_dialog = lambda result: _NoBlockDialog(result, parent=window)
+    before = len(window.findChildren(UpdateDialog))
+
+    for _ in range(2):
+        window.property("update_bar").details_button.click()
+        _collect_deleted()
+
+    # A dialog left parented to the window means every click adds one.
+    assert len(window.findChildren(UpdateDialog)) == before
+
+
+def test_the_fake_dialog_is_handed_back_too(window: Any, update_host: Any) -> None:
+    """The host calls `deleteLater()` on whatever the factory returned."""
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(A_RELEASE)
+    dialog = _FakeDialog(UpdateChoice.LATER)
+    update_host.make_dialog = lambda result: dialog
+
+    window.property("update_bar").details_button.click()
+
+    assert dialog.deleted == 1
+
+
+# ------------------------------------------------- one check at a time
+
+
+class _HeldRunner:
+    """A `JobRunner` that starts nothing and keeps the callbacks for the test to fire."""
+
+    def __init__(self) -> None:
+        self.work: list[Any] = []
+        self.done: list[Any] = []
+        self.failed: list[Any] = []
+
+    def __call__(self, work: Any, on_done: Any, on_error: Any) -> None:
+        self.work.append(work)
+        self.done.append(on_done)
+        self.failed.append(on_error)
+
+
+def _check_button(window: Any) -> Any:
+    from PySide6.QtWidgets import QPushButton
+
+    button = window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    return button
+
+
+def test_a_second_click_while_a_check_is_running_starts_nothing(
+    window: Any, update_host: Any
+) -> None:
+    """Two checks in flight are two writers of update.json, and one wasted request."""
+    runner = _HeldRunner()
+    update_host.run_job = runner
+    update_host.check = lambda: A_RELEASE
+    button = _check_button(window)
+
+    button.click()
+    assert button.isEnabled() is False, "the button stays pressable during a check"
+    button.click()
+
+    assert len(runner.work) == 1
+
+    runner.done[0](A_RELEASE)
+    assert button.isEnabled() is True, "the button never came back"
+
+
+def test_the_slot_refuses_a_second_check_even_when_nothing_disabled_it(
+    window: Any, update_host: Any
+) -> None:
+    """The flag, not the button.
+
+    Disabling the button hides the second click from a USER, and a test that
+    clicks twice cannot tell the two mechanisms apart — measured: removing the
+    flag left all 51 tests green. `check_now` is a slot, and a slot is callable
+    by anything that can reach the host.
+    """
+    runner = _HeldRunner()
+    update_host.run_job = runner
+    update_host.check = lambda: A_RELEASE
+
+    update_host.check_now()
+    _check_button(window).setEnabled(True)  # as if something re-enabled it
+    update_host.check_now()
+
+    assert len(runner.work) == 1
+
+
+def test_a_check_that_fails_gives_the_button_back(window: Any, update_host: Any) -> None:
+    """Both outcomes settle it; only one of them was the happy path."""
+    runner = _HeldRunner()
+    update_host.run_job = runner
+    update_host.check = lambda: A_RELEASE
+    button = _check_button(window)
+
+    button.click()
+    runner.failed[0](OSError("no route"))
+
+    assert button.isEnabled() is True
+    assert "no route" in window.property("update_bar").text()
+
+
+def test_a_manual_check_while_the_launch_check_is_still_asking_is_refused(
+    window: Any, update_host: Any
+) -> None:
+    """The same question is already in flight; a second one is a second writer."""
+
+    class _Busy:
+        def isRunning(self) -> bool:
+            return True
+
+    runner = _HeldRunner()
+    update_host.run_job = runner
+    update_host.check = lambda: A_RELEASE
+    was, update_host.startup_thread = update_host.startup_thread, _Busy()
+    try:
+        _check_button(window).click()
+    finally:
+        update_host.startup_thread = was
+
+    assert runner.work == []
+    assert window.property("update_bar").text() == "Yu'lon is already checking for updates."
+    assert _check_button(window).isEnabled() is True, "a refusal is not a check in flight"
 
 
 def test_adopting_a_server_that_already_has_a_tab_rebuilds_it_for_the_new_distro(
@@ -869,9 +1063,9 @@ def test_use_existing_on_a_wsl_server_does_not_demote_its_tab_to_the_local_daemo
     assert existing.services.controller.wsl_distro == "Ubuntu-24.04"
     assert window.saved_states, "nothing was written back at all"
     remembered = window.saved_states[-1].find("wow-wotlk", server_dir)
-    assert remembered is not None and remembered.wsl_distro == "Ubuntu-24.04", (
-        "the distro was erased from what would be saved"
-    )
+    assert (
+        remembered is not None and remembered.wsl_distro == "Ubuntu-24.04"
+    ), "the distro was erased from what would be saved"
 
 
 def test_a_tab_that_is_mid_import_is_not_torn_down_to_change_its_distro(

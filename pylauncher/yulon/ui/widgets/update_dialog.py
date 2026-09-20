@@ -9,6 +9,12 @@ of commit subjects.
 otherwise, so Esc, the window's close button and a dialog dismissed by the
 window manager are all "not now" and none of them is a skip.
 
+**The body is text from the network and this file is where that is contained.**
+Three separate doors, because each of them was measured open (see
+`as_shown_markdown`, `_NotesView` and `_strip_images`): markdown that renders an
+image, a document that still holds an image fragment, and a link whose scheme
+is not http.
+
 Not themed here: `apply_dadcraft_theme(window)` styles `QDialog` through the
 top-level stylesheet, which a dialog parented to the window inherits — the same
 reason `ManifestPromptDialog` does not apply it either. Gamepad reachability
@@ -20,8 +26,11 @@ is up.
 from __future__ import annotations
 
 import enum
+import re
+from collections.abc import Callable
 
 from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -32,7 +41,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yulon.log import get_logger
 from yulon.update import UpdateCheck
+
+logger = get_logger(__name__)
 
 _NO_NOTES = "No release notes were published for this version."
 
@@ -43,41 +55,162 @@ The servers run in Docker containers this process does not own; restarting the
 app does not touch them.
 """
 
+IMAGE_REMOVED = "🖼"
+"""What an image in a release body is replaced with: a character, never a fetch."""
+
+_OPENABLE_SCHEMES = ("http", "https")
+"""The only schemes a link in the notes may hand to the desktop.
+
+`file:`, `smb:` and a bare `//host/share` path are the ones this excludes, and
+they are excluded because opening one is not "showing a page": on Windows a UNC
+path is an SMB connection, which is an NTLM handshake with a host the release
+body named.
+"""
+
+_LEAVE_ALONE = re.compile(
+    r"""
+      (?P<fence>^(?P<ticks>`{3,}|~{3,})[^\n]*\n.*?(?:^(?P=ticks)[^\n]*$|\Z))
+    | (?P<code>(?P<span>`+)(?!`)[^\n]*?(?<!`)(?P=span)(?!`))
+    | (?P<autolink><https?://[^>\s]+>)
+    """,
+    re.DOTALL | re.MULTILINE | re.VERBOSE,
+)
+"""The three runs of a release body that must reach markdown exactly as written.
+
+A fenced block and a code span because they are the one place `<` means `<` —
+`` `<config_dir>` `` read as prose and escaped shows the reader `&lt;config_dir>`,
+which is what this file did until the cold review of 2026-09-21. An autolink
+because `<https://…>` is the spelling that makes a bare URL clickable, and
+escaping its first character turned every one of them into plain text.
+"""
+
 
 def as_shown_markdown(body: str) -> str:
-    """The release body with every `<` neutralised, so raw HTML is shown and not parsed.
+    """A release body that markdown may render: no raw HTML, and no image.
 
-    Measured on PySide6 6.11 (T90): `setMarkdown()` hands a raw HTML block
-    straight through to the document, and md4c swallows everything up to the
-    next blank line with it — a body reading
+    Two rewrites, and both were measured rather than assumed, on PySide6 6.11:
 
-        <img src='...'><script>x</script>
-        - Ten.
+    * **`<` outside code becomes `&lt;`.** `setMarkdown()` hands a raw HTML
+      block straight through to the document, and md4c swallows everything up
+      to the next blank line with it — a body reading
 
-    rendered as the heading alone. The bullet was GONE from the dialog, with
-    nothing to say it had been dropped, and the `<img>` was a URL chosen by
-    whoever wrote the release body that the widget would then go and fetch.
+          <img src='...'><script>x</script>
+          - Ten.
 
-    `&lt;` is an entity markdown renders as a literal `<`, so the tag is shown
-    to the reader as text and the rest of the body survives. `&` is left alone:
-    escaping it too would turn every deliberate entity in a body into visible
-    source, and an entity cannot start a tag.
+      rendered as the heading alone. The bullet was GONE from the dialog with
+      nothing to say it had been dropped. `&lt;` is an entity markdown renders
+      as a literal `<`, so the tag is shown to the reader as text and the rest
+      of the body survives.
+    * **`![` becomes `[`,** which turns an image into an ordinary link. An
+      image is the one markdown construct that reaches outside the process
+      with no click at all: `![i](file:///…)` rendered the file (measured:
+      1600 red pixels in a `grab()` of the notes box), and `![](//host/x.png)`
+      on Windows is an SMB connection to a host the release body chose. As a
+      link it is inert until clicked, and `_NotesView` decides what a click may
+      open.
+
+    `&` is left alone: escaping it too would turn every deliberate entity in a
+    body into visible source, and an entity cannot start a tag.
+
+    This is the FIRST of the two doors on images. `_strip_images` is the other,
+    and it exists because this one is a text rewrite and text rewrites are
+    guesses about a parser (`_NotesView.setMarkdown`).
     """
-    return body.replace("<", "&lt;")
+    out: list[str] = []
+    last = 0
+    for match in _LEAVE_ALONE.finditer(body):
+        out.append(_neutralise(body[last : match.start()]))
+        out.append(match.group())
+        last = match.end()
+    out.append(_neutralise(body[last:]))
+    return "".join(out)
+
+
+def _neutralise(text: str) -> str:
+    """The rewrite of one run of ordinary prose. See `as_shown_markdown`."""
+    return text.replace("<", "&lt;").replace("![", "[")
+
+
+def _strip_images(document: QTextDocument) -> int:
+    """Replace every image fragment in `document` with a character. Returns how many.
+
+    The second door, and the one that does not depend on reading markdown the
+    way md4c reads it: whatever syntax produced it, an image in the document is
+    a `QTextCharFormat` that `isImageFormat()`, and Qt resolves its name when
+    the document is laid out. Overriding `loadResource` is NOT enough and that
+    was measured: with it returning None, `![i](file:///…/red.png)`, a bare
+    absolute path and a reference-style image each still rendered the file
+    (1600 red pixels in a `grab()`), because Qt's own image handling opens the
+    path when the resource comes back null.
+
+    Applied to a document that no widget owns yet, so nothing has been laid out
+    and no name has been resolved when the fragments go.
+    """
+    spots: list[tuple[int, int]] = []
+    block = document.begin()
+    while block.isValid():
+        iterator = block.begin()
+        while not iterator.atEnd():
+            fragment = iterator.fragment()
+            if fragment.isValid() and fragment.charFormat().isImageFormat():
+                spots.append((fragment.position(), fragment.length()))
+            iterator += 1
+        block = block.next()
+    cursor = QTextCursor(document)
+    # Back to front: every removal moves the positions after it.
+    for position, length in reversed(spots):
+        cursor.setPosition(position)
+        cursor.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
+        # An empty format, or the replacement inherits the image format it replaced.
+        cursor.insertText(IMAGE_REMOVED, QTextCharFormat())
+    if spots:
+        logger.info(f"release notes: {len(spots)} image(s) replaced, none fetched")
+    return len(spots)
 
 
 class _NotesView(QTextBrowser):
-    """The notes box, which fetches nothing.
+    """The notes box: it renders a release body and reaches nothing.
 
-    `loadResource` is the one door a document has to the outside: an image in
-    the body — markdown's own `![](http://…)` as much as a raw `<img>` — is
-    GET-ed when the dialog opens, from a URL nobody in this process chose, with
-    no user action at all. Shutting the door here covers every shape of it,
-    which escaping the source alone does not.
+    `loadResource` returning None is kept as the last of the three doors, and
+    its docstring no longer claims to be the first: it does not stop an image
+    (measured — see `_strip_images`). What it does stop is a resource this
+    widget would fetch for any OTHER reason, which costs nothing to refuse.
+
+    Links are NOT handed to `setOpenExternalLinks`, which opens whatever scheme
+    the anchor carries: `[run](file:///etc/passwd)` and a UNC link both reach
+    `QDesktopServices` that way. `setOpenLinks(False)` means a click navigates
+    nothing, and `_clicked` opens an http(s) URL and ignores everything else.
     """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.open_url: Callable[[str], object] = lambda url: QDesktopServices.openUrl(QUrl(url))
+        self.setOpenLinks(False)
+        self.setOpenExternalLinks(False)
+        self.anchorClicked.connect(self._clicked)
+
+    def set_release_body(self, markdown: str) -> int:
+        """Show `markdown`, with the images taken out before this widget owns it.
+
+        Built in a document of its own and handed over afterwards, so the
+        stripping happens while nothing is laid out — a widget that already
+        held the document could resolve an image name on the way.
+        """
+        document = QTextDocument(self)
+        document.setMarkdown(as_shown_markdown(markdown))
+        removed = _strip_images(document)
+        self.setDocument(document)
+        return removed
 
     def loadResource(self, type_: int, name: QUrl | str) -> object:
         return None
+
+    def _clicked(self, url: QUrl) -> None:
+        """A link in the release notes was clicked. http(s) only, and only outward."""
+        if url.scheme().lower() in _OPENABLE_SCHEMES:
+            self.open_url(url.toString())
+            return
+        logger.info(f"release notes: refused to open a {url.scheme()!r} link")
 
 
 class UpdateChoice(enum.Enum):
@@ -112,11 +245,7 @@ class UpdateDialog(QDialog):
 
         notes = _NotesView(self)
         notes.setObjectName("update-notes")
-        # The body is written by whoever cut the release. `setOpenExternalLinks`
-        # sends a clicked link to the system browser instead of navigating this
-        # widget to it, so the box can only ever show the text it was given.
-        notes.setOpenExternalLinks(True)
-        notes.setMarkdown(as_shown_markdown(result.notes_markdown.strip()) or _NO_NOTES)
+        notes.set_release_body(result.notes_markdown.strip() or _NO_NOTES)
         column.addWidget(notes, 1)
 
         buttons = QHBoxLayout()

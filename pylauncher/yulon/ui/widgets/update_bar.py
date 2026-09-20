@@ -12,11 +12,31 @@ link it used to carry is now a button that opens the what's-new dialog.
 
 from __future__ import annotations
 
+import html
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFontMetrics, QResizeEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
 from yulon.update import UpdateCheck
+
+
+def as_plain_tooltip(text: str) -> str:
+    """`text` as a tooltip that shows exactly `text`, whatever is in it.
+
+    A tooltip is sniffed: Qt decides between plain and rich text with
+    `Qt.mightBeRichText()`, and measured on 6.11 that answers **True** for
+    `HTTP Error 403: <img src=x>` — a sentence this bar really can be handed,
+    because an error from the check is shown verbatim. As rich text it rendered
+    as `HTTP Error 403: ￼`: the tag became an image placeholder, i.e. a name Qt
+    would go and resolve.
+
+    So the sniff is decided rather than avoided — escaped, then wrapped, which
+    makes the answer True on purpose and the content inert. Measured on the
+    same build: the wrapped form round-trips through `QTextDocument.setHtml()`
+    back to the original characters.
+    """
+    return f"<span style='white-space:pre-wrap'>{html.escape(text)}</span>"
 
 
 class UpdateBar(QWidget):
@@ -72,7 +92,7 @@ class UpdateBar(QWidget):
 
     def _say(self, text: str) -> None:
         self._text = text
-        self.label.setToolTip(text)
+        self.label.setToolTip(as_plain_tooltip(text))
         self._elide()
 
     def _elide(self) -> None:
