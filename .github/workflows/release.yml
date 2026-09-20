@@ -163,6 +163,43 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller build/pylauncher.spec --noconfirm --clean
 
+      # ASK THE BUILT BUNDLE, on every runner. v0.8.69-fixtest was cut with the
+      # stamp step already in this job: all three builds logged "stamped
+      # 0.8.69-fixtest", every job was green, and the published app reported
+      # 0.8.66-Public - the stamp module had not reached the bundle
+      # (`collect_submodules` returns nothing here; see build/pylauncher.spec).
+      # Nothing in the workflow could see that, because nothing ever asked the
+      # artifact what it thought it was.
+      #
+      # It cannot fail the release: `continue-on-error`, a `--version` that is
+      # allowed to come back empty, and a `::warning::` rather than an exit
+      # code, because the owner's rule is that a tag never fails over its
+      # version. A warning is visible on the run and in the annotations list.
+      - name: The built bundle reports the version it was stamped with
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          exe="dist/yulon/yulon"
+          [ "$RUNNER_OS" = "Windows" ] && exe="dist/yulon/yulon.exe"
+          # `--version` is answered before PySide6 is imported, so this needs no
+          # display and no Qt libraries on the runner.
+          built="$("$exe" --version 2>/dev/null | tail -1 || true)"
+          expected="$(python build/stamp_version.py --derive "${GITHUB_REF_NAME}" || true)"
+          if [ -z "$built" ]; then
+            # Its own case rather than a mismatch, because one plausible cause is
+            # not a stamp problem at all: the Windows build is a windowed exe,
+            # and whether it writes to a redirected pipe is a fact about the
+            # runner that this step is the first thing here to measure.
+            echo "::warning title=The built bundle did not answer --version::${exe} printed nothing; the release is published anyway"
+          elif [ -z "$expected" ]; then
+            echo "branch build: the bundle reports '${built}', and there is no tag to compare it with"
+          elif [ "$built" = "$expected" ]; then
+            echo "the bundle reports ${built}, which is the tag it was built from"
+          else
+            echo "::warning title=The bundle does not know its own version::built='${built}' tag='${expected}' - the stamp did not reach the bundle; the release is published anyway"
+          fi
+
       # The gate that closes this class instead of the instance.
       #
       # Two libraries have shipped missing and been found by USERS: libxcb-cursor0

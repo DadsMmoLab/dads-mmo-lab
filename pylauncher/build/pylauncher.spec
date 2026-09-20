@@ -11,6 +11,7 @@
 # install Python (README §3b).
 
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_submodules
 
@@ -50,12 +51,50 @@ datas = [
 # static analysis recovers no reference to it; naming it lets PyInstaller's
 # pygame hook collect the SDL2 shared libraries the joystick reader links at
 # runtime (Windows ships `SDL2.dll`, macOS bundles the SDL2 framework).
+# `collect_submodules("yulon")` RETURNED NOTHING FOR AS LONG AS IT HAS BEEN
+# HERE, and said nothing about it. Measured on a real build 2026-09-21, after a
+# fork release tag shipped a bundle that reported the wrong version:
+#
+#   MEASURE: collect_submodules found 0 modules
+#   MEASURE: cwd=.../pylauncher
+#   MEASURE: ROOT on sys.path: False
+#   MEASURE: `import yulon` in the spec process: ModuleNotFoundError
+#   MEASURE: with ROOT on sys.path, collect_submodules found 107 modules
+#
+# PyInstaller runs a spec with a sanitized `sys.path`: the working directory is
+# `pylauncher/`, but neither it nor `ROOT` is on the path, so the isolated
+# import `collect_submodules` does fails, and the helper answers with an empty
+# list. Not even `on_error="raise"` raises - it returned 0 too - so there is no
+# setting of it that would have complained.
+#
+# Every `yulon.*` module in the bundle got there because modulegraph followed a
+# real `import` statement out of `main.py`, which works because `pathex` below
+# puts ROOT on the analysis path. That is why nobody noticed: the ONE module
+# this list was meant to catch is one that no `import` statement names.
+sys.path.insert(0, ROOT)
 hiddenimports = collect_submodules("yulon") + [
     "pydantic",
     "pydantic_core",
     "certifi",
     "pygame",
 ]
+
+# AND THE STAMP BY NAME, not by trusting the machinery above a second time.
+# `build/stamp_version.py` writes `yulon/_build_version.py` in the release job
+# before this runs, and `yulon/__init__.py` reads it through
+# `importlib.import_module` - a form modulegraph cannot follow, by design, since
+# the module does not exist in a checkout. So it is named here when it exists,
+# which is the only reason it reaches the bundle on all three runners.
+#
+# The shipped v0.8.69-fixtest bundle is what this is for: all three build jobs
+# logged "stamped 0.8.69-fixtest", and the app it produced reported 0.8.66-Public
+# because `grep -c yulon._build_version` over the frozen executable was 0.
+# `tests/test_build_version.py` pins this name against the path the stamper
+# writes; only a real build proves the rest, which is what the release job's
+# version-check step is for.
+_stamp = os.path.join(ROOT, "yulon", "_build_version.py")
+if os.path.exists(_stamp):
+    hiddenimports.append("yulon._build_version")
 
 a = Analysis(
     [os.path.join(ROOT, "main.py")],

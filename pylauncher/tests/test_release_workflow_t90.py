@@ -192,6 +192,45 @@ def test_this_job_cannot_turn_a_published_release_red() -> None:
     assert "continue-on-error: true" in header
 
 
+def test_the_build_job_asks_the_built_bundle_what_version_it_is() -> None:
+    """The check that would have caught v0.8.69-fixtest, on every runner.
+
+    That tag stamped correctly on all three and shipped an app reporting the
+    fallback, with every job green: nothing in the workflow ever asked the
+    artifact what it thought it was.
+    """
+    step = _step_with(BUILD_JOB, "--version")
+    assert "build/stamp_version.py --derive" in step, "compare against the tag, not a literal"
+    assert "RUNNER_OS" in step, "the Windows bundle is yulon.exe"
+    # THE LAST BRANCH, not the step: the step holds two `::warning` lines - one
+    # for a bundle that did not answer at all - and `"::warning" in step` stayed
+    # green with the disagreement itself downgraded to a plain echo, which is
+    # exactly the line that had to be loud. Found by mutating.
+    disagreement = step[step.rindex("          else") :]
+    assert "::warning" in disagreement, f"a mismatch must annotate the run:\n{disagreement}"
+    assert "${built}" in disagreement and "${expected}" in disagreement, "name both versions"
+
+
+def test_the_version_check_cannot_fail_a_tag() -> None:
+    """The owner's rule: a tag never fails over its version.
+
+    Three ways it could have: a non-zero exit from the step, `set -e` catching a
+    bundle that will not start, and the job stopping on the step's own result.
+    """
+    step = _step_with(BUILD_JOB, "--version")
+    assert "continue-on-error: true" in step
+    assert "exit 1" not in step
+    assert "set -euo" not in step, "-e would fail the build on a bundle that cannot start"
+
+
+def test_the_version_is_checked_after_the_build_and_before_packaging() -> None:
+    """A check that runs before PyInstaller has nothing to ask."""
+    built = BUILD_JOB.index("run: pyinstaller build/pylauncher.spec")
+    asked = BUILD_JOB.index('"$exe" --version')
+    packaged = BUILD_JOB.index("name: Package AppImage")
+    assert built < asked < packaged
+
+
 def test_the_checksums_are_taken_over_regular_files_only() -> None:
     """`sha256sum -- *` exits 1 on a directory, and `set -e` would fail the job."""
     sums = _step_with(NOTES_JOB, "sha256sum")

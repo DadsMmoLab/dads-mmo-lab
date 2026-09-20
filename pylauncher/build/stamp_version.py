@@ -30,8 +30,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ref")
     parser.add_argument("--out", type=Path, default=_DEFAULT_OUT)
+    parser.add_argument(
+        "--derive",
+        action="store_true",
+        help=(
+            "print the version this ref implies and write nothing; a ref that is "
+            "not a version tag prints an empty line. The release job compares this "
+            "with what the built bundle answers to `--version`."
+        ),
+    )
     args = parser.parse_args(argv)
     version = version_from_ref(args.ref)
+    if args.derive:
+        print(version or "")
+        return 0
     if version is None:
         print(f"{args.ref!r} is not a version tag: no stamp written")
         return 0
