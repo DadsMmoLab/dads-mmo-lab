@@ -311,6 +311,18 @@ jobs:
   notes-and-checksums:
     needs: build
     if: ${{ !cancelled() }}
+    # EVERYTHING HERE IS ADDITIVE, so nothing here may turn a release that is
+    # already published red. The three build jobs have attached the artifacts
+    # by the time this starts; what this job adds is a checksum file and a
+    # better body. A directory in the release folder, or a transient GitHub API
+    # error in either attach step, would otherwise mark a finished release as
+    # failed and send whoever cut it looking for a broken build.
+    #
+    # It fails safe on the other side too: the app refuses to self-install an
+    # artifact `SHA256SUMS` does not list, so a release that did not get one
+    # offers the download page instead of installing something unproven. The
+    # step logs still show what went wrong, and the run is marked with it.
+    continue-on-error: true
     # ubuntu-latest, unlike the build matrix: nothing here is compiled or
     # bundled, so the glibc floor the `build` job pins 22.04 for does not apply,
     # and this job does not inherit that label's dated expiry.
@@ -329,6 +341,16 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          # THE BUILD ARTIFACTS ONLY. `download-artifact` sees every artifact of
+          # the RUN, and this job uploads one of its own - so on "Re-run failed
+          # jobs" an unfiltered download drops the first attempt's SHA256SUMS
+          # back into the release folder, and the new file lists the old file
+          # under the hash it had before: a checksum line for a name no release
+          # carries. The upload below is deliberately named so that this
+          # pattern cannot match it, and the test pins that relationship in
+          # both directions - including that this pattern still matches all
+          # three `yulon-${{ matrix.artifact }}` names above.
+          pattern: yulon-*
           # An action's inputs are never subject to `defaults.run`, so this path
           # is from the repository root; the `run:` steps below are in
           # `pylauncher/` and see the same directory as `release/`.
@@ -343,17 +365,33 @@ jobs:
           mkdir -p release
           cd release
           ls -l
-          # All three builds failed: `sha256sum -- *` would write a file with no
-          # lines, which reads as "this release lists no artifact" rather than
-          # as "there is nothing here". Publish nothing instead.
-          if [ -z "$(ls -A)" ]; then
+          # The second stop for the re-run trap above, in case a future edit
+          # loosens the download pattern: whatever is here under this name is
+          # this job's own previous answer, never an artifact of the release.
+          rm -f SHA256SUMS
+          # REGULAR FILES ONLY, and never the file being written. `sha256sum`
+          # exits 1 on a directory, and under `set -e` that would fail a job
+          # whose whole output is optional. `-printf '%f\n'` keeps the bare
+          # names the format needs (a name with a newline in it would break
+          # this, and would break `sha256sum`'s own format as well; no artifact
+          # this workflow builds has one). `LC_ALL=C sort` so the file reads the
+          # same whatever the runner's locale is, and `-r` so an empty list runs
+          # nothing rather than leaving `sha256sum` reading stdin.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+            | LC_ALL=C sort > ../artifacts.txt
+          # All three builds failed, or the folder holds nothing but
+          # directories: a checksum file with no lines would read as "this
+          # release lists no artifact" rather than as "there is nothing here".
+          if [ ! -s ../artifacts.txt ]; then
             echo "no artifact was built: nothing to checksum"
+            rm -f ../artifacts.txt
             exit 0
           fi
-          # Written OUTSIDE the directory and moved in, because the glob would
-          # otherwise pick up the file being written and checksum it half-made.
-          sha256sum -- * > ../SHA256SUMS
+          # Written OUTSIDE the directory and moved in, so the list cannot
+          # include the file being written half-made.
+          xargs -d '\n' -r sha256sum -- < ../artifacts.txt > ../SHA256SUMS
           mv ../SHA256SUMS SHA256SUMS
+          rm -f ../artifacts.txt
           cat SHA256SUMS
           echo "have=true" >> "$GITHUB_OUTPUT"
 
@@ -368,7 +406,14 @@ jobs:
         if: steps.sums.outputs.have == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: yulon-SHA256SUMS
+          # NOT `yulon-...`: that is the prefix the download pattern above
+          # matches, and this job must never be able to download its own
+          # answer on a re-run.
+          name: checksums-SHA256SUMS
+          # A re-run of this job finds the first attempt's artifact still in the
+          # run, and `upload-artifact@v4` refuses a name the run already holds
+          # unless it is told to replace it.
+          overwrite: true
           path: pylauncher/release/SHA256SUMS
 
       - name: Attach SHA256SUMS and the changelog body

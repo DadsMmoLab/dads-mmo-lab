@@ -91,8 +91,19 @@ def pick_previous(tags: Iterable[str], tag: str) -> str | None:
 
 
 def _git(argv: list[str]) -> str:
+    # `errors="replace"`: a changelog blob is whatever somebody committed, and
+    # one byte of latin-1 in it (an accented name, a dash pasted from a mail
+    # client) would otherwise raise UnicodeDecodeError inside `subprocess`
+    # itself - before this function's own error handling, and out through
+    # `main`'s `except OSError`, which a ValueError is not. The entry it
+    # appears in still reads; one character of it becomes U+FFFD.
     done = subprocess.run(
-        ["git", *argv], capture_output=True, text=True, encoding="utf-8", check=False
+        ["git", *argv],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
     if done.returncode != 0:
         raise OSError(done.stderr.strip() or f"git {argv[0]} exited {done.returncode}")
@@ -116,8 +127,16 @@ def main(argv: Sequence[str] | None = None, *, run_git: RunGit = _git) -> int:
                 old = ""
         notes = new_entries(old, new)
         print(f"release notes: {args.tag} against {previous or 'nothing'}: {len(notes)} characters")
-    except OSError as exc:
-        print(f"release notes skipped, GitHub's generated notes stay: {exc}", file=sys.stderr)
+    # `Exception`, not `OSError`. The promise at the top of this file is that a
+    # release is never refused over its notes, and an `except OSError` keeps it
+    # only for the failures that were thought of: a `git` this script cannot
+    # run, and a ref it cannot read. Anything else - a decode, a regex, a
+    # `MemoryError` on a changelog somebody grew to a gigabyte - came out as a
+    # traceback and a red step on a release whose artifacts were already
+    # published. `BaseException` is deliberately NOT caught: a cancelled run
+    # must stop rather than publish an empty body.
+    except Exception as exc:  # noqa: BLE001 - see above; the release outranks the notes
+        print(f"release notes skipped, GitHub's generated notes stay: {exc!r}", file=sys.stderr)
     args.out.write_text(notes, encoding="utf-8")
     return 0
 
