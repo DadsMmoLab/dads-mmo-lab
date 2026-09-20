@@ -120,6 +120,10 @@ class UpdateDialog(QDialog):
         column.addWidget(notes, 1)
 
         buttons = QHBoxLayout()
+        # Kept in a dict rather than looked up again with `findChild`, which
+        # mypy reads as possibly-None at every call. A caller that wants one
+        # asks for it by the objectName below — that is the contract the tests
+        # and the gate screenshots use.
         self._buttons: dict[UpdateChoice, QPushButton] = {}
         for name, label, choice in (
             ("update-action", action_label, UpdateChoice.UPDATE),
@@ -136,10 +140,6 @@ class UpdateDialog(QDialog):
             self._buttons[choice] = button
         column.addLayout(buttons)
         self._buttons[UpdateChoice.UPDATE].setDefault(True)
-
-    def button(self, choice: UpdateChoice) -> QPushButton:
-        """The button for one choice — how a caller relabels or disables one."""
-        return self._buttons[choice]
 
     def _choose(self, choice: UpdateChoice) -> None:
         self.choice = choice
