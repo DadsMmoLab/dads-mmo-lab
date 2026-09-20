@@ -103,6 +103,18 @@ jobs:
 
       - run: pip install -r requirements.txt pyinstaller
 
+      # T90: the bundle carries the tag it was built from, so a forgotten bump of
+      # `yulon/__init__.py` cannot make the update check compare the wrong
+      # version - v0.8.68 shipped reporting 0.8.66. The stamp is a gitignored
+      # `yulon/_build_version.py` that `yulon.__init__` prefers over its
+      # hand-written fallback, and `collect_submodules("yulon")` in the spec is
+      # what carries it into the bundle. It must therefore be written BEFORE
+      # PyInstaller reads the package. A dispatch build of a branch writes
+      # nothing and keeps the fallback. Never fails.
+      - name: Stamp the version from the tag
+        shell: bash
+        run: python build/stamp_version.py "${GITHUB_REF_NAME}"
+
       # PYINSTALLER BUNDLES WHAT IT FINDS ON THE BUILDER, so a library missing
       # from the runner is a library missing from the artifact. Qt 6.5+ needs
       # libxcb-cursor0 to load its `xcb` platform plugin, the runner does not
@@ -276,4 +288,98 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: pylauncher/release/*
+          # Stays as the FALLBACK. `notes-and-checksums` below replaces this
+          # body with the CHANGELOG entries the tag gained, and only when it
+          # found any; a release whose changelog says nothing new keeps
+          # GitHub's generated list rather than an empty page.
           generate_release_notes: true
+
+  # T90: ONE job for what belongs to the release as a whole. Each build job
+  # attaches its own artifact and cannot see the other two, so none of them can
+  # checksum the others, and none of them can own the body either - three
+  # concurrent writers of one release body is how it ends up being whichever
+  # runner finished last.
+  #
+  # `!cancelled()` rather than the default `success()`: fail-fast is off, so a
+  # release with two good artifacts still gets their checksums. The app refuses
+  # to self-install an artifact `SHA256SUMS` does not list, which is the whole
+  # point of publishing it, and a missing third line is honest.
+  #
+  # NOT gated on the tag as a whole (only the two attach steps are), so that a
+  # `workflow_dispatch` run proves this job the same way it proves the matrix -
+  # without publishing anything. `SHA256SUMS` then lands as a run artifact.
+  notes-and-checksums:
+    needs: build
+    if: ${{ !cancelled() }}
+    # ubuntu-latest, unlike the build matrix: nothing here is compiled or
+    # bundled, so the glibc floor the `build` job pins 22.04 for does not apply,
+    # and this job does not inherit that label's dated expiry.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # release_notes.py reads CHANGELOG.md at the previous -Public tag with
+          # `git show`; the default shallow clone has neither that tag nor that
+          # blob, and the script would degrade to "no notes" on every release.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/download-artifact@v4
+        with:
+          # An action's inputs are never subject to `defaults.run`, so this path
+          # is from the repository root; the `run:` steps below are in
+          # `pylauncher/` and see the same directory as `release/`.
+          path: pylauncher/release
+          merge-multiple: true
+
+      - name: SHA256SUMS over every artifact this release carries
+        id: sums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cd release
+          ls -l
+          # All three builds failed: `sha256sum -- *` would write a file with no
+          # lines, which reads as "this release lists no artifact" rather than
+          # as "there is nothing here". Publish nothing instead.
+          if [ -z "$(ls -A)" ]; then
+            echo "no artifact was built: nothing to checksum"
+            exit 0
+          fi
+          # Written OUTSIDE the directory and moved in, because the glob would
+          # otherwise pick up the file being written and checksum it half-made.
+          sha256sum -- * > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+          echo "have=true" >> "$GITHUB_OUTPUT"
+
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        shell: bash
+        run: |
+          python build/release_notes.py --tag "${GITHUB_REF_NAME}" --out "${RUNNER_TEMP}/notes.md"
+          if [ -s "${RUNNER_TEMP}/notes.md" ]; then echo "have=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Keep SHA256SUMS where a dispatch run can be read
+        if: steps.sums.outputs.have == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: yulon-SHA256SUMS
+          path: pylauncher/release/SHA256SUMS
+
+      - name: Attach SHA256SUMS and the changelog body
+        if: startsWith(github.ref, 'refs/tags/v') && steps.sums.outputs.have == 'true' && steps.notes.outputs.have == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pylauncher/release/SHA256SUMS
+          body_path: ${{ runner.temp }}/notes.md
+
+      - name: Attach SHA256SUMS (the changelog gained nothing; generated notes stay)
+        if: startsWith(github.ref, 'refs/tags/v') && steps.sums.outputs.have == 'true' && steps.notes.outputs.have != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pylauncher/release/SHA256SUMS
