@@ -1,38 +1,22 @@
-"""Tests for the self-update check (`yulon.update`, README §10): check + notify only."""
+"""Tests for the self-update check (`yulon.update`, README §10): what one answer means."""
 
 from __future__ import annotations
 
 import email.message
 import json
 import urllib.error
+from pathlib import Path
 
 import pytest
 
-from yulon.update import RELEASES_PAGE, check_for_update, is_newer, parse_version
-
-# The releases feed as GitHub really answers it for this repo: newest first, and
-# every single entry flagged `prerelease`. Trimmed to the fields the check reads.
-REAL_FEED = json.dumps(
-    [
-        {
-            "tag_name": "v0.6.57Public",
-            "prerelease": True,
-            "draft": False,
-            "html_url": "https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v0.6.57Public",
-        },
-        {
-            "tag_name": "v0.6.55Public",
-            "prerelease": True,
-            "draft": False,
-            "html_url": "https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v0.6.55Public",
-        },
-        {
-            "tag_name": "v0.6.53",
-            "prerelease": True,
-            "draft": False,
-            "html_url": "https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v0.6.53",
-        },
-    ]
+from tests.support_update import FEED, release
+from yulon.update import (
+    RELEASES_PAGE,
+    check_for_update,
+    evaluate_feed,
+    is_newer,
+    is_public_tag,
+    parse_version,
 )
 
 
@@ -43,7 +27,7 @@ def fake_github(url: str) -> str:
         # GitHub has 404'd this call for every user since the feature shipped.
         raise urllib.error.HTTPError(url, 404, "Not Found", email.message.Message(), None)
     if "/releases" in url:
-        return REAL_FEED
+        return FEED
     raise AssertionError(f"the check asked for an endpoint nobody serves: {url}")
 
 
@@ -67,56 +51,132 @@ def test_is_newer_compares_numerically_not_lexically() -> None:
     assert is_newer("garbage", "0.1.4") is False
 
 
-def test_a_feed_of_nothing_but_prereleases_still_yields_an_update() -> None:
-    """The bug: every release upstream cuts is a prerelease, so `/releases/latest` 404s.
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("v0.8.70-Public", True),
+        ("v0.8.70-public", True),
+        ("v0.8.70-PUBLIC", True),
+        ("v0.8.71-fixtest", False),
+        ("v0.8.5-DeckTest", False),
+        ("v0.6.60-phase8", False),
+        ("v0.6.59Public", False),
+        ("v0.6.59", False),
+        ("0.8.70-Public", False),
+        ("", False),
+        ("v0.8.70-Public-rc1", False),
+    ],
+)
+def test_only_a_dash_public_tag_is_a_release_for_players(tag: str, expected: bool) -> None:
+    """The defect this closes: a test tag shares this feed and was offered to players.
 
-    The check must ask the endpoint that lists them and take the newest, or it
-    finds nothing for anybody — which is what it did for its whole life.
+    `-fixtest` and `-DeckTest` builds are cut from the same repository, and the
+    check compared the numeric triple only — so the newest thing anybody had
+    tagged became the update every user was told to install.
     """
-    result = check_for_update("0.6.53", http_get=fake_github)
+    assert is_public_tag(tag) is expected
+
+
+def test_a_test_tag_is_never_offered() -> None:
+    result = evaluate_feed(FEED, "0.8.66-Public")
+    assert result.latest == "v0.8.70-Public" and result.available
+
+
+def test_the_newest_is_by_version_not_by_position_and_a_draft_does_not_count() -> None:
+    """The feed is ordered by creation date, and a draft sits in it invisibly."""
+    assert evaluate_feed(FEED, "0.8.0-Public").latest == "v0.8.70-Public"
+
+
+def test_notes_cover_every_public_release_newer_than_mine_newest_first() -> None:
+    notes = evaluate_feed(FEED, "0.8.66-Public").notes_markdown
+    assert notes == (
+        "## v0.8.70-Public\n\n### New\n- Ten.\n\n## v0.8.69-Public\n\n### Fixed\n- Nine.\n"
+    )
+
+
+def test_notes_stop_at_my_version() -> None:
+    assert "Six." not in evaluate_feed(FEED, "0.8.66-Public").notes_markdown
+
+
+def test_assets_and_the_checksum_file_are_carried() -> None:
+    result = evaluate_feed(FEED, "0.8.66-Public")
+    assert [a.name for a in result.assets] == ["Yulon-v0.8.70-Public-x86_64.AppImage", "SHA256SUMS"]
+    assert result.assets[0].size == 10
+    assert result.assets[0].url.endswith(".AppImage")
+    assert result.has_checksums
+
+
+def test_up_to_date_is_not_an_error() -> None:
+    result = evaluate_feed(FEED, "0.8.70-Public")
+    assert not result.available and result.error is None and result.latest == "v0.8.70-Public"
+    assert result.notes_markdown == ""
+
+
+def test_a_test_build_newer_than_every_public_release_is_offered_nothing() -> None:
+    """A developer running `0.8.71-fixtest` is not told to downgrade to 0.8.70."""
+    assert not evaluate_feed(FEED, "0.8.71-fixtest").available
+
+
+def test_a_feed_with_no_public_release_says_so() -> None:
+    result = evaluate_feed(json.dumps([release("v0.8.71-fixtest")]), "0.8.0")
+    assert not result.available and result.error == "no public release"
+
+
+def test_a_rate_limit_body_is_json_but_not_a_feed() -> None:
+    """`{"message": "API rate limit exceeded"}` is valid JSON and nothing to offer."""
+    result = evaluate_feed(json.dumps({"message": "API rate limit exceeded"}), "0.8.0")
+    assert not result.available and result.error == "no public release"
+
+
+def test_an_empty_feed_is_no_public_release() -> None:
+    assert evaluate_feed("[]", "0.8.0").error == "no public release"
+
+
+def test_a_body_that_is_not_json_at_all_raises_for_the_caller_to_catch() -> None:
+    """`evaluate_feed` is pure and says so by raising; `check_for_update` never does."""
+    with pytest.raises(ValueError):
+        evaluate_feed("<html>rate limited</html>", "0.8.0")
+
+
+def test_malformed_assets_are_dropped_not_fatal() -> None:
+    feed = json.dumps(
+        [
+            {
+                **release("v0.9.0-Public"),
+                "assets": [
+                    {"name": 3},
+                    "junk",
+                    {"name": "a", "browser_download_url": "u", "size": "big"},
+                ],
+            }
+        ]
+    )
+    assert evaluate_feed(feed, "0.8.0").assets == ()
+
+
+def test_the_fallback_page_is_one_that_exists() -> None:
+    """`/releases/latest` 404s here: every release this project cuts is a prerelease."""
+    assert RELEASES_PAGE.endswith("/releases")
+
+
+def test_a_feed_of_nothing_but_prereleases_still_yields_an_update() -> None:
+    """The endpoint that lists them all, not `/releases/latest`, which 404s for everyone."""
+    result = check_for_update("0.8.66-Public", http_get=fake_github)
 
     assert result.available is True
-    assert result.latest == "v0.6.57Public"
-    assert result.url.endswith("/releases/tag/v0.6.57Public")
+    assert result.latest == "v0.8.70-Public"
+    assert result.url.endswith("/releases/tag/v0.8.70-Public")
     assert result.error is None
 
 
-def test_a_draft_is_not_a_release_anyone_can_download() -> None:
-    """Drafts sit at the top of the feed and are invisible to users; skip past them."""
-    feed = json.dumps(
-        [
-            {"tag_name": "v9.9.9", "draft": True, "html_url": "https://example.test/draft"},
-            {"tag_name": "v0.6.57Public", "draft": False, "html_url": "https://example.test/57"},
-        ]
-    )
-
-    result = check_for_update("0.6.53", http_get=lambda url: feed)
-
-    assert result.latest == "v0.6.57Public" and result.available is True
-
-
-def test_a_re_cut_of_an_old_tag_is_not_offered_as_an_upgrade() -> None:
-    """The feed is ordered by creation date, not by version, so newest can be older."""
-    feed = json.dumps(
-        [
-            {"tag_name": "v0.6.10", "draft": False, "html_url": "https://example.test/10"},
-            {"tag_name": "v0.6.57Public", "draft": False, "html_url": "https://example.test/57"},
-        ]
-    )
-
-    result = check_for_update("0.6.57", http_get=lambda url: feed)
-
-    assert result.latest == "v0.6.10" and result.available is False
-
-
 def test_check_reports_available_only_for_a_newer_release() -> None:
-    payload = json.dumps([{"tag_name": "v9.9.9", "html_url": "https://example.test/rel/v9.9.9"}])
+    payload = json.dumps([release("v9.9.9-Public")])
     result = check_for_update("0.1.4", http_get=lambda url: payload)
-    assert result.available is True and result.latest == "v9.9.9"
-    assert result.url == "https://example.test/rel/v9.9.9" and result.error is None
+    assert result.available is True and result.latest == "v9.9.9-Public"
+    assert result.url.endswith("/releases/tag/v9.9.9-Public") and result.error is None
 
     same = check_for_update("9.9.9", http_get=lambda url: payload)
-    assert same.available is False and same.latest == "v9.9.9"
+    assert same.available is False and same.latest == "v9.9.9-Public"
 
 
 def test_check_degrades_cleanly_offline_or_on_odd_payloads() -> None:
@@ -126,9 +186,6 @@ def test_check_degrades_cleanly_offline_or_on_odd_payloads() -> None:
     off = check_for_update("0.1.4", http_get=offline)
     assert off.available is False and off.latest is None and off.url == RELEASES_PAGE
     assert off.error is not None and "no network" in off.error
-
-    odd = check_for_update("0.1.4", http_get=lambda url: json.dumps([{"tag_name": "latest"}]))
-    assert odd.available is False and "unrecognized" in (odd.error or "")
 
     broken = check_for_update("0.1.4", http_get=lambda url: "<html>rate limited</html>")
     assert broken.available is False and broken.error is not None
@@ -141,3 +198,13 @@ def test_check_degrades_cleanly_offline_or_on_odd_payloads() -> None:
 
     empty = check_for_update("0.1.4", http_get=lambda url: "[]")
     assert empty.available is False and empty.latest is None and empty.error is not None
+
+
+def test_the_build_script_agrees_on_what_public_means() -> None:
+    """One definition of `-Public`, or the release notes describe a different release."""
+    script = Path(__file__).resolve().parents[1] / "build" / "release_notes.py"
+    if not script.exists():
+        pytest.skip("plan 1 not merged into this tree")
+    assert 'r"^v(\\d+)\\.(\\d+)\\.(\\d+)-public$", re.IGNORECASE' in script.read_text(
+        encoding="utf-8"
+    )
