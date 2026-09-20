@@ -176,10 +176,22 @@ class _NotesView(QTextBrowser):
     (measured — see `_strip_images`). What it does stop is a resource this
     widget would fetch for any OTHER reason, which costs nothing to refuse.
 
-    Links are NOT handed to `setOpenExternalLinks`, which opens whatever scheme
-    the anchor carries: `[run](file:///etc/passwd)` and a UNC link both reach
-    `QDesktopServices` that way. `setOpenLinks(False)` means a click navigates
-    nothing, and `_clicked` opens an http(s) URL and ignores everything else.
+    Links are NOT handed to `setOpenLinks`/`setOpenExternalLinks`, and both
+    halves of why were measured on 6.11 by clicking a real anchor:
+
+    * `[share](smb://host/share)` with `setOpenExternalLinks(True)` **was
+      handed to `QDesktopServices`** — a scheme the release body chose, started
+      by the desktop. On Windows the same shape over a UNC path is an SMB
+      connection, i.e. an NTLM handshake, before it is anything else.
+    * `[run](file:///etc/hostname)` was not launched but **navigated to**: the
+      widget's `source()` became that path and its text became the file's
+      contents (`'PKGame-Laptop'`, off this disk). A release body could put the
+      contents of a local file in front of the reader by naming it. Overriding
+      `loadResource` did not stop that either.
+
+    So both doors are shut: `setOpenLinks(False)` means a click navigates
+    nothing, and `_clicked` opens an http(s) URL and ignores every other
+    scheme.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:

@@ -345,6 +345,27 @@ def test_only_an_http_link_is_handed_to_the_desktop(qapp: object, href: str, ope
     assert handed == ([href] if opened else [])
 
 
+def test_a_file_link_never_puts_a_local_file_in_front_of_the_reader(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Measured on 6.11: the old widget NAVIGATED to a `file:` link and showed the file.
+
+    Clicking `[run](file:///etc/hostname)` left `source()` at that path and the
+    box reading the machine's hostname off the disk. Not a launch — a read, and
+    a release body naming the path.
+    """
+    secret = tmp_path / "secret.txt"
+    secret.write_text("the contents of a local file", encoding="utf-8")
+    notes = _notes(UpdateDialog(RESULT))
+    before = notes.toPlainText()
+
+    notes.anchorClicked.emit(QUrl.fromLocalFile(str(secret)))
+
+    assert notes.source().toString() == "", "the widget navigated somewhere"
+    assert notes.toPlainText() == before
+    assert "the contents of a local file" not in notes.toPlainText()
+
+
 def test_raw_html_in_a_release_body_is_shown_and_eats_nothing_after_it(qapp: object) -> None:
     """Measured on 6.11: a raw HTML block swallowed the rest of the body silently.
 
