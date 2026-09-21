@@ -2324,14 +2324,37 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("selfupdate/layout.py", "other_instances"): (
+        "T90 plan 3. Lists `/proc` to find every OTHER live process running this app's own "
+        "executable, before the update helper is started. It decides a REFUSAL and never a "
+        "write: two copies of Yu'lon open from one folder is how the swap moves the entries "
+        "under the second one, so a non-empty answer stops the update with the reason on the "
+        "bar. A `/proc` entry it cannot read is skipped -- that is another user's process, and "
+        "another user's Yu'lon is not running out of this folder -- and a platform with no "
+        "`/proc` answers the empty list, which the caller states rather than hides"
+    ),
+    ("selfupdate/stage.py", "staged_entries"): (
+        "T90 plan 3. Lists the STAGING directory this app filled moments earlier, to find the "
+        "top-level names the new build ships. It decides no write of its own; what it feeds is "
+        "`entries_to_swap()`, whose answer is checked against the running build's shipped "
+        "manifest before anything is moved -- a staged name that would land on a file the "
+        "running build did not ship REFUSES the whole update. An unreadable directory is the "
+        "same refusal"
+    ),
+    ("selfupdate/stage.py", "stage"): (
+        "T90 plan 3. Lists the unpack scratch directory -- inside the marked staging directory, "
+        "created by this same call -- to move each of the build's top-level entries up one "
+        "level. The write it decides is `os.replace` into the staging directory and nothing "
+        "else; the install's own entries are not touched here at all, and are not touched by "
+        "this process ever (the helper moves them after it has exited)"
+    ),
     ("selfupdate/stage.py", "_the_one_yulon_directory"): (
-        "T90 plan 3. Lists the folder this app just extracted an update archive INTO, inside a "
-        "folder it created itself moments earlier, to find the single top-level `yulon/` "
-        "directory a Yu'lon tarball carries. It decides a REFUSAL and never a write: anything "
-        "other than exactly one `yulon/` directory is `not a Yu'lon package` and nothing is "
-        "installed, and an OSError reading it is the same refusal rather than a traceback. The "
-        "write it guards -- the rename of that directory to `<install>.new` -- happens only on "
-        "the one answer it gives, and the running install is not touched by any of it"
+        "T90 plan 3. Lists the scratch folder this app just extracted an update archive INTO, "
+        "inside the staging directory it created itself moments earlier, to find the single "
+        "top-level `yulon/` directory a Yu'lon tarball carries. It decides a REFUSAL and never "
+        "a write: anything other than exactly one `yulon/` directory is `not a Yu'lon package` "
+        "and nothing is installed, and an OSError reading it is the same refusal rather than a "
+        "traceback. The running install is not touched by any of it"
     ),
     ("steam.py", "find_profile"): (
         "8.8. Lists `userdata/` to count Steam profiles. It decides a REFUSAL and never a "

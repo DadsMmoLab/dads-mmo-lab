@@ -22,6 +22,7 @@ from __future__ import annotations
 import threading
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -109,9 +110,17 @@ class UpdateProgressDialog(QDialog):
         row.addWidget(self.close_button)
         column.addLayout(row)
 
+        self._over = False
+        """True once the worker has stopped. Until then, closing means CANCELLING."""
+
         self.relay = _Relay(self)
         self.relay.progressed.connect(self.set_progress)
         self.relay.staged.connect(self.set_stage)
+        # Handed back to Qt whichever way it ends. It is parented to the
+        # window, so Qt owns it for the lifetime of the app, and every press of
+        # "Update now" would otherwise leave another one parked there — the
+        # same leak `UpdateDialog` is given a `deleteLater()` for.
+        self.finished.connect(self.deleteLater)
 
     @Slot(str)
     def set_stage(self, text: str) -> None:
@@ -146,12 +155,53 @@ class UpdateProgressDialog(QDialog):
         self.cancel_button.setEnabled(False)
         self.cancel_button.setText(CANCELLING)
 
+    def reject(self) -> None:
+        """Esc, the X, and the Close button all come here. **Esc is a CANCEL.**
+
+        Until cold review 1 this was Qt's own `reject()`, which simply hides
+        the dialog — with `cancel_event` unset. The update then carried on
+        unwatched: minutes later `install_done` started the swap helper and
+        closed the app under whatever the player had begun in the meantime,
+        and the dialog that would have refused that was gone. Pressing Esc
+        cannot mean "stop showing me this and do it anyway".
+
+        So while the worker is running, this asks it to stop and the dialog
+        STAYS UP saying "Cancelling…" until the worker really has stopped —
+        `main.py` closes it through `close_now()` when the `Cancelled` comes
+        back. Once the dialog is showing a refusal, or the worker is done,
+        Close closes.
+        """
+        if self._over:
+            super().reject()
+            return
+        self.ask_to_cancel()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """The window's X, which Qt does not route through `reject()`."""
+        if self._over:
+            super().closeEvent(event)
+            return
+        self.ask_to_cancel()
+        event.ignore()
+
+    def close_now(self) -> None:
+        """Close for real. The one way out that does not mean "cancel".
+
+        Called by `main.py` when the worker has actually stopped — finished,
+        refused or cancelled — which is the only moment at which closing this
+        dialog cannot leave an update running behind it.
+        """
+        self._over = True
+        super().reject()
+
     def finish_error(self, message: str) -> None:
         """The update was refused. Show why, and leave one button: Close.
 
         The message is `str(UpdateError)`, which every refusal in
         `yulon/selfupdate/` writes for a player rather than for a log.
         """
+        # The worker has stopped; Esc and the X may close from here on.
+        self._over = True
         self.stage_label.setText(message)
         self.bar.setVisible(False)
         self.detail_label.setText("")

@@ -87,20 +87,25 @@ class Install:
         return self.kind in _SWAPPABLE and self.writable and self.target is not None
 
 
-def _probe(target: Path) -> bool:
-    """Can a sibling be created beside `target`? **Tried, not asked.**
+def _probe(directory: Path) -> bool:
+    """Can a file be created in `directory`? **Tried, not asked.**
 
     `os.access` lies: on Windows it reports the read-only ATTRIBUTE and knows
     nothing about the ACL that actually decides, and on a network mount it
-    answers from the local credentials rather than from the server. The swap is
-    a rename of `target` to a sibling and of another sibling onto `target`, so
-    the question is exactly "may I make a file in this directory", and the only
-    honest way to ask it is to make one and remove it.
+    answers from the local credentials rather than from the server. The only
+    honest way to ask is to make a file and remove it.
+
+    **Which directory is asked changed in cold review 1.** It used to be the
+    target's PARENT, because the swap renamed the whole install folder; since
+    the swap now works on the entries inside the folder and stages into
+    `<target>/.yulon-new`, the folder that has to accept a new file is the
+    target itself. An AppImage is still a file with siblings, so that one asks
+    its parent — `detect_install` passes whichever applies.
     """
     try:
-        handle, name = tempfile.mkstemp(prefix=".yulon-update-probe-", dir=target.parent)
+        handle, name = tempfile.mkstemp(prefix=".yulon-update-probe-", dir=directory)
     except OSError as exc:
-        logger.info(f"self-update: {target.parent} does not take a new file ({exc})")
+        logger.info(f"self-update: {directory} does not take a new file ({exc})")
         return False
     os.close(handle)
     try:
@@ -144,12 +149,18 @@ def detect_install(
         return Install(kind, None, "", False)
     if arch not in _X86_64:
         return Install(InstallKind.UNSUPPORTED, None, "", False)
+    # The folder the executable sits in — which is NOT assumed to be a folder
+    # this app owns. It may be the player's Downloads folder, if that is where
+    # they unpacked the zip. What may be replaced inside it is decided by
+    # `layout.shipped_entries()`, never by this function.
     if which == "windows":
         return Install(InstallKind.WINDOWS_ZIP, exe.parent, exe.name, probe_writable(exe.parent))
     appimage = env.get("APPIMAGE")
     if appimage and Path(appimage).is_file():
         target = Path(appimage)
-        return Install(InstallKind.APPIMAGE, target, "", probe_writable(target))
+        # A file install stages beside itself, so the PARENT is what has to
+        # take a new file; a folder install stages inside itself.
+        return Install(InstallKind.APPIMAGE, target, "", probe_writable(target.parent))
     return Install(InstallKind.TARBALL, exe.parent, exe.name, probe_writable(exe.parent))
 
 

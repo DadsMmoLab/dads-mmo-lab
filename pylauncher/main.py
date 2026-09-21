@@ -253,6 +253,23 @@ def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
         return False
 
 
+def in_smoke_test(environ: dict[str, str] | None = None) -> bool:
+    """Is this process the one-shot run that PROVES a staged build opens?
+
+    `selfupdate.stage.smoke_test()` starts the newly unpacked build with
+    `YULON_SMOKE_TEST=1`, and `release.yml` uses the same variable to check the
+    packaged app on every runner. In both cases the app must build its window
+    and leave — and **must change nothing on the way**, because on the update
+    path it is running out of a staged folder while the OLD build is still
+    installed, with the player's real config directory in reach. So under this
+    variable there is no update check (no GitHub request, no `update.json`), no
+    repair of an unreadable `state.json`, and no removal of a previous build's
+    backup. Each of those is pinned in `test_main.py`.
+    """
+    env = os.environ if environ is None else environ
+    return bool(env.get("YULON_SMOKE_TEST"))
+
+
 def close_refusal(window: object) -> str | None:
     """Why this window may not close yet, in the tab's own words — or None.
 
@@ -299,17 +316,23 @@ def announce_previous_update(
     from yulon.selfupdate.cleanup import finish_previous_update
     from yulon.selfupdate.detect import Install, detect_install
 
-    env = os.environ if environ is None else environ
-    if env.get("YULON_SMOKE_TEST"):
+    if in_smoke_test(environ):
         return False
+    running = version or __version__
     try:
         here = install if isinstance(install, Install) else detect_install()
-        if not finish_previous_update(here):
-            return False
+        outcome = finish_previous_update(here, running=running)
     except Exception as exc:  # noqa: BLE001 - boundary: a start must not fail over this
         logger.info(f"self-update: could not finish the previous update: {exc}")
         return False
-    bar.show_message(f"Updated to Yu'lon {version or __version__}.")
+    if outcome.problem:
+        # A swap that stopped part-way. Said rather than tidied away: the
+        # backup is still there and the player needs to know it is.
+        bar.show_message(outcome.problem, keep_details=True)
+        return False
+    if not outcome.removed:
+        return False
+    bar.show_message(f"Updated to Yu'lon {outcome.version or running}.")
     return True
 
 
@@ -341,6 +364,7 @@ def build_window() -> object:
     )
     from yulon.selfupdate.detect import OPEN_PAGE, Install, action_label, detect_install
     from yulon.selfupdate.fetch import Cancelled
+    from yulon.selfupdate.layout import other_instances
     from yulon.selfupdate.swap import start_helper
     from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
@@ -426,7 +450,10 @@ def build_window() -> object:
             apply_dadcraft_theme(self, width=width)
 
     catalog = load_catalog()
-    state = load_state()
+    # `repair=False` under the smoke run: `load_state()` moves an unreadable
+    # `state.json` aside, and the smoke run of a STAGED build must not touch
+    # the player's files while the old build is still the installed one.
+    state = load_state(repair=not in_smoke_test())
     window = _Window()
     window.setWindowTitle(f"Dad's MMO Lab — Yu'lon {__version__}")
     window.setWindowIcon(get_app_icon())
@@ -878,6 +905,9 @@ def build_window() -> object:
             # and unpacks, `start_helper` starts a process that outlives this
             # one, and `close()` ends the app.
             self.current_install: Callable[[], Install] = detect_install
+            self.other_copies: Callable[[Path], list[int]] = lambda exe: other_instances(
+                exe, os.getpid()
+            )
             self.apply: Callable[..., object] = apply_update
             self.start_helper: Callable[..., None] = start_helper
             # `window.close()` answers a bool; nothing here reads it, and
@@ -890,6 +920,8 @@ def build_window() -> object:
             )
             self._progress: Any = None
             self._installing = False
+            self._ready: Any = None
+            """A staged update whose close gate refused. Pressing again replaces it."""
 
         @Slot(object)
         def startup_result(self, result: object) -> None:
@@ -1073,6 +1105,10 @@ def build_window() -> object:
             self._installing = True
             version = str(offered.latest)
             progress = self.make_progress(version)
+            # Parented to the window, so Qt owns it for the lifetime of the
+            # app — which is why it is handed back with `deleteLater()` on
+            # every path out, exactly as the what's-new dialog is. Without it
+            # every press left another dialog parked on the window.
             self._progress = progress
             relay = progress.relay
             cancelled = progress.cancel_event.is_set
@@ -1104,21 +1140,73 @@ def build_window() -> object:
             self._installing = False
             progress, self._progress = self._progress, None
             if progress is not None:
-                progress.accept()
+                progress.close_now()
             if isinstance(outcome, ReadyToRestart):
-                # **In this order, and the order is the whole of it.** The
-                # helper waits for THIS process to exit before it renames
-                # anything, so it is started first and the window is closed
-                # immediately after, through the normal close path — every
-                # thread joined, every tab shut down. `close_refusal()` was
-                # asked before any of this began; if the close is somehow
-                # refused anyway the helper waits out its 120 seconds and
-                # relaunches what is already running rather than renaming.
-                self.start_helper(outcome.plan)
-                logger.info(f"self-update: closing to install {outcome.version}")
-                self.close_window()
+                self.restart_into(outcome)
             elif isinstance(outcome, SavedForManualInstall):
                 self.show_saved(outcome)
+
+        def restart_into(self, ready: ReadyToRestart) -> None:
+            """Start the helper and close — **after asking the close gate again**.
+
+            **The second ask is not belt and braces** (cold review 1). The
+            download, the unpack and the smoke test take minutes, and a player
+            can start a database import in them: the first ask was true when
+            the update began and says nothing about now. Starting the helper
+            anyway would then close the window past the guard that exists to
+            stop exactly that, or — if the close were refused — leave a helper
+            counting down beside a running import.
+
+            So nothing is started if anything refuses. The staged build stays
+            where it is, marked, and the bar says what to do; pressing
+            `Update now` again replaces it cleanly (`stage.prepare()` discards
+            the previous marked staging and starts over).
+            """
+            reason = self.refusal() or self._another_copy_is_open()
+            if reason is not None:
+                self._ready = ready
+                logger.info(f"self-update: staged {ready.version}, waiting for: {reason}")
+                update_bar.show_message(
+                    f"The update to {ready.version} is ready; it will be installed when "
+                    f"this is finished: {reason} — press Update now again.",
+                    keep_details=True,
+                )
+                return
+            self._ready = None
+            # **In this order, and the order is the whole of it.** The helper
+            # waits for THIS process to exit before it moves anything, so it is
+            # started first and the window is closed immediately after, through
+            # the normal close path — every thread joined, every tab shut down.
+            self.start_helper(ready.plan)
+            logger.info(f"self-update: closing to install {ready.version}")
+            self.close_window()
+
+        def _another_copy_is_open(self) -> str | None:
+            """Is a second Yu'lon running out of this same install?
+
+            **Two copies open is how an install gets lost** (cold review 1):
+            the first one's helper moves the entries under the second one, and
+            the second one's next start then reads a tree that was replaced
+            beneath it. Asked here, immediately before the helper is started,
+            because that is the last moment at which the answer is still true.
+
+            Linux reads `/proc/<pid>/exe`. On Windows there is no such answer
+            here, and the honest statement is that the open files are what
+            refuses: the helper's `Move-Item` fails on a locked entry and rolls
+            everything back. That is on the gate list rather than claimed.
+            """
+            install = self.current_install()
+            target = install.target
+            if target is None or not install.executable:
+                return None
+            others = self.other_copies(target / install.executable)
+            if not others:
+                return None
+            logger.info(f"self-update: {len(others)} other copy/copies of Yu'lon are open")
+            return (
+                "another copy of Yu'lon is open from the same folder. Close it and press "
+                "Update now again."
+            )
 
         def show_saved(self, outcome: SavedForManualInstall) -> None:
             """A verified file the player installs themselves (macOS, a read-only folder)."""
@@ -1135,13 +1223,17 @@ def build_window() -> object:
         def install_failed(self, problem: object) -> None:
             """A refusal, or a cancel. Both leave the running install exactly as it was."""
             self._installing = False
+            self._ready = None
             progress, self._progress = self._progress, None
             if isinstance(problem, Cancelled):
                 if progress is not None:
-                    progress.reject()
+                    progress.close_now()
                 return
             logger.info(f"self-update refused: {problem}")
             if progress is not None:
+                # NOT closed: the reason replaces the bar and the dialog waits
+                # for the player to read it. `finish_error` is what makes Close
+                # the one button, and what lets Esc really close from then on.
                 progress.finish_error(str(problem))
             else:  # pragma: no cover - there is always a dialog on this path
                 update_bar.show_message(f"Could not install the update: {problem}")
@@ -1161,6 +1253,20 @@ def build_window() -> object:
     header = window.property("header")
     if header is not None:
         header.add_action(check_button)
+
+    if in_smoke_test():
+        # No launch check: it would ask GitHub and write `update.json` in the
+        # player's own config directory, from a build that is not installed
+        # yet. The window is built either way, which is what the smoke run
+        # exists to prove.
+        logger.info("YULON_SMOKE_TEST set: the launch update check is not started")
+        window.resize(*DEFAULT_WINDOW_SIZE)
+        window.setMinimumSize(*MINIMUM_WINDOW_SIZE)
+        window.setProperty("tabs", tabs)
+        window.yulon_log_panels = panels
+        window.yulon_controllers = controller_views
+        assert isinstance(window, QWidget)
+        return window
 
     update_thread = QThread(window)
     update_worker = _UpdateWorker()

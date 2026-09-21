@@ -174,15 +174,40 @@ def test_the_real_probe_says_no_when_the_parent_is_missing(tmp_path: Path) -> No
 
 def test_the_real_probe_says_no_for_a_folder_nobody_may_write(tmp_path: Path) -> None:
     """Tried rather than asked: `os.access` lies on Windows ACLs and network mounts."""
-    parent = tmp_path / "ro"
-    parent.mkdir()
-    target = parent / "yulon"
+    target = tmp_path / "yulon"
     target.mkdir()
-    parent.chmod(0o500)
+    target.chmod(0o500)
     try:
         assert detect._probe(target) is False
     finally:
-        parent.chmod(0o700)
+        target.chmod(0o700)
+
+
+def test_a_folder_install_is_asked_about_itself_and_an_appimage_about_its_parent(
+    tmp_path: Path,
+) -> None:
+    """**Which directory is probed changed in cold review 1**, with the design.
+
+    The swap used to rename the whole install folder, so the question was "can
+    I make a sibling of it". It now stages into `<target>/.yulon-new`, so the
+    question is "can I make a file INSIDE it" — and getting that wrong would
+    offer "Update now" on a folder the update cannot write to. An AppImage is
+    still a file whose work directories are siblings, so that one still asks
+    its parent.
+    """
+    asked: list[Path] = []
+    _detect(probe_writable=lambda p: asked.append(p) or True)
+    assert asked == [Path("/opt/apps/yulon")], "a folder install must be asked about itself"
+
+    asked.clear()
+    appimage = tmp_path / "Yulon.AppImage"
+    appimage.write_bytes(b"x")
+    _detect(
+        environ={"APPIMAGE": str(appimage)},
+        executable=Path("/tmp/.mount_x/yulon"),
+        probe_writable=lambda p: asked.append(p) or True,
+    )
+    assert asked == [tmp_path], "an AppImage stages beside itself, so its parent is the question"
 
 
 # -- the label ---------------------------------------------------------------

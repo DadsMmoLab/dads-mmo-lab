@@ -22,11 +22,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from yulon.log import get_logger
-from yulon.selfupdate import fetch, swap
+from yulon.selfupdate import fetch, layout, swap
 from yulon.selfupdate import stage as stage_module
 from yulon.selfupdate.detect import Install
 from yulon.selfupdate.fetch import Cancelled, IsCancelled, Progress, UpdateError
-from yulon.selfupdate.stage import sibling
 from yulon.selfupdate.swap import SwapPlan
 from yulon.update import CHECKSUMS_NAME, UpdateCheck
 
@@ -86,7 +85,11 @@ class ApplyIO:
     fetch_text: Callable[[str], str] = field(default=fetch.fetch_text)
     download: Callable[..., Path] = field(default=fetch.download)
     verify: Callable[[Path, str], None] = field(default=fetch.verify)
+    prepare: Callable[..., Path] = field(default=stage_module.prepare)
     stage: Callable[[Install, Path], Path] = field(default=stage_module.stage)
+    entries_to_swap: Callable[[Install, Path], tuple[str, ...]] = field(
+        default=stage_module.entries_to_swap
+    )
     smoke_test: Callable[[Path], None] = field(default=stage_module.smoke_test)
     plan_swap: Callable[..., SwapPlan] = field(default=swap.plan_swap)
     script_dir: Callable[[], Path] = field(default=_real_script_dir)
@@ -252,10 +255,13 @@ def _swap_path(
     the install, and the promise this package makes is about what is on disk
     afterwards rather than about which exception class got there.
     """
-    del result  # judged already by `_what_to_ask_for`
-    downloads = sibling(target, ".download")
-    staged_at = sibling(target, ".new")
-    unpack = sibling(target, ".new-unpack")
+    del result, target  # judged already by `_what_to_ask_for`
+    # **Everything happens inside a marked `.yulon-new`.** The download lands
+    # there too, so it is on the same filesystem as the entries it becomes and
+    # so that one marked directory is the whole footprint of an update — which
+    # is what makes "a refusal removes what it staged" a delete this app can
+    # prove is its own (`layout.discard_ours`).
+    staged = io.prepare(install, tag, pid=pid)
     try:
         digest = _digest_for(tag, name, io, stage_changed)
         _stop_if_cancelled(cancelled)
@@ -263,7 +269,7 @@ def _swap_path(
             tag=tag,
             name=name,
             size=size,
-            dest=downloads / name,
+            dest=_download_into(install, staged) / name,
             digest=digest,
             progress=progress,
             stage_changed=stage_changed,
@@ -276,15 +282,27 @@ def _swap_path(
         stage_changed(TESTING)
         io.smoke_test(stage_module.staged_executable(install, staged))
         _stop_if_cancelled(cancelled)
-        plan = io.plan_swap(install, staged, pid=pid, script_dir=io.script_dir())
+        entries = io.entries_to_swap(install, staged)
+        plan = io.plan_swap(install, staged, pid=pid, script_dir=io.script_dir(), entries=entries)
     except BaseException:
-        stage_module.discard(downloads, staged_at, unpack)
+        layout.discard_ours(install, layout.NEW_NAME)
+        layout.discard_ours(install, layout.OLD_NAME)
         raise
-    # The archive has done its job; what the helper renames is `<target>.new`.
-    stage_module.discard(downloads)
     stage_changed(READY)
     logger.info(f"self-update: {tag} is staged at {staged} and the helper is written")
     return ReadyToRestart(plan, tag)
+
+
+def _download_into(install: Install, staged: Path) -> Path:
+    """Where the artifact lands while it is being fetched: the marked `.yulon-new`.
+
+    One marked directory is the whole footprint of an update, for both kinds of
+    install — which is what makes "a refusal removes what it staged" a delete
+    this app can prove is its own, and what keeps a `.part` file out of the
+    player's folder if the app is killed mid-download.
+    """
+    del install
+    return staged
 
 
 def _download_only(

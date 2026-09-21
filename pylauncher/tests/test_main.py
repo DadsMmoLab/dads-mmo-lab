@@ -32,6 +32,13 @@ import main
 from tests.conftest import process_events, pump_until
 from yulon import platform, state, update
 
+_REAL_LOAD_STATE = state.load_state
+"""Captured at import, before the module fixture replaces it with a stand-in.
+
+The window fixture patches `state.load_state` for the whole module, so a test
+about the REAL function has to hold on to it from before that happened.
+"""
+
 
 def _report(**kwargs: Any) -> platform.ProvisionReport:
     base: dict[str, Any] = {"platform": "windows"}
@@ -524,7 +531,11 @@ def _app_window(qapp: object) -> Iterator[Any]:
     monkeypatch.setattr(
         update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
     )
-    monkeypatch.setattr(state, "load_state", lambda path=None: state.AppState(installs=[]))
+    monkeypatch.setattr(
+        state,
+        "load_state",
+        lambda path=None, repair=True: state.AppState(installs=[]),
+    )
     # Captured here rather than in the test that reads it: `build_window()`
     # imports `save_state` into its own namespace on the way in, so a patch
     # applied after the window exists is never seen by the window.
@@ -1770,56 +1781,54 @@ class _Bar:
 
 
 def _swapped_install(tmp_path: Path) -> Any:
-    """A folder install with an `.old` beside it, as the helper leaves things."""
+    """A folder install with a MARKED `.yulon-old` inside it, as the helper leaves things."""
+    import os
+
+    from yulon.selfupdate import layout
     from yulon.selfupdate.detect import Install, InstallKind
 
-    target = tmp_path / "yulon"
-    target.mkdir()
+    target = tmp_path / "app"
+    (target / "_internal").mkdir(parents=True)
     (target / "yulon").write_text("the new build", encoding="utf-8")
-    old = tmp_path / "yulon.old"
+    install = Install(InstallKind.TARBALL, target, "yulon", True)
+    old = layout.work_dir(install, layout.OLD_NAME)
     old.mkdir()
     (old / "yulon").write_text("the previous build", encoding="utf-8")
-    return Install(InstallKind.TARBALL, target, "yulon", True)
+    layout.write_marker(
+        install,
+        layout.OLD_NAME,
+        layout.Marker(
+            layout.OLD_NAME,
+            "v1",
+            "v2",
+            os.getpid(),
+            layout.now(),
+            entries=("yulon", "_internal"),
+            state=layout.SWAPPING,
+        ),
+    )
+    return install
 
 
 def test_the_first_start_after_a_swap_removes_the_old_build_and_says_so(tmp_path: Path) -> None:
     bar = _Bar()
     install = _swapped_install(tmp_path)
 
-    assert main.announce_previous_update(bar, install=install, environ={}, version="0.8.70") is True
+    assert main.announce_previous_update(bar, install=install, environ={}, version="v2") is True
 
-    assert not (tmp_path / "yulon.old").exists()
-    assert bar.messages == ["Updated to Yu'lon 0.8.70."]
+    assert not (tmp_path / "app" / ".yulon-old").exists()
+    assert bar.messages == ["Updated to Yu'lon v2."]
 
 
 def test_an_ordinary_start_removes_nothing_and_says_nothing(tmp_path: Path) -> None:
     from yulon.selfupdate.detect import Install, InstallKind
 
-    target = tmp_path / "yulon"
+    target = tmp_path / "app"
     target.mkdir()
     bar = _Bar()
     install = Install(InstallKind.TARBALL, target, "yulon", True)
 
     assert main.announce_previous_update(bar, install=install, environ={}) is False
-    assert bar.messages == []
-
-
-def test_the_smoke_test_of_a_staged_build_deletes_nothing(tmp_path: Path) -> None:
-    """`YULON_SMOKE_TEST` proves a staged build with the OLD tree still in place.
-
-    It runs before the swap, so an `.old` beside the install belongs to the
-    update BEFORE this one and is the player's way back. A smoke test that
-    removed it would be a check that changes the thing it is checking.
-    """
-    bar = _Bar()
-    install = _swapped_install(tmp_path)
-
-    assert (
-        main.announce_previous_update(bar, install=install, environ={"YULON_SMOKE_TEST": "1"})
-        is False
-    )
-
-    assert (tmp_path / "yulon.old" / "yulon").read_text(encoding="utf-8") == "the previous build"
     assert bar.messages == []
 
 
@@ -1859,6 +1868,7 @@ class _FakeProgress:
         self.shown = 0
         self.accepted = 0
         self.rejected = 0
+        self.closed = 0
         self.errors: list[str] = []
 
     def show(self) -> None:
@@ -1869,6 +1879,9 @@ class _FakeProgress:
 
     def reject(self) -> None:
         self.rejected += 1
+
+    def close_now(self) -> None:
+        self.closed += 1
 
     def finish_error(self, message: str) -> None:
         self.errors.append(message)
@@ -1903,6 +1916,7 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
 
     names = (
         "current_install",
+        "other_copies",
         "apply",
         "start_helper",
         "close_window",
@@ -1912,6 +1926,7 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
     )
     seams = {name: getattr(update_host, name) for name in names}
     update_host.current_install = lambda: _swappable(tmp_path)
+    update_host.other_copies = lambda _exe: []
     update_host.refusal = lambda: None
     update_host.run_job = run_inline
     update_host.progresses = []
@@ -1931,6 +1946,7 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
         setattr(update_host, name, seam)
     update_host._installing = False
     update_host._progress = None
+    update_host._ready = None
 
 
 def test_a_ready_update_starts_the_helper_and_then_closes_the_window(
@@ -1950,7 +1966,7 @@ def test_a_ready_update_starts_the_helper_and_then_closes_the_window(
 
     assert order == ["helper:helper.sh", "close"]
     assert installing_host.progresses[0].shown == 1
-    assert installing_host.progresses[0].accepted == 1
+    assert installing_host.progresses[0].closed == 1
 
 
 def test_the_helper_is_never_started_while_a_tab_refuses_to_close(
@@ -1997,7 +2013,7 @@ def test_a_refused_update_shows_the_reason_and_leaves_the_app_running(
 
     progress = installing_host.progresses[0]
     assert progress.errors == ["The download's checksum does not match. Nothing was installed."]
-    assert progress.accepted == 0
+    assert progress.closed == 0, "a dialog showing a refusal must stay up to be read"
     assert installing_host.helpers == [] and installing_host.closes == []
 
 
@@ -2012,7 +2028,7 @@ def test_a_cancelled_update_just_closes_the_progress_dialog(installing_host: Any
     installing_host.start_update(_install_offer())
 
     progress = installing_host.progresses[0]
-    assert (progress.rejected, progress.errors) == (1, [])
+    assert (progress.closed, progress.errors) == (1, [])
     assert installing_host.helpers == [] and installing_host.closes == []
 
 
@@ -2147,3 +2163,227 @@ def test_the_dialogs_action_button_says_what_pressing_it_will_do(
         assert dialog._buttons[UpdateChoice.UPDATE].text() == "Open download page"
     finally:
         dialog.deleteLater()
+
+
+# ------------------------------------- the update's second look at the close gate
+
+
+def test_the_close_gate_is_asked_AGAIN_immediately_before_the_helper_starts(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """**The first ask says nothing about now** (cold review 1).
+
+    The download, the unpack and the smoke test take minutes, and a player can
+    start a database import in them. Starting the helper anyway would close the
+    window past the guard that exists to stop exactly that — or, if the close
+    were refused, leave a helper counting down beside a running import.
+
+    The refusal here appears only AFTER the update has been allowed to begin,
+    which is the case a single ask cannot see.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    asked: list[int] = []
+
+    def refusal() -> str | None:
+        asked.append(1)
+        return None if len(asked) == 1 else "A database import is running."
+
+    installing_host.refusal = refusal
+    installing_host.apply = lambda *a, **k: ReadyToRestart(
+        SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.70-Public"
+    )
+
+    installing_host.start_update(_install_offer())
+
+    assert len(asked) == 2, "the gate was asked once, not again before the helper"
+    assert installing_host.helpers == [], "the helper was started during an import"
+    assert installing_host.closes == [], "the window was closed past the guard"
+    bar = installing_host.parent().property("update_bar")
+    assert "ready" in bar.text() and "A database import is running." in bar.text()
+    assert "press Update now again" in bar.text()
+
+
+def test_pressing_update_now_again_replaces_the_staged_build_cleanly(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """The second press re-runs the whole sequence, which re-prepares the staging folder.
+
+    `stage.prepare()` discards the previous MARKED staging directory and starts
+    over, so a staged build left by a refused restart is replaced rather than
+    reused half-way — and the second press is not blocked by the first.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    runs: list[int] = []
+    # One answer per ask, in order. `start_update` asks once before the work
+    # and `restart_into` asks again before the helper, so the first press is
+    # allowed to start and then refused at the gate; the second is allowed all
+    # the way.
+    answers: list[str | None] = [None, "A database import is running.", None, None]
+
+    def apply(*_a: Any, **_k: Any) -> Any:
+        runs.append(1)
+        return ReadyToRestart(SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.70-Public")
+
+    def refusal() -> str | None:
+        return answers.pop(0) if answers else None
+
+    installing_host.apply = apply
+    installing_host.refusal = refusal
+
+    offer = _install_offer()
+    installing_host.start_update(offer)
+    assert installing_host.helpers == []
+    assert installing_host._ready is not None, "the staged build was forgotten"
+
+    installing_host.start_update(offer)
+
+    assert runs == [1, 1], "the second press did not run the update again"
+    assert len(installing_host.helpers) == 1, "the second press did not install"
+    assert installing_host.closes == [1]
+    assert installing_host._ready is None
+
+
+def test_a_second_copy_of_yulon_stops_the_swap(installing_host: Any, tmp_path: Path) -> None:
+    """Two copies open is how an install gets lost: the helper swaps under the other one."""
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    installing_host.apply = lambda *a, **k: ReadyToRestart(
+        SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.70-Public"
+    )
+    installing_host.other_copies = lambda _exe: [99999]
+
+    installing_host.start_update(_install_offer())
+
+    assert installing_host.helpers == [] and installing_host.closes == []
+    bar = installing_host.parent().property("update_bar")
+    assert "another copy of Yu'lon is open" in bar.text()
+
+
+def test_the_other_copies_seam_is_asked_about_the_install_s_own_executable(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    asked: list[Path] = []
+    installing_host.apply = lambda *a, **k: ReadyToRestart(
+        SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.70-Public"
+    )
+    installing_host.other_copies = lambda exe: asked.append(exe) or []
+
+    installing_host.start_update(_install_offer())
+
+    assert asked == [tmp_path / "yulon" / "yulon"]
+
+
+def test_a_cancel_closes_the_progress_dialog_for_real(installing_host: Any) -> None:
+    """`close_now()` and not `reject()`: on this dialog `reject()` MEANS cancel."""
+    from yulon.selfupdate.fetch import Cancelled
+
+    def cancel(*_a: Any, **_k: Any) -> Any:
+        raise Cancelled("The update was cancelled.")
+
+    installing_host.apply = cancel
+    installing_host.start_update(_install_offer())
+
+    progress = installing_host.progresses[0]
+    assert progress.closed == 1 and progress.errors == []
+
+
+# ------------------------------------------------ what the smoke run must not do
+
+
+def test_the_smoke_run_is_recognised_by_its_variable_and_nothing_else() -> None:
+    assert main.in_smoke_test({"YULON_SMOKE_TEST": "1"}) is True
+    assert main.in_smoke_test({}) is False
+    assert main.in_smoke_test({"YULON_SMOKE_TEST": ""}) is False
+
+
+def test_the_smoke_run_does_not_repair_the_players_state_file(tmp_path: Path) -> None:
+    """A staged build proving it opens must not move the INSTALLED build's files aside.
+
+    `load_state()` moves an unreadable `state.json` to `.broken`, which is the
+    right thing for a real start and the wrong thing for a build that is not
+    installed yet.
+    """
+    path = tmp_path / "state.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    assert _REAL_LOAD_STATE(path, repair=False).installs == []
+    assert path.read_text(encoding="utf-8") == "{not json", "the smoke run moved it aside"
+    assert not (tmp_path / "state.json.broken").exists()
+
+    assert _REAL_LOAD_STATE(path, repair=True).installs == []
+    assert (tmp_path / "state.json.broken").exists(), "a real start still repairs it"
+
+
+def test_the_window_built_by_the_smoke_run_starts_no_update_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No GitHub request and no `update.json`, from a build that is not installed yet.
+
+    Built through the real `build_window()` under the variable, with the check
+    replaced by something that records: what is asserted is that it was never
+    called and that no update thread exists to call it.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon import update as update_module
+    from yulon import update_state
+
+    asked: list[int] = []
+    monkeypatch.setenv("YULON_SMOKE_TEST", "1")
+    monkeypatch.setattr(update_module, "check_with_cache", lambda **kwargs: asked.append(1) or None)
+    scratch = tmp_path / "config"
+    scratch.mkdir()
+    monkeypatch.setattr(
+        update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
+    monkeypatch.setattr(state, "load_state", lambda path=None, repair=True: state.AppState())
+
+    window = main.build_window()
+    try:
+        assert window.property("update_thread") is None, "a launch check thread was started"
+        assert window.property("update_worker") is None
+        assert asked == [], "the smoke run asked GitHub"
+        assert not (scratch / "update.json").exists(), "the smoke run wrote update.json"
+        assert window.property("update_bar") is not None, "the window was still built"
+    finally:
+        main._stop_background_threads(window)
+        QApplication.processEvents()
+
+
+def test_the_smoke_run_removes_no_previous_build(tmp_path: Path) -> None:
+    """It runs with the OLD tree still installed and an `.old` possibly beside it."""
+    bar = _Bar()
+    install = _swapped_install(tmp_path)
+
+    assert (
+        main.announce_previous_update(bar, install=install, environ={"YULON_SMOKE_TEST": "1"})
+        is False
+    )
+
+    assert (tmp_path / "app" / ".yulon-old" / "yulon").read_text(encoding="utf-8") == (
+        "the previous build"
+    )
+    assert bar.messages == []
+
+
+def test_a_half_done_swap_is_said_rather_than_tidied_away(tmp_path: Path) -> None:
+    """A helper killed between two moves. The backup is the way back, and it stays."""
+    from yulon.selfupdate import layout
+
+    bar = _Bar()
+    install = _swapped_install(tmp_path)
+    assert install.target is not None
+    (install.target / "_internal").rmdir()
+
+    assert main.announce_previous_update(bar, install=install, environ={}, version="v2") is False
+
+    assert bar.messages and "_internal" in bar.messages[0]
+    assert layout.work_dir(install, layout.OLD_NAME).exists()

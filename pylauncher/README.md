@@ -212,12 +212,31 @@ progress for the reasons its entry gives: the running build has no command chann
   release's own `SHA256SUMS` before anything is unpacked, and the new build is started once with a
   test flag and has to exit cleanly before your install is touched. If any of that fails, Yu'lon
   says why and your install is exactly as it was.
-- **Putting the previous version back.** When Yu'lon replaces itself it keeps the old build beside
-  the new one, and removes it the next time the new one starts. So if the new version will not open,
-  the old one is still there for that one start: rename `yulon` to `yulon.broken` and `yulon.old`
-  back to `yulon` (on Windows, the folder holding `yulon.exe`; with the AppImage, rename the
-  `.AppImage` file and its `.AppImage.old` the same way). Then start it again and use
-  `Skip this version`.
+- **Your own files in the Yu'lon folder are never touched.** Yu'lon replaces the files it shipped —
+  the program and its `_internal` folder — one at a time, and nothing else. If you unpacked the
+  Windows zip straight into your Downloads folder, or keep notes or saves beside the program, they
+  stay exactly where they are. If the new version would have to replace something Yu'lon did not
+  put there, the update stops and tells you, and offers you the download instead. Yu'lon also never
+  renames or deletes the folder itself.
+- **Putting the previous version back.** While it updates, Yu'lon works in two folders inside your
+  Yu'lon folder: `.yulon-new` (the new version, before it is installed) and `.yulon-old` (the files
+  it replaced). Both are removed the next time the new version starts. So if the new version will
+  not open, the previous one is still in `.yulon-old` for that one start:
+
+  1. open your Yu'lon folder;
+  2. move `yulon` (on Windows `yulon.exe`) and the `_internal` folder out of the way — into a new
+     folder called `broken`, say;
+  3. move everything out of `.yulon-old` back into the Yu'lon folder;
+  4. start Yu'lon again, and press `Skip this version`.
+
+  With the AppImage it is the same two folders beside the `.AppImage` file: the file inside
+  `.yulon-old` is the version you had, and renaming it back over the `.AppImage` puts it back.
+
+  If Yu'lon ever says an update **did not finish**, that is the same procedure: the message names
+  what is missing, and `.yulon-old` is left alone until you have dealt with it.
+- **If two copies of Yu'lon are open**, the one you press Update in will say so and stop. Close the
+  other one first — otherwise the files would be replaced underneath it.
+
 
 ## Developers
 

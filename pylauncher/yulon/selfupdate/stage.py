@@ -1,23 +1,31 @@
-"""Unpack the new build beside the old one, and prove it opens.
+"""Unpack the new build inside the install, and prove it opens.
 
-Beside, because the swap is then a RENAME: `<target>.new` and `<target>` are
-siblings on the same filesystem, so the helper that replaces one with the other
-never copies bytes and never leaves a half-written install.
+**Inside, not beside** (cold review 1). The staged build lands in
+`<target>/.yulon-new/`, which is on the same filesystem as the entries it will
+replace by construction, and which cannot be confused with anything of the
+player's: it is a marked working directory, and `layout.py` records why every
+delete in this package is gated on that marker.
 
 **The archive's own safety is the standard library's, not a rule re-written
-here.** `tarfile`'s `data` filter is what refuses a member that would land
-outside the destination or a link that points out of it, and this module
-refuses to extract at all if the interpreter has no such filter. `zipfile` has
-no equivalent, so its member names ARE judged here — and as both a POSIX and a
-Windows path, because neither reading catches all four shapes on its own (the
-test carries the measurement).
+here.** `tarfile`'s `data` filter refuses a member that would land outside the
+destination or a link that points out of it, and this module refuses to
+extract at all if the interpreter has no such filter. `zipfile` has no
+equivalent, so its member names ARE judged here — as both a POSIX and a
+Windows path, because neither reading catches all four shapes on its own.
 
-What this module's own rules add is small and specific: a Yu'lon tarball's top
-level is exactly one `yulon/` directory, and a staged tree has to carry the
-executable this install launches. Everything else is the stdlib's.
+What this module adds is three rules of its own:
 
-Every refusal discards what it staged before it raises, so the folder beside
-the install is either a complete new build or nothing.
+* a Yu'lon tarball's top level is exactly one `yulon/` directory;
+* the unpacked build is bounded in bytes and in member count, so a small
+  archive cannot fill the disk;
+* **a staged entry may replace an entry in the install folder only if the
+  running build SHIPPED that name.** A collision with anything else — a
+  `README.txt` the player put there — refuses the whole update, because moving
+  a file this app cannot prove is its own is the defect the entry-level design
+  was written to remove.
+
+Every refusal discards what it staged before it raises, and discards it
+through `layout.discard_ours`, so it can only ever remove a marked directory.
 """
 
 from __future__ import annotations
@@ -30,8 +38,9 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from yulon import runner
+from yulon import __version__, runner
 from yulon.log import get_logger
+from yulon.selfupdate import layout
 from yulon.selfupdate.detect import Install, InstallKind
 from yulon.selfupdate.fetch import UpdateError
 
@@ -43,6 +52,24 @@ TOP_LEVEL_DIR = "yulon"
 SMOKE_TIMEOUT_SECONDS = 60.0
 """How long the staged build has to open a window and leave. It takes seconds."""
 
+MAX_UNPACKED_BYTES = 1024 * 1024 * 1024
+"""How much an archive may unpack to before it is refused. **Measured, not chosen.**
+
+The real published artifacts of `v0.8.712-fixtest`: the Linux tar.gz unpacks to
+**231.6 MB** over 652 members, and the Windows zip to **151.8 MB** over 391.
+One gigabyte is a little over four times the larger of the two, which leaves
+room for a bundle that grows and still refuses the case this exists for — a
+300 KB archive that unpacks to gigabytes, which the size of the DOWNLOAD says
+nothing about.
+"""
+
+MAX_MEMBERS = 20_000
+"""How many files an archive may hold. 652 and 391 in the real artifacts.
+
+Counted as well as the bytes, because a million empty files cost no bytes and
+still take a filesystem apart.
+"""
+
 _NOT_A_PACKAGE = (
     "That download is not a Yu'lon package (its top level is not a single "
     "`yulon` folder). Nothing was installed."
@@ -50,11 +77,11 @@ _NOT_A_PACKAGE = (
 
 
 def sibling(target: Path, suffix: str) -> Path:
-    """`<target><suffix>` — BESIDE `target`, never inside it.
+    """`<target><suffix>` — beside `target`, never inside it.
 
-    `Path(str(target) + suffix)` and not `target.with_suffix()`: a folder called
-    `yulon` has no suffix to replace, and an AppImage called
-    `Yulon-v0.8.70-Public-x86_64.AppImage` would lose `.AppImage`.
+    Only the AppImage (a file install) uses this shape now; a folder install
+    keeps everything under `<target>/.yulon-*`. Kept as one function because
+    `layout.work_dir()` builds both from it and the two must agree.
     """
     return Path(str(target) + suffix)
 
@@ -62,8 +89,10 @@ def sibling(target: Path, suffix: str) -> Path:
 def discard(*paths: Path) -> None:
     """Remove each path, file or tree. **Never raises.**
 
-    It runs on the failure path, and an exception raised here would replace the
-    real reason the update was refused with a second, less useful one.
+    **Private to this module's own unpack scratch.** Everything a caller can
+    name goes through `layout.discard_ours`, which will only remove a marked
+    working directory; this one exists for the directory `_extract` fills and
+    then renames, which belongs to a single call and never outlives it.
     """
     for path in paths:
         try:
@@ -90,12 +119,46 @@ def _require_a_data_filter() -> None:
         )
 
 
-def stage(install: Install, archive: Path) -> Path:
-    """Put the downloaded build at `<target>.new` and return that path.
+def prepare(install: Install, version: str, *, pid: int) -> Path:
+    """Make a fresh, marked `.yulon-new` for this update and return it.
 
-    A stale `<target>.new` from an earlier attempt is REPLACED, never merged:
-    what is left of a refused update is not a head start, it is rubbish that
-    would otherwise be launched.
+    Refuses if a `.yulon-new` is there that this app cannot prove it made —
+    that is somebody's own folder and it is not ours to delete — and refuses if
+    another live copy of Yu'lon is staging into the same install.
+    """
+    busy = layout.another_copy_is_updating(install, pid)
+    if busy is not None:
+        raise UpdateError(busy)
+    for name in (layout.NEW_NAME, layout.OLD_NAME):
+        path = layout.work_dir(install, name)
+        if path.exists() and not layout.discard_ours(install, name):
+            raise UpdateError(
+                f"There is already a {path.name} in your Yu'lon folder and Yu'lon did not "
+                "put it there. Move or rename it, then try again."
+            )
+    staged = layout.work_dir(install, layout.NEW_NAME)
+    marker = layout.Marker(
+        role=layout.NEW_NAME,
+        from_version=__version__,
+        to_version=version,
+        pid=pid,
+        stamp=layout.now(),
+    )
+    try:
+        staged.mkdir(parents=True)
+        layout.write_marker(install, layout.NEW_NAME, marker)
+    except OSError as exc:
+        raise UpdateError(f"Yu'lon could not prepare a place for the update: {exc}") from exc
+    return staged
+
+
+def stage(install: Install, archive: Path) -> Path:
+    """Put the downloaded build at `.yulon-new` and return that path.
+
+    `prepare()` has already made the marked directory; this fills it. A folder
+    install unpacks into a scratch dir inside it and then moves the build's
+    entries up; a file install (the AppImage) IS one file, so the download is
+    copied to `<file>.yulon-new`.
     """
     target = install.target
     if target is None or install.kind not in (
@@ -104,57 +167,84 @@ def stage(install: Install, archive: Path) -> Path:
         InstallKind.WINDOWS_ZIP,
     ):
         raise UpdateError("Yu'lon cannot replace this kind of install by itself.")
-    staged = sibling(target, ".new")
-    unpack = sibling(target, ".new-unpack")
-    discard(staged, unpack)
+    staged = layout.work_dir(install, layout.NEW_NAME)
+    if install.kind is InstallKind.APPIMAGE:
+        _stage_appimage(archive, staged / layout.APPIMAGE_ENTRY)
+        return staged
+    scratch = staged / "unpack"
     try:
-        if install.kind is InstallKind.APPIMAGE:
-            _stage_appimage(archive, staged)
-        else:
-            _stage_archive(install, archive, unpack, staged)
-    except BaseException:
-        discard(staged, unpack)
-        raise
+        _unpack_into(install, archive, scratch)
+        built = (
+            _the_one_yulon_directory(scratch) if install.kind is InstallKind.TARBALL else scratch
+        )
+        _require_the_executable(install, built)
+        for entry in sorted(built.iterdir()):
+            os.replace(entry, staged / entry.name)
+    finally:
+        discard(scratch)
     return staged
 
 
 def _stage_appimage(archive: Path, staged: Path) -> None:
-    """An AppImage is one file: the download IS the new build, copied and made runnable."""
+    """An AppImage is one file: the download IS the new build, renamed and made runnable.
+
+    `os.replace` and not a copy: the download already landed inside the same
+    marked directory, so this is a rename rather than 86 MB moved twice.
+    """
     try:
-        shutil.copyfile(archive, staged)
+        os.replace(archive, staged)
         os.chmod(staged, 0o755)
     except OSError as exc:
         raise UpdateError(f"The new AppImage could not be put in place: {exc}") from exc
 
 
-def _stage_archive(install: Install, archive: Path, unpack: Path, staged: Path) -> None:
-    """Unpack into `<target>.new-unpack`, then rename the right directory to `<target>.new`.
-
-    Two steps rather than one, and the reason is the tarball's shape: its top
-    level is a `yulon/` directory that has to BECOME `<target>.new` rather than
-    sit inside it, so the extraction needs somewhere to land first. The zip has
-    no top-level directory, so its unpack dir is the new tree and the rename is
-    the whole of the second step.
-    """
-    unpack.mkdir(parents=True)
+def _unpack_into(install: Install, archive: Path, scratch: Path) -> None:
+    scratch.mkdir(parents=True, exist_ok=True)
     if install.kind is InstallKind.TARBALL:
-        _extract_tar(archive, unpack)
-        new_tree = _the_one_yulon_directory(unpack)
+        _extract_tar(archive, scratch)
     else:
-        _extract_zip(archive, unpack)
-        new_tree = unpack
-    executable = new_tree / install.executable
-    if not executable.is_file():
+        _extract_zip(archive, scratch)
+
+
+def _require_the_executable(install: Install, built: Path) -> None:
+    if not (built / install.executable).is_file():
         raise UpdateError(
             f"That download does not contain {install.executable}, so it is not a build of "
             "Yu'lon for this computer. Nothing was installed."
         )
-    os.replace(new_tree, staged)
-    discard(unpack)
+
+
+class _Budget:
+    """Counts what an archive has really written, and refuses the moment it is too much.
+
+    Counted from the FILES ON DISK rather than from the archive's declared
+    sizes, so a header that lies is measured rather than believed.
+    """
+
+    def __init__(self) -> None:
+        self.bytes = 0
+        self.members = 0
+
+    def add(self, path: Path) -> None:
+        self.members += 1
+        if self.members > MAX_MEMBERS:
+            raise UpdateError(
+                f"That download holds more than {MAX_MEMBERS} files, which is not a build "
+                "of Yu'lon. Nothing was installed."
+            )
+        try:
+            self.bytes += path.stat().st_size if path.is_file() else 0
+        except OSError:  # a member the filter dropped; it wrote nothing
+            return
+        if self.bytes > MAX_UNPACKED_BYTES:
+            raise UpdateError(
+                f"That download unpacks to more than {MAX_UNPACKED_BYTES // (1024 * 1024)} MB, "
+                "which is not a build of Yu'lon. Nothing was installed."
+            )
 
 
 def _extract_tar(archive: Path, into: Path) -> None:
-    """`tarfile` with `filter="data"`, which is the whole of the path defence here.
+    """`tarfile` with `filter="data"`, one member at a time, under a size budget.
 
     Measured on 3.13.15 against tarballs built for each shape: `../evil` raises
     `OutsideDestinationError`; a member linking to `../../../etc/passwd` raises
@@ -163,11 +253,20 @@ def _extract_tar(archive: Path, into: Path) -> None:
     where `_the_one_yulon_directory` then refuses the archive for not being a
     Yu'lon package. The executable bit survives and a setuid bit is stripped
     (`0o4755` came out `0o755`).
+
+    One member at a time rather than `extractall`, so the budget is checked as
+    the bytes land: `extractall` on a 300 KB archive that unpacks to gigabytes
+    returns only once the disk is full.
     """
     _require_a_data_filter()
+    budget = _Budget()
     try:
         with tarfile.open(archive) as handle:
-            handle.extractall(into, filter="data")
+            for member in handle:
+                handle.extract(member, into, filter="data")
+                budget.add(into / member.name)
+    except UpdateError:
+        raise
     except (tarfile.TarError, OSError, ValueError) as exc:
         raise UpdateError(f"The download could not be unpacked: {exc}") from exc
 
@@ -194,36 +293,35 @@ def _names_somewhere_else(name: str) -> bool:
 
 
 def _extract_zip(archive: Path, into: Path) -> None:
-    """Every member name judged first, then one `extractall`.
-
-    Judged BEFORE anything is written, so a zip whose tenth member is
-    `..\\evil.exe` does not leave the first nine on disk — and the caller's
-    discard would have removed those anyway, but only from the unpack folder,
-    which is precisely not where an escaping member goes.
-    """
+    """Every member name judged first, then one member at a time under the budget."""
+    budget = _Budget()
     try:
         with zipfile.ZipFile(archive) as handle:
-            for info in handle.infolist():
+            infos = handle.infolist()
+            for info in infos:
                 if _names_somewhere_else(info.filename):
                     raise UpdateError(
                         f"That download contains a file that names somewhere else on this "
                         f"computer ({info.filename!r}). Nothing was installed."
                     )
-            handle.extractall(into)
+            for info in infos:
+                budget.add(Path(handle.extract(info, into)))
+    except UpdateError:
+        raise
     except (zipfile.BadZipFile, OSError, ValueError) as exc:
         raise UpdateError(f"The download could not be unpacked: {exc}") from exc
 
 
-def _the_one_yulon_directory(unpack: Path) -> Path:
+def _the_one_yulon_directory(scratch: Path) -> Path:
     """The archive's single top-level `yulon/`, or a refusal.
 
     A listing that decides a refusal and never a write: what it can say is "no"
-    (`_NOT_A_PACKAGE`) or "here is the folder to rename", and an unreadable
-    folder is the same "no" — this is a directory this function created itself,
-    moments earlier.
+    (`_NOT_A_PACKAGE`) or "here is the folder whose entries go up one level",
+    and an unreadable folder is the same "no" — this is a directory this
+    function's caller created itself, moments earlier.
     """
     try:
-        entries = sorted(unpack.iterdir())
+        entries = sorted(scratch.iterdir())
     except OSError as exc:
         raise UpdateError(f"The download could not be unpacked: {exc}") from exc
     if len(entries) != 1 or entries[0].name != TOP_LEVEL_DIR or not entries[0].is_dir():
@@ -232,9 +330,58 @@ def _the_one_yulon_directory(unpack: Path) -> Path:
     return entries[0]
 
 
+def staged_entries(install: Install, staged: Path) -> tuple[str, ...]:
+    """The top-level names the STAGED build ships, minus this app's own marker."""
+    try:
+        found = sorted(p.name for p in staged.iterdir() if p.name != layout.MARKER_NAME)
+    except OSError as exc:
+        raise UpdateError(f"The staged update could not be read: {exc}") from exc
+    if not found:
+        raise UpdateError("The staged update is empty. Nothing was installed.")
+    bad = [name for name in found if not layout.is_entry_name(name)]
+    if bad:  # pragma: no cover - extraction cannot produce one; the rule is stated anyway
+        raise UpdateError(f"The staged update holds a name Yu'lon will not move: {bad[0]!r}")
+    del install
+    return tuple(found)
+
+
+def entries_to_swap(install: Install, staged: Path) -> tuple[str, ...]:
+    """The entries the helper will replace, **executable first**, or a refusal.
+
+    Two rules, and the second is the one the data loss was about:
+
+    * the executable comes FIRST, because the helper moves the current entries
+      out in this order and brings the staged ones in reversed — so the
+      executable is the first thing to leave and the last thing to arrive, and
+      a half-done swap is "no executable" rather than "the new executable on
+      the old libraries";
+    * a staged entry may collide with something already in the install folder
+      only if the RUNNING build shipped that name. A `README.txt` or a
+      `thesis.docx` beside the executable is the player's, and an update that
+      moved it aside would be the defect this design removed. That refuses the
+      whole update, and the dialog falls back to downloading the file.
+    """
+    target = install.target
+    if target is None:
+        raise UpdateError("Yu'lon cannot replace this install by itself.")
+    ours = layout.shipped_entries(install)
+    found = staged_entries(install, staged)
+    trespass = [name for name in found if (target / name).exists() and name not in ours]
+    if trespass:
+        raise UpdateError(
+            f"The new version would have to replace {trespass[0]!r} in your Yu'lon folder, "
+            "and Yu'lon did not put that there. Nothing was changed — download the new "
+            "version and install it into a folder of its own."
+        )
+    rest = sorted(name for name in found if name != install.executable)
+    return (install.executable, *rest) if install.executable in found else tuple(rest)
+
+
 def staged_executable(install: Install, staged: Path) -> Path:
-    """What to run to prove the staged build opens: a file target IS the executable."""
-    return staged / install.executable if install.executable else staged
+    """What to run to prove the staged build opens, inside its work directory."""
+    if install.kind is InstallKind.APPIMAGE:
+        return staged / layout.APPIMAGE_ENTRY
+    return staged / install.executable
 
 
 RunSmoke = Callable[[list[str], "dict[str, str] | None", float], int]
@@ -251,6 +398,7 @@ def _run(argv: list[str], env: dict[str, str] | None, timeout: float) -> int:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
+        cwd=str(Path(argv[0]).parent),
         creationflags=runner.creationflags(),
     )
     return completed.returncode
@@ -263,7 +411,14 @@ def smoke_test(exe: Path, *, run: RunSmoke = _run, timeout: float = SMOKE_TIMEOU
     without entering the event loop, so this proves the thing a packaging fault
     actually breaks: that the bundle's Qt, its plugins and its data files are
     all present on THIS machine. It is the last check before the running
-    install is replaced.
+    install is touched.
+
+    **What the smoke run must NOT do is the other half of this**, and `main.py`
+    enforces it: under that variable the app starts no update check, writes no
+    `update.json` or `state.json`, and removes no `.yulon-old`. The staged
+    build runs with the old tree still in place and the player's real config
+    directory in reach, so a smoke test with side effects is a check that
+    changes what it is checking.
 
     The environment comes from `runner.child_env()`, which is the app's one
     rule for not handing a child the frozen parent's `LD_LIBRARY_PATH`.

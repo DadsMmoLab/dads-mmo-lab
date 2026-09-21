@@ -122,18 +122,40 @@ dropped rather than read.
 """
 
 
+class DuplicateName(UpdateError):
+    """`SHA256SUMS` lists one name twice, with two digests. Refused, never last-wins."""
+
+
 def parse_checksums(text: str) -> dict[str, str]:
     """`SHA256SUMS` as `{name: lowercase hex}`. A line that is not one is ignored.
 
     Ignored rather than refused: the file is produced by `sha256sum` in a
     workflow this project owns, and a future line this parser has not seen must
     not cost a user their update when the line they need is right there.
+
+    **A name listed TWICE is refused** (cold review 1). A dict silently keeps
+    the last line, so a file with `Yulon-x.tar.gz` twice would have this app
+    check the artifact against whichever digest came second — a choice made by
+    whoever wrote the file rather than by this app. There is no reading of two
+    digests for one name that is safe, so neither is taken.
+
+    A leading byte-order mark is stripped by the caller (`fetch_text` decodes
+    `utf-8-sig`), so a `SHA256SUMS` that has been through a Windows editor
+    still parses. Before that it failed closed on line 1 — safe, but it refused
+    a file that was perfectly good.
     """
     found: dict[str, str] = {}
     for line in text.splitlines():
         match = _CHECKSUM_LINE.match(line.strip("\r"))
-        if match:
-            found[match.group(2)] = match.group(1).lower()
+        if not match:
+            continue
+        name, digest = match.group(2), match.group(1).lower()
+        if name in found and found[name] != digest:
+            raise DuplicateName(
+                f"This release's SHA256SUMS lists {name} twice with different checksums, "
+                "so Yu'lon cannot tell which is right. Use the release page instead."
+            )
+        found[name] = digest
     return found
 
 
@@ -408,4 +430,9 @@ def fetch_text(
                 response.close()
             except Exception as exc:  # noqa: BLE001 - closing is best effort
                 logger.debug(f"self-update: closing the checksums connection raised {exc}")
-    return b"".join(chunks).decode("utf-8", errors="replace")
+    # `utf-8-sig`: a byte-order mark is legal in a UTF-8 file and every Windows
+    # editor writes one. Read as plain UTF-8 the BOM becomes U+FEFF at the
+    # start of line 1, which no checksum line can match — so a hand-edited
+    # `SHA256SUMS` refused the update on its first line (cold review 1). A file
+    # without a BOM decodes identically.
+    return b"".join(chunks).decode("utf-8-sig", errors="replace")

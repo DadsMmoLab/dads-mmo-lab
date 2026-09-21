@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from yulon.selfupdate import layout
 from yulon.selfupdate.apply import (
     ApplyIO,
     ReadyToRestart,
@@ -82,6 +83,7 @@ class _IO:
         self.staged: list[Path] = []
         self.smoked: list[Path] = []
         self.planned: list[tuple[Path, int, Path]] = []
+        self.prepared: list[tuple[str, int]] = []
 
     def _step(self, name: str) -> None:
         self.calls.append(name)
@@ -122,33 +124,61 @@ class _IO:
         self._step("verify")
         self.verified.append((path, digest))
 
+    def prepare(self, install: Install, version: str, *, pid: int) -> Path:
+        self._step("prepare")
+        self.prepared.append((version, pid))
+        staged = layout.work_dir(install, layout.NEW_NAME)
+        staged.mkdir(parents=True, exist_ok=True)
+        layout.write_marker(
+            install,
+            layout.NEW_NAME,
+            layout.Marker(layout.NEW_NAME, "0.8.66-Public", version, pid, layout.now()),
+        )
+        return staged
+
     def stage(self, install: Install, archive: Path) -> Path:
         self._step("stage")
         assert install.target is not None
-        staged = Path(str(install.target) + ".new")
-        staged.mkdir()
+        staged = layout.work_dir(install, layout.NEW_NAME)
         (staged / install.executable).write_text("the new build", encoding="utf-8")
         self.staged.append(staged)
         return staged
+
+    def entries_to_swap(self, install: Install, staged: Path) -> tuple[str, ...]:
+        self._step("entries_to_swap")
+        del staged
+        return (install.executable, "_internal")
 
     def smoke_test(self, exe: Path) -> None:
         self._step("smoke_test")
         self.smoked.append(exe)
 
-    def plan_swap(self, install: Install, staged: Path, *, pid: int, script_dir: Path) -> SwapPlan:
+    def plan_swap(
+        self,
+        install: Install,
+        staged: Path,
+        *,
+        pid: int,
+        script_dir: Path,
+        entries: tuple[str, ...] = (),
+    ) -> SwapPlan:
         self._step("plan_swap")
         self.planned.append((staged, pid, script_dir))
+        self.entries = entries
+        del install
         script = script_dir / f"yulon-update-{pid}.sh"
         script.write_text("#!/bin/sh\n", encoding="utf-8")
-        return SwapPlan(script, ["/bin/sh", str(script)])
+        return SwapPlan(script, ["/bin/sh", str(script)], entries)
 
     def as_apply_io(self, script_dir: Path) -> ApplyIO:
         return ApplyIO(
+            prepare=self.prepare,
             fetch_text=self.fetch_text,
             download=self.download,
             verify=self.verify,
             stage=self.stage,
             smoke_test=self.smoke_test,
+            entries_to_swap=self.entries_to_swap,
             plan_swap=self.plan_swap,
             script_dir=lambda: script_dir,
         )
@@ -179,9 +209,10 @@ def _apply(
 
 
 def _nothing_is_staged(install: Install) -> None:
+    """No working directory of this app's is left beside or inside the install."""
     assert install.target is not None
-    for suffix in (".download", ".new", ".new-unpack"):
-        assert not Path(str(install.target) + suffix).exists(), f"{suffix} was left behind"
+    for name in (layout.NEW_NAME, layout.OLD_NAME):
+        assert not layout.work_dir(install, name).exists(), f"{name} was left behind"
 
 
 # -- the happy path ----------------------------------------------------------
@@ -194,7 +225,7 @@ def test_the_steps_happen_in_exactly_this_order(tmp_path: Path) -> None:
 
     outcome = _apply(io, install, tmp_path, stages=stages)
 
-    assert io.calls == ["fetch_text", "download", "verify", "stage", "smoke_test", "plan_swap"]
+    assert io.calls == STEPS
     assert isinstance(outcome, ReadyToRestart)
     assert outcome.version == TAG
     assert outcome.plan.script.exists()
@@ -217,16 +248,22 @@ def test_the_checksums_are_fetched_from_an_address_the_app_built_itself(tmp_path
     assert io.downloaded[0][0].endswith(f"/releases/download/{TAG}/{ARTIFACT}")
 
 
-def test_the_download_lands_beside_the_install_so_the_swap_is_a_rename(tmp_path: Path) -> None:
+def test_the_download_lands_in_the_marked_staging_folder(tmp_path: Path) -> None:
+    """One marked directory is the whole footprint of an update.
+
+    Inside `.yulon-new`, so the archive is on the same filesystem as the
+    entries it becomes AND so a `.part` left by a killed app is inside
+    something this app can prove is its own rather than loose in the player's
+    folder.
+    """
     io = _IO()
     install = _install(tmp_path)
     assert install.target is not None
     _apply(io, install, tmp_path)
     _url, dest, size = io.downloaded[0]
-    assert dest == Path(str(install.target) + ".download") / ARTIFACT
+    assert dest == layout.work_dir(install, layout.NEW_NAME) / ARTIFACT
     assert size == SIZE, "the size the RELEASE declares is the bound, not a header"
     assert io.verified == [(dest, DIGEST)]
-    assert not dest.parent.exists(), "the download folder was left beside the install"
 
 
 def test_the_staged_executable_is_what_the_smoke_test_runs(tmp_path: Path) -> None:
@@ -234,7 +271,7 @@ def test_the_staged_executable_is_what_the_smoke_test_runs(tmp_path: Path) -> No
     install = _install(tmp_path)
     assert install.target is not None
     _apply(io, install, tmp_path)
-    assert io.smoked == [Path(str(install.target) + ".new") / "yulon"]
+    assert io.smoked == [layout.work_dir(install, layout.NEW_NAME) / "yulon"]
 
 
 def test_the_plan_is_made_for_this_process_and_this_staged_tree(tmp_path: Path) -> None:
@@ -243,9 +280,10 @@ def test_the_plan_is_made_for_this_process_and_this_staged_tree(tmp_path: Path) 
     assert install.target is not None
     _apply(io, install, tmp_path)
     staged, pid, script_dir = io.planned[0]
-    assert staged == Path(str(install.target) + ".new")
+    assert staged == layout.work_dir(install, layout.NEW_NAME)
     assert pid == 4242
     assert script_dir == tmp_path / "scripts"
+    assert io.entries == ("yulon", "_internal"), "the helper was not told what to replace"
 
 
 # -- the refusals that never reach the network -------------------------------
@@ -295,7 +333,16 @@ def test_an_artifact_the_checksum_file_does_not_list_is_refused_before_the_downl
 
 # -- every step failing in turn ----------------------------------------------
 
-STEPS = ["fetch_text", "download", "verify", "stage", "smoke_test", "plan_swap"]
+STEPS = [
+    "prepare",
+    "fetch_text",
+    "download",
+    "verify",
+    "stage",
+    "smoke_test",
+    "entries_to_swap",
+    "plan_swap",
+]
 
 
 @pytest.mark.parametrize("failing", STEPS)

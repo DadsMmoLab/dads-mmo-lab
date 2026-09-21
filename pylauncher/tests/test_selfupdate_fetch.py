@@ -18,6 +18,7 @@ import pytest
 from yulon.selfupdate import fetch
 from yulon.selfupdate.fetch import (
     Cancelled,
+    DuplicateName,
     UpdateError,
     artifact_url,
     download,
@@ -421,3 +422,33 @@ def test_a_deadline_that_is_ticked_does_not_fire_and_one_that_is_not_does() -> N
             time.sleep(0.01)
         assert starved.fired, "a connection that sent nothing was never cut off"
     assert starved.restart(0.05) is False, "a fired deadline cannot be restarted"
+
+
+def test_a_checksum_file_with_a_byte_order_mark_still_reads() -> None:
+    """A Windows editor writes a BOM; read as plain UTF-8 it broke line 1.
+
+    The file failed closed, which is safe — and it refused a `SHA256SUMS` that
+    was perfectly good, on the one line that names the artifact a Linux player
+    needs (cold review 1).
+    """
+    body = f"{A}  one.tar.gz\n{B}  two.zip\n".encode()
+    text = fetch_text(
+        "https://github.com/x/y/releases/download/v1/SHA256SUMS",
+        open_url=_opener(_Response([b"\xef\xbb\xbf" + body])),
+    )
+    assert parse_checksums(text) == {"one.tar.gz": A, "two.zip": B}
+
+
+def test_a_name_listed_twice_with_two_digests_is_refused_rather_than_last_wins() -> None:
+    """A dict keeps the last line, which lets whoever wrote the file choose the digest."""
+    with pytest.raises(DuplicateName, match="twice"):
+        parse_checksums(f"{A}  one.zip\n{B}  one.zip\n")
+
+
+def test_a_name_listed_twice_with_the_SAME_digest_is_not_a_conflict() -> None:
+    """Nothing to choose between, so nothing to refuse."""
+    assert parse_checksums(f"{A}  one.zip\n{A}  one.zip\n") == {"one.zip": A}
+
+
+def test_a_duplicate_is_an_update_error_so_the_dialog_can_show_it() -> None:
+    assert issubclass(DuplicateName, UpdateError)
