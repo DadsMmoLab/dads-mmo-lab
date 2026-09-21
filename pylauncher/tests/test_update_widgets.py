@@ -707,6 +707,80 @@ def test_the_walk_reaches_a_nested_table_a_merged_cell_and_a_textured_run(
     assert "deep" in document.toPlainText(), "the text under the brush was taken with it"
 
 
+def _mixed_document(png: Path, order: str) -> QTextDocument:
+    """Images and a textured run in a chosen order, with the images NON-adjacent.
+
+    Adjacent identical images merge into one fragment of length 2 — the same
+    length as the marker that replaces them — which hides the position shift
+    this test exists for (the fourth cold review's trap). The `p` between each
+    pair is what keeps them separate.
+    """
+    from PySide6.QtGui import QBrush, QPixmap, QTextCharFormat, QTextCursor
+
+    document = QTextDocument()
+    cursor = QTextCursor(document)
+    textured = QTextCharFormat()
+    textured.setBackground(QBrush(QPixmap(str(png))))
+
+    def images() -> None:
+        for _ in range(3):
+            cursor.insertImage(str(png))
+            cursor.insertText("p")
+
+    if order == "images-then-brush":
+        images()
+        cursor.insertText("RED", textured)
+    elif order == "brush-then-images":
+        cursor.insertText("RED", textured)
+        images()
+    else:  # image inside the textured span
+        cursor.insertText("RE", textured)
+        cursor.insertImage(str(png))
+        cursor.insertText("D", textured)
+    bold = QTextCharFormat()
+    bold.setFontWeight(700)
+    cursor.insertText("tail", bold)
+    return document
+
+
+@pytest.mark.parametrize("order", ["images-then-brush", "brush-then-images", "image-inside-brush"])
+def test_an_image_before_a_textured_span_does_not_leave_it_textured(
+    qapp: object, a_red_png: Path, order: str
+) -> None:
+    """The fallback door was open in exactly the case it exists for.
+
+    Measured (fourth cold review, 2026-09-21): images and brushes were two
+    passes over positions collected before either ran, and `IMAGE_REMOVED` is
+    two UTF-16 units where an image is one — so every brush range after an
+    image was off by one per image. `img p img p img p TEXTURED tail` came out
+    with the textured run STILL textured and the plain format stamped over
+    `🖼p`.
+    """
+    document = _mixed_document(a_red_png, order)
+    assert _resources_in(document), "the premise: this document names a file"
+
+    _strip_resources(document)
+
+    assert _resources_in(document) == []
+    assert document.toPlainText().endswith("tail"), "the tail was overwritten"
+
+
+def test_the_nest_survives_an_image_in_front_of_it(qapp: object, a_red_png: Path) -> None:
+    """The same shift, in the shape the third review built: images added before the nest."""
+    from PySide6.QtGui import QTextCursor
+
+    document = _a_nest_of_textured_formats(a_red_png)
+    cursor = QTextCursor(document)
+    cursor.setPosition(0)
+    for _ in range(3):
+        cursor.insertImage(str(a_red_png))
+        cursor.insertText("p")
+
+    _strip_resources(document)
+
+    assert _resources_in(document) == []
+
+
 def test_the_walk_clears_a_textured_brush_no_markdown_can_currently_make(
     qapp: object, a_red_png: Path
 ) -> None:

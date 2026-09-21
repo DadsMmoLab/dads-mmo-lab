@@ -202,8 +202,7 @@ def _strip_resources(document: QTextDocument) -> int:
                         cell.setFormat(cell_format)
                         cleared += 1
 
-    images: list[tuple[int, int, QTextCharFormat]] = []
-    brushes: list[tuple[int, int, QTextCharFormat]] = []
+    edits: list[tuple[int, int, bool, QTextCharFormat]] = []
     block = document.begin()
     while block.isValid():
         block_format = block.blockFormat()
@@ -217,11 +216,10 @@ def _strip_resources(document: QTextDocument) -> int:
             fragment = iterator.fragment()
             if fragment.isValid():
                 char_format = fragment.charFormat()
-                where = (fragment.position(), fragment.length(), char_format)
                 if char_format.isImageFormat():
-                    images.append(where)
+                    edits.append((fragment.position(), fragment.length(), True, char_format))
                 elif _is_textured(char_format.background()):
-                    brushes.append(where)
+                    edits.append((fragment.position(), fragment.length(), False, char_format))
             iterator += 1
         block = block.next()
 
@@ -235,20 +233,28 @@ def _strip_resources(document: QTextDocument) -> int:
     document.setUndoRedoEnabled(False)
     cursor.beginEditBlock()
     try:
-        # Back to front: every replacement moves the positions after it.
-        for position, length, char_format in reversed(images):
+        # **ONE list, strictly back to front**, images and brushes together.
+        # They were two passes until the fourth cold review (2026-09-21), and
+        # the positions were all collected BEFORE any edit: `IMAGE_REMOVED` is
+        # two UTF-16 units where an image is one, so replacing the images first
+        # shifted every brush range after them by one per image. Measured on
+        # `img p img p img p TEXTURED tail`: the textured run came out still
+        # textured and the plain format was stamped over `🖼p` instead — the
+        # fallback door open in exactly the case it is there for.
+        #
+        # Descending by position is what makes one pass enough: an edit only
+        # moves what follows it, and everything that follows has been done.
+        for position, length, is_image, char_format in sorted(edits, reverse=True):
             cursor.setPosition(position)
             cursor.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
-            cursor.insertText(IMAGE_REMOVED, _mark_format(char_format))
-            cleared += 1
-        for position, length, char_format in reversed(brushes):
-            # A background is cleared, NOT replaced: the text under it is the
-            # author's and has done nothing wrong.
-            cursor.setPosition(position)
-            cursor.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
-            plain = QTextCharFormat(char_format)
-            plain.clearBackground()
-            cursor.setCharFormat(plain)
+            if is_image:
+                cursor.insertText(IMAGE_REMOVED, _mark_format(char_format))
+            else:
+                # A background is cleared, NOT replaced: the text under it is
+                # the author's and has done nothing wrong.
+                plain = QTextCharFormat(char_format)
+                plain.clearBackground()
+                cursor.setCharFormat(plain)
             cleared += 1
     finally:
         cursor.endEditBlock()

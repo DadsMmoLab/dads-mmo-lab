@@ -278,6 +278,14 @@ class _Deadline:
     `fired` is what the caller checks afterwards, because a shut-down socket
     makes a read answer "end of stream" — an empty, apparently complete body,
     which is exactly how the header case managed to report success.
+
+    **Unproved: Windows.** Whether `shutdown()` from another thread wakes a
+    recv blocked inside OpenSSL on Winsock has not been measured — every
+    number above is Linux, and the reviewer's HTTPS run was Linux too. If it
+    does not, the per-operation `timeout=` still applies there, so the worst
+    case on Windows is the old behaviour rather than a hang: a trickle that
+    beats the 5 s socket timeout holds the launch thread. Worth a Win11 gate
+    before anyone claims the bound is cross-platform.
     """
 
     def __init__(self, seconds: float) -> None:
@@ -383,14 +391,14 @@ def _urllib_fetch(
         try:
             opener = _watching_opener(watcher, verify_context())
             with opener.open(request, timeout=min(_TIMEOUT_SECONDS, deadline)) as resp:
-                _refuse_if_expired(watcher)
+                _refuse_if_expired(watcher, deadline)
                 return HttpAnswer(
                     int(resp.status),
-                    _read_bounded(resp, now, stop_at, watcher),
+                    _read_bounded(resp, now, stop_at, watcher, deadline),
                     resp.headers.get("ETag"),
                 )
         except urllib.error.HTTPError as exc:
-            _refuse_if_expired(watcher)
+            _refuse_if_expired(watcher, deadline)
             if exc.code == 304:
                 return HttpAnswer(
                     304, "", exc.headers.get("ETag") if exc.headers else if_none_match
@@ -402,20 +410,27 @@ def _urllib_fetch(
             # `IncompleteRead` or an `AttributeError` depending on where in
             # `http.client` it was. The watcher says which it was; anything
             # else is re-raised untouched for the caller to degrade on.
-            _refuse_if_expired(watcher)
+            _refuse_if_expired(watcher, deadline)
             raise
 
 
-def _refuse_if_expired(watcher: _Deadline) -> None:
-    """A shut-down socket reads as a clean end of stream. It is not one."""
+def _refuse_if_expired(watcher: _Deadline, seconds: float) -> None:
+    """A shut-down socket reads as a clean end of stream. It is not one.
+
+    `seconds` is the deadline this call was GIVEN, not the module default: the
+    message said "15.0s" whatever the caller asked for, which is exactly the
+    sort of line a gate quotes back (fourth cold review).
+    """
     if watcher.fired:
-        raise TimeoutError(
-            f"the releases feed was still arriving after {TOTAL_FETCH_SECONDS}s and was dropped"
-        )
+        raise TimeoutError(f"the releases feed was still arriving after {seconds}s and was dropped")
 
 
 def _read_bounded(
-    resp: object, now: Callable[[], float], stop_at: float, watcher: _Deadline
+    resp: object,
+    now: Callable[[], float],
+    stop_at: float,
+    watcher: _Deadline,
+    seconds: float,
 ) -> str:
     """Read a response body under the wall clock and the size cap.
 
@@ -437,9 +452,9 @@ def _read_bounded(
             # through a file object it has already dropped. Which it was is the
             # watcher's to say; only if it did not fire is the error the
             # caller's problem.
-            _refuse_if_expired(watcher)
+            _refuse_if_expired(watcher, seconds)
             raise
-        _refuse_if_expired(watcher)
+        _refuse_if_expired(watcher, seconds)
         if not chunk:
             break
         chunks.append(chunk)
@@ -447,7 +462,7 @@ def _read_bounded(
         if size > MAX_FEED_BYTES:
             raise ValueError(f"the releases feed is too large: over {MAX_FEED_BYTES} bytes")
         if now() >= stop_at:
-            raise TimeoutError(f"the releases feed was still arriving after {TOTAL_FETCH_SECONDS}s")
+            raise TimeoutError(f"the releases feed was still arriving after {seconds}s")
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
@@ -519,20 +534,84 @@ the dialog's own action button, which carries the vetted URL.
 TRUNCATED_NOTE = "… the rest is on the release page."
 
 
-def clipped_notes(text: str, limit: int) -> str:
-    """`text` cut to at most `limit` characters at a line boundary. See `MAX_NOTES_CHARS`.
+def _open_fence(text: str) -> str | None:
+    """The fence marker `text` leaves unclosed, or None. CommonMark-ish, not exact.
 
-    A whole line, or — for a single line longer than the cap, which is the
-    hostile case — a hard cut at the limit, because there is no boundary to
-    prefer and the point is the bound.
+    A closing fence must be the same character and at least as long as the one
+    that opened it, which is why the marker itself is carried rather than a
+    flag.
+    """
+    marker: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if marker is None:
+            for fence in ("```", "~~~"):
+                if stripped.startswith(fence):
+                    character = fence[0]
+                    marker = character * (len(stripped) - len(stripped.lstrip(character)))
+                    break
+        elif stripped.startswith(marker) and set(stripped) == {marker[0]}:
+            marker = None
+    return marker
+
+
+def _without_a_dangling_heading(text: str) -> str:
+    """`text` with any trailing heading that has nothing under it removed.
+
+    Ending on `## v1.163.0-Public` and then the trailer says a release is
+    coming and then does not deliver it (fourth cold review, 2026-09-21).
+    """
+    lines = text.splitlines()
+    while lines and (not lines[-1].strip() or lines[-1].lstrip().startswith("#")):
+        lines.pop()
+    return "\n".join(lines)
+
+
+def clipped_notes(text: str, limit: int = MAX_NOTES_CHARS) -> str:
+    """`text` cut to at most `limit` characters, whole. The ONE cap in this app.
+
+    Used for a single release body and for all of them together, and called
+    again by the dialog on whatever it is handed — so it has to be
+    **idempotent**: `clipped_notes(clipped_notes(x)) == clipped_notes(x)`,
+    which the `len(text) <= limit` short-circuit gives, because everything this
+    returns is within the limit.
+
+    Three things it does that the first version did not (all from the fourth
+    cold review, all measured):
+
+    * **It counts what it emits.** `evaluate_feed` used to add up sections only
+      — not the newlines joining them, not the trailer — so 700 releases of 100
+      characters assembled to 66,038 against a 65,536 cap, the dialog clipped
+      the result a second time, and the reader got a cut-off trailer, a bare
+      heading and a second trailer.
+    * **It closes a fence it cut inside.** A body of ` ``` ` plus 3,000 code
+      lines left the fence open, so the trailer rendered as code and the next
+      release's `## v1.1.0-Public` showed as literal text rather than a
+      heading.
+    * **It never ends on a heading** with nothing under it.
+
+    A single line longer than the cap is cut hard: there is no boundary to
+    prefer and the bound is the point.
     """
     if len(text) <= limit:
         return text
-    head = text[:limit]
-    cut = head.rfind("\n")
-    if cut > 0:
-        head = head[:cut]
-    return f"{head.rstrip()}\n\n{TRUNCATED_NOTE}"
+    budget = limit
+    for _ in range(4):
+        head = text[: max(0, budget)]
+        cut = head.rfind("\n")
+        if cut > 0:
+            head = head[:cut]
+        head = _without_a_dangling_heading(head.rstrip())
+        marker = _open_fence(head)
+        tail = f"\n{marker}" if marker else ""
+        tail += f"\n\n{TRUNCATED_NOTE}"
+        if len(head) + len(tail) <= limit:
+            return head + tail
+        budget -= len(head) + len(tail) - limit
+        if budget <= 0:
+            break
+    # Nothing of the notes fits beside the trailer; say only the true part.
+    return TRUNCATED_NOTE[:limit]
 
 
 def _assets(release: dict[str, object]) -> tuple[ReleaseAsset, ...]:
@@ -582,28 +661,24 @@ def evaluate_feed(feed_text: str, current: str) -> UpdateCheck:
     if not is_newer(tag, current):
         return UpdateCheck(current, tag, False, url)
     mine = version_key(current)
-    # Capped HERE, where the notes are assembled, so the cached feed and the
-    # dialog agree about what the player is shown — and capped again in the
-    # dialog, because `notes_markdown` is a plain field any caller can set.
-    sections: list[str] = []
-    total = 0
-    for version, entry in releases:
-        if mine is None or version <= mine:
-            continue
-        body = clipped_notes(str(entry.get("body") or "").strip(), MAX_BODY_CHARS)
-        section = f"## {entry.get('tag_name')}\n\n{body}\n"
-        if total + len(section) > MAX_NOTES_CHARS:
-            sections.append(f"\n{TRUNCATED_NOTE}\n")
-            break
-        sections.append(section)
-        total += len(section)
+    # Each body capped, then the whole thing capped by the SAME function the
+    # dialog calls. One cap, counting everything it emits — the two used to
+    # disagree by the joining newlines and the trailer, and the dialog then cut
+    # the result a second time (fourth cold review). `clipped_notes` is
+    # idempotent, so the dialog's own guard changes nothing here.
+    sections = [
+        f"## {entry.get('tag_name')}\n\n"
+        f"{clipped_notes(str(entry.get('body') or '').strip(), MAX_BODY_CHARS)}\n"
+        for version, entry in releases
+        if mine is not None and version > mine
+    ]
     assets = _assets(newest)
     return UpdateCheck(
         current,
         tag,
         True,
         url,
-        notes_markdown="\n".join(sections),
+        notes_markdown=clipped_notes("\n".join(sections), MAX_NOTES_CHARS),
         assets=assets,
         has_checksums=any(a.name == CHECKSUMS_NAME for a in assets),
     )

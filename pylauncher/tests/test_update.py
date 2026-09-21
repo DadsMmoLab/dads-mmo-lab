@@ -379,6 +379,89 @@ def test_notes_that_fit_are_left_exactly_alone() -> None:
     assert TRUNCATED_NOTE not in evaluate_feed(FEED, "0.8.66-Public").notes_markdown
 
 
+def test_a_cut_inside_a_fence_closes_it(qapp: object) -> None:
+    """Measured: the trailer rendered as CODE and the next release's heading as text.
+
+    A body of ` ``` ` plus 3,000 code lines is cut mid-fence, and an unclosed
+    fence swallows everything after it (fourth cold review, 2026-09-21).
+    Asserted by RENDERING, because "is it a heading" is a question about the
+    document rather than about the string.
+    """
+    from PySide6.QtGui import QTextDocument
+
+    from yulon.ui.widgets.update_dialog import SAFE_MARKDOWN
+
+    fenced = "```\n" + "\n".join(f"code line {n}" for n in range(3000))
+    feed = json.dumps(
+        [
+            release("v1.2.0-Public", body=fenced),
+            release("v1.1.0-Public", body="### Fixed\n- older."),
+        ]
+    )
+
+    notes = evaluate_feed(feed, "1.0.0-Public").notes_markdown
+
+    assert notes.count("```") % 2 == 0, "the fence was left open"
+    document = QTextDocument()
+    document.setMarkdown(notes, SAFE_MARKDOWN)
+    headings = [
+        block.text() for block in _blocks(document) if block.blockFormat().headingLevel() > 0
+    ]
+    assert "v1.1.0-Public" in headings, "the older release's heading rendered as code or text"
+    assert any(
+        TRUNCATED_NOTE in block.text() and block.blockFormat().headingLevel() == 0
+        for block in _blocks(document)
+    ), "the trailer is not an ordinary paragraph"
+
+
+def _blocks(document: object) -> list:
+    out = []
+    block = document.begin()  # type: ignore[attr-defined]
+    while block.isValid():
+        out.append(block)
+        block = block.next()
+    return out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "\n".join(f"line {n}" for n in range(5000)),
+        "```\n" + "\n".join(f"code {n}" for n in range(5000)),
+        "## v1.0.0-Public\n\n" * 3000,
+        "x" * 200000,
+        "short enough",
+    ],
+)
+def test_the_cap_is_idempotent_and_within_its_limit(text: str) -> None:
+    """The dialog caps again whatever it is handed, so a second cap must change nothing."""
+    once = clipped_notes(text, 4096)
+
+    assert len(once) <= 4096
+    assert clipped_notes(once, 4096) == once
+
+
+def test_the_cap_never_ends_on_a_heading_with_nothing_under_it() -> None:
+    """`## v1.163.0-Public` followed by the trailer promises a release and gives none."""
+    text = "".join(f"## v1.{n}.0-Public\n\n{'x' * 100}\n\n" for n in range(700))
+
+    capped = clipped_notes(text, 4096)
+
+    body = capped[: -len(TRUNCATED_NOTE)].rstrip()
+    assert not body.splitlines()[-1].lstrip().startswith("#")
+
+
+def test_seven_hundred_releases_come_out_capped_once(qapp: object) -> None:
+    """Measured: 66,038 characters against a 65,536 cap, then clipped a second time."""
+    feed = json.dumps([release(f"v1.{n}.0-Public", body="x" * 100) for n in range(700, 0, -1)])
+
+    notes = evaluate_feed(feed, "1.0.0-Public").notes_markdown
+
+    assert len(notes) <= MAX_NOTES_CHARS
+    assert notes.count(TRUNCATED_NOTE) == 1, "the notes were capped twice"
+    assert clipped_notes(notes, MAX_NOTES_CHARS) == notes, "the dialog would cut it again"
+
+
 def test_a_feed_with_no_public_release_says_so() -> None:
     result = evaluate_feed(json.dumps([release("v0.8.71-fixtest")]), "0.8.0")
     assert not result.available and result.error == "no public release"

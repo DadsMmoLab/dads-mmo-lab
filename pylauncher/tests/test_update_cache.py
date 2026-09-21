@@ -321,13 +321,32 @@ def a_server_that(shape: str, *, seconds: float = 8.0, gap: float = 0.05) -> Ite
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
+    # Polled, not blocking: `listener.close()` does NOT reliably wake a thread
+    # blocked in `accept()` — the same thing `_Deadline` documents about a
+    # blocked read — and when it does not, the join below waits out the whole
+    # `HANG_BOUND`. Measured: 61 s for a test whose work takes 0.02 s.
+    listener.settimeout(0.05)
     port = listener.getsockname()[1]
+    # A failure inside the thread is only a "thread exception" warning
+    # otherwise, and the test around it passes (fourth cold review): a server
+    # that never served would make "it stopped at the deadline" true for the
+    # wrong reason.
+    trouble: list[BaseException] = []
+    # The client gives up at its deadline; without this the server would keep
+    # trickling for the full `seconds` and the join below would wait for it,
+    # which cost this file 67 s a run.
+    stop = threading.Event()
 
     def serve() -> None:
-        try:
-            conn, _ = listener.accept()
-        except OSError:
-            return
+        while True:
+            try:
+                conn, _ = listener.accept()
+                break
+            except TimeoutError:
+                if stop.is_set():
+                    return
+            except OSError:
+                return
         with conn:
             try:
                 conn.recv(4096)
@@ -344,7 +363,7 @@ def a_server_that(shape: str, *, seconds: float = 8.0, gap: float = 0.05) -> Ite
                         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                         b"Content-Length: 100000\r\n\r\n"
                     )
-                while time.monotonic() < end:
+                while time.monotonic() < end and not stop.is_set():
                     conn.sendall(
                         b"X"
                         if shape == "headers"
@@ -352,15 +371,22 @@ def a_server_that(shape: str, *, seconds: float = 8.0, gap: float = 0.05) -> Ite
                     )
                     time.sleep(gap)
             except OSError:
+                # The client hanging up is what this server is FOR.
                 return
+            except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+                trouble.append(exc)
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
         yield f"http://127.0.0.1:{port}/feed"
     finally:
+        stop.set()
         listener.close()
         thread.join(timeout=HANG_BOUND)
+        assert not thread.is_alive(), "the trickling server thread outlived the test"
+        if trouble:
+            raise AssertionError(f"the test server failed: {trouble[0]!r}") from trouble[0]
 
 
 @pytest.mark.parametrize("shape", ["body", "chunked", "headers"])
@@ -388,20 +414,35 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
+    listener.settimeout(0.05)  # see `a_server_that`: close() may not wake accept()
     port = listener.getsockname()[1]
     body = FEED.encode()
+    stop = threading.Event()
+
+    trouble: list[BaseException] = []
 
     def serve() -> None:
+        while True:
+            try:
+                conn, _ = listener.accept()
+                break
+            except TimeoutError:
+                if stop.is_set():
+                    return
+            except OSError:
+                return
         try:
-            conn, _ = listener.accept()
-        except OSError:
-            return
-        with conn:
-            conn.recv(4096)
-            conn.sendall(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                b'ETag: W/"one"\r\nContent-Length: ' + str(len(body)).encode() + b"\r\n\r\n" + body
-            )
+            with conn:
+                conn.recv(4096)
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    b'ETag: W/"one"\r\nContent-Length: '
+                    + str(len(body)).encode()
+                    + b"\r\n\r\n"
+                    + body
+                )
+        except BaseException as exc:  # noqa: BLE001 - reported below, not swallowed
+            trouble.append(exc)
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
@@ -410,13 +451,82 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
         answer = update._urllib_fetch(f"http://127.0.0.1:{port}/feed", None, deadline=10.0)
         elapsed = time.monotonic() - started
     finally:
+        stop.set()
         listener.close()
         thread.join(timeout=HANG_BOUND)
+        assert not thread.is_alive(), "the test server thread outlived the test"
 
+    assert not trouble, f"the test server failed: {trouble[0]!r}"
     assert answer.status == 200
     assert answer.text == FEED
     assert answer.etag == 'W/"one"'
     assert elapsed < 5.0, "an ordinary answer waited on the deadline"
+    # The watchdog is cancelled on the normal path: no Timer is left ticking,
+    # and removing that `cancel()` used to fail nothing at all. Counted by
+    # NAME rather than with `active_count()`, which is process-global and saw
+    # an unrelated thread on the 3.11 leg.
+    assert _live_watchdogs() == [], "a watchdog Timer outlived the fetch"
+
+
+def _live_watchdogs() -> list[threading.Thread]:
+    """Every `_Deadline` timer still ARMED in this process.
+
+    `finished` is set by `cancel()` and by a timer that has already run, so a
+    timer winding down after it fired — which an earlier trickle test leaves
+    for a moment — is not one of these, and no waiting is needed to tell them
+    apart. Counting threads instead was flaky: `active_count()` is
+    process-global and saw an unrelated thread on the 3.11 leg.
+    """
+    return [
+        thread
+        for thread in threading.enumerate()
+        if isinstance(thread, threading.Timer)
+        and getattr(thread.function, "__qualname__", "").startswith("_Deadline")
+        and not thread.finished.is_set()
+    ]
+
+
+def test_many_fetches_leave_no_watchdogs_behind() -> None:
+    """One cancelled timer is luck; ten is the contract."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    listener.settimeout(0.05)  # see `a_server_that`: close() may not wake accept()
+    port = listener.getsockname()[1]
+    body = FEED.encode()
+    stop = threading.Event()
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.recv(4096)
+                    conn.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+                    )
+                except OSError:
+                    return
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        for _ in range(10):
+            update._urllib_fetch(f"http://127.0.0.1:{port}/feed", None, deadline=10.0)
+    finally:
+        stop.set()
+        listener.close()
+        thread.join(timeout=HANG_BOUND)
+        assert not thread.is_alive(), "the test server thread outlived the test"
+
+    assert _live_watchdogs() == [], "watchdog timers piled up across fetches"
 
 
 def test_a_body_too_big_to_be_a_feed_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
