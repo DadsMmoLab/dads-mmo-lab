@@ -219,18 +219,119 @@ def test_a_staging_directory_left_by_a_dead_process_is_ours_to_replace(tmp_path:
     assert layout.another_copy_is_updating(install, os.getpid()) is None
 
 
-def test_a_staging_directory_a_live_process_made_is_not(tmp_path: Path) -> None:
-    """One instance's stage() deleting another's staged build is how an install was lost."""
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="identity is read off /proc here")
+def test_a_staging_directory_another_copy_of_the_app_made_is_not(tmp_path: Path) -> None:
+    """One instance's stage() deleting another's staged build is how an install was lost.
+
+    The other process really is running the install's executable — a copied
+    interpreter under the install's own name — because since round 4 a live pid
+    on its own is not enough to refuse.
+    """
+    import shutil
+
     install = _folder(tmp_path)
-    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    assert install.target is not None
+    exe = install.target / install.executable
+    exe.unlink()
+    # A copy of `sleep` and not of the interpreter: a Python copied out of its
+    # prefix cannot find its standard library and exits at once.
+    sleep = shutil.which("sleep")
+    assert sleep is not None, "the precondition: this box has `sleep`"
+    shutil.copy2(sleep, exe)
+    alive = subprocess.Popen([str(exe), "30"])
     try:
         layout.write_marker(install, layout.NEW_NAME, _marker(pid=alive.pid))
-        said = layout.another_copy_is_updating(install, os.getpid())
+        deadline = time.monotonic() + 10
+        said = None
+        while time.monotonic() < deadline and said is None:
+            said = layout.another_copy_is_updating(install, os.getpid())
+            time.sleep(0.02)
         assert said is not None and "already installing" in said
     finally:
         alive.kill()
         alive.wait(timeout=30)
     assert alive.poll() is not None
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="identity is read off /proc here")
+def test_a_marker_naming_a_live_pid_that_is_not_this_app_refuses_nothing(tmp_path: Path) -> None:
+    """**Pid reuse** (round 4, S2), and the dead end it used to be.
+
+    The pid in the marker is alive — it belongs to something else entirely,
+    which is what a recycled pid looks like. Before the identity check this
+    answered "another copy of Yu'lon is already installing" for as long as that
+    process lived, and the only way out was deleting a hidden folder by hand.
+    """
+    install = _folder(tmp_path)
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert layout.pid_is_this_app(other.pid, install.target / install.executable) is False
+        layout.write_marker(install, layout.NEW_NAME, _marker(pid=other.pid))
+        assert layout.another_copy_is_updating(install, os.getpid()) is None
+    finally:
+        other.kill()
+        other.wait(timeout=30)
+    assert other.poll() is not None
+
+
+def test_a_marker_too_old_to_believe_is_ignored_when_identity_cannot_be_asked(
+    tmp_path: Path,
+) -> None:
+    """An AppImage has no executable to compare, so age is all there is.
+
+    Fifteen minutes is the whole difference between refusing and carrying on,
+    and the pid is this very process, so the liveness check genuinely passes.
+    """
+    install = _appimage(tmp_path)
+    assert layout.pid_is_this_app(os.getpid(), None) is None
+
+    layout.write_marker(install, layout.NEW_NAME, _marker(pid=os.getpid()))
+    said = layout.another_copy_is_updating(install, our_pid=os.getpid() + 1)
+    assert said is not None and "already installing" in said, "a fresh marker must be believed"
+
+    path = layout.marker_path(install, layout.NEW_NAME)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["stamp"] = layout.now() - layout.STALE_MARKER_SECONDS - 1
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert layout.another_copy_is_updating(install, our_pid=os.getpid() + 1) is None
+
+
+def test_liveness_is_asked_of_a_real_process_and_a_reaped_one() -> None:
+    """`pid_is_alive` against the two answers that are not guesses (round 4, S1)."""
+    assert layout.pid_is_alive(os.getpid()) is True
+    gone = subprocess.Popen([sys.executable, "-c", "raise SystemExit(0)"])
+    gone.wait(timeout=30)
+    assert gone.poll() is not None, "the precondition: the child has been reaped"
+    assert layout.pid_is_alive(gone.pid) is False
+    assert layout.pid_is_alive(0) is False
+    assert layout.pid_is_alive(-1) is False
+
+
+def test_on_windows_liveness_never_goes_near_os_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**`os.kill(pid, 0)` sends Ctrl-C on Windows** (round 4, S1).
+
+    CPython maps signal 0 there to `GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)`
+    — so the liveness probe the POSIX branch uses would, against a console
+    process group, interrupt the very process it was asking about. The Windows
+    branch is injected here because it cannot be run from Linux; what is pinned
+    is that it is taken, and that `os.kill` is not.
+    """
+    asked: list[int] = []
+
+    def never(*args: object, **kw: object) -> None:  # pragma: no cover - must not run
+        raise AssertionError("os.kill was used as a liveness probe on Windows")
+
+    def ask_the_kernel(pid: int) -> bool:
+        asked.append(pid)
+        return True
+
+    monkeypatch.setattr(layout.os, "kill", never)
+    monkeypatch.setattr(layout, "_windows_pid_is_alive", ask_the_kernel)
+
+    assert layout.pid_is_alive(4321, windows=True) is True
+    assert asked == [4321], "the kernel was not asked"
+    assert layout.pid_is_alive(0, windows=True) is False
+    assert asked == [4321], "a pid that cannot exist was still asked about"
 
 
 def test_our_own_staging_directory_is_not_another_copy(tmp_path: Path) -> None:
@@ -253,8 +354,10 @@ def test_another_process_running_the_same_executable_is_found(tmp_path: Path) ->
     import shutil
 
     exe = tmp_path / "yulon"
-    shutil.copy2(sys.executable, exe)
-    other = subprocess.Popen([str(exe), "-c", "import time; time.sleep(30)"])
+    sleep = shutil.which("sleep")
+    assert sleep is not None, "the precondition: this box has `sleep`"
+    shutil.copy2(sleep, exe)
+    other = subprocess.Popen([str(exe), "30"])
     try:
         deadline = time.monotonic() + 10
         found: list[int] = []

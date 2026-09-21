@@ -25,14 +25,16 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from yulon.selfupdate import layout
-from yulon.selfupdate.cleanup import finish_previous_update
+from yulon.selfupdate.cleanup import finish_previous_update, recovery_steps
 from yulon.selfupdate.detect import Install, InstallKind
 from yulon.selfupdate.stage import prepare
 from yulon.selfupdate.swap import plan_swap
@@ -45,30 +47,37 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="the real helper is P
 ENTRIES = ("yulon", "_internal", "extra.dat")
 """Three entries, so there are FIVE places between moves to be killed at."""
 
+TWO = ("yulon", "_internal")
+"""The shape every one-dir build really has, and the one the players run."""
 
-def _install(root: Path, version: str) -> Install:
+
+def _put(where: Path, name: str, version: str, entries: tuple[str, ...]) -> None:
+    """One entry, of the kind its name implies. The executable prints its version."""
+    if name == "yulon":
+        (where / name).write_text(f"#!/bin/sh\necho {version}\n", encoding="utf-8")
+        (where / name).chmod(0o755)
+    elif name == "_internal":
+        (where / name).mkdir()
+        (where / name / "lib").write_text(version, encoding="utf-8")
+        (where / name / layout.SHIPPED_MANIFEST).write_text(
+            "\n".join(entries) + "\n", encoding="utf-8"
+        )
+    else:
+        (where / name).write_text(version, encoding="utf-8")
+
+
+def _install(root: Path, version: str, entries: tuple[str, ...] = ENTRIES) -> Install:
     target = root / "app"
-    (target / "_internal").mkdir(parents=True)
-    (target / "_internal" / "lib").write_text(version, encoding="utf-8")
-    (target / "_internal" / layout.SHIPPED_MANIFEST).write_text(
-        "\n".join(ENTRIES) + "\n", encoding="utf-8"
-    )
-    (target / "yulon").write_text(f"#!/bin/sh\necho {version}\n", encoding="utf-8")
-    (target / "yulon").chmod(0o755)
-    (target / "extra.dat").write_text(version, encoding="utf-8")
+    target.mkdir(parents=True)
+    for name in entries:
+        _put(target, name, version, entries)
     return Install(InstallKind.TARBALL, target, "yulon", True)
 
 
-def _stage_a_build(install: Install, version: str) -> Path:
+def _stage_a_build(install: Install, version: str, entries: tuple[str, ...] = ENTRIES) -> Path:
     staged = prepare(install, version, pid=os.getpid())
-    (staged / "_internal").mkdir()
-    (staged / "_internal" / "lib").write_text(version, encoding="utf-8")
-    (staged / "_internal" / layout.SHIPPED_MANIFEST).write_text(
-        "\n".join(ENTRIES) + "\n", encoding="utf-8"
-    )
-    (staged / "yulon").write_text(f"#!/bin/sh\necho {version}\n", encoding="utf-8")
-    (staged / "yulon").chmod(0o755)
-    (staged / "extra.dat").write_text(version, encoding="utf-8")
+    for name in entries:
+        _put(staged, name, version, entries)
     layout.discard_ours(install, layout.DOWNLOAD_NAME)
     return staged
 
@@ -89,7 +98,9 @@ def _killing_mv(root: Path, at: int) -> Path:
     return bindir
 
 
-def _swap_killed_after(root: Path, install: Install, at: int) -> None:
+def _swap_killed_after(
+    root: Path, install: Install, at: int, entries: tuple[str, ...] = ENTRIES
+) -> None:
     """Run the real helper with a dead app pid, killing it after move `at`."""
     staged = layout.work_dir(install, layout.NEW_NAME)
     plan = plan_swap(
@@ -97,7 +108,7 @@ def _swap_killed_after(root: Path, install: Install, at: int) -> None:
         staged,
         pid=os.getpid(),
         script_dir=root,
-        entries=ENTRIES,
+        entries=entries,
         platform_id="linux",
     )
     dead = subprocess.Popen(["sleep", "0"])
@@ -126,65 +137,106 @@ KILL_POINTS = [1, 2, 3, 4, 5]
 
 # -- the written instruction, executed ---------------------------------------
 
-RECOVERY_STEPS = """\
-1. In the Yu'lon folder, delete (or move away) every file and folder that ALSO
-   exists inside `.yulon-old`.
-2. Move everything in `.yulon-old` except `.yulon-marker` into the Yu'lon
-   folder, then delete `.yulon-old` and `.yulon-new`.
-"""
-"""The instruction this test EXECUTES, kept beside the script that does it.
 
-**Two steps, and the first one is not optional** (round 3, F3). The one-step
-version — "move everything out of `.yulon-old` back in" — is wrong at the last
-kill point before the executable arrives: the new `_internal` is already in
-place, and moving a directory onto an existing directory of the same name puts
-it INSIDE, so the player ended with the old `yulon` beside the NEW `_internal`
-and a nested `_internal/_internal`. The test could not see it, because it read
-one file.
+def _flat(text: str) -> str:
+    """Wrapping, quoting, backticks and case removed, so prose and a message compare.
 
-**Prose and script can drift**, and this file cannot stop that: what it can do
-is keep them one screen apart and assert that the README still contains these
-words, so a change to one is visible next to the other.
-"""
-
-
-def _follow_the_readme(target: Path) -> None:
-    """Exactly what `RECOVERY_STEPS` says, and nothing a player would not do.
-
-    1. delete from the Yu'lon folder everything that ALSO exists in `.yulon-old`
-    2. move everything in `.yulon-old` except the marker into the Yu'lon folder,
-       then delete `.yulon-old` and `.yulon-new`
+    The README sets the steps as a blockquote, so `>` at the start of a
+    continuation line lands in the middle of a sentence; that is markdown, not
+    a difference in the words.
     """
-    backup = target / layout.OLD_NAME
-    theirs = [p for p in sorted(backup.iterdir()) if p.name != layout.MARKER_NAME]
+    lines = [line.strip().lstrip(">").strip() for line in text.splitlines()]
+    return " ".join(" ".join(lines).replace("`", "").split()).lower()
 
-    for item in theirs:  # step 1
+
+def _step_one(target: Path, step: str) -> None:
+    """Delete from the install everything that is also in the backup."""
+    assert "also exists inside" in step and layout.OLD_NAME in step, step
+    assert "delete" in step.lower(), step
+    for item in sorted((target / layout.OLD_NAME).iterdir()):
         here = target / item.name
         if here.is_dir() and not here.is_symlink():
             shutil.rmtree(here)
-        elif here.exists():
+        elif here.exists() or here.is_symlink():
             here.unlink()
 
-    for item in theirs:  # step 2
-        shutil.move(str(item), str(target / item.name))
+
+def _step_two(target: Path, step: str) -> None:
+    """Move the backup's contents in, **except the names the step itself lists**.
+
+    The exception list is read OUT OF THE MESSAGE rather than out of `layout`:
+    a step that forgot to name `helper.log` would then move it into the install
+    folder here, where it stays for ever as a name the next update collides
+    with. That is what "the app's bookkeeping" means to a player — whatever the
+    sentence they were given happens to say.
+    """
+    assert layout.OLD_NAME in step and layout.NEW_NAME in step, step
+    head, _, rest = step.partition("except ")
+    assert head and rest, step
+    kept = {name.strip() for name in rest.partition(" into the")[0].split(",")}
+    assert kept == set(layout.BOOKKEEPING), f"the step names {sorted(kept)}"
+
+    backup = target / layout.OLD_NAME
+    for item in sorted(backup.iterdir()):
+        if item.name not in kept:
+            shutil.move(str(item), str(target / item.name))
     shutil.rmtree(backup)
     staged = target / layout.NEW_NAME
     if staged.exists():
         shutil.rmtree(staged)
 
 
-def _assert_the_old_build_is_back(target: Path) -> None:
+def _step_three(target: Path, step: str) -> None:
+    """Remove the names the NEW build brought and the old one has no use for."""
+    assert step.startswith("Delete ") and " from the Yu'lon folder" in step, step
+    named = step[len("Delete ") : step.index(" from the Yu'lon folder")]
+    for name in named.split(", "):
+        here = target / name.strip()
+        assert layout.is_entry_name(name.strip()), name
+        if here.is_dir() and not here.is_symlink():
+            shutil.rmtree(here)
+        elif here.exists() or here.is_symlink():
+            here.unlink()
+
+
+_EXECUTORS = {1: _step_one, 2: _step_two, 3: _step_three}
+"""One implementation per step of `cleanup.recovery_steps()`, by position.
+
+**The steps are data and this executes them** (round 4, M4). They used to be a
+paragraph in the README, a second copy in this file that the test actually ran,
+and a third, one-step version in the app's own message — and the app's was the
+wrong one: following it at the last kill point before the executable arrives
+put the old `_internal` INSIDE the new one and left a launcher that would not
+start. A step this table has no entry for fails the test rather than being
+skipped, which is the only way a new step cannot go unexecuted.
+"""
+
+
+def _follow_the_message(target: Path, steps: tuple[str, ...]) -> None:
+    """Do what the player was told, in order, and nothing else."""
+    assert steps, "the message gave no steps at all"
+    for n, step in enumerate(steps, 1):
+        assert n in _EXECUTORS, f"step {n} is one nothing here knows how to do: {step}"
+        _EXECUTORS[n](target, step)
+
+
+def _assert_the_old_build_is_back(
+    target: Path, entries: tuple[str, ...] = ENTRIES, brought: tuple[str, ...] = ()
+) -> None:
     """**Every entry, by content** — which is what the old one-file assertion missed.
 
     The one-step instruction left `_internal/_internal` nested inside the new
     `_internal` and the old `yulon` beside it, and a test that read only
     `extra.dat` called that a success (round 3, F3).
     """
-    for name in ENTRIES:
+    for name in entries:
         assert (target / name).exists(), f"{name} is missing"
-    assert (target / "extra.dat").read_text(encoding="utf-8") == "OLD"
+    for name in brought:
+        assert not (target / name).exists(), f"{name} is what the NEW version brought"
     assert "OLD" in (target / "yulon").read_text(encoding="utf-8")
     assert (target / "_internal" / "lib").read_text(encoding="utf-8") == "OLD"
+    if "extra.dat" in entries:
+        assert (target / "extra.dat").read_text(encoding="utf-8") == "OLD"
     assert not (
         target / "_internal" / "_internal"
     ).exists(), "a directory was moved INSIDE the one it was meant to replace"
@@ -193,34 +245,97 @@ def _assert_the_old_build_is_back(target: Path) -> None:
     ), "the old `_internal` is not the one that came back"
 
 
-def test_the_readme_still_says_what_this_test_executes() -> None:
-    """The one thing that can catch a drift between the prose and the script above."""
-    text = README.read_text(encoding="utf-8")
-    assert layout.OLD_NAME in text and layout.MARKER_NAME in text and layout.NEW_NAME in text
-    for phrase in ("also exists inside", "except", "delete"):
-        assert phrase.lower() in text.lower(), f"the README no longer says {phrase!r}"
-    # Step 1 is the half that was missing, so it is named rather than implied.
-    assert "delete (or move away)" in text
+def _and_it_starts(target: Path) -> None:
+    """**Run it.** Every assertion above is about files; this is about a launcher.
+
+    A restore that leaves the right bytes in the wrong place still has to
+    produce a program that runs — the nested-`_internal` failure was invisible
+    to a test that only read files.
+    """
+    done = subprocess.run(
+        [str(target / "yulon")], capture_output=True, text=True, timeout=DEADLINE, cwd=target
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "OLD", done.stdout
 
 
-@pytest.mark.parametrize("at", KILL_POINTS)
-def test_following_the_readme_by_hand_restores_the_old_build(at: int, tmp_path: Path) -> None:
-    """The case the app cannot reach: no executable, so nothing of ours can run.
+def test_the_readme_quotes_the_steps_the_app_itself_gives() -> None:
+    """**One source, and the README has to match it word for word** (round 4, M4).
+
+    The README and the app's message were written separately and drifted: the
+    app was still giving a single step that the README had already replaced.
+    Wrapping, backticks and case are removed before comparing, so the prose can
+    be formatted as prose; the words cannot differ.
+    """
+    text = _flat(README.read_text(encoding="utf-8"))
+    for step in recovery_steps():
+        assert _flat(step) in text, f"the README no longer says: {step}"
+    # And the third step, which only some builds get, by the rule it states.
+    assert _flat("the new version brought them and the old one does not use them") in text
+
+
+def _shapes() -> list[Any]:
+    """Every kill point of a two-entry build, a three-entry one, and one that grows.
+
+    The move count is not `2 × entries`: an entry the OLD build does not have
+    is not moved out, only in. **Both sizes** because the executable leaves
+    first and arrives last, so which entries are where at a given kill point
+    depends on how many there are (round 4, M4).
+    """
+    cases = []
+    for old, extra, name in (
+        (TWO, (), "two"),
+        (ENTRIES, (), "three"),
+        (TWO, ("plugins.dat",), "two-and-a-new-entry"),
+    ):
+        moves = len(old) * 2 + len(extra)
+        for at in range(1, moves):
+            cases.append(pytest.param(old, extra, at, id=f"{name}-kill-{at}"))
+    return cases
+
+
+def _steps_in(message: str) -> tuple[str, ...]:
+    """The numbered steps read back OUT of the message the player is shown.
+
+    Not out of `cleanup`: what is under test is the sentence the app puts on
+    its bar, so that is what gets executed.
+    """
+    _, _, tail = message.partition("To put the version you had back: ")
+    assert tail, message
+    tail = tail.partition(" (the installer's last message was:")[0]
+    parts = re.split(r"(?:^|\s)(?=\d+\. )", tail.strip())
+    steps = tuple(re.sub(r"^\d+\. ", "", part).strip() for part in parts if part.strip())
+    assert steps, message
+    return steps
+
+
+@pytest.mark.parametrize(("old", "extra", "at"), _shapes())
+def test_the_steps_the_app_gives_put_the_old_build_back(
+    old: tuple[str, ...], extra: tuple[str, ...], at: int, tmp_path: Path
+) -> None:
+    """**The message is executed**, at every kill point, and the result is started.
 
     The old instruction failed twice here — it moved the good `_internal` into
     a `broken/` folder, and it moved `.yulon-marker` into the install folder
     and left an empty unmarked `.yulon-old` behind, which every later update
-    then refused.
+    then refused. It was also not the instruction the app was giving.
     """
-    install = _install(tmp_path, "OLD")
+    from yulon.selfupdate.cleanup import recovery_steps as from_source
+
+    install = _install(tmp_path, "OLD", old)
     target = install.target
     assert target is not None
-    _stage_a_build(install, "NEW")
-    _swap_killed_after(tmp_path, install, at)
+    entries = (*old, *extra)
+    _stage_a_build(install, "NEW", entries)
+    _swap_killed_after(tmp_path, install, at, entries)
+    assert [n for n in old if not (target / n).exists()], "the precondition: something is gone"
 
-    _follow_the_readme(target)
+    steps = _steps_in(finish_previous_update(install, running="OLD").problem)
+    assert steps == from_source(extra), "the message is not the one source's steps"
+    _follow_the_message(target, steps)
 
-    _assert_the_old_build_is_back(target)
+    _assert_the_old_build_is_back(target, old, extra)
+    _and_it_starts(target)
     assert not (target / layout.MARKER_NAME).exists(), "the marker was moved into the install"
     assert not (target / layout.OLD_NAME).exists()
     assert not (target / layout.NEW_NAME).exists()
@@ -320,10 +435,10 @@ def test_the_startup_pass_changes_nothing_at_all_when_a_swap_is_half_done(
 
 
 @pytest.mark.parametrize(("at", "restored"), HALF_DONE_STATES)
-def test_the_instruction_the_half_done_message_gives_is_the_one_that_works(
+def test_the_steps_still_work_for_a_player_who_started_and_stopped(
     at: int, restored: str | None, tmp_path: Path
 ) -> None:
-    """The message is the README's instruction, and the instruction is executed here.
+    """Half-way through the instruction is a state too, and the steps must survive it.
 
     So the sentence a player reads at start is pinned to the procedure that
     really puts their install back, in every state they can be in.
@@ -339,9 +454,10 @@ def test_the_instruction_the_half_done_message_gives_is_the_one_that_works(
     said = finish_previous_update(install, running="OLD").problem
     assert layout.OLD_NAME in said
 
-    _follow_the_readme(target)
+    _follow_the_message(target, _steps_in(said))
 
     _assert_the_old_build_is_back(target)
+    _and_it_starts(target)
     assert not (target / layout.MARKER_NAME).exists()
     assert prepare(install, "NEWER", pid=os.getpid()).exists()
 

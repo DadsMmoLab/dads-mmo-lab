@@ -67,8 +67,27 @@ and a player who had already saved that same release's archive there got a
 WORK_NAMES = (NEW_NAME, OLD_NAME, DOWNLOAD_NAME)
 """Everything `discard_ours` will even consider. Anything else raises."""
 
-RESERVED_NAMES = frozenset({*WORK_NAMES, MARKER_NAME, "helper-started", "helper.log"})
 """Names that can never be a build ENTRY, so a swap can never move one."""
+
+HELPER_LOCK = "helper.lock"
+"""A directory the helper creates to become THE helper. `mkdir` is the atomic part.
+
+Two helpers on one install produced a mixed-version install with no backup
+(round 4, measured 6 runs of 6): both passed their checks, both swapped, and
+the second moved the first's new executable into a backup that then held only
+bookkeeping — so the old executable was gone. `mkdir` either creates the
+directory or fails; there is no window between looking and taking.
+"""
+
+STAND_DOWN = "stand-down"
+"""Written by the APP to tell a helper it started that it is not wanted after all.
+
+Holds the nonce of the attempt being cancelled. The helper reads it on every
+tick of its wait and again immediately before its first move, so a helper that
+outlived the app's patience cannot swap unasked — which is what an orphan did
+in round 4: the app said "nothing was changed" and the helper swapped anyway
+twelve seconds later.
+"""
 
 HELPER_STAMP = "helper-started"
 """Written inside `.yulon-old` by the helper, as its first act after validating.
@@ -89,6 +108,15 @@ no trace at all. It is inside `.yulon-old`, so it is removed with the rest by a
 marker-gated delete, and the next start quotes its last line when it reports a
 failure.
 """
+
+BOOKKEEPING = frozenset({MARKER_NAME, HELPER_STAMP, HELPER_LOG, HELPER_LOCK, STAND_DOWN})
+"""The files this app keeps inside a working directory. Everything else in one is somebody's.
+
+Used by two rules: an "empty" work dir is one holding nothing but these, and
+the player's recovery instruction says to move everything EXCEPT these.
+"""
+
+RESERVED_NAMES = frozenset({*WORK_NAMES, *BOOKKEEPING})
 
 APPIMAGE_ENTRY = "yulon.AppImage"
 """What the staged AppImage is called inside its work directory.
@@ -139,6 +167,13 @@ class Marker:
     stamp: float
     entries: tuple[str, ...] = ()
     state: str = STAGED
+    new_entries: tuple[str, ...] = ()
+    """Entries the NEW build ships that the old one did not.
+
+    Recorded because the recovery instruction has to name them: nothing in
+    `.yulon-old` will replace them, and left in place they collide with the
+    next update for ever (round 4, M4).
+    """
     target: str = ""
     """The absolute install this marker belongs to. A marker copied elsewhere is not ours."""
     token: str = ""
@@ -162,6 +197,7 @@ class Marker:
                 "pid": self.pid,
                 "stamp": self.stamp,
                 "entries": list(self.entries),
+                "new_entries": list(self.new_entries),
                 "state": self.state,
                 "target": self.target,
                 "token": self.token,
@@ -308,6 +344,7 @@ def read_marker(install: Install, name: str) -> Marker | None:
             pid=int(raw.get("pid", 0)),
             stamp=float(raw.get("stamp", 0.0)),
             entries=tuple(str(e) for e in entries),
+            new_entries=tuple(str(e) for e in (raw.get("new_entries") or []) if is_entry_name(e)),
             state=str(raw.get("state", STAGED)),
         )
     except (KeyError, TypeError, ValueError):
@@ -317,6 +354,26 @@ def read_marker(install: Install, name: str) -> Marker | None:
 def helper_stamp(install: Install) -> Path:
     """Where the helper says "I am running": `<.yulon-old>/helper-started`."""
     return work_dir(install, OLD_NAME) / HELPER_STAMP
+
+
+def stand_down_path(install: Install) -> Path:
+    """Where the app tells a helper it is not wanted: `<.yulon-old>/stand-down`."""
+    return work_dir(install, OLD_NAME) / STAND_DOWN
+
+
+def stamp_holds(install: Install, nonce: str) -> bool:
+    """Is the helper's stamp THIS attempt's? A stale one answers False.
+
+    Read rather than merely existing (round 4). Nothing removes the stamp on
+    the helper's own failure paths, so one left behind by a give-up made the
+    next attempt believe a helper was running when nothing had started.
+    """
+    if not nonce:
+        return False
+    try:
+        return nonce in helper_stamp(install).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
 
 
 def helper_log_tail(install: Install) -> str:
@@ -351,9 +408,7 @@ def is_empty_work_dir(install: Install, name: str) -> bool:
     """
     path = work_dir(install, name)
     try:
-        return path.is_dir() and all(
-            p.name in (MARKER_NAME, HELPER_STAMP, HELPER_LOG) for p in path.iterdir()
-        )
+        return path.is_dir() and all(p.name in BOOKKEEPING for p in path.iterdir())
     except OSError:
         return False
 
@@ -431,23 +486,52 @@ def another_copy_is_updating(install: Install, our_pid: int) -> str | None:
     staging into the same folder — which is how one instance's `stage()` came
     to delete the other's staged build (cold review 1).
 
-    A marker whose pid is dead is a crashed attempt, and is ours to replace.
+    **A live pid is not enough** (round 4): pids are reused, and a marker
+    naming one that now belongs to somebody's text editor refused every future
+    update with no way out. So the pid must also BE this app where that can be
+    asked, and where it cannot, a marker older than `STALE_MARKER_SECONDS` is
+    treated as abandoned.
     """
     marker = read_marker(install, NEW_NAME)
     if marker is None or marker.pid in (0, our_pid):
         return None
     if not pid_is_alive(marker.pid):
         return None
+    target = install.target
+    exe = target / install.executable if target is not None and install.executable else None
+    identity = pid_is_this_app(marker.pid, exe)
+    if identity is False:
+        logger.info(f"self-update: pid {marker.pid} is alive but is not Yu'lon; carrying on")
+        return None
+    if identity is None and now() - marker.stamp > STALE_MARKER_SECONDS:
+        logger.info(f"self-update: the marker naming pid {marker.pid} is too old to believe")
+        return None
     return (
-        "Another copy of Yu'lon is already installing an update into this folder. "
-        "Close it, or wait for it to finish."
+        "Another copy of Yu'lon is already installing an update into this folder. Close it, or "
+        f"wait for it to finish — if you are sure no other copy is open, delete the {NEW_NAME} "
+        "folder beside Yu'lon and try again."
     )
 
 
-def pid_is_alive(pid: int) -> bool:
-    """Is there a process with this id? Best effort, and False when it cannot tell."""
+def pid_is_alive(pid: int, *, windows: bool | None = None) -> bool:
+    """Is there a process with this id? Best effort, and False when it cannot tell.
+
+    **`os.kill(pid, 0)` is not a liveness probe on Windows and is dangerous
+    there** (round 4). CPython maps signal 0 on Windows to
+    `GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)`: it does not ask whether the
+    process exists, and against a console process group it SENDS a Ctrl-C. So
+    Windows asks the kernel directly — `OpenProcess` with
+    `PROCESS_QUERY_LIMITED_INFORMATION`, then `GetExitCodeValue == STILL_ACTIVE`
+    — and an access-denied answer counts as alive, because a process another
+    user owns is a process.
+
+    `windows` is injected so the branch can be tested from either platform.
+    """
     if pid <= 0:
         return False
+    on_windows = os.name == "nt" if windows is None else windows
+    if on_windows:
+        return _windows_pid_is_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -457,6 +541,89 @@ def pid_is_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+_STILL_ACTIVE = 259
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_ACCESS_DENIED = 5
+
+
+def _windows_pid_is_alive(pid: int) -> bool:  # pragma: no cover - Windows only
+    """`OpenProcess` + `GetExitCodeProcess`, which is the question actually being asked."""
+    import ctypes
+
+    # `getattr`, not `ctypes.windll`: the attribute exists only on Windows, and
+    # a `type: ignore` for it is itself an error when mypy runs with
+    # `--platform win32`, which CI does (the convention `platform.py` uses).
+    kernel32 = getattr(ctypes, "windll").kernel32  # noqa: B009 - Windows-only attribute
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # Access denied means it exists and is not ours to look at.
+        return bool(kernel32.GetLastError() == _ERROR_ACCESS_DENIED)
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return bool(code.value == _STILL_ACTIVE)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+STALE_MARKER_SECONDS = 15 * 60
+"""How old a marker must be before a live pid it names is disbelieved.
+
+**A pid is reused** (round 4), and a marker naming one that now belongs to a
+text editor made the app refuse every update with "another copy of Yu'lon is
+already installing" and no way out. Where the pid's identity can be checked it
+is; where it cannot, a quarter of an hour is longer than any update this app
+has ever taken and short enough that a player is not stuck.
+"""
+
+
+def pid_is_this_app(pid: int, executable: Path | None) -> bool | None:
+    """Is that pid running OUR executable? None means "cannot tell here".
+
+    Linux reads `/proc/<pid>/exe`; Windows asks
+    `QueryFullProcessImageNameW`. Anywhere else, and on any error, the answer
+    is None and the caller falls back to the marker's age.
+    """
+    if executable is None or pid <= 0:
+        return None
+    try:
+        wanted = executable.resolve()
+    except OSError:
+        return None
+    if os.name == "posix":
+        link = Path("/proc") / str(pid) / "exe"
+        if not link.parent.is_dir():
+            return None
+        try:
+            return link.resolve() == wanted
+        except OSError:
+            return None
+    return _windows_pid_is_this_app(pid, wanted)  # pragma: no cover - Windows only
+
+
+def _windows_pid_is_this_app(pid: int, wanted: Path) -> bool | None:  # pragma: no cover
+    import ctypes
+
+    # `getattr`, not `ctypes.windll`: the attribute exists only on Windows, and
+    # a `type: ignore` for it is itself an error when mypy runs with
+    # `--platform win32`, which CI does (the convention `platform.py` uses).
+    kernel32 = getattr(ctypes, "windll").kernel32  # noqa: B009 - Windows-only attribute
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        size = ctypes.c_ulong(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return None
+        return Path(buffer.value) == wanted
+    except OSError:
+        return None
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def other_instances(executable: Path, our_pid: int) -> list[int]:

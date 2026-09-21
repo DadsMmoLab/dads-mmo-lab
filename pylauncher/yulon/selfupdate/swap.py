@@ -40,6 +40,7 @@ resolves it to.
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -87,24 +88,38 @@ second copy beside it is the wrong answer to every question.
 
 POSIX_FOLDER_HELPER = f"""#!/bin/sh
 # Yu'lon self-update helper (one-dir install). Every path arrives as an argument.
-# $1 ticks  $2 pid  $3 target  $4 launch  $5 n  then n entries executable-FIRST
-# followed by the same n entries executable-LAST.
-trap 'rm -f -- "$0"' EXIT
+# $1 ticks  $2 pid  $3 nonce  $4 target  $5 launch  $6 n  then n entries
+# executable-FIRST followed by the same n entries executable-LAST.
 ticks="$1"
 pid="$2"
-target="$3"
-launch="$4"
-half="$5"
-shift 5
+nonce="$3"
+target="$4"
+launch="$5"
+half="$6"
+shift 6
 new="$target/{layout.NEW_NAME}"
 old="$target/{layout.OLD_NAME}"
 marker="{layout.MARKER_NAME}"
+lock="$old/{layout.HELPER_LOCK}"
 stamp="$old/{layout.HELPER_STAMP}"
+standdown="$old/{layout.STAND_DOWN}"
+log="$old/{layout.HELPER_LOG}"
+have_lock=0
+
+cleanup() {{
+  if [ "$have_lock" -eq 1 ]; then
+    rm -f -- "$lock/owner" 2>/dev/null
+    rmdir -- "$lock" 2>/dev/null
+  fi
+  rm -f -- "$0"
+}}
+trap cleanup EXIT
 
 # ---- validate before anything moves --------------------------------------
 case "$ticks" in ""|*[!0-9]*) exit 64 ;; esac
 case "$pid" in ""|*[!0-9]*) exit 64 ;; esac
 case "$half" in ""|*[!0-9]*) exit 64 ;; esac
+case "$nonce" in ""|*[!0-9a-f]*) exit 64 ;; esac
 [ "$ticks" -gt 0 ] || exit 64
 [ "$pid" -gt 1 ] || exit 64
 [ "$half" -gt 0 ] || exit 64
@@ -119,43 +134,92 @@ for e in "$@"; do
   case "$e" in
     ""|.|..|-*|*/*|*[!-._A-Za-z0-9]*) exit 64 ;;
     "{layout.NEW_NAME}"|"{layout.OLD_NAME}"|"{layout.DOWNLOAD_NAME}"|"$marker") exit 64 ;;
+    "{layout.HELPER_STAMP}"|"{layout.HELPER_LOG}"|"{layout.HELPER_LOCK}") exit 64 ;;
+    "{layout.STAND_DOWN}") exit 64 ;;
   esac
 done
-# The two halves must name the same set, or the swap's own invariants mean
-# nothing: phase 1 would move one set out and phase 2 bring another in.
+# The two halves must name the same SET, both ways round: checking one
+# direction alone passes (a,a) against (a,b).
 i=0
 for e in "$@"; do
   i=$((i + 1))
-  [ "$i" -le "$half" ] || break
   found=0
   j=0
   for f in "$@"; do
     j=$((j + 1))
-    [ "$j" -gt "$half" ] || continue
+    if [ "$i" -le "$half" ]; then
+      [ "$j" -gt "$half" ] || continue
+    else
+      [ "$j" -le "$half" ] || continue
+    fi
     [ "$f" = "$e" ] && found=1
   done
   [ "$found" -eq 1 ] || exit 64
 done
 
+# ---- become THE helper, atomically ----------------------------------------
+# `mkdir` creates or fails; there is no window between looking and taking. Two
+# helpers on one install produced a mixed-version install with no backup at all
+# (round 4, 6 runs of 6).
+if mkdir -- "$lock" 2>/dev/null; then
+  have_lock=1
+  printf %s "$nonce" > "$lock/owner"
+else
+  echo "another helper holds the lock; standing aside" >> "$log"
+  exit 73
+fi
+
 # ---- say that we are alive, before waiting for anything --------------------
-# The app does not close until this file exists. On the Windows gate of
-# 2026-09-21 the helper was spawned and never ran, and the app closed anyway.
-log="$old/{layout.HELPER_LOG}"
-: > "$stamp" || exit 64
-echo "started pid=$$ target=$target entries=$half" >> "$log"
+printf %s "$nonce" > "$stamp" || exit 64
+echo "started pid=$$ nonce=$nonce target=$target entries=$half" >> "$log"
+
+# ---- anything that means "do not do this after all" ------------------------
+told_to_stop() {{
+  if [ -f "$standdown" ] && grep -q -- "$nonce" "$standdown" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}}
+still_ours() {{
+  [ -d "$new" ] && [ -d "$old" ] || return 1
+  [ -f "$new/$marker" ] && [ -f "$old/$marker" ] || return 1
+  [ -f "$lock/owner" ] && [ "$(cat "$lock/owner" 2>/dev/null)" = "$nonce" ] || return 1
+  [ -f "$stamp" ] && grep -q -- "$nonce" "$stamp" 2>/dev/null || return 1
+  i=0
+  for e in "$@"; do
+    i=$((i + 1))
+    [ "$i" -le "$half" ] || break
+    [ -e "$new/$e" ] || return 1
+  done
+  return 0
+}}
 
 # ---- wait for the app ------------------------------------------------------
 i=0
 while kill -0 "$pid" 2>/dev/null; do
+  if told_to_stop; then
+    echo "stood down while waiting" >> "$log"
+    exit 74
+  fi
   i=$((i + 1))
   if [ "$i" -gt "$ticks" ]; then
-    # Still running. Move nothing, start nothing, and leave the staged build
-    # where it is for the next start to reuse or clean up.
     echo "gave up: pid $pid still running after $ticks ticks" >> "$log"
     exit 75
   fi
   sleep {TICK_SECONDS}
 done
+
+# ---- everything again, at the last moment before the first move -----------
+# The app may have decided against this while we were waiting, and the folders
+# may have been cleared by a second copy of Yu'lon or by the player.
+if told_to_stop; then
+  echo "stood down before moving anything" >> "$log"
+  exit 74
+fi
+if ! still_ours "$@"; then
+  echo "the staged update is no longer ours; moving nothing" >> "$log"
+  exit 74
+fi
 
 # ---- move the current entries aside, executable FIRST ----------------------
 # The two halves of "$@" are the same names in the two orders this needs. They
@@ -209,49 +273,63 @@ fi
 
 echo "relaunching $launch" >> "$log"
 cd -- "$target" || exit 70
-rm -f -- "$0"
+cleanup
 exec "$launch"
 """
 """`sh` and not `bash`: an AppImage may run on a box with no bash.
 
-**Nothing is ever built into a string** (cold review 2, S2). The previous
-version collected the moved names into `moved="$e $moved"` and then iterated
-`for e in $moved`, unquoted — so an entry called `my file` would have failed
-the swap and left itself in `.yulon-old`, and an entry called `*` would have
-expanded against the working directory. The entries now arrive TWICE, in the
-two orders the swap needs, and each loop reads its half of `"$@"` with a
-counter. `layout.is_entry_name` refuses whitespace and glob characters on the
-Python side as well, and the `case` above is the same rule again in the shell.
+**Three things make this helper single-owner and stoppable** (round 4, which
+measured all three holes on this very script):
 
-**What is undone is read off the filesystem**, not off a list: an entry that
-was placed is one that is no longer in `.yulon-new`, and an entry that was
-moved aside is one that is now in `.yulon-old`.
+* a **nonce** it is given and writes into its stamp, so a stamp left by an
+  earlier attempt cannot make the app close for a helper that never started;
+* a **lock** — `mkdir` of `<.yulon-old>/helper.lock`, which is atomic — so two
+  helpers on one install cannot both swap. That produced a mixed-version
+  install with NO backup: both exited 0, both relaunched, and the second moved
+  the first's new executable into a backup holding only bookkeeping;
+* a **stand-down** file the app writes, read on every tick of the wait AND
+  again immediately before the first move, together with a full re-validation
+  at that same moment. An orphan helper used to swap twelve seconds after the
+  app had told the player nothing had changed.
 
-The `trap` removes the script on every exit that is not the `exec` — a refused
-argument list, the give-up path — and the `exec` is preceded by its own `rm`,
-because `exec` replaces the process and an EXIT trap never runs.
+Nothing is ever built into a string: the entries arrive TWICE, in the two
+orders the swap needs, and each loop reads its half of `"$@"` with a counter.
 
-`cd -- "$target"` before the exec, so the new build starts in the folder a
-double-click would start it in.
+The `trap` removes the lock and the script on every exit that is not the
+`exec`; the success path calls `cleanup` explicitly, because `exec` replaces
+the process and an EXIT trap never runs.
 """
 
 POSIX_FILE_HELPER = f"""#!/bin/sh
 # Yu'lon self-update helper (AppImage). Every path arrives as an argument.
-# $1 ticks  $2 pid  $3 target (the .AppImage file)
-trap 'rm -f -- "$0"' EXIT
+# $1 ticks  $2 pid  $3 nonce  $4 target (the .AppImage file)
 ticks="$1"
 pid="$2"
-target="$3"
+nonce="$3"
+target="$4"
 new="$target{layout.NEW_NAME}"
 old="$target{layout.OLD_NAME}"
 marker="{layout.MARKER_NAME}"
 entry="{layout.APPIMAGE_ENTRY}"
+lock="$old/{layout.HELPER_LOCK}"
 stamp="$old/{layout.HELPER_STAMP}"
+standdown="$old/{layout.STAND_DOWN}"
 log="$old/{layout.HELPER_LOG}"
+have_lock=0
+
+cleanup() {{
+  if [ "$have_lock" -eq 1 ]; then
+    rm -f -- "$lock/owner" 2>/dev/null
+    rmdir -- "$lock" 2>/dev/null
+  fi
+  rm -f -- "$0"
+}}
+trap cleanup EXIT
 
 # ---- validate before anything moves --------------------------------------
 case "$ticks" in ""|*[!0-9]*) exit 64 ;; esac
 case "$pid" in ""|*[!0-9]*) exit 64 ;; esac
+case "$nonce" in ""|*[!0-9a-f]*) exit 64 ;; esac
 [ "$ticks" -gt 0 ] || exit 64
 [ "$pid" -gt 1 ] || exit 64
 case "$target" in /*) ;; *) exit 64 ;; esac
@@ -262,13 +340,39 @@ case "$target" in /*) ;; *) exit 64 ;; esac
 [ -f "$old/$marker" ] || exit 64
 [ -f "$new/$entry" ] || exit 64
 
-# ---- say that we are alive, before waiting for anything --------------------
-: > "$stamp" || exit 64
-echo "started pid=$$ target=$target" >> "$log"
+if mkdir -- "$lock" 2>/dev/null; then
+  have_lock=1
+  printf %s "$nonce" > "$lock/owner"
+else
+  echo "another helper holds the lock; standing aside" >> "$log"
+  exit 73
+fi
+
+printf %s "$nonce" > "$stamp" || exit 64
+echo "started pid=$$ nonce=$nonce target=$target" >> "$log"
+
+told_to_stop() {{
+  if [ -f "$standdown" ] && grep -q -- "$nonce" "$standdown" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}}
+still_ours() {{
+  [ -d "$new" ] && [ -d "$old" ] || return 1
+  [ -f "$new/$marker" ] && [ -f "$old/$marker" ] || return 1
+  [ -f "$new/$entry" ] || return 1
+  [ -f "$lock/owner" ] && [ "$(cat "$lock/owner" 2>/dev/null)" = "$nonce" ] || return 1
+  [ -f "$stamp" ] && grep -q -- "$nonce" "$stamp" 2>/dev/null || return 1
+  return 0
+}}
 
 # ---- wait for the app ------------------------------------------------------
 i=0
 while kill -0 "$pid" 2>/dev/null; do
+  if told_to_stop; then
+    echo "stood down while waiting" >> "$log"
+    exit 74
+  fi
   i=$((i + 1))
   if [ "$i" -gt "$ticks" ]; then
     echo "gave up: pid $pid still running after $ticks ticks" >> "$log"
@@ -276,6 +380,15 @@ while kill -0 "$pid" 2>/dev/null; do
   fi
   sleep {TICK_SECONDS}
 done
+
+if told_to_stop; then
+  echo "stood down before moving anything" >> "$log"
+  exit 74
+fi
+if ! still_ours; then
+  echo "the staged update is no longer ours; moving nothing" >> "$log"
+  exit 74
+fi
 
 # ---- one entry, the same two moves a folder install makes ------------------
 if mv -- "$target" "$old/$entry"; then
@@ -290,23 +403,21 @@ fi
 chmod 0755 -- "$target" 2>/dev/null
 echo "relaunching $target" >> "$log"
 cd -- "$(dirname -- "$target")" || exit 70
-rm -f -- "$0"
+cleanup
 exec "$target"
 """
 """The AppImage half: one file replaced by one file, and its name kept.
 
+The same nonce, lock and stand-down protocol as the folder helper, for the
+same three measured reasons — see `POSIX_FOLDER_HELPER`.
+
 The file keeps its old version number on purpose, so a desktop entry or a
 shortcut pointing at it keeps working; the window title is what says the
-version. Its work directories are marked directories beside it, exactly as a
-folder install's are inside it, so `layout.discard_ours` is the only thing that
-can ever delete either of them.
-
-The `trap` removes the script on the refusal and give-up paths; the success
-path removes it just before the `exec`, which an EXIT trap never survives.
+version.
 """
 
 POWERSHELL_FOLDER_HELPER = f"""param(
-  [int]$Ticks, [int]$ProcId, [string]$Target, [string]$Launch, [int]$Half,
+  [int]$Ticks, [int]$ProcId, [string]$Nonce, [string]$Target, [string]$Launch, [int]$Half,
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$Entries
 )
 # Yu'lon self-update helper (one-dir install). Every path arrives as a parameter.
@@ -315,56 +426,89 @@ $ErrorActionPreference = 'Stop'
 $New = Join-Path $Target '{layout.NEW_NAME}'
 $Old = Join-Path $Target '{layout.OLD_NAME}'
 $Marker = '{layout.MARKER_NAME}'
+$Lock = Join-Path $Old '{layout.HELPER_LOCK}'
+$Owner = Join-Path $Lock 'owner'
 $Stamp = Join-Path $Old '{layout.HELPER_STAMP}'
+$StandDown = Join-Path $Old '{layout.STAND_DOWN}'
 $Log = Join-Path $Old '{layout.HELPER_LOG}'
-$Reserved = @('{layout.NEW_NAME}', '{layout.OLD_NAME}', '{layout.DOWNLOAD_NAME}', $Marker)
+$Reserved = @('{layout.NEW_NAME}', '{layout.OLD_NAME}', '{layout.DOWNLOAD_NAME}', $Marker,
+              '{layout.HELPER_STAMP}', '{layout.HELPER_LOG}', '{layout.HELPER_LOCK}',
+              '{layout.STAND_DOWN}')
+$HaveLock = $false
 
 function Say($text) {{
   try {{ Add-Content -LiteralPath $Log -Value $text -ErrorAction SilentlyContinue }} catch {{}}
 }}
-function Refuse() {{
+function Done($code) {{
+  if ($HaveLock) {{
+    Remove-Item -LiteralPath $Lock -Recurse -Force -ErrorAction SilentlyContinue
+  }}
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-  exit 64
+  exit $code
+}}
+function ToldToStop() {{
+  if (-not (Test-Path -LiteralPath $StandDown -PathType Leaf)) {{ return $false }}
+  try {{ return (Get-Content -LiteralPath $StandDown -Raw) -match [regex]::Escape($Nonce) }}
+  catch {{ return $false }}
+}}
+function StillOurs() {{
+  if (-not (Test-Path -LiteralPath (Join-Path $New $Marker) -PathType Leaf)) {{ return $false }}
+  if (-not (Test-Path -LiteralPath (Join-Path $Old $Marker) -PathType Leaf)) {{ return $false }}
+  if (-not (Test-Path -LiteralPath $Owner -PathType Leaf)) {{ return $false }}
+  try {{ if ((Get-Content -LiteralPath $Owner -Raw).Trim() -ne $Nonce) {{ return $false }} }}
+  catch {{ return $false }}
+  try {{ if (-not ((Get-Content -LiteralPath $Stamp -Raw) -match [regex]::Escape($Nonce))) {{
+    return $false
+  }} }} catch {{ return $false }}
+  foreach ($e in $Forward) {{
+    if (-not (Test-Path -LiteralPath (Join-Path $New $e))) {{ return $false }}
+  }}
+  return $true
 }}
 
 # `[int]` refuses a non-numeric argument before this body runs at all:
 # PowerShell fails the parameter binding and the script exits non-zero having
 # executed none of it. These checks are for values that ARE integers and are
 # still wrong.
-if ($Ticks -le 0 -or $ProcId -le 1 -or $Half -le 0) {{ Refuse }}
-if (-not [System.IO.Path]::IsPathRooted($Target)) {{ Refuse }}
-if (-not (Test-Path -LiteralPath $Target -PathType Container)) {{ Refuse }}
-if (-not (Test-Path -LiteralPath (Join-Path $New $Marker) -PathType Leaf)) {{ Refuse }}
-if (-not (Test-Path -LiteralPath (Join-Path $Old $Marker) -PathType Leaf)) {{ Refuse }}
-if (-not $Entries -or $Entries.Count -ne ($Half * 2)) {{ Refuse }}
+if ($Ticks -le 0 -or $ProcId -le 1 -or $Half -le 0) {{ Done 64 }}
+if ($Nonce -notmatch '^[0-9a-f]+$') {{ Done 64 }}
+if (-not [System.IO.Path]::IsPathRooted($Target)) {{ Done 64 }}
+if (-not (Test-Path -LiteralPath $Target -PathType Container)) {{ Done 64 }}
+if (-not (Test-Path -LiteralPath (Join-Path $New $Marker) -PathType Leaf)) {{ Done 64 }}
+if (-not (Test-Path -LiteralPath (Join-Path $Old $Marker) -PathType Leaf)) {{ Done 64 }}
+if (-not $Entries -or $Entries.Count -ne ($Half * 2)) {{ Done 64 }}
 foreach ($e in $Entries) {{
-  if ([string]::IsNullOrWhiteSpace($e) -or $e -eq '.' -or $e -eq '..') {{ Refuse }}
-  if ($e -notmatch '^[._A-Za-z0-9][-._A-Za-z0-9]*$') {{ Refuse }}
-  if ($Reserved -contains $e) {{ Refuse }}
+  if ([string]::IsNullOrWhiteSpace($e) -or $e -eq '.' -or $e -eq '..') {{ Done 64 }}
+  if ($e -notmatch '^[._A-Za-z0-9][-._A-Za-z0-9]*$') {{ Done 64 }}
+  if ($Reserved -contains $e) {{ Done 64 }}
 }}
 $Forward = $Entries[0..($Half - 1)]
 $Backward = $Entries[$Half..($Entries.Count - 1)]
-# The two halves must name the same set, or phase 1 moves one set out and
-# phase 2 brings another in.
-foreach ($e in $Forward) {{ if ($Backward -notcontains $e) {{ Refuse }} }}
-foreach ($e in $Backward) {{ if ($Forward -notcontains $e) {{ Refuse }} }}
+foreach ($e in $Forward) {{ if ($Backward -notcontains $e) {{ Done 64 }} }}
+foreach ($e in $Backward) {{ if ($Forward -notcontains $e) {{ Done 64 }} }}
 
-# ---- say that we are alive, before waiting for anything --------------------
-# The app does not close until this file exists. Measured on the Windows 11
-# gate box, 2026-09-21: spawned with DETACHED_PROCESS this script never ran at
-# all, and the app closed anyway.
-try {{ New-Item -ItemType File -Path $Stamp -Force | Out-Null }} catch {{ Refuse }}
-Say "started pid=$PID target=$Target entries=$Half"
+# ---- become THE helper, atomically ----------------------------------------
+try {{
+  New-Item -ItemType Directory -Path $Lock -ErrorAction Stop | Out-Null
+  $HaveLock = $true
+  Set-Content -LiteralPath $Owner -Value $Nonce -NoNewline
+}} catch {{
+  Say "another helper holds the lock; standing aside"
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+  exit 73
+}}
+
+Set-Content -LiteralPath $Stamp -Value $Nonce -NoNewline
+Say "started pid=$PID nonce=$Nonce target=$Target entries=$Half"
 
 $deadline = (Get-Date).AddSeconds($Ticks * {TICK_SECONDS})
 while (Get-Process -Id $ProcId -ErrorAction SilentlyContinue) {{
-  if ((Get-Date) -gt $deadline) {{
-    Say "gave up: pid $ProcId still running"
-    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-    exit 75
-  }}
+  if (ToldToStop) {{ Say "stood down while waiting"; Done 74 }}
+  if ((Get-Date) -gt $deadline) {{ Say "gave up: pid $ProcId still running"; Done 75 }}
   Start-Sleep -Milliseconds 200
 }}
+if (ToldToStop) {{ Say "stood down before moving anything"; Done 74 }}
+if (-not (StillOurs)) {{ Say "the staged update is no longer ours; moving nothing"; Done 74 }}
 
 function Move-One($from, $to) {{
   # Windows releases a process's handles late: the loader, Explorer's
@@ -411,24 +555,22 @@ try {{
 }} catch {{
   Say "FAILED relaunching $Launch : $_"
 }}
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+Done 0
 """
-"""The Windows half. `-LiteralPath` everywhere: `-Path` globs, and `[` is legal in a folder name.
+"""The Windows half: the same nonce, lock and stand-down protocol as the POSIX one.
 
-**Measured on a real Windows 11 box, 2026-09-21 (the lead's gate).** The script
-itself is good: run by hand with
-`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <ps1>
-5 999999 "<target with a space and an &>" "<target>\\yulon.exe" 2 yulon.exe
-_internal _internal yulon.exe` it exited 0, swapped both entries, left the old
-build in `.yulon-old`, and deleted itself. So on that box: `-ExecutionPolicy
-Bypass -File` from `%TEMP%` runs, `[int]` and `ValueFromRemainingArguments`
-bind the doubled list, a path with a space and an `&` survives as a parameter,
-and `Move-Item` of the executable and `_internal` works once the app is gone.
+**Measured on a real Windows 11 box, 2026-09-21 (two gates).** The script
+itself is good: run by hand it exits 0, swaps both entries, leaves the old
+build in `.yulon-old` and deletes itself; and with the spawn corrected (see
+`windows_creation_flags`) the whole update ran end to end in an interactive
+session, breakaway refused with `[WinError 5]` and the retry taking over.
 
-What failed there was the SPAWN, not this file — see `_spawn_detached`.
-
-`Refuse` removes the script on every argument refusal: the previous version
-left a `.ps1` in `%TEMP%` on each of those paths.
+**What is untested here**: the lock, the stand-down and the re-validation
+lines — every one of them was added after the last Windows run, and this side
+has no PowerShell. The gate list says what to do: delay the stamp past the
+app's window with a `Start-Sleep` before `Set-Content -LiteralPath $Stamp`,
+confirm the app refuses to close, then close the app by hand and confirm
+nothing moved.
 """
 
 POWERSHELL_UNDER_SYSTEMROOT = "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
@@ -453,7 +595,12 @@ def powershell_path() -> str:
 
 @dataclass(frozen=True)
 class SwapPlan:
-    """Everything the swap needs: the script that was written, and how to start it."""
+    """Everything the swap needs: the script that was written, and how to start it.
+
+    `arm()` makes a NEW plan from this one with a fresh nonce and its own
+    script, which is what is actually started. The fields below describe the
+    swap; the nonce describes one attempt at it.
+    """
 
     script: Path
     argv: list[str]
@@ -461,10 +608,18 @@ class SwapPlan:
     entries: tuple[str, ...] = ()
     """The names the helper will replace, executable first. Empty for an AppImage."""
     body: str = ""
-    """The script's text, so `ensure_script()` can write it again at the moment of use.
+    """The script's text, so `arm()` can write it again at the moment of use.
 
     The body is a module constant and holds no path, so carrying it here costs
     nothing and cannot carry anything of the player's with it.
+    """
+    nonce: str = ""
+    """This attempt's secret. A stamp that does not hold it is not this attempt's."""
+    fixed: tuple[str, ...] = ()
+    """The arguments before the nonce and after it, so `arm()` can rebuild argv.
+
+    `(which, script_dir, ticks, pid, target, launch, half, *entries)`. Kept as
+    plain strings because that is what they are on the command line.
     """
 
 
@@ -498,16 +653,13 @@ def plan_swap(
     if install.kind is InstallKind.APPIMAGE:
         # One entry, under the fixed name the script spells itself.
         _make_the_backup_dir(install, marker, (layout.APPIMAGE_ENTRY,))
-        script, body = _write(script_dir, f"yulon-update-{pid}", which, POSIX_FILE_HELPER)
-        argv = _argv(which, script, [ticks, str(pid), str(target)])
-        logger.info(f"self-update: helper written to {script} for the AppImage")
-        return SwapPlan(script, argv, (layout.APPIMAGE_ENTRY,), body)
+        parts: tuple[str, ...] = (which, str(script_dir), ticks, str(pid), str(target))
+        return arm(SwapPlan(Path(), [], (layout.APPIMAGE_ENTRY,), POSIX_FILE_HELPER, "", parts))
     named = tuple(entries)
     if not named or not all(layout.is_entry_name(name) for name in named):
         raise UpdateError("Yu'lon could not work out which files to replace.")
     _make_the_backup_dir(install, marker, named)
     launch = target / install.executable
-    script, body = _write(script_dir, f"yulon-update-{pid}", which, POSIX_FOLDER_HELPER)
     # **The entries go twice, in the two orders the swap needs**: the current
     # ones are moved aside executable-FIRST and the staged ones are brought in
     # executable-LAST, so the executable is never present beside libraries of
@@ -515,11 +667,19 @@ def plan_swap(
     # without rebuilding it into a string, and a string is word-split — which
     # is the defect this avoids by doing the reversing HERE, where lists are
     # lists (cold review 2, S2).
-    values = [ticks, str(pid), str(target), str(launch), str(len(named))]
-    argv = _argv(which, script, [*values, *named, *reversed(named)])
-    logger.info(f"self-update: helper written to {script} for {len(named)} entries")
+    parts = (
+        which,
+        str(script_dir),
+        ticks,
+        str(pid),
+        str(target),
+        str(launch),
+        str(len(named)),
+        *named,
+        *reversed(named),
+    )
     del staged  # the helper finds it by name under the target it validated
-    return SwapPlan(script, argv, named, body)
+    return arm(SwapPlan(Path(), [], named, POSIX_FOLDER_HELPER, "", parts))
 
 
 def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Sequence[str]) -> None:
@@ -532,6 +692,8 @@ def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Seque
     (`cleanup.finish_previous_update`): it carries the version being installed
     and the entries that were supposed to land.
     """
+    target = install.target
+    assert target is not None  # `plan_swap` refused a `None` target already
     if not layout.discard_ours(install, layout.OLD_NAME):
         raise UpdateError(
             f"There is a {layout.OLD_NAME} folder beside Yu'lon that this copy cannot vouch "
@@ -552,6 +714,7 @@ def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Seque
                 pid=marker.pid,
                 stamp=layout.now(),
                 entries=tuple(entries),
+                new_entries=tuple(name for name in entries if not (target / name).exists()),
                 state=layout.SWAPPING,
             ),
         )
@@ -603,6 +766,55 @@ def script_in(argv: list[str]) -> Path:
     return Path(argv[1])
 
 
+def arm(plan: SwapPlan) -> SwapPlan:
+    """A NEW plan for ONE attempt: a fresh nonce, its own script file, its own argv.
+
+    **Every start gets its own nonce and its own script** (round 4). The nonce
+    is what the helper writes into its stamp, so a stamp left behind by an
+    earlier attempt cannot make the app close for a helper that never started;
+    and the script is named after the nonce, so two attempts cannot overwrite
+    each other's file.
+
+    Called immediately before the helper is started, which is also what makes
+    it the answer to a `/tmp` sweep between staging and pressing: the script is
+    written here, not minutes earlier.
+    """
+    which, script_dir, *rest = plan.fixed
+    nonce = secrets.token_hex(8)
+    script, body = _write(Path(script_dir), f"yulon-update-{rest[1]}-{nonce}", which, plan.body)
+    # The nonce goes third, after the ticks and the pid: the helper reads it by
+    # position, like every other argument.
+    argv = _argv(which, script, [rest[0], rest[1], nonce, *rest[2:]])
+    logger.info(f"self-update: helper written to {script}")
+    return SwapPlan(script, argv, plan.entries, plan.body, nonce, plan.fixed)
+
+
+def stand_down(install: Install, plan: SwapPlan) -> None:
+    """Tell a helper this app started that it is not wanted after all. Never raises.
+
+    Written into the marked backup, holding the attempt's nonce, and read by
+    the helper on every tick of its wait AND immediately before its first move.
+    Without it an orphan swapped twelve seconds after the app had told the
+    player that nothing had changed (round 4).
+    """
+    if not plan.nonce:
+        return
+    try:
+        layout.stand_down_path(install).write_text(plan.nonce + "\n", encoding="utf-8")
+        logger.info(f"self-update: stood down the helper for nonce {plan.nonce}")
+    except OSError as exc:
+        logger.warning(f"self-update: could not write the stand-down file: {exc}")
+
+
+def clear_stamp(install: Install) -> None:
+    """Remove any stamp and stand-down left by an earlier attempt. Never raises."""
+    for path in (layout.helper_stamp(install), layout.stand_down_path(install)):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.info(f"self-update: could not remove {path}: {exc}")
+
+
 def staging_is_intact(install: Install, plan: SwapPlan) -> str | None:
     """Is the staged build still there, still ours, and still complete? None = yes.
 
@@ -627,28 +839,13 @@ def staging_is_intact(install: Install, plan: SwapPlan) -> str | None:
     return None
 
 
-def ensure_script(plan: SwapPlan) -> bool:
-    """Write the helper script again, now, just before it is used. False if it cannot be.
+Spawn = Callable[[list[str]], object]
+"""How the helper is started, and what it hands back.
 
-    **Written at the last moment rather than trusted from minutes ago** (round
-    3, F1). It lives in the temporary directory, which on a long-running
-    desktop is swept by the system: a plan made before a database import and
-    started after it could name a script that no longer exists, and the app
-    would close for nothing.
-
-    Rewriting is cheap — it is twenty lines — and it is the same bytes either
-    way, because the body is a module constant and the paths are arguments.
-    """
-    try:
-        _write_body(plan.script, plan.body)
-    except UpdateError as exc:
-        logger.info(f"self-update: the helper script could not be written: {exc}")
-        return False
-    return True
-
-
-Spawn = Callable[[list[str]], None]
-"""How the helper is started. A seam, so a test never starts one it cannot join."""
+The handle is kept by the app so a helper it decided against can be ENDED
+rather than merely asked to stand down (round 4): the `Popen` used to be
+dropped on the floor, and an orphan swapped twelve seconds later.
+"""
 
 
 def windows_creation_flags(available: object = subprocess, *, breakaway: bool = True) -> int:
@@ -686,7 +883,7 @@ def windows_creation_flags(available: object = subprocess, *, breakaway: bool = 
     return flags
 
 
-def _spawn_detached(argv: list[str]) -> None:
+def _spawn_detached(argv: list[str]) -> object:
     """Start the helper so that it OUTLIVES this process.
 
     POSIX: `start_new_session=True` puts it in a session of its own, so the
@@ -706,32 +903,62 @@ def _spawn_detached(argv: list[str]) -> None:
     """
     posix = os.name == "posix"
     script = script_in(argv)
+    started: list[object] = []
     where = str(script.parent if script.parent.is_dir() else Path.cwd())
 
     def start(flags: int) -> None:
-        subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            cwd=where,
-            env=runner.child_env(),
-            start_new_session=posix,
-            creationflags=flags,
+        started.append(
+            subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                cwd=where,
+                env=runner.child_env(),
+                start_new_session=posix,
+                creationflags=flags,
+            )
         )
 
     if posix:
         start(0)
-        return
+        return started[0]
     try:  # pragma: no cover - Windows only; the gate measures this
         start(windows_creation_flags())
-    except OSError as exc:  # pragma: no cover - including PermissionError
+    except FileNotFoundError:  # pragma: no cover - nothing to retry: the exe is not there
+        raise
+    except OSError as exc:  # pragma: no cover - PermissionError under a job object
+        # **Measured on the Windows 11 gate, 2026-09-21**: under a scheduled
+        # task the breakaway flag is refused with `[WinError 5] Access is
+        # denied`, and the retry without it starts the helper and the whole
+        # update then runs. A missing executable is NOT retried — the second
+        # attempt would fail the same way and hide the reason.
         logger.info(f"self-update: the helper would not start with breakaway ({exc}); retrying")
         start(windows_creation_flags(breakaway=False))
+    return started[0]
 
 
-def start_helper(plan: SwapPlan, *, spawn: Spawn = _spawn_detached) -> None:
+def end_helper(handle: object, *, seconds: float = 5.0) -> None:
+    """Stop a helper this app started and wait for it to go. Never raises.
+
+    Belt to the stand-down file's braces: the file is what a helper checks, and
+    this is what makes sure there is nothing left to check it. Both, because a
+    helper that is between two checks when the app gives up would otherwise
+    have a window to act in.
+    """
+    if handle is None:
+        return
+    try:
+        if handle.poll() is not None:  # type: ignore[attr-defined]
+            return
+        handle.terminate()  # type: ignore[attr-defined]
+        handle.wait(timeout=seconds)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 - tidying must not raise
+        logger.info(f"self-update: could not end the helper: {exc}")
+
+
+def start_helper(plan: SwapPlan, *, spawn: Spawn = _spawn_detached) -> object:
     """Start the helper. **Call this only once the window really is going to close.**
 
     `main.py` asks `close_refusal()` twice — before the update starts, and
@@ -742,4 +969,4 @@ def start_helper(plan: SwapPlan, *, spawn: Spawn = _spawn_detached) -> None:
     launching a second copy beside the running one.
     """
     logger.info(f"self-update: starting the helper as {plan.argv[0]}")
-    spawn(plan.argv)
+    return spawn(plan.argv)

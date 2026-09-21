@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import subprocess
 import time
@@ -210,6 +211,7 @@ def test_a_folder_plan_is_sh_the_script_the_bound_the_pid_and_the_entries(tmp_pa
         str(plan.script),
         str(DEFAULT_TICKS),
         "4242",
+        plan.nonce,
         str(install.target),
         str(install.target / "yulon"),
         "2",
@@ -219,6 +221,8 @@ def test_a_folder_plan_is_sh_the_script_the_bound_the_pid_and_the_entries(tmp_pa
         "_internal",
         "yulon",
     ]
+    assert re.fullmatch(r"[0-9a-f]{16}", plan.nonce), "the nonce is not hex"
+    assert plan.nonce in plan.script.name, "two attempts would share one script file"
     assert plan.entries == ("yulon", "_internal")
     assert stat.S_IMODE(plan.script.stat().st_mode) == 0o700
 
@@ -309,7 +313,14 @@ def test_an_appimage_plan_names_the_file_and_nothing_else(tmp_path: Path) -> Non
         script_dir=tmp_path,
         platform_id="linux",
     )
-    assert plan.argv == ["/bin/sh", str(plan.script), str(DEFAULT_TICKS), "7", str(target)]
+    assert plan.argv == [
+        "/bin/sh",
+        str(plan.script),
+        str(DEFAULT_TICKS),
+        "7",
+        plan.nonce,
+        str(target),
+    ]
     assert plan.entries == (layout.APPIMAGE_ENTRY,)
 
 
@@ -342,6 +353,7 @@ def test_a_windows_plan_runs_powershell_by_its_absolute_path_with_the_fixed_flag
         str(plan.script),
         str(DEFAULT_TICKS),
         "99",
+        plan.nonce,
         str(install.target),
         str(install.target / "yulon.exe"),
         "2",
@@ -485,13 +497,18 @@ def test_the_helper_swaps_the_entries_relaunches_and_deletes_itself(tmp_path: Pa
 
 
 @posix_only
-def test_a_failure_part_way_puts_every_entry_back_exactly_as_it_was(tmp_path: Path) -> None:
-    """The rollback arm: `_internal` cannot be brought in, so `yulon` goes back too.
+def test_a_staged_entry_that_vanished_stops_the_helper_before_it_moves_anything(
+    tmp_path: Path,
+) -> None:
+    """The re-validation immediately before the first move (round 4).
 
-    The staged `_internal` is removed between planning and running — which is
-    what a disk that filled up, or a second copy of Yu'lon, looks like from the
-    helper's side. Any precondition failure must move NOTHING in the end.
+    The staged `_internal` is removed between planning and running — what a
+    disk that filled up, a second copy of Yu'lon, or the player looks like from
+    the helper's side. The helper now refuses rather than swapping and rolling
+    back: nothing moves at all.
     """
+    import shutil
+
     install = _plain(tmp_path)
     target = install.target
     assert target is not None
@@ -501,8 +518,6 @@ def test_a_failure_part_way_puts_every_entry_back_exactly_as_it_was(tmp_path: Pa
     _a_launcher(target / "yulon", "old", witness)
     staged = _staged_folder(install, label="new", witness=witness)
     before = _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME})
-
-    import shutil
 
     shutil.rmtree(staged / "_internal")
     assert not (staged / "_internal").exists(), "the precondition: one staged entry is missing"
@@ -516,12 +531,71 @@ def test_a_failure_part_way_puts_every_entry_back_exactly_as_it_was(tmp_path: Pa
         entries=("yulon", "_internal"),
         platform_id="linux",
     )
-    _run_helper(plan, app)
+    assert _run_helper(plan, app) == 74, "the helper did not refuse"
+
+    assert _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME}) == before
+    assert not witness.exists(), "something was launched"
+
+
+@posix_only
+def test_a_move_that_fails_part_way_is_undone_exactly(tmp_path: Path) -> None:
+    """The rollback arm, reached the only way it now can be: a `mv` that fails.
+
+    The third move is the first bring-in, so both entries are out and one is
+    coming back when it fails. What must come out of that is the OLD build,
+    whole, and a relaunch of it.
+    """
+    install = _plain(tmp_path)
+    target = install.target
+    assert target is not None
+    witness = tmp_path / "launched"
+    (target / "_internal").mkdir()
+    (target / "_internal" / "lib").write_text("old lib", encoding="utf-8")
+    _a_launcher(target / "yulon", "old", witness)
+    _staged_folder(install, label="new", witness=witness)
+    before = _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME})
+
+    failing = tmp_path / "failbin"
+    failing.mkdir()
+    (failing / "mv").write_text(
+        "#!/bin/sh\n"
+        'n=$(cat "$MVCOUNT" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$MVCOUNT"\n'
+        'if [ "$n" -eq "$FAILAT" ]; then exit 1; fi\n'
+        '/bin/mv "$@"\n',
+        encoding="utf-8",
+    )
+    (failing / "mv").chmod(0o755)
+
+    app = subprocess.Popen(["sleep", "0.3"])
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=app.pid,
+        script_dir=tmp_path,
+        entries=("yulon", "_internal"),
+        platform_id="linux",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{failing}{os.pathsep}{os.environ['PATH']}",
+        "MVCOUNT": str(tmp_path / "count"),
+        "FAILAT": "3",
+    }
+    helper = subprocess.Popen(plan.argv, stdin=subprocess.DEVNULL, env=env)
+    try:
+        app.wait(timeout=HELPER_DEADLINE)
+        helper.wait(timeout=HELPER_DEADLINE)
+    finally:
+        for child in (app, helper):
+            if child.poll() is None:  # pragma: no cover - only on a failing run
+                child.kill()
+                child.wait()
 
     _until(lambda: witness.exists(), "the old build was relaunched")
     assert _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME}) == before
     assert witness.read_text(encoding="utf-8") == "old"
-    assert (target / "_internal" / "lib").read_text(encoding="utf-8") == "old lib"
+    log = (layout.work_dir(install, layout.OLD_NAME) / layout.HELPER_LOG).read_text("utf-8")
+    assert "rolling back" in log
 
 
 @posix_only
@@ -689,23 +763,25 @@ def _a_dead_pid() -> int:
         ("ticks-zero", lambda a: a[:2] + ["0"] + a[3:]),
         ("ticks-negative", lambda a: a[:2] + ["-1"] + a[3:]),
         ("pid-empty", lambda a: a[:3] + [""] + a[4:]),
+        ("nonce-empty", lambda a: a[:4] + [""] + a[5:]),
+        ("nonce-not-hex", lambda a: a[:4] + ["zz"] + a[5:]),
         ("pid-word", lambda a: a[:3] + ["abc"] + a[4:]),
         ("pid-one", lambda a: a[:3] + ["1"] + a[4:]),
         ("pid-zero", lambda a: a[:3] + ["0"] + a[4:]),
-        ("half-word", lambda a: a[:6] + ["two"] + a[7:]),
-        ("half-zero", lambda a: a[:6] + ["0"] + a[7:]),
-        ("half-disagrees", lambda a: a[:6] + ["3"] + a[7:]),
-        ("relative-target", lambda a: a[:4] + ["app"] + a[5:]),
-        ("entry-empty", lambda a: a[:7] + [""] + a[8:]),
-        ("entry-dotdot", lambda a: a[:7] + [".."] + a[8:]),
-        ("entry-nested", lambda a: a[:7] + ["a/b"] + a[8:]),
-        ("entry-backslash", lambda a: a[:7] + ["a\\b"] + a[8:]),
-        ("entry-space", lambda a: a[:7] + ["my file"] + a[8:]),
-        ("entry-glob", lambda a: a[:7] + ["*"] + a[8:]),
-        ("entry-dash", lambda a: a[:7] + ["-rf"] + a[8:]),
-        ("entry-marker", lambda a: a[:7] + [".yulon-marker"] + a[8:]),
-        ("entry-backup", lambda a: a[:7] + [".yulon-old"] + a[8:]),
-        ("no-entries", lambda a: a[:7]),
+        ("half-word", lambda a: a[:7] + ["two"] + a[8:]),
+        ("half-zero", lambda a: a[:7] + ["0"] + a[8:]),
+        ("half-disagrees", lambda a: a[:7] + ["3"] + a[8:]),
+        ("relative-target", lambda a: a[:5] + ["app"] + a[6:]),
+        ("entry-empty", lambda a: a[:8] + [""] + a[9:]),
+        ("entry-dotdot", lambda a: a[:8] + [".."] + a[9:]),
+        ("entry-nested", lambda a: a[:8] + ["a/b"] + a[9:]),
+        ("entry-backslash", lambda a: a[:8] + ["a\\b"] + a[9:]),
+        ("entry-space", lambda a: a[:8] + ["my file"] + a[9:]),
+        ("entry-glob", lambda a: a[:8] + ["*"] + a[9:]),
+        ("entry-dash", lambda a: a[:8] + ["-rf"] + a[9:]),
+        ("entry-marker", lambda a: a[:8] + [".yulon-marker"] + a[9:]),
+        ("entry-backup", lambda a: a[:8] + [".yulon-old"] + a[9:]),
+        ("no-entries", lambda a: a[:8]),
     ],
 )
 def test_the_real_helper_refuses_a_bad_argument_and_moves_nothing(
@@ -800,10 +876,10 @@ def test_the_entries_are_handed_over_twice_in_the_two_orders_the_swap_needs(
         entries=("yulon", "_internal", "extra.dat"),
         platform_id="linux",
     )
-    half = int(plan.argv[6])
+    half = int(plan.argv[7])
     assert half == 3
-    forward = plan.argv[7 : 7 + half]
-    backward = plan.argv[7 + half :]
+    forward = plan.argv[8 : 8 + half]
+    backward = plan.argv[8 + half :]
     assert forward == ["yulon", "_internal", "extra.dat"]
     assert backward == list(reversed(forward))
     assert forward[0] == "yulon", "the executable leaves first"
@@ -900,7 +976,7 @@ def test_the_helper_refuses_a_name_that_would_word_split_rather_than_quoting_it(
         platform_id="linux",
     )
     argv = list(plan.argv)
-    argv[7] = "my file"
+    argv[8] = "my file"
     helper = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
     try:
         assert helper.wait(timeout=HELPER_DEADLINE) == 64
@@ -1002,8 +1078,8 @@ def test_the_two_halves_must_name_the_same_set(tmp_path: Path) -> None:
         platform_id="linux",
     )
     argv = list(plan.argv)
-    assert argv[7:] == ["yulon", "_internal", "_internal", "yulon"], "the precondition"
-    argv[9] = "yulon"  # the halves now name {yulon,_internal} and {yulon,yulon}
+    assert argv[8:] == ["yulon", "_internal", "_internal", "yulon"], "the precondition"
+    argv[10] = "yulon"  # the halves now name {yulon,_internal} and {yulon,yulon}
 
     helper = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
     assert helper.wait(timeout=HELPER_DEADLINE) == 64
@@ -1012,9 +1088,14 @@ def test_the_two_halves_must_name_the_same_set(tmp_path: Path) -> None:
     assert not plan.script.exists(), "a refused helper left itself in the temp dir"
 
 
-def test_a_plan_can_be_verified_and_its_script_written_again(tmp_path: Path) -> None:
-    """`/tmp` gets swept, and a second copy of Yu'lon can clear the work dirs (round 3, F1)."""
-    from yulon.selfupdate.swap import ensure_script, staging_is_intact
+def test_a_plan_is_armed_with_a_fresh_nonce_and_its_own_script(tmp_path: Path) -> None:
+    """Every attempt gets its own nonce and its own file (round 4).
+
+    A stale stamp is then harmless by construction, and two attempts cannot
+    overwrite each other's script — which they did, because the name carried
+    only the pid.
+    """
+    from yulon.selfupdate.swap import arm, staging_is_intact
 
     install, target, _witness = _ready_to_swap(tmp_path)
     plan = plan_swap(
@@ -1025,15 +1106,187 @@ def test_a_plan_can_be_verified_and_its_script_written_again(tmp_path: Path) -> 
         entries=("yulon", "_internal"),
         platform_id="linux",
     )
-    assert staging_is_intact(install, plan) is None
+    again = arm(plan)
 
-    plan.script.unlink()
-    assert ensure_script(plan) is True
-    assert plan.script.exists()
-    assert plan.script.read_text(encoding="utf-8") == plan.body
+    assert again.nonce != plan.nonce, "two attempts share a nonce"
+    assert again.script != plan.script, "two attempts share a script file"
+    assert again.script.exists() and again.script.read_text(encoding="utf-8") == again.body
+    assert again.argv[4] == again.nonce
+    assert staging_is_intact(install, again) is None
 
     (layout.work_dir(install, layout.NEW_NAME) / "_internal").rename(tmp_path / "taken")
-    assert staging_is_intact(install, plan) == "part of it (_internal) is gone"
+    assert staging_is_intact(install, again) == "part of it (_internal) is gone"
 
     layout.discard_ours(install, layout.NEW_NAME)
-    assert staging_is_intact(install, plan) == "the files it had prepared are gone"
+    assert staging_is_intact(install, again) == "the files it had prepared are gone"
+
+
+def test_a_stamp_from_another_attempt_is_not_this_ones(tmp_path: Path) -> None:
+    """What made the app close for a helper that had never started (round 4, M2)."""
+    install, _target, _witness = _ready_to_swap(tmp_path)
+    layout.work_dir(install, layout.OLD_NAME).mkdir(parents=True, exist_ok=True)
+    layout.helper_stamp(install).write_text("deadbeefdeadbeef", encoding="utf-8")
+
+    assert layout.stamp_holds(install, "deadbeefdeadbeef") is True
+    assert layout.stamp_holds(install, "0123456789abcdef") is False
+    assert layout.stamp_holds(install, "") is False
+
+
+def test_clearing_removes_a_stale_stamp_and_stand_down(tmp_path: Path) -> None:
+    from yulon.selfupdate.swap import clear_stamp
+
+    install, _target, _witness = _ready_to_swap(tmp_path)
+    layout.work_dir(install, layout.OLD_NAME).mkdir(parents=True, exist_ok=True)
+    layout.helper_stamp(install).write_text("old", encoding="utf-8")
+    layout.stand_down_path(install).write_text("older", encoding="utf-8")
+
+    clear_stamp(install)
+
+    assert not layout.helper_stamp(install).exists()
+    assert not layout.stand_down_path(install).exists()
+
+
+@posix_only
+def test_only_one_of_two_helpers_on_one_pid_swaps(tmp_path: Path) -> None:
+    """**The mixed-version install with no backup** (round 4, measured 6 of 6).
+
+    Both helpers used to pass their checks, both swapped, and the second moved
+    the first's NEW executable into a backup that then held only bookkeeping —
+    so the old executable was gone entirely. `mkdir` of the lock is atomic:
+    one takes it, the other exits 73 having moved nothing.
+    """
+    install = _plain(tmp_path)
+    target = install.target
+    assert target is not None
+    witness = tmp_path / "launched"
+    (target / "_internal").mkdir()
+    (target / "_internal" / "lib").write_text("old lib", encoding="utf-8")
+    _a_launcher(target / "yulon", "old", witness)
+    _staged_folder(install, label="new", witness=witness)
+
+    app = subprocess.Popen(["sleep", "0.6"])
+    plans = [
+        plan_swap(
+            install,
+            layout.work_dir(install, layout.NEW_NAME),
+            pid=app.pid,
+            script_dir=tmp_path,
+            entries=("yulon", "_internal"),
+            platform_id="linux",
+        )
+        for _ in range(2)
+    ]
+    helpers = [subprocess.Popen(p.argv, stdin=subprocess.DEVNULL) for p in plans]
+    try:
+        app.wait(timeout=HELPER_DEADLINE)
+        codes = [h.wait(timeout=HELPER_DEADLINE) for h in helpers]
+    finally:
+        for child in [app, *helpers]:
+            if child.poll() is None:  # pragma: no cover - only on a failing run
+                child.kill()
+                child.wait()
+
+    assert sorted(codes) == [0, 73], f"both helpers acted: {codes}"
+    _until(lambda: witness.exists(), "the winner relaunched")
+    assert witness.read_text(encoding="utf-8") == "new", "the loser swapped too"
+    assert (target / "_internal" / "lib").read_text(encoding="utf-8") == "new lib"
+    backup = layout.work_dir(install, layout.OLD_NAME)
+    assert "old" in (backup / "yulon").read_text(encoding="utf-8"), "the old build was lost"
+    assert (backup / "_internal" / "lib").read_text(encoding="utf-8") == "old lib"
+
+
+@posix_only
+def test_a_helper_whose_app_had_already_gone_still_reads_the_stand_down(tmp_path: Path) -> None:
+    """**The check immediately before the first move**, reached deterministically.
+
+    The app's pid is already dead when the helper starts, so the wait loop's
+    body never runs even once and the only thing that can stop this helper is
+    the re-read it does at the last moment before moving anything. That is the
+    real shape of the orphan: the app gave up and quit while the helper was
+    still getting going, and a moment later the swap happened into a window
+    nobody was watching.
+    """
+    from yulon.selfupdate.swap import stand_down
+
+    install = _plain(tmp_path)
+    target = install.target
+    assert target is not None
+    witness = tmp_path / "launched"
+    (target / "_internal").mkdir()
+    (target / "_internal" / "lib").write_text("old lib", encoding="utf-8")
+    _a_launcher(target / "yulon", "old", witness)
+    _staged_folder(install, label="new", witness=witness)
+    before = _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME})
+
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=_a_dead_pid(),
+        script_dir=tmp_path,
+        entries=("yulon", "_internal"),
+        platform_id="linux",
+    )
+    stand_down(install, plan)
+    assert layout.stand_down_path(install).exists(), "the precondition: it was told to stop"
+
+    helper = subprocess.Popen(plan.argv, stdin=subprocess.DEVNULL)
+    try:
+        code = helper.wait(timeout=HELPER_DEADLINE)
+    finally:
+        if helper.poll() is None:  # pragma: no cover - only on a failing run
+            helper.kill()
+            helper.wait(timeout=HELPER_DEADLINE)
+
+    assert code == 74, "the helper moved on a stand-down it should have read"
+    assert _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME}) == before
+    assert not witness.exists(), "the orphan swapped and relaunched anyway"
+    log = (layout.work_dir(install, layout.OLD_NAME) / layout.HELPER_LOG).read_text("utf-8")
+    assert "before moving anything" in log
+
+
+@posix_only
+def test_a_helper_told_to_stand_down_while_waiting_moves_nothing(tmp_path: Path) -> None:
+    """**The orphan** (round 4, M1): it swapped twelve seconds after the app gave up."""
+    from yulon.selfupdate.swap import stand_down
+
+    install = _plain(tmp_path)
+    target = install.target
+    assert target is not None
+    witness = tmp_path / "launched"
+    (target / "_internal").mkdir()
+    (target / "_internal" / "lib").write_text("old lib", encoding="utf-8")
+    _a_launcher(target / "yulon", "old", witness)
+    _staged_folder(install, label="new", witness=witness)
+    before = _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME})
+
+    app = subprocess.Popen(["sleep", "30"])
+    try:
+        plan = plan_swap(
+            install,
+            layout.work_dir(install, layout.NEW_NAME),
+            pid=app.pid,
+            script_dir=tmp_path,
+            entries=("yulon", "_internal"),
+            platform_id="linux",
+        )
+        helper = subprocess.Popen(plan.argv, stdin=subprocess.DEVNULL)
+        try:
+            _until(layout.helper_stamp(install).exists, "the helper reported in")
+            stand_down(install, plan)
+            code = helper.wait(timeout=HELPER_DEADLINE)
+        finally:
+            if helper.poll() is None:  # pragma: no cover - only on a failing run
+                helper.kill()
+                helper.wait(timeout=HELPER_DEADLINE)
+    finally:
+        app.kill()
+        app.wait(timeout=HELPER_DEADLINE)
+    assert app.poll() is not None
+
+    assert code == 74, "the helper did not stand down"
+    # And now the app really has gone: nothing may happen afterwards either.
+    time.sleep(0.5)
+    assert _hash_tree(target, ignoring={layout.NEW_NAME, layout.OLD_NAME}) == before
+    assert not witness.exists(), "the orphan swapped and relaunched anyway"
+    assert not plan.script.exists(), "the helper left itself behind"
+    assert not (layout.work_dir(install, layout.OLD_NAME) / layout.HELPER_LOCK).exists()

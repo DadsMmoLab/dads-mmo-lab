@@ -230,18 +230,24 @@ progress for the reasons its entry gives: the running build has no command chann
   and leaves your folder exactly as it found it, backup included. (It could try to put things back
   by itself, and deliberately does not: that would mean the running program renaming the very files
   it is running from, with nothing to undo a half-done attempt.) Putting the previous version back
-  is two steps you take yourself, in this order:
+  is two steps you take yourself, in this order — the same words Yu'lon puts on its own message
+  bar, so you do not have to come back here for them:
 
-  > 1. In the Yu'lon folder, delete (or move away) every file and folder that ALSO exists inside
+  > 1. In the Yu'lon folder, delete (or move away) every file and folder that also exists inside
   >    `.yulon-old`.
-  > 2. Move everything in `.yulon-old` except `.yulon-marker` into the Yu'lon folder, then delete
-  >    `.yulon-old` and `.yulon-new`.
+  > 2. Move everything in `.yulon-old` except `.yulon-marker`, `helper-started`, `helper.lock`,
+  >    `helper.log`, `stand-down` into the Yu'lon folder, then delete `.yulon-old` and
+  >    `.yulon-new`.
+
+  Those five names are Yu'lon's own notes about the update, not part of any version; they go with
+  the folder. If the new version brought a file the old one never had, Yu'lon's message adds a
+  third step naming it — delete those too, because the new version brought them and the old one
+  does not use them.
 
   **Step 1 is not optional**: if the new version's `_internal` folder is already in place, moving
   the old one on top of it would put it *inside* rather than replace it, and Yu'lon would not
-  start. Yu'lon prints these same two steps when it finds an unfinished update, so you do not have
-  to come back here for them. With the AppImage it is the same two steps: the file inside
-  `.yulon-old` is the version you had.
+  start. With the AppImage it is the same steps: the file inside `.yulon-old` is the version you
+  had.
 
 - **If two copies of Yu'lon are open**, the one you press Update in will say so and stop. Close the
   other one first — otherwise the files would be replaced underneath it.

@@ -61,6 +61,46 @@ from yulon.selfupdate.layout import Marker
 logger = get_logger(__name__)
 
 
+def recovery_steps(new_entries: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """The steps that put the previous version back, as DATA. **The one source.**
+
+    The message, the README and the test that executes the procedure all come
+    from here, because when they were three copies they disagreed: the app was
+    still printing a one-step instruction that the README had already replaced,
+    and following it on a swap killed after the third move destroyed the only
+    copy of the old `_internal` (round 4, M4).
+
+    `new_entries` are names the NEW build ships and the old one did not. They
+    have to be removed by hand: nothing in `.yulon-old` will replace them, and
+    left behind they are a collision that refuses every later update for ever.
+    """
+    first = (
+        f"In the Yu'lon folder, delete (or move away) every file and folder that also exists "
+        f"inside {layout.OLD_NAME}."
+    )
+    second = (
+        f"Move everything in {layout.OLD_NAME} except {_KEPT} into the Yu'lon folder, then "
+        f"delete {layout.OLD_NAME} and {layout.NEW_NAME}."
+    )
+    if not new_entries:
+        return (first, second)
+    return (
+        first,
+        second,
+        f"Delete {', '.join(sorted(new_entries))} from the Yu'lon folder: "
+        "the new version brought them and the old one does not use them.",
+    )
+
+
+_KEPT = ", ".join(sorted(layout.BOOKKEEPING))
+"""The bookkeeping files a player leaves where they are, named in the instruction."""
+
+
+def steps_as_text(new_entries: tuple[str, ...] = ()) -> str:
+    """The steps as one numbered sentence, for a message that has one line to say it in."""
+    return " ".join(f"{n}. {step}" for n, step in enumerate(recovery_steps(new_entries), 1))
+
+
 def same_build(marker_version: str, running: str) -> bool:
     """Do these two name the same build, `v` or no `v`?
 
@@ -152,6 +192,7 @@ def finish_previous_update(install: Install, *, running: str = __version__) -> O
         return Outcome()
     held = _entries_in_backup(install, marker)
     if not held:
+        # Nothing in the backup but this app's own bookkeeping.
         # The helper put everything back: there is nothing in the backup to
         # lose, whatever the target is missing. **This branch comes before the
         # missing-entries one on purpose**: a build that ships a THIRD entry
@@ -164,13 +205,13 @@ def finish_previous_update(install: Install, *, running: str = __version__) -> O
         # A swap that stopped part-way, or an install a player has partly put
         # back by hand. Either way this is not a state to tidy from inside the
         # process that is running out of it: say what is where and stop.
-        return _half_done(marker, missing)
+        return _half_done(install, marker, missing)
     if not same_build(marker.to_version, running):
         # Everything is in place, the backup still holds a copy of the build,
         # and this is not the version the update was to. Somebody has put the
         # old build back by hand, or is running an older one. Nothing here is
         # safe to delete and nothing needs moving.
-        return _not_installed(marker)
+        return _not_installed(install, marker)
     if not layout.discard_ours(install, layout.OLD_NAME):
         logger.info(f"self-update: {old} is still there; leaving it for next time")
         return Outcome()
@@ -193,9 +234,20 @@ def _another_copy_owns_this(marker: Marker) -> bool:
 
 
 def _entries_in_backup(install: Install, marker: Marker) -> list[str]:
-    """Which of the entries the marker names are actually IN `.yulon-old`."""
+    """What is in `.yulon-old` that is not this app's own bookkeeping.
+
+    **Not just the entries the marker names** (round 4). A backup holding a
+    `player.sav` — dropped in there by somebody, or left by a build that once
+    shipped it — is not empty, and `_rolled_back` deletes what this answers
+    empty about. Anything in there that is not ours is a reason to report
+    rather than to delete.
+    """
     backup = layout.work_dir(install, layout.OLD_NAME)
-    return [name for name in marker.entries if (backup / name).exists()]
+    del marker
+    try:
+        return sorted(p.name for p in backup.iterdir() if p.name not in layout.BOOKKEEPING)
+    except OSError:
+        return []
 
 
 def _rolled_back(install: Install, marker: Marker) -> Outcome:
@@ -210,6 +262,7 @@ def _rolled_back(install: Install, marker: Marker) -> Outcome:
     **Deletes only marked working directories**, like everything else in this
     module.
     """
+    tail = _and_the_log(install)
     for name in layout.WORK_NAMES:
         layout.discard_ours(install, name)
     logger.info(f"self-update: the update to {marker.to_version} was rolled back")
@@ -217,11 +270,12 @@ def _rolled_back(install: Install, marker: Marker) -> Outcome:
         problem=(
             f"The update to {without_v(marker.to_version)} could not be installed, and the "
             "version you had was put back. You can try again from See what's new."
+            f"{tail}"
         )
     )
 
 
-def _not_installed(marker: Marker) -> Outcome:
+def _not_installed(install: Install, marker: Marker) -> Outcome:
     """Everything is in place, the backup still holds a build, and this is not that build.
 
     Somebody has put the old version back by hand, or is running an older one.
@@ -233,30 +287,40 @@ def _not_installed(marker: Marker) -> Outcome:
         problem=(
             f"The update to {without_v(marker.to_version)} is not installed. The version in "
             f"the {layout.OLD_NAME} folder beside Yu'lon is the one you had; delete that "
-            "folder when you no longer want it."
+            f"folder when you no longer want it.{_and_the_log(install)}"
         )
     )
 
 
-def _half_done(marker: Marker, missing: list[str]) -> Outcome:
+def _half_done(install: Install, marker: Marker, missing: list[str]) -> Outcome:
     """A swap that stopped part-way. **Reported, and nothing is touched.**
 
     Not repaired in this process, for the three reasons the module docstring
-    gives. What the player gets is the one instruction — the same one
-    `pylauncher/README.md` carries and `tests/test_selfupdate_recovery.py`
-    executes at every kill point — and an install that is exactly as the helper
-    left it, including the backup that is the way out of it.
+    gives. What the player gets is the instruction — rendered from
+    `recovery_steps()`, the one place it exists — and an install that is
+    exactly as the helper left it, including the backup that is the way out.
     """
     logger.warning(f"self-update: {missing} are missing after an update to {marker.to_version}")
     return Outcome(
         problem=(
             f"An update to {without_v(marker.to_version)} did not finish: "
             f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} missing from this "
-            f"folder. Nothing has been changed. To put the version you had back, move the "
-            f"files from the {layout.OLD_NAME} folder back into this folder, except "
-            f"{layout.MARKER_NAME}; then delete {layout.OLD_NAME}."
+            f"folder. Nothing has been changed. To put the version you had back: "
+            f"{steps_as_text(marker.new_entries)}"
+            f"{_and_the_log(install)}"
         )
     )
+
+
+def _and_the_log(install: Install) -> str:
+    """The helper's last word, when it left one. `""` otherwise.
+
+    The Windows gate could only guess at what had happened because the helper
+    left no trace; the log exists for that, and this is what makes the claim in
+    `layout.HELPER_LOG` true rather than aspirational.
+    """
+    tail = layout.helper_log_tail(install)
+    return f" (the installer's last message was: {tail})" if tail else ""
 
 
 def _entries_missing(install: Install, marker: layout.Marker) -> list[str]:

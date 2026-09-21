@@ -2343,6 +2343,17 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "another user's Yu'lon is not running out of this folder -- and a platform with no "
         "`/proc` answers the empty list, which the caller states rather than hides"
     ),
+    ("selfupdate/cleanup.py", "_entries_in_backup"): (
+        "T90 plan 3, round 4. Lists `.yulon-old` -- one of this app's own marked working "
+        "directories, under the install -- to answer whether it holds anything that is not "
+        "this app's own bookkeeping. It decides a DELETE, and that is why the question "
+        "changed: it used to ask `are the entries the marker names in there`, so a "
+        "`player.sav` somebody had put in the backup counted as nothing and went with the "
+        "folder when the rollback arm removed it. Anything in there that is not one of the "
+        "five bookkeeping names is now a reason to REPORT and leave it, and an OSError "
+        "answers the empty list -- which is safe only because the delete that follows is "
+        "`discard_ours`, which refuses any directory it cannot prove this install made"
+    ),
     ("selfupdate/stage.py", "staged_entries"): (
         "T90 plan 3. Lists the STAGING directory this app filled moments earlier, to find the "
         "top-level names the new build ships. It decides no write of its own; what it feeds is "

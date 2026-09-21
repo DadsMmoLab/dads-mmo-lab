@@ -297,3 +297,94 @@ def test_a_rollback_is_said_once_and_the_staged_build_goes_with_it(tmp_path: Pat
     assert "9.9.9-Public" in outcome.problem
     assert not staged.exists(), "a whole staged build was left beside the install"
     assert not old.exists()
+
+
+def test_a_rollback_never_deletes_a_backup_holding_something_that_is_not_ours(
+    tmp_path: Path,
+) -> None:
+    """**The data loss, one step further in** (round 4).
+
+    The rollback arm deletes `.yulon-old` because a completed rollback leaves
+    it holding nothing but this app's own bookkeeping. "Nothing" was asked as
+    "none of the entries the marker names" — so a `player.sav` sitting in there
+    counted as empty and went with the folder. It is asked as "nothing that is
+    not ours" now, and anything else is reported instead.
+    """
+    install = _install(tmp_path)
+    old = _a_finished_swap(install, to="v9.9.9-Public")
+    for name in ("yulon", "_internal"):
+        path = old / name
+        path.rmdir() if path.is_dir() else path.unlink()
+    # Not an entry the marker names, and therefore invisible to the old check.
+    (old / "player.sav").write_bytes(b"forty hours")
+
+    outcome = finish_previous_update(install, running=OLD_VERSION)
+
+    assert old.exists(), "a folder holding the player's file was deleted"
+    assert (old / "player.sav").read_bytes() == b"forty hours"
+    assert outcome.removed is False
+    assert "is not installed" in outcome.problem
+
+
+def test_the_apps_own_bookkeeping_does_not_stop_a_rollback_being_tidied(tmp_path: Path) -> None:
+    """The other side of it: the five names the helper itself writes are not somebody's files."""
+    install = _install(tmp_path)
+    old = _a_finished_swap(install, to="v9.9.9-Public")
+    for name in ("yulon", "_internal"):
+        path = old / name
+        path.rmdir() if path.is_dir() else path.unlink()
+    for name in layout.BOOKKEEPING:
+        if name != layout.MARKER_NAME:
+            (old / name).write_text("ours", encoding="utf-8")
+    (old / layout.HELPER_LOCK).unlink()
+    (old / layout.HELPER_LOCK).mkdir()
+
+    outcome = finish_previous_update(install, running=OLD_VERSION)
+
+    assert not old.exists(), "the app's own notes stopped it tidying up"
+    assert "could not be installed" in outcome.problem
+
+
+@pytest.mark.parametrize(
+    ("running", "half_done", "expected"),
+    [
+        (NEW_VERSION, True, "did not finish"),
+        (OLD_VERSION, False, "is not installed"),
+    ],
+)
+def test_every_report_quotes_the_helpers_last_word(
+    running: str, half_done: bool, expected: str, tmp_path: Path
+) -> None:
+    """**The Windows gate could only guess** at what the helper had done (round 4, S4).
+
+    `helper_log_tail` existed and nothing read it. The log is the one record of
+    a process that is gone by the time anybody looks, so every report that says
+    something went wrong now ends with its last line.
+    """
+    install = _install(tmp_path)
+    assert install.target is not None
+    old = _a_finished_swap(install)
+    (old / layout.HELPER_LOG).write_text(
+        "started pid=123 nonce=abc\nFAILED bringing in _internal\n", encoding="utf-8"
+    )
+    if half_done:
+        # Something is missing, so this is a half-done swap rather than a tidy-up.
+        (install.target / "_internal").rmdir()
+
+    outcome = finish_previous_update(install, running=running)
+
+    assert expected in outcome.problem
+    assert "FAILED bringing in _internal" in outcome.problem, "the log was not quoted"
+
+
+def test_a_report_with_no_log_to_quote_reads_as_a_sentence(tmp_path: Path) -> None:
+    """Most of the time there is no log — the helper never got far enough to write one."""
+    install = _install(tmp_path)
+    assert install.target is not None
+    _a_finished_swap(install)
+    (install.target / "_internal").rmdir()
+
+    problem = finish_previous_update(install, running=NEW_VERSION).problem
+
+    assert "installer's last message" not in problem
+    assert problem.endswith(".")

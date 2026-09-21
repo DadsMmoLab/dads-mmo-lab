@@ -16,6 +16,7 @@ import io
 import os
 import subprocess
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -142,17 +143,40 @@ def test_preparing_refuses_a_staging_folder_this_app_did_not_make(tmp_path: Path
     assert (theirs / "notes.txt").read_text(encoding="utf-8") == "mine"
 
 
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="identity is read off /proc here")
 def test_preparing_refuses_while_another_copy_is_updating(tmp_path: Path) -> None:
-    import sys
+    """The other process is really running this install's executable.
+
+    A live pid alone stopped being enough in round 4: pids are reused, and a
+    marker naming one that had become somebody's text editor refused every
+    future update with no way out.
+    """
+    import shutil
 
     install = _install(tmp_path)
-    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    assert install.target is not None
+    exe = install.target / install.executable
+    exe.unlink()
+    # **A copy of `sleep`, not of the interpreter**: an interpreter copied out
+    # of its prefix cannot find its standard library and dies in a few
+    # milliseconds, which made this a race against a process that was already
+    # gone by the time `prepare()` asked.
+    sleep = shutil.which("sleep")
+    assert sleep is not None, "the precondition: this box has `sleep`"
+    shutil.copy2(sleep, exe)
+    alive = subprocess.Popen([str(exe), "30"])
     try:
         layout.write_marker(
             install,
             layout.NEW_NAME,
             layout.Marker(layout.NEW_NAME, "v1", "v2", alive.pid, layout.now()),
         )
+        deadline = time.monotonic() + 10
+        refused = False
+        while time.monotonic() < deadline and not refused:
+            refused = layout.another_copy_is_updating(install, os.getpid()) is not None
+            time.sleep(0.02)
+        assert refused, "the other copy was never seen"
         with pytest.raises(UpdateError, match="Another copy of Yu'lon"):
             _prepared(install)
     finally:

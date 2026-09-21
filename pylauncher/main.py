@@ -8,6 +8,7 @@ catalog view are remembered and get a tab. Everything else lives in `yulon/`.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sys
@@ -341,19 +342,23 @@ def announce_previous_update(
     return True
 
 
-HELPER_STAMP_SECONDS = 10.0
+HELPER_STAMP_SECONDS = 30.0
 """How long the app waits for the helper to say it is running, before refusing to close.
 
-Generous against what the helper does before it stamps — validate its
-arguments and create one file — and short enough that a player is not left
-looking at a frozen window. The **cost of it being too short** is that the app
-stays open and says so, which is the safe side; the cost of not waiting at all
-was measured on the Windows 11 gate of 2026-09-21, where the app closed for a
-helper that had already exited.
+**Thirty and not ten** (round 4): a cold Windows box scanning a freshly written
+`.ps1` can take longer than ten seconds to get PowerShell as far as its first
+line, and the price of being too short is a refusal the player has to read and
+act on. A long window is only safe because the app now STANDS THE HELPER DOWN
+when it gives up — without that, a slow helper became an orphan that swapped
+unasked. The cost of not waiting at all was the Windows 11 gate of 2026-09-21,
+where the app closed for a helper that had already exited.
 """
 
+STAND_DOWN_SECONDS = 5.0
+"""How long the app waits for a helper it has stood down to actually exit."""
 
-def wait_for_helper(stamp: Path, *, seconds: float = HELPER_STAMP_SECONDS) -> bool:
+
+def wait_for_helper(stamp: Path, *, seconds: float = HELPER_STAMP_SECONDS, holds: str = "") -> bool:
     """Wait for the helper's own "I am running" file. True if it appeared.
 
     A poll that keeps painting rather than a `sleep`: this runs on the GUI
@@ -365,13 +370,22 @@ def wait_for_helper(stamp: Path, *, seconds: float = HELPER_STAMP_SECONDS) -> bo
     """
     from PySide6.QtWidgets import QApplication
 
+    def arrived() -> bool:
+        # **The nonce, not merely the file** (round 4). Nothing used to remove
+        # a stamp, so one left by a helper that had given up made this answer
+        # True in 0.04 s against a spawn that started nothing at all.
+        try:
+            return holds in stamp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+
     end = time.monotonic() + seconds
     while time.monotonic() < end:
-        if stamp.exists():
+        if arrived():
             return True
         QApplication.processEvents()
         time.sleep(0.05)
-    return stamp.exists()
+    return arrived()
 
 
 def downloads_dir() -> Path:
@@ -404,7 +418,14 @@ def build_window() -> object:
     from yulon.selfupdate.fetch import Cancelled
     from yulon.selfupdate.layout import WORK_NAMES as work_names_const
     from yulon.selfupdate.layout import discard_ours, helper_stamp, other_instances
-    from yulon.selfupdate.swap import ensure_script, staging_is_intact, start_helper
+    from yulon.selfupdate.swap import (
+        arm,
+        clear_stamp,
+        end_helper,
+        staging_is_intact,
+        stand_down,
+        start_helper,
+    )
     from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
@@ -948,7 +969,8 @@ def build_window() -> object:
                 exe, os.getpid()
             )
             self.apply: Callable[..., object] = apply_update
-            self.start_helper: Callable[..., None] = start_helper
+            self.start_helper: Callable[..., Any] = start_helper
+            self.end_helper: Callable[[Any], None] = end_helper
             # `window.close()` answers a bool; nothing here reads it, and
             # typing the seam as taking none and returning one would make a
             # test's `lambda: closed.append(1)` the odd one out.
@@ -957,9 +979,13 @@ def build_window() -> object:
             self.make_progress: Callable[[str], Any] = lambda version: UpdateProgressDialog(
                 version, parent=window
             )
-            self.await_helper: Callable[[Path], bool] = wait_for_helper
+            self.await_helper: Callable[[Path, str], bool] = lambda stamp, nonce: (
+                wait_for_helper(stamp, holds=nonce)
+            )
             self._progress: Any = None
             self._installing = False
+            self._restarting = False
+            """One restart attempt at a time; a re-entrant click made two helpers."""
             self._ready: Any = None
             """A staged update whose close gate refused. Pressing again replaces it."""
 
@@ -1149,7 +1175,7 @@ def build_window() -> object:
                     f"Yu'lon can update when this is finished: {reason}",
                 )
                 return
-            if self._installing:
+            if self._installing or self._restarting:
                 return
             self._installing = True
             version = str(offered.latest)
@@ -1219,32 +1245,30 @@ def build_window() -> object:
                 logger.info(f"self-update: could not discard the staged build: {exc}")
 
         def restart_into(self, ready: ReadyToRestart) -> None:
-            """Start the helper and close — **once the helper has proved it is alive**.
+            """Start the helper and close — **once that helper has proved it is ours**.
 
-            Three questions are asked here, in this order, and each of them was
-            paid for:
+            The handshake, in order, and every step of it was paid for:
 
-            1. **is anything refusing a close now?** The download, the unpack
-               and the smoke test take minutes, and a player can start a
-               database import in them; the first ask said nothing about now
-               (cold review 1).
-            2. **is the staged build still there?** A second copy of Yu'lon, a
-               `/tmp` sweep or the player can have taken it away since. The app
-               used to close for a helper that then exited 64, and nothing
-               reopened it (round 3).
-            3. **did the helper actually start?** It writes a stamp inside the
-               marked backup before it waits for anything, and this waits for
-               that stamp. **On the Windows 11 gate of 2026-09-21 the helper
-               was spawned and never ran** — `DETACHED_PROCESS` leaves
-               PowerShell 5.1 without a console — and the app closed anyway,
-               leaving a shut launcher, an un-swapped folder and no word. The
-               flags are fixed; this is the thing that makes the fix
-               unnecessary for safety.
+            1. **one attempt at a time.** `_restarting` is set for the whole of
+               this, because a click delivered inside `processEvents()` used to
+               re-enter and produce two helpers on one install (round 4, M3).
+            2. **is anything refusing a close now?** The work takes minutes and
+               a player can start a database import in them (cold review 1).
+            3. **is the staged build still there, and is it ours?** A second
+               copy, a `/tmp` sweep or the player can have taken it away.
+            4. **arm**: a fresh nonce and a script named after it, written now.
+            5. **start**, keeping the handle, and wait for a stamp holding THIS
+               nonce. A stale stamp answers nothing (round 4, M2).
+            6. **no stamp → stand down**: write the stand-down file, terminate
+               the process we started, wait for it, and only then speak. An
+               orphan used to swap twelve seconds after the app had told the
+               player that nothing had changed (round 4, M1).
             """
+            if self._restarting:
+                logger.info("self-update: a restart is already under way; ignoring")
+                return
             progress = self._progress
             if progress is not None and progress.cancel_event.is_set():
-                # Pressed while this very slot was queued. The helper has not
-                # been started, so there is nothing to undo but the staging.
                 self.discard_staged()
                 return
             reason = self.refusal() or self._another_copy_is_open()
@@ -1259,36 +1283,66 @@ def build_window() -> object:
                 return
             install = self.current_install()
             gone = staging_is_intact(install, ready.plan)
-            if gone is not None or not ensure_script(ready.plan):
+            if gone is not None:
                 self._ready = None
                 self.discard_staged()
                 logger.info(f"self-update: not closing; the staged update is gone ({gone})")
                 update_bar.show_message(
-                    "The update Yu'lon had prepared is no longer there "
-                    f"({gone or 'its installer could not be written'}). Nothing was changed — "
-                    "press Update now again.",
+                    f"The update Yu'lon had prepared is no longer there ({gone}). Nothing was "
+                    "changed — press Update now again.",
                     keep_details=True,
                 )
                 return
-            self.start_helper(ready.plan)
-            if not self.await_helper(helper_stamp(install)):
-                # **Never close on faith.** The helper did not say it was
-                # running, so whatever happens next, it is not going to be an
-                # update — and a launcher that closes itself for nothing is the
-                # worst outcome there is. The staged build is kept, so pressing
-                # again costs no download.
+            self._restarting = True
+            try:
+                self._try_to_restart(install, ready)
+            finally:
+                self._restarting = False
+
+        def _try_to_restart(self, install: Install, ready: ReadyToRestart) -> None:
+            """The half of `restart_into` that owns a running helper."""
+            clear_stamp(install)
+            try:
+                armed = arm(ready.plan)
+            except Exception as exc:  # noqa: BLE001 - a refusal, not a crash
+                logger.warning(f"self-update: could not write the helper: {exc}")
                 self._ready = ready
-                logger.warning("self-update: the helper did not report in; not closing")
                 update_bar.show_message(
-                    "Yu'lon could not start the installer, so nothing was changed. "
-                    "Press Update now again, or install the new version by hand from the "
-                    "release page.",
+                    f"Yu'lon could not write the installer ({exc}), so nothing was changed.",
                     keep_details=True,
                 )
                 return
-            self._ready = None
-            logger.info(f"self-update: the helper is running; closing to install {ready.version}")
-            self.close_window()
+            attempt = dataclasses.replace(ready, plan=armed)
+            try:
+                handle = self.start_helper(armed)
+            except Exception as exc:  # noqa: BLE001 - AppLocker, a missing shell, a full disk
+                # **Nothing may escape this slot.** It runs on the GUI thread
+                # from a queued signal, where an exception is a traceback
+                # nobody sees and an app that has done half an update.
+                logger.warning(f"self-update: the installer would not start: {exc}")
+                self._ready = ready
+                update_bar.show_message(
+                    f"Yu'lon could not start the installer ({exc}), so nothing was changed. "
+                    "You can install the new version by hand from the release page.",
+                    keep_details=True,
+                )
+                return
+            if self.await_helper(helper_stamp(install), armed.nonce):
+                self._ready = None
+                logger.info(f"self-update: the helper is running; closing for {ready.version}")
+                self.close_window()
+                return
+            # **Never close on faith, and never leave one running.**
+            stand_down(install, armed)
+            self.end_helper(handle)
+            self._ready = attempt
+            logger.warning("self-update: the helper did not report in; not closing")
+            update_bar.show_message(
+                "Yu'lon could not start the installer, so nothing was changed. "
+                "Press Update now again, or install the new version by hand from the "
+                "release page.",
+                keep_details=True,
+            )
 
         def _another_copy_is_open(self) -> str | None:
             """Is a second Yu'lon running out of this same install?
