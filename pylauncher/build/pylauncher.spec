@@ -109,6 +109,11 @@ a = Analysis(
     # the bundle and pull main.py in a second time as a library module named
     # `main` beside the real entry point (review, 2026-08-28). The frozen exe IS
     # main.py and never runs `-m yulon`.
+    # Still true now that `sys.path.insert` above makes collect_submodules
+    # actually collect: `excludes` beats a hidden import. Measured on the
+    # published v0.8.691-fixtest Linux bundle, 2026-09-21 - `yulon.__main__` 0
+    # occurrences in the PYZ table of contents, `yulon._build_version` 1,
+    # `yulon.update_state` 1.
     excludes=[
         "tkinter",
         "PySide6.QtWebEngineCore",

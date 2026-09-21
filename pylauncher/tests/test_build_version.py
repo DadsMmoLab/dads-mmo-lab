@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import subprocess
 import sys
 import types
@@ -75,7 +76,11 @@ def test_deriving_a_version_writes_nothing(
     assert not target.exists()
 
     assert stamp_version.main(["Yulon", "--out", str(target), "--derive"]) == 0
-    assert capsys.readouterr().out == "\n", "a branch derives an empty line, not the word None"
+    assert capsys.readouterr().out == "", (
+        "a branch derives NOTHING - not the word None, and not a blank line: the "
+        "release job tests the captured text for emptiness, and a line ending is "
+        "not nothing once a Windows shell has been through it"
+    )
     assert not target.exists()
 
 
@@ -141,8 +146,13 @@ def test_the_app_can_say_its_version_without_a_window() -> None:
     """
     import yulon
 
+    # `-X importtime` writes one stderr line per module actually imported, which
+    # is the only way to ask "did this run reach Qt" and get an answer. The
+    # first version of this test asserted `"PySide6" not in stderr` - and
+    # importing PySide6 prints nothing to stderr, so the flag could have been
+    # moved below the Qt imports and this would have stayed green.
     done = subprocess.run(
-        [sys.executable, "main.py", "--version"],
+        [sys.executable, "-X", "importtime", "main.py", "--version"],
         cwd=Path(__file__).resolve().parents[1],
         capture_output=True,
         text=True,
@@ -151,4 +161,13 @@ def test_the_app_can_say_its_version_without_a_window() -> None:
     )
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == yulon.__version__
-    assert "PySide6" not in done.stderr
+
+    imported = [line for line in done.stderr.splitlines() if line.startswith("import time:")]
+    assert (
+        len(imported) > 10
+    ), f"no import trace to read; -X importtime is not working:\n{done.stderr}"
+    heavy = [line for line in imported if re.search(r"\b(PySide6|pygame|pydantic)\b", line)]
+    assert not heavy, (
+        "`--version` has to answer on a runner with no display and no Qt "
+        "libraries, and this run imported:\n" + "\n".join(heavy)
+    )

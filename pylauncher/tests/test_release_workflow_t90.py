@@ -216,11 +216,49 @@ def test_the_version_check_cannot_fail_a_tag() -> None:
 
     Three ways it could have: a non-zero exit from the step, `set -e` catching a
     bundle that will not start, and the job stopping on the step's own result.
+
+    The two shell assertions are patterns and not literals because the literals
+    let the very things they forbid straight through: `"set -euo" not in step`
+    passed with `set -e`, and `"exit 1" not in step` passed with `exit 2`.
     """
     step = _step_with(BUILD_JOB, "--version")
     assert "continue-on-error: true" in step
-    assert "exit 1" not in step
-    assert "set -euo" not in step, "-e would fail the build on a bundle that cannot start"
+    assert not re.search(r"\bexit [1-9]", step), "any non-zero exit fails the build job"
+    for line in re.findall(r"^\s*set [-+]\S+", step, re.M):
+        assert "e" not in line.split()[1].lstrip(
+            "-+"
+        ), f"{line.strip()!r} would fail the build on a bundle that cannot start"
+
+
+def test_asking_the_bundle_cannot_hang_the_job() -> None:
+    """A windowed exe that throws puts up a MODAL box nothing on a runner closes.
+
+    The step is the first thing that ever runs the bundle on Windows and macOS.
+    Without a bound it would sit there until the six-hour job limit, and a
+    cancelled job never reaches "Attach to the GitHub Release" - so a hang here
+    costs the tag its artifacts, which `continue-on-error` does NOT rescue,
+    because a timeout is not an error the step returns.
+
+    Two bounds, because the inner one is what keeps the rest of the step
+    running and the outer one is what catches anything the inner one misses.
+    """
+    step = _step_with(BUILD_JOB, "--version")
+    assert re.search(r"^\s*timeout-minutes: \d+$", step, re.M), "the step needs its own limit"
+    # `timeout(1)` is coreutils and macOS does not ship it, so the wait is
+    # written with kill/sleep, which every one of the three runners has.
+    assert "timeout " not in step, "coreutils timeout is not on the macOS runner"
+    assert "kill -0" in step and "kill -9" in step
+
+
+def test_a_windows_carriage_return_is_not_a_version() -> None:
+    """`python --derive` prints CRLF on Windows and `$(...)` strips only the LF.
+
+    A branch build then compared "0.8.70-Public" with "\\r", found it non-empty,
+    and warned that the stamp had not reached the bundle. Tag builds passed only
+    because both sides carried the same stray byte.
+    """
+    step = _step_with(BUILD_JOB, "--version")
+    assert step.count("tr -d '\\r'") == 2, "strip it from what the bundle says AND from the tag"
 
 
 def test_the_version_is_checked_after_the_build_and_before_packaging() -> None:

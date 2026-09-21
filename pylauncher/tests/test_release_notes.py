@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -166,6 +167,96 @@ def test_the_last_number_orders_as_a_decimal_fraction() -> None:
     assert rn.version_key("v0.9.0") > rn.version_key("v0.8.99")
 
 
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "v0.8.7.1",  # a fourth number is not this scheme; reading it as .7 is a lie
+        "v1.2.3.4-Public",
+        "v0.8.7.",
+        "v0.8",
+        "0.8",
+        "junk",
+        "",
+        "v1.2.3456789012-Public",  # eleven digits in the last number
+        "v0.8.9999999999",  # ten: the cap REFUSES, it does not trim to nine
+        "v1234567890.2.3-Public",
+        "v" + "9" * 5000 + ".0.0",  # int() of this raised, before the cap
+        "v0.8." + "9" * 5000,
+    ],
+)
+def test_what_is_not_a_version_keys_to_nothing(tag: str) -> None:
+    assert rn.version_key(tag) is None
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("v0.8.7-Public", (0, 8, Fraction(7, 10))),
+        ("V0.8.7-Public", (0, 8, Fraction(7, 10))),
+        ("v0.8.05", (0, 8, Fraction(1, 20))),
+        ("v0.8.65-Public", (0, 8, Fraction(13, 20))),
+        ("v0.6.59Public", (0, 6, Fraction(59, 100))),
+    ],
+)
+def test_the_key_is_the_one_the_app_uses(tag: str, expected: tuple[int, int, Fraction]) -> None:
+    """These exact values are compared against `yulon/update.py`'s own key.
+
+    The two trees carry the same rule in two files - the app cannot import from
+    `build/`, and this script must not import from `yulon` - so the pin that
+    keeps them honest lives over there and reads this function by path. Any
+    drift here, including a raise, reads as disagreement there.
+    """
+    assert rn.version_key(tag) == expected
+
+
+@pytest.mark.parametrize(
+    "rubbish",
+    [
+        "",
+        "v",
+        "v.",
+        "v..",
+        "v0..7",
+        "v-1.2.3",
+        "v0.8.7\n",
+        "\x00",
+        "vv0.8.7",
+        "v1." + "2" * 4300 + ".3",
+    ],
+)
+def test_no_string_makes_the_key_raise(rubbish: str) -> None:
+    """A tag list is whatever `git tag` returns, and a release is never refused
+    over its notes - nor may a raise here read as disagreement with the app.
+
+    "Does not raise", not "is None": the two are different claims and only the
+    first one is being made here.
+    """
+    assert rn.version_key(rubbish) is None or isinstance(rn.version_key(rubbish), tuple)
+
+
+def test_surrounding_whitespace_is_not_part_of_a_tag() -> None:
+    """`git tag --list` output is split into lines, and a line can carry a `\\r`
+    from a repository written on Windows; the key strips before it matches, and
+    `pick_previous` strips again before it returns a name."""
+    assert rn.version_key(" v0.8.7-Public \n") == rn.version_key("v0.8.7-Public")
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["v0.8.7-Public", "V0.8.7-Public", "0.8.7", "v0.6.59Public", "v0.8.7-Public-rc1"],
+)
+def test_what_is_a_version_keys_to_something(tag: str) -> None:
+    """A capital V too: `PUBLIC_TAG` is case-insensitive, so a `V` tag reached
+    `pick_previous` and was then dropped for keying to None, without a word."""
+    assert rn.version_key(tag) is not None
+
+
+def test_a_leading_zero_is_part_of_the_fraction() -> None:
+    """`.05` is five hundredths, so it sorts BELOW `.1`. Intended, not an accident."""
+    assert rn.version_key("v0.8.05") < rn.version_key("v0.8.1")  # type: ignore[operator]
+    assert rn.version_key("v0.8.05") != rn.version_key("v0.8.5")
+
+
 def test_previous_across_the_real_tag_history() -> None:
     """The case that made this a bug: 0.8.7 came after 0.8.65, not before it."""
     assert rn.pick_previous(REAL_TAGS, "v0.8.7-Public") == "v0.8.65-Public"
@@ -177,6 +268,19 @@ def test_previous_across_the_real_tag_history() -> None:
 def test_a_version_equal_to_this_one_is_not_a_previous_release() -> None:
     """`.70` and `.7` are the same version, so 0.8.70's previous is 0.8.65."""
     assert rn.pick_previous(REAL_TAGS, "v0.8.70-Public") == "v0.8.65-Public"
+
+
+def test_two_tags_for_one_version_resolve_the_same_way_every_time() -> None:
+    """Two spellings of one release can both be tagged; the answer must not drift.
+
+    Not hypothetical: upstream's `v0.8.7-Public` is the commit whose
+    `__version__` reads "0.8.70-Public". Whichever is picked, the notes are
+    measured against the same release, so the tie is broken by taking the
+    lexicographically last tag - deterministic, and cheap to reason about.
+    """
+    both = ["v0.8.4-Public", "v0.8.7-Public", "v0.8.70-Public"]
+    assert rn.pick_previous(both, "v0.8.71-Public") == "v0.8.70-Public"
+    assert rn.pick_previous(list(reversed(both)), "v0.8.71-Public") == "v0.8.70-Public"
 
 
 def _git(answers: dict[tuple[str, ...], str]) -> Callable[[list[str]], str]:

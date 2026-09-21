@@ -42,7 +42,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     version = version_from_ref(args.ref)
     if args.derive:
-        print(version or "")
+        # Nothing at all for a branch, not a blank line: the release job decides
+        # whether there is a tag to compare against by testing the captured text
+        # for emptiness, and `$(...)` strips a trailing newline but a Windows
+        # `\r` survives it - a blank line there read as "there is a tag", and the
+        # step warned about a stamp that was never supposed to exist.
+        if version is not None:
+            print(version)
         return 0
     if version is None:
         print(f"{args.ref!r} is not a version tag: no stamp written")

@@ -19,7 +19,24 @@ from fractions import Fraction
 from pathlib import Path
 
 PUBLIC_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)-public$", re.IGNORECASE)
-_ANY_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
+
+_ANY_VERSION = re.compile(r"^[vV]?(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?![\d.])")
+"""Three numbers, and the third one ENDS there.
+
+`(?![\\d.])` because without it `v0.8.7.1` read as .7 and `v1.2.3456789012`
+read as its first nine digits - a version this scheme does not define, answered
+with a number rather than a refusal. A non-digit after the third number is
+fine and must stay so: `v0.6.59Public`, `v0.8.7-Public` and `v0.8.7-Public-rc1`
+all key, and it is `PUBLIC_TAG` - not this - that decides which of them counts
+as a release.
+
+`[vV]` because `PUBLIC_TAG` is case-insensitive: a `V0.9.0-Public` tag passed
+as a release and then keyed to None, and was dropped without a word.
+
+`{1,9}` because `int()` refuses a string of more than 4300 digits outright
+(measured: `ValueError: Exceeds the limit`), and a release is never refused
+over its notes. Nine digits is far past any version anyone will write.
+"""
 _DEFAULT_HEADING = "New"
 
 RunGit = Callable[[list[str]], str]
@@ -91,6 +108,10 @@ def version_key(tag: str) -> tuple[int, int, Fraction] | None:
     `Fraction`, not `float`: the comparison is exact, and two tags that mean
     the same version compare equal rather than nearly equal.
 
+    A LEADING ZERO IS PART OF THE FRACTION, and that is the point rather than a
+    quirk: `.05` is five hundredths and sorts below `.1`, where reading the
+    digits as an integer would put it above.
+
     KNOWN COST, not fixed: 0.8.10 would order BELOW 0.8.9, because 10/100 is
     less than 9/10. No tag in this repository has ever been written that way,
     and the scheme the owner picked is the one the tags are in.
@@ -103,7 +124,16 @@ def version_key(tag: str) -> tuple[int, int, Fraction] | None:
 
 
 def pick_previous(tags: Iterable[str], tag: str) -> str | None:
-    """The highest-versioned -Public tag whose version is below `tag`'s, or None."""
+    """The highest-versioned -Public tag whose version is below `tag`'s, or None.
+
+    Two tags can spell one version, and one pair already does: upstream's
+    `v0.8.7-Public` is commit 3534587b, whose `__version__` reads
+    "0.8.70-Public" (measured 2026-09-21). To whoever cut it those are one
+    release, which is the decimal rule stated from the other end. So the tie is
+    broken by `max` falling through to the tag string - the lexicographically
+    last one wins, deterministically - and which of them is named does not
+    change the notes, because the changelog is read at a commit either way.
+    """
     mine = version_key(tag)
     if mine is None:
         return None
