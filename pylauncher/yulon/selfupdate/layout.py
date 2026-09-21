@@ -67,8 +67,28 @@ and a player who had already saved that same release's archive there got a
 WORK_NAMES = (NEW_NAME, OLD_NAME, DOWNLOAD_NAME)
 """Everything `discard_ours` will even consider. Anything else raises."""
 
-RESERVED_NAMES = frozenset({*WORK_NAMES, MARKER_NAME})
+RESERVED_NAMES = frozenset({*WORK_NAMES, MARKER_NAME, "helper-started", "helper.log"})
 """Names that can never be a build ENTRY, so a swap can never move one."""
+
+HELPER_STAMP = "helper-started"
+"""Written inside `.yulon-old` by the helper, as its first act after validating.
+
+**The app does not close until this exists** (Windows gate, 2026-09-21). On
+that box the helper was spawned and never ran — `DETACHED_PROCESS` leaves
+PowerShell 5.1 with no console and it exits at once — and the app closed
+anyway. The player was left with a shut launcher, an un-swapped folder and not
+a word. A file the helper writes itself is the only thing that can prove it is
+alive; everything else is faith in a `Popen` that returned.
+"""
+
+HELPER_LOG = "helper.log"
+"""A few plain lines the helper appends as it goes, inside the marked backup dir.
+
+The Windows gate could only guess at what had happened because the helper left
+no trace at all. It is inside `.yulon-old`, so it is removed with the rest by a
+marker-gated delete, and the next start quotes its last line when it reports a
+failure.
+"""
 
 APPIMAGE_ENTRY = "yulon.AppImage"
 """What the staged AppImage is called inside its work directory.
@@ -294,6 +314,31 @@ def read_marker(install: Install, name: str) -> Marker | None:
         return None
 
 
+def helper_stamp(install: Install) -> Path:
+    """Where the helper says "I am running": `<.yulon-old>/helper-started`."""
+    return work_dir(install, OLD_NAME) / HELPER_STAMP
+
+
+def helper_log_tail(install: Install) -> str:
+    """The last line the helper wrote, or `""`. Never raises.
+
+    Quoted back to the player when the next start has to report a failure — on
+    the Windows gate there was nothing at all to quote, which is why the log
+    exists.
+    """
+    try:
+        lines = [
+            line.strip()
+            for line in (work_dir(install, OLD_NAME) / HELPER_LOG)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return ""
+    return lines[-1][:200] if lines else ""
+
+
 def is_empty_work_dir(install: Install, name: str) -> bool:
     """An existing work dir holding nothing, or nothing but a marker file.
 
@@ -306,7 +351,9 @@ def is_empty_work_dir(install: Install, name: str) -> bool:
     """
     path = work_dir(install, name)
     try:
-        return path.is_dir() and all(p.name == MARKER_NAME for p in path.iterdir())
+        return path.is_dir() and all(
+            p.name in (MARKER_NAME, HELPER_STAMP, HELPER_LOG) for p in path.iterdir()
+        )
     except OSError:
         return False
 

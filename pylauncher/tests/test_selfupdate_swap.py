@@ -253,7 +253,7 @@ def test_an_unmarked_backup_folder_stops_the_update_rather_than_being_deleted(
     (theirs / "notes.txt").write_text("mine", encoding="utf-8")
     _mark(install, layout.NEW_NAME)
 
-    with pytest.raises(UpdateError, match="did not put it there"):
+    with pytest.raises(UpdateError, match="cannot vouch for"):
         plan_swap(
             install,
             layout.work_dir(install, layout.NEW_NAME),
@@ -866,10 +866,17 @@ def test_the_posix_helper_never_iterates_an_unquoted_variable() -> None:
     """
     from yulon.selfupdate.swap import POSIX_FILE_HELPER, POSIX_FOLDER_HELPER
 
+    folder_loops = [
+        line.strip() for line in POSIX_FOLDER_HELPER.splitlines() if line.strip().startswith("for ")
+    ]
+    assert folder_loops, "the folder helper has no loops; this pin is reading the wrong text"
     for script in (POSIX_FOLDER_HELPER, POSIX_FILE_HELPER):
         loops = [line.strip() for line in script.splitlines() if line.strip().startswith("for ")]
         for loop in loops:
-            assert loop == 'for e in "$@"; do', f"a loop iterates something else: {loop}"
+            assert loop in (
+                'for e in "$@"; do',
+                'for f in "$@"; do',
+            ), f"a loop iterates something else: {loop}"
         assert (
             "$moved" not in script and "$placed" not in script
         ), "the helper is rebuilding a list into a string again"
@@ -902,3 +909,131 @@ def test_the_helper_refuses_a_name_that_would_word_split_rather_than_quoting_it(
             helper.kill()
             helper.wait(timeout=HELPER_DEADLINE)
     assert not witness.exists()
+
+
+def test_the_real_helper_says_it_is_running_before_it_waits(tmp_path: Path) -> None:
+    """**The Windows gate's fix, proved on the shell that can be run here.**
+
+    The app does not close until this file exists. On Windows 11 the helper was
+    spawned and never ran, and the app closed anyway; a file the helper writes
+    itself is the only thing that can prove otherwise.
+
+    Written BEFORE the wait loop, so it is there while the app is still open —
+    which is the whole point.
+    """
+    install, target, witness = _ready_to_swap(tmp_path)
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        plan = plan_swap(
+            install,
+            layout.work_dir(install, layout.NEW_NAME),
+            pid=alive.pid,
+            script_dir=tmp_path,
+            entries=("yulon", "_internal"),
+            platform_id="linux",
+        )
+        argv = list(plan.argv)
+        argv[2] = "20"
+        helper = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+        try:
+            stamp = layout.helper_stamp(install)
+            _until(stamp.exists, "the helper stamped before waiting for the app")
+            assert not witness.exists(), "it swapped before the app had gone"
+        finally:
+            helper.kill()
+            helper.wait(timeout=HELPER_DEADLINE)
+    finally:
+        alive.kill()
+        alive.wait(timeout=HELPER_DEADLINE)
+    assert alive.poll() is not None
+
+
+def test_a_refused_helper_never_says_it_is_running(tmp_path: Path) -> None:
+    """The stamp means "I validated my arguments and I am waiting", not "I was started"."""
+    install, target, _witness = _ready_to_swap(tmp_path)
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=_a_dead_pid(),
+        script_dir=tmp_path,
+        entries=("yulon", "_internal"),
+        platform_id="linux",
+    )
+    argv = list(plan.argv)
+    argv[3] = "abc"  # a pid the helper refuses
+
+    helper = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+    assert helper.wait(timeout=HELPER_DEADLINE) == 64
+    assert not layout.helper_stamp(install).exists(), "a refused helper claimed to be running"
+
+
+def test_the_helper_leaves_a_log_of_what_it_did(tmp_path: Path) -> None:
+    """The Windows gate could only guess, because the helper left no trace at all."""
+    install, target, witness = _ready_to_swap(tmp_path)
+    app = subprocess.Popen(["sleep", "0.3"])
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=app.pid,
+        script_dir=tmp_path,
+        entries=("yulon", "_internal"),
+        platform_id="linux",
+    )
+    _run_helper(plan, app)
+    _until(lambda: witness.exists(), "the new build was relaunched")
+
+    log = (layout.work_dir(install, layout.OLD_NAME) / layout.HELPER_LOG).read_text("utf-8")
+    assert "started pid=" in log
+    assert "moved out yulon" in log and "brought in yulon" in log
+    assert "relaunching" in log
+    assert layout.helper_log_tail(install).startswith("relaunching")
+
+
+def test_the_two_halves_must_name_the_same_set(tmp_path: Path) -> None:
+    """Otherwise phase 1 moves one set out and phase 2 brings another in (round 3, F8)."""
+    install, target, witness = _ready_to_swap(tmp_path)
+    before = _hash_tree(target, ignoring={layout.OLD_NAME})
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=_a_dead_pid(),
+        script_dir=tmp_path,
+        entries=("yulon", "_internal"),
+        platform_id="linux",
+    )
+    argv = list(plan.argv)
+    assert argv[7:] == ["yulon", "_internal", "_internal", "yulon"], "the precondition"
+    argv[9] = "yulon"  # the halves now name {yulon,_internal} and {yulon,yulon}
+
+    helper = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+    assert helper.wait(timeout=HELPER_DEADLINE) == 64
+    assert _hash_tree(target, ignoring={layout.OLD_NAME}) == before
+    assert not witness.exists()
+    assert not plan.script.exists(), "a refused helper left itself in the temp dir"
+
+
+def test_a_plan_can_be_verified_and_its_script_written_again(tmp_path: Path) -> None:
+    """`/tmp` gets swept, and a second copy of Yu'lon can clear the work dirs (round 3, F1)."""
+    from yulon.selfupdate.swap import ensure_script, staging_is_intact
+
+    install, target, _witness = _ready_to_swap(tmp_path)
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=_a_dead_pid(),
+        script_dir=tmp_path,
+        entries=("yulon", "_internal"),
+        platform_id="linux",
+    )
+    assert staging_is_intact(install, plan) is None
+
+    plan.script.unlink()
+    assert ensure_script(plan) is True
+    assert plan.script.exists()
+    assert plan.script.read_text(encoding="utf-8") == plan.body
+
+    (layout.work_dir(install, layout.NEW_NAME) / "_internal").rename(tmp_path / "taken")
+    assert staging_is_intact(install, plan) == "part of it (_internal) is gone"
+
+    layout.discard_ours(install, layout.NEW_NAME)
+    assert staging_is_intact(install, plan) == "the files it had prepared are gone"

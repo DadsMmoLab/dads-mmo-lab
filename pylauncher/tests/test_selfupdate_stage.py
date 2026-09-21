@@ -137,7 +137,7 @@ def test_preparing_refuses_a_staging_folder_this_app_did_not_make(tmp_path: Path
     theirs = install.target / layout.NEW_NAME
     theirs.mkdir()
     (theirs / "notes.txt").write_text("mine", encoding="utf-8")
-    with pytest.raises(UpdateError, match="did not put it there"):
+    with pytest.raises(UpdateError, match="cannot vouch for"):
         _prepared(install)
     assert (theirs / "notes.txt").read_text(encoding="utf-8") == "mine"
 

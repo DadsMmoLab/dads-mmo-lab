@@ -138,8 +138,10 @@ def prepare(install: Install, version: str, *, pid: int) -> Path:
         path = layout.work_dir(install, name)
         if path.exists() and not layout.discard_ours(install, name):
             raise UpdateError(
-                f"There is already a {path.name} in your Yu'lon folder and Yu'lon did not "
-                "put it there. Move or rename it, then try again."
+                f"There is a {path.name} folder beside Yu'lon that this copy cannot vouch "
+                "for — it was left by an earlier update, or by another copy of Yu'lon, and "
+                "Yu'lon will not delete a folder it cannot prove it made. Move or rename it, "
+                "then try again."
             )
     for name in (layout.NEW_NAME, layout.DOWNLOAD_NAME):
         _make_work_dir(install, name, version, pid)

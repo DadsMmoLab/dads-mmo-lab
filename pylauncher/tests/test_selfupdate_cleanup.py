@@ -56,7 +56,7 @@ def test_a_finished_swap_is_tidied_up_and_named(tmp_path: Path) -> None:
     outcome = finish_previous_update(install, running=NEW_VERSION)
 
     assert outcome.removed is True
-    assert outcome.version == NEW_VERSION
+    assert outcome.version == "0.8.70-Public", "one spelling of the version"
     assert outcome.problem == ""
     assert not old.exists()
 
@@ -104,23 +104,26 @@ def test_a_backup_from_an_update_that_did_not_happen_is_the_rollback_arm(
     outcome = finish_previous_update(install, running=OLD_VERSION)
 
     assert outcome.removed is False
-    assert "could not be installed" in outcome.problem
-    assert not old.exists(), "the backup was kept after the install was proved whole"
+    # The backup still holds a copy of the build, so it is the ONLY copy of
+    # what is in it and nothing here deletes it (round 3, F6).
+    assert "is not installed" in outcome.problem
+    assert old.exists(), "the only copy of the old build was deleted"
 
 
-def test_a_swap_that_stopped_part_way_is_put_right_rather_than_tidied_away(
+def test_a_swap_that_stopped_part_way_is_reported_and_nothing_is_touched(
     tmp_path: Path,
 ) -> None:
-    """A helper killed between two moves. The app restores what the backup holds.
+    """A helper killed between two moves. **The app says so and changes nothing.**
 
-    Reported AND repaired: the entries the marker names come back out of
-    `.yulon-old`, so the install ends at the version that was running, and the
-    player is told the update did not finish rather than left to read it out
-    of a folder listing.
+    It used to restore the entries here, inside the live process, renaming the
+    `_internal` that process was executing out of — with no undo of its own if
+    the second rename failed. Removed on the lead's decision (2026-09-21); the
+    whole-tree proof lives in `test_selfupdate_recovery.py`, which builds every
+    half-done state and hashes the install before and after.
     """
     install = _install(tmp_path)
     assert install.target is not None
-    _a_finished_swap(install)
+    old = _a_finished_swap(install)
     # `_internal` never arrived: the helper was killed after the executable.
     (install.target / "_internal").rmdir()
 
@@ -128,17 +131,17 @@ def test_a_swap_that_stopped_part_way_is_put_right_rather_than_tidied_away(
 
     assert outcome.removed is False
     assert "did not finish" in outcome.problem
-    assert NEW_VERSION in outcome.problem
-    assert (install.target / "_internal").exists(), "the missing entry was not put back"
-    assert (install.target / "yulon").read_text(encoding="utf-8") == "the previous build"
-    for name in layout.WORK_NAMES:
-        assert not layout.work_dir(install, name).exists(), f"{name} was left behind"
+    assert "Nothing has been changed." in outcome.problem
+    assert layout.OLD_NAME in outcome.problem and layout.MARKER_NAME in outcome.problem
+    assert not (install.target / "_internal").exists(), "the app put an entry back"
+    assert old.exists(), "the way out was removed"
+    assert (old / "yulon").read_text(encoding="utf-8") == "the previous build"
 
 
 def test_a_half_finished_swap_whose_files_are_in_neither_place_is_left_alone(
     tmp_path: Path,
 ) -> None:
-    """The one case the app cannot fix: it says what is missing and touches nothing."""
+    """Nothing to say beyond what is missing, and nothing to do about it here."""
     install = _install(tmp_path)
     assert install.target is not None
     old = _a_finished_swap(install)
@@ -242,7 +245,7 @@ def test_the_running_version_and_the_marker_agree_on_a_real_release(tmp_path: Pa
     outcome = finish_previous_update(install, running=running)
 
     assert outcome.removed is True, "a real build would never have cleaned up"
-    assert outcome.version == tag
+    assert outcome.version == running, "one spelling of the version"
 
 
 @pytest.mark.parametrize(
@@ -281,10 +284,16 @@ def test_a_rollback_is_said_once_and_the_staged_build_goes_with_it(tmp_path: Pat
     staged = layout.work_dir(install, layout.NEW_NAME)
     (staged / "yulon").write_text("the build that was not installed", encoding="utf-8")
 
+    # An empty backup: the helper put EVERY entry back, which is what a
+    # completed rollback leaves. That is the state this arm is about — a
+    # backup that still holds one is the only copy of it, and is never deleted.
+    (old / "yulon").unlink()
+    (old / "_internal").rmdir()
+
     outcome = finish_previous_update(install, running=OLD_VERSION)
 
     assert outcome.removed is False
     assert "could not be installed" in outcome.problem
-    assert "v9.9.9-Public" in outcome.problem
+    assert "9.9.9-Public" in outcome.problem
     assert not staged.exists(), "a whole staged build was left beside the install"
     assert not old.exists()

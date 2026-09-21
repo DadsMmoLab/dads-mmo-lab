@@ -4,6 +4,34 @@ The helper moves the entries the build ships into `<target>/.yulon-old/` and
 leaves them there on purpose: it is the way back the README tells a player how
 to use by hand, and it has to survive until the new build has actually opened.
 
+**This module never moves a build entry.** It deletes marked working
+directories, and it reports. That is the whole of what it may do, and the rule
+is the same one the swap helper exists for: **the running app never renames its
+own files.**
+
+A version of this file did restore entries in place, and it was removed on the
+lead's decision (2026-09-21). Three things were wrong with it:
+
+* it ran **inside the live process** and renamed `<target>/_internal` — the
+  directory that process is executing out of. On Linux the rename succeeds and
+  every later lazy import reads the new tree through the old path; on Windows
+  the loaded files are locked and it fails.
+* it had **no undo of its own**: an `OSError` on the second entry returned
+  "could not put it right" with the first entry already swapped back, which is
+  the mixed-version install the whole design is built to prevent.
+* it was reachable **almost never**. Entries leave executable-FIRST and arrive
+  executable-LAST, so every kill point of a half-done swap leaves the target
+  with no executable at all — the app cannot start, so nothing here can run.
+  With an executable present the only states are untouched, swap complete, and
+  rollback complete. The in-place repair was the most dangerous kind of code
+  for the rarest state.
+
+So a half-done swap is **reported and nothing is touched**: the message says
+what is where and gives the one instruction `pylauncher/README.md` carries, and
+`tests/test_selfupdate_recovery.py` executes that instruction at every kill
+point. A player whose install has no executable has that path anyway, because
+the app cannot start to offer them anything else.
+
 **Three things are checked before anything is deleted** (cold review 1). The
 first version of this file deleted `<target>.old` on sight — which, for an
 install unpacked into a Downloads folder, was the player's own documents. Now:
@@ -23,7 +51,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
 from yulon import __version__
 from yulon.log import get_logger
@@ -53,10 +80,18 @@ def same_build(marker_version: str, running: str) -> bool:
     equal — a backup from an update to one is not the backup from an update to
     the other.
     """
-    return _without_v(marker_version) == _without_v(running)
+    return without_v(marker_version) == without_v(running)
 
 
-def _without_v(text: str) -> str:
+def without_v(text: str) -> str:
+    """One leading `v`/`V` off, for comparing and for SHOWING.
+
+    Public because the banner uses it too: the marker carries the feed's tag
+    (`v0.8.73-Public`) and the window title carries `__version__`
+    (`0.8.73-Public`), and the first live gate showed the two spellings side by
+    side on one screen — "Updated to Yu'lon v0.8.73-Public." over a title
+    saying 0.8.73-Public (round 3, F9). One spelling everywhere.
+    """
     stripped = text.strip()
     return stripped[1:] if stripped[:1] in ("v", "V") else stripped
 
@@ -78,6 +113,19 @@ class Outcome:
 def finish_previous_update(install: Install, *, running: str = __version__) -> Outcome:
     """Remove a `.yulon-old` this app made, for a swap that really finished.
 
+    **The only thing this can change on disk is a marked working directory**,
+    and it changes those only through `layout.discard_ours`. It never moves,
+    renames or restores an entry of the build — see the module docstring for
+    the three reasons the version that did was removed.
+
+    **`.yulon-old` is deleted on exactly two answers** (round 3): the swap
+    completed and the running build is the one the marker names, or the backup
+    holds no build entry at all (the helper's rollback moved everything back,
+    so there is nothing in there to lose). Every other state is REPORTED and
+    nothing is touched — including the one the third cold review measured,
+    where a player had restored two entries of three and `_rolled_back` deleted
+    the only remaining copy of the third while saying it had been put back.
+
     `running` is injected rather than read here so a test can say which build
     is open without pretending to be one.
     """
@@ -93,145 +141,121 @@ def finish_previous_update(install: Install, *, running: str = __version__) -> O
         # a folder they made is not news.
         logger.info(f"self-update: {old} carries no marker of ours; leaving it alone")
         return Outcome()
-    if not same_build(marker.to_version, running):
-        # We are running the version the update was FROM, so the swap did not
-        # finish. Either it was undone (every entry is in place — the rollback
-        # arm) or it stopped part-way (an entry is missing), and those are two
-        # different things to say and do.
-        if _entries_missing(install, marker):
-            return _repair(install, marker, _entries_missing(install, marker))
+    if _another_copy_owns_this(marker):
+        # **A second instance must not tidy up the first one's update** (round
+        # 3, F1). Measured there: instance B started while A held a staged
+        # build waiting for a close gate, removed both work dirs, and told the
+        # player the update had been rolled back — which was false, and left
+        # A's next press starting a helper that exited 64 against an app that
+        # had already closed.
+        logger.info(f"self-update: pid {marker.pid} is still updating here; leaving it alone")
+        return Outcome()
+    held = _entries_in_backup(install, marker)
+    if not held:
+        # The helper put everything back: there is nothing in the backup to
+        # lose, whatever the target is missing. **This branch comes before the
+        # missing-entries one on purpose**: a build that ships a THIRD entry
+        # for the first time names three in its marker, and an old install that
+        # never had the third would otherwise be told it was missing at every
+        # start, for ever (round 3).
         return _rolled_back(install, marker)
     missing = _entries_missing(install, marker)
     if missing:
-        return _repair(install, marker, missing)
+        # A swap that stopped part-way, or an install a player has partly put
+        # back by hand. Either way this is not a state to tidy from inside the
+        # process that is running out of it: say what is where and stop.
+        return _half_done(marker, missing)
+    if not same_build(marker.to_version, running):
+        # Everything is in place, the backup still holds a copy of the build,
+        # and this is not the version the update was to. Somebody has put the
+        # old build back by hand, or is running an older one. Nothing here is
+        # safe to delete and nothing needs moving.
+        return _not_installed(marker)
     if not layout.discard_ours(install, layout.OLD_NAME):
         logger.info(f"self-update: {old} is still there; leaving it for next time")
         return Outcome()
     # The staged copy has done its job too, and it is marked, so this can only
     # ever remove something this app made.
     layout.discard_ours(install, layout.NEW_NAME)
+    layout.discard_ours(install, layout.DOWNLOAD_NAME)
     logger.info(f"self-update: removed the previous build at {old}")
-    return Outcome(removed=True, version=marker.to_version)
+    return Outcome(removed=True, version=without_v(marker.to_version))
+
+
+def _another_copy_owns_this(marker: Marker) -> bool:
+    """Is the copy of Yu'lon that made this working directory still running?
+
+    The same liveness question `layout.another_copy_is_updating` asks before
+    staging, asked again at start — because the answer decides whether these
+    directories are rubbish or somebody's work in progress.
+    """
+    return marker.pid not in (0, os.getpid()) and layout.pid_is_alive(marker.pid)
+
+
+def _entries_in_backup(install: Install, marker: Marker) -> list[str]:
+    """Which of the entries the marker names are actually IN `.yulon-old`."""
+    backup = layout.work_dir(install, layout.OLD_NAME)
+    return [name for name in marker.entries if (backup / name).exists()]
 
 
 def _rolled_back(install: Install, marker: Marker) -> Outcome:
-    """The swap was undone, or never ran. Say so once, and take the staged copy away.
+    """The backup holds nothing: the helper put every entry back. Say so once.
 
-    Reached when the running build is NOT the one the marker names and every
-    entry is where it should be — the helper rolled back, or gave up. Until
-    cold review 2 this was silent and left a whole staged build (about 230 MB)
-    beside the install until the next update overwrote it, with nothing saying
-    why the update had not happened.
+    Reached when `.yulon-old` carries a marker of ours and not one build entry
+    — which is what a completed rollback, or a give-up before the first move,
+    leaves behind. There is nothing in there to lose, so the marked directories
+    go and the staged build with them; until cold review 2 this was silent and
+    left about 230 MB beside the install with nothing saying why.
+
+    **Deletes only marked working directories**, like everything else in this
+    module.
     """
     for name in layout.WORK_NAMES:
         layout.discard_ours(install, name)
     logger.info(f"self-update: the update to {marker.to_version} was rolled back")
     return Outcome(
         problem=(
-            f"The update to {marker.to_version} could not be installed, and the version you "
-            "had was put back. You can try again from See what's new."
+            f"The update to {without_v(marker.to_version)} could not be installed, and the "
+            "version you had was put back. You can try again from See what's new."
         )
     )
 
 
-def _repair(install: Install, marker: Marker, missing: list[str]) -> Outcome:
-    """A swap that stopped part-way. **Put it right here if the files are there.**
+def _not_installed(marker: Marker) -> Outcome:
+    """Everything is in place, the backup still holds a build, and this is not that build.
 
-    The README used to be the whole answer, and following it literally made
-    things worse (cold review 2): with the executable already in `.yulon-old`
-    and the old `_internal` still in place, its "move the program and
-    `_internal` aside" step moved the one good `_internal` away and restored
-    only the executable.
-
-    So the app does it, whenever the app can run at all. **Every entry the
-    marker names is restored, not only the ones that are missing** — a kill
-    after the fourth of six moves leaves some entries already replaced by the
-    new build, and restoring only the absent ones would end at a MIXTURE: the
-    new `extra.dat` beside the old everything else. That was measured by this
-    file's own test at kill points 4 and 5 before this loop was written this
-    way. What comes out is one whole version, the one that was running before.
-
-    An entry the target still holds is put back into `.yulon-new`, which is
-    removed at the end — so nothing is deleted outside a marked directory of
-    this app's own, even here.
-
-    The executable is restored LAST, for the helper's reason: an install with
-    an executable and the wrong libraries beside it is worse than one with no
-    executable at all.
-
-    A file that cannot be moved back leaves everything alone and says what is
-    missing: half a repair is worse than none.
+    Somebody has put the old version back by hand, or is running an older one.
+    Nothing here is missing and nothing here is safe to delete — the backup is
+    the only copy of what it holds — so this says where things are and stops.
     """
-    target = install.target
-    assert target is not None  # a marker was read from under it
-    backup = layout.work_dir(install, layout.OLD_NAME)
-    staged = layout.work_dir(install, layout.NEW_NAME)
-    unrecoverable = [name for name in missing if not (backup / name).exists()]
-    if unrecoverable:
-        logger.warning(f"self-update: cannot repair; {unrecoverable} are in neither place")
-        return Outcome(problem=_cannot_repair(marker, unrecoverable))
-    # `marker.entries` is stored executable-first; restoring runs backwards.
-    restorable = [name for name in marker.entries if (backup / name).exists()]
-    try:
-        # The staging directory is where the half-installed new entries are
-        # parked, and it has to be one this app can prove is its own or the
-        # discard below will refuse it and leave them there. A rollback may
-        # have taken it away entirely, so it is remade and marked here.
-        staged.mkdir(parents=True, exist_ok=True)
-        if layout.read_marker(install, layout.NEW_NAME) is None:
-            layout.write_marker(
-                install,
-                layout.NEW_NAME,
-                layout.Marker(
-                    role=layout.NEW_NAME,
-                    from_version=marker.from_version,
-                    to_version=marker.to_version,
-                    pid=os.getpid(),
-                    stamp=layout.now(),
-                ),
-            )
-        for name in reversed(restorable):
-            _park(target / name, staged, name)
-            os.replace(backup / name, target / name)
-    except OSError as exc:
-        logger.warning(f"self-update: the repair stopped at {exc}")
-        return Outcome(problem=_cannot_repair(marker, missing))
-    logger.info(f"self-update: put {restorable} back after a half-finished update")
-    for name in layout.WORK_NAMES:
-        layout.discard_ours(install, name)
+    logger.info(f"self-update: an update to {marker.to_version} is not the build running here")
     return Outcome(
         problem=(
-            f"The update to {marker.to_version} did not finish, so Yu'lon has put the version "
-            "you had back. You can try again from See what's new."
+            f"The update to {without_v(marker.to_version)} is not installed. The version in "
+            f"the {layout.OLD_NAME} folder beside Yu'lon is the one you had; delete that "
+            "folder when you no longer want it."
         )
     )
 
 
-def _park(entry: Path, staged: Path, name: str) -> None:
-    """Move `entry` out of the way into the staging directory, if it is there at all.
+def _half_done(marker: Marker, missing: list[str]) -> Outcome:
+    """A swap that stopped part-way. **Reported, and nothing is touched.**
 
-    Into `.yulon-new` rather than deleted: that directory is this app's own and
-    is removed whole at the end of the repair, so even the half-installed new
-    build is taken away by a marker-gated delete rather than by an `rmtree` of
-    something computed here.
+    Not repaired in this process, for the three reasons the module docstring
+    gives. What the player gets is the one instruction — the same one
+    `pylauncher/README.md` carries and `tests/test_selfupdate_recovery.py`
+    executes at every kill point — and an install that is exactly as the helper
+    left it, including the backup that is the way out of it.
     """
-    if not entry.exists():
-        return
-    spare = staged / name
-    suffix = 0
-    while spare.exists():
-        suffix += 1
-        spare = staged / f"{name}.replaced-{suffix}"
-    os.replace(entry, spare)
-
-
-def _cannot_repair(marker: Marker, missing: list[str]) -> str:
-    """The one case the app cannot fix, in the fewest words a player can act on."""
-    return (
-        f"An update to {marker.to_version} did not finish and Yu'lon could not put it right: "
-        f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} missing. "
-        f"Move the files from the {layout.OLD_NAME} folder back into this folder, except "
-        f"{layout.MARKER_NAME}; then delete {layout.OLD_NAME}."
+    logger.warning(f"self-update: {missing} are missing after an update to {marker.to_version}")
+    return Outcome(
+        problem=(
+            f"An update to {without_v(marker.to_version)} did not finish: "
+            f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} missing from this "
+            f"folder. Nothing has been changed. To put the version you had back, move the "
+            f"files from the {layout.OLD_NAME} folder back into this folder, except "
+            f"{layout.MARKER_NAME}; then delete {layout.OLD_NAME}."
+        )
     )
 
 

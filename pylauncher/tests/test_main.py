@@ -1817,7 +1817,7 @@ def test_the_first_start_after_a_swap_removes_the_old_build_and_says_so(tmp_path
     assert main.announce_previous_update(bar, install=install, environ={}, version="v2") is True
 
     assert not (tmp_path / "app" / ".yulon-old").exists()
-    assert bar.messages == ["Updated to Yu'lon v2."]
+    assert bar.messages == ["Updated to Yu'lon 2."]
 
 
 def test_an_ordinary_start_removes_nothing_and_says_nothing(tmp_path: Path) -> None:
@@ -1843,7 +1843,7 @@ def test_a_start_that_cannot_remove_the_old_build_still_starts(tmp_path: Path) -
         # It still SPEAKS: the marker says the update was to a version this is
         # not, so the honest answer is that it did not happen. What must not
         # happen is a traceback out of `build_window()`.
-        assert bar.messages and "could not be installed" in bar.messages[0]
+        assert bar.messages and "is not installed" in bar.messages[0]
     finally:
         install.target.chmod(0o700)
 
@@ -1921,6 +1921,7 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
     names = (
         "current_install",
         "other_copies",
+        "await_helper",
         "apply",
         "start_helper",
         "close_window",
@@ -1945,6 +1946,9 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
     update_host.start_helper = update_host.helpers.append
     update_host.closes = []
     update_host.close_window = lambda: update_host.closes.append(1)
+    # The helper's "I am running" stamp. Tests about anything ELSE say yes
+    # here; the tests that are about the stamp replace this.
+    update_host.await_helper = lambda _stamp: True
     yield update_host
     for name, seam in seams.items():
         setattr(update_host, name, seam)
@@ -1958,10 +1962,11 @@ def test_a_ready_update_starts_the_helper_and_then_closes_the_window(
 ) -> None:
     """**The order is the whole of it.** The helper waits for THIS pid to exit."""
     from yulon.selfupdate.apply import ReadyToRestart
-    from yulon.selfupdate.swap import SwapPlan
 
     order: list[str] = []
-    plan = SwapPlan(tmp_path / "helper.sh", ["/bin/sh", "x"])
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
     installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
     installing_host.start_helper = lambda p: order.append(f"helper:{p.script.name}")
     installing_host.close_window = lambda: order.append("close")
@@ -2414,14 +2419,17 @@ def test_a_second_press_reuses_the_build_that_is_already_verified(
     what is already there.
     """
     from yulon.selfupdate.apply import ReadyToRestart
-    from yulon.selfupdate.swap import SwapPlan
 
     runs: list[int] = []
     answers: list[str | None] = [None, "A database import is running.", None]
 
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+
     def apply(*_a: Any, **_k: Any) -> Any:
         runs.append(1)
-        return ReadyToRestart(SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.70-Public")
+        return ReadyToRestart(plan, "v0.8.70-Public")
 
     installing_host.apply = apply
     installing_host.refusal = lambda: (answers.pop(0) if answers else None)
@@ -2444,14 +2452,17 @@ def test_a_staged_build_for_a_DIFFERENT_version_is_not_reused(
     from yulon.selfupdate.swap import SwapPlan
 
     runs: list[int] = []
+    install = _a_staged_install(tmp_path, version="v0.8.99-Public")
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
 
     def apply(*_a: Any, **_k: Any) -> Any:
         runs.append(1)
-        return ReadyToRestart(SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.99-Public")
+        return ReadyToRestart(plan, "v0.8.99-Public")
 
     installing_host.apply = apply
     installing_host._ready = ReadyToRestart(
-        SwapPlan(tmp_path / "old.sh", ["/bin/sh"]), "v0.8.70-Public"
+        SwapPlan(tmp_path / "old.sh", ["/bin/sh"], ("yulon",), "#!/bin/sh\n"), "v0.8.70-Public"
     )
     installing_host.start_update(
         dataclasses.replace(
@@ -2467,4 +2478,190 @@ def test_a_staged_build_for_a_DIFFERENT_version_is_not_reused(
     )
 
     assert runs == [1], "a staging for another version was installed"
-    assert installing_host.helpers[0].script == tmp_path / "h.sh"
+    assert installing_host.helpers[0].script == plan.script
+
+
+# ------------------------------------- never close for a helper that did not start
+
+
+def _a_staged_install(tmp_path: Path, *, version: str = "v0.8.70-Public") -> Any:
+    """A marked, complete staging exactly as `apply_update` leaves one."""
+    from yulon.selfupdate import layout
+
+    install = _swappable(tmp_path)
+    assert install.target is not None
+    for name in (layout.NEW_NAME, layout.OLD_NAME):
+        layout.work_dir(install, name).mkdir(parents=True, exist_ok=True)
+        layout.write_marker(
+            install,
+            name,
+            layout.Marker(name, "v1", version, os.getpid(), layout.now(), entries=("yulon",)),
+        )
+    (layout.work_dir(install, layout.NEW_NAME) / "yulon").write_text("new", encoding="utf-8")
+    return install
+
+
+def _a_plan(tmp_path: Path, install: Any) -> Any:
+    from yulon.selfupdate.swap import SwapPlan
+
+    script = tmp_path / "helper.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    return SwapPlan(script, ["/bin/sh", str(script)], ("yulon",), "#!/bin/sh\n")
+
+
+def test_the_window_is_not_closed_when_the_helper_never_reports_in(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """**The Windows 11 gate, 2026-09-21.**
+
+    The helper was spawned and never ran — `DETACHED_PROCESS` leaves PowerShell
+    5.1 without a console — and the app closed anyway: a shut launcher, an
+    un-swapped folder, and not a word to the player. A `Popen` that returned is
+    not a helper that is running, and this is what says so.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+    # A helper that starts and stamps nothing, which is exactly what happened.
+    installing_host.start_helper = installing_host.helpers.append
+    installing_host.await_helper = lambda _stamp: False
+
+    installing_host.start_update(_install_offer())
+
+    assert installing_host.helpers == [plan], "the helper was never started"
+    assert installing_host.closes == [], "the app closed for a helper that had not started"
+    bar = installing_host.parent().property("update_bar")
+    assert "could not start the installer" in bar.text()
+    assert "nothing was changed" in bar.text()
+    assert installing_host._ready is not None, "the staged build was thrown away"
+
+
+def test_the_window_closes_once_the_helper_has_reported_in(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """And the other half: a helper that stamps is one the app may close for."""
+    from yulon.selfupdate import layout
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+    order: list[str] = []
+
+    def start(p: Any) -> None:
+        order.append("helper")
+        # What the real helper does first, after validating.
+        layout.helper_stamp(install).write_text("", encoding="utf-8")
+
+    installing_host.start_helper = start
+    installing_host.close_window = lambda: order.append("close")
+    seen: list[Path] = []
+    installing_host.await_helper = lambda stamp: seen.append(stamp) or stamp.exists()
+
+    installing_host.start_update(_install_offer())
+
+    assert order == ["helper", "close"], "the app closed before the helper reported in"
+    assert seen == [layout.helper_stamp(install)]
+
+
+def test_the_real_wait_gives_up_and_says_so(tmp_path: Path) -> None:
+    """`wait_for_helper` itself, bounded and measured.
+
+    Its bound is deliberately short here: what is under test is that it RETURNS
+    rather than that it waits a particular length of time.
+    """
+    import time as _time
+
+    stamp = tmp_path / "helper-started"
+    started = _time.monotonic()
+    assert main.wait_for_helper(stamp, seconds=0.2) is False
+    waited = _time.monotonic() - started
+    assert 0.1 <= waited < 5.0, f"the wait took {waited:.2f}s"
+
+    stamp.write_text("", encoding="utf-8")
+    assert main.wait_for_helper(stamp, seconds=0.2) is True
+
+
+def test_a_staged_build_that_vanished_does_not_close_the_app(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """A second copy of Yu'lon, a `/tmp` sweep, or the player (round 3, F1).
+
+    The app used to close for a helper that then exited 64 against work
+    directories that were no longer there, and nothing reopened it.
+    """
+    from yulon.selfupdate import layout
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+    installing_host.start_helper = installing_host.helpers.append
+    # Between staging and pressing, somebody cleared the work dirs.
+    for name in layout.WORK_NAMES:
+        layout.discard_ours(install, name)
+
+    installing_host.start_update(_install_offer())
+
+    assert installing_host.helpers == [], "a helper was started against nothing"
+    assert installing_host.closes == []
+    bar = installing_host.parent().property("update_bar")
+    assert "no longer there" in bar.text() and "press Update now again" in bar.text()
+
+
+def test_a_helper_script_swept_from_the_temp_directory_is_written_again(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """The script lives in `tempfile.gettempdir()`, which a desktop sweeps."""
+    from yulon.selfupdate import layout
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    plan.script.unlink()
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+
+    def start(p: Any) -> None:
+        installing_host.helpers.append(p)
+        layout.helper_stamp(install).write_text("", encoding="utf-8")
+
+    installing_host.start_helper = start
+    installing_host.await_helper = lambda stamp: stamp.exists()
+
+    installing_host.start_update(_install_offer())
+
+    assert plan.script.exists(), "the helper script was not written again"
+    assert installing_host.closes == [1]
+
+
+def test_the_windows_flags_are_the_ones_the_gate_settled() -> None:
+    """**`DETACHED_PROCESS` is not among them**, and that is the whole finding.
+
+    Measured on Windows 11, 2026-09-21: with it, the helper was spawned and
+    never ran at any of 40 samples over two minutes. Microsoft documents it as
+    mutually exclusive with `CREATE_NO_WINDOW`, and PowerShell 5.1 with no
+    console at all exits immediately.
+    """
+    from types import SimpleNamespace
+
+    from yulon.selfupdate.swap import windows_creation_flags
+
+    fake = SimpleNamespace(
+        CREATE_NO_WINDOW=0x08000000,
+        CREATE_NEW_PROCESS_GROUP=0x00000200,
+        CREATE_BREAKAWAY_FROM_JOB=0x01000000,
+        DETACHED_PROCESS=0x00000008,
+    )
+    with_breakaway = windows_creation_flags(fake)
+    assert with_breakaway == 0x08000000 | 0x00000200 | 0x01000000
+    assert not with_breakaway & fake.DETACHED_PROCESS, "DETACHED_PROCESS is back"
+
+    without = windows_creation_flags(fake, breakaway=False)
+    assert without == 0x08000000 | 0x00000200
+    assert not without & fake.CREATE_BREAKAWAY_FROM_JOB

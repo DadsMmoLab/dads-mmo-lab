@@ -219,22 +219,30 @@ progress for the reasons its entry gives: the running build has no command chann
   put there, the update stops and tells you, and offers you the download instead. Yu'lon also never
   renames or deletes the folder itself.
 - **Putting the previous version back.** While it updates, Yu'lon works in folders called
-  `.yulon-new`, `.yulon-download` and `.yulon-old` in your Yu'lon folder. **They are hidden** — a
-  name beginning with a dot is hidden on Linux and macOS, and on Windows you may need *View →
-  Show → Hidden items* in Explorer to see them. All three are removed the next time the new version
-  starts.
+  `.yulon-new`, `.yulon-download` and `.yulon-old` in your Yu'lon folder. All three are removed the
+  next time the new version starts. **Whether you can see them depends on your system**: on Linux
+  and macOS a name beginning with a dot is hidden by default (Ctrl+H in most file managers, or
+  `ls -a`); on **Windows they are ordinary visible folders** — Explorer does not hide dot-names and
+  Yu'lon does not set the hidden attribute — so you will see them in the folder while an update
+  runs.
 
-  Almost always you do not have to do anything: if an update stops part-way, Yu'lon puts the
-  version you had back **by itself** the next time it starts, and tells you it did. The one case it
-  cannot handle is an update that stopped before the program file arrived, because then there is
-  nothing of Yu'lon's left to run. If that happens, open your Yu'lon folder and:
+  If an update stops part-way, Yu'lon **does not touch anything** — it tells you what is missing
+  and leaves your folder exactly as it found it, backup included. (It could try to put things back
+  by itself, and deliberately does not: that would mean the running program renaming the very files
+  it is running from, with nothing to undo a half-done attempt.) Putting the previous version back
+  is two steps you take yourself, in this order:
 
-  > move the files from `.yulon-old` back into this folder, except `.yulon-marker`;
-  > then delete `.yulon-old`
+  > 1. In the Yu'lon folder, delete (or move away) every file and folder that ALSO exists inside
+  >    `.yulon-old`.
+  > 2. Move everything in `.yulon-old` except `.yulon-marker` into the Yu'lon folder, then delete
+  >    `.yulon-old` and `.yulon-new`.
 
-  That is the whole of it — do not move anything else out of the way first, and do not move
-  `.yulon-marker`. With the AppImage it is the same: the file inside `.yulon-old` is the version you
-  had, and renaming it back over the `.AppImage` puts it back.
+  **Step 1 is not optional**: if the new version's `_internal` folder is already in place, moving
+  the old one on top of it would put it *inside* rather than replace it, and Yu'lon would not
+  start. Yu'lon prints these same two steps when it finds an unfinished update, so you do not have
+  to come back here for them. With the AppImage it is the same two steps: the file inside
+  `.yulon-old` is the version you had.
+
 - **If two copies of Yu'lon are open**, the one you press Update in will say so and stop. Close the
   other one first — otherwise the files would be replaced underneath it.
 

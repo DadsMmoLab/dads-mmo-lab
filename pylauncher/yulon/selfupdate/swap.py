@@ -99,6 +99,7 @@ shift 5
 new="$target/{layout.NEW_NAME}"
 old="$target/{layout.OLD_NAME}"
 marker="{layout.MARKER_NAME}"
+stamp="$old/{layout.HELPER_STAMP}"
 
 # ---- validate before anything moves --------------------------------------
 case "$ticks" in ""|*[!0-9]*) exit 64 ;; esac
@@ -120,6 +121,28 @@ for e in "$@"; do
     "{layout.NEW_NAME}"|"{layout.OLD_NAME}"|"{layout.DOWNLOAD_NAME}"|"$marker") exit 64 ;;
   esac
 done
+# The two halves must name the same set, or the swap's own invariants mean
+# nothing: phase 1 would move one set out and phase 2 bring another in.
+i=0
+for e in "$@"; do
+  i=$((i + 1))
+  [ "$i" -le "$half" ] || break
+  found=0
+  j=0
+  for f in "$@"; do
+    j=$((j + 1))
+    [ "$j" -gt "$half" ] || continue
+    [ "$f" = "$e" ] && found=1
+  done
+  [ "$found" -eq 1 ] || exit 64
+done
+
+# ---- say that we are alive, before waiting for anything --------------------
+# The app does not close until this file exists. On the Windows gate of
+# 2026-09-21 the helper was spawned and never ran, and the app closed anyway.
+log="$old/{layout.HELPER_LOG}"
+: > "$stamp" || exit 64
+echo "started pid=$$ target=$target entries=$half" >> "$log"
 
 # ---- wait for the app ------------------------------------------------------
 i=0
@@ -128,6 +151,7 @@ while kill -0 "$pid" 2>/dev/null; do
   if [ "$i" -gt "$ticks" ]; then
     # Still running. Move nothing, start nothing, and leave the staged build
     # where it is for the next start to reuse or clean up.
+    echo "gave up: pid $pid still running after $ticks ticks" >> "$log"
     exit 75
   fi
   sleep {TICK_SECONDS}
@@ -143,8 +167,9 @@ for e in "$@"; do
   i=$((i + 1))
   [ "$i" -le "$half" ] || break
   if [ -e "$target/$e" ]; then
-    mv -- "$target/$e" "$old/$e" || {{ ok=0; break; }}
+    mv -- "$target/$e" "$old/$e" || {{ ok=0; echo "FAILED moving out $e" >> "$log"; break; }}
   fi
+  echo "moved out $e" >> "$log"
 done
 
 # ---- bring the staged entries in, executable LAST --------------------------
@@ -153,12 +178,14 @@ if [ "$ok" -eq 1 ]; then
   for e in "$@"; do
     i=$((i + 1))
     [ "$i" -gt "$half" ] || continue
-    mv -- "$new/$e" "$target/$e" || {{ ok=0; break; }}
+    mv -- "$new/$e" "$target/$e" || {{ ok=0; echo "FAILED bringing in $e" >> "$log"; break; }}
+    echo "brought in $e" >> "$log"
   done
 fi
 
 # ---- any failure is undone, and the filesystem says what to undo -----------
 if [ "$ok" -eq 0 ]; then
+  echo "rolling back" >> "$log"
   # Take the new entries back out, executable first: an entry that was placed
   # is the one that is no longer in the staging directory.
   i=0
@@ -180,6 +207,7 @@ if [ "$ok" -eq 0 ]; then
   done
 fi
 
+echo "relaunching $launch" >> "$log"
 cd -- "$target" || exit 70
 rm -f -- "$0"
 exec "$launch"
@@ -218,6 +246,8 @@ new="$target{layout.NEW_NAME}"
 old="$target{layout.OLD_NAME}"
 marker="{layout.MARKER_NAME}"
 entry="{layout.APPIMAGE_ENTRY}"
+stamp="$old/{layout.HELPER_STAMP}"
+log="$old/{layout.HELPER_LOG}"
 
 # ---- validate before anything moves --------------------------------------
 case "$ticks" in ""|*[!0-9]*) exit 64 ;; esac
@@ -232,11 +262,16 @@ case "$target" in /*) ;; *) exit 64 ;; esac
 [ -f "$old/$marker" ] || exit 64
 [ -f "$new/$entry" ] || exit 64
 
+# ---- say that we are alive, before waiting for anything --------------------
+: > "$stamp" || exit 64
+echo "started pid=$$ target=$target" >> "$log"
+
 # ---- wait for the app ------------------------------------------------------
 i=0
 while kill -0 "$pid" 2>/dev/null; do
   i=$((i + 1))
   if [ "$i" -gt "$ticks" ]; then
+    echo "gave up: pid $pid still running after $ticks ticks" >> "$log"
     exit 75
   fi
   sleep {TICK_SECONDS}
@@ -244,11 +279,16 @@ done
 
 # ---- one entry, the same two moves a folder install makes ------------------
 if mv -- "$target" "$old/$entry"; then
-  if ! mv -- "$new/$entry" "$target"; then
+  echo "moved out $entry" >> "$log"
+  if mv -- "$new/$entry" "$target"; then
+    echo "brought in $entry" >> "$log"
+  else
+    echo "FAILED bringing in $entry; rolling back" >> "$log"
     mv -- "$old/$entry" "$target"
   fi
 fi
 chmod 0755 -- "$target" 2>/dev/null
+echo "relaunching $target" >> "$log"
 cd -- "$(dirname -- "$target")" || exit 70
 rm -f -- "$0"
 exec "$target"
@@ -275,29 +315,51 @@ $ErrorActionPreference = 'Stop'
 $New = Join-Path $Target '{layout.NEW_NAME}'
 $Old = Join-Path $Target '{layout.OLD_NAME}'
 $Marker = '{layout.MARKER_NAME}'
+$Stamp = Join-Path $Old '{layout.HELPER_STAMP}'
+$Log = Join-Path $Old '{layout.HELPER_LOG}'
 $Reserved = @('{layout.NEW_NAME}', '{layout.OLD_NAME}', '{layout.DOWNLOAD_NAME}', $Marker)
+
+function Say($text) {{
+  try {{ Add-Content -LiteralPath $Log -Value $text -ErrorAction SilentlyContinue }} catch {{}}
+}}
+function Refuse() {{
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+  exit 64
+}}
 
 # `[int]` refuses a non-numeric argument before this body runs at all:
 # PowerShell fails the parameter binding and the script exits non-zero having
 # executed none of it. These checks are for values that ARE integers and are
 # still wrong.
-if ($Ticks -le 0 -or $ProcId -le 1 -or $Half -le 0) {{ exit 64 }}
-if (-not [System.IO.Path]::IsPathRooted($Target)) {{ exit 64 }}
-if (-not (Test-Path -LiteralPath $Target -PathType Container)) {{ exit 64 }}
-if (-not (Test-Path -LiteralPath (Join-Path $New $Marker) -PathType Leaf)) {{ exit 64 }}
-if (-not (Test-Path -LiteralPath (Join-Path $Old $Marker) -PathType Leaf)) {{ exit 64 }}
-if (-not $Entries -or $Entries.Count -ne ($Half * 2)) {{ exit 64 }}
+if ($Ticks -le 0 -or $ProcId -le 1 -or $Half -le 0) {{ Refuse }}
+if (-not [System.IO.Path]::IsPathRooted($Target)) {{ Refuse }}
+if (-not (Test-Path -LiteralPath $Target -PathType Container)) {{ Refuse }}
+if (-not (Test-Path -LiteralPath (Join-Path $New $Marker) -PathType Leaf)) {{ Refuse }}
+if (-not (Test-Path -LiteralPath (Join-Path $Old $Marker) -PathType Leaf)) {{ Refuse }}
+if (-not $Entries -or $Entries.Count -ne ($Half * 2)) {{ Refuse }}
 foreach ($e in $Entries) {{
-  if ([string]::IsNullOrWhiteSpace($e) -or $e -eq '.' -or $e -eq '..') {{ exit 64 }}
-  if ($e -notmatch '^[._A-Za-z0-9][-._A-Za-z0-9]*$') {{ exit 64 }}
-  if ($Reserved -contains $e) {{ exit 64 }}
+  if ([string]::IsNullOrWhiteSpace($e) -or $e -eq '.' -or $e -eq '..') {{ Refuse }}
+  if ($e -notmatch '^[._A-Za-z0-9][-._A-Za-z0-9]*$') {{ Refuse }}
+  if ($Reserved -contains $e) {{ Refuse }}
 }}
 $Forward = $Entries[0..($Half - 1)]
 $Backward = $Entries[$Half..($Entries.Count - 1)]
+# The two halves must name the same set, or phase 1 moves one set out and
+# phase 2 brings another in.
+foreach ($e in $Forward) {{ if ($Backward -notcontains $e) {{ Refuse }} }}
+foreach ($e in $Backward) {{ if ($Forward -notcontains $e) {{ Refuse }} }}
+
+# ---- say that we are alive, before waiting for anything --------------------
+# The app does not close until this file exists. Measured on the Windows 11
+# gate box, 2026-09-21: spawned with DETACHED_PROCESS this script never ran at
+# all, and the app closed anyway.
+try {{ New-Item -ItemType File -Path $Stamp -Force | Out-Null }} catch {{ Refuse }}
+Say "started pid=$PID target=$Target entries=$Half"
 
 $deadline = (Get-Date).AddSeconds($Ticks * {TICK_SECONDS})
 while (Get-Process -Id $ProcId -ErrorAction SilentlyContinue) {{
   if ((Get-Date) -gt $deadline) {{
+    Say "gave up: pid $ProcId still running"
     Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
     exit 75
   }}
@@ -318,15 +380,18 @@ function Move-One($from, $to) {{
 $ok = $true
 foreach ($e in $Forward) {{
   if (Test-Path -LiteralPath (Join-Path $Target $e)) {{
-    if (-not (Move-One (Join-Path $Target $e) (Join-Path $Old $e))) {{ $ok = $false; break }}
+    if (Move-One (Join-Path $Target $e) (Join-Path $Old $e)) {{ Say "moved out $e" }}
+    else {{ Say "FAILED moving out $e"; $ok = $false; break }}
   }}
 }}
 if ($ok) {{
   foreach ($e in $Backward) {{
-    if (-not (Move-One (Join-Path $New $e) (Join-Path $Target $e))) {{ $ok = $false; break }}
+    if (Move-One (Join-Path $New $e) (Join-Path $Target $e)) {{ Say "brought in $e" }}
+    else {{ Say "FAILED bringing in $e"; $ok = $false; break }}
   }}
 }}
 if (-not $ok) {{
+  Say "rolling back"
   foreach ($e in $Forward) {{
     if (-not (Test-Path -LiteralPath (Join-Path $New $e)) -and
         (Test-Path -LiteralPath (Join-Path $Target $e))) {{
@@ -340,17 +405,30 @@ if (-not $ok) {{
   }}
 }}
 
-Start-Process -FilePath $Launch -WorkingDirectory $Target
+try {{
+  Start-Process -FilePath $Launch -WorkingDirectory $Target
+  Say "relaunched $Launch"
+}} catch {{
+  Say "FAILED relaunching $Launch : $_"
+}}
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 """
 """The Windows half. `-LiteralPath` everywhere: `-Path` globs, and `[` is legal in a folder name.
 
-**Unmeasured from the Linux side, and the gate list says exactly what to look
-at**: whether a detached PowerShell survives its parent's exit from Explorer
-and from a shortcut, how long the one-dir folder's ENTRIES stay locked after
-the process goes, whether `-ExecutionPolicy Bypass -File` runs a script written
-to `%TEMP%` under the box's policy, and whether `ValueFromRemainingArguments`
-really binds the doubled entry list the way this assumes.
+**Measured on a real Windows 11 box, 2026-09-21 (the lead's gate).** The script
+itself is good: run by hand with
+`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <ps1>
+5 999999 "<target with a space and an &>" "<target>\\yulon.exe" 2 yulon.exe
+_internal _internal yulon.exe` it exited 0, swapped both entries, left the old
+build in `.yulon-old`, and deleted itself. So on that box: `-ExecutionPolicy
+Bypass -File` from `%TEMP%` runs, `[int]` and `ValueFromRemainingArguments`
+bind the doubled list, a path with a space and an `&` survives as a parameter,
+and `Move-Item` of the executable and `_internal` works once the app is gone.
+
+What failed there was the SPAWN, not this file — see `_spawn_detached`.
+
+`Refuse` removes the script on every argument refusal: the previous version
+left a `.ps1` in `%TEMP%` on each of those paths.
 """
 
 POWERSHELL_UNDER_SYSTEMROOT = "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
@@ -382,6 +460,12 @@ class SwapPlan:
     """`argv[0]` is the interpreter. Every path in here is one whole element."""
     entries: tuple[str, ...] = ()
     """The names the helper will replace, executable first. Empty for an AppImage."""
+    body: str = ""
+    """The script's text, so `ensure_script()` can write it again at the moment of use.
+
+    The body is a module constant and holds no path, so carrying it here costs
+    nothing and cannot carry anything of the player's with it.
+    """
 
 
 def plan_swap(
@@ -414,16 +498,16 @@ def plan_swap(
     if install.kind is InstallKind.APPIMAGE:
         # One entry, under the fixed name the script spells itself.
         _make_the_backup_dir(install, marker, (layout.APPIMAGE_ENTRY,))
-        script = _write(script_dir, f"yulon-update-{pid}", which, POSIX_FILE_HELPER)
+        script, body = _write(script_dir, f"yulon-update-{pid}", which, POSIX_FILE_HELPER)
         argv = _argv(which, script, [ticks, str(pid), str(target)])
         logger.info(f"self-update: helper written to {script} for the AppImage")
-        return SwapPlan(script, argv, (layout.APPIMAGE_ENTRY,))
+        return SwapPlan(script, argv, (layout.APPIMAGE_ENTRY,), body)
     named = tuple(entries)
     if not named or not all(layout.is_entry_name(name) for name in named):
         raise UpdateError("Yu'lon could not work out which files to replace.")
     _make_the_backup_dir(install, marker, named)
     launch = target / install.executable
-    script = _write(script_dir, f"yulon-update-{pid}", which, POSIX_FOLDER_HELPER)
+    script, body = _write(script_dir, f"yulon-update-{pid}", which, POSIX_FOLDER_HELPER)
     # **The entries go twice, in the two orders the swap needs**: the current
     # ones are moved aside executable-FIRST and the staged ones are brought in
     # executable-LAST, so the executable is never present beside libraries of
@@ -435,7 +519,7 @@ def plan_swap(
     argv = _argv(which, script, [*values, *named, *reversed(named)])
     logger.info(f"self-update: helper written to {script} for {len(named)} entries")
     del staged  # the helper finds it by name under the target it validated
-    return SwapPlan(script, argv, named)
+    return SwapPlan(script, argv, named, body)
 
 
 def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Sequence[str]) -> None:
@@ -450,8 +534,10 @@ def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Seque
     """
     if not layout.discard_ours(install, layout.OLD_NAME):
         raise UpdateError(
-            "There is already a .yulon-old in your Yu'lon folder and Yu'lon did not put it "
-            "there. Move or rename it, then try again."
+            f"There is a {layout.OLD_NAME} folder beside Yu'lon that this copy cannot vouch "
+            "for — it was left by an earlier update, or by another copy of Yu'lon, and Yu'lon "
+            "will not delete a folder it cannot prove it made. Move or rename it, then try "
+            "again."
         )
     old = layout.work_dir(install, layout.OLD_NAME)
     try:
@@ -473,10 +559,16 @@ def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Seque
         raise UpdateError(f"Yu'lon could not prepare the backup folder: {exc}") from exc
 
 
-def _write(script_dir: Path, stem: str, which: str, posix_body: str) -> Path:
-    """Write the helper script, 0o700, with LF endings. Returns its path."""
+def _write(script_dir: Path, stem: str, which: str, posix_body: str) -> tuple[Path, str]:
+    """Write the helper script, 0o700, with LF endings. Returns `(path, text)`."""
     text = POWERSHELL_FOLDER_HELPER if which == "windows" else posix_body
     script = script_dir / (f"{stem}.ps1" if which == "windows" else f"{stem}.sh")
+    _write_body(script, text)
+    return script, text
+
+
+def _write_body(script: Path, text: str) -> None:
+    """The write itself, so `ensure_script()` can repeat it without rebuilding a plan."""
     try:
         script.parent.mkdir(parents=True, exist_ok=True)
         # `newline="\n"`: a POSIX `sh` script whose shebang line ends `\r` is
@@ -489,7 +581,6 @@ def _write(script_dir: Path, stem: str, which: str, posix_body: str) -> Path:
         os.chmod(script, 0o700)
     except OSError as exc:
         raise UpdateError(f"Yu'lon could not write its update helper: {exc}") from exc
-    return script
 
 
 def _argv(which: str, script: Path, values: list[str]) -> list[str]:
@@ -512,19 +603,99 @@ def script_in(argv: list[str]) -> Path:
     return Path(argv[1])
 
 
+def staging_is_intact(install: Install, plan: SwapPlan) -> str | None:
+    """Is the staged build still there, still ours, and still complete? None = yes.
+
+    **Asked immediately before the helper is started** (round 3, F1), because
+    minutes can pass between staging and pressing: a second copy of Yu'lon can
+    start and clear the work dirs, a cleaner can empty `/tmp`, or the player
+    can delete the folders themselves. Measured in that review: the app closed
+    itself for a helper that then exited 64, and nothing reopened it.
+
+    It re-reads the markers rather than trusting the plan, so a directory that
+    has been replaced by something unmarked answers here and not in the shell.
+    """
+    for name in (layout.NEW_NAME, layout.OLD_NAME):
+        if layout.read_marker(install, name) is None:
+            logger.info(f"self-update: {name} is gone or is no longer marked as ours")
+            return "the files it had prepared are gone"
+    staged = layout.work_dir(install, layout.NEW_NAME)
+    for entry in plan.entries:
+        if not (staged / entry).exists():
+            logger.info(f"self-update: the staged {entry} is gone")
+            return f"part of it ({entry}) is gone"
+    return None
+
+
+def ensure_script(plan: SwapPlan) -> bool:
+    """Write the helper script again, now, just before it is used. False if it cannot be.
+
+    **Written at the last moment rather than trusted from minutes ago** (round
+    3, F1). It lives in the temporary directory, which on a long-running
+    desktop is swept by the system: a plan made before a database import and
+    started after it could name a script that no longer exists, and the app
+    would close for nothing.
+
+    Rewriting is cheap — it is twenty lines — and it is the same bytes either
+    way, because the body is a module constant and the paths are arguments.
+    """
+    try:
+        _write_body(plan.script, plan.body)
+    except UpdateError as exc:
+        logger.info(f"self-update: the helper script could not be written: {exc}")
+        return False
+    return True
+
+
 Spawn = Callable[[list[str]], None]
 """How the helper is started. A seam, so a test never starts one it cannot join."""
+
+
+def windows_creation_flags(available: object = subprocess, *, breakaway: bool = True) -> int:
+    """The flags a Windows helper is started with. **Measured, and one of them was wrong.**
+
+    `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`, optionally with
+    `CREATE_BREAKAWAY_FROM_JOB`.
+
+    **`DETACHED_PROCESS` is deliberately NOT here** (Windows 11 gate,
+    2026-09-21). With it the helper was spawned and never ran: Microsoft
+    documents `DETACHED_PROCESS` and `CREATE_NO_WINDOW` as mutually exclusive,
+    and a `powershell.exe` started with no console at all exits immediately.
+    The measured symptom was the whole failure — no `powershell.exe` carrying
+    `yulon-update` at any of 40 samples over 120 s, `.yulon-new` still holding
+    the new build, the `.ps1` still in `%TEMP%`, the app closed and nothing
+    coming back. The same script run by hand on the same box worked, which is
+    what narrowed it to the spawn.
+
+    `CREATE_NO_WINDOW` gives it a console that is never shown, which is what
+    PowerShell 5.1 needs; `CREATE_NEW_PROCESS_GROUP` keeps a Ctrl-C in the
+    parent's group away from it. `CREATE_BREAKAWAY_FROM_JOB` is asked for
+    because a launcher such as Steam or Task Scheduler may put this app in a
+    job object that would kill the helper with it — and it is asked for
+    SEPARATELY, because a job that does not permit breakaway makes
+    `CreateProcess` fail outright, so `_spawn_detached` retries without it.
+
+    **Still to be re-measured by the lead**: that the helper now really runs on
+    that box, and whether the breakaway flag is accepted or refused there.
+    """
+    flags = 0
+    for name in ("CREATE_NO_WINDOW", "CREATE_NEW_PROCESS_GROUP"):
+        flags |= int(getattr(available, name, 0))
+    if breakaway:
+        flags |= int(getattr(available, "CREATE_BREAKAWAY_FROM_JOB", 0))
+    return flags
 
 
 def _spawn_detached(argv: list[str]) -> None:
     """Start the helper so that it OUTLIVES this process.
 
     POSIX: `start_new_session=True` puts it in a session of its own, so the
-    terminal's SIGHUP and this process's exit do not reach it. Windows:
-    `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, fetched
-    off `subprocess` at call time exactly as `runner.creationflags()` does,
-    because those names do not exist on POSIX and this file is type-checked for
-    both.
+    terminal's SIGHUP and this process's exit do not reach it.
+
+    Windows: see `windows_creation_flags` for what is set and for the gate that
+    settled it. The breakaway flag is dropped and the spawn retried if the job
+    this app is in refuses it — measured as the one plausible way
+    `CreateProcess` fails on flags alone.
 
     `cwd` is the SCRIPT's own directory and never the install folder: on
     Windows a process whose working directory is a folder holds that folder
@@ -534,22 +705,30 @@ def _spawn_detached(argv: list[str]) -> None:
     reach the shell that will start the new build.
     """
     posix = os.name == "posix"
-    flags = 0
-    if not posix:  # pragma: no cover - Windows only; the gate measures this
-        for name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"):
-            flags |= int(getattr(subprocess, name, 0))
     script = script_in(argv)
-    subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        cwd=str(script.parent if script.parent.is_dir() else Path.cwd()),
-        env=runner.child_env(),
-        start_new_session=posix,
-        creationflags=flags,
-    )
+    where = str(script.parent if script.parent.is_dir() else Path.cwd())
+
+    def start(flags: int) -> None:
+        subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            cwd=where,
+            env=runner.child_env(),
+            start_new_session=posix,
+            creationflags=flags,
+        )
+
+    if posix:
+        start(0)
+        return
+    try:  # pragma: no cover - Windows only; the gate measures this
+        start(windows_creation_flags())
+    except OSError as exc:  # pragma: no cover - including PermissionError
+        logger.info(f"self-update: the helper would not start with breakaway ({exc}); retrying")
+        start(windows_creation_flags(breakaway=False))
 
 
 def start_helper(plan: SwapPlan, *, spawn: Spawn = _spawn_detached) -> None:
