@@ -619,6 +619,21 @@ class _FakeDialog:
         self.deleted += 1
 
 
+def _opens_into(opened: list[str]) -> Any:
+    """An opener that records and says it worked. `Callable[[str], bool]`.
+
+    The `True` is the contract, not decoration: an opener that answers False —
+    which `QDesktopServices.openUrl()` really does on a box with no browser —
+    puts the URL on the bar instead.
+    """
+
+    def opener(url: str) -> bool:
+        opened.append(url)
+        return True
+
+    return opener
+
+
 @pytest.fixture
 def update_host(window: Any) -> Iterator[Any]:
     """The window's update host, with its bar and its `update.json` clean at both ends.
@@ -759,7 +774,7 @@ def test_later_in_the_dialog_changes_nothing(window: Any, update_host: Any) -> N
     update_host.startup_result(A_RELEASE)
     update_host.make_dialog = lambda result: _FakeDialog(UpdateChoice.LATER)
     opened: list[str] = []
-    update_host.open_url = opened.append
+    update_host.open_url = _opens_into(opened)
 
     window.property("update_bar").details_button.click()
 
@@ -777,7 +792,7 @@ def test_update_now_opens_the_release_page_and_replaces_nothing(
     update_host.startup_result(A_RELEASE)
     update_host.make_dialog = lambda result: _FakeDialog(UpdateChoice.UPDATE)
     opened: list[str] = []
-    update_host.open_url = opened.append
+    update_host.open_url = _opens_into(opened)
 
     window.property("update_bar").details_button.click()
 
@@ -798,11 +813,134 @@ def test_a_release_url_from_somewhere_else_is_never_handed_to_the_desktop(
     update_host.startup_result(hostile)
     update_host.make_dialog = lambda result: _FakeDialog(UpdateChoice.UPDATE)
     opened: list[str] = []
-    update_host.open_url = opened.append
+    update_host.open_url = _opens_into(opened)
 
     window.property("update_bar").details_button.click()
 
     assert opened == [update.RELEASES_PAGE]
+
+
+# ------------------------------- when there is no browser to open (yulon-arch)
+
+
+def _press_update_now(window: Any, update_host: Any, result: Any = None) -> None:
+    """The real path: a release is offered, the dialog opens, "Update now" is pressed."""
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(result if result is not None else A_RELEASE)
+    update_host.make_dialog = lambda offered: _FakeDialog(UpdateChoice.UPDATE)
+    window.property("update_bar").details_button.click()
+
+
+def _clipboard() -> Any:
+    from PySide6.QtGui import QGuiApplication
+
+    return QGuiApplication.clipboard()
+
+
+def test_a_browser_that_will_not_open_leaves_the_player_the_url(
+    window: Any, update_host: Any
+) -> None:
+    """Measured on yulon-arch, 2026-09-21: no browser and no `xdg-open` on the box.
+
+    The dialog closed and nothing happened and nothing was said — the player
+    had no route to the release at all. `QDesktopServices.openUrl()` returns a
+    bool and the app threw it away.
+    """
+    _clipboard().setText("something else")
+    update_host.open_url = lambda url: False
+
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert not bar.isHidden()
+    assert A_RELEASE.url in bar.text()
+    assert "Could not open a browser" in bar.text()
+    assert "clipboard" in bar.text(), "the message has to say the URL was copied"
+    assert _clipboard().text() == A_RELEASE.url
+
+
+def test_an_opener_that_raises_is_the_same_as_one_that_refuses(
+    window: Any, update_host: Any
+) -> None:
+    """A desktop helper that is missing can raise instead of answering False."""
+
+    def explodes(url: str) -> bool:
+        raise OSError("no xdg-open on this machine")
+
+    update_host.open_url = explodes
+
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert A_RELEASE.url in bar.text() and "Could not open a browser" in bar.text()
+    assert _clipboard().text() == A_RELEASE.url
+
+
+def test_a_browser_that_opens_says_nothing(window: Any, update_host: Any) -> None:
+    """The bar keeps the offer; success is not news."""
+    opened: list[str] = []
+    update_host.open_url = _opens_into(opened)
+
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert opened == [A_RELEASE.url]
+    assert "Could not open" not in bar.text()
+    assert A_RELEASE.latest in bar.text(), "the bar still shows the offer"
+
+
+def test_the_url_on_the_bar_is_the_vetted_one_and_never_the_feeds(
+    window: Any, update_host: Any
+) -> None:
+    """A hostile `html_url` must not be put on screen, or in the clipboard, either."""
+    update_host.open_url = lambda url: False
+    hostile = dataclasses.replace(A_RELEASE, url="file:///etc/passwd")
+
+    _press_update_now(window, update_host, hostile)
+
+    bar = window.property("update_bar")
+    assert update.RELEASES_PAGE in bar.text()
+    assert "/etc/passwd" not in bar.text()
+    assert _clipboard().text() == update.RELEASES_PAGE
+
+
+def test_the_message_arrives_even_for_a_version_the_player_skipped(
+    window: Any, update_host: Any
+) -> None:
+    """They asked for it by pressing the button; the bar may not stay hidden."""
+    update.skip_version(str(A_RELEASE.latest))
+    update_host.open_url = lambda url: False
+
+    update_host.manual_result(A_RELEASE)
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert not bar.isHidden()
+    assert A_RELEASE.url in bar.text()
+
+
+def test_a_link_in_the_notes_falls_back_the_same_way(window: Any, update_host: Any) -> None:
+    """The other route out of the dialog, through the host's REAL dialog factory.
+
+    Not the fake: what this pins is that `make_dialog`'s default hands the
+    notes view the host's opener, so both routes share one fallback.
+    """
+    update_host.open_url = lambda url: False
+    dialog = update_host.make_dialog(A_RELEASE)
+    try:
+        from PySide6.QtCore import QUrl
+
+        dialog.notes.anchorClicked.emit(QUrl("https://example.invalid/notes"))
+    finally:
+        dialog.deleteLater()
+        # Or the next test's child count starts at one (the leak test found it).
+        _collect_deleted()
+
+    bar = window.property("update_bar")
+    assert "https://example.invalid/notes" in bar.text()
+    assert "Could not open a browser" in bar.text()
+    assert _clipboard().text() == "https://example.invalid/notes"
 
 
 def test_the_details_button_does_nothing_before_a_check_has_answered(

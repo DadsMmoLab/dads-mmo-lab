@@ -298,6 +298,56 @@ def test_a_skip_during_a_check_survives_the_checks_own_save(tmp_path: Path) -> N
     assert not should_announce(result, path), "and the bar stays down, because it was skipped"
 
 
+def test_the_log_says_where_the_answer_came_from(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Measured on all four live gates: the line read the same either way.
+
+    `update check: current=… latest=… newer=…` was identical whether GitHub had
+    been asked or the day-old cache had answered, so a gate could only tell the
+    two apart by reading `last_checked` out of `update.json` before and after.
+    """
+    server, clock, path = Server(FEED), Clock(1000.0), tmp_path / "update.json"
+
+    with caplog.at_level("INFO", logger="yulon.update"):
+        caplog.clear()
+        _check(server, clock, path)
+        asked = caplog.text
+
+        caplog.clear()
+        _check(server, clock, path)
+        cached = caplog.text
+
+        caplog.clear()
+        clock.t += CHECK_INTERVAL_SECONDS
+        _check(server, clock, path)
+        revalidated = caplog.text
+
+    assert "source=asked GitHub" in asked
+    assert "source=from today's cache" in cached
+    assert "source=not modified (304)" in revalidated
+    for text in (asked, cached, revalidated):
+        assert "update check: current=0.8.66-Public latest=v0.8.70-Public newer=True" in text
+
+
+def test_the_log_says_so_when_the_cache_answered_because_github_could_not_be_reached(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    server, clock, path = Server(FEED), Clock(1000.0), tmp_path / "update.json"
+    _check(server, clock, path)
+
+    def down(url: str, etag: str | None) -> HttpAnswer:
+        raise OSError("dns")
+
+    with caplog.at_level("INFO", logger="yulon.update"):
+        caplog.clear()
+        check_with_cache(
+            current="0.8.66-Public", fetch=down, state_path=path, now=clock, force=True
+        )
+
+    assert "source=from the cache, GitHub could not be reached" in caplog.text
+
+
 def test_a_hostile_body_that_raises_something_unexpected_still_answers(tmp_path: Path) -> None:
     """ "Never raises" is the contract `_UpdateWorker` depends on for its `done` signal.
 

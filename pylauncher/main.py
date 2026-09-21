@@ -246,7 +246,7 @@ def build_window() -> object:
     from yulon.ui.theme import apply_dadcraft_theme
     from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
-    from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog
+    from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog, default_open_url
     from yulon.update import (
         UpdateCheck,
         check_with_cache,
@@ -757,9 +757,9 @@ def build_window() -> object:
             self.check: Callable[[], object] = lambda: check_with_cache(force=True)
             self.run_job = threaded_job_runner(window)
             self.make_dialog: Callable[[UpdateCheck], UpdateDialog] = lambda result: UpdateDialog(
-                result, parent=window
+                result, parent=window, open_url=self.open_or_say
             )
-            self.open_url: Callable[[str], object] = lambda url: QDesktopServices.openUrl(QUrl(url))
+            self.open_url: Callable[[str], bool] = default_open_url
             self._offered: UpdateCheck | None = None
             self._checking = False
             self.startup_thread: QThread | None = None
@@ -803,6 +803,45 @@ def build_window() -> object:
             self._checking = False
             check_button.setEnabled(True)
 
+        def open_or_say(self, url: str, what: str = "The download page") -> bool:
+            """Open `url`, or put it on the bar where the player can get at it.
+
+            The yulon-arch gate (2026-09-21): a box with no browser and no
+            `xdg-open`. "Open download page" closed the dialog and then nothing
+            happened and nothing was said — `openUrl()` answers a bool and this
+            app dropped it. Both routes out of the dialog come here, so there
+            is one fallback rather than two.
+
+            `url` is always a string that has already been vetted — through
+            `safe_release_url` for the action button, through the scheme check
+            for a link in the notes. The raw `html_url` never reaches this, so
+            it can never reach the screen or the clipboard either.
+            """
+            try:
+                opened = bool(self.open_url(url))
+            except Exception as exc:  # a missing desktop helper can raise
+                logger.info(f"opening {url} failed: {type(exc).__name__}: {exc}")
+                opened = False
+            if opened:
+                return True
+            copied = self._copy(url)
+            tail = " It is on your clipboard." if copied else ""
+            update_bar.show_message(f"Could not open a browser. {what} is: {url}{tail}")
+            return False
+
+        @staticmethod
+        def _copy(url: str) -> bool:
+            """Put `url` on the clipboard. False if this machine has none."""
+            try:
+                clipboard = QGuiApplication.clipboard()
+                if clipboard is None:
+                    return False
+                clipboard.setText(url)
+            except Exception as exc:  # no display, no clipboard
+                logger.info(f"could not copy {url} to the clipboard: {exc}")
+                return False
+            return True
+
         @Slot()
         def check_now(self) -> None:
             if self._checking:
@@ -843,8 +882,9 @@ def build_window() -> object:
                 elif dialog.choice is UpdateChoice.UPDATE:
                     # The feed chose this string, not this app: `html_url` is
                     # handed to the desktop, which starts whatever its scheme
-                    # says. `safe_release_url` is the rule.
-                    self.open_url(safe_release_url(offered.url))
+                    # says. `safe_release_url` is the rule; `open_or_say` is
+                    # what happens when there is no browser to hand it to.
+                    self.open_or_say(safe_release_url(offered.url))
             finally:
                 dialog.deleteLater()
 

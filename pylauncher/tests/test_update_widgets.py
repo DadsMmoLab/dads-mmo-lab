@@ -126,6 +126,48 @@ def test_an_error_message_with_a_tag_in_it_is_shown_and_not_rendered(qapp: objec
     assert bar.text() == message
 
 
+def test_the_bar_text_can_be_selected_with_the_mouse_and_is_still_plain(qapp: object) -> None:
+    """A message can carry a URL the player has to get out of the app by hand.
+
+    On a box with no browser and no `xdg-open` (yulon-arch, gate of
+    2026-09-21) that URL is the only route to the release, so it has to be
+    selectable — and still `PlainText`, because it comes off the network.
+    """
+    from PySide6.QtCore import Qt
+
+    bar = UpdateBar()
+    bar.show_message("Could not open a browser. The download page is: https://example.invalid/r")
+
+    assert bar.label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+    assert bar.label.textFormat() == Qt.TextFormat.PlainText
+
+
+def test_the_dialog_hands_its_notes_the_opener_it_was_given(qapp: object) -> None:
+    """One opener for both routes out of this dialog, so one place decides the fallback."""
+    handed: list[str] = []
+
+    def opener(url: str) -> bool:
+        handed.append(url)
+        return True
+
+    dialog = UpdateDialog(RESULT, open_url=opener)
+
+    dialog.notes.anchorClicked.emit(QUrl("https://example.invalid/notes"))
+
+    assert handed == ["https://example.invalid/notes"]
+
+
+def test_the_notes_opener_answers_whether_it_opened(qapp: object) -> None:
+    """`Callable[[str], bool]`: the widget passes the answer back to its caller."""
+    dialog = UpdateDialog(RESULT, open_url=lambda url: False)
+
+    assert dialog.notes.open_link(QUrl("https://example.invalid/x")) is False
+
+    dialog_ok = UpdateDialog(RESULT, open_url=lambda url: True)
+    assert dialog_ok.notes.open_link(QUrl("https://example.invalid/x")) is True
+    assert dialog_ok.notes.open_link(QUrl("file:///etc/passwd")) is False, "refused, not opened"
+
+
 def test_the_tag_is_shown_as_text_and_never_as_markup(qapp: object) -> None:
     """The tag comes from the network and used to be interpolated into HTML."""
     from PySide6.QtCore import Qt

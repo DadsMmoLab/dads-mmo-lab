@@ -58,6 +58,25 @@ app does not touch them.
 IMAGE_REMOVED = "🖼"
 """What an image in a release body is replaced with: a character, never a fetch."""
 
+
+def default_open_url(url: str) -> bool:
+    """Hand `url` to the desktop. **False means nothing opened**, and it happens.
+
+    `QDesktopServices.openUrl()` answers a bool and the app used to throw it
+    away: on yulon-arch (gate, 2026-09-21) — no browser installed and no
+    `xdg-open`, only `exo-open` and `gio` — pressing "Open download page"
+    closed the dialog and did nothing, silently, leaving the player with no
+    route to the release at all.
+
+    **What False does NOT catch, measured on yulon-ubuntu the same day:** where
+    `xdg-open` exists, it returns True as soon as the helper is *started*. A
+    snap Firefox that then dies for want of a display is a successful open as
+    far as Qt is concerned. Nothing here can see that, and this does not try —
+    the fallback is for the answer Qt does give.
+    """
+    return bool(QDesktopServices.openUrl(QUrl(url)))
+
+
 _OPENABLE_SCHEMES = ("http", "https")
 """The only schemes a link in the notes may hand to the desktop.
 
@@ -196,7 +215,7 @@ class _NotesView(QTextBrowser):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.open_url: Callable[[str], object] = lambda url: QDesktopServices.openUrl(QUrl(url))
+        self.open_url: Callable[[str], bool] = default_open_url
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
         self.anchorClicked.connect(self._clicked)
@@ -218,11 +237,19 @@ class _NotesView(QTextBrowser):
         return None
 
     def _clicked(self, url: QUrl) -> None:
-        """A link in the release notes was clicked. http(s) only, and only outward."""
-        if url.scheme().lower() in _OPENABLE_SCHEMES:
-            self.open_url(url.toString())
-            return
-        logger.info(f"release notes: refused to open a {url.scheme()!r} link")
+        """A link in the release notes was clicked."""
+        self.open_link(url)
+
+    def open_link(self, url: QUrl) -> bool:
+        """Open `url` if its scheme is allowed. False = refused, or the opener could not.
+
+        The answer is returned rather than dropped: an opener that cannot open
+        anything is the yulon-arch case, and somebody has to tell the player.
+        """
+        if url.scheme().lower() not in _OPENABLE_SCHEMES:
+            logger.info(f"release notes: refused to open a {url.scheme()!r} link")
+            return False
+        return bool(self.open_url(url.toString()))
 
 
 class UpdateChoice(enum.Enum):
@@ -242,6 +269,7 @@ class UpdateDialog(QDialog):
         *,
         action_label: str = "Open download page",
         parent: QWidget | None = None,
+        open_url: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.choice = UpdateChoice.LATER
@@ -257,7 +285,12 @@ class UpdateDialog(QDialog):
 
         notes = _NotesView(self)
         notes.setObjectName("update-notes")
+        # One opener for both routes out of this dialog — the action button and
+        # a link in the notes — so one place decides what happens when it fails.
+        if open_url is not None:
+            notes.open_url = open_url
         notes.set_release_body(result.notes_markdown.strip() or _NO_NOTES)
+        self.notes = notes
         column.addWidget(notes, 1)
 
         buttons = QHBoxLayout()

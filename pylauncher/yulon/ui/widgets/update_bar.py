@@ -53,6 +53,13 @@ class UpdateBar(QWidget):
         self.label = QLabel(self)
         self.label.setObjectName("update-bar-text")
         self.label.setTextFormat(Qt.TextFormat.PlainText)
+        # Selectable, because a message can be the only route the player has:
+        # on a box with no browser and no `xdg-open` (yulon-arch, gate of
+        # 2026-09-21) the download URL is printed here and nowhere else. Still
+        # PlainText — the text comes off the network — and still elided, so the
+        # clipboard copy that goes with that message is what carries the whole
+        # URL; a selection can only ever be what is on screen.
+        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         # Ignored horizontally, and elided in `resizeEvent` below: the tag comes
         # off the network, so its length is not this app's to promise, and the
         # window's 960px minimum is measured without this row (MINIMUM_WINDOW_SIZE).

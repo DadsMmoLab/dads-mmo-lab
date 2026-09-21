@@ -331,7 +331,6 @@ def evaluate_feed(feed_text: str, current: str) -> UpdateCheck:
     tag = str(newest.get("tag_name"))
     url = str(newest.get("html_url") or RELEASES_PAGE)
     if not is_newer(tag, current):
-        logger.info(f"update check: current={current} latest={tag} newer=False")
         return UpdateCheck(current, tag, False, url)
     mine = version_key(current)
     sections = [
@@ -340,7 +339,6 @@ def evaluate_feed(feed_text: str, current: str) -> UpdateCheck:
         if mine is not None and version > mine
     ]
     assets = _assets(newest)
-    logger.info(f"update check: current={current} latest={tag} newer=True")
     return UpdateCheck(
         current,
         tag,
@@ -364,7 +362,7 @@ def check_for_update(
     that takes a plain text-getter, and what a caller with its own HTTP wants.
     """
     try:
-        return evaluate_feed(http_get(api_url), current)
+        return _log_check(evaluate_feed(http_get(api_url), current), ASKED_GITHUB)
     except Exception as exc:  # boundary: "never raises" is the whole contract
         logger.info(f"update check skipped: {type(exc).__name__}: {exc}")
         return UpdateCheck(current, None, False, RELEASES_PAGE, error=str(exc))
@@ -391,6 +389,33 @@ def safe_release_url(url: str, *, page: str = RELEASES_PAGE) -> str:
         return url
     logger.info(f"update: refusing to open {url!r}, which is not under {repo!r}")
     return page
+
+
+ASKED_GITHUB = "asked GitHub"
+NOT_MODIFIED = "not modified (304)"
+FROM_TODAYS_CACHE = "from today's cache"
+UNREACHABLE = "from the cache, GitHub could not be reached"
+NOTHING_ON_OFFER = "from the cache, GitHub offered nothing"
+
+
+def _log_check(result: UpdateCheck, source: str) -> UpdateCheck:
+    """One line per check, saying where the answer came from. Returns `result`.
+
+    The source is on it because the line was otherwise IDENTICAL whether the
+    feed had just been fetched or a day-old cache had answered — measured on
+    all four live gates of 2026-09-21, where the only way to tell was to read
+    `last_checked` out of `update.json` before and after. A gate that cannot
+    see which of the two happened cannot prove the once-a-day rule at all.
+
+    Logged HERE and not in `evaluate_feed`, which is pure and is called twice
+    in one check (once for the cache, once for the fresh feed) — so that line
+    appeared twice per check, with nothing to tell the two apart.
+    """
+    logger.info(
+        f"update check: current={result.current} latest={result.latest} "
+        f"newer={result.available} source={source}"
+    )
+    return result
 
 
 def _from_cache(state: UpdateState, current: str) -> UpdateCheck | None:
@@ -443,7 +468,7 @@ def check_with_cache(
         and cached is not None
         and 0 <= moment - state.last_checked < CHECK_INTERVAL_SECONDS
     ):
-        return cached
+        return _log_check(cached, FROM_TODAYS_CACHE)
     try:
         # The ETag goes only with the body it describes. Sending one whose feed
         # was lost or unreadable buys a 304 with nothing to read it against.
@@ -452,7 +477,7 @@ def check_with_cache(
         answer = fetch(api_url, state.etag if cached is not None else None)
         if answer.status == 304 and cached is not None:
             remember({"last_checked": moment}, state_path)
-            return cached
+            return _log_check(cached, NOT_MODIFIED)
         fresh = evaluate_feed(answer.text, current)
     except Exception as exc:
         # Everything, not the four types this used to name. `HTTPError` IS a
@@ -466,17 +491,21 @@ def check_with_cache(
         if cached is not None:
             # Offline with a cache still knows about the update; the error says
             # why the answer might be old, and a manual check shows it.
-            return dataclasses.replace(cached, error=str(exc))
-        return UpdateCheck(current, None, False, RELEASES_PAGE, error=str(exc))
+            return _log_check(dataclasses.replace(cached, error=str(exc)), UNREACHABLE)
+        return _log_check(
+            UpdateCheck(current, None, False, RELEASES_PAGE, error=str(exc)), UNREACHABLE
+        )
     if fresh.error:
         # A rate-limit body parses as JSON and holds no release. Caching it over
         # a good feed would throw away the only answer this app has.
-        return cached if cached is not None else fresh
+        if cached is not None:
+            return _log_check(cached, NOTHING_ON_OFFER)
+        return _log_check(fresh, ASKED_GITHUB)
     remember(
         {"last_checked": moment, "etag": answer.etag, "feed": answer.text},
         state_path,
     )
-    return fresh
+    return _log_check(fresh, ASKED_GITHUB)
 
 
 def skip_version(tag: str, state_path: Path | None = None) -> bool:
