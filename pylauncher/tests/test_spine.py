@@ -2324,6 +2324,16 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("selfupdate/layout.py", "is_empty_work_dir"): (
+        "T90 plan 3, cold review 2. Lists ONE of this app's own working directories -- a name "
+        "it spells itself, under the install -- to answer whether it holds anything. It decides "
+        "a DELETE, and that is the point: `prepare()` makes the directory and then writes the "
+        "marker, and a disk that filled up between the two left an empty `.yulon-new` that "
+        "every later update refused for ever. An empty directory under one of four reserved "
+        "names holds nothing of anybody's, so removing it costs nothing; a directory with a "
+        "single file of the player's in it answers False and is then never touched. An OSError "
+        "answers False, which is the safe side of that question"
+    ),
     ("selfupdate/layout.py", "other_instances"): (
         "T90 plan 3. Lists `/proc` to find every OTHER live process running this app's own "
         "executable, before the update helper is started. It decides a REFUSAL and never a "

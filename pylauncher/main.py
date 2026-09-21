@@ -364,7 +364,8 @@ def build_window() -> object:
     )
     from yulon.selfupdate.detect import OPEN_PAGE, Install, action_label, detect_install
     from yulon.selfupdate.fetch import Cancelled
-    from yulon.selfupdate.layout import other_instances
+    from yulon.selfupdate.layout import WORK_NAMES as work_names_const
+    from yulon.selfupdate.layout import discard_ours, other_instances
     from yulon.selfupdate.swap import start_helper
     from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
@@ -1084,6 +1085,15 @@ def build_window() -> object:
             that exists to stop exactly that.
             """
             install = self.current_install()
+            ready = self._ready
+            if ready is not None and ready.version == str(offered.latest):
+                # **The verified build is already staged** and this press is the
+                # one the bar asked for after a refused restart. Downloading and
+                # unpacking 90 MB again to reach the same bytes is a minute of
+                # the player's time for nothing (cold review 2).
+                logger.info(f"self-update: reusing the staged {ready.version}")
+                self.restart_into(ready)
+                return
             if action_label(install, offered) == OPEN_PAGE:
                 # The feed chose this string, not this app: `html_url` is
                 # handed to the desktop, which starts whatever its scheme says.
@@ -1136,15 +1146,38 @@ def build_window() -> object:
 
         @Slot(object)
         def install_done(self, outcome: object) -> None:
-            """The update finished. Either restart into it, or say where it was saved."""
+            """The update finished. Either restart into it, or say where it was saved.
+
+            **Cancel is checked here as well as in the worker** (cold review 2,
+            S4). The worker's last look at the event is before it writes the
+            helper; this slot runs on the GUI thread, queued, and a Cancel
+            pressed in that window would otherwise have been ignored — the app
+            would have started the helper and closed itself under a player who
+            had just said not to.
+            """
             self._installing = False
             progress, self._progress = self._progress, None
+            cancelled = progress is not None and progress.cancel_event.is_set()
             if progress is not None:
                 progress.close_now()
+            if cancelled:
+                logger.info("self-update: cancelled after the work finished; discarding it")
+                self.discard_staged()
+                return
             if isinstance(outcome, ReadyToRestart):
                 self.restart_into(outcome)
             elif isinstance(outcome, SavedForManualInstall):
                 self.show_saved(outcome)
+
+        def discard_staged(self) -> None:
+            """Throw away a staged build nobody is going to install. Never raises."""
+            self._ready = None
+            try:
+                install = self.current_install()
+                for name in work_names_const:
+                    discard_ours(install, name)
+            except Exception as exc:  # noqa: BLE001 - tidying must not raise at a slot
+                logger.info(f"self-update: could not discard the staged build: {exc}")
 
         def restart_into(self, ready: ReadyToRestart) -> None:
             """Start the helper and close — **after asking the close gate again**.
@@ -1162,6 +1195,12 @@ def build_window() -> object:
             `Update now` again replaces it cleanly (`stage.prepare()` discards
             the previous marked staging and starts over).
             """
+            progress = self._progress
+            if progress is not None and progress.cancel_event.is_set():
+                # Pressed while this very slot was queued. The helper has not
+                # been started, so there is nothing to undo but the staging.
+                self.discard_staged()
+                return
             reason = self.refusal() or self._another_copy_is_open()
             if reason is not None:
                 self._ready = ready

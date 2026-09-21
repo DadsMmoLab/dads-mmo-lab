@@ -120,36 +120,65 @@ def _require_a_data_filter() -> None:
 
 
 def prepare(install: Install, version: str, *, pid: int) -> Path:
-    """Make a fresh, marked `.yulon-new` for this update and return it.
+    """Make a fresh, marked `.yulon-new` and `.yulon-download`, and return the staging one.
 
-    Refuses if a `.yulon-new` is there that this app cannot prove it made —
+    Refuses if either is already there and this app cannot prove it made it —
     that is somebody's own folder and it is not ours to delete — and refuses if
     another live copy of Yu'lon is staging into the same install.
+
+    **Two directories, because the archive is not part of the build.** It used
+    to be downloaded into the staging directory, which made it one of the
+    entries `staged_entries()` reports and the helper then moved a 90 MB
+    tarball into the player's folder as part of the program (cold review 2).
     """
     busy = layout.another_copy_is_updating(install, pid)
     if busy is not None:
         raise UpdateError(busy)
-    for name in (layout.NEW_NAME, layout.OLD_NAME):
+    for name in layout.WORK_NAMES:
         path = layout.work_dir(install, name)
         if path.exists() and not layout.discard_ours(install, name):
             raise UpdateError(
                 f"There is already a {path.name} in your Yu'lon folder and Yu'lon did not "
                 "put it there. Move or rename it, then try again."
             )
-    staged = layout.work_dir(install, layout.NEW_NAME)
-    marker = layout.Marker(
-        role=layout.NEW_NAME,
-        from_version=__version__,
-        to_version=version,
-        pid=pid,
-        stamp=layout.now(),
-    )
+    for name in (layout.NEW_NAME, layout.DOWNLOAD_NAME):
+        _make_work_dir(install, name, version, pid)
+    return layout.work_dir(install, layout.NEW_NAME)
+
+
+def _make_work_dir(install: Install, name: str, version: str, pid: int) -> None:
+    """Create one marked working directory, or leave nothing behind.
+
+    **The marker failing used to leave the directory** (cold review 2, S1): a
+    disk that filled up between `mkdir` and the write left an empty
+    `.yulon-new` that every later attempt refused, for ever. The directory is
+    removed here if the marker cannot be written, and `layout` additionally
+    counts an EMPTY work dir as this app's — two independent ways out of the
+    same wedge.
+    """
+    path = layout.work_dir(install, name)
     try:
-        staged.mkdir(parents=True)
-        layout.write_marker(install, layout.NEW_NAME, marker)
+        path.mkdir(parents=True)
     except OSError as exc:
         raise UpdateError(f"Yu'lon could not prepare a place for the update: {exc}") from exc
-    return staged
+    try:
+        layout.write_marker(
+            install,
+            name,
+            layout.Marker(
+                role=name,
+                from_version=__version__,
+                to_version=version,
+                pid=pid,
+                stamp=layout.now(),
+            ),
+        )
+    except OSError as exc:
+        try:
+            path.rmdir()
+        except OSError:  # pragma: no cover - it was empty a moment ago
+            logger.info(f"self-update: {path} was left behind after a failed marker")
+        raise UpdateError(f"Yu'lon could not prepare a place for the update: {exc}") from exc
 
 
 def stage(install: Install, archive: Path) -> Path:
@@ -171,7 +200,11 @@ def stage(install: Install, archive: Path) -> Path:
     if install.kind is InstallKind.APPIMAGE:
         _stage_appimage(archive, staged / layout.APPIMAGE_ENTRY)
         return staged
-    scratch = staged / "unpack"
+    # The scratch directory lives in the DOWNLOAD work dir, not in the staging
+    # one: `.yulon-new` must end up holding exactly the build's own top-level
+    # entries and this app's marker, because that is what `staged_entries()`
+    # reads and what the helper is then told to move into the player's folder.
+    scratch = layout.work_dir(install, layout.DOWNLOAD_NAME) / "unpack"
     try:
         _unpack_into(install, archive, scratch)
         built = (
@@ -331,7 +364,15 @@ def _the_one_yulon_directory(scratch: Path) -> Path:
 
 
 def staged_entries(install: Install, staged: Path) -> tuple[str, ...]:
-    """The top-level names the STAGED build ships, minus this app's own marker."""
+    """The top-level names the STAGED build ships. **Exactly the build, nothing else.**
+
+    The downloaded archive used to be in here — it was downloaded INTO the
+    staging directory — so it came back from this function as one of the
+    "entries the build ships", and the helper moved a 90 MB tarball into the
+    player's folder as part of the program (cold review 2). It now lives in its
+    own `.yulon-download` work dir, which is removed as soon as it has been
+    unpacked, so the only thing this has to skip is the marker.
+    """
     try:
         found = sorted(p.name for p in staged.iterdir() if p.name != layout.MARKER_NAME)
     except OSError as exc:

@@ -212,8 +212,12 @@ def test_a_folder_plan_is_sh_the_script_the_bound_the_pid_and_the_entries(tmp_pa
         "4242",
         str(install.target),
         str(install.target / "yulon"),
+        "2",
+        # the entries, twice: executable first, then executable last
         "yulon",
         "_internal",
+        "_internal",
+        "yulon",
     ]
     assert plan.entries == ("yulon", "_internal")
     assert stat.S_IMODE(plan.script.stat().st_mode) == 0o700
@@ -340,8 +344,11 @@ def test_a_windows_plan_runs_powershell_by_its_absolute_path_with_the_fixed_flag
         "99",
         str(install.target),
         str(install.target / "yulon.exe"),
+        "2",
         "yulon.exe",
         "_internal",
+        "_internal",
+        "yulon.exe",
     ]
 
 
@@ -551,7 +558,14 @@ def test_the_helper_gives_up_on_a_live_app_and_moves_and_starts_nothing(tmp_path
         argv = list(plan.argv)
         argv[2] = "2"
         helper = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
-        code = helper.wait(timeout=HELPER_DEADLINE)
+        try:
+            code = helper.wait(timeout=HELPER_DEADLINE)
+        finally:
+            # A helper that did NOT give up would otherwise be left counting
+            # down for six minutes after this test has finished.
+            if helper.poll() is None:  # pragma: no cover - only on a failing run
+                helper.kill()
+                helper.wait(timeout=HELPER_DEADLINE)
     finally:
         alive.kill()
         alive.wait(timeout=HELPER_DEADLINE)
@@ -565,51 +579,6 @@ def test_the_helper_gives_up_on_a_live_app_and_moves_and_starts_nothing(tmp_path
         layout.read_marker(install, layout.NEW_NAME) is not None
     ), "the staged build lost its mark"
     assert not plan.script.exists(), "the helper left itself behind"
-
-
-@posix_only
-@pytest.mark.parametrize(
-    ("label", "mangle"),
-    [
-        ("relative-target", lambda a: a[:4] + ["app"] + a[5:]),
-        ("empty-entry", lambda a: a[:6] + [""]),
-        ("dotdot-entry", lambda a: a[:6] + [".."]),
-        ("nested-entry", lambda a: a[:6] + ["a/b"]),
-        ("backslash-entry", lambda a: a[:6] + ["a\\b"]),
-        ("no-entries", lambda a: a[:6]),
-    ],
-)
-def test_the_helper_validates_its_arguments_before_it_moves_anything(
-    label: str, mangle: Callable[[list[str]], list[str]], tmp_path: Path
-) -> None:
-    """Run the REAL script with bad arguments: nothing moves, and it says so by exit code."""
-    install = _plain(tmp_path)
-    target = install.target
-    assert target is not None
-    witness = tmp_path / "launched"
-    (target / "_internal").mkdir()
-    (target / "_internal" / "lib").write_text("old lib", encoding="utf-8")
-    _a_launcher(target / "yulon", "old", witness)
-    _staged_folder(install, label="new", witness=witness)
-    before = _hash_tree(target, ignoring={layout.OLD_NAME})
-
-    dead = subprocess.Popen(["sleep", "0"])
-    dead.wait(timeout=HELPER_DEADLINE)
-    plan = plan_swap(
-        install,
-        layout.work_dir(install, layout.NEW_NAME),
-        pid=dead.pid,
-        script_dir=tmp_path,
-        entries=("yulon", "_internal"),
-        platform_id="linux",
-    )
-    argv = mangle(list(plan.argv))
-    helper = subprocess.Popen(argv, cwd=str(tmp_path), stdin=subprocess.DEVNULL)
-    code = helper.wait(timeout=HELPER_DEADLINE)
-
-    assert code == 64, f"{label}: the helper did not refuse its arguments"
-    assert not witness.exists(), f"{label}: something was launched"
-    assert _hash_tree(target, ignoring={layout.OLD_NAME}) == before, f"{label}: something moved"
 
 
 @posix_only
@@ -686,4 +655,250 @@ def test_the_appimage_helper_refuses_a_staging_folder_with_no_marker(tmp_path: P
     helper = subprocess.Popen(plan.argv, stdin=subprocess.DEVNULL)
     assert helper.wait(timeout=HELPER_DEADLINE) == 64
     assert "old" in target.read_text(encoding="utf-8")
+    assert not witness.exists()
+
+
+# -- what the helper refuses before it moves anything (cold review 2, S3) ----
+
+
+def _ready_to_swap(tmp_path: Path) -> tuple[Install, Path, Path]:
+    """An install, a marked staged build, and a witness — all ready for the helper."""
+    install = _plain(tmp_path)
+    target = install.target
+    assert target is not None
+    witness = tmp_path / "launched"
+    (target / "_internal").mkdir()
+    (target / "_internal" / "lib").write_text("old lib", encoding="utf-8")
+    _a_launcher(target / "yulon", "old", witness)
+    _staged_folder(install, label="new", witness=witness)
+    return install, target, witness
+
+
+def _a_dead_pid() -> int:
+    dead = subprocess.Popen(["sleep", "0"])
+    dead.wait(timeout=HELPER_DEADLINE)
+    return dead.pid
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("label", "mangle"),
+    [
+        ("ticks-empty", lambda a: a[:2] + [""] + a[3:]),
+        ("ticks-word", lambda a: a[:2] + ["soon"] + a[3:]),
+        ("ticks-zero", lambda a: a[:2] + ["0"] + a[3:]),
+        ("ticks-negative", lambda a: a[:2] + ["-1"] + a[3:]),
+        ("pid-empty", lambda a: a[:3] + [""] + a[4:]),
+        ("pid-word", lambda a: a[:3] + ["abc"] + a[4:]),
+        ("pid-one", lambda a: a[:3] + ["1"] + a[4:]),
+        ("pid-zero", lambda a: a[:3] + ["0"] + a[4:]),
+        ("half-word", lambda a: a[:6] + ["two"] + a[7:]),
+        ("half-zero", lambda a: a[:6] + ["0"] + a[7:]),
+        ("half-disagrees", lambda a: a[:6] + ["3"] + a[7:]),
+        ("relative-target", lambda a: a[:4] + ["app"] + a[5:]),
+        ("entry-empty", lambda a: a[:7] + [""] + a[8:]),
+        ("entry-dotdot", lambda a: a[:7] + [".."] + a[8:]),
+        ("entry-nested", lambda a: a[:7] + ["a/b"] + a[8:]),
+        ("entry-backslash", lambda a: a[:7] + ["a\\b"] + a[8:]),
+        ("entry-space", lambda a: a[:7] + ["my file"] + a[8:]),
+        ("entry-glob", lambda a: a[:7] + ["*"] + a[8:]),
+        ("entry-dash", lambda a: a[:7] + ["-rf"] + a[8:]),
+        ("entry-marker", lambda a: a[:7] + [".yulon-marker"] + a[8:]),
+        ("entry-backup", lambda a: a[:7] + [".yulon-old"] + a[8:]),
+        ("no-entries", lambda a: a[:7]),
+    ],
+)
+def test_the_real_helper_refuses_a_bad_argument_and_moves_nothing(
+    label: str, mangle: Callable[[list[str]], list[str]], tmp_path: Path
+) -> None:
+    """**A pid of `abc` used to swap IMMEDIATELY**, without waiting for anything.
+
+    `kill -0 abc` fails, so the wait loop was never entered at all — the helper
+    went straight to moving files under a still-running app. Non-numeric ticks
+    made `[ -gt ]` an error and the give-up bound never fired. And the reserved
+    names were accepted as entries, so a swap could be asked to move
+    `.yulon-old` (cold review 2, S3).
+
+    Every case runs the REAL script and asserts exit 64 and an untouched tree.
+    """
+    install, target, witness = _ready_to_swap(tmp_path)
+    before = _hash_tree(target, ignoring={layout.OLD_NAME})
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=_a_dead_pid(),
+        script_dir=tmp_path,
+        entries=("yulon", "_internal"),
+        platform_id="linux",
+    )
+    argv = mangle(list(plan.argv))
+
+    helper = subprocess.Popen(argv, cwd=str(tmp_path), stdin=subprocess.DEVNULL)
+    try:
+        code = helper.wait(timeout=HELPER_DEADLINE)
+    finally:
+        if helper.poll() is None:  # pragma: no cover - only on a failing run
+            helper.kill()
+            helper.wait(timeout=HELPER_DEADLINE)
+
+    assert code == 64, f"{label}: the helper did not refuse its arguments"
+    assert not witness.exists(), f"{label}: something was launched"
+    assert _hash_tree(target, ignoring={layout.OLD_NAME}) == before, f"{label}: something moved"
+    assert not plan.script.exists(), f"{label}: the refused helper left itself in the temp dir"
+
+
+@posix_only
+def test_a_live_pid_that_is_not_the_app_is_still_waited_for(tmp_path: Path) -> None:
+    """The precondition the pid validation protects: the wait loop really runs."""
+    install, target, witness = _ready_to_swap(tmp_path)
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        plan = plan_swap(
+            install,
+            layout.work_dir(install, layout.NEW_NAME),
+            pid=alive.pid,
+            script_dir=tmp_path,
+            entries=("yulon", "_internal"),
+            platform_id="linux",
+        )
+        argv = list(plan.argv)
+        argv[2] = "2"
+        helper = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+        try:
+            assert helper.wait(timeout=HELPER_DEADLINE) == 75
+        finally:
+            if helper.poll() is None:  # pragma: no cover - only on a failing run
+                helper.kill()
+                helper.wait(timeout=HELPER_DEADLINE)
+    finally:
+        alive.kill()
+        alive.wait(timeout=HELPER_DEADLINE)
+    assert alive.poll() is not None
+    assert not witness.exists()
+
+
+# -- the entries go in both orders (S2) --------------------------------------
+
+
+def test_the_entries_are_handed_over_twice_in_the_two_orders_the_swap_needs(
+    tmp_path: Path,
+) -> None:
+    """Reversing a list inside POSIX `sh` means rebuilding it into a string.
+
+    A string is word-split, which is how an entry called `my file` would have
+    failed the swap and left itself in `.yulon-old`. The reversing is done
+    here, in Python, where a list is a list.
+    """
+    install = _plain(tmp_path)
+    assert install.target is not None
+    _mark(install, layout.NEW_NAME)
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=4242,
+        script_dir=tmp_path,
+        entries=("yulon", "_internal", "extra.dat"),
+        platform_id="linux",
+    )
+    half = int(plan.argv[6])
+    assert half == 3
+    forward = plan.argv[7 : 7 + half]
+    backward = plan.argv[7 + half :]
+    assert forward == ["yulon", "_internal", "extra.dat"]
+    assert backward == list(reversed(forward))
+    assert forward[0] == "yulon", "the executable leaves first"
+    assert backward[-1] == "yulon", "the executable arrives last"
+
+
+def test_the_windows_argv_puts_the_script_where_the_spawner_looks_for_it(
+    tmp_path: Path,
+) -> None:
+    """`argv[-1]` is an ENTRY now that the entries are trailing arguments.
+
+    `_spawn_detached` used it as the script path to derive its working
+    directory from, so on Windows it was setting the helper's cwd from a file
+    name (cold review 2).
+    """
+    from yulon.selfupdate.swap import script_in
+
+    install = _plain(tmp_path, InstallKind.WINDOWS_ZIP, "yulon.exe")
+    _mark(install, layout.NEW_NAME)
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=99,
+        script_dir=tmp_path,
+        entries=("yulon.exe", "_internal"),
+        platform_id="windows",
+    )
+    assert plan.argv[-1] != str(plan.script), "the precondition: the script is not last"
+    assert script_in(plan.argv) == plan.script
+
+    elsewhere = tmp_path / "other"
+    elsewhere.mkdir()
+    other = _plain(elsewhere)
+    _mark(other, layout.NEW_NAME)
+    posix = plan_swap(
+        other,
+        layout.work_dir(other, layout.NEW_NAME),
+        pid=2,
+        script_dir=tmp_path,
+        entries=("yulon",),
+        platform_id="linux",
+    )
+    assert script_in(posix.argv) == posix.script
+
+
+def test_the_posix_helper_never_iterates_an_unquoted_variable() -> None:
+    """The loops read `"$@"`; nothing is rebuilt into a string and word-split.
+
+    **This is a TEXT pin and it says so**, because the behaviour it guards is
+    unreachable while the name rules hold: `layout.is_entry_name` refuses
+    whitespace and globs on the Python side, and the helper's own `case`
+    refuses them again, so no entry that WOULD word-split can reach the loops.
+    Restoring the old `moved="$e $moved"` / `for e in $moved` shape therefore
+    changes no behaviour any test can observe today — measured: that mutation
+    left all 56 swap and live tests green.
+
+    What it does change is the shape, and the shape is the reason the rules
+    above are belt and braces rather than the only defence. So the shape is
+    what is asserted: every `for` loop in both helpers iterates `"$@"`.
+    """
+    from yulon.selfupdate.swap import POSIX_FILE_HELPER, POSIX_FOLDER_HELPER
+
+    for script in (POSIX_FOLDER_HELPER, POSIX_FILE_HELPER):
+        loops = [line.strip() for line in script.splitlines() if line.strip().startswith("for ")]
+        for loop in loops:
+            assert loop == 'for e in "$@"; do', f"a loop iterates something else: {loop}"
+        assert (
+            "$moved" not in script and "$placed" not in script
+        ), "the helper is rebuilding a list into a string again"
+
+
+def test_the_helper_refuses_a_name_that_would_word_split_rather_than_quoting_it(
+    tmp_path: Path,
+) -> None:
+    """The other half: the rule that makes the loops' shape belt and braces.
+
+    Driven through the REAL script with `my file` as an entry, so what is
+    pinned is the shell's own `case` and not only the Python rule.
+    """
+    install, target, witness = _ready_to_swap(tmp_path)
+    plan = plan_swap(
+        install,
+        layout.work_dir(install, layout.NEW_NAME),
+        pid=_a_dead_pid(),
+        script_dir=tmp_path,
+        entries=("yulon", "_internal"),
+        platform_id="linux",
+    )
+    argv = list(plan.argv)
+    argv[7] = "my file"
+    helper = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+    try:
+        assert helper.wait(timeout=HELPER_DEADLINE) == 64
+    finally:
+        if helper.poll() is None:  # pragma: no cover - only on a failing run
+            helper.kill()
+            helper.wait(timeout=HELPER_DEADLINE)
     assert not witness.exists()

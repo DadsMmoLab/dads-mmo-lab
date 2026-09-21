@@ -31,8 +31,10 @@ moving somebody's folder aside is the defect this module was written for.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import secrets
 import shutil
 import time
 from dataclasses import dataclass
@@ -40,18 +42,33 @@ from pathlib import Path
 
 from yulon.log import get_logger
 from yulon.selfupdate.detect import Install, InstallKind
+from yulon.update_state import load_update_state, remember
 
 logger = get_logger(__name__)
 
 NEW_NAME = ".yulon-new"
 OLD_NAME = ".yulon-old"
+DOWNLOAD_NAME = ".yulon-download"
 MARKER_NAME = ".yulon-marker"
-"""The three fixed names. **Constants, never anything computed from an argument.**
+"""The four fixed names. **Constants, never anything computed from an argument.**
 
 The helper scripts spell these themselves rather than taking them as arguments,
-so the only path either of them can remove is one of these two under a
-directory it has already validated.
+so the only paths either of them can remove are these, under a directory it has
+already validated.
+
+`.yulon-download` is its own directory and not a file inside `.yulon-new`
+(cold review 2): the archive used to be downloaded into the staging directory,
+which made it one of the "entries the staged build ships" — so the helper moved
+a 90 MB tarball into the player's folder as though it were part of the program,
+and a player who had already saved that same release's archive there got a
+"Yu'lon did not put that there" refusal about their own file.
 """
+
+WORK_NAMES = (NEW_NAME, OLD_NAME, DOWNLOAD_NAME)
+"""Everything `discard_ours` will even consider. Anything else raises."""
+
+RESERVED_NAMES = frozenset({*WORK_NAMES, MARKER_NAME})
+"""Names that can never be a build ENTRY, so a swap can never move one."""
 
 APPIMAGE_ENTRY = "yulon.AppImage"
 """What the staged AppImage is called inside its work directory.
@@ -102,6 +119,18 @@ class Marker:
     stamp: float
     entries: tuple[str, ...] = ()
     state: str = STAGED
+    target: str = ""
+    """The absolute install this marker belongs to. A marker copied elsewhere is not ours."""
+    token: str = ""
+    """A random secret kept in `update.json`. **This is what a forged marker cannot have.**
+
+    A marker on its own is a file an archive could contain and a player could
+    write by hand: the second cold review produced a `.yulon-old/` holding a
+    hand-written marker and a `save.dat`, and it was deleted. Binding the
+    marker to this install's path AND to a token that lives in the config
+    directory means forging one needs to read a file that no release body and
+    no archive can reach.
+    """
 
     def as_json(self) -> str:
         return json.dumps(
@@ -114,24 +143,46 @@ class Marker:
                 "stamp": self.stamp,
                 "entries": list(self.entries),
                 "state": self.state,
+                "target": self.target,
+                "token": self.token,
             },
             indent=2,
         )
 
 
-def is_entry_name(name: object) -> bool:
-    """Is `name` a single path segment — something that can only be INSIDE the target?
+_NOT_IN_AN_ENTRY = frozenset('/\\*?[]:"<>|')
+"""Separators, and the characters a shell or Windows would read as something else.
 
-    The one rule both the Python side and the two helper scripts apply to every
-    entry. `a/b`, `a\\b`, `.`, `..` and `""` are all refused, so an entry can
-    never name anything outside the folder it is an entry of.
+The glob characters are here because the POSIX helper's loops are written not to
+word-split — but a `*` reaching a shell at all is a class of bug this does not
+want to depend on one file to avoid, and Windows refuses these in a filename
+anyway. `:` and the quoting characters go with them for the same reason.
+"""
+
+
+def is_entry_name(name: object) -> bool:
+    """Is `name` a single, ordinary path segment that can only be INSIDE the target?
+
+    The one rule the Python side and both helper scripts apply to every entry.
+    Refused: anything with a separator, `.`/`..`/empty, whitespace, a glob or
+    quoting character, a leading `-` (which a command would read as an option),
+    a control character, and any of this app's own reserved names — a swap must
+    never be able to move `.yulon-old` or a marker.
+
+    **Whitespace and globs are refused rather than quoted** (cold review 2).
+    Today's builds ship `yulon` and `_internal`, so none of this is reachable;
+    the shipped manifest exists so that a future build CAN ship another name,
+    and the moment it can, an entry called `my file` would have failed the swap
+    and left itself in `.yulon-old`.
     """
     return (
         isinstance(name, str)
         and bool(name)
-        and "/" not in name
-        and "\\" not in name
         and name not in (".", "..")
+        and name not in RESERVED_NAMES
+        and not name.startswith("-")
+        and not any(c in _NOT_IN_AN_ENTRY for c in name)
+        and not any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in name)
     )
 
 
@@ -162,11 +213,41 @@ def marker_path(install: Install, name: str) -> Path:
     return work_dir(install, name) / MARKER_NAME
 
 
+def install_token(state_path: Path | None = None) -> str:
+    """This installation's secret, from `update.json`; made on first use.
+
+    Kept beside the update check's own state because that is this app's config
+    directory — somewhere an archive being unpacked, or a release body, has no
+    way to read. An unwritable config directory answers `""`, and everything
+    below then treats a token as "cannot be checked" rather than as "wrong":
+    the alternative is a launcher that refuses to update because it could not
+    write a preferences file.
+    """
+    state = load_update_state(state_path)
+    if state.update_token:
+        return state.update_token
+    fresh = secrets.token_hex(16)
+    if not remember({"update_token": fresh}, state_path):
+        logger.info("self-update: could not record this install's token")
+        return ""
+    return fresh
+
+
 def write_marker(install: Install, name: str, marker: Marker) -> None:
-    """Write the marker for one working directory. Raises `OSError` on failure."""
+    """Write the marker for one working directory. Raises `OSError` on failure.
+
+    The install's path and token are filled in here rather than by the caller,
+    so no caller can forget the binding.
+    """
+    target = install.target
+    bound = dataclasses.replace(
+        marker,
+        target=str(target) if target is not None else "",
+        token=marker.token or install_token(),
+    )
     path = marker_path(install, name)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(marker.as_json() + "\n", encoding="utf-8")
+    path.write_text(bound.as_json() + "\n", encoding="utf-8")
 
 
 def read_marker(install: Install, name: str) -> Marker | None:
@@ -181,6 +262,20 @@ def read_marker(install: Install, name: str) -> Marker | None:
         logger.debug(f"self-update: no readable marker for {name}: {exc}")
         return None
     if not isinstance(raw, dict) or raw.get("signature") != _SIGNATURE:
+        return None
+    if raw.get("role") != name:
+        # A marker is for the directory it is IN. One copied from `.yulon-new`
+        # into `.yulon-old` names the wrong role and is not this app's word
+        # about this directory.
+        logger.info(f"self-update: a marker in {name} claims role {raw.get('role')!r}")
+        return None
+    target = install.target
+    if raw.get("target") != (str(target) if target is not None else ""):
+        logger.info(f"self-update: a marker in {name} names a different install")
+        return None
+    ours = install_token()
+    if ours and raw.get("token") != ours:
+        logger.info(f"self-update: a marker in {name} does not carry this install's token")
         return None
     entries = raw.get("entries")
     if not isinstance(entries, list) or not all(is_entry_name(e) for e in entries):
@@ -199,13 +294,32 @@ def read_marker(install: Install, name: str) -> Marker | None:
         return None
 
 
+def is_empty_work_dir(install: Install, name: str) -> bool:
+    """An existing work dir holding nothing, or nothing but a marker file.
+
+    **Ours by construction** (cold review 2, S1): `prepare()` makes the
+    directory and then writes the marker, and a disk that filled up between the
+    two used to leave an empty `.yulon-new` that every later attempt refused
+    for ever. An empty directory under one of this app's four reserved names
+    holds nothing of anybody's, so removing it costs nothing and unsticks the
+    update.
+    """
+    path = work_dir(install, name)
+    try:
+        return path.is_dir() and all(p.name == MARKER_NAME for p in path.iterdir())
+    except OSError:
+        return False
+
+
 def is_ours(install: Install, name: str) -> bool:
     """Does `work_dir(install, name)` exist AND carry a marker this app wrote?
 
     The gate on every delete. A `.yulon-old` a player made by hand answers
     False here, and is then left exactly where it is.
     """
-    return work_dir(install, name).exists() and read_marker(install, name) is not None
+    if not work_dir(install, name).exists():
+        return False
+    return read_marker(install, name) is not None or is_empty_work_dir(install, name)
 
 
 def discard_ours(install: Install, name: str) -> bool:
@@ -215,12 +329,12 @@ def discard_ours(install: Install, name: str) -> bool:
     `<target>/.yulon-new`, `<target>/.yulon-old` or the AppImage's two
     siblings — and only when the marker says so.
     """
-    if name not in (NEW_NAME, OLD_NAME):
+    if name not in WORK_NAMES:
         raise ValueError(f"{name!r} is not one of this app's working directories")
     path = work_dir(install, name)
     if not path.exists():
         return True
-    if read_marker(install, name) is None:
+    if read_marker(install, name) is None and not is_empty_work_dir(install, name):
         logger.info(f"self-update: {path} carries no marker of ours; leaving it alone")
         return False
     try:

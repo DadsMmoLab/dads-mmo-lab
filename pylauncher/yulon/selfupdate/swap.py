@@ -54,47 +54,70 @@ from yulon.selfupdate.fetch import UpdateError
 logger = get_logger(__name__)
 
 TICK_SECONDS = "0.2"
-DEFAULT_TICKS = 600
+DEFAULT_TICKS = 1800
 """How long the helper waits for the app to exit, as a NUMBER OF TICKS it is given.
 
-600 x 0.2 s = 120 seconds by default. **It is an argument and not a constant in
-the script text**, because until cold review 1 it was the latter and nothing
-could test the give-up path: mutating the give-up branch to swap anyway left
-all 21 swap tests green. A test now runs the real helper with a handful of
-ticks against a process that stays alive.
+1800 x 0.2 s = **six minutes**, and the number is read off the close path rather
+than chosen. `main._stop_background_threads()` is what runs between the helper
+starting and this process exiting, and its bounds add up:
+
+    every controller tab's `shutdown()`      (its own joins)
+    every log panel      `panel.wait(5000)`   5 s EACH
+    the update thread    `thread.wait(8000)`  8 s
+    every held job       `wait_all(8000)`     8 s
+
+so a player with several tabs open and a log following in each can legitimately
+take a minute or more to close. 120 seconds — what this was — is inside that
+range, and a helper that gives up moves nothing and relaunches nothing: the
+player would have closed Yu'lon for an update that then silently did not
+happen. Six minutes is comfortably past the sum for any plausible number of
+tabs, and the cost of it being too long is only that a HUNG app leaves a
+waiting shell around for six minutes instead of two.
+
+**It is an argument and not a constant in the script text**, because until cold
+review 1 it was the latter and nothing could test the give-up path: mutating
+the give-up branch to swap anyway left all 21 swap tests green. A test now runs
+the real helper with a handful of ticks against a process that stays alive.
 
 Past the bound the helper does **nothing**: it does not swap, and it does not
-relaunch either. A process still alive two minutes after being asked to close
+relaunch either. A process still alive six minutes after being asked to close
 is one whose files are still open — and it is evidently still running, so a
 second copy beside it is the wrong answer to every question.
 """
 
 POSIX_FOLDER_HELPER = f"""#!/bin/sh
 # Yu'lon self-update helper (one-dir install). Every path arrives as an argument.
-# $1 ticks  $2 pid  $3 target  $4 launch  $5.. the entries, executable FIRST
+# $1 ticks  $2 pid  $3 target  $4 launch  $5 n  then n entries executable-FIRST
+# followed by the same n entries executable-LAST.
+trap 'rm -f -- "$0"' EXIT
 ticks="$1"
 pid="$2"
 target="$3"
 launch="$4"
-shift 4
+half="$5"
+shift 5
 new="$target/{layout.NEW_NAME}"
 old="$target/{layout.OLD_NAME}"
 marker="{layout.MARKER_NAME}"
 
 # ---- validate before anything moves --------------------------------------
-case "$target" in
-  /*) ;;
-  *) exit 64 ;;
-esac
+case "$ticks" in ""|*[!0-9]*) exit 64 ;; esac
+case "$pid" in ""|*[!0-9]*) exit 64 ;; esac
+case "$half" in ""|*[!0-9]*) exit 64 ;; esac
+[ "$ticks" -gt 0 ] || exit 64
+[ "$pid" -gt 1 ] || exit 64
+[ "$half" -gt 0 ] || exit 64
+[ "$#" -eq "$((half * 2))" ] || exit 64
+case "$target" in /*) ;; *) exit 64 ;; esac
 [ -d "$target" ] || exit 64
 [ -d "$new" ] || exit 64
 [ -d "$old" ] || exit 64
 [ -f "$new/$marker" ] || exit 64
 [ -f "$old/$marker" ] || exit 64
-[ "$#" -ge 1 ] || exit 64
 for e in "$@"; do
   case "$e" in
-    ""|"."|".."|*/*|*\\\\*) exit 64 ;;
+    ""|.|..|-*|*/*|*[!-._A-Za-z0-9]*) exit 64 ;;
+    "{layout.NEW_NAME}"|"{layout.OLD_NAME}"|"{layout.DOWNLOAD_NAME}"|"$marker") exit 64 ;;
   esac
 done
 
@@ -105,36 +128,55 @@ while kill -0 "$pid" 2>/dev/null; do
   if [ "$i" -gt "$ticks" ]; then
     # Still running. Move nothing, start nothing, and leave the staged build
     # where it is for the next start to reuse or clean up.
-    rm -f -- "$0"
     exit 75
   fi
   sleep {TICK_SECONDS}
 done
 
-# ---- move the current entries aside, executable first ----------------------
-moved=""
+# ---- move the current entries aside, executable FIRST ----------------------
+# The two halves of "$@" are the same names in the two orders this needs. They
+# are read with a counter rather than by shifting, so nothing is ever rebuilt
+# into a string and nothing is ever word-split or glob-expanded.
 ok=1
+i=0
 for e in "$@"; do
+  i=$((i + 1))
+  [ "$i" -le "$half" ] || break
   if [ -e "$target/$e" ]; then
-    if mv -- "$target/$e" "$old/$e"; then moved="$e $moved"; else ok=0; break; fi
-  else
-    moved="$e $moved"
+    mv -- "$target/$e" "$old/$e" || {{ ok=0; break; }}
   fi
 done
 
-# ---- bring the staged entries in, executable last --------------------------
-placed=""
+# ---- bring the staged entries in, executable LAST --------------------------
 if [ "$ok" -eq 1 ]; then
-  for e in $moved; do
-    if mv -- "$new/$e" "$target/$e"; then placed="$e $placed"; else ok=0; break; fi
+  i=0
+  for e in "$@"; do
+    i=$((i + 1))
+    [ "$i" -gt "$half" ] || continue
+    mv -- "$new/$e" "$target/$e" || {{ ok=0; break; }}
   done
 fi
 
-# ---- any failure is undone in the exact reverse of what was done -----------
+# ---- any failure is undone, and the filesystem says what to undo -----------
 if [ "$ok" -eq 0 ]; then
-  for e in $placed; do mv -- "$target/$e" "$new/$e"; done
-  for e in $moved; do
-    [ -e "$old/$e" ] && mv -- "$old/$e" "$target/$e"
+  # Take the new entries back out, executable first: an entry that was placed
+  # is the one that is no longer in the staging directory.
+  i=0
+  for e in "$@"; do
+    i=$((i + 1))
+    [ "$i" -le "$half" ] || break
+    if [ ! -e "$new/$e" ] && [ -e "$target/$e" ]; then
+      mv -- "$target/$e" "$new/$e"
+    fi
+  done
+  # Put the old entries back, executable last.
+  i=0
+  for e in "$@"; do
+    i=$((i + 1))
+    [ "$i" -gt "$half" ] || continue
+    if [ -e "$old/$e" ]; then
+      mv -- "$old/$e" "$target/$e"
+    fi
   done
 fi
 
@@ -144,26 +186,31 @@ exec "$launch"
 """
 """`sh` and not `bash`: an AppImage may run on a box with no bash.
 
-`moved` and `placed` are built by PREPENDING, so iterating them walks the
-reverse of the order they were filled in — which is what makes the rollback the
-exact inverse of the work, and what makes the staged entries arrive with the
-executable last.
+**Nothing is ever built into a string** (cold review 2, S2). The previous
+version collected the moved names into `moved="$e $moved"` and then iterated
+`for e in $moved`, unquoted — so an entry called `my file` would have failed
+the swap and left itself in `.yulon-old`, and an entry called `*` would have
+expanded against the working directory. The entries now arrive TWICE, in the
+two orders the swap needs, and each loop reads its half of `"$@"` with a
+counter. `layout.is_entry_name` refuses whitespace and glob characters on the
+Python side as well, and the `case` above is the same rule again in the shell.
 
-An entry that is not in the target yet is recorded as moved without a `mv`, so
-a build that gained an entry still installs and still rolls back cleanly.
+**What is undone is read off the filesystem**, not off a list: an entry that
+was placed is one that is no longer in `.yulon-new`, and an entry that was
+moved aside is one that is now in `.yulon-old`.
 
-`rm -f -- "$0"` before the `exec`: the shell has the script open on a
-descriptor, so unlinking it does not stop it being read, and this is the only
-moment at which the helper can remove itself.
+The `trap` removes the script on every exit that is not the `exec` — a refused
+argument list, the give-up path — and the `exec` is preceded by its own `rm`,
+because `exec` replaces the process and an EXIT trap never runs.
 
 `cd -- "$target"` before the exec, so the new build starts in the folder a
-double-click would start it in — and, on Windows, so the helper itself is never
-the process holding the install folder open.
+double-click would start it in.
 """
 
 POSIX_FILE_HELPER = f"""#!/bin/sh
 # Yu'lon self-update helper (AppImage). Every path arrives as an argument.
 # $1 ticks  $2 pid  $3 target (the .AppImage file)
+trap 'rm -f -- "$0"' EXIT
 ticks="$1"
 pid="$2"
 target="$3"
@@ -173,10 +220,11 @@ marker="{layout.MARKER_NAME}"
 entry="{layout.APPIMAGE_ENTRY}"
 
 # ---- validate before anything moves --------------------------------------
-case "$target" in
-  /*) ;;
-  *) exit 64 ;;
-esac
+case "$ticks" in ""|*[!0-9]*) exit 64 ;; esac
+case "$pid" in ""|*[!0-9]*) exit 64 ;; esac
+[ "$ticks" -gt 0 ] || exit 64
+[ "$pid" -gt 1 ] || exit 64
+case "$target" in /*) ;; *) exit 64 ;; esac
 [ -f "$target" ] || exit 64
 [ -d "$new" ] || exit 64
 [ -d "$old" ] || exit 64
@@ -189,7 +237,6 @@ i=0
 while kill -0 "$pid" 2>/dev/null; do
   i=$((i + 1))
   if [ "$i" -gt "$ticks" ]; then
-    rm -f -- "$0"
     exit 75
   fi
   sleep {TICK_SECONDS}
@@ -211,29 +258,42 @@ exec "$target"
 The file keeps its old version number on purpose, so a desktop entry or a
 shortcut pointing at it keeps working; the window title is what says the
 version. Its work directories are marked directories beside it, exactly as a
-folder install's are inside it, so `layout.discard_ours` is the only thing
-that can ever delete either of them.
+folder install's are inside it, so `layout.discard_ours` is the only thing that
+can ever delete either of them.
+
+The `trap` removes the script on the refusal and give-up paths; the success
+path removes it just before the `exec`, which an EXIT trap never survives.
 """
 
 POWERSHELL_FOLDER_HELPER = f"""param(
-  [int]$Ticks, [int]$ProcId, [string]$Target, [string]$Launch,
+  [int]$Ticks, [int]$ProcId, [string]$Target, [string]$Launch, [int]$Half,
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$Entries
 )
 # Yu'lon self-update helper (one-dir install). Every path arrives as a parameter.
+# $Entries holds the same names twice: executable-FIRST, then executable-LAST.
 $ErrorActionPreference = 'Stop'
 $New = Join-Path $Target '{layout.NEW_NAME}'
 $Old = Join-Path $Target '{layout.OLD_NAME}'
 $Marker = '{layout.MARKER_NAME}'
+$Reserved = @('{layout.NEW_NAME}', '{layout.OLD_NAME}', '{layout.DOWNLOAD_NAME}', $Marker)
 
+# `[int]` refuses a non-numeric argument before this body runs at all:
+# PowerShell fails the parameter binding and the script exits non-zero having
+# executed none of it. These checks are for values that ARE integers and are
+# still wrong.
+if ($Ticks -le 0 -or $ProcId -le 1 -or $Half -le 0) {{ exit 64 }}
 if (-not [System.IO.Path]::IsPathRooted($Target)) {{ exit 64 }}
 if (-not (Test-Path -LiteralPath $Target -PathType Container)) {{ exit 64 }}
 if (-not (Test-Path -LiteralPath (Join-Path $New $Marker) -PathType Leaf)) {{ exit 64 }}
 if (-not (Test-Path -LiteralPath (Join-Path $Old $Marker) -PathType Leaf)) {{ exit 64 }}
-if (-not $Entries -or $Entries.Count -lt 1) {{ exit 64 }}
+if (-not $Entries -or $Entries.Count -ne ($Half * 2)) {{ exit 64 }}
 foreach ($e in $Entries) {{
-  if ([string]::IsNullOrEmpty($e) -or $e -eq '.' -or $e -eq '..') {{ exit 64 }}
-  if ($e.Contains('/') -or $e.Contains('\\')) {{ exit 64 }}
+  if ([string]::IsNullOrWhiteSpace($e) -or $e -eq '.' -or $e -eq '..') {{ exit 64 }}
+  if ($e -notmatch '^[._A-Za-z0-9][-._A-Za-z0-9]*$') {{ exit 64 }}
+  if ($Reserved -contains $e) {{ exit 64 }}
 }}
+$Forward = $Entries[0..($Half - 1)]
+$Backward = $Entries[$Half..($Entries.Count - 1)]
 
 $deadline = (Get-Date).AddSeconds($Ticks * {TICK_SECONDS})
 while (Get-Process -Id $ProcId -ErrorAction SilentlyContinue) {{
@@ -255,24 +315,25 @@ function Move-One($from, $to) {{
   return $false
 }}
 
-$moved = @()
-$placed = @()
 $ok = $true
-foreach ($e in $Entries) {{
+foreach ($e in $Forward) {{
   if (Test-Path -LiteralPath (Join-Path $Target $e)) {{
-    if (Move-One (Join-Path $Target $e) (Join-Path $Old $e)) {{ $moved = ,$e + $moved }}
-    else {{ $ok = $false; break }}
-  }} else {{ $moved = ,$e + $moved }}
+    if (-not (Move-One (Join-Path $Target $e) (Join-Path $Old $e))) {{ $ok = $false; break }}
+  }}
 }}
 if ($ok) {{
-  foreach ($e in $moved) {{
-    if (Move-One (Join-Path $New $e) (Join-Path $Target $e)) {{ $placed = ,$e + $placed }}
-    else {{ $ok = $false; break }}
+  foreach ($e in $Backward) {{
+    if (-not (Move-One (Join-Path $New $e) (Join-Path $Target $e))) {{ $ok = $false; break }}
   }}
 }}
 if (-not $ok) {{
-  foreach ($e in $placed) {{ Move-One (Join-Path $Target $e) (Join-Path $New $e) | Out-Null }}
-  foreach ($e in $moved) {{
+  foreach ($e in $Forward) {{
+    if (-not (Test-Path -LiteralPath (Join-Path $New $e)) -and
+        (Test-Path -LiteralPath (Join-Path $Target $e))) {{
+      Move-One (Join-Path $Target $e) (Join-Path $New $e) | Out-Null
+    }}
+  }}
+  foreach ($e in $Backward) {{
     if (Test-Path -LiteralPath (Join-Path $Old $e)) {{
       Move-One (Join-Path $Old $e) (Join-Path $Target $e) | Out-Null
     }}
@@ -286,9 +347,10 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 
 **Unmeasured from the Linux side, and the gate list says exactly what to look
 at**: whether a detached PowerShell survives its parent's exit from Explorer
-and from a shortcut, how long the one-dir folder's entries really stay locked
-after the process goes, and whether `-ExecutionPolicy Bypass -File` runs a
-script written to `%TEMP%` under the box's policy.
+and from a shortcut, how long the one-dir folder's ENTRIES stay locked after
+the process goes, whether `-ExecutionPolicy Bypass -File` runs a script written
+to `%TEMP%` under the box's policy, and whether `ValueFromRemainingArguments`
+really binds the doubled entry list the way this assumes.
 """
 
 POWERSHELL_UNDER_SYSTEMROOT = "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
@@ -352,18 +414,25 @@ def plan_swap(
     if install.kind is InstallKind.APPIMAGE:
         # One entry, under the fixed name the script spells itself.
         _make_the_backup_dir(install, marker, (layout.APPIMAGE_ENTRY,))
-        script = _write(script_dir, f"yulon-update-{pid}", which, POSIX_FILE_HELPER, None)
+        script = _write(script_dir, f"yulon-update-{pid}", which, POSIX_FILE_HELPER)
         argv = _argv(which, script, [ticks, str(pid), str(target)])
         logger.info(f"self-update: helper written to {script} for the AppImage")
         return SwapPlan(script, argv, (layout.APPIMAGE_ENTRY,))
     named = tuple(entries)
-    _make_the_backup_dir(install, marker, named)
     if not named or not all(layout.is_entry_name(name) for name in named):
         raise UpdateError("Yu'lon could not work out which files to replace.")
+    _make_the_backup_dir(install, marker, named)
     launch = target / install.executable
-    body = POSIX_FOLDER_HELPER if which != "windows" else POWERSHELL_FOLDER_HELPER
-    script = _write(script_dir, f"yulon-update-{pid}", which, body, POWERSHELL_FOLDER_HELPER)
-    argv = _argv(which, script, [ticks, str(pid), str(target), str(launch), *named])
+    script = _write(script_dir, f"yulon-update-{pid}", which, POSIX_FOLDER_HELPER)
+    # **The entries go twice, in the two orders the swap needs**: the current
+    # ones are moved aside executable-FIRST and the staged ones are brought in
+    # executable-LAST, so the executable is never present beside libraries of
+    # the other version. Reversing a list inside POSIX `sh` cannot be done
+    # without rebuilding it into a string, and a string is word-split — which
+    # is the defect this avoids by doing the reversing HERE, where lists are
+    # lists (cold review 2, S2).
+    values = [ticks, str(pid), str(target), str(launch), str(len(named))]
+    argv = _argv(which, script, [*values, *named, *reversed(named)])
     logger.info(f"self-update: helper written to {script} for {len(named)} entries")
     del staged  # the helper finds it by name under the target it validated
     return SwapPlan(script, argv, named)
@@ -404,11 +473,9 @@ def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Seque
         raise UpdateError(f"Yu'lon could not prepare the backup folder: {exc}") from exc
 
 
-def _write(
-    script_dir: Path, stem: str, which: str, posix_body: str, windows_body: str | None
-) -> Path:
+def _write(script_dir: Path, stem: str, which: str, posix_body: str) -> Path:
     """Write the helper script, 0o700, with LF endings. Returns its path."""
-    text = windows_body if (which == "windows" and windows_body is not None) else posix_body
+    text = POWERSHELL_FOLDER_HELPER if which == "windows" else posix_body
     script = script_dir / (f"{stem}.ps1" if which == "windows" else f"{stem}.sh")
     try:
         script.parent.mkdir(parents=True, exist_ok=True)
@@ -429,6 +496,20 @@ def _argv(which: str, script: Path, values: list[str]) -> list[str]:
     if which == "windows":
         return [powershell_path(), *_POWERSHELL_FLAGS, str(script), *values]
     return ["/bin/sh", str(script), *values]
+
+
+def script_in(argv: list[str]) -> Path:
+    """The helper script inside an argv, **by position and not by guessing**.
+
+    `argv[-1]` was used for the Windows shape and is now an entry NAME, because
+    the entries are trailing arguments — so `_spawn_detached` was setting the
+    helper's working directory to something that is not a directory at all
+    (cold review 2). POSIX puts the script at index 1; PowerShell puts it
+    immediately after `-File`.
+    """
+    if "-File" in argv:
+        return Path(argv[argv.index("-File") + 1])
+    return Path(argv[1])
 
 
 Spawn = Callable[[list[str]], None]
@@ -457,7 +538,7 @@ def _spawn_detached(argv: list[str]) -> None:
     if not posix:  # pragma: no cover - Windows only; the gate measures this
         for name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"):
             flags |= int(getattr(subprocess, name, 0))
-    script = Path(argv[1] if argv[0].endswith("sh") else argv[-1])
+    script = script_in(argv)
     subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,

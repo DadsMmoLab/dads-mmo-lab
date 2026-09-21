@@ -69,11 +69,6 @@ def test_only_a_single_path_segment_is_an_entry(name: object) -> None:
     assert layout.is_entry_name(name) is False
 
 
-@pytest.mark.parametrize("name", ["yulon", "yulon.exe", "_internal", "a b", "a&b", "100%"])
-def test_an_ordinary_name_is_an_entry(name: str) -> None:
-    assert layout.is_entry_name(name) is True
-
-
 # -- the marker --------------------------------------------------------------
 
 
@@ -88,11 +83,16 @@ def test_a_directory_with_no_marker_is_not_ours(tmp_path: Path) -> None:
     """The whole point: a `.yulon-old` the player made is never this app's to delete."""
     install = _folder(tmp_path)
     assert install.target is not None
-    (install.target / ".yulon-old").mkdir()
+    theirs = install.target / ".yulon-old"
+    theirs.mkdir()
+    # With something of theirs in it. An EMPTY one is this app's own leftover
+    # and is deliberately removable (S1); what must never be touched is a
+    # directory that holds anything.
+    (theirs / "save.dat").write_bytes(b"a saved game")
     assert layout.read_marker(install, layout.OLD_NAME) is None
     assert layout.is_ours(install, layout.OLD_NAME) is False
     assert layout.discard_ours(install, layout.OLD_NAME) is False
-    assert (install.target / ".yulon-old").exists(), "an unmarked folder was deleted"
+    assert (theirs / "save.dat").read_bytes() == b"a saved game"
 
 
 @pytest.mark.parametrize(
@@ -112,20 +112,24 @@ def test_a_marker_that_does_not_parse_means_not_ours(payload: str, tmp_path: Pat
     old = install.target / ".yulon-old"
     old.mkdir()
     (old / layout.MARKER_NAME).write_text(payload, encoding="utf-8")
+    # A file of somebody's beside it: a directory holding ONLY a marker is
+    # deliberately treated as ours (S1), so the thing under test here has to be
+    # a directory with something in it to lose.
+    (old / "save.dat").write_bytes(b"a saved game")
     assert layout.read_marker(install, layout.OLD_NAME) is None
     assert layout.discard_ours(install, layout.OLD_NAME) is False
-    assert old.exists()
+    assert (old / "save.dat").read_bytes() == b"a saved game"
 
 
 def test_a_marker_with_a_byte_order_mark_still_reads(tmp_path: Path) -> None:
     """Someone opens it in Notepad to see what it is. That must not break an update."""
     install = _folder(tmp_path)
     assert install.target is not None
-    old = install.target / ".yulon-old"
-    old.mkdir()
-    (old / layout.MARKER_NAME).write_bytes(
-        b"\xef\xbb\xbf" + _marker(role=layout.OLD_NAME).as_json().encode("utf-8")
-    )
+    # Written by the app — so it carries this install's path and token — and
+    # then given the byte-order mark a Windows editor would add.
+    layout.write_marker(install, layout.OLD_NAME, _marker(role=layout.OLD_NAME))
+    path = layout.marker_path(install, layout.OLD_NAME)
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
     assert layout.read_marker(install, layout.OLD_NAME) is not None
 
 
@@ -142,14 +146,6 @@ def test_a_marked_directory_is_removed_and_nothing_else_is(tmp_path: Path) -> No
     assert not (install.target / ".yulon-old").exists()
     assert keep.read_bytes() == b"years of work"
     assert (install.target / "yulon").exists()
-
-
-@pytest.mark.parametrize("name", ["_internal", "..", "thesis.docx", ".yulon-marker"])
-def test_nothing_but_the_two_working_directories_can_even_be_asked_for(name: str) -> None:
-    """`discard_ours` is the only delete in the package, and it takes two names."""
-    install = Install(InstallKind.TARBALL, Path("/opt/app"), "yulon", True)
-    with pytest.raises(ValueError, match="working director"):
-        layout.discard_ours(install, name)
 
 
 # -- what the build shipped --------------------------------------------------
@@ -287,3 +283,161 @@ def test_a_marker_holds_the_clock_rather_than_a_typed_time(tmp_path: Path) -> No
     assert before <= marker.stamp <= time.time() + 1
     raw = json.loads(layout.marker_path(install, layout.NEW_NAME).read_text(encoding="utf-8"))
     assert raw["signature"] == "yulon-self-update"
+
+
+# -- what a marker is bound to (cold review 2) -------------------------------
+
+
+def test_a_forged_marker_without_this_installs_token_is_not_ours(tmp_path: Path) -> None:
+    """**A marker is a file an archive could contain and a player could type.**
+
+    The second cold review wrote a `.yulon-old/` holding a hand-made marker and
+    a `save.dat`, and it was deleted. The marker now carries a secret that
+    lives in the config directory, which nothing being unpacked into the
+    install folder can read.
+    """
+    install = _folder(tmp_path)
+    assert install.target is not None
+    theirs = install.target / layout.OLD_NAME
+    theirs.mkdir()
+    (theirs / "save.dat").write_bytes(b"a saved game")
+    (theirs / layout.MARKER_NAME).write_text(
+        json.dumps(
+            {
+                "signature": "yulon-self-update",
+                "role": layout.OLD_NAME,
+                "entries": [],
+                "target": str(install.target),
+                "token": "guessed",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert layout.read_marker(install, layout.OLD_NAME) is None
+    assert layout.discard_ours(install, layout.OLD_NAME) is False
+    assert (theirs / "save.dat").read_bytes() == b"a saved game"
+
+
+def test_a_marker_naming_a_different_install_is_not_ours(tmp_path: Path) -> None:
+    """One copied from another Yu'lon folder, or from a backup of one."""
+    install = _folder(tmp_path)
+    layout.write_marker(install, layout.OLD_NAME, _marker(role=layout.OLD_NAME))
+    path = layout.marker_path(install, layout.OLD_NAME)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["target"] = "/somewhere/else"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert layout.read_marker(install, layout.OLD_NAME) is None
+
+
+def test_a_marker_for_the_other_role_is_not_ours(tmp_path: Path) -> None:
+    """A `.yulon-new` marker copied into `.yulon-old` is not this app's word about it."""
+    install = _folder(tmp_path)
+    layout.write_marker(install, layout.NEW_NAME, _marker())
+    staged = layout.marker_path(install, layout.NEW_NAME)
+    backup = layout.work_dir(install, layout.OLD_NAME)
+    backup.mkdir()
+    (backup / layout.MARKER_NAME).write_text(staged.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert layout.read_marker(install, layout.OLD_NAME) is None
+
+
+def test_the_token_is_kept_in_the_config_dir_and_is_stable(tmp_path: Path) -> None:
+    from yulon import update_state
+
+    first = layout.install_token()
+    assert len(first) >= 16
+    assert layout.install_token() == first, "a second call minted a new token"
+    assert update_state.load_update_state().update_token == first
+
+
+# -- an empty work dir is ours (S1) ------------------------------------------
+
+
+def test_an_empty_work_dir_counts_as_ours(tmp_path: Path) -> None:
+    """`mkdir` succeeded and the marker did not — a disk that filled up in between.
+
+    It used to be a permanent refusal: every later attempt found an unmarked
+    `.yulon-new` and stopped. An empty directory under one of this app's own
+    names holds nothing of anybody's.
+    """
+    install = _folder(tmp_path)
+    assert install.target is not None
+    (install.target / layout.NEW_NAME).mkdir()
+
+    assert layout.is_empty_work_dir(install, layout.NEW_NAME) is True
+    assert layout.is_ours(install, layout.NEW_NAME) is True
+    assert layout.discard_ours(install, layout.NEW_NAME) is True
+    assert not (install.target / layout.NEW_NAME).exists()
+
+
+def test_a_work_dir_holding_only_an_unreadable_marker_counts_as_ours(tmp_path: Path) -> None:
+    """The same failure one step later: the marker was created and not finished."""
+    install = _folder(tmp_path)
+    assert install.target is not None
+    path = install.target / layout.NEW_NAME
+    path.mkdir()
+    (path / layout.MARKER_NAME).write_text("", encoding="utf-8")
+
+    assert layout.is_empty_work_dir(install, layout.NEW_NAME) is True
+    assert layout.discard_ours(install, layout.NEW_NAME) is True
+
+
+def test_a_work_dir_with_anything_else_in_it_is_not_empty(tmp_path: Path) -> None:
+    install = _folder(tmp_path)
+    assert install.target is not None
+    path = install.target / layout.OLD_NAME
+    path.mkdir()
+    (path / "save.dat").write_bytes(b"x")
+    assert layout.is_empty_work_dir(install, layout.OLD_NAME) is False
+    assert layout.discard_ours(install, layout.OLD_NAME) is False
+    assert (path / "save.dat").exists()
+
+
+# -- names a swap may never move (S2) ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "my file",
+        "tab\tname",
+        "*",
+        "a*b",
+        "a?b",
+        "a[b]c",
+        "-rf",
+        "a:b",
+        'a"b',
+        "a\x01b",
+        ".yulon-new",
+        ".yulon-old",
+        ".yulon-download",
+        ".yulon-marker",
+    ],
+)
+def test_a_name_a_shell_or_windows_would_read_as_something_else_is_not_an_entry(
+    name: str,
+) -> None:
+    """Whitespace and globs are refused rather than quoted (cold review 2, S2).
+
+    The helper's loops no longer word-split — but a `*` reaching a shell at all
+    is a class of defect this does not want to depend on one file to avoid, and
+    the reserved names are ones the swap must never be able to move.
+    """
+    assert layout.is_entry_name(name) is False
+
+
+@pytest.mark.parametrize("name", ["yulon", "yulon.exe", "_internal", "LICENSE.txt", "a-b_c.1"])
+def test_an_ordinary_build_name_is_still_an_entry(name: str) -> None:
+    assert layout.is_entry_name(name) is True
+
+
+def test_the_three_work_dirs_are_the_only_names_discard_will_take() -> None:
+    install = Install(InstallKind.TARBALL, Path("/opt/app"), "yulon", True)
+    for name in layout.WORK_NAMES:
+        assert layout.discard_ours(install, name) is True  # nothing there; nothing to do
+    for name in ("_internal", "..", "thesis.docx", layout.MARKER_NAME):
+        with pytest.raises(ValueError, match="working director"):
+            layout.discard_ours(install, name)

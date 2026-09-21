@@ -106,7 +106,8 @@ def _prepared(install: Install) -> Path:
     return prepare(install, "v0.8.70-Public", pid=PID)
 
 
-WORK = {layout.NEW_NAME, layout.OLD_NAME}
+WORK = set(layout.WORK_NAMES)
+"""This app's own working directories, which "the install is untouched" is not about."""
 
 
 # -- prepare -----------------------------------------------------------------

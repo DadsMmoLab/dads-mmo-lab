@@ -1836,12 +1836,16 @@ def test_a_start_that_cannot_remove_the_old_build_still_starts(tmp_path: Path) -
     """It runs while the window is built; a traceback here is a launcher that will not open."""
     bar = _Bar()
     install = _swapped_install(tmp_path)
-    tmp_path.chmod(0o500)
+    assert install.target is not None
+    install.target.chmod(0o500)
     try:
         assert main.announce_previous_update(bar, install=install, environ={}) is False
-        assert bar.messages == []
+        # It still SPEAKS: the marker says the update was to a version this is
+        # not, so the honest answer is that it did not happen. What must not
+        # happen is a traceback out of `build_window()`.
+        assert bar.messages and "could not be installed" in bar.messages[0]
     finally:
-        tmp_path.chmod(0o700)
+        install.target.chmod(0o700)
 
 
 def test_the_downloads_folder_is_one_the_player_can_find(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2205,48 +2209,6 @@ def test_the_close_gate_is_asked_AGAIN_immediately_before_the_helper_starts(
     assert "press Update now again" in bar.text()
 
 
-def test_pressing_update_now_again_replaces_the_staged_build_cleanly(
-    installing_host: Any, tmp_path: Path
-) -> None:
-    """The second press re-runs the whole sequence, which re-prepares the staging folder.
-
-    `stage.prepare()` discards the previous MARKED staging directory and starts
-    over, so a staged build left by a refused restart is replaced rather than
-    reused half-way — and the second press is not blocked by the first.
-    """
-    from yulon.selfupdate.apply import ReadyToRestart
-    from yulon.selfupdate.swap import SwapPlan
-
-    runs: list[int] = []
-    # One answer per ask, in order. `start_update` asks once before the work
-    # and `restart_into` asks again before the helper, so the first press is
-    # allowed to start and then refused at the gate; the second is allowed all
-    # the way.
-    answers: list[str | None] = [None, "A database import is running.", None, None]
-
-    def apply(*_a: Any, **_k: Any) -> Any:
-        runs.append(1)
-        return ReadyToRestart(SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.70-Public")
-
-    def refusal() -> str | None:
-        return answers.pop(0) if answers else None
-
-    installing_host.apply = apply
-    installing_host.refusal = refusal
-
-    offer = _install_offer()
-    installing_host.start_update(offer)
-    assert installing_host.helpers == []
-    assert installing_host._ready is not None, "the staged build was forgotten"
-
-    installing_host.start_update(offer)
-
-    assert runs == [1, 1], "the second press did not run the update again"
-    assert len(installing_host.helpers) == 1, "the second press did not install"
-    assert installing_host.closes == [1]
-    assert installing_host._ready is None
-
-
 def test_a_second_copy_of_yulon_stops_the_swap(installing_host: Any, tmp_path: Path) -> None:
     """Two copies open is how an install gets lost: the helper swaps under the other one."""
     from yulon.selfupdate.apply import ReadyToRestart
@@ -2387,3 +2349,122 @@ def test_a_half_done_swap_is_said_rather_than_tidied_away(tmp_path: Path) -> Non
 
     assert bar.messages and "_internal" in bar.messages[0]
     assert layout.work_dir(install, layout.OLD_NAME).exists()
+
+
+def test_a_cancel_pressed_while_the_result_was_queued_is_not_ignored(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """**The worker's last look at the event is before it writes the helper** (S4).
+
+    `install_done` runs on the GUI thread, queued behind whatever is in front
+    of it, and a Cancel pressed in that window used to be ignored entirely: the
+    app started the swap helper and closed itself under a player who had just
+    said not to.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    def apply_and_then_cancel(*_a: Any, **_k: Any) -> Any:
+        # The work finished; the press lands before the result is delivered.
+        installing_host.progresses[0].cancel_event.set()
+        return ReadyToRestart(SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.70-Public")
+
+    installing_host.apply = apply_and_then_cancel
+
+    installing_host.start_update(_install_offer())
+
+    assert installing_host.helpers == [], "the helper was started after a cancel"
+    assert installing_host.closes == [], "the app closed after a cancel"
+    assert installing_host._ready is None
+
+
+def test_a_cancelled_update_throws_the_staged_build_away(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """A staged build nobody will install is 230 MB beside the player's install."""
+    from yulon.selfupdate import layout
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    install = _swappable(tmp_path)
+    layout.write_marker(
+        install,
+        layout.NEW_NAME,
+        layout.Marker(layout.NEW_NAME, "v1", "v0.8.70-Public", os.getpid(), layout.now()),
+    )
+    staged = layout.work_dir(install, layout.NEW_NAME)
+    (staged / "yulon").write_text("the build nobody asked for", encoding="utf-8")
+
+    def apply_and_then_cancel(*_a: Any, **_k: Any) -> Any:
+        installing_host.progresses[0].cancel_event.set()
+        return ReadyToRestart(SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.70-Public")
+
+    installing_host.apply = apply_and_then_cancel
+    installing_host.start_update(_install_offer())
+
+    assert not staged.exists(), "the staged build was left behind after a cancel"
+
+
+def test_a_second_press_reuses_the_build_that_is_already_verified(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """Downloading and unpacking 90 MB again to reach the same bytes is a minute for nothing.
+
+    The first press stages and is refused at the gate; the second press installs
+    what is already there.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    runs: list[int] = []
+    answers: list[str | None] = [None, "A database import is running.", None]
+
+    def apply(*_a: Any, **_k: Any) -> Any:
+        runs.append(1)
+        return ReadyToRestart(SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.70-Public")
+
+    installing_host.apply = apply
+    installing_host.refusal = lambda: (answers.pop(0) if answers else None)
+
+    offer = _install_offer()
+    installing_host.start_update(offer)
+    assert runs == [1] and installing_host.helpers == []
+
+    installing_host.start_update(offer)
+
+    assert runs == [1], "the second press downloaded and unpacked it all over again"
+    assert len(installing_host.helpers) == 1 and installing_host.closes == [1]
+
+
+def test_a_staged_build_for_a_DIFFERENT_version_is_not_reused(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """The offer moved on while the update was waiting; the old staging is not it."""
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    runs: list[int] = []
+
+    def apply(*_a: Any, **_k: Any) -> Any:
+        runs.append(1)
+        return ReadyToRestart(SwapPlan(tmp_path / "h.sh", ["/bin/sh"]), "v0.8.99-Public")
+
+    installing_host.apply = apply
+    installing_host._ready = ReadyToRestart(
+        SwapPlan(tmp_path / "old.sh", ["/bin/sh"]), "v0.8.70-Public"
+    )
+    installing_host.start_update(
+        dataclasses.replace(
+            _install_offer(),
+            latest="v0.8.99-Public",
+            assets=(
+                update.ReleaseAsset(
+                    "Yulon-v0.8.99-Public-x86_64.tar.gz", "https://example.invalid/a", 1234
+                ),
+                update.ReleaseAsset("SHA256SUMS", "https://example.invalid/s", 10),
+            ),
+        )
+    )
+
+    assert runs == [1], "a staging for another version was installed"
+    assert installing_host.helpers[0].script == tmp_path / "h.sh"

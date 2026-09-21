@@ -173,17 +173,27 @@ jobs:
       #
       # `dist/yulon` only: the macOS job's `.app` is never swapped in place and
       # the step would have nothing to list there.
+      #
+      # WARN-ONLY, like the version check below it: the owner's rule is that a
+      # tag never fails over T90's additions, and the app has a fallback for a
+      # build with no manifest ({executable, _internal}). `continue-on-error`
+      # forgives a non-zero exit, and the body reports its own failure as a
+      # `::warning::` so it is visible on the run and in the annotations list.
       - name: Record the top-level names this build ships
         if: matrix.os != 'macos-latest'
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           out="dist/yulon/_internal/yulon-shipped.txt"
-          : > "$out"
-          for entry in dist/yulon/*; do
-            basename "$entry" >> "$out"
-          done
-          cat "$out"
+          if : > "$out"; then
+            for entry in dist/yulon/*; do
+              basename "$entry" >> "$out"
+            done
+            cat "$out"
+          else
+            echo "::warning::could not write $out; the app falls back to yulon + _internal"
+          fi
 
       # ASK THE BUILT BUNDLE, on every runner. v0.8.69-fixtest was cut with the
       # stamp step already in this job: all three builds logged "stamped

@@ -245,10 +245,10 @@ def _swap_path(
 ) -> ReadyToRestart:
     """Download beside the install, unpack, prove it opens, and write the helper.
 
-    The download goes to `<target>.download/` and not to the player's downloads
-    folder, because the swap is a RENAME and a rename only works on one
-    filesystem: `<target>.download`, `<target>.new` and `<target>` are all
-    siblings by construction.
+    The download goes into `<target>/.yulon-download/` and not the player's
+    downloads folder, because the swap is a RENAME and a rename only works on
+    one filesystem: the two work directories and the install's own entries are
+    all on the same one by construction.
 
     `except BaseException` and not `except Exception`: a `Cancelled`, a
     `KeyboardInterrupt` and a `SystemExit` all leave the same rubbish beside
@@ -256,11 +256,11 @@ def _swap_path(
     afterwards rather than about which exception class got there.
     """
     del result, target  # judged already by `_what_to_ask_for`
-    # **Everything happens inside a marked `.yulon-new`.** The download lands
-    # there too, so it is on the same filesystem as the entries it becomes and
-    # so that one marked directory is the whole footprint of an update — which
-    # is what makes "a refusal removes what it staged" a delete this app can
-    # prove is its own (`layout.discard_ours`).
+    # **Everything happens inside marked working directories**, and every one
+    # of them is removed on every way out — which is what makes "a refusal
+    # removes what it staged" a delete this app can prove is its own
+    # (`layout.discard_ours`). The archive has its OWN directory, because
+    # anything in the staging one is by definition an entry of the new build.
     staged = io.prepare(install, tag, pid=pid)
     try:
         digest = _digest_for(tag, name, io, stage_changed)
@@ -278,6 +278,11 @@ def _swap_path(
         )
         stage_changed(UNPACKING)
         staged = io.stage(install, archive)
+        # **The archive goes the moment it has been unpacked.** It used to sit
+        # in the staging directory, which made it one of the entries the helper
+        # moved into the player's folder — 90 MB of tarball installed as though
+        # it were part of the program (cold review 2).
+        layout.discard_ours(install, layout.DOWNLOAD_NAME)
         _stop_if_cancelled(cancelled)
         stage_changed(TESTING)
         io.smoke_test(stage_module.staged_executable(install, staged))
@@ -285,8 +290,8 @@ def _swap_path(
         entries = io.entries_to_swap(install, staged)
         plan = io.plan_swap(install, staged, pid=pid, script_dir=io.script_dir(), entries=entries)
     except BaseException:
-        layout.discard_ours(install, layout.NEW_NAME)
-        layout.discard_ours(install, layout.OLD_NAME)
+        for name in layout.WORK_NAMES:
+            layout.discard_ours(install, name)
         raise
     stage_changed(READY)
     logger.info(f"self-update: {tag} is staged at {staged} and the helper is written")
@@ -294,15 +299,18 @@ def _swap_path(
 
 
 def _download_into(install: Install, staged: Path) -> Path:
-    """Where the artifact lands while it is being fetched: the marked `.yulon-new`.
+    """Where the artifact lands while it is being fetched: the marked `.yulon-download`.
 
-    One marked directory is the whole footprint of an update, for both kinds of
-    install — which is what makes "a refusal removes what it staged" a delete
-    this app can prove is its own, and what keeps a `.part` file out of the
-    player's folder if the app is killed mid-download.
+    **Its own directory, and not the staging one** (cold review 2). Everything
+    in `.yulon-new` is an entry of the new build by definition — that is what
+    `stage.staged_entries()` reads — so an archive left there was handed to the
+    helper as part of the program. It is still a marked directory beside the
+    staging one, on the same filesystem, so the unpack is a rename and a `.part`
+    file from an app that was killed mid-download is inside something this app
+    can prove is its own rather than loose in the player's folder.
     """
-    del install
-    return staged
+    del staged
+    return layout.work_dir(install, layout.DOWNLOAD_NAME)
 
 
 def _download_only(

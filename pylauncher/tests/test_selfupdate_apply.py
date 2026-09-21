@@ -60,9 +60,17 @@ def _install(root: Path, *, writable: bool = True) -> Install:
 
 
 def _hash_tree(root: Path) -> str:
-    """One digest over every path and byte under `root` — "untouched", provable."""
+    """Every path and byte under `root` that is not one of this app's work dirs.
+
+    The work directories are checked separately by `_nothing_is_staged`: they
+    are Yu'lon's own and exist only while an update is in flight, so folding
+    them into "the install is untouched" would make that assertion about the
+    update rather than about the player's folder.
+    """
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
+        if path.relative_to(root).parts[0] in layout.WORK_NAMES:
+            continue
         digest.update(str(path.relative_to(root)).encode("utf-8"))
         if path.is_file():
             digest.update(path.read_bytes())
@@ -125,16 +133,22 @@ class _IO:
         self.verified.append((path, digest))
 
     def prepare(self, install: Install, version: str, *, pid: int) -> Path:
+        """Both marked work dirs, exactly as the real `prepare` makes them.
+
+        A fake that made only the staging one left an unmarked
+        `.yulon-download` behind — which is the shape of the defect this
+        package exists to avoid, produced by the test's own double.
+        """
         self._step("prepare")
         self.prepared.append((version, pid))
-        staged = layout.work_dir(install, layout.NEW_NAME)
-        staged.mkdir(parents=True, exist_ok=True)
-        layout.write_marker(
-            install,
-            layout.NEW_NAME,
-            layout.Marker(layout.NEW_NAME, "0.8.66-Public", version, pid, layout.now()),
-        )
-        return staged
+        for name in (layout.NEW_NAME, layout.DOWNLOAD_NAME):
+            layout.work_dir(install, name).mkdir(parents=True, exist_ok=True)
+            layout.write_marker(
+                install,
+                name,
+                layout.Marker(name, "0.8.66-Public", version, pid, layout.now()),
+            )
+        return layout.work_dir(install, layout.NEW_NAME)
 
     def stage(self, install: Install, archive: Path) -> Path:
         self._step("stage")
@@ -211,7 +225,7 @@ def _apply(
 def _nothing_is_staged(install: Install) -> None:
     """No working directory of this app's is left beside or inside the install."""
     assert install.target is not None
-    for name in (layout.NEW_NAME, layout.OLD_NAME):
+    for name in layout.WORK_NAMES:
         assert not layout.work_dir(install, name).exists(), f"{name} was left behind"
 
 
@@ -248,22 +262,31 @@ def test_the_checksums_are_fetched_from_an_address_the_app_built_itself(tmp_path
     assert io.downloaded[0][0].endswith(f"/releases/download/{TAG}/{ARTIFACT}")
 
 
-def test_the_download_lands_in_the_marked_staging_folder(tmp_path: Path) -> None:
-    """One marked directory is the whole footprint of an update.
+def test_the_download_lands_in_its_own_marked_folder_and_not_in_the_staging_one(
+    tmp_path: Path,
+) -> None:
+    """**Never `.yulon-new`** (cold review 2).
 
-    Inside `.yulon-new`, so the archive is on the same filesystem as the
-    entries it becomes AND so a `.part` left by a killed app is inside
-    something this app can prove is its own rather than loose in the player's
-    folder.
+    Everything in the staging directory is an entry of the new build by
+    definition — that is what `stage.staged_entries()` reads — so an archive
+    left there was handed to the helper as part of the program, and a 90 MB
+    tarball was installed into the player's folder. It is still a marked
+    directory beside it, on the same filesystem, so the unpack is a rename and
+    a `.part` from a killed app is inside something this app can prove is its
+    own.
     """
     io = _IO()
     install = _install(tmp_path)
     assert install.target is not None
     _apply(io, install, tmp_path)
     _url, dest, size = io.downloaded[0]
-    assert dest == layout.work_dir(install, layout.NEW_NAME) / ARTIFACT
+    assert dest == layout.work_dir(install, layout.DOWNLOAD_NAME) / ARTIFACT
+    assert dest.parent != layout.work_dir(install, layout.NEW_NAME)
     assert size == SIZE, "the size the RELEASE declares is the bound, not a header"
     assert io.verified == [(dest, DIGEST)]
+    assert not layout.work_dir(
+        install, layout.DOWNLOAD_NAME
+    ).exists(), "the archive was still there when the helper was planned"
 
 
 def test_the_staged_executable_is_what_the_smoke_test_runs(tmp_path: Path) -> None:
