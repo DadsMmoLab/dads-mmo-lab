@@ -437,7 +437,7 @@ def build_window() -> object:
     from yulon.selfupdate.detect import OPEN_PAGE, Install, action_label, detect_install
     from yulon.selfupdate.fetch import Cancelled
     from yulon.selfupdate.layout import WORK_NAMES as work_names_const
-    from yulon.selfupdate.layout import discard_ours, helper_stamp, other_instances
+    from yulon.selfupdate.layout import discard_ours, helper_stamp, make_way, other_instances
     from yulon.selfupdate.swap import (
         arm,
         discard_script,
@@ -994,6 +994,7 @@ def build_window() -> object:
             self.end_helper: Callable[[Any], bool] = end_helper
             self.release_after: Callable[[Install, Any], None] = release_after
             self.discard_script: Callable[[Any], None] = discard_script
+            self.make_way: Callable[[Install], str | None] = make_way
             self._helper: Any = None
             """A helper that would not stop. While one is here, no second is started."""
             # `window.close()` answers a bool; nothing here reads it, and
@@ -1260,9 +1261,19 @@ def build_window() -> object:
                 self.show_saved(outcome)
 
         def discard_staged(self) -> None:
-            """Throw away a staged build nobody is going to install. Never raises."""
+            """Throw away a staged build nobody is going to install. Never raises.
+
+            **The script of a helper that is still running is not rubbish**
+            (round 6): after a helper that would not stop, `_ready` holds that
+            attempt, and removing its file here would be deleting a script out
+            from under a live process. Harmless on Linux, where the kernel
+            keeps the open file, and not something to rely on.
+            """
             ready, self._ready = self._ready, None
-            if ready is not None:
+            running = self._helper is not None and not _has_stopped(self._helper)
+            if ready is not None and running:
+                logger.info("self-update: leaving the script of a helper that is still running")
+            elif ready is not None:
                 self.discard_script(ready.plan)
             try:
                 install = self.current_install()
@@ -1400,6 +1411,19 @@ def build_window() -> object:
             self.release_after(install, armed)
             self._helper = None
             logger.warning("self-update: the helper did not report in; not closing")
+            # **Why it did not report in matters** (round 6). A helper that
+            # exits 73 found the lock already held, and asking the player to
+            # press again then asks them to watch the same thing happen for the
+            # rest of the session. So the lock is looked at: rubbish is cleared
+            # and the press is worth making; a live holder that will not let go
+            # is named, and the way out is closing Yu'lon rather than pressing.
+            stuck = self.make_way(install)
+            if stuck is not None:
+                update_bar.show_message(
+                    f"Yu'lon could not start the installer: {stuck}",
+                    keep_details=True,
+                )
+                return
             update_bar.show_message(
                 "Yu'lon could not start the installer, so nothing was changed. "
                 "Press Update now again, or install the new version by hand from the "

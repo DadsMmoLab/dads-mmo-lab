@@ -350,3 +350,177 @@ def test_a_smoke_test_that_refuses_leaves_the_install_and_the_folder_exactly_as_
     assert {p.name: p.stat().st_mtime_ns for p in target.iterdir()} == before
     for name in layout.WORK_NAMES:
         assert not layout.work_dir(install, name).exists(), f"{name} was left behind"
+
+
+# -- a helper from an earlier press, on the REAL apply path (round 6) ---------
+
+
+def _tree(target: Path) -> dict[str, str]:
+    """Every path and byte under the install, working directories included."""
+    found: dict[str, str] = {}
+    for path in sorted(target.rglob("*")):
+        rel = str(path.relative_to(target))
+        if path.is_symlink():
+            found[rel] = "L:" + os.readlink(path)
+        elif path.is_file():
+            found[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            found[rel] = "D"
+    return found
+
+
+def _a_staged_helper(install: Install, scripts: Path, witness: Path) -> tuple[object, object]:
+    """A REAL helper, started and stamped, waiting on a live pid. Returns (plan, handles).
+
+    The state a player reaches by pressing Update now, having the close
+    refused, and pressing again: the first helper is alive, holding the lock,
+    inside `.yulon-old`.
+    """
+    from yulon.selfupdate.swap import _spawn_detached, arm, plan_swap
+
+    staged = layout.work_dir(install, layout.NEW_NAME)
+    app = subprocess.Popen(["sleep", "30"])
+    plan = arm(
+        plan_swap(
+            install,
+            staged,
+            pid=app.pid,
+            script_dir=scripts,
+            entries=("yulon", "_internal"),
+            platform_id="linux",
+        )
+    )
+    helper = _spawn_detached(plan.argv)
+    _until(lambda: layout.stamp_holds(install, plan.nonce), "the first helper reported in")
+    held = layout.lock_holder(install)
+    assert held is not None and held.nonce == plan.nonce and held.alive()
+    del witness
+    return plan, (app, helper)
+
+
+def test_a_new_update_stands_the_previous_helper_down_before_it_discards_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The guard has to be on the path the app really takes** (round 6).
+
+    It was written beside `_make_the_backup_dir`, which runs minutes into
+    `apply_update` — long after `prepare()` has discarded every working
+    directory, the live helper's lock with it. So on the real path the holder
+    was never once stood down, and only the script's own owner check kept the
+    install whole. This test drives the REAL `apply_update`, and what it
+    asserts is the ORDER: by the time `.yulon-old` is discarded, the helper
+    that was working in it has exited.
+    """
+    install = _install(tmp_path, "OLD")
+    target = install.target
+    assert target is not None
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    witness = tmp_path / "witness"
+    archive = _archive(tmp_path / "Yulon-9.9.9-x86_64.tar.gz", "NEW")
+
+    # A first attempt, staged and with a helper waiting. Its work dirs are
+    # exactly what the second attempt is about to discard.
+    _run(install, archive, "9.9.9", scripts)
+    plan, (app, helper) = _a_staged_helper(install, scripts, witness)
+
+    seen: list[tuple[str, bool]] = []
+    real_discard = layout.discard_ours
+
+    def watched(inst: Install, name: str) -> bool:
+        # Was the helper already gone when this directory was removed?
+        seen.append((name, helper.poll() is not None))  # type: ignore[attr-defined]
+        return real_discard(inst, name)
+
+    monkeypatch.setattr(layout, "discard_ours", watched)
+    monkeypatch.setattr("yulon.selfupdate.stage.layout.discard_ours", watched)
+
+    try:
+        ready = _run(install, archive, "9.9.9", scripts)
+        assert helper.wait(timeout=DEADLINE) == 74, "the first helper was not stood down"  # type: ignore[attr-defined]
+    finally:
+        for child in (app, helper):
+            if child.poll() is None:  # type: ignore[attr-defined] # pragma: no cover
+                child.kill()  # type: ignore[attr-defined]
+                child.wait(timeout=DEADLINE)  # type: ignore[attr-defined]
+
+    removals = [gone for name, gone in seen if name == layout.OLD_NAME]
+    assert removals, "the backup directory was never discarded"
+    assert all(removals), "the backup was discarded while its helper was still running"
+    assert not plan.script.exists(), "the stood-down helper left its script behind"
+
+    # And the update it was blocking goes through.
+    _swap(ready.plan, witness)
+    _until(lambda: witness.exists(), "the new build was relaunched")
+    assert witness.read_text(encoding="utf-8") == "NEW"
+
+
+def test_a_helper_that_will_not_let_go_refuses_the_update_and_touches_nothing(
+    tmp_path: Path,
+) -> None:
+    """The other half: the refusal, in words, with nothing discarded.
+
+    The lock is held by a process that is alive and pays no attention to the
+    stand-down file — the shape of a helper wedged on a file an antivirus
+    scanner has open. Everything on disk has to be exactly as it was.
+    """
+    install = _install(tmp_path, "OLD")
+    target = install.target
+    assert target is not None
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    archive = _archive(tmp_path / "Yulon-9.9.9-x86_64.tar.gz", "NEW")
+
+    _run(install, archive, "9.9.9", scripts)
+    lock = layout.helper_lock(install)
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text("beefbeefbeefbeef", encoding="utf-8")
+    stubborn = subprocess.Popen(["sleep", "30"])
+    try:
+        (lock / "pid").write_text(str(stubborn.pid), encoding="utf-8")
+        before = {k: v for k, v in _tree(target).items() if not k.endswith(layout.STAND_DOWN)}
+
+        with pytest.raises(UpdateError, match="still working in this folder"):
+            _run(install, archive, "9.9.9", scripts)
+
+        # Everything except the stand-down file, which asking it to stop IS.
+        after = {k: v for k, v in _tree(target).items() if not k.endswith(layout.STAND_DOWN)}
+        assert after == before, "something was discarded under a live helper"
+        assert lock.is_dir(), "the lock was removed"
+        assert layout.stand_down_path(install).read_text(encoding="utf-8").strip() == (
+            "beefbeefbeefbeef"
+        ), "it was not even asked to stop"
+    finally:
+        stubborn.kill()
+        stubborn.wait(timeout=DEADLINE)
+
+
+def test_a_lock_left_by_a_helper_that_died_does_not_block_the_next_update(
+    tmp_path: Path,
+) -> None:
+    """A lock naming a pid that is gone is rubbish, and the update carries on.
+
+    Without this the same staged plan got exit 73 on every press, for ever,
+    while the message kept asking for another one.
+    """
+    install = _install(tmp_path, "OLD")
+    target = install.target
+    assert target is not None
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    witness = tmp_path / "witness"
+    archive = _archive(tmp_path / "Yulon-9.9.9-x86_64.tar.gz", "NEW")
+
+    _run(install, archive, "9.9.9", scripts)
+    dead = subprocess.Popen(["sleep", "0"])
+    dead.wait(timeout=DEADLINE)
+    lock = layout.helper_lock(install)
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text("0123456789abcdef", encoding="utf-8")
+    (lock / "pid").write_text(str(dead.pid), encoding="utf-8")
+
+    ready = _run(install, archive, "9.9.9", scripts)
+
+    _swap(ready.plan, witness)
+    _until(lambda: witness.exists(), "the new build was relaunched")
+    assert witness.read_text(encoding="utf-8") == "NEW"

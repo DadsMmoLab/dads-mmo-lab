@@ -1927,6 +1927,7 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
         "end_helper",
         "release_after",
         "discard_script",
+        "make_way",
         "close_window",
         "refusal",
         "make_progress",
@@ -1969,6 +1970,7 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
     update_host.release_after = lambda install, plan: update_host.released.append(plan)
     update_host.discarded = []
     update_host.discard_script = update_host.discarded.append
+    update_host.make_way = lambda _install: None  # nothing is holding the lock
     update_host.closes = []
     update_host.close_window = lambda: update_host.closes.append(1)
     # The helper's "I am running" stamp, holding THIS attempt's nonce. Tests
@@ -2982,6 +2984,87 @@ def test_the_wait_refuses_a_nonce_that_is_not_one(tmp_path: Path) -> None:
     stamp.write_text("somebody else's attempt", encoding="utf-8")
     with pytest.raises(ValueError, match="nonce"):
         main.wait_for_helper(stamp, seconds=0.1, holds="")
+
+
+def test_a_lock_nothing_can_free_is_said_once_rather_than_pressed_for_ever(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """**Never loop the player** (round 6).
+
+    A helper that exits 73 found the lock already held — by a helper that was
+    SIGKILLed, or one that died between `mkdir` and its owner write. The app
+    only sees "no stamp", and its answer was "press Update now again", which
+    asks the player to watch the same thing happen for the rest of the
+    session. The lock is looked at instead, and a holder that will not let go
+    is named with the way out.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+    installing_host.await_helper = lambda _stamp, _nonce: False
+    installing_host.make_way = lambda _install: (
+        "An installer Yu'lon started earlier is still working in this folder."
+    )
+
+    installing_host.start_update(_install_offer())
+
+    bar = installing_host.parent().property("update_bar")
+    assert "still working in this folder" in bar.text()
+    assert "Press Update now again" not in bar.text(), "the player was sent round the loop"
+    assert installing_host.closes == []
+
+
+def test_a_lock_that_was_only_rubbish_leaves_the_ordinary_message(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """And when the way is clear, the press the message asks for is worth making."""
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+    installing_host.await_helper = lambda _stamp, _nonce: False
+    asked: list[Any] = []
+    installing_host.make_way = lambda inst: asked.append(inst) and None
+
+    installing_host.start_update(_install_offer())
+
+    assert len(asked) == 1, "the lock was never looked at"
+    bar = installing_host.parent().property("update_bar")
+    assert "Press Update now again" in bar.text()
+
+
+def test_the_script_of_a_helper_that_is_still_running_is_not_deleted(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """**A live process's script is not rubbish** (round 6, N3a).
+
+    After a helper that would not stop, `_ready` holds that attempt — and a
+    cancel, or any other discard, would otherwise unlink the file that process
+    is running from. The kernel keeps an open file on Linux; Windows does not
+    have to, and either way this breaks the invariant the rest of the round is
+    built on.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+    installing_host.await_helper = lambda _stamp, _nonce: False
+    installing_host.end_helper = lambda handle: False  # it would not stop
+
+    installing_host.start_update(_install_offer())
+    assert installing_host._helper is not None, "the precondition: a helper is still running"
+
+    installing_host.discard_staged()
+
+    assert installing_host.discarded == [], "the running helper's script was deleted"
+    assert installing_host._ready is None, "the staged build was kept"
 
 
 def test_the_windows_flags_are_the_ones_the_gate_settled() -> None:

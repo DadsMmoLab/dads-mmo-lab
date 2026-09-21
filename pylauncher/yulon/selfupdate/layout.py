@@ -433,6 +433,105 @@ def release_lock_of(install: Install, nonce: str) -> bool:
     return True
 
 
+LOCK_WAIT_SECONDS = 10.0
+"""How long the app waits for a helper it did not start to release the lock."""
+
+STALE_LOCK_SECONDS = 30.0
+"""How old an owner-less lock must be before it is treated as rubbish.
+
+A lock is `mkdir` then two small writes. A helper that died between them
+leaves a directory naming nobody, and without this the same staged plan got
+exit 73 on every press for ever while the message kept saying "press Update
+now again" (round 6). Thirty seconds is a thousand times the gap it covers.
+"""
+
+
+def tell_to_stop(install: Install, nonce: str) -> None:
+    """Write the stand-down file for `nonce`. Never raises.
+
+    Lives here rather than in `swap` because the two callers are on opposite
+    sides of the package: the attempt that started a helper stands its own
+    down, and `stage.prepare` stands down a helper it did NOT start before it
+    discards the directory that helper is working in.
+    """
+    if not nonce:
+        return
+    try:
+        stand_down_path(install).write_text(nonce + "\n", encoding="utf-8")
+        logger.info(f"self-update: stood down the helper for nonce {nonce}")
+    except OSError as exc:
+        logger.warning(f"self-update: could not write the stand-down file: {exc}")
+
+
+def clear_stale_lock(install: Install) -> bool:
+    """Remove a lock nobody is behind. True if there is no lock afterwards.
+
+    **A lock the app cannot free wedges the feature** (round 6): every press of
+    the same staged plan got exit 73 and the message kept asking for another
+    press. Two kinds are rubbish — one naming a pid that is gone, and one
+    naming nobody at all that has been sitting there longer than
+    `STALE_LOCK_SECONDS`. A lock whose pid is alive is never touched here.
+    """
+    holder = lock_holder(install)
+    if holder is None:
+        return True
+    if holder.alive():
+        return False
+    lock = helper_lock(install)
+    if not holder.pid:
+        try:
+            age = now() - lock.stat().st_mtime
+        except OSError:
+            age = 0.0
+        if age < STALE_LOCK_SECONDS:
+            return False
+        logger.info(f"self-update: the helper lock names nobody and is {age:.0f}s old")
+    try:
+        shutil.rmtree(lock)
+    except OSError as exc:
+        logger.info(f"self-update: could not remove the stale helper lock: {exc}")
+        return False
+    return True
+
+
+def make_way(install: Install, *, seconds: float = LOCK_WAIT_SECONDS) -> str | None:
+    """Is a live helper working in `.yulon-old`? Stand it down; refuse if it stays.
+
+    **The app used to delete the directory out from under it** (round 5, M2).
+    The state: a first helper is alive because the close was refused after it
+    had stamped; the player presses Update now again; the backup directory is
+    discarded, the live helper's lock with it, and a second helper then takes a
+    lock of the same name. In 5 runs of 12 the first helper's exit trap removed
+    the SECOND one's lock, the second's re-validation failed, and the app
+    closed with nothing swapped and nothing relaunched.
+
+    **Called before the FIRST discard of an update, not before the last**
+    (round 6): it lived beside `_make_the_backup_dir`, which runs minutes after
+    `stage.prepare` has already discarded every working directory — so on the
+    real path the live holder's lock was gone before this was ever asked, and
+    only the script-side owner check was keeping the install whole.
+    """
+    if clear_stale_lock(install):
+        return None
+    holder = lock_holder(install)
+    if holder is None:  # pragma: no cover - cleared between the two reads
+        return None
+    logger.info(f"self-update: a helper ({holder.nonce}) is still working here; standing it down")
+    tell_to_stop(install, holder.nonce)
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if clear_stale_lock(install):
+            return None
+        time.sleep(0.05)
+    if clear_stale_lock(install):
+        return None
+    return (
+        "An installer Yu'lon started earlier is still working in this folder, and Yu'lon will "
+        "not start a second one beside it. Wait a moment and press Update now again; if it is "
+        "still refused, close Yu'lon and open it again."
+    )
+
+
 def stamp_holds(install: Install, nonce: str) -> bool:
     """Is the helper's stamp THIS attempt's? A stale one answers False.
 

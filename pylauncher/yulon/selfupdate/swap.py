@@ -42,7 +42,6 @@ from __future__ import annotations
 import os
 import secrets
 import subprocess
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -468,6 +467,7 @@ function OwnTheLock() {{
   # Only a lock whose owner is still OUR nonce: the app may have discarded this
   # backup and a second helper may hold a new lock of the same name (round 5).
   if (-not $HaveLock) {{ return $false }}
+  if (-not (Exists $Owner 'Leaf')) {{ return $false }}
   try {{ return (Get-Content -LiteralPath $Owner -Raw).Trim() -eq $Nonce }}
   catch {{ return $false }}
 }}
@@ -478,22 +478,30 @@ function Done($code) {{
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
   exit $code
 }}
+# **Both predicates answer, and neither throws** (round 6). With
+# `$ErrorActionPreference = 'Stop'` a `Test-Path` on a path an antivirus
+# scanner has locked terminates the script where it stands — before any move,
+# so the install is whole, but with the lock left behind holding a pid that no
+# longer exists, which is the wedge that then refuses every later press.
+function Exists($path, $kind) {{
+  try {{ return (Test-Path -LiteralPath $path -PathType $kind) }} catch {{ return $false }}
+}}
 function ToldToStop() {{
-  if (-not (Test-Path -LiteralPath $StandDown -PathType Leaf)) {{ return $false }}
+  if (-not (Exists $StandDown 'Leaf')) {{ return $false }}
   try {{ return (Get-Content -LiteralPath $StandDown -Raw) -match [regex]::Escape($Nonce) }}
   catch {{ return $false }}
 }}
 function StillOurs() {{
-  if (-not (Test-Path -LiteralPath (Join-Path $New $Marker) -PathType Leaf)) {{ return $false }}
-  if (-not (Test-Path -LiteralPath (Join-Path $Old $Marker) -PathType Leaf)) {{ return $false }}
-  if (-not (Test-Path -LiteralPath $Owner -PathType Leaf)) {{ return $false }}
+  if (-not (Exists (Join-Path $New $Marker) 'Leaf')) {{ return $false }}
+  if (-not (Exists (Join-Path $Old $Marker) 'Leaf')) {{ return $false }}
+  if (-not (Exists $Owner 'Leaf')) {{ return $false }}
   try {{ if ((Get-Content -LiteralPath $Owner -Raw).Trim() -ne $Nonce) {{ return $false }} }}
   catch {{ return $false }}
   try {{ if (-not ((Get-Content -LiteralPath $Stamp -Raw) -match [regex]::Escape($Nonce))) {{
     return $false
   }} }} catch {{ return $false }}
   foreach ($e in $Forward) {{
-    if (-not (Test-Path -LiteralPath (Join-Path $New $e))) {{ return $false }}
+    if (-not (Exists (Join-Path $New $e) 'Any')) {{ return $false }}
   }}
   return $true
 }}
@@ -585,8 +593,11 @@ function Rollback() {{
 # `$ErrorActionPreference = 'Stop'` an unguarded `Test-Path` on a path a
 # scanner has locked, or a `Set-Content` on a full disk, terminated the helper
 # mid-swap: no rollback, no relaunch, no lock released, and an install with
-# half of each version in it. So the whole swap is one try/catch, the catch
-# puts back what was moved, and the finally releases what is ours.
+# half of each version in it. So the whole swap is one try/catch and the catch
+# puts back what was moved. There is no `finally` here and none is wanted:
+# every way out of this script goes through `Done`, which releases the lock
+# when it is still ours and removes the script — including the relaunch path
+# below, which `Done 0` ends (round 6: this comment said "finally").
 $ok = $true
 try {{
   foreach ($e in $Forward) {{
@@ -784,46 +795,11 @@ def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Seque
         raise UpdateError(f"Yu'lon could not prepare the backup folder: {exc}") from exc
 
 
-LOCK_WAIT_SECONDS = 10.0
-"""How long the app waits for a helper it did not start to release the lock."""
-
-
-def make_way_for_the_backup(install: Install, *, seconds: float = LOCK_WAIT_SECONDS) -> str | None:
-    """Is a live helper working in `.yulon-old`? Stand it down; refuse if it stays.
-
-    **The app used to delete the directory out from under it** (round 5, M2).
-    The state: a first helper is alive because the close was refused after it
-    had stamped; the player presses Update now again; `_make_the_backup_dir`
-    rmtrees `.yulon-old`, the first helper's lock with it, and a second helper
-    then takes a lock of the same name. In 5 runs of 12 the first helper's exit
-    trap removed the SECOND one's lock, the second's re-validation then failed,
-    and the app closed with nothing swapped and nothing relaunched.
-
-    A lock whose pid is dead is a leftover and is discarded as before. A lock
-    whose pid is ALIVE gets the stand-down file — the same file, the same way —
-    and this waits for the lock to go. It is a refusal, in the player's words,
-    if it does not.
-    """
-    holder = layout.lock_holder(install)
-    if holder is None:
-        return None
-    if not holder.alive():
-        logger.info("self-update: the helper lock was left behind by a helper that is gone")
-        return None
-    logger.info(f"self-update: a helper ({holder.nonce}) is still working here; standing it down")
-    tell_to_stop(install, holder.nonce)
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        if layout.lock_holder(install) is None or not holder.alive():
-            return None
-        time.sleep(0.05)
-    if layout.lock_holder(install) is None:
-        return None
-    return (
-        "An installer Yu'lon started earlier is still working in this folder, and Yu'lon will "
-        "not start a second one beside it. Wait a moment and press Update now again; if it is "
-        "still refused, close Yu'lon and open it again."
-    )
+def make_way_for_the_backup(
+    install: Install, *, seconds: float = layout.LOCK_WAIT_SECONDS
+) -> str | None:
+    """`layout.make_way`, kept here as the name the swap side calls it by."""
+    return layout.make_way(install, seconds=seconds)
 
 
 def _write(script_dir: Path, stem: str, which: str, posix_body: str) -> tuple[Path, str]:
@@ -835,7 +811,13 @@ def _write(script_dir: Path, stem: str, which: str, posix_body: str) -> tuple[Pa
 
 
 def _write_body(script: Path, text: str) -> None:
-    """The write itself, so `ensure_script()` can repeat it without rebuilding a plan."""
+    """The write itself: one script, written by `arm()` at the moment of use.
+
+    It was split out for an `ensure_script()` that wrote the file a second time
+    just before the helper started. That function is gone (round 5): arming
+    writes the one script, immediately before the spawn, so there is nothing
+    left to repeat.
+    """
     try:
         script.parent.mkdir(parents=True, exist_ok=True)
         # `newline="\n"`: a POSIX `sh` script whose shebang line ends `\r` is
@@ -913,17 +895,11 @@ def stand_down(install: Install, plan: SwapPlan) -> None:
 def tell_to_stop(install: Install, nonce: str) -> None:
     """The stand-down file itself, for a nonce from anywhere. Never raises.
 
-    Split out because the app also has to stand down a helper it did NOT start
-    — one left working in a backup directory a new attempt is about to discard
-    (round 5, M2) — and that helper is known only by the nonce in its lock.
+    One line, because `stage.prepare` has to do the same thing before it
+    discards a directory a helper it did not start is working in, and that is
+    on the other side of this package (round 6).
     """
-    if not nonce:
-        return
-    try:
-        layout.stand_down_path(install).write_text(nonce + "\n", encoding="utf-8")
-        logger.info(f"self-update: stood down the helper for nonce {nonce}")
-    except OSError as exc:
-        logger.warning(f"self-update: could not write the stand-down file: {exc}")
+    layout.tell_to_stop(install, nonce)
 
 
 def clear_stamp(install: Install) -> None:
@@ -992,8 +968,13 @@ def windows_creation_flags(available: object = subprocess, *, breakaway: bool = 
     SEPARATELY, because a job that does not permit breakaway makes
     `CreateProcess` fail outright, so `_spawn_detached` retries without it.
 
-    **Still to be re-measured by the lead**: that the helper now really runs on
-    that box, and whether the breakaway flag is accepted or refused there.
+    **Measured again on 2026-09-21** with a packaged build of `14ba50c5`, on
+    the same Windows 11 box: with these flags the helper ran. Under the
+    scheduled task the gate drives, `CREATE_BREAKAWAY_FROM_JOB` was refused
+    outright — `[WinError 5] Access is denied` — and the retry without it
+    started the helper, which then reported in, swapped, and relaunched. Both
+    halves of that are therefore load-bearing, and the fallback is not a
+    precaution but the path that box takes.
     """
     flags = 0
     for name in ("CREATE_NO_WINDOW", "CREATE_NEW_PROCESS_GROUP"):

@@ -134,6 +134,16 @@ def prepare(install: Install, version: str, *, pid: int) -> Path:
     busy = layout.another_copy_is_updating(install, pid)
     if busy is not None:
         raise UpdateError(busy)
+    # **Before the first discard, not before the last** (round 6). A helper
+    # from an earlier press can still be working in `.yulon-old`, and the loop
+    # below deletes that directory — its lock with it. The guard for that used
+    # to sit beside `_make_the_backup_dir`, which runs minutes later, by which
+    # time there was nothing left to find: on the real path the live holder was
+    # never once stood down, and only the script's own owner check kept the
+    # install whole.
+    busy = layout.make_way(install)
+    if busy is not None:
+        raise UpdateError(busy)
     for name in layout.WORK_NAMES:
         path = layout.work_dir(install, name)
         if path.exists() and not layout.discard_ours(install, name):
