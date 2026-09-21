@@ -1715,3 +1715,435 @@ def test_the_client_dir_seam_rebuilds_the_tab_so_the_new_folder_reaches_the_appl
     # Mutation: in `main.on_client_dir_changed()`, call `add_controller(game,
     # sd, None, ...)` instead of `add_controller(game, sd, cd, ...)` —
     # `rebuilt.services.applier.client_dir` reads `None` and this fails.
+
+
+# ------------------------------------------------- the update that installs itself
+
+
+class _Busy:
+    """A controller view that is in the middle of something that cannot be stopped."""
+
+    def __init__(self, reason: str | None) -> None:
+        self._reason = reason
+
+    def busy_reason(self) -> str | None:
+        return self._reason
+
+
+class _Window:
+    """Only what `close_refusal()` reads off a window."""
+
+    def __init__(self, *views: Any) -> None:
+        self.yulon_controllers = list(views)
+
+
+def test_close_refusal_is_silent_when_nothing_is_running() -> None:
+    assert main.close_refusal(_Window()) is None
+    assert main.close_refusal(_Window(_Busy(None), _Busy(None))) is None
+
+
+def test_close_refusal_answers_the_first_reason_it_finds() -> None:
+    assert main.close_refusal(_Window(_Busy(None), _Busy("A database import is running."))) == (
+        "A database import is running."
+    )
+
+
+def test_close_refusal_ignores_a_view_that_has_no_busy_reason_at_all() -> None:
+    """Older tabs and anything a test puts in the list; the sweep is defensive on purpose."""
+    assert main.close_refusal(_Window(object(), _Busy("An import is running."))) == (
+        "An import is running."
+    )
+
+
+def test_close_refusal_on_a_window_with_no_controllers_at_all() -> None:
+    assert main.close_refusal(object()) is None
+
+
+class _Bar:
+    """Only what `announce_previous_update()` says to."""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def show_message(self, text: str, *, keep_details: bool = False) -> None:
+        self.messages.append(text)
+
+
+def _swapped_install(tmp_path: Path) -> Any:
+    """A folder install with an `.old` beside it, as the helper leaves things."""
+    from yulon.selfupdate.detect import Install, InstallKind
+
+    target = tmp_path / "yulon"
+    target.mkdir()
+    (target / "yulon").write_text("the new build", encoding="utf-8")
+    old = tmp_path / "yulon.old"
+    old.mkdir()
+    (old / "yulon").write_text("the previous build", encoding="utf-8")
+    return Install(InstallKind.TARBALL, target, "yulon", True)
+
+
+def test_the_first_start_after_a_swap_removes_the_old_build_and_says_so(tmp_path: Path) -> None:
+    bar = _Bar()
+    install = _swapped_install(tmp_path)
+
+    assert main.announce_previous_update(bar, install=install, environ={}, version="0.8.70") is True
+
+    assert not (tmp_path / "yulon.old").exists()
+    assert bar.messages == ["Updated to Yu'lon 0.8.70."]
+
+
+def test_an_ordinary_start_removes_nothing_and_says_nothing(tmp_path: Path) -> None:
+    from yulon.selfupdate.detect import Install, InstallKind
+
+    target = tmp_path / "yulon"
+    target.mkdir()
+    bar = _Bar()
+    install = Install(InstallKind.TARBALL, target, "yulon", True)
+
+    assert main.announce_previous_update(bar, install=install, environ={}) is False
+    assert bar.messages == []
+
+
+def test_the_smoke_test_of_a_staged_build_deletes_nothing(tmp_path: Path) -> None:
+    """`YULON_SMOKE_TEST` proves a staged build with the OLD tree still in place.
+
+    It runs before the swap, so an `.old` beside the install belongs to the
+    update BEFORE this one and is the player's way back. A smoke test that
+    removed it would be a check that changes the thing it is checking.
+    """
+    bar = _Bar()
+    install = _swapped_install(tmp_path)
+
+    assert (
+        main.announce_previous_update(bar, install=install, environ={"YULON_SMOKE_TEST": "1"})
+        is False
+    )
+
+    assert (tmp_path / "yulon.old" / "yulon").read_text(encoding="utf-8") == "the previous build"
+    assert bar.messages == []
+
+
+def test_a_start_that_cannot_remove_the_old_build_still_starts(tmp_path: Path) -> None:
+    """It runs while the window is built; a traceback here is a launcher that will not open."""
+    bar = _Bar()
+    install = _swapped_install(tmp_path)
+    tmp_path.chmod(0o500)
+    try:
+        assert main.announce_previous_update(bar, install=install, environ={}) is False
+        assert bar.messages == []
+    finally:
+        tmp_path.chmod(0o700)
+
+
+def test_the_downloads_folder_is_one_the_player_can_find(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`~/Downloads` when it is there, the home folder when it is not."""
+    import pathlib
+
+    home = Path(os.environ.get("HOME", "/"))
+    monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: home))
+    answer = main.downloads_dir()
+    assert answer in (home / "Downloads", home)
+    assert answer.is_dir(), "the folder a verified download is told to go to does not exist"
+
+
+class _FakeProgress:
+    """`UpdateProgressDialog` with no window: the four things the host uses."""
+
+    def __init__(self) -> None:
+        import threading
+
+        from yulon.ui.widgets.update_progress import _Relay
+
+        self.cancel_event = threading.Event()
+        self.relay = _Relay()
+        self.shown = 0
+        self.accepted = 0
+        self.rejected = 0
+        self.errors: list[str] = []
+
+    def show(self) -> None:
+        self.shown += 1
+
+    def accept(self) -> None:
+        self.accepted += 1
+
+    def reject(self) -> None:
+        self.rejected += 1
+
+    def finish_error(self, message: str) -> None:
+        self.errors.append(message)
+
+
+def _swappable(tmp_path: Path) -> Any:
+    from yulon.selfupdate.detect import Install, InstallKind
+
+    target = tmp_path / "yulon"
+    target.mkdir(exist_ok=True)
+    return Install(InstallKind.TARBALL, target, "yulon", True)
+
+
+def _install_offer() -> Any:
+    """A release this machine could really install: checksums, and its own artifact."""
+    return dataclasses.replace(
+        A_RELEASE,
+        assets=(
+            update.ReleaseAsset(
+                "Yulon-v0.8.70-Public-x86_64.tar.gz", "https://example.invalid/a", 1234
+            ),
+            update.ReleaseAsset("SHA256SUMS", "https://example.invalid/s", 10),
+        ),
+        has_checksums=True,
+    )
+
+
+@pytest.fixture
+def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
+    """`update_host` with the install-side seams replaced, and put back afterwards."""
+    from yulon.ui.widgets.job import run_inline
+
+    names = (
+        "current_install",
+        "apply",
+        "start_helper",
+        "close_window",
+        "refusal",
+        "make_progress",
+        "run_job",
+    )
+    seams = {name: getattr(update_host, name) for name in names}
+    update_host.current_install = lambda: _swappable(tmp_path)
+    update_host.refusal = lambda: None
+    update_host.run_job = run_inline
+    update_host.progresses = []
+
+    def make_progress(_version: str) -> Any:
+        progress = _FakeProgress()
+        update_host.progresses.append(progress)
+        return progress
+
+    update_host.make_progress = make_progress
+    update_host.helpers = []
+    update_host.start_helper = update_host.helpers.append
+    update_host.closes = []
+    update_host.close_window = lambda: update_host.closes.append(1)
+    yield update_host
+    for name, seam in seams.items():
+        setattr(update_host, name, seam)
+    update_host._installing = False
+    update_host._progress = None
+
+
+def test_a_ready_update_starts_the_helper_and_then_closes_the_window(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """**The order is the whole of it.** The helper waits for THIS pid to exit."""
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    order: list[str] = []
+    plan = SwapPlan(tmp_path / "helper.sh", ["/bin/sh", "x"])
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+    installing_host.start_helper = lambda p: order.append(f"helper:{p.script.name}")
+    installing_host.close_window = lambda: order.append("close")
+
+    installing_host.start_update(_install_offer())
+
+    assert order == ["helper:helper.sh", "close"]
+    assert installing_host.progresses[0].shown == 1
+    assert installing_host.progresses[0].accepted == 1
+
+
+def test_the_helper_is_never_started_while_a_tab_refuses_to_close(
+    installing_host: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An update ends in `window.close()`; starting one mid-import is a way past the guard.
+
+    The refusal is the SAME `close_refusal()` the window's close filter asks,
+    and the assertion is that `apply` was never called — not merely that a
+    message was shown.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    said: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        staticmethod(lambda _p, title, text, *a, **k: said.append((title, text)) or 0),
+    )
+    applied: list[int] = []
+    installing_host.apply = lambda *a, **k: applied.append(1)
+    installing_host.refusal = lambda: "A database import is running."
+
+    installing_host.start_update(_install_offer())
+
+    assert applied == [], "the update ran while a tab refused to close"
+    assert installing_host.helpers == [] and installing_host.closes == []
+    assert installing_host.progresses == [], "a progress dialog was opened for a refused update"
+    assert said and "A database import is running." in said[0][1]
+    assert said[0][1].startswith("Yu'lon can update when this is finished:")
+
+
+def test_a_refused_update_shows_the_reason_and_leaves_the_app_running(
+    installing_host: Any,
+) -> None:
+    from yulon.selfupdate.fetch import UpdateError
+
+    def refuse(*_a: Any, **_k: Any) -> Any:
+        raise UpdateError("The download's checksum does not match. Nothing was installed.")
+
+    installing_host.apply = refuse
+
+    installing_host.start_update(_install_offer())
+
+    progress = installing_host.progresses[0]
+    assert progress.errors == ["The download's checksum does not match. Nothing was installed."]
+    assert progress.accepted == 0
+    assert installing_host.helpers == [] and installing_host.closes == []
+
+
+def test_a_cancelled_update_just_closes_the_progress_dialog(installing_host: Any) -> None:
+    from yulon.selfupdate.fetch import Cancelled
+
+    def cancel(*_a: Any, **_k: Any) -> Any:
+        raise Cancelled("The update was cancelled.")
+
+    installing_host.apply = cancel
+
+    installing_host.start_update(_install_offer())
+
+    progress = installing_host.progresses[0]
+    assert (progress.rejected, progress.errors) == (1, [])
+    assert installing_host.helpers == [] and installing_host.closes == []
+
+
+def test_a_saved_download_is_shown_to_the_player_and_nothing_is_replaced(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    from yulon.selfupdate.apply import SavedForManualInstall
+
+    saved = tmp_path / "Downloads" / "Yulon-v0.8.70-Public-macos.dmg"
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    saved.write_bytes(b"x")
+    installing_host.apply = lambda *a, **k: SavedForManualInstall(saved, "v0.8.70-Public")
+    opened: list[str] = []
+    installing_host.open_url = _opens_into(opened)
+
+    installing_host.start_update(_install_offer())
+
+    bar = installing_host.parent().property("update_bar")
+    assert str(saved) in bar.text()
+    assert "Close Yu'lon, then install it." in bar.text()
+    assert opened and opened[0].startswith("file://") and opened[0].endswith(saved.name)
+    assert installing_host.helpers == [] and installing_host.closes == []
+
+
+def test_the_worker_is_handed_this_process_and_the_dialogs_own_cancel(
+    installing_host: Any,
+) -> None:
+    """What `apply_update` is called with, which is what a fake can never notice by itself."""
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    seen: dict[str, Any] = {}
+
+    def record(result: Any, install: Any, **kwargs: Any) -> Any:
+        seen["result"] = result
+        seen["install"] = install
+        seen.update(kwargs)
+        return ReadyToRestart(SwapPlan(Path("x"), ["/bin/sh"]), "v0.8.70-Public")
+
+    installing_host.apply = record
+    offer = _install_offer()
+
+    installing_host.start_update(offer)
+
+    assert seen["result"] is offer
+    assert seen["pid"] == os.getpid()
+    progress = installing_host.progresses[0]
+    assert seen["cancelled"]() is False
+    progress.cancel_event.set()
+    assert seen["cancelled"]() is True, "the dialog's Cancel is not what the worker reads"
+    assert seen["progress"] == progress.relay.emit_progress
+    assert seen["stage_changed"] == progress.relay.emit_stage
+
+
+def test_an_install_this_app_cannot_replace_opens_the_release_page_instead(
+    installing_host: Any,
+) -> None:
+    """A checkout, an unsupported machine, or a release with no checksums."""
+    from yulon.selfupdate.detect import Install, InstallKind
+
+    installing_host.current_install = lambda: Install(InstallKind.SOURCE, None, "", False)
+    applied: list[int] = []
+    installing_host.apply = lambda *a, **k: applied.append(1)
+    opened: list[str] = []
+    installing_host.open_url = _opens_into(opened)
+
+    installing_host.start_update(_install_offer())
+
+    assert applied == []
+    assert opened == [A_RELEASE.url]
+    assert installing_host.progresses == []
+
+
+def test_a_second_press_while_an_update_is_running_does_nothing(installing_host: Any) -> None:
+    """The guard the check already has, for the action that ends in closing the window."""
+    from yulon.selfupdate.apply import ReadyToRestart
+    from yulon.selfupdate.swap import SwapPlan
+
+    started: list[int] = []
+
+    def apply_and_stay_running(*_a: Any, **_k: Any) -> Any:
+        started.append(1)
+        return ReadyToRestart(SwapPlan(Path("x"), ["/bin/sh"]), "v0.8.70-Public")
+
+    installing_host.apply = apply_and_stay_running
+    installing_host._installing = True
+
+    installing_host.start_update(_install_offer())
+
+    assert started == [], "a second update started while one was in flight"
+
+
+def test_the_dialogs_action_button_says_what_pressing_it_will_do(
+    update_host: Any, tmp_path: Path
+) -> None:
+    """The label and the behaviour come from ONE call, so they cannot disagree.
+
+    Driven through the REAL `make_dialog`, which is the only thing that joins
+    them: a test that called `action_label()` itself would prove the function
+    and not the wiring.
+    """
+    from yulon.selfupdate.detect import Install, InstallKind
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    offer = _install_offer()
+    update_host._offered = offer
+
+    update_host.current_install = lambda: _swappable(tmp_path)
+    dialog = update_host.make_dialog(offer)
+    try:
+        assert dialog._buttons[UpdateChoice.UPDATE].text() == "Update now"
+    finally:
+        dialog.deleteLater()
+
+    update_host.current_install = lambda: Install(InstallKind.MACOS_APP, None, "", False)
+    mac_offer = dataclasses.replace(
+        offer,
+        assets=(
+            update.ReleaseAsset("Yulon-v0.8.70-Public-macos.dmg", "https://example.invalid/d", 5),
+            update.ReleaseAsset("SHA256SUMS", "https://example.invalid/s", 10),
+        ),
+    )
+    dialog = update_host.make_dialog(mac_offer)
+    try:
+        assert dialog._buttons[UpdateChoice.UPDATE].text() == "Download"
+    finally:
+        dialog.deleteLater()
+
+    update_host.current_install = lambda: Install(InstallKind.SOURCE, None, "", False)
+    dialog = update_host.make_dialog(offer)
+    try:
+        assert dialog._buttons[UpdateChoice.UPDATE].text() == "Open download page"
+    finally:
+        dialog.deleteLater()

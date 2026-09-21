@@ -253,6 +253,78 @@ def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
         return False
 
 
+def close_refusal(window: object) -> str | None:
+    """Why this window may not close yet, in the tab's own words — or None.
+
+    **One answer, asked by two callers**, and that is why it is a function and
+    not a loop inside the close filter. There is exactly one thing today that
+    refuses a close — the database import, which runs for ten to thirty minutes
+    and cannot be stopped part-way without leaving the databases half written —
+    and a self-update that closed the window during one would destroy the
+    install it was protecting. So the update asks the SAME question the close
+    filter asks, rather than a second question written to look like it.
+
+    Read off `yulon_controllers` as an attribute and not through
+    `property()`, for `_Window`'s reason: a list put through `setProperty()`
+    comes back as a copy frozen at that call, and the tabs that matter here are
+    the ones opened afterwards.
+    """
+    for view in getattr(window, "yulon_controllers", []):
+        reason = getattr(view, "busy_reason", lambda: None)()
+        if reason:
+            return str(reason)
+    return None
+
+
+def announce_previous_update(
+    bar: UpdateBar,
+    *,
+    install: object = None,
+    environ: dict[str, str] | None = None,
+    version: str | None = None,
+) -> bool:
+    """First start after a swap: remove `<install>.old` and say so once. Never raises.
+
+    **Not under `YULON_SMOKE_TEST`.** That variable is how the staged build is
+    proved before the swap — it opens the window and exits 0 — and it runs with
+    the OLD tree still in place and an `.old` possibly beside it from the
+    update before this one. A smoke test that deleted anything would be a check
+    that changes the thing it is checking.
+
+    A failure here is logged and nothing else: this runs while the window is
+    being built, and a launcher that will not open because it could not remove
+    a folder is a worse bug than a folder left on disk.
+    """
+    from yulon import __version__
+    from yulon.selfupdate.cleanup import finish_previous_update
+    from yulon.selfupdate.detect import Install, detect_install
+
+    env = os.environ if environ is None else environ
+    if env.get("YULON_SMOKE_TEST"):
+        return False
+    try:
+        here = install if isinstance(install, Install) else detect_install()
+        if not finish_previous_update(here):
+            return False
+    except Exception as exc:  # noqa: BLE001 - boundary: a start must not fail over this
+        logger.info(f"self-update: could not finish the previous update: {exc}")
+        return False
+    bar.show_message(f"Updated to Yu'lon {version or __version__}.")
+    return True
+
+
+def downloads_dir() -> Path:
+    """Where a verified file goes when this install cannot be replaced in place.
+
+    `~/Downloads` when it exists, and the home folder when it does not — a
+    macOS or read-only-folder player is told the path in the bar and has the
+    folder opened for them, so the one thing that matters is that it is
+    somewhere they can find and somewhere they can write.
+    """
+    downloads = Path.home() / "Downloads"
+    return downloads if downloads.is_dir() else Path.home()
+
+
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
     from PySide6.QtCore import QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
@@ -262,6 +334,14 @@ def build_window() -> object:
     from yulon import __version__
     from yulon.catalog.catalog import load_catalog
     from yulon.install_wiring import installer_for_app
+    from yulon.selfupdate.apply import (
+        ReadyToRestart,
+        SavedForManualInstall,
+        apply_update,
+    )
+    from yulon.selfupdate.detect import OPEN_PAGE, Install, action_label, detect_install
+    from yulon.selfupdate.fetch import Cancelled
+    from yulon.selfupdate.swap import start_helper
     from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
@@ -271,6 +351,7 @@ def build_window() -> object:
     from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog, default_open_url
+    from yulon.ui.widgets.update_progress import UpdateProgressDialog
     from yulon.update import (
         UpdateCheck,
         check_with_cache,
@@ -781,13 +862,34 @@ def build_window() -> object:
             self.check: Callable[[], object] = lambda: check_with_cache(force=True)
             self.run_job = threaded_job_runner(window)
             self.make_dialog: Callable[[UpdateCheck], UpdateDialog] = lambda result: UpdateDialog(
-                result, parent=window, open_url=self.open_a_notes_link
+                result,
+                action_label=action_label(self.current_install(), result),
+                parent=window,
+                open_url=self.open_a_notes_link,
             )
             self.open_url: Callable[[str], bool] = default_open_url
             self._offered: UpdateCheck | None = None
             self._checking = False
             self.startup_thread: QThread | None = None
             """The launch check's thread, set once it exists. A manual check waits for it."""
+            # The install-side seams (T90 plan 3). Every one of them is
+            # something a test must be able to replace: `detect_install()`
+            # reads this process's own frozen-ness, `apply_update` downloads
+            # and unpacks, `start_helper` starts a process that outlives this
+            # one, and `close()` ends the app.
+            self.current_install: Callable[[], Install] = detect_install
+            self.apply: Callable[..., object] = apply_update
+            self.start_helper: Callable[..., None] = start_helper
+            # `window.close()` answers a bool; nothing here reads it, and
+            # typing the seam as taking none and returning one would make a
+            # test's `lambda: closed.append(1)` the odd one out.
+            self.close_window: Callable[[], object] = window.close
+            self.refusal: Callable[[], str | None] = lambda: close_refusal(window)
+            self.make_progress: Callable[[str], Any] = lambda version: UpdateProgressDialog(
+                version, parent=window
+            )
+            self._progress: Any = None
+            self._installing = False
 
         @Slot(object)
         def startup_result(self, result: object) -> None:
@@ -912,8 +1014,12 @@ def build_window() -> object:
         def open_details(self) -> None:
             """Show what is in the release, and do what the player answers.
 
-            "Update now" is `Open download page` in this plan: nothing here
-            replaces the running app (T90 plan 3 does).
+            What the action button SAYS is what pressing it does, and
+            `action_label()` decides both from the same two facts: what kind of
+            install this is, and whether the release can be proved. A packaged
+            install with checksums and its own artifact gets "Update now"; a
+            read-only folder or a Mac gets "Download"; everything else gets the
+            release page.
 
             `deleteLater()` and not simply letting it fall out of scope: the
             dialog is parented to the window, so Qt owns it for the lifetime of
@@ -927,22 +1033,126 @@ def build_window() -> object:
             dialog = self.make_dialog(offered)
             try:
                 dialog.exec()
-                if dialog.choice is UpdateChoice.SKIP:
-                    skip_version(str(offered.latest))
-                    update_bar.clear()
-                elif dialog.choice is UpdateChoice.UPDATE:
-                    # The feed chose this string, not this app: `html_url` is
-                    # handed to the desktop, which starts whatever its scheme
-                    # says. `safe_release_url` is the rule; `open_or_say` is
-                    # what happens when there is no browser to hand it to.
-                    self.open_or_say(safe_release_url(offered.url))
+                choice = dialog.choice
             finally:
                 dialog.deleteLater()
+            if choice is UpdateChoice.SKIP:
+                skip_version(str(offered.latest))
+                update_bar.clear()
+            elif choice is UpdateChoice.UPDATE:
+                self.start_update(offered)
+
+        def start_update(self, offered: UpdateCheck) -> None:
+            """The action button was pressed. Install, save, or open the page.
+
+            **The busy question is asked here and nowhere else**, through
+            `close_refusal()` — the same function the window's own close filter
+            asks. An update ends in `window.close()`, so starting one during a
+            database import would be a way to close the window past the guard
+            that exists to stop exactly that.
+            """
+            install = self.current_install()
+            if action_label(install, offered) == OPEN_PAGE:
+                # The feed chose this string, not this app: `html_url` is
+                # handed to the desktop, which starts whatever its scheme says.
+                # `safe_release_url` is the rule; `open_or_say` is what happens
+                # when there is no browser to hand it to.
+                self.open_or_say(safe_release_url(offered.url))
+                return
+            reason = self.refusal()
+            if reason is not None:
+                logger.info(f"update refused while busy: {reason}")
+                QMessageBox.information(
+                    window,
+                    "Yu'lon is still working",
+                    f"Yu'lon can update when this is finished: {reason}",
+                )
+                return
+            if self._installing:
+                return
+            self._installing = True
+            version = str(offered.latest)
+            progress = self.make_progress(version)
+            self._progress = progress
+            relay = progress.relay
+            cancelled = progress.cancel_event.is_set
+
+            def work() -> object:
+                return self.apply(
+                    offered,
+                    install,
+                    downloads_dir=downloads_dir(),
+                    pid=os.getpid(),
+                    progress=relay.emit_progress,
+                    stage_changed=relay.emit_stage,
+                    cancelled=cancelled,
+                )
+
+            # `show()` and not `exec()`: `exec()` spins a nested event loop
+            # that does not return until the dialog closes, and the job runner
+            # would then be started from inside it — or, with `run_inline`,
+            # would have finished and closed the dialog before `exec()` was
+            # ever reached, leaving an offscreen run waiting on a window that
+            # is already gone. `setModal(True)` + `show()` is modal to the
+            # user and not to this function.
+            progress.show()
+            self.run_job(work, self.install_done, self.install_failed)
+
+        @Slot(object)
+        def install_done(self, outcome: object) -> None:
+            """The update finished. Either restart into it, or say where it was saved."""
+            self._installing = False
+            progress, self._progress = self._progress, None
+            if progress is not None:
+                progress.accept()
+            if isinstance(outcome, ReadyToRestart):
+                # **In this order, and the order is the whole of it.** The
+                # helper waits for THIS process to exit before it renames
+                # anything, so it is started first and the window is closed
+                # immediately after, through the normal close path — every
+                # thread joined, every tab shut down. `close_refusal()` was
+                # asked before any of this began; if the close is somehow
+                # refused anyway the helper waits out its 120 seconds and
+                # relaunches what is already running rather than renaming.
+                self.start_helper(outcome.plan)
+                logger.info(f"self-update: closing to install {outcome.version}")
+                self.close_window()
+            elif isinstance(outcome, SavedForManualInstall):
+                self.show_saved(outcome)
+
+        def show_saved(self, outcome: SavedForManualInstall) -> None:
+            """A verified file the player installs themselves (macOS, a read-only folder)."""
+            shown = outcome.path if outcome.path.suffix == ".dmg" else outcome.path.parent
+            try:
+                self.open_url(QUrl.fromLocalFile(str(shown)).toString())
+            except Exception as exc:  # a missing desktop helper can raise
+                logger.info(f"could not open {shown}: {type(exc).__name__}: {exc}")
+            update_bar.show_message(
+                f"Saved to {outcome.path}. Close Yu'lon, then install it.", keep_details=True
+            )
+
+        @Slot(object)
+        def install_failed(self, problem: object) -> None:
+            """A refusal, or a cancel. Both leave the running install exactly as it was."""
+            self._installing = False
+            progress, self._progress = self._progress, None
+            if isinstance(problem, Cancelled):
+                if progress is not None:
+                    progress.reject()
+                return
+            logger.info(f"self-update refused: {problem}")
+            if progress is not None:
+                progress.finish_error(str(problem))
+            else:  # pragma: no cover - there is always a dialog on this path
+                update_bar.show_message(f"Could not install the update: {problem}")
 
     update_host = _UpdateHost(window)
     update_bar.details_requested.connect(update_host.open_details)
     window.setProperty("update_bar", update_bar)
     window.setProperty("update_host", update_host)
+    # The first start after a swap: the previous build is beside this one under
+    # `.old`, and this is the earliest moment it is provably not needed.
+    announce_previous_update(update_bar)
 
     check_button = QPushButton("Check for updates", window)
     check_button.setObjectName("check-for-updates")
@@ -1173,20 +1383,20 @@ def main() -> int:
             be stopped part-way without leaving the databases half-written, so the only
             choice that ever existed was between waiting and a crash; this makes that
             choice visible and takes the crash off the table (review, 2026-08-23).
+
+            The sweep itself moved out to `close_refusal()` in T90 plan 3, unchanged,
+            because the self-update ends in `window.close()` and has to ask the SAME
+            question this filter asks rather than a second one written to look like it.
             """
 
             def eventFilter(self, watched: QObject, event: QEvent) -> bool:
                 if event.type() is not QEvent.Type.Close:
                     return False
-                reasons = [
-                    reason
-                    for view in getattr(watched, "yulon_controllers", [])
-                    if (reason := getattr(view, "busy_reason", lambda: None)())
-                ]
-                if not reasons:
+                reason = close_refusal(watched)
+                if reason is None:
                     return False
-                logger.info(f"close refused: {reasons[0]}")
-                QMessageBox.information(None, "Yu'lon is still working", reasons[0])
+                logger.info(f"close refused: {reason}")
+                QMessageBox.information(None, "Yu'lon is still working", reason)
                 event.ignore()
                 return True
 
