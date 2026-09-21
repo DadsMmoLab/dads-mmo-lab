@@ -10,6 +10,7 @@ the models generate, so the language-neutral copy can't drift.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -757,3 +758,80 @@ def test_a_rename_on_a_single_file_deploy_is_refused_at_load() -> None:
     assert ok.deploy[0].rename == (("a.lua", "b.lua"),)
     # And a single-file deploy with no rename is the ordinary case.
     assert parse_manifest({**base, "deploy": [{"src": "One.lua", "dest": "d/"}]}).deploy[0].src
+
+
+# The CONFIG block of pjerra/SitMeansRest's SitMeansRest.lua as merged at 0378014
+# (2026-09-21), verbatim. A configure patch is a regex over this text, and one
+# that matches nothing configures nothing and says nothing (T91).
+_SIT_MEANS_REST_CONFIG = """\
+local CONFIG = {
+    DURATION = 20,          -- Seconds to rest
+    CHECK_INTERVAL = 500,   -- Check for movement every 500ms
+    POLL_INTERVAL = 1000,   -- Check stand-state (X key sit) every 1s
+    REGEN_AURA = 25990,     -- Graccu's Mistletoe (Fruitcake effect)
+    SIT_EMOTE_ID = 86,      -- TEXT_EMOTE_SIT
+    STAND_STATE_SIT = 1,    -- UNIT_STAND_STATE_SIT (ground sit: X key or /sit;
+                            -- chair states 2-4 deliberately excluded so bench
+                            -- bots don't trigger)
+
+    -- RESTED XP
+    -- Sitting still also builds rested XP -- the blue part of the XP bar --
+    -- the way an inn does, only fast enough to be worth a break. Ground or
+    -- chair, any seat counts here; bots are skipped, so the bench bots the
+    -- regen buff avoids are no concern.
+    REST_XP_ENABLED = true, -- false turns the whole feature off
+
+    -- Seconds of sitting still before rested XP starts to build. Standing up,
+    -- moving or entering combat starts the count again, so a tap of the sit
+    -- key between pulls earns nothing.
+    REST_XP_DELAY = 30,
+
+    -- How fast it builds: percent of the current level's XP bar per minute.
+    -- 5 means a ten-minute break is worth half a level of rested XP. For
+    -- scale, an inn gives 5 percent per EIGHT HOURS.
+    REST_XP_RATE = 5.0,
+
+    -- Stop building at this many levels' worth of rested XP. The core has its
+    -- own ceiling and that one always applies as well: next-level XP times
+    -- Rate.Rest.MaxBonus / 2, which at the stock 1.5 is 0.75 of a level --
+    -- about fifteen minutes at the default rate. So this only bites when it
+    -- is set BELOW the core's; lower it to keep inns worth a visit.
+    REST_XP_MAX_LEVELS = 1.5,
+}
+"""
+
+_SIT_MEANS_REST_ANSWERS = {
+    "duration": "45",
+    "regen_aura": "1234",
+    "rest_xp_enabled": "false",
+    "rest_xp_delay": "90",
+    "rest_xp_rate": "12.5",
+    "rest_xp_max_levels": "0.5",
+}
+
+
+def test_every_sit_means_rest_patch_lands_on_the_shipped_script() -> None:
+    path = MANIFESTS_DIR / "wow-wotlk" / "ale" / "sitmeanrest.json"
+    manifest = parse_manifest(json.loads(path.read_text(encoding="utf-8")))
+    prompts = {prompt.key for prompt in manifest.prompts}
+    assert prompts == set(_SIT_MEANS_REST_ANSWERS), "an answer for every prompt, and no spare"
+
+    text = _SIT_MEANS_REST_CONFIG
+    for patch in manifest.patches:
+        assert patch.regex and patch.when == "configure"
+        assert len(re.findall(patch.find, text)) == 1, f"{patch.find} must match exactly once"
+        text = re.sub(patch.find, patch.replace.format(**_SIT_MEANS_REST_ANSWERS), text)
+
+    for key, answer in (
+        ("DURATION", "45"),
+        ("REGEN_AURA", "1234"),
+        ("REST_XP_ENABLED", "false"),
+        ("REST_XP_DELAY", "90"),
+        ("REST_XP_RATE", "12.5"),
+        ("REST_XP_MAX_LEVELS", "0.5"),
+    ):
+        assert re.search(rf"^\s*{key}\s*=\s*{re.escape(answer)},", text, re.M), key
+
+    # every declared key is one the installer asks about, and the reverse
+    asked = {key.default.strip("{}") for conf in manifest.conf for key in conf.keys if key.default}
+    assert asked == prompts
