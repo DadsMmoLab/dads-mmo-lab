@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Sequence
+from fractions import Fraction
 from pathlib import Path
 
 PUBLIC_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)-public$", re.IGNORECASE)
@@ -72,20 +73,48 @@ def new_entries(old: str, new: str) -> str:
     return "\n".join(blocks)
 
 
-def _triple(tag: str) -> tuple[int, int, int] | None:
+def version_key(tag: str) -> tuple[int, int, Fraction] | None:
+    """How Yu'lon versions sort: the LAST number is a decimal fraction.
+
+    Owner's decision, 2026-09-21, and it is what the tag history has always
+    done. `v0.8.7-Public` was cut on 2026-09-19, six days AFTER
+    `v0.8.65-Public`; the whole line reads 0.6.5, 0.6.51 ... 0.6.59, 0.8.0,
+    0.8.4, 0.8.5, 0.8.6, 0.8.65, 0.8.7, with the fork's .66 .67 .68 .69 test
+    tags sitting between .65 and .7. Read as integers, 65 > 7, so the notes for
+    the release after 0.8.7 would have been measured against 0.8.65 and would
+    have re-published everything 0.8.7 already announced.
+
+    So major and minor are whole numbers, and the last number is a fraction of
+    its own digits: "65" is 65/100, "7" is 7/10, "0" is 0. That makes
+    .6 < .65 < .66 < .69 < .7, and .7 and .70 the same version.
+
+    `Fraction`, not `float`: the comparison is exact, and two tags that mean
+    the same version compare equal rather than nearly equal.
+
+    KNOWN COST, not fixed: 0.8.10 would order BELOW 0.8.9, because 10/100 is
+    less than 9/10. No tag in this repository has ever been written that way,
+    and the scheme the owner picked is the one the tags are in.
+    """
     match = _ANY_VERSION.match(tag.strip())
-    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+    if match is None:
+        return None
+    last = match[3]
+    return (int(match[1]), int(match[2]), Fraction(int(last), 10 ** len(last)))
 
 
 def pick_previous(tags: Iterable[str], tag: str) -> str | None:
     """The highest-versioned -Public tag whose version is below `tag`'s, or None."""
-    mine = _triple(tag)
+    mine = version_key(tag)
     if mine is None:
         return None
+    # Strictly below: `v0.8.70-Public` and `v0.8.7-Public` are one version, so
+    # neither is the other's previous release.
     below = [
         (version, t)
         for t in tags
-        if PUBLIC_TAG.match(t.strip()) and (version := _triple(t)) is not None and version < mine
+        if PUBLIC_TAG.match(t.strip())
+        and (version := version_key(t)) is not None
+        and version < mine
     ]
     return max(below)[1].strip() if below else None
 

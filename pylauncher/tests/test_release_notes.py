@@ -125,6 +125,60 @@ def test_public_is_case_insensitive_and_needs_the_dash() -> None:
     assert rn.pick_previous(["v0.1.0-public", "v0.2.0Public"], "v0.9.0-Public") == "v0.1.0-public"
 
 
+REAL_TAGS = [
+    "v0.6.5",
+    "v0.6.51Public",
+    "v0.6.52Public",
+    "v0.6.55Public",
+    "v0.6.57Public",
+    "v0.6.58Public",
+    "v0.6.59Public",
+    "v0.6.60-phase8",
+    "v0.8.0-Public",
+    "v0.8.4-Public",
+    "v0.8.5-DeckTest",
+    "v0.8.6-DeckTest",
+    "v0.8.65-DeckTest",
+    "v0.8.65-Public",
+    "v0.8.66-fixtest",
+    "v0.8.67-fixtest",
+    "v0.8.68-fixtest",
+    "v0.8.69-fixtest",
+    "v0.8.7-Public",
+]
+"""`git tag --list 'v*'` on 2026-09-21, the releases among them.
+
+A literal and not a `git` call: CI checks out shallow, with no tags at all, so a
+test that read them would pass here and be vacuous there. What it costs is that
+this list is a copy, which is why the ordering below is asserted against the
+dates too - `v0.8.7-Public` was cut on 2026-09-19, six days AFTER
+`v0.8.65-Public`, and that is the fact the scheme has to reproduce.
+"""
+
+
+def test_the_last_number_orders_as_a_decimal_fraction() -> None:
+    """Owner's rule, 2026-09-21: `.65` is sixty-five hundredths, not sixty-five."""
+    ordered = ["v0.8.6", "v0.8.65", "v0.8.66", "v0.8.69", "v0.8.7"]
+    keys = [rn.version_key(tag) for tag in ordered]
+    assert keys == sorted(keys), f"decimal order broken: {list(zip(ordered, keys, strict=True))}"
+    assert rn.version_key("v0.8.7") == rn.version_key("v0.8.70"), ".7 and .70 are one version"
+    assert rn.version_key("v0.8.0") < rn.version_key("v0.8.01")
+    assert rn.version_key("v0.9.0") > rn.version_key("v0.8.99")
+
+
+def test_previous_across_the_real_tag_history() -> None:
+    """The case that made this a bug: 0.8.7 came after 0.8.65, not before it."""
+    assert rn.pick_previous(REAL_TAGS, "v0.8.7-Public") == "v0.8.65-Public"
+    assert rn.pick_previous(REAL_TAGS, "v0.8.71-Public") == "v0.8.7-Public"
+    assert rn.pick_previous(REAL_TAGS, "v0.8.69-fixtest") == "v0.8.65-Public"
+    assert rn.pick_previous(REAL_TAGS, "v0.8.65-Public") == "v0.8.4-Public"
+
+
+def test_a_version_equal_to_this_one_is_not_a_previous_release() -> None:
+    """`.70` and `.7` are the same version, so 0.8.70's previous is 0.8.65."""
+    assert rn.pick_previous(REAL_TAGS, "v0.8.70-Public") == "v0.8.65-Public"
+
+
 def _git(answers: dict[tuple[str, ...], str]) -> Callable[[list[str]], str]:
     def run(argv: list[str]) -> str:
         key = tuple(argv)
