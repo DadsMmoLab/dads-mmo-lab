@@ -973,6 +973,55 @@ def test_a_link_in_the_notes_is_not_announced_as_the_download_page(
     assert "download page" not in text
 
 
+def test_an_enormous_link_is_shortened_on_the_bar_but_whole_on_the_clipboard(
+    window: Any, update_host: Any
+) -> None:
+    """A release body chooses this string, and the bar is one elided line.
+
+    Shown short so the message stays readable; copied whole, because the
+    clipboard is what the player actually uses (third cold review,
+    2026-09-21).
+    """
+    long_url = "https://example.invalid/" + "a" * 900
+    update_host.open_url = lambda url: False
+    dialog = update_host.make_dialog(A_RELEASE)
+    try:
+        from PySide6.QtCore import QUrl
+
+        dialog.notes.anchorClicked.emit(QUrl(long_url))
+    finally:
+        dialog.deleteLater()
+        _collect_deleted()
+
+    text = window.property("update_bar").text()
+    assert len(text) < 400, f"the bar was handed {len(text)} characters"
+    assert "…" in text
+    assert text.startswith("Could not open a browser. The link is: https://example.invalid/")
+    assert _clipboard().text() == long_url, "the clipboard keeps the whole vetted URL"
+
+
+def test_an_absurd_link_is_refused_without_putting_it_anywhere(
+    window: Any, update_host: Any
+) -> None:
+    """Past a few thousand characters it is not a link anyone is going to use."""
+    absurd = "https://example.invalid/" + "b" * 5000
+    _clipboard().setText("untouched")
+    update_host.open_url = lambda url: False
+    dialog = update_host.make_dialog(A_RELEASE)
+    try:
+        from PySide6.QtCore import QUrl
+
+        dialog.notes.anchorClicked.emit(QUrl(absurd))
+    finally:
+        dialog.deleteLater()
+        _collect_deleted()
+
+    text = window.property("update_bar").text()
+    assert "could not open the link" in text.lower()
+    assert "b" * 100 not in text
+    assert _clipboard().text() == "untouched", "an absurd URL was put on the clipboard"
+
+
 def test_a_link_in_the_notes_falls_back_the_same_way(window: Any, update_host: Any) -> None:
     """The other route out of the dialog, through the host's REAL dialog factory.
 

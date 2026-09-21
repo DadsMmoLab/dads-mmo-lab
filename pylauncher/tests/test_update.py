@@ -13,10 +13,14 @@ import pytest
 
 from tests.support_update import FEED, release
 from yulon.update import (
+    MAX_BODY_CHARS,
+    MAX_NOTES_CHARS,
     RELEASES_API,
     RELEASES_PAGE,
     RELEASES_REPO,
+    TRUNCATED_NOTE,
     check_for_update,
+    clipped_notes,
     evaluate_feed,
     is_newer,
     is_public_tag,
@@ -324,6 +328,57 @@ def test_the_notes_hold_only_what_is_newer_under_the_decimal_rule() -> None:
     assert [line for line in notes.splitlines() if line.startswith("## ")] == ["## v0.8.7-Public"]
 
 
+# ------------------------------------------- what a body may cost the GUI thread
+
+
+def test_one_release_body_is_cut_at_its_cap() -> None:
+    """Measured: 125 KB of `` `a `` took 10.2 s to lay out, on the GUI thread."""
+    huge = "\n".join("a line of notes" for _ in range(20000))
+    feed = json.dumps([release("v0.9.0-Public", body=huge)])
+
+    notes = evaluate_feed(feed, "0.8.0-Public").notes_markdown
+
+    assert len(notes) <= MAX_BODY_CHARS + 200, f"a body of {len(notes)} reached the dialog"
+    assert notes.endswith(TRUNCATED_NOTE + "\n")
+    assert "a line of notes" in notes, "the beginning is still shown"
+
+
+def test_the_notes_of_many_releases_are_capped_together() -> None:
+    """Twenty releases each under the per-body cap can still add up to minutes."""
+    body = "\n".join("x" * 60 for _ in range(200))
+    feed = json.dumps([release(f"v0.9.{n}-Public", body=body) for n in range(9, 0, -1)])
+
+    notes = evaluate_feed(feed, "0.8.0-Public").notes_markdown
+
+    assert len(notes) <= MAX_NOTES_CHARS + len(TRUNCATED_NOTE) + 4
+    assert TRUNCATED_NOTE in notes
+
+
+def test_a_cut_falls_on_a_line_boundary() -> None:
+    text = "\n".join(f"line {n}" for n in range(1000))
+
+    cut = clipped_notes(text, 100)
+
+    body = cut[: -len(TRUNCATED_NOTE)].rstrip()
+    assert all(line.startswith("line ") for line in body.splitlines())
+    assert len(cut) <= 100 + len(TRUNCATED_NOTE) + 2
+
+
+def test_one_enormous_line_is_cut_anyway() -> None:
+    """There is no boundary to prefer, and the bound is the point."""
+    cut = clipped_notes("`a" * 62500, 1000)
+
+    assert len(cut) <= 1000 + len(TRUNCATED_NOTE) + 2
+    assert cut.endswith(TRUNCATED_NOTE)
+
+
+def test_notes_that_fit_are_left_exactly_alone() -> None:
+    ordinary = "### New\n- Ten.\n- Eleven.\n"
+
+    assert clipped_notes(ordinary, MAX_NOTES_CHARS) == ordinary
+    assert TRUNCATED_NOTE not in evaluate_feed(FEED, "0.8.66-Public").notes_markdown
+
+
 def test_a_feed_with_no_public_release_says_so() -> None:
     result = evaluate_feed(json.dumps([release("v0.8.71-fixtest")]), "0.8.0")
     assert not result.available and result.error == "no public release"
@@ -403,6 +458,12 @@ def test_only_this_repositorys_own_pages_are_ever_opened(url: str, allowed: bool
         # never saw it leave (second cold review, 2026-09-21).
         "https://github.com/DadsMmoLab/dads-mmo-lab/../../other",
         "https://github.com/DadsMmoLab/dads-mmo-lab/./x",
+        # A TRAILING `..` — the prefix matched and `/../` never saw it.
+        "https://github.com/DadsMmoLab/dads-mmo-lab/..",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/..?x",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/..#x",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/.",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/x/..",
         "https://github.com/DadsMmoLab/dads-mmo-lab/%2e%2e/%2e%2e/other",
         "https://github.com/DadsMmoLab/dads-mmo-lab/%2E%2E/other",
         "https://github.com/DadsMmoLab/dads-mmo-lab\\..\\other",

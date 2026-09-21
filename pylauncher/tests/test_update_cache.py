@@ -10,15 +10,21 @@ the whole of GitHub as far as these tests are concerned.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import email.message
 import json
+import socket
+import threading
+import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from tests.conftest import HANG_BOUND
 from tests.support_update import FEED
 from yulon import update
 from yulon.update import (
@@ -206,6 +212,32 @@ def test_a_feed_with_nothing_in_it_still_counts_as_having_asked(tmp_path: Path) 
     assert server.calls == 2, "it asked again inside the same day"
 
 
+def test_a_feed_that_never_has_anything_is_still_only_asked_once_a_day(tmp_path: Path) -> None:
+    """With no cache the stamp was never consulted, so it asked on EVERY launch.
+
+    Measured before the fix (third cold review, 2026-09-21): a fresh state plus
+    a rate-limit body gave 3 launches, 3 fetches. A fork whose feed holds no
+    `-Public` tag is in that state permanently.
+    """
+    empty = json.dumps({"message": "API rate limit exceeded"})
+    server, clock, path = Server(empty), Clock(1000.0), tmp_path / "update.json"
+
+    first = _check(server, clock, path)
+    assert not first.available and first.error == "no public release"
+    assert server.calls == 1
+
+    clock.t += 60
+    again = _check(server, clock, path)
+
+    assert server.calls == 1, "it asked again inside the same day with nothing cached"
+    assert not again.available
+    assert again.error == "no public release", "the reason a manual check would show is kept"
+
+    clock.t += CHECK_INTERVAL_SECONDS
+    _check(server, clock, path)
+    assert server.calls == 2, "and it does ask again once the day is up"
+
+
 def test_a_304_with_no_cached_feed_asks_again_without_the_etag(tmp_path: Path) -> None:
     """An ETag without the body it describes is worse than no ETag at all."""
     path = tmp_path / "update.json"
@@ -257,112 +289,177 @@ def test_urllib_turns_a_304_into_an_answer_not_an_exception(
 ) -> None:
     """urllib raises on 304. Here that is the cheapest possible answer, not a failure."""
 
-    def raise_304(request: urllib.request.Request, timeout: float, context: object) -> object:
+    def raise_304(
+        _self: object, request: urllib.request.Request, *_a: object, **_k: object
+    ) -> object:
         assert request.get_header("If-none-match") == 'W/"one"'
         headers = email.message.Message()
         headers["ETag"] = 'W/"one"'
         raise urllib.error.HTTPError(request.full_url, 304, "Not Modified", headers, None)
 
-    monkeypatch.setattr(urllib.request, "urlopen", raise_304)
+    # The opener, not `urlopen`: since the fetch grew a deadline it builds its
+    # own so the connection can be shut down from the watchdog thread.
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", raise_304)
 
     assert update._urllib_fetch("https://example.invalid", 'W/"one"') == HttpAnswer(
         304, "", 'W/"one"'
     )
 
 
-class _Trickle:
-    """A response that answers, slowly, for ever. What a socket timeout does not catch."""
+@contextlib.contextmanager
+def a_server_that(shape: str, *, seconds: float = 8.0, gap: float = 0.05) -> Iterator[str]:
+    """A real socket on 127.0.0.1 that trickles, so the bound is proved not argued.
 
-    def __init__(self, chunk: bytes = b"x" * 1024, gap: float = 0.0) -> None:
-        self.chunk = chunk
-        self.gap = gap
-        self.status = 200
-        self.headers = {"ETag": None}
-        self.served = 0
-        self.clock = 0.0
-
-    def read(self, size: int = -1) -> bytes:
-        # Each read "takes" a second of the injected clock: a server that sends
-        # something before every socket timeout keeps the connection alive for
-        # as long as it likes.
-        self.clock += 1.0
-        self.served += len(self.chunk)
-        return self.chunk
-
-    def __enter__(self) -> _Trickle:
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        return None
-
-
-def test_a_server_that_trickles_for_ever_is_cut_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The 5 s timeout is per socket read, so it never fires on a slow drip.
-
-    The launch check runs on its own thread and the header button answers
-    "already checking" while it does — for ever, on a server like this (second
-    cold review, 2026-09-21).
+    A faked response object cannot show this: `http.client`'s `read(n)` blocks
+    until it has n bytes, which a stand-in whose `read` returns immediately
+    never does — that is exactly why the first version of these tests passed
+    while a real server ran 12 s against a 2 s deadline (third cold review,
+    2026-09-21). Loopback only, and the listener is closed and the thread
+    joined in the `finally` whatever the test does.
     """
-    trickle = _Trickle()
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: trickle)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
 
-    with pytest.raises(TimeoutError):
-        update._urllib_fetch(
-            "https://example.invalid", None, now=lambda: trickle.clock, deadline=15.0
-        )
+    def serve() -> None:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        with conn:
+            try:
+                conn.recv(4096)
+                end = time.monotonic() + seconds
+                if shape == "headers":
+                    conn.sendall(b"HTTP/1.1 200 OK\r\n")
+                elif shape == "chunked":
+                    conn.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        b"Transfer-Encoding: chunked\r\n\r\n"
+                    )
+                else:
+                    conn.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        b"Content-Length: 100000\r\n\r\n"
+                    )
+                while time.monotonic() < end:
+                    conn.sendall(
+                        b"X"
+                        if shape == "headers"
+                        else b"1\r\nx\r\n" if shape == "chunked" else b"x"
+                    )
+                    time.sleep(gap)
+            except OSError:
+                return
 
-    assert trickle.clock >= 15.0, "it gave up before the bound"
-    assert trickle.clock < 60.0, "it read far past the bound"
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}/feed"
+    finally:
+        listener.close()
+        thread.join(timeout=HANG_BOUND)
+
+
+@pytest.mark.parametrize("shape", ["body", "chunked", "headers"])
+def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(shape: str) -> None:
+    """Measured before the fix, against this very server with a 2 s deadline:
+
+        body 12.0s   chunked 12.0s   headers 12.0s (and it RETURNED an answer)
+
+    Two reasons a clock checked between reads could not see it: `read(n)`
+    blocks until it has n bytes, and the header phase is inside `urlopen`,
+    which had not returned yet — the deadline was computed after it did.
+    """
+    with a_server_that(shape) as url:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            update._urllib_fetch(url, None, deadline=2.0)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 3.0, f"the {shape} shape ran {elapsed:.1f}s against a 2.0s deadline"
+
+
+def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
+    """The bound must not truncate or delay an ordinary answer."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    body = FEED.encode()
+
+    def serve() -> None:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        with conn:
+            conn.recv(4096)
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b'ETag: W/"one"\r\nContent-Length: ' + str(len(body)).encode() + b"\r\n\r\n" + body
+            )
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        started = time.monotonic()
+        answer = update._urllib_fetch(f"http://127.0.0.1:{port}/feed", None, deadline=10.0)
+        elapsed = time.monotonic() - started
+    finally:
+        listener.close()
+        thread.join(timeout=HANG_BOUND)
+
+    assert answer.status == 200
+    assert answer.text == FEED
+    assert answer.etag == 'W/"one"'
+    assert elapsed < 5.0, "an ordinary answer waited on the deadline"
 
 
 def test_a_body_too_big_to_be_a_feed_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hundred releases is a few hundred kB; anything past a few MB is not a feed."""
-    flood = _Trickle(chunk=b"y" * (1024 * 1024))
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: flood)
 
-    with pytest.raises(ValueError, match="too large"):
-        update._urllib_fetch("https://example.invalid", None, now=lambda: flood.clock)
-
-    assert flood.served <= update.MAX_FEED_BYTES + len(flood.chunk)
-
-
-def test_an_ordinary_answer_is_read_whole(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The bound must not truncate a feed that arrives normally."""
-
-    class Once:
+    class Flood:
         status = 200
-        headers = {"ETag": 'W/"one"'}
+        headers = {"ETag": None}
 
         def __init__(self) -> None:
-            self.left = [FEED.encode()]
+            self.chunk = b"y" * (1024 * 1024)
+            self.served = 0
 
         def read(self, size: int = -1) -> bytes:
-            return self.left.pop() if self.left else b""
+            self.served += len(self.chunk)
+            return self.chunk
 
-        def __enter__(self) -> Once:
+        def __enter__(self) -> Flood:
             return self
 
         def __exit__(self, *_exc: object) -> None:
             return None
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Once())
+    flood = Flood()
+    monkeypatch.setattr(update.urllib.request.OpenerDirector, "open", lambda *a, **k: flood)
 
-    answer = update._urllib_fetch("https://example.invalid", None)
+    with pytest.raises(ValueError, match="too large"):
+        update._urllib_fetch("https://example.invalid", None)
 
-    assert answer.status == 200
-    assert answer.text == FEED
-    assert answer.etag == 'W/"one"'
+    assert flood.served <= update.MAX_FEED_BYTES + len(flood.chunk)
 
 
 def test_any_other_http_error_is_still_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """403 (rate limited) and 500 are failures; only 304 is an answer."""
 
-    def raise_403(request: urllib.request.Request, timeout: float, context: object) -> object:
+    def raise_403(
+        _self: object, request: urllib.request.Request, *_a: object, **_k: object
+    ) -> object:
         raise urllib.error.HTTPError(
             request.full_url, 403, "rate limited", email.message.Message(), None
         )
 
-    monkeypatch.setattr(urllib.request, "urlopen", raise_403)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", raise_403)
 
     with pytest.raises(urllib.error.HTTPError):
         update._urllib_fetch("https://example.invalid", None)

@@ -83,6 +83,30 @@ wider, and the user is free to drag it.
 """
 
 
+SHOWN_URL_CHARS = 200
+"""How much of a URL the update bar prints before the middle is elided.
+
+The bar is one elided line, and a link from a release body has no length this
+app can promise. The whole URL still goes on the clipboard, which is what a
+player actually uses (T90, third review).
+"""
+
+ABSURD_URL_CHARS = 2000
+"""Past this, a link is refused outright rather than shown or copied."""
+
+
+def _short(url: str) -> str:
+    """`url` with its middle replaced by an ellipsis, so both ends stay readable.
+
+    The ends are the parts that say anything: the host at the front, and the
+    file name at the back.
+    """
+    if len(url) <= SHOWN_URL_CHARS:
+        return url
+    keep = (SHOWN_URL_CHARS - 1) // 2
+    return f"{url[:keep]}…{url[-keep:]}"
+
+
 def build_catalog_tab(
     window: QMainWindow, catalog_view: CatalogView, log_panel: LogPanel
 ) -> tuple[QTabWidget, UpdateBar, QSplitter]:
@@ -838,11 +862,21 @@ def build_window() -> object:
                 opened = False
             if opened:
                 return True
+            keep = self._offered is not None
+            if len(url) > ABSURD_URL_CHARS:
+                # A release body chose this string. Past a few thousand
+                # characters it is not a link anybody is going to use, and it
+                # has no business on the bar or on the clipboard.
+                logger.info(f"refusing to show a {len(url)}-character link")
+                update_bar.show_message(
+                    "Could not open the link, and it is too long to show.", keep_details=keep
+                )
+                return False
             copied = self._copy(url)
             tail = " It is on your clipboard." if copied else ""
             update_bar.show_message(
-                f"Could not open a browser. {what} is: {url}{tail}",
-                keep_details=self._offered is not None,
+                f"Could not open a browser. {what} is: {_short(url)}{tail}",
+                keep_details=keep,
             )
             return False
 

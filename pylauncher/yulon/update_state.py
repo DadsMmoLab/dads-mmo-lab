@@ -65,6 +65,14 @@ class UpdateState(BaseModel):
     running NOW — a user who updates by hand must not be told about an update they have."""
     skipped_version: str | None = None
     """The one tag the player pressed "Skip this version" on. A newer one un-hides the bar."""
+    last_error: str | None = None
+    """Why the last attempt gave nothing, when it gave nothing and there is no feed.
+
+    Kept so that the once-a-day rule can hold on `last_checked` alone — a fork
+    whose feed has no `-Public` tag has nothing to cache, and without this the
+    answer inside the day would be a silent "no update known" with no reason a
+    manual check could show (T90, third review).
+    """
 
 
 def update_state_path(config_dir: Path | None = None) -> Path:

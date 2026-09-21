@@ -8,6 +8,7 @@ check being a plain frozen dataclass.
 from __future__ import annotations
 
 import dataclasses
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from PySide6.QtGui import QImage, QTextDocument, qRgb
 from PySide6.QtWidgets import QLabel, QPushButton, QTextBrowser
 
 from tests.conftest import process_events
+from yulon.ui.widgets import update_dialog
 from yulon.ui.widgets.dadcraft_decorations import DadcraftHeader
 from yulon.ui.widgets.update_bar import UpdateBar
 from yulon.ui.widgets.update_dialog import (
@@ -27,6 +29,15 @@ from yulon.ui.widgets.update_dialog import (
     _strip_resources,
 )
 from yulon.update import UpdateCheck
+
+STRIP_BOUND = 10.0
+"""A deadlock/quadratic breaker for the strip, not a claim about how fast Qt is.
+
+Measured on the dev box: 0.12 s for the 20,000-image body this bounds, and
+22.8 s before the fix. Eighty times the measurement and a fifth of the
+defect, so a loaded CI runner cannot flake it and a return to quadratic
+behaviour cannot hide under it.
+"""
 
 RESULT = UpdateCheck(
     "0.8.66-Public",
@@ -322,6 +333,9 @@ def _resources_in(document: QTextDocument) -> list[str]:
 
     if document.baseUrl().toString():
         found.append(f"baseUrl {document.baseUrl().toString()!r}")
+    document_url = document.metaInformation(QTextDocument.MetaInformation.DocumentUrl)
+    if document_url:
+        found.append(f"DocumentUrl {document_url!r}")
     return found
 
 
@@ -440,6 +454,133 @@ def test_the_strip_runs_at_the_call_site_and_says_what_it_took(
     assert IMAGE_REMOVED in notes.toPlainText()
 
 
+def test_twenty_thousand_images_do_not_hold_the_gui_thread(qapp: object) -> None:
+    """Measured before the fix: `"![a](x) " * 20000` spent **22.8 s** in the strip.
+
+    One `insertText` per image, each re-laying the document out and pushing an
+    undo step — quadratic on a 160 KB body that fits in one GitHub release
+    (third cold review, 2026-09-21). Collected first and applied inside one
+    `beginEditBlock` with undo off, the same body is ~0.12 s here.
+
+    The bound is deliberately loose (10 s against a measured 0.12 s) so a
+    loaded CI runner cannot flake it: what it catches is the return of
+    quadratic behaviour, which was 200x over this bound, not a slow box.
+    """
+    body = "![a](x) " * 20000
+    document = QTextDocument()
+    document.setMarkdown(body, update_dialog.SAFE_MARKDOWN)
+
+    started = time.monotonic()
+    removed = _strip_resources(document)
+    elapsed = time.monotonic() - started
+
+    assert removed >= 20000, f"the premise: this document holds 20,000 images, not {removed}"
+    assert elapsed < STRIP_BOUND, f"the strip took {elapsed:.1f}s for {removed} images"
+
+
+def test_the_cap_keeps_that_body_away_from_the_dialog_in_the_first_place(
+    qapp: object,
+) -> None:
+    """The algorithm is linear now AND the call site is capped — both, not either.
+
+    The cap alone hid the quadratic behaviour from the timing test above:
+    64k characters is ~8,000 images, which the slow version got through inside
+    the bound. That is why the test above builds the document itself.
+    """
+    notes = _NotesView()
+
+    removed = notes.set_release_body("![a](x) " * 20000)
+
+    assert 0 < removed < 20000, f"the cap let {removed} images through"
+
+
+def _anchors_in(document: QTextDocument) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    block = document.begin()
+    while block.isValid():
+        iterator = block.begin()
+        while not iterator.atEnd():
+            char_format = iterator.fragment().charFormat()
+            if char_format.isAnchor():
+                found.append((iterator.fragment().text(), char_format.anchorHref()))
+            iterator += 1
+        block = block.next()
+    return found
+
+
+def test_qt_itself_drops_a_badge_links_href_before_this_app_sees_it(qapp: object) -> None:
+    """The third review said the replacement killed badge links. It does not — Qt does.
+
+    Measured on 6.11: for `[![badge](img)](https://…)` the href is **nowhere in
+    the document** after `setMarkdown`, with or without `MarkdownNoHTML`, and
+    the one fragment is a bare image with `isAnchor()` False. An ordinary
+    `[text](url)` link keeps its anchor perfectly. So there is no anchor here
+    for the replacement to drop, and this app cannot put back what the parser
+    never produced — pinned so the claim is not made again from either side.
+
+    Not worked around with another markdown rewrite: racing md4c with a regex
+    is the defect the previous review spent itself on. The release page stays
+    one button away on the dialog's own action.
+    """
+    body = "[![badge](https://img.example/b.svg)](https://github.com/DadsMmoLab/dads-mmo-lab)"
+    raw = QTextDocument()
+    raw.setMarkdown(body, update_dialog.SAFE_MARKDOWN)
+
+    assert _anchors_in(raw) == [], "Qt kept an anchor after all — then this app must too"
+    assert "github.com/DadsMmoLab" not in raw.toHtml()
+
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    assert _resources_in(_notes(dialog).document()) == []
+    assert IMAGE_REMOVED in _notes(dialog).toPlainText()
+
+
+def test_an_image_inside_a_link_keeps_the_link_when_there_is_one(
+    qapp: object, a_red_png: Path
+) -> None:
+    """`_mark_format`'s reason, driven directly because markdown cannot reach it.
+
+    If an image fragment DOES carry an anchor — a document built by hand, or a
+    future Qt that keeps it — the href is the author's text and survives the
+    replacement; only the resource goes.
+    """
+    from PySide6.QtGui import QTextCharFormat, QTextCursor
+
+    document = QTextDocument()
+    cursor = QTextCursor(document)
+    image = QTextCharFormat()
+    image.setAnchor(True)
+    image.setAnchorHref("https://github.com/DadsMmoLab/dads-mmo-lab")
+    cursor.insertImage(str(a_red_png))
+    cursor.setPosition(0)
+    cursor.setPosition(1, QTextCursor.MoveMode.KeepAnchor)
+    merged = QTextCharFormat(cursor.charFormat())
+    merged.setAnchor(True)
+    merged.setAnchorHref("https://github.com/DadsMmoLab/dads-mmo-lab")
+    cursor.setCharFormat(merged)
+    assert _anchors_in(document), "the premise: an image fragment carrying an anchor"
+
+    _strip_resources(document)
+
+    assert _anchors_in(document) == [(IMAGE_REMOVED, "https://github.com/DadsMmoLab/dads-mmo-lab")]
+    assert _resources_in(document) == []
+
+
+def test_a_textured_run_of_text_keeps_its_text(qapp: object, a_red_png: Path) -> None:
+    """A background is the brush's fault, not the text's: clear one, keep the other."""
+    from PySide6.QtGui import QBrush, QPixmap, QTextCharFormat, QTextCursor
+
+    document = QTextDocument()
+    cursor = QTextCursor(document)
+    char_format = QTextCharFormat()
+    char_format.setBackground(QBrush(QPixmap(str(a_red_png))))
+    cursor.insertText("the author's own words", char_format)
+
+    _strip_resources(document)
+
+    assert document.toPlainText() == "the author's own words"
+    assert _resources_in(document) == []
+
+
 def test_the_strip_reports_nothing_to_do_on_an_ordinary_body(qapp: object) -> None:
     notes = _NotesView()
 
@@ -501,6 +642,71 @@ def test_the_github_dialect_is_kept(qapp: object) -> None:
     assert "gone" in shown
 
 
+def _a_nest_of_textured_formats(png: Path) -> QTextDocument:
+    """A 3x3 table with merged cells, a nested 2x2, a frame, and a textured run.
+
+    Markdown cannot produce this — with `MarkdownNoHTML` nothing can — so it is
+    built by hand. It exists because each of these mutations left all 63 tests
+    green (third cold review, 2026-09-21): dropping `childFrames()` from the
+    walk, turning the cell condition off, and dropping the character-background
+    half. A walk nothing nested is ever fed is a walk nobody is testing.
+    """
+    from PySide6.QtGui import (
+        QBrush,
+        QPixmap,
+        QTextCharFormat,
+        QTextCursor,
+        QTextFrameFormat,
+        QTextTableFormat,
+    )
+
+    def textured() -> QBrush:
+        return QBrush(QPixmap(str(png)))
+
+    document = QTextDocument()
+    cursor = QTextCursor(document)
+    table_format = QTextTableFormat()
+    table_format.setBackground(textured())
+    outer = cursor.insertTable(3, 3, table_format)
+    for row in range(3):
+        for column in range(3):
+            cell = outer.cellAt(row, column)
+            cell_format = cell.format()
+            cell_format.setBackground(textured())
+            cell.setFormat(cell_format)
+    outer.mergeCells(0, 0, 2, 2)
+
+    inner = outer.cellAt(2, 2).firstCursorPosition().insertTable(2, 2, table_format)
+    for row in range(2):
+        for column in range(2):
+            cell = inner.cellAt(row, column)
+            cell_format = cell.format()
+            cell_format.setBackground(textured())
+            cell.setFormat(cell_format)
+
+    frame_format = QTextFrameFormat()
+    frame_format.setBackground(textured())
+    frame = inner.cellAt(1, 1).firstCursorPosition().insertFrame(frame_format)
+    char_format = QTextCharFormat()
+    char_format.setBackground(textured())
+    frame.firstCursorPosition().insertText("deep", char_format)
+    return document
+
+
+def test_the_walk_reaches_a_nested_table_a_merged_cell_and_a_textured_run(
+    qapp: object, a_red_png: Path
+) -> None:
+    """Every level of the nest, because three ways of not walking it passed 63/63."""
+    document = _a_nest_of_textured_formats(a_red_png)
+    assert _resources_in(document), "the premise: this document names a file, repeatedly"
+
+    cleared = _strip_resources(document)
+
+    assert cleared >= 14, f"only {cleared} formats were cleared"
+    assert _resources_in(document) == []
+    assert "deep" in document.toPlainText(), "the text under the brush was taken with it"
+
+
 def test_the_walk_clears_a_textured_brush_no_markdown_can_currently_make(
     qapp: object, a_red_png: Path
 ) -> None:
@@ -523,12 +729,20 @@ def test_the_walk_clears_a_textured_brush_no_markdown_can_currently_make(
     frame_format.setBackground(QBrush(QPixmap(str(a_red_png))))
     document.rootFrame().setFrameFormat(frame_format)
     document.setBaseUrl(QUrl.fromLocalFile(str(a_red_png.parent)))
+    document.setMetaInformation(
+        QTextDocument.MetaInformation.DocumentUrl, QUrl.fromLocalFile(str(a_red_png)).toString()
+    )
     assert _resources_in(document), "the premise: this document names a file"
 
     cleared = _strip_resources(document)
 
     assert cleared >= 2
     assert _resources_in(document) == []
+    # Both bases, because a relative name in a future body would be resolved
+    # against either. Neither can be set from markdown today, which is why this
+    # test sets them by hand — see `_strip_resources`.
+    assert document.baseUrl().toString() == ""
+    assert document.metaInformation(QTextDocument.MetaInformation.DocumentUrl) == ""
 
 
 def test_an_image_leaves_a_mark_rather_than_disappearing(qapp: object, a_red_png: Path) -> None:
@@ -610,15 +824,26 @@ def test_raw_html_in_a_release_body_is_shown_and_eats_nothing_after_it(qapp: obj
     assert "<script>" in shown, "the tag must be shown as text, not parsed away"
 
 
-def test_the_notes_box_refuses_every_resource_it_is_asked_for(qapp: object) -> None:
-    """The last of the three doors, and the one that stops a fetch for any OTHER reason.
+def test_the_notes_box_has_no_load_resource_override_because_it_never_helped(
+    qapp: object, a_red_png: Path
+) -> None:
+    """Deleting it was invisible to every test — so it was measured instead.
 
-    It is NOT what stops an image: that was measured and it does not (see
-    `test_no_image_in_a_release_body_is_ever_rendered`).
+    A document holding an image, set on the widget without going through
+    `set_release_body` (so the strip never runs), renders **60,000 red pixels**
+    with the override and 60,000 without it: Qt's own image handling opens the
+    path when the resource comes back null. The defence was dead, and dead
+    defence reads like a guard.
     """
-    notes = _notes(UpdateDialog(RESULT))
+    view = _NotesView()
+    document = QTextDocument(view)
+    document.setMarkdown(f"![i]({a_red_png})", update_dialog.SAFE_MARKDOWN)
+    view.setDocument(document)
 
-    assert notes.loadResource(2, QUrl("http://example.invalid/x.png")) is None
+    assert _red_pixels(view) > 0, "if this is 0, Qt changed and the override may be worth having"
+    assert "loadResource" not in dir(_NotesView) or "_NotesView" not in str(
+        _NotesView.loadResource
+    ), "the override is back without a measurement saying it works"
 
 
 @pytest.mark.parametrize(

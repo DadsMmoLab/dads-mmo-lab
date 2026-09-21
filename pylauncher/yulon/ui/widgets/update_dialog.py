@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from yulon.log import get_logger
-from yulon.update import UpdateCheck
+from yulon.update import MAX_NOTES_CHARS, UpdateCheck, clipped_notes
 
 logger = get_logger(__name__)
 
@@ -129,6 +129,22 @@ pixels) — that is what `_strip_resources` is for.
 """
 
 
+def _mark_format(replaced: QTextCharFormat) -> QTextCharFormat:
+    """The format the 🖼 mark is written in: nothing of the image, but the link.
+
+    `[![badge](img)](https://…)` is an image INSIDE a link, and replacing it
+    with an empty format dropped the anchor with it, so every badge link in a
+    release body went dead (third cold review, 2026-09-21). The href and its
+    underline are the author's text, not the image's resource, so they stay.
+    """
+    kept = QTextCharFormat()
+    if replaced.isAnchor():
+        kept.setAnchor(True)
+        kept.setAnchorHref(replaced.anchorHref())
+        kept.setFontUnderline(True)
+    return kept
+
+
 def _is_textured(brush: QBrush) -> bool:
     """Does this brush name something Qt would have to go and load?"""
     return brush.style() == Qt.BrushStyle.TexturePattern or not brush.textureImage().isNull()
@@ -186,7 +202,8 @@ def _strip_resources(document: QTextDocument) -> int:
                         cell.setFormat(cell_format)
                         cleared += 1
 
-    spots: list[tuple[int, int]] = []
+    images: list[tuple[int, int, QTextCharFormat]] = []
+    brushes: list[tuple[int, int, QTextCharFormat]] = []
     block = document.begin()
     while block.isValid():
         block_format = block.blockFormat()
@@ -200,18 +217,42 @@ def _strip_resources(document: QTextDocument) -> int:
             fragment = iterator.fragment()
             if fragment.isValid():
                 char_format = fragment.charFormat()
-                if char_format.isImageFormat() or _is_textured(char_format.background()):
-                    spots.append((fragment.position(), fragment.length()))
+                where = (fragment.position(), fragment.length(), char_format)
+                if char_format.isImageFormat():
+                    images.append(where)
+                elif _is_textured(char_format.background()):
+                    brushes.append(where)
             iterator += 1
         block = block.next()
 
-    # Back to front: every replacement moves the positions after it.
-    for position, length in reversed(spots):
-        cursor.setPosition(position)
-        cursor.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
-        # An empty format, or the replacement inherits the one it replaced.
-        cursor.insertText(IMAGE_REMOVED, QTextCharFormat())
-        cleared += 1
+    # ONE edit block for the lot. Measured (third cold review, 2026-09-21): a
+    # body of `"![a](x) " * 20000` — 160 KB, which fits in one GitHub release
+    # body — spent **22.8 s** here against 0.03 s in `setMarkdown`, because
+    # every `insertText` re-laid the document out and pushed an undo step. The
+    # same body is now well under a second. Undo is off for the same reason:
+    # nothing can undo a document this app builds and then hands over.
+    undo_was = document.isUndoRedoEnabled()
+    document.setUndoRedoEnabled(False)
+    cursor.beginEditBlock()
+    try:
+        # Back to front: every replacement moves the positions after it.
+        for position, length, char_format in reversed(images):
+            cursor.setPosition(position)
+            cursor.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
+            cursor.insertText(IMAGE_REMOVED, _mark_format(char_format))
+            cleared += 1
+        for position, length, char_format in reversed(brushes):
+            # A background is cleared, NOT replaced: the text under it is the
+            # author's and has done nothing wrong.
+            cursor.setPosition(position)
+            cursor.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
+            plain = QTextCharFormat(char_format)
+            plain.clearBackground()
+            cursor.setCharFormat(plain)
+            cleared += 1
+    finally:
+        cursor.endEditBlock()
+        document.setUndoRedoEnabled(undo_was)
 
     # Nothing may leave a base that a relative name could be resolved against.
     document.setBaseUrl(QUrl())
@@ -224,10 +265,16 @@ def _strip_resources(document: QTextDocument) -> int:
 class _NotesView(QTextBrowser):
     """The notes box: it renders a release body and reaches nothing.
 
-    `loadResource` returning None is kept as the last of the three doors, and
-    its docstring no longer claims to be the first: it does not stop an image
-    (measured — see `_strip_resources`). What it does stop is a resource this
-    widget would fetch for any OTHER reason, which costs nothing to refuse.
+    **There is no `loadResource` override any more, and that is a measurement
+    rather than a tidy-up.** It was here to refuse resources; it never refused
+    one. With it removed this widget renders a document holding an image in
+    **60,000 red pixels** — byte for byte what a plain `QTextBrowser` does —
+    because Qt's own image handling opens the path when the resource comes back
+    null (measured twice: first cold review for the image case, third for this
+    one). Deleting the call was invisible to all 68 tests, which is the
+    definition of the dead defence the second review made this file remove
+    elsewhere. What actually stops a resource is `SAFE_MARKDOWN` and
+    `_strip_resources`, before this widget is ever given the document.
 
     Links are NOT handed to `setOpenLinks`/`setOpenExternalLinks`, and both
     halves of why were measured on 6.11 by clicking a real anchor:
@@ -261,14 +308,15 @@ class _NotesView(QTextBrowser):
         stripping happens while nothing is laid out — a widget that already
         held the document could resolve an image name on the way.
         """
+        # Capped again here. `evaluate_feed` caps what it assembles, but
+        # `notes_markdown` is an ordinary field and this widget is public: a
+        # caller that built an `UpdateCheck` by hand would otherwise hand Qt a
+        # body that takes minutes to lay out on the GUI thread.
         document = QTextDocument(self)
-        document.setMarkdown(markdown, SAFE_MARKDOWN)
+        document.setMarkdown(clipped_notes(markdown, MAX_NOTES_CHARS), SAFE_MARKDOWN)
         removed = _strip_resources(document)
         self.setDocument(document)
         return removed
-
-    def loadResource(self, type_: int, name: QUrl | str) -> object:
-        return None
 
     def _clicked(self, url: QUrl) -> None:
         """A link in the release notes was clicked."""

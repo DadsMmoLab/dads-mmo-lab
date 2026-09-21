@@ -17,8 +17,11 @@ had tagged most recently was offered to every player as their next version.
 from __future__ import annotations
 
 import dataclasses
+import http.client
 import json
 import re
+import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -27,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 from yulon import __version__
 from yulon.log import get_logger
@@ -236,6 +240,119 @@ order of magnitude past that and still small enough to hold twice over while
 _READ_CHUNK = 64 * 1024
 
 
+class _Deadline:
+    """Shuts the connection down when the clock runs out, wherever it is blocked.
+
+    **Checking a clock between reads is not a bound**, which the third cold
+    review measured against a real socket server trickling one byte every half
+    second (2026-09-21): with a 2 s deadline, a plain body ran 12.0 s, a chunked
+    body 12.0 s, and trickled HEADERS 12.0 s and then *returned an answer*. Two
+    reasons, and the unit test could see neither, because it faked a response
+    object whose `read()` returns immediately:
+
+    * `http.client`'s `read(n)` blocks until it has n bytes or the stream ends,
+      so a byte at a time never reaches the check between reads; and
+    * the header phase is inside `urlopen`, which had not returned yet — the
+      old code computed its deadline *after* it did.
+
+    So the clock starts before `urlopen` and this shuts the socket down from
+    another thread when it expires. `shutdown(SHUT_RDWR)` and not just
+    `close()`: closing a socket another thread is blocked in does not reliably
+    wake it.
+
+    **This is one of two halves, and each was measured doing a different job.**
+    Against the same trickling server with a 2 s deadline:
+
+    * with the watchdog disabled, `body` and `chunked` still stopped at 2.0 s
+      (`_read_bounded`'s `read1()` returns what has arrived, so the clock
+      between reads is consulted) but `headers` ran the server's full length
+      and returned success — the header phase is inside `urlopen`;
+    * with `read1()` swapped back to `read()`, `headers` stopped at 2.0 s and
+      `body` ran **8.0 s**: a shutdown did NOT wake that blocked `read`, which
+      only returned when the server itself stopped.
+
+    So neither alone bounds every shape, and the per-socket `timeout=` under
+    both is what covers a server that goes completely silent. All three are
+    pinned by `test_a_real_server_that_trickles_is_cut_off_at_the_deadline`.
+
+    `fired` is what the caller checks afterwards, because a shut-down socket
+    makes a read answer "end of stream" — an empty, apparently complete body,
+    which is exactly how the header case managed to report success.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.fired = False
+        self._connections: list[object] = []
+        self._lock = threading.Lock()
+        self._timer = threading.Timer(seconds, self._abort)
+        self._timer.daemon = True
+
+    def watch(self, connection: object) -> None:
+        """Called by the handler as soon as a connection exists to shut down."""
+        with self._lock:
+            self._connections.append(connection)
+
+    def _abort(self) -> None:
+        with self._lock:
+            self.fired = True
+            connections, self._connections = self._connections, []
+        for connection in connections:
+            sock = getattr(connection, "sock", None)
+            try:
+                if sock is not None:
+                    sock.shutdown(socket.SHUT_RDWR)
+            except OSError:  # already gone, or never connected
+                pass
+            try:
+                close = getattr(connection, "close", None)
+                if close is not None:
+                    close()
+            except OSError:
+                pass
+
+    def __enter__(self) -> _Deadline:
+        self._timer.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        # Cancelled on every path, and the list is emptied so a timer that is
+        # already running cannot reach a connection this call no longer owns.
+        self._timer.cancel()
+        with self._lock:
+            self._connections = []
+
+
+def _watching_opener(watcher: _Deadline, context: object) -> urllib.request.OpenerDirector:
+    """An opener whose connections are handed to `watcher` the moment they exist.
+
+    `urlopen` gives the caller nothing until the headers have been read, which
+    is one of the two places a trickling server can hold this app. A handler
+    that builds the connection is the earliest point anything can.
+    """
+
+    def capture(factory: Any) -> Any:
+        def build(*args: Any, **kwargs: Any) -> Any:
+            connection = factory(*args, **kwargs)
+            watcher.watch(connection)
+            return connection
+
+        return build
+
+    # `Any` at these four points on purpose: `do_open` is typed against
+    # `_HTTPConnectionProtocol`, a keyword-only signature a wrapper cannot
+    # restate without repeating CPython's parameter list — which is the kind of
+    # copy that drifts silently. The wrapper only adds a `watch()` call.
+    class _Http(urllib.request.HTTPHandler):
+        def http_open(self, req: urllib.request.Request) -> Any:
+            return self.do_open(capture(http.client.HTTPConnection), req)
+
+    class _Https(urllib.request.HTTPSHandler):
+        def https_open(self, req: urllib.request.Request) -> Any:
+            return self.do_open(capture(http.client.HTTPSConnection), req, context=context)
+
+    return urllib.request.build_opener(_Http(), _Https(context=context))  # type: ignore[arg-type]
+
+
 def _urllib_fetch(
     url: str,
     if_none_match: str | None,
@@ -251,36 +368,78 @@ def _urllib_fetch(
     Every other status keeps raising, so a 403 (rate limited) or a 500 still
     reaches the caller's `except` and is reported as the failure it is.
 
-    The body is read in chunks against `TOTAL_FETCH_SECONDS` and
-    `MAX_FEED_BYTES` rather than in one `read()`, because neither a trickle nor
-    a flood is a thing `timeout=` can see. `now` is injected so a test can say
-    what a slow server costs without waiting for it.
+    **The whole call is under one wall clock**, headers included, and the clock
+    is enforced by `_Deadline` shutting the socket rather than by looking at
+    the time between reads — see that class for what a real trickling server
+    did to the version that only looked. `MAX_FEED_BYTES` bounds the other
+    direction, a server that answers too fast and too much.
     """
     headers = {"User-Agent": f"yulon/{__version__}", "Accept": "application/vnd.github+json"}
     if if_none_match:
         headers["If-None-Match"] = if_none_match
     request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(
-            request, timeout=_TIMEOUT_SECONDS, context=verify_context()
-        ) as resp:
-            return HttpAnswer(
-                int(resp.status),
-                _read_bounded(resp, now, now() + deadline),
-                resp.headers.get("ETag"),
-            )
-    except urllib.error.HTTPError as exc:
-        if exc.code == 304:
-            return HttpAnswer(304, "", exc.headers.get("ETag") if exc.headers else if_none_match)
-        raise
+    stop_at = now() + deadline
+    with _Deadline(deadline) as watcher:
+        try:
+            opener = _watching_opener(watcher, verify_context())
+            with opener.open(request, timeout=min(_TIMEOUT_SECONDS, deadline)) as resp:
+                _refuse_if_expired(watcher)
+                return HttpAnswer(
+                    int(resp.status),
+                    _read_bounded(resp, now, stop_at, watcher),
+                    resp.headers.get("ETag"),
+                )
+        except urllib.error.HTTPError as exc:
+            _refuse_if_expired(watcher)
+            if exc.code == 304:
+                return HttpAnswer(
+                    304, "", exc.headers.get("ETag") if exc.headers else if_none_match
+                )
+            raise
+        except Exception:
+            # Everything, for `_read_bounded`'s reason: a socket shut down
+            # under a blocked read comes back as an `OSError`, an
+            # `IncompleteRead` or an `AttributeError` depending on where in
+            # `http.client` it was. The watcher says which it was; anything
+            # else is re-raised untouched for the caller to degrade on.
+            _refuse_if_expired(watcher)
+            raise
 
 
-def _read_bounded(resp: object, now: Callable[[], float], stop_at: float) -> str:
-    """Read a response body under a wall clock and a size cap. See `_urllib_fetch`."""
+def _refuse_if_expired(watcher: _Deadline) -> None:
+    """A shut-down socket reads as a clean end of stream. It is not one."""
+    if watcher.fired:
+        raise TimeoutError(
+            f"the releases feed was still arriving after {TOTAL_FETCH_SECONDS}s and was dropped"
+        )
+
+
+def _read_bounded(
+    resp: object, now: Callable[[], float], stop_at: float, watcher: _Deadline
+) -> str:
+    """Read a response body under the wall clock and the size cap.
+
+    `read1()` where the response has it: it answers with whatever has arrived
+    instead of waiting for a full chunk, so the clock below is consulted often
+    rather than once per 64 KiB. The watchdog is what makes the bound true
+    even so — `read1` on an empty socket still blocks.
+    """
+    reader = getattr(resp, "read1", None) or resp.read  # type: ignore[attr-defined]
     chunks: list[bytes] = []
     size = 0
     while True:
-        chunk = resp.read(_READ_CHUNK)  # type: ignore[attr-defined]
+        try:
+            chunk = reader(_READ_CHUNK)
+        except Exception:
+            # A connection shut down under a blocked read surfaces as almost
+            # anything: an `OSError`, an `IncompleteRead`, or — measured on the
+            # chunked shape — an `AttributeError` from `http.client` reading
+            # through a file object it has already dropped. Which it was is the
+            # watcher's to say; only if it did not fire is the error the
+            # caller's problem.
+            _refuse_if_expired(watcher)
+            raise
+        _refuse_if_expired(watcher)
         if not chunk:
             break
         chunks.append(chunk)
@@ -336,6 +495,46 @@ def _public_releases(feed: object) -> list[tuple[VersionKey, dict[str, object]]]
     return found
 
 
+MAX_BODY_CHARS = 16 * 1024
+"""How much of ONE release's notes is shown before the reader is sent to the page."""
+
+MAX_NOTES_CHARS = 64 * 1024
+"""How much of ALL the notes between two versions is shown, together.
+
+Both caps exist because **Qt's layout is slow on input this app cannot fix**,
+measured on the dev box (third cold review, 2026-09-21), all on the GUI thread
+and all inside one GitHub release body:
+
+    "`a" * 62500       125 KB     8.3 s to lay out (10.2 s re-measured)
+    "`a" * 100000      200 KB   108.9 s
+    a 2000x20 table    164 KB     7.8 s
+
+Nothing in this app can make `QTextDocument` faster at those, so it is handed
+less. Counted in CHARACTERS rather than bytes because that is what the layout
+cost scales with. Cut at a line boundary, so the last thing shown is a whole
+line, and followed by `TRUNCATED_NOTE` — the release page is one click away on
+the dialog's own action button, which carries the vetted URL.
+"""
+
+TRUNCATED_NOTE = "… the rest is on the release page."
+
+
+def clipped_notes(text: str, limit: int) -> str:
+    """`text` cut to at most `limit` characters at a line boundary. See `MAX_NOTES_CHARS`.
+
+    A whole line, or — for a single line longer than the cap, which is the
+    hostile case — a hard cut at the limit, because there is no boundary to
+    prefer and the point is the bound.
+    """
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    cut = head.rfind("\n")
+    if cut > 0:
+        head = head[:cut]
+    return f"{head.rstrip()}\n\n{TRUNCATED_NOTE}"
+
+
 def _assets(release: dict[str, object]) -> tuple[ReleaseAsset, ...]:
     """The release's downloadable files, skipping anything the API did not shape right.
 
@@ -383,11 +582,21 @@ def evaluate_feed(feed_text: str, current: str) -> UpdateCheck:
     if not is_newer(tag, current):
         return UpdateCheck(current, tag, False, url)
     mine = version_key(current)
-    sections = [
-        f"## {entry.get('tag_name')}\n\n{str(entry.get('body') or '').strip()}\n"
-        for version, entry in releases
-        if mine is not None and version > mine
-    ]
+    # Capped HERE, where the notes are assembled, so the cached feed and the
+    # dialog agree about what the player is shown — and capped again in the
+    # dialog, because `notes_markdown` is a plain field any caller can set.
+    sections: list[str] = []
+    total = 0
+    for version, entry in releases:
+        if mine is None or version <= mine:
+            continue
+        body = clipped_notes(str(entry.get("body") or "").strip(), MAX_BODY_CHARS)
+        section = f"## {entry.get('tag_name')}\n\n{body}\n"
+        if total + len(section) > MAX_NOTES_CHARS:
+            sections.append(f"\n{TRUNCATED_NOTE}\n")
+            break
+        sections.append(section)
+        total += len(section)
     assets = _assets(newest)
     return UpdateCheck(
         current,
@@ -453,8 +662,8 @@ def safe_release_url(url: str, *, page: str = RELEASES_PAGE) -> str:
     return page
 
 
-_SUSPICIOUS = ("/../", "/./", "%2e", "%2E", "\\")
-"""Spellings that make a URL mean one thing here and another to a browser."""
+_SUSPICIOUS = ("%2e", "%2E", "\\")
+"""Encoded or mis-slashed spellings a browser reads differently from `startswith`."""
 
 
 def _can_only_go_where_it_says(url: str, host: str | None) -> bool:
@@ -476,6 +685,11 @@ def _can_only_go_where_it_says(url: str, host: str | None) -> bool:
             return False
     except ValueError:  # a port that is not a number at all
         return False
+    if any(segment in (".", "..") for segment in parts.path.split("/")):
+        return False
+    # Every segment, so a TRAILING `..` is caught as well as an embedded one:
+    # `…/dads-mmo-lab/..` matched the prefix and normalises to `github.com/`
+    # in a browser, and `/../` alone never saw it (third cold review).
     return parts.hostname == host
 
 
@@ -551,12 +765,33 @@ def check_with_cache(
     state = load_update_state(state_path)
     cached = _from_cache(state, current)
     moment = now()
+    # `> 0` is the "never asked" sentinel and it is load-bearing now that this
+    # branch no longer needs a cache: `last_checked` defaults to 0.0, and
+    # without this a first-ever check would read as fresh and never fetch.
+    asked_before = state.last_checked > 0
+    # A stored feed that will not parse is a LOCAL fault, and the one case
+    # worth spending a request on inside the day — it is not the fork-with-no-
+    # public-tag case S2 is about, where there is simply nothing to store.
+    cache_is_corrupt = bool(state.feed) and cached is None
     if (
         not force
-        and cached is not None
+        and asked_before
+        and not cache_is_corrupt
         and 0 <= moment - state.last_checked < CHECK_INTERVAL_SECONDS
     ):
-        return _log_check(cached, FROM_TODAYS_CACHE)
+        # On `last_checked` ALONE, cache or no cache. Requiring a cache here
+        # meant the stamp was never consulted when there was nothing to cache:
+        # a fork whose feed holds no `-Public` tag, or a rate-limited one, was
+        # asked again on every single launch, for ever (third cold review,
+        # 2026-09-21 — measured at 3 launches, 3 fetches). With no cache the
+        # answer inside the day is "no update known", carrying the reason the
+        # last attempt gave so a manual check can still show it.
+        if cached is not None:
+            return _log_check(cached, FROM_TODAYS_CACHE)
+        return _log_check(
+            UpdateCheck(current, None, False, RELEASES_PAGE, error=state.last_error),
+            FROM_TODAYS_CACHE,
+        )
     try:
         # The ETag goes only with the body it describes. Sending one whose feed
         # was lost or unreadable buys a 304 with nothing to read it against.
@@ -590,12 +825,17 @@ def check_with_cache(
         # ATTEMPT still happened, and not recording it left the check asking on
         # every launch for as long as the feed stayed empty. Only the stamp
         # moves; the good feed and its ETag stay where they are.
-        remember({"last_checked": moment}, state_path)
+        remember({"last_checked": moment, "last_error": fresh.error}, state_path)
         if cached is not None:
             return _log_check(cached, NOTHING_ON_OFFER)
         return _log_check(fresh, ASKED_GITHUB)
     remember(
-        {"last_checked": moment, "etag": answer.etag, "feed": answer.text},
+        {
+            "last_checked": moment,
+            "etag": answer.etag,
+            "feed": answer.text,
+            "last_error": None,
+        },
         state_path,
     )
     return _log_check(fresh, ASKED_GITHUB)
