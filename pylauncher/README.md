@@ -191,9 +191,33 @@ progress for the reasons its entry gives: the running build has no command chann
   you. If there is one, a line under the header says so and `See what's new` opens what changed in
   every public release since yours. `Later` brings it back next launch; `Skip this version` hides
   that one version until a newer one is cut. There is also a `Check for updates` button in the
-  header, which asks straight away and tells you either way. It does not replace itself yet: the
-  button opens the download page. Yu'lon remembers all of this in `update.json` beside
-  `state.json`; deleting it only costs one more request.
+  header, which asks straight away and tells you either way. Yu'lon remembers all of this in
+  `update.json` beside `state.json`; deleting it only costs one more request.
+- **What "Update now" does, per platform.** Yu'lon only ever installs a release it can prove: one
+  that publishes a `SHA256SUMS` file listing the exact file for your computer. Anything else offers
+  the release page instead.
+
+  | You run | What the button does | State |
+  |---|---|---|
+  | Linux, the AppImage | downloads, checks, replaces itself and restarts | **built** |
+  | Linux, the tar.gz folder | downloads, checks, replaces itself and restarts | **built** |
+  | Windows, the zip folder | downloads, checks, replaces itself and restarts | **built** |
+  | macOS | downloads and checks the `.dmg`, then opens it for you to install | **built** |
+  | A folder you cannot write to | downloads and checks the file into your Downloads folder | **built** |
+  | A source checkout | opens the release page | **built** |
+
+  **Built** means written and unit-tested, not yet pressed on a real machine of that kind — the live
+  proof on Linux and Windows is the step still owed, and this table says **run live** only once it
+  has passed. Nothing is downloaded until you press the button, the download is checked against the
+  release's own `SHA256SUMS` before anything is unpacked, and the new build is started once with a
+  test flag and has to exit cleanly before your install is touched. If any of that fails, Yu'lon
+  says why and your install is exactly as it was.
+- **Putting the previous version back.** When Yu'lon replaces itself it keeps the old build beside
+  the new one, and removes it the next time the new one starts. So if the new version will not open,
+  the old one is still there for that one start: rename `yulon` to `yulon.broken` and `yulon.old`
+  back to `yulon` (on Windows, the folder holding `yulon.exe`; with the AppImage, rename the
+  `.AppImage` file and its `.AppImage.old` the same way). Then start it again and use
+  `Skip this version`.
 
 ## Developers
 

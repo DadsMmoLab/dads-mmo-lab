@@ -526,7 +526,7 @@ def is_public_tag(tag: str) -> bool:
 
 
 def public_tag(tag: str) -> str | None:
-    """The `v1.2.3-Public` text inside `tag`, or None. **Use this, not the raw field.**
+    r"""The `v1.2.3-Public` text inside `tag`, or None. **Use this, not the raw field.**
 
     A `tag_name` is remote text of any length and any shape. `evaluate_feed`
     used to store it as it arrived, and it becomes the window title, the
@@ -536,8 +536,17 @@ def public_tag(tag: str) -> str | None:
     (seventh cold review, 2026-09-21).
 
     What comes back is the matched text, which cannot hold whitespace or a
-    control character and is short, because `PUBLIC_TAG` says so. The case is
-    the feed's own: `V0.8.7-Public` passes and is stored as it was written.
+    control character — `PUBLIC_TAG` says that much. **It does not say the tag
+    is short**, and this docstring claimed it did until T90 plan 3: `\d+` is
+    unbounded, so `v` + a million digits + `-Public` matches here in full. What
+    makes a tag short on the path this app really walks is `version_key`, whose
+    `_VERSION` caps each number at nine digits and REFUSES a tenth; a tag this
+    function returns but `version_key` cannot read is dropped by
+    `_public_releases`, which ANDs the two. A caller that uses this alone gets
+    only the whitespace and control-character guarantee.
+
+    The case is the feed's own: `V0.8.7-Public` passes and is stored as it was
+    written.
     """
     found = PUBLIC_TAG.match(tag.strip())
     return found.group(0) if found else None
@@ -589,6 +598,13 @@ worst thing that shape can be:
     one-column table   0.31 s      images             0.07 s
     backticks          0.30 s      bullets            0.12 s
     headings           0.08 s      10,000 releases    0.01 s
+
+**Two boxes, and both numbers are recorded rather than the friendlier one.**
+The 0.37 s above is this dev box's whole cost for the 4x16 KB 20-column table.
+The reviewer's laptop measured the same shape as **1.72 s to build the document
+and 0.61 s to show it** — six times as long, on hardware a player may well be
+running. The cap is set for the slower of the two and the faster one is not the
+claim.
 
 That is a one-off stall while the dialog opens, on hostile input at the cap,
 and it is accepted. **Do not raise this without re-measuring**: the cost is
