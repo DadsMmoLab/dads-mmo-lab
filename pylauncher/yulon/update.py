@@ -342,6 +342,30 @@ class _Deadline:
             except OSError:
                 pass
 
+    def restart(self, seconds: float) -> bool:
+        """Start the clock again from now. False once it has fired — that is final.
+
+        Shared with the artifact download (`selfupdate/fetch.py`), where the
+        bound is not on the whole transfer: a 70 MB AppImage over a slow line
+        is legitimate and may take minutes, while a connection that sends
+        NOTHING for `STALL_SECONDS` is the case this class exists for. So the
+        one-shot deadline above is restarted on every chunk that arrives.
+
+        A timer that fires between the check and the cancel below is not a
+        race this has to win: `fired` is set under the lock by `_abort`, the
+        socket is shut down, and every reader checks `fired` after each read.
+        The worst outcome is a download refused a moment after it deserved to
+        be.
+        """
+        with self._lock:
+            if self.fired:
+                return False
+        self._timer.cancel()
+        self._timer = threading.Timer(seconds, self._abort)
+        self._timer.daemon = True
+        self._timer.start()
+        return True
+
     def __enter__(self) -> _Deadline:
         self._timer.start()
         return self
