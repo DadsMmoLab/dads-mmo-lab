@@ -186,8 +186,14 @@ progress for the reasons its entry gives: the running build has no command chann
   still have to supply that yourself.
 - Read [`../DISCLAIMER.md`](../DISCLAIMER.md) before running a server.
 - Releases, including the packaged builds: <https://github.com/DadsMmoLab/dads-mmo-lab/releases>.
-- On launch it checks GitHub Releases and shows a banner if a newer version exists. It never
-  replaces itself.
+- On launch it asks GitHub Releases whether a newer **public** release exists — at most once a day,
+  and only tags ending `-Public`, so the test builds this project also tags are never offered to
+  you. If there is one, a line under the header says so and `See what's new` opens what changed in
+  every public release since yours. `Later` brings it back next launch; `Skip this version` hides
+  that one version until a newer one is cut. There is also a `Check for updates` button in the
+  header, which asks straight away and tells you either way. It does not replace itself yet: the
+  button opens the download page. Yu'lon remembers all of this in `update.json` beside
+  `state.json`; deleting it only costs one more request.
 
 ## Developers
 
