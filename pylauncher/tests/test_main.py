@@ -1970,7 +1970,7 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
     update_host.release_after = lambda install, plan: update_host.released.append(plan)
     update_host.discarded = []
     update_host.discard_script = update_host.discarded.append
-    update_host.make_way = lambda _install: None  # nothing is holding the lock
+    update_host.make_way = lambda _install, **_kw: None  # nothing is holding the lock
     update_host.closes = []
     update_host.close_window = lambda: update_host.closes.append(1)
     # The helper's "I am running" stamp, holding THIS attempt's nonce. Tests
@@ -3005,7 +3005,7 @@ def test_a_lock_nothing_can_free_is_said_once_rather_than_pressed_for_ever(
     plan = _a_plan(tmp_path, install)
     installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
     installing_host.await_helper = lambda _stamp, _nonce: False
-    installing_host.make_way = lambda _install: (
+    installing_host.make_way = lambda _install, **_kw: (
         "An installer Yu'lon started earlier is still working in this folder."
     )
 
@@ -3029,11 +3029,17 @@ def test_a_lock_that_was_only_rubbish_leaves_the_ordinary_message(
     installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
     installing_host.await_helper = lambda _stamp, _nonce: False
     asked: list[Any] = []
-    installing_host.make_way = lambda inst: asked.append(inst) and None
+
+    def watched(inst: Any, **kw: Any) -> None:
+        asked.append((inst, kw.get("tick")))
+        return None
+
+    installing_host.make_way = watched
 
     installing_host.start_update(_install_offer())
 
     assert len(asked) == 1, "the lock was never looked at"
+    assert asked[0][1] is main.pump, "the GUI thread would stop repainting while it waits"
     bar = installing_host.parent().property("update_bar")
     assert "Press Update now again" in bar.text()
 
@@ -3065,6 +3071,47 @@ def test_the_script_of_a_helper_that_is_still_running_is_not_deleted(
 
     assert installing_host.discarded == [], "the running helper's script was deleted"
     assert installing_host._ready is None, "the staged build was kept"
+
+
+def test_a_click_delivered_while_the_lock_is_waited_on_starts_nothing(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """The tick pumps events, and an event can be a press (round 7, S1).
+
+    `pump()` is `processEvents()`, so anything queued runs — including the
+    click on Update now that a player gives a window which has not closed yet.
+    `_restarting` is held across the whole handshake and that is what has to
+    cover this; here the press is made from inside the tick, which is exactly
+    where `processEvents()` would deliver it.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    offer = _install_offer()
+    applies: list[int] = []
+
+    def apply(*_a: Any, **_k: Any) -> Any:
+        applies.append(1)
+        return ReadyToRestart(plan, "v0.8.70-Public")
+
+    def waited(_install: Any, **kw: Any) -> None:
+        # One tick, and the press arrives in it.
+        tick = kw.get("tick")
+        assert tick is not None
+        installing_host.start_update(offer)
+        return None
+
+    installing_host.apply = apply
+    installing_host.await_helper = lambda _stamp, _nonce: False
+    installing_host.make_way = waited
+
+    installing_host.start_update(offer)
+
+    assert applies == [1], "the update ran twice"
+    assert len(installing_host.helpers) == 1, "a second helper was started from a tick"
+    assert installing_host.closes == []
 
 
 def test_the_windows_flags_are_the_ones_the_gate_settled() -> None:

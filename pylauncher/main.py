@@ -368,8 +368,6 @@ def wait_for_helper(stamp: Path, *, seconds: float = HELPER_STAMP_SECONDS, holds
     because a nested loop here would let another click start a second update
     while this one is half-way out of the door.
     """
-    from PySide6.QtWidgets import QApplication
-
     if not holds:
         # **`"" in anything` is True** (round 5, N5): an empty nonce made this
         # answer yes to ANY stamp, including one left by an earlier attempt,
@@ -390,9 +388,24 @@ def wait_for_helper(stamp: Path, *, seconds: float = HELPER_STAMP_SECONDS, holds
     while time.monotonic() < end:
         if arrived():
             return True
-        QApplication.processEvents()
+        pump()
         time.sleep(0.05)
     return arrived()
+
+
+def pump() -> None:
+    """Let the window repaint from inside a wait on the GUI thread.
+
+    `processEvents()` and not a nested event loop, because a nested loop would
+    let another click start a second update while this one is half-way out of
+    the door. **Both** GUI-thread waits use it: the wait for the helper's
+    stamp, and the wait for a lock a helper of an earlier press is holding,
+    which sat on a bare `time.sleep` and froze the window for its whole ten
+    seconds (measured 10.02 s, round 7).
+    """
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.processEvents()
 
 
 def _has_stopped(handle: Any) -> bool:
@@ -994,7 +1007,7 @@ def build_window() -> object:
             self.end_helper: Callable[[Any], bool] = end_helper
             self.release_after: Callable[[Install, Any], None] = release_after
             self.discard_script: Callable[[Any], None] = discard_script
-            self.make_way: Callable[[Install], str | None] = make_way
+            self.make_way: Callable[..., str | None] = make_way
             self._helper: Any = None
             """A helper that would not stop. While one is here, no second is started."""
             # `window.close()` answers a bool; nothing here reads it, and
@@ -1417,7 +1430,7 @@ def build_window() -> object:
             # rest of the session. So the lock is looked at: rubbish is cleared
             # and the press is worth making; a live holder that will not let go
             # is named, and the way out is closing Yu'lon rather than pressing.
-            stuck = self.make_way(install)
+            stuck = self.make_way(install, tick=pump)
             if stuck is not None:
                 update_bar.show_message(
                     f"Yu'lon could not start the installer: {stuck}",

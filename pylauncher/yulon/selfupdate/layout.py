@@ -37,6 +37,7 @@ import os
 import secrets
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -494,7 +495,12 @@ def clear_stale_lock(install: Install) -> bool:
     return True
 
 
-def make_way(install: Install, *, seconds: float = LOCK_WAIT_SECONDS) -> str | None:
+def make_way(
+    install: Install,
+    *,
+    seconds: float = LOCK_WAIT_SECONDS,
+    tick: Callable[[], None] | None = None,
+) -> str | None:
     """Is a live helper working in `.yulon-old`? Stand it down; refuse if it stays.
 
     **The app used to delete the directory out from under it** (round 5, M2).
@@ -510,6 +516,12 @@ def make_way(install: Install, *, seconds: float = LOCK_WAIT_SECONDS) -> str | N
     `stage.prepare` has already discarded every working directory — so on the
     real path the live holder's lock was gone before this was ever asked, and
     only the script-side owner check was keeping the install whole.
+
+    `tick` is called on every poll, and exists because one of the two callers
+    is on the GUI thread: without it a holder that stays made the window stop
+    repainting for the whole ten seconds (measured 10.02 s, round 7), which is
+    the frozen window this feature is trying not to be. The caller on a worker
+    thread passes nothing.
     """
     if clear_stale_lock(install):
         return None
@@ -522,6 +534,8 @@ def make_way(install: Install, *, seconds: float = LOCK_WAIT_SECONDS) -> str | N
     while time.monotonic() < end:
         if clear_stale_lock(install):
             return None
+        if tick is not None:
+            tick()
         time.sleep(0.05)
     if clear_stale_lock(install):
         return None

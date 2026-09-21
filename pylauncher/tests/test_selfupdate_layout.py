@@ -656,3 +656,99 @@ def test_a_path_that_no_longer_exists_falls_back_to_its_spelling(tmp_path: Path)
     gone = tmp_path / "gone"
     assert layout.same_file(gone, gone) is True
     assert layout.same_file(gone, tmp_path / "other") is False
+
+
+def test_a_lock_naming_nobody_is_given_a_moment_before_it_is_rubbish(tmp_path: Path) -> None:
+    """**The `mkdir` → owner-write window is real** (round 7, S2).
+
+    A helper takes the lock by creating the directory and then writes its nonce
+    and pid into it. In between, the lock names nobody — and a lock naming
+    nobody is exactly what a helper killed at that moment leaves behind. So
+    "nobody is behind it" cannot be decided on emptiness alone: young ones are
+    left alone (a live helper is a heartbeat away from writing its owner), old
+    ones are rubbish. Both halves of that are asserted here, with the age set
+    by `os.utime` rather than by waiting.
+    """
+    install = _folder(tmp_path)
+    lock = layout.helper_lock(install)
+    lock.mkdir(parents=True)
+    assert layout.lock_holder(install) is not None, "the precondition: a lock naming nobody"
+
+    young = time.time() - 5
+    os.utime(lock, (young, young))
+    assert layout.clear_stale_lock(install) is False, "a helper mid-mkdir lost its lock"
+    assert lock.is_dir()
+
+    old = time.time() - (layout.STALE_LOCK_SECONDS + 1)
+    os.utime(lock, (old, old))
+    assert layout.clear_stale_lock(install) is True
+    assert not lock.exists(), "a lock nobody is behind was kept for ever"
+
+
+def test_a_lock_stamped_in_the_future_is_not_treated_as_ancient(tmp_path: Path) -> None:
+    """A clock that jumped, or a file copied off a box with a different one.
+
+    A future mtime makes the age negative, which is younger than any bound —
+    so it is kept, which is the safe side: the cost is one refused press, and
+    the cost of the other side is deleting a live helper's lock.
+    """
+    install = _folder(tmp_path)
+    lock = layout.helper_lock(install)
+    lock.mkdir(parents=True)
+    ahead = time.time() + 3600
+    os.utime(lock, (ahead, ahead))
+
+    assert layout.clear_stale_lock(install) is False
+    assert lock.is_dir()
+
+
+def test_a_lock_naming_a_pid_is_judged_by_that_pid_and_not_by_its_age(tmp_path: Path) -> None:
+    """Age is the fallback for a lock with no owner, never the rule for one with a pid."""
+    install = _folder(tmp_path)
+    lock = layout.helper_lock(install)
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text("abcd0123abcd0123", encoding="utf-8")
+    (lock / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    ancient = time.time() - (layout.STALE_LOCK_SECONDS * 100)
+    os.utime(lock, (ancient, ancient))
+
+    assert layout.clear_stale_lock(install) is False, "a LIVE helper's lock was removed"
+    assert lock.is_dir()
+
+
+def test_waiting_for_a_lock_lets_the_caller_keep_the_window_alive(tmp_path: Path) -> None:
+    """**A ten-second freeze is the crash this feature is trying not to be** (round 7, S1).
+
+    `make_way` runs on the GUI thread when a press finds a helper of an earlier
+    attempt still holding the lock. It polled on a bare `time.sleep`, so the
+    window stopped repainting for the whole bound — measured 10.02 s. The tick
+    is what the caller paints with; the bound is unchanged.
+    """
+    install = _folder(tmp_path)
+    lock = layout.helper_lock(install)
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text("abcd0123abcd0123", encoding="utf-8")
+    (lock / "pid").write_text(str(os.getpid()), encoding="utf-8")  # alive, and staying
+    ticks: list[int] = []
+
+    started = time.monotonic()
+    said = layout.make_way(install, seconds=0.4, tick=lambda: ticks.append(1))
+    waited = time.monotonic() - started
+
+    assert said is not None and "still working in this folder" in said
+    assert ticks, "the caller was never given a chance to repaint"
+    assert 0.3 <= waited < 4.0, f"the wait took {waited:.2f}s"
+    assert layout.stand_down_path(install).read_text(encoding="utf-8").strip() == (
+        "abcd0123abcd0123"
+    )
+
+
+def test_waiting_without_a_tick_is_allowed(tmp_path: Path) -> None:
+    """The worker-thread caller (`stage.prepare`) passes none, and nothing breaks."""
+    install = _folder(tmp_path)
+    lock = layout.helper_lock(install)
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text("abcd0123abcd0123", encoding="utf-8")
+    (lock / "pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    assert layout.make_way(install, seconds=0.2) is not None
