@@ -37,7 +37,19 @@ from yulon.selfupdate import layout
 from yulon.selfupdate.cleanup import finish_previous_update, recovery_steps
 from yulon.selfupdate.detect import Install, InstallKind
 from yulon.selfupdate.stage import prepare
-from yulon.selfupdate.swap import plan_swap
+from yulon.selfupdate.swap import SwapPlan, arm, plan_swap
+
+
+def _a_ready_plan(*args: object, **kw: object) -> SwapPlan:
+    """`plan_swap` + `arm`: a plan with a script on disk, ready to start.
+
+    Since round 5 `plan_swap` writes nothing — the script is written once, at
+    the moment of use, by `arm()`, because arming in both places left an
+    orphaned helper script in the temp directory after every single update.
+    These tests want the armed thing, so they say so here in one place.
+    """
+    return arm(plan_swap(*args, **kw))  # type: ignore[arg-type]
+
 
 DEADLINE = 15.0
 README = Path(__file__).resolve().parents[1] / "README.md"
@@ -103,7 +115,7 @@ def _swap_killed_after(
 ) -> None:
     """Run the real helper with a dead app pid, killing it after move `at`."""
     staged = layout.work_dir(install, layout.NEW_NAME)
-    plan = plan_swap(
+    plan = _a_ready_plan(
         install,
         staged,
         pid=os.getpid(),

@@ -2351,8 +2351,10 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`player.sav` somebody had put in the backup counted as nothing and went with the "
         "folder when the rollback arm removed it. Anything in there that is not one of the "
         "five bookkeeping names is now a reason to REPORT and leave it, and an OSError "
-        "answers the empty list -- which is safe only because the delete that follows is "
-        "`discard_ours`, which refuses any directory it cannot prove this install made"
+        "answers the empty list. That is the unsafe direction, and it is bounded: the "
+        "delete it can lead to is `discard_ours`, which removes a directory carrying "
+        "THIS install's marker -- a directory this app made -- so what an unreadable "
+        "backup can cost is the app's own backup, never a folder of the player's"
     ),
     ("selfupdate/stage.py", "staged_entries"): (
         "T90 plan 3. Lists the STAGING directory this app filled moments earlier, to find the "

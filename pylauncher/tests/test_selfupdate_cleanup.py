@@ -7,6 +7,7 @@ test here is one of the gates that replaced it.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -388,3 +389,71 @@ def test_a_report_with_no_log_to_quote_reads_as_a_sentence(tmp_path: Path) -> No
 
     assert "installer's last message" not in problem
     assert problem.endswith(".")
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="identity is read off /proc here")
+def test_a_reused_pid_does_not_silence_the_whole_startup_report(tmp_path: Path) -> None:
+    """**One rule, both callers** (round 5, N1).
+
+    The staging side asks liveness, identity and age; this side asked
+    `pid_is_alive` alone. So a marker naming a pid that had been recycled — to
+    somebody's editor, to a shell — made the first start after an update say
+    nothing at all: no tidy-up, no banner, no half-done warning. Here the pid
+    really is alive and really is not Yu'lon.
+    """
+    import subprocess
+    import sys
+
+    install = _install(tmp_path)
+    old = _a_finished_swap(install)
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert layout.pid_is_alive(other.pid) is True, "the precondition: the pid is alive"
+        path = layout.marker_path(install, layout.OLD_NAME)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["pid"] = other.pid
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        outcome = finish_previous_update(install, running=NEW_VERSION)
+    finally:
+        other.kill()
+        other.wait(timeout=30)
+
+    assert outcome.removed is True, "the startup pass did nothing at all"
+    assert outcome.version == "0.8.70-Public"
+    assert not old.exists()
+
+
+def test_a_backup_a_live_copy_of_the_app_made_is_left_alone(tmp_path: Path) -> None:
+    """And the half that must keep working: our own pid is, by definition, this app.
+
+    A marker naming THIS process is not another copy — that is the ordinary
+    case — so the pid used here is one whose identity cannot be read at all
+    (an AppImage has no executable to compare) and whose marker is fresh.
+    """
+    from yulon.selfupdate.detect import InstallKind
+
+    target = tmp_path / "Yulon-v0.8.66-Public-x86_64.AppImage"
+    target.write_bytes(b"the running build")
+    install = Install(InstallKind.APPIMAGE, target, "", True)
+    backup = layout.work_dir(install, layout.OLD_NAME)
+    backup.mkdir(parents=True)
+    (backup / layout.APPIMAGE_ENTRY).write_bytes(b"the previous build")
+    layout.write_marker(
+        install,
+        layout.OLD_NAME,
+        layout.Marker(
+            role=layout.OLD_NAME,
+            from_version=OLD_VERSION,
+            to_version=NEW_VERSION,
+            pid=os.getppid(),
+            stamp=layout.now(),
+            entries=(layout.APPIMAGE_ENTRY,),
+            state=layout.SWAPPING,
+        ),
+    )
+
+    outcome = finish_previous_update(install, running=NEW_VERSION)
+
+    assert outcome.removed is False and outcome.problem == ""
+    assert backup.exists(), "another copy's work in progress was tidied away"

@@ -39,6 +39,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from yulon.log import get_logger
 from yulon.selfupdate.detect import Install, InstallKind
@@ -361,6 +362,77 @@ def stand_down_path(install: Install) -> Path:
     return work_dir(install, OLD_NAME) / STAND_DOWN
 
 
+def helper_lock(install: Install) -> Path:
+    """The directory whose existence IS the lock: `<.yulon-old>/helper.lock`."""
+    return work_dir(install, OLD_NAME) / HELPER_LOCK
+
+
+@dataclass(frozen=True)
+class LockHolder:
+    """Who holds the helper lock, as the helper itself wrote it."""
+
+    nonce: str
+    """The attempt's secret. `release_lock_of` will remove a lock only for this."""
+    pid: int
+    """The helper's own process id, or 0 when it could not be read."""
+
+    def alive(self) -> bool:
+        """Is that helper still running? `False` when the pid is unknown."""
+        return self.pid > 0 and pid_is_alive(self.pid)
+
+
+def lock_holder(install: Install) -> LockHolder | None:
+    """Who holds the lock, or None if nothing does. Never raises.
+
+    **The pid is in there so the app can tell a live helper from a dead one's
+    leavings** (round 5). A lock is a directory, and a helper killed with
+    SIGKILL — or with `TerminateProcess`, which cannot be trapped at all —
+    leaves it behind: without a pid the app could only guess whether waiting
+    for it to go would ever end.
+    """
+    lock = helper_lock(install)
+    try:
+        nonce = (lock / "owner").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return LockHolder("", 0) if lock.is_dir() else None
+    try:
+        pid = int((lock / "pid").read_text(encoding="utf-8", errors="replace").strip() or 0)
+    except (OSError, ValueError):
+        pid = 0
+    return LockHolder(nonce, pid)
+
+
+def release_lock_of(install: Install, nonce: str) -> bool:
+    """Remove the helper lock **only when it is this nonce's**. Never raises.
+
+    The app calls this after it has ended a helper it started and confirmed it
+    gone. `/bin/sh` is dash on most Linuxes and dash does not run an EXIT trap
+    on SIGTERM, and Windows `TerminateProcess` runs nothing at all — so the
+    lock outlives the process that took it, and every later press then gets
+    exit 73 and no stamp for the rest of the session (round 5, M1).
+
+    The nonce is the whole safety of it: a lock somebody else's helper holds is
+    never touched here.
+    """
+    if not nonce:
+        return False
+    holder = lock_holder(install)
+    if holder is None:
+        return True
+    if holder.nonce != nonce:
+        logger.info(f"self-update: the lock belongs to {holder.nonce or 'nobody we know'}; leaving")
+        return False
+    lock = helper_lock(install)
+    try:
+        for name in ("owner", "pid"):
+            (lock / name).unlink(missing_ok=True)
+        lock.rmdir()
+    except OSError as exc:
+        logger.info(f"self-update: could not remove the helper lock: {exc}")
+        return False
+    return True
+
+
 def stamp_holds(install: Install, nonce: str) -> bool:
     """Is the helper's stamp THIS attempt's? A stale one answers False.
 
@@ -493,24 +565,41 @@ def another_copy_is_updating(install: Install, our_pid: int) -> str | None:
     treated as abandoned.
     """
     marker = read_marker(install, NEW_NAME)
-    if marker is None or marker.pid in (0, our_pid):
-        return None
-    if not pid_is_alive(marker.pid):
-        return None
-    target = install.target
-    exe = target / install.executable if target is not None and install.executable else None
-    identity = pid_is_this_app(marker.pid, exe)
-    if identity is False:
-        logger.info(f"self-update: pid {marker.pid} is alive but is not Yu'lon; carrying on")
-        return None
-    if identity is None and now() - marker.stamp > STALE_MARKER_SECONDS:
-        logger.info(f"self-update: the marker naming pid {marker.pid} is too old to believe")
+    if marker is None or not another_copy_is_working(install, marker, our_pid=our_pid):
         return None
     return (
         "Another copy of Yu'lon is already installing an update into this folder. Close it, or "
         f"wait for it to finish — if you are sure no other copy is open, delete the {NEW_NAME} "
         "folder beside Yu'lon and try again."
     )
+
+
+def another_copy_is_working(install: Install, marker: Marker, *, our_pid: int) -> bool:
+    """Is the copy of Yu'lon that wrote this marker still running? **The one rule.**
+
+    Both places that ask have to ask the same way, and for a round they did
+    not: this file checked identity and age before staging, while
+    `cleanup.finish_previous_update` asked `pid_is_alive` alone — so at start a
+    marker naming a REUSED pid made the startup report silently empty, which is
+    the failure that rule was written to stop (round 5, N1).
+
+    Liveness, then identity where it can be asked (`/proc`,
+    `QueryFullProcessImageNameW`), then the marker's age where it cannot.
+    """
+    if marker.pid in (0, our_pid):
+        return False
+    if not pid_is_alive(marker.pid):
+        return False
+    target = install.target
+    exe = target / install.executable if target is not None and install.executable else None
+    identity = pid_is_this_app(marker.pid, exe)
+    if identity is False:
+        logger.info(f"self-update: pid {marker.pid} is alive but is not Yu'lon; carrying on")
+        return False
+    if identity is None and now() - marker.stamp > STALE_MARKER_SECONDS:
+        logger.info(f"self-update: the marker naming pid {marker.pid} is too old to believe")
+        return False
+    return True
 
 
 def pid_is_alive(pid: int, *, windows: bool | None = None) -> bool:
@@ -548,20 +637,59 @@ _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _ERROR_ACCESS_DENIED = 5
 
 
+def _kernel32() -> Any:  # pragma: no cover - Windows only
+    """`kernel32` with the signatures declared, which on 64-bit Windows is not optional.
+
+    **A HANDLE is a pointer and ctypes assumes a C `int`** (round 5, W1). With
+    no `restype` the top 32 bits of every handle `OpenProcess` returns are
+    thrown away, so `CloseHandle` is given a number that is not the handle and
+    the truncated value can even test falsy for a process that really is there.
+    `use_last_error=True` plus `ctypes.get_last_error()` for the same reason in
+    the other direction: `kernel32.GetLastError()` through ctypes reads the
+    error of whatever ctypes itself did last, so an access-denied answer — a
+    process another user owns, which IS alive — read as dead.
+
+    `getattr`, not `ctypes.WinDLL` by attribute: the name exists only on
+    Windows, and a `type: ignore` for it is itself an error under
+    `mypy --platform win32`, which CI runs (the convention `platform.py` uses).
+    """
+    import ctypes
+    from ctypes import wintypes  # noqa: F401 - Windows-only module
+
+    windll = getattr(ctypes, "WinDLL")  # noqa: B009 - Windows-only attribute
+    kernel32 = windll("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
 def _windows_pid_is_alive(pid: int) -> bool:  # pragma: no cover - Windows only
     """`OpenProcess` + `GetExitCodeProcess`, which is the question actually being asked."""
     import ctypes
+    from ctypes import wintypes
 
-    # `getattr`, not `ctypes.windll`: the attribute exists only on Windows, and
-    # a `type: ignore` for it is itself an error when mypy runs with
-    # `--platform win32`, which CI does (the convention `platform.py` uses).
-    kernel32 = getattr(ctypes, "windll").kernel32  # noqa: B009 - Windows-only attribute
+    kernel32 = _kernel32()
     handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         # Access denied means it exists and is not ours to look at.
-        return bool(kernel32.GetLastError() == _ERROR_ACCESS_DENIED)
+        # `getattr` again: `ctypes.get_last_error` is Windows-only in the
+        # stubs, so naming it directly is an error under the other two
+        # platforms CI type-checks.
+        last_error = getattr(ctypes, "get_last_error")  # noqa: B009 - Windows-only
+        return bool(last_error() == _ERROR_ACCESS_DENIED)
     try:
-        code = ctypes.c_ulong()
+        code = wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
             return False
         return bool(code.value == _STILL_ACTIVE)
@@ -598,7 +726,7 @@ def pid_is_this_app(pid: int, executable: Path | None) -> bool | None:
         if not link.parent.is_dir():
             return None
         try:
-            return link.resolve() == wanted
+            return same_file(link.resolve(), wanted)
         except OSError:
             return None
     return _windows_pid_is_this_app(pid, wanted)  # pragma: no cover - Windows only
@@ -606,24 +734,42 @@ def pid_is_this_app(pid: int, executable: Path | None) -> bool | None:
 
 def _windows_pid_is_this_app(pid: int, wanted: Path) -> bool | None:  # pragma: no cover
     import ctypes
+    from ctypes import wintypes
 
-    # `getattr`, not `ctypes.windll`: the attribute exists only on Windows, and
-    # a `type: ignore` for it is itself an error when mypy runs with
-    # `--platform win32`, which CI does (the convention `platform.py` uses).
-    kernel32 = getattr(ctypes, "windll").kernel32  # noqa: B009 - Windows-only attribute
+    kernel32 = _kernel32()
     handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return None
     try:
-        size = ctypes.c_ulong(32768)
+        size = wintypes.DWORD(32768)
         buffer = ctypes.create_unicode_buffer(size.value)
         if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
             return None
-        return Path(buffer.value) == wanted
+        return same_file(Path(buffer.value), wanted)
     except OSError:
         return None
     finally:
         kernel32.CloseHandle(handle)
+
+
+def same_file(one: Path, other: Path) -> bool:
+    """Are these two paths the same file? Spelling is not the question.
+
+    **The kernel answers with whatever spelling the process was started with**
+    (round 5, W2): an 8.3 short path (`C:\\PROGRA~1\\Yulon\\yulon.exe`), a
+    `subst` drive or a junction all name the file a resolved `Path` spells
+    differently, and a plain `==` between them answered False — which read as
+    "that pid is not Yu'lon" and cleared the other copy's staging directory.
+
+    `os.path.samefile` asks the filesystem, which is the real question; when
+    either path is gone there is nothing to ask, so the spellings are compared
+    case-folded and normalised, which is as close as anything can get.
+    """
+    try:
+        return os.path.samefile(one, other)
+    except OSError:
+        pass
+    return os.path.normcase(os.path.normpath(one)) == os.path.normcase(os.path.normpath(other))
 
 
 def other_instances(executable: Path, our_pid: int) -> list[int]:

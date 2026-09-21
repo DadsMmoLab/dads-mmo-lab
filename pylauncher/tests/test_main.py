@@ -1925,6 +1925,8 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
         "apply",
         "start_helper",
         "end_helper",
+        "release_after",
+        "discard_script",
         "close_window",
         "refusal",
         "make_progress",
@@ -1945,13 +1947,28 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
     update_host.make_progress = make_progress
     update_host.helpers = []
 
+    class _Handle:
+        """What `start_helper` really returns: a process that is still running."""
+
+        def poll(self) -> int | None:
+            return None
+
     def started(plan: Any) -> Any:
         update_host.helpers.append(plan)
-        return None
+        return _Handle()
 
     update_host.start_helper = started
     update_host.ended = []
-    update_host.end_helper = update_host.ended.append
+
+    def ended(handle: Any) -> bool:
+        update_host.ended.append(handle)
+        return True  # it stopped; the tests about it NOT stopping say so
+
+    update_host.end_helper = ended
+    update_host.released = []
+    update_host.release_after = lambda install, plan: update_host.released.append(plan)
+    update_host.discarded = []
+    update_host.discard_script = update_host.discarded.append
     update_host.closes = []
     update_host.close_window = lambda: update_host.closes.append(1)
     # The helper's "I am running" stamp, holding THIS attempt's nonce. Tests
@@ -1964,6 +1981,7 @@ def installing_host(update_host: Any, tmp_path: Path) -> Iterator[Any]:
     update_host._restarting = False
     update_host._progress = None
     update_host._ready = None
+    update_host._helper = None
 
 
 def test_a_ready_update_starts_the_helper_and_then_closes_the_window(
@@ -2816,6 +2834,154 @@ def test_a_helper_that_will_not_start_is_reported_and_not_raised(
     assert "Access is denied" in bar.text(), "the reason was not passed on"
     assert installing_host._ready is not None, "the staged build was thrown away"
     assert installing_host._restarting is False
+
+
+def test_a_failed_attempt_releases_the_lock_before_it_clears_the_stamp(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """**The lock outlives the process that took it** (round 5, M1).
+
+    `/bin/sh` is dash on most Linuxes and dash runs no EXIT trap on SIGTERM;
+    Windows `TerminateProcess` runs nothing at all. So a helper the app stops
+    leaves `helper.lock` behind, and every later press then got exit 73 and no
+    stamp for the rest of the session. The app removes it — but only after the
+    process is confirmed gone, and only its own.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+    installing_host.await_helper = lambda _stamp, _nonce: False
+
+    installing_host.start_update(_install_offer())
+
+    armed = installing_host.helpers[0]
+    assert len(installing_host.ended) == 1, "the helper was not stopped"
+    assert [p.nonce for p in installing_host.released] == [armed.nonce], "the lock was left"
+    assert installing_host._helper is None, "the app thinks a helper is still running"
+    bar = installing_host.parent().property("update_bar")
+    assert "Press Update now again" in bar.text()
+
+
+def test_a_helper_that_will_not_die_stops_the_session_trying_again(
+    installing_host: Any, tmp_path: Path
+) -> None:
+    """The other half of M1: if it would not stop, a second one must not go in beside it.
+
+    Saying "press Update now again" here is what would send a second helper
+    into an install a live one is holding — the two-helper race, arrived at
+    from the other direction.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    offer = _install_offer()
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+    installing_host.await_helper = lambda _stamp, _nonce: False
+    installing_host.end_helper = lambda handle: False  # it ignored everything
+
+    installing_host.start_update(offer)
+
+    assert installing_host.released == [], "a lock a live helper holds was released"
+    assert installing_host._helper is not None
+    bar = installing_host.parent().property("update_bar")
+    assert "could not stop it either" in bar.text()
+    assert "Close Yu'lon and open it again" in bar.text()
+
+    # And the second press starts nothing at all.
+    started = len(installing_host.helpers)
+    installing_host.start_update(offer)
+    assert len(installing_host.helpers) == started, "a second helper went in beside a live one"
+    assert installing_host.closes == []
+
+
+def test_a_script_nothing_ever_ran_is_removed(installing_host: Any, tmp_path: Path) -> None:
+    """One `.ps1` per update stayed in `%TEMP%` for ever (round 5, from the Windows gate).
+
+    A helper that starts deletes its own script; these are the paths where no
+    helper ever ran. Here the spawn itself raises, which is AppLocker, a
+    missing shell or a full disk.
+    """
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+
+    def refuse(_plan: Any) -> Any:
+        raise PermissionError("[WinError 5] Access is denied")
+
+    installing_host.start_helper = refuse
+
+    installing_host.start_update(_install_offer())
+
+    assert len(installing_host.discarded) == 1, "the script was left in the temp directory"
+    assert installing_host.discarded[0].nonce, "the armed plan was not the one discarded"
+
+
+def test_a_cancelled_update_takes_its_script_with_it(installing_host: Any, tmp_path: Path) -> None:
+    """The same for a staged build nobody is going to install."""
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    plan = _a_plan(tmp_path, install)
+    installing_host._ready = ReadyToRestart(plan, "v0.8.70-Public")
+
+    installing_host.discard_staged()
+
+    assert installing_host.discarded == [plan]
+    assert installing_host._ready is None
+
+
+def test_only_one_helper_script_is_written_for_one_attempt(
+    installing_host: Any, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**Two were written and one was orphaned** (round 5, from the Windows gate).
+
+    `plan_swap` armed the plan it returned, minutes before the press, and
+    `restart_into` armed it again; only the second was ever started, and only a
+    started helper deletes its own script. Here the REAL `arm` runs, into a
+    directory of its own, and what is counted is the files on disk.
+    """
+    import logging
+
+    from yulon.selfupdate.apply import ReadyToRestart
+
+    install = _a_staged_install(tmp_path)
+    installing_host.current_install = lambda: install
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    plan = _a_plan(tmp_path, install)
+    plan = dataclasses.replace(plan, fixed=("/bin/sh", str(scripts), *plan.fixed[2:]))
+    installing_host.apply = lambda *a, **k: ReadyToRestart(plan, "v0.8.70-Public")
+
+    with caplog.at_level(logging.INFO, logger="yulon.selfupdate.swap"):
+        installing_host.start_update(_install_offer())
+
+    written = sorted(scripts.glob("yulon-update-*"))
+    assert len(written) == 1, f"{len(written)} scripts were written: {written}"
+    assert written[0] == installing_host.helpers[0].script
+    said = [r for r in caplog.records if "helper written" in r.getMessage()]
+    assert len(said) == 1, f"the log says a script was written {len(said)} times"
+
+
+def test_the_wait_refuses_a_nonce_that_is_not_one(tmp_path: Path) -> None:
+    """**`"" in anything` is True** (round 5, N5).
+
+    An empty nonce made the wait answer yes to any stamp at all, including one
+    an earlier attempt had left — which is precisely what the nonce was added
+    to stop. It is a programming error, and it closes the window, so it raises.
+    """
+    stamp = tmp_path / "helper-started"
+    stamp.write_text("somebody else's attempt", encoding="utf-8")
+    with pytest.raises(ValueError, match="nonce"):
+        main.wait_for_helper(stamp, seconds=0.1, holds="")
 
 
 def test_the_windows_flags_are_the_ones_the_gate_settled() -> None:

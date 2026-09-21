@@ -181,7 +181,7 @@ def finish_previous_update(install: Install, *, running: str = __version__) -> O
         # a folder they made is not news.
         logger.info(f"self-update: {old} carries no marker of ours; leaving it alone")
         return Outcome()
-    if _another_copy_owns_this(marker):
+    if _another_copy_owns_this(install, marker):
         # **A second instance must not tidy up the first one's update** (round
         # 3, F1). Measured there: instance B started while A held a staged
         # build waiting for a close gate, removed both work dirs, and told the
@@ -223,14 +223,16 @@ def finish_previous_update(install: Install, *, running: str = __version__) -> O
     return Outcome(removed=True, version=without_v(marker.to_version))
 
 
-def _another_copy_owns_this(marker: Marker) -> bool:
+def _another_copy_owns_this(install: Install, marker: Marker) -> bool:
     """Is the copy of Yu'lon that made this working directory still running?
 
-    The same liveness question `layout.another_copy_is_updating` asks before
-    staging, asked again at start — because the answer decides whether these
-    directories are rubbish or somebody's work in progress.
+    **The same question, asked the same way** (round 5, N1). This used to ask
+    `pid_is_alive` alone while the staging side asked liveness, identity and
+    age — so a marker naming a REUSED pid made this answer yes for as long as
+    somebody's editor held that number, and the whole startup report was
+    silently empty: no tidy-up, no banner, no half-done warning, nothing.
     """
-    return marker.pid not in (0, os.getpid()) and layout.pid_is_alive(marker.pid)
+    return layout.another_copy_is_working(install, marker, our_pid=os.getpid())
 
 
 def _entries_in_backup(install: Install, marker: Marker) -> list[str]:

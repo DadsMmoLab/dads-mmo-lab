@@ -42,6 +42,7 @@ from __future__ import annotations
 import os
 import secrets
 import subprocess
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,13 +108,24 @@ log="$old/{layout.HELPER_LOG}"
 have_lock=0
 
 cleanup() {{
-  if [ "$have_lock" -eq 1 ]; then
-    rm -f -- "$lock/owner" 2>/dev/null
+  # **Only a lock whose owner is still us.** The app may have discarded this
+  # backup directory and a SECOND helper may hold a new lock of the same name;
+  # removing it then unlocked an install another helper was working on, and
+  # both came away having moved nothing (round 5, M2).
+  if [ "$have_lock" -eq 1 ] && [ "$(cat "$lock/owner" 2>/dev/null)" = "$nonce" ]; then
+    rm -f -- "$lock/owner" "$lock/pid" 2>/dev/null
     rmdir -- "$lock" 2>/dev/null
   fi
   rm -f -- "$0"
 }}
 trap cleanup EXIT
+# **dash does not run an EXIT trap on a signal** (round 5, M1), and /bin/sh is
+# dash on most Linuxes: without these the app's own `end_helper` left the lock
+# and the script behind, and every later press got exit 73 for the rest of the
+# session. Exiting from the handler makes the EXIT trap run.
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 130' INT
 
 # ---- validate before anything moves --------------------------------------
 case "$ticks" in ""|*[!0-9]*) exit 64 ;; esac
@@ -164,6 +176,7 @@ done
 if mkdir -- "$lock" 2>/dev/null; then
   have_lock=1
   printf %s "$nonce" > "$lock/owner"
+  printf %s "$$" > "$lock/pid"
 else
   echo "another helper holds the lock; standing aside" >> "$log"
   exit 73
@@ -318,13 +331,24 @@ log="$old/{layout.HELPER_LOG}"
 have_lock=0
 
 cleanup() {{
-  if [ "$have_lock" -eq 1 ]; then
-    rm -f -- "$lock/owner" 2>/dev/null
+  # **Only a lock whose owner is still us.** The app may have discarded this
+  # backup directory and a SECOND helper may hold a new lock of the same name;
+  # removing it then unlocked an install another helper was working on, and
+  # both came away having moved nothing (round 5, M2).
+  if [ "$have_lock" -eq 1 ] && [ "$(cat "$lock/owner" 2>/dev/null)" = "$nonce" ]; then
+    rm -f -- "$lock/owner" "$lock/pid" 2>/dev/null
     rmdir -- "$lock" 2>/dev/null
   fi
   rm -f -- "$0"
 }}
 trap cleanup EXIT
+# **dash does not run an EXIT trap on a signal** (round 5, M1), and /bin/sh is
+# dash on most Linuxes: without these the app's own `end_helper` left the lock
+# and the script behind, and every later press got exit 73 for the rest of the
+# session. Exiting from the handler makes the EXIT trap run.
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 130' INT
 
 # ---- validate before anything moves --------------------------------------
 case "$ticks" in ""|*[!0-9]*) exit 64 ;; esac
@@ -343,6 +367,7 @@ case "$target" in /*) ;; *) exit 64 ;; esac
 if mkdir -- "$lock" 2>/dev/null; then
   have_lock=1
   printf %s "$nonce" > "$lock/owner"
+  printf %s "$$" > "$lock/pid"
 else
   echo "another helper holds the lock; standing aside" >> "$log"
   exit 73
@@ -439,8 +464,15 @@ $HaveLock = $false
 function Say($text) {{
   try {{ Add-Content -LiteralPath $Log -Value $text -ErrorAction SilentlyContinue }} catch {{}}
 }}
+function OwnTheLock() {{
+  # Only a lock whose owner is still OUR nonce: the app may have discarded this
+  # backup and a second helper may hold a new lock of the same name (round 5).
+  if (-not $HaveLock) {{ return $false }}
+  try {{ return (Get-Content -LiteralPath $Owner -Raw).Trim() -eq $Nonce }}
+  catch {{ return $false }}
+}}
 function Done($code) {{
-  if ($HaveLock) {{
+  if (OwnTheLock) {{
     Remove-Item -LiteralPath $Lock -Recurse -Force -ErrorAction SilentlyContinue
   }}
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
@@ -488,17 +520,30 @@ foreach ($e in $Forward) {{ if ($Backward -notcontains $e) {{ Done 64 }} }}
 foreach ($e in $Backward) {{ if ($Forward -notcontains $e) {{ Done 64 }} }}
 
 # ---- become THE helper, atomically ----------------------------------------
+# **The two failures here are not the same failure** (round 5, W3). A directory
+# that could not be CREATED means another helper has it: stand aside, 73, and
+# leave it alone. A directory created whose owner file could not be WRITTEN is
+# a lock nobody owns — reported as "another helper holds it", it stayed for
+# ever and refused every later attempt — so it is removed and this exits 70.
 try {{
   New-Item -ItemType Directory -Path $Lock -ErrorAction Stop | Out-Null
   $HaveLock = $true
-  Set-Content -LiteralPath $Owner -Value $Nonce -NoNewline
 }} catch {{
   Say "another helper holds the lock; standing aside"
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
   exit 73
 }}
+try {{
+  Set-Content -LiteralPath $Owner -Value $Nonce -NoNewline
+  Set-Content -LiteralPath (Join-Path $Lock 'pid') -Value "$PID" -NoNewline
+}} catch {{
+  Say "took the lock but could not write its owner; releasing it"
+  Remove-Item -LiteralPath $Lock -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+  exit 70
+}}
 
-Set-Content -LiteralPath $Stamp -Value $Nonce -NoNewline
+try {{ Set-Content -LiteralPath $Stamp -Value $Nonce -NoNewline }} catch {{ Done 64 }}
 Say "started pid=$PID nonce=$Nonce target=$Target entries=$Half"
 
 $deadline = (Get-Date).AddSeconds($Ticks * {TICK_SECONDS})
@@ -521,20 +566,7 @@ function Move-One($from, $to) {{
   return $false
 }}
 
-$ok = $true
-foreach ($e in $Forward) {{
-  if (Test-Path -LiteralPath (Join-Path $Target $e)) {{
-    if (Move-One (Join-Path $Target $e) (Join-Path $Old $e)) {{ Say "moved out $e" }}
-    else {{ Say "FAILED moving out $e"; $ok = $false; break }}
-  }}
-}}
-if ($ok) {{
-  foreach ($e in $Backward) {{
-    if (Move-One (Join-Path $New $e) (Join-Path $Target $e)) {{ Say "brought in $e" }}
-    else {{ Say "FAILED bringing in $e"; $ok = $false; break }}
-  }}
-}}
-if (-not $ok) {{
+function Rollback() {{
   Say "rolling back"
   foreach ($e in $Forward) {{
     if (-not (Test-Path -LiteralPath (Join-Path $New $e)) -and
@@ -547,6 +579,33 @@ if (-not $ok) {{
       Move-One (Join-Path $Old $e) (Join-Path $Target $e) | Out-Null
     }}
   }}
+}}
+
+# **Nothing between two moves may end this script** (round 5, W3). With
+# `$ErrorActionPreference = 'Stop'` an unguarded `Test-Path` on a path a
+# scanner has locked, or a `Set-Content` on a full disk, terminated the helper
+# mid-swap: no rollback, no relaunch, no lock released, and an install with
+# half of each version in it. So the whole swap is one try/catch, the catch
+# puts back what was moved, and the finally releases what is ours.
+$ok = $true
+try {{
+  foreach ($e in $Forward) {{
+    if (Test-Path -LiteralPath (Join-Path $Target $e)) {{
+      if (Move-One (Join-Path $Target $e) (Join-Path $Old $e)) {{ Say "moved out $e" }}
+      else {{ Say "FAILED moving out $e"; $ok = $false; break }}
+    }}
+  }}
+  if ($ok) {{
+    foreach ($e in $Backward) {{
+      if (Move-One (Join-Path $New $e) (Join-Path $Target $e)) {{ Say "brought in $e" }}
+      else {{ Say "FAILED bringing in $e"; $ok = $false; break }}
+    }}
+  }}
+  if (-not $ok) {{ Rollback }}
+}} catch {{
+  Say "the installer stopped part way: $_"
+  $ok = $false
+  try {{ Rollback }} catch {{ Say "the rollback itself failed: $_" }}
 }}
 
 try {{
@@ -654,7 +713,7 @@ def plan_swap(
         # One entry, under the fixed name the script spells itself.
         _make_the_backup_dir(install, marker, (layout.APPIMAGE_ENTRY,))
         parts: tuple[str, ...] = (which, str(script_dir), ticks, str(pid), str(target))
-        return arm(SwapPlan(Path(), [], (layout.APPIMAGE_ENTRY,), POSIX_FILE_HELPER, "", parts))
+        return SwapPlan(Path(), [], (layout.APPIMAGE_ENTRY,), POSIX_FILE_HELPER, "", parts)
     named = tuple(entries)
     if not named or not all(layout.is_entry_name(name) for name in named):
         raise UpdateError("Yu'lon could not work out which files to replace.")
@@ -679,7 +738,7 @@ def plan_swap(
         *reversed(named),
     )
     del staged  # the helper finds it by name under the target it validated
-    return arm(SwapPlan(Path(), [], named, POSIX_FOLDER_HELPER, "", parts))
+    return SwapPlan(Path(), [], named, POSIX_FOLDER_HELPER, "", parts)
 
 
 def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Sequence[str]) -> None:
@@ -694,6 +753,9 @@ def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Seque
     """
     target = install.target
     assert target is not None  # `plan_swap` refused a `None` target already
+    busy = make_way_for_the_backup(install)
+    if busy is not None:
+        raise UpdateError(busy)
     if not layout.discard_ours(install, layout.OLD_NAME):
         raise UpdateError(
             f"There is a {layout.OLD_NAME} folder beside Yu'lon that this copy cannot vouch "
@@ -720,6 +782,48 @@ def _make_the_backup_dir(install: Install, marker: layout.Marker, entries: Seque
         )
     except OSError as exc:
         raise UpdateError(f"Yu'lon could not prepare the backup folder: {exc}") from exc
+
+
+LOCK_WAIT_SECONDS = 10.0
+"""How long the app waits for a helper it did not start to release the lock."""
+
+
+def make_way_for_the_backup(install: Install, *, seconds: float = LOCK_WAIT_SECONDS) -> str | None:
+    """Is a live helper working in `.yulon-old`? Stand it down; refuse if it stays.
+
+    **The app used to delete the directory out from under it** (round 5, M2).
+    The state: a first helper is alive because the close was refused after it
+    had stamped; the player presses Update now again; `_make_the_backup_dir`
+    rmtrees `.yulon-old`, the first helper's lock with it, and a second helper
+    then takes a lock of the same name. In 5 runs of 12 the first helper's exit
+    trap removed the SECOND one's lock, the second's re-validation then failed,
+    and the app closed with nothing swapped and nothing relaunched.
+
+    A lock whose pid is dead is a leftover and is discarded as before. A lock
+    whose pid is ALIVE gets the stand-down file — the same file, the same way —
+    and this waits for the lock to go. It is a refusal, in the player's words,
+    if it does not.
+    """
+    holder = layout.lock_holder(install)
+    if holder is None:
+        return None
+    if not holder.alive():
+        logger.info("self-update: the helper lock was left behind by a helper that is gone")
+        return None
+    logger.info(f"self-update: a helper ({holder.nonce}) is still working here; standing it down")
+    tell_to_stop(install, holder.nonce)
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if layout.lock_holder(install) is None or not holder.alive():
+            return None
+        time.sleep(0.05)
+    if layout.lock_holder(install) is None:
+        return None
+    return (
+        "An installer Yu'lon started earlier is still working in this folder, and Yu'lon will "
+        "not start a second one beside it. Wait a moment and press Update now again; if it is "
+        "still refused, close Yu'lon and open it again."
+    )
 
 
 def _write(script_dir: Path, stem: str, which: str, posix_body: str) -> tuple[Path, str]:
@@ -778,6 +882,12 @@ def arm(plan: SwapPlan) -> SwapPlan:
     Called immediately before the helper is started, which is also what makes
     it the answer to a `/tmp` sweep between staging and pressing: the script is
     written here, not minutes earlier.
+
+    **This is the ONLY place a helper script is written** (round 5, from the
+    Windows gate). `plan_swap` used to arm the plan it returned, minutes before
+    the press, and `restart_into` armed it again — so every update left one
+    orphaned `.ps1` in `%TEMP%` for ever, and so did every refused attempt. A
+    plan now carries what is needed to write a script, and not a file.
     """
     which, script_dir, *rest = plan.fixed
     nonce = secrets.token_hex(8)
@@ -797,11 +907,21 @@ def stand_down(install: Install, plan: SwapPlan) -> None:
     Without it an orphan swapped twelve seconds after the app had told the
     player that nothing had changed (round 4).
     """
-    if not plan.nonce:
+    tell_to_stop(install, plan.nonce)
+
+
+def tell_to_stop(install: Install, nonce: str) -> None:
+    """The stand-down file itself, for a nonce from anywhere. Never raises.
+
+    Split out because the app also has to stand down a helper it did NOT start
+    — one left working in a backup directory a new attempt is about to discard
+    (round 5, M2) — and that helper is known only by the nonce in its lock.
+    """
+    if not nonce:
         return
     try:
-        layout.stand_down_path(install).write_text(plan.nonce + "\n", encoding="utf-8")
-        logger.info(f"self-update: stood down the helper for nonce {plan.nonce}")
+        layout.stand_down_path(install).write_text(nonce + "\n", encoding="utf-8")
+        logger.info(f"self-update: stood down the helper for nonce {nonce}")
     except OSError as exc:
         logger.warning(f"self-update: could not write the stand-down file: {exc}")
 
@@ -939,23 +1059,76 @@ def _spawn_detached(argv: list[str]) -> object:
     return started[0]
 
 
-def end_helper(handle: object, *, seconds: float = 5.0) -> None:
-    """Stop a helper this app started and wait for it to go. Never raises.
+def end_helper(handle: object, *, seconds: float = 5.0) -> bool:
+    """Stop a helper this app started and **say whether it really went**. Never raises.
 
     Belt to the stand-down file's braces: the file is what a helper checks, and
     this is what makes sure there is nothing left to check it. Both, because a
     helper that is between two checks when the app gives up would otherwise
     have a window to act in.
+
+    **The answer is not decoration** (round 5, M1). A `wait()` that timed out
+    was swallowed and the app carried on as though the helper were gone — so it
+    released a lock that was still held and told the player to press again into
+    a helper that was still running. Terminate, wait, kill, wait; and if it is
+    STILL there, say so, and the caller does not start another.
     """
     if handle is None:
-        return
+        return True
     try:
         if handle.poll() is not None:  # type: ignore[attr-defined]
-            return
+            return True
         handle.terminate()  # type: ignore[attr-defined]
-        handle.wait(timeout=seconds)  # type: ignore[attr-defined]
+        try:
+            handle.wait(timeout=seconds)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a timeout, and SIGKILL is the answer
+            logger.info("self-update: the helper ignored the polite stop; killing it")
+            handle.kill()  # type: ignore[attr-defined]
+            handle.wait(timeout=seconds)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - tidying must not raise
-        logger.info(f"self-update: could not end the helper: {exc}")
+        logger.warning(f"self-update: could not end the helper: {exc}")
+    try:
+        gone = handle.poll() is not None  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - a handle that cannot answer is not proof
+        return False
+    if not gone:
+        logger.warning("self-update: the helper is still running after a kill")
+    return gone
+
+
+def discard_script(plan: SwapPlan) -> None:
+    """Remove the script an attempt wrote but never got a helper to run. Never raises.
+
+    A helper that starts deletes its own script on every path it can exit by,
+    including its argument refusals; this is for the paths where no helper ever
+    ran — a spawn that raised, a stand-down, a cancel, a refusal — because each
+    of those otherwise left a file in the temp directory for ever.
+    """
+    if not plan.nonce or not str(plan.script):
+        return
+    try:
+        plan.script.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.info(f"self-update: could not remove {plan.script}: {exc}")
+
+
+def release_after(install: Install, plan: SwapPlan) -> None:
+    """Clear up after a helper of ours that is CONFIRMED gone. Never raises.
+
+    In this order, and the order is the point (round 5):
+
+    1. the **lock**, and only if its owner is this attempt's nonce. `/bin/sh`
+       is dash, dash does not run an EXIT trap on SIGTERM, and Windows
+       `TerminateProcess` runs nothing at all — so a helper the app stopped
+       leaves its lock behind, and the next press then gets exit 73 and no
+       stamp for the whole session;
+    2. the **stamp and stand-down**, which are only safe to remove once
+       nothing is left to read them: removing the stand-down of a helper that
+       is still running is telling it to carry on (N2).
+    """
+    layout.release_lock_of(install, plan.nonce)
+    clear_stamp(install)
+    discard_script(plan)
 
 
 def start_helper(plan: SwapPlan, *, spawn: Spawn = _spawn_detached) -> object:

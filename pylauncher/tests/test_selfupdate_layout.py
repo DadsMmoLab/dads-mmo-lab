@@ -33,6 +33,39 @@ def _appimage(root: Path) -> Install:
     return Install(InstallKind.APPIMAGE, target, "", True)
 
 
+def _a_stand_in(exe: Path) -> subprocess.Popen[bytes]:
+    """A live process whose `/proc/<pid>/exe` really is `exe`, or a skip.
+
+    A copy of `sleep` and not of the interpreter: a Python copied out of its
+    prefix cannot find its standard library and exits in milliseconds, which
+    made these a race against a process that was already gone.
+
+    **`sleep` is not always a program** (round 5, N6): on a busybox box it is an
+    applet, and a copy of busybox invoked under another name looks for an
+    applet of THAT name and exits at once. A shell script cannot stand in
+    either — `/proc/<pid>/exe` would be the interpreter, not the copy. So the
+    copy is started and watched: if it is not alive a moment later, this box
+    cannot answer the question and the test says so instead of failing.
+    """
+    import shutil
+
+    sleep = shutil.which("sleep")
+    if sleep is None:
+        pytest.skip("this box has no `sleep` to stand in for the app")
+    shutil.copy2(sleep, exe)
+    child = subprocess.Popen([str(exe), "30"])
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if child.poll() is not None:
+            pytest.skip(f"a copy of {sleep} does not run under another name (busybox?)")
+        if layout.pid_is_this_app(child.pid, exe) is True:
+            return child
+        time.sleep(0.02)
+    child.kill()
+    child.wait(timeout=30)
+    pytest.skip("a copied `sleep` could not be identified through /proc on this box")
+
+
 def _marker(**kw: object) -> layout.Marker:
     base: dict[str, object] = {
         "role": layout.NEW_NAME,
@@ -227,18 +260,11 @@ def test_a_staging_directory_another_copy_of_the_app_made_is_not(tmp_path: Path)
     interpreter under the install's own name — because since round 4 a live pid
     on its own is not enough to refuse.
     """
-    import shutil
-
     install = _folder(tmp_path)
     assert install.target is not None
     exe = install.target / install.executable
     exe.unlink()
-    # A copy of `sleep` and not of the interpreter: a Python copied out of its
-    # prefix cannot find its standard library and exits at once.
-    sleep = shutil.which("sleep")
-    assert sleep is not None, "the precondition: this box has `sleep`"
-    shutil.copy2(sleep, exe)
-    alive = subprocess.Popen([str(exe), "30"])
+    alive = _a_stand_in(exe)
     try:
         layout.write_marker(install, layout.NEW_NAME, _marker(pid=alive.pid))
         deadline = time.monotonic() + 10
@@ -351,13 +377,8 @@ def test_another_process_running_the_same_executable_is_found(tmp_path: Path) ->
     Driven with a real second process running a real copied interpreter, so
     what is asserted is the `/proc/<pid>/exe` read and not a fake.
     """
-    import shutil
-
     exe = tmp_path / "yulon"
-    sleep = shutil.which("sleep")
-    assert sleep is not None, "the precondition: this box has `sleep`"
-    shutil.copy2(sleep, exe)
-    other = subprocess.Popen([str(exe), "30"])
+    other = _a_stand_in(exe)
     try:
         deadline = time.monotonic() + 10
         found: list[int] = []
@@ -544,3 +565,94 @@ def test_the_three_work_dirs_are_the_only_names_discard_will_take() -> None:
     for name in ("_internal", "..", "thesis.docx", layout.MARKER_NAME):
         with pytest.raises(ValueError, match="working director"):
             layout.discard_ours(install, name)
+
+
+# -- the helper lock (round 5) ------------------------------------------------
+
+
+def _held(install: layout.Install, nonce: str, pid: int) -> Path:
+    lock = layout.helper_lock(install)
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text(nonce, encoding="utf-8")
+    (lock / "pid").write_text(str(pid), encoding="utf-8")
+    return lock
+
+
+def test_a_lock_says_who_holds_it_and_whether_they_are_alive(tmp_path: Path) -> None:
+    """**The pid is in the lock so the app can tell a live helper from leavings.**
+
+    A helper killed with SIGKILL, or with `TerminateProcess` which cannot be
+    trapped at all, leaves the directory behind; without a pid the app could
+    only guess whether waiting for it would ever end.
+    """
+    install = _folder(tmp_path)
+    assert layout.lock_holder(install) is None
+
+    _held(install, "abcd0123abcd0123", os.getpid())
+    holder = layout.lock_holder(install)
+    assert holder is not None
+    assert (holder.nonce, holder.pid) == ("abcd0123abcd0123", os.getpid())
+    assert holder.alive() is True
+
+    dead = subprocess.Popen([sys.executable, "-c", "raise SystemExit(0)"])
+    dead.wait(timeout=30)
+    (layout.helper_lock(install) / "pid").write_text(str(dead.pid), encoding="utf-8")
+    holder = layout.lock_holder(install)
+    assert holder is not None and holder.alive() is False
+
+
+def test_a_lock_with_no_owner_file_still_reads_as_held(tmp_path: Path) -> None:
+    """Between `mkdir` and the write there is a moment, and a crash in it is a lock."""
+    install = _folder(tmp_path)
+    layout.helper_lock(install).mkdir(parents=True)
+    holder = layout.lock_holder(install)
+    assert holder is not None and holder.nonce == "" and holder.alive() is False
+
+
+def test_only_the_attempt_that_took_the_lock_may_release_it(tmp_path: Path) -> None:
+    """**The nonce is the whole safety of it** (round 5, M1).
+
+    The app removes a lock after it has ended the helper it started, because
+    dash runs no EXIT trap on SIGTERM and `TerminateProcess` runs nothing at
+    all. A lock somebody else's helper holds is never touched.
+    """
+    install = _folder(tmp_path)
+    _held(install, "abcd0123abcd0123", os.getpid())
+
+    assert layout.release_lock_of(install, "ffff0000ffff0000") is False
+    assert layout.helper_lock(install).is_dir(), "another attempt's lock was removed"
+    assert layout.release_lock_of(install, "") is False
+    assert layout.helper_lock(install).is_dir()
+
+    assert layout.release_lock_of(install, "abcd0123abcd0123") is True
+    assert layout.lock_holder(install) is None
+    # And releasing what is already gone is not an error.
+    assert layout.release_lock_of(install, "abcd0123abcd0123") is True
+
+
+def test_two_spellings_of_one_file_are_one_file(tmp_path: Path) -> None:
+    """**The kernel answers with the spelling the process was started with** (round 5, W2).
+
+    On Windows that is an 8.3 short path, a `subst` drive or a junction; here
+    it is a symlinked directory, which is the same question a `==` between two
+    strings gets wrong — and getting it wrong reads as "that pid is not
+    Yu'lon" and clears the other copy's staging directory.
+    """
+    real = tmp_path / "install"
+    real.mkdir()
+    exe = real / "yulon"
+    exe.write_text("the build", encoding="utf-8")
+    link = tmp_path / "by-another-name"
+    link.symlink_to(real)
+
+    assert link / "yulon" != exe, "the precondition: two spellings"
+    assert layout.same_file(link / "yulon", exe) is True
+    assert layout.same_file(exe, exe) is True
+    assert layout.same_file(real / "nothing-here", exe) is False
+
+
+def test_a_path_that_no_longer_exists_falls_back_to_its_spelling(tmp_path: Path) -> None:
+    """`samefile` needs both files; when one is gone the spellings are all there is."""
+    gone = tmp_path / "gone"
+    assert layout.same_file(gone, gone) is True
+    assert layout.same_file(gone, tmp_path / "other") is False

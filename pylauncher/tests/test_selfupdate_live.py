@@ -161,11 +161,20 @@ def _run(
     return outcome
 
 
-def _swap(plan_argv: list[str], witness: Path) -> None:
-    """Run the REAL helper against a dead pid, and wait for it and the relaunch."""
+def _swap(plan: object, witness: Path) -> None:
+    """Arm the plan as the app does, run the REAL helper, and wait for the relaunch.
+
+    **`arm()` is called here and nowhere else in this file**, because since
+    round 5 that is the only place a helper script is written: `plan_swap`
+    returns a description, and arming it at the moment of use is what stopped
+    every update leaving an orphaned script in the temp directory.
+    """
+    from yulon.selfupdate.swap import arm
+
+    armed = arm(plan)  # type: ignore[arg-type]
     dead = subprocess.Popen(["sleep", "0"])
     dead.wait(timeout=DEADLINE)
-    argv = list(plan_argv)
+    argv = list(armed.argv)
     argv[3] = str(dead.pid)
     env = {**os.environ, "YULON_WITNESS": str(witness)}
     helper = subprocess.Popen(argv, stdin=subprocess.DEVNULL, env=env)
@@ -175,6 +184,7 @@ def _swap(plan_argv: list[str], witness: Path) -> None:
         if helper.poll() is None:  # pragma: no cover - only on a failing run
             helper.kill()
             helper.wait(timeout=DEADLINE)
+    assert not armed.script.exists(), "the helper left its script behind"
 
 
 def _until(condition: Callable[[], bool], what: str) -> None:
@@ -224,7 +234,7 @@ def test_one_update_end_to_end_leaves_the_build_the_players_files_and_nothing_el
         install, layout.DOWNLOAD_NAME
     ).exists(), "the archive was left beside the install"
 
-    _swap(ready.plan.argv, witness)
+    _swap(ready.plan, witness)
     _until(lambda: witness.exists(), "the new build was relaunched")
 
     assert witness.read_text(encoding="utf-8") == "NEW", "the OLD build was relaunched"
@@ -261,13 +271,13 @@ def test_a_second_update_from_there_works(tmp_path: Path) -> None:
     witness = tmp_path / "witness"
 
     first = _run(install, _archive(tmp_path / "a-9.9.9.tar.gz", "MIDDLE"), "9.9.9", scripts)
-    _swap(first.plan.argv, witness)
+    _swap(first.plan, witness)
     _until(lambda: witness.exists(), "the middle build was relaunched")
     assert finish_previous_update(install, running="9.9.9").removed is True
 
     witness.unlink()
     second = _run(install, _archive(tmp_path / "b-9.9.10.tar.gz", "NEWEST"), "9.9.10", scripts)
-    _swap(second.plan.argv, witness)
+    _swap(second.plan, witness)
     _until(lambda: witness.exists(), "the newest build was relaunched")
     assert finish_previous_update(install, running="9.9.10").removed is True
 
@@ -312,7 +322,7 @@ def test_a_build_that_ships_a_third_entry_installs_it(tmp_path: Path) -> None:
     assert set(ready.plan.entries) == {"yulon", "_internal", "LICENSE.txt"}
     assert ready.plan.entries[0] == "yulon", "the executable leaves first and arrives last"
 
-    _swap(ready.plan.argv, witness)
+    _swap(ready.plan, witness)
     _until(lambda: witness.exists(), "the new build was relaunched")
     assert (target / "LICENSE.txt").read_text(encoding="utf-8") == "shipped NEW"
     finish_previous_update(install, running="9.9.9")

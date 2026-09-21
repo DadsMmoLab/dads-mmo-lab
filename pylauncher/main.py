@@ -370,6 +370,13 @@ def wait_for_helper(stamp: Path, *, seconds: float = HELPER_STAMP_SECONDS, holds
     """
     from PySide6.QtWidgets import QApplication
 
+    if not holds:
+        # **`"" in anything` is True** (round 5, N5): an empty nonce made this
+        # answer yes to ANY stamp, including one left by an earlier attempt,
+        # which is the whole failure the nonce exists to stop. A caller with no
+        # nonce has a bug, and a bug here closes the window.
+        raise ValueError("wait_for_helper needs the nonce the helper was given")
+
     def arrived() -> bool:
         # **The nonce, not merely the file** (round 4). Nothing used to remove
         # a stamp, so one left by a helper that had given up made this answer
@@ -386,6 +393,19 @@ def wait_for_helper(stamp: Path, *, seconds: float = HELPER_STAMP_SECONDS, holds
         QApplication.processEvents()
         time.sleep(0.05)
     return arrived()
+
+
+def _has_stopped(handle: Any) -> bool:
+    """Has a helper process really exited? **"I cannot tell" counts as running.**
+
+    Used by the guard that refuses to start a second helper beside one that
+    would not stop (round 5, M1): the safe answer to an unanswerable question
+    there is the one that starts nothing.
+    """
+    try:
+        return bool(handle.poll() is not None)
+    except Exception:  # noqa: BLE001 - a handle that cannot answer is not proof
+        return False
 
 
 def downloads_dir() -> Path:
@@ -420,8 +440,9 @@ def build_window() -> object:
     from yulon.selfupdate.layout import discard_ours, helper_stamp, other_instances
     from yulon.selfupdate.swap import (
         arm,
-        clear_stamp,
+        discard_script,
         end_helper,
+        release_after,
         staging_is_intact,
         stand_down,
         start_helper,
@@ -970,7 +991,11 @@ def build_window() -> object:
             )
             self.apply: Callable[..., object] = apply_update
             self.start_helper: Callable[..., Any] = start_helper
-            self.end_helper: Callable[[Any], None] = end_helper
+            self.end_helper: Callable[[Any], bool] = end_helper
+            self.release_after: Callable[[Install, Any], None] = release_after
+            self.discard_script: Callable[[Any], None] = discard_script
+            self._helper: Any = None
+            """A helper that would not stop. While one is here, no second is started."""
             # `window.close()` answers a bool; nothing here reads it, and
             # typing the seam as taking none and returning one would make a
             # test's `lambda: closed.append(1)` the odd one out.
@@ -1236,7 +1261,9 @@ def build_window() -> object:
 
         def discard_staged(self) -> None:
             """Throw away a staged build nobody is going to install. Never raises."""
-            self._ready = None
+            ready, self._ready = self._ready, None
+            if ready is not None:
+                self.discard_script(ready.plan)
             try:
                 install = self.current_install()
                 for name in work_names_const:
@@ -1300,8 +1327,25 @@ def build_window() -> object:
                 self._restarting = False
 
         def _try_to_restart(self, install: Install, ready: ReadyToRestart) -> None:
-            """The half of `restart_into` that owns a running helper."""
-            clear_stamp(install)
+            """The half of `restart_into` that owns a running helper.
+
+            **Nothing is cleared on the way in** (round 5, N2). `clear_stamp`
+            removes the stand-down file as well as the stamp, and a helper from
+            an earlier attempt that is still running reads that file: clearing
+            it before the helper is confirmed gone is telling it to carry on
+            after all. A stale stamp costs nothing here — it cannot hold this
+            attempt's nonce — so the clearing belongs where the proof is, in
+            `release_after()`, once the helper has really gone.
+            """
+            if self._helper is not None and not _has_stopped(self._helper):
+                logger.warning("self-update: a helper from an earlier press is still running")
+                self._ready = ready
+                update_bar.show_message(
+                    "An installer Yu'lon started is still running, so nothing was changed. "
+                    "Close Yu'lon and open it again, then press Update now.",
+                    keep_details=True,
+                )
+                return
             try:
                 armed = arm(ready.plan)
             except Exception as exc:  # noqa: BLE001 - a refusal, not a crash
@@ -1320,6 +1364,8 @@ def build_window() -> object:
                 # from a queued signal, where an exception is a traceback
                 # nobody sees and an app that has done half an update.
                 logger.warning(f"self-update: the installer would not start: {exc}")
+                # Nothing ran it, so nothing will delete it.
+                self.discard_script(armed)
                 self._ready = ready
                 update_bar.show_message(
                     f"Yu'lon could not start the installer ({exc}), so nothing was changed. "
@@ -1334,8 +1380,25 @@ def build_window() -> object:
                 return
             # **Never close on faith, and never leave one running.**
             stand_down(install, armed)
-            self.end_helper(handle)
             self._ready = attempt
+            if not self.end_helper(handle):
+                # It would not stop. Saying "press Update now again" here is
+                # what sent a second helper in beside a live one; the honest
+                # answer is that this session cannot try again.
+                self._helper = handle
+                logger.warning("self-update: the helper did not report in and would not stop")
+                update_bar.show_message(
+                    "Yu'lon could not start the installer and could not stop it either, so "
+                    "nothing was changed. Close Yu'lon and open it again before trying the "
+                    "update, or install the new version by hand from the release page.",
+                    keep_details=True,
+                )
+                return
+            # **Only now**: the lock this helper took (dash runs no EXIT trap on
+            # a signal, and TerminateProcess runs nothing at all), and then the
+            # stamp and stand-down, which nothing is left to read.
+            self.release_after(install, armed)
+            self._helper = None
             logger.warning("self-update: the helper did not report in; not closing")
             update_bar.show_message(
                 "Yu'lon could not start the installer, so nothing was changed. "
