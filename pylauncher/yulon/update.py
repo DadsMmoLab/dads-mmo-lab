@@ -534,34 +534,78 @@ the dialog's own action button, which carries the vetted URL.
 TRUNCATED_NOTE = "… the rest is on the release page."
 
 
-def _open_fence(text: str) -> str | None:
-    """The fence marker `text` leaves unclosed, or None. CommonMark-ish, not exact.
+def _fence_after(marker: str | None, line: str) -> str | None:
+    """The fence `line` leaves open, given `marker` open before it. CommonMark's rule.
 
-    A closing fence must be the same character and at least as long as the one
-    that opened it, which is why the marker itself is carried rather than a
-    flag.
+    Not "CommonMark-ish": the near-miss version of this cost the reader the
+    notes. ` ```a`b ` is a PARAGRAPH — a backtick fence's info string may not
+    contain a backtick — and calling it a fence made this module append a
+    closer that opened a real one, so the trailer rendered as code and the
+    next release's heading came out at level 0 (fifth cold review,
+    2026-09-21). Four spaces of indent is an indented code block rather than a
+    fence, and a tab is four columns, so neither opens one either.
+
+    A lone `\\r` is not treated as a line break: GitHub sends `\\n` or
+    `\\r\\n`, and `clipped_notes` splits on `\\n` so that what it rejoins is
+    byte for byte what it was given.
+    """
+    body = line.rstrip()
+    indent = len(body) - len(body.lstrip(" "))
+    body = body.lstrip(" ")
+    if indent > 3 or not body or body[0] not in "`~":
+        return marker
+    character = body[0]
+    run = len(body) - len(body.lstrip(character))
+    if run < 3:
+        return marker
+    rest = body[run:]
+    if marker is not None:
+        # A closer: the same character, at least as long, and nothing after it.
+        if character == marker[0] and run >= len(marker) and not rest.strip():
+            return None
+        return marker
+    if character == "`" and "`" in rest:
+        return marker  # an info string with a backtick in it: not a fence at all
+    return character * run
+
+
+def _open_fence(text: str) -> str | None:
+    """The fence marker `text` leaves unclosed, or None.
+
+    The marker itself is carried rather than a flag because a closing fence
+    must be at least as long as the one that opened it.
     """
     marker: str | None = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if marker is None:
-            for fence in ("```", "~~~"):
-                if stripped.startswith(fence):
-                    character = fence[0]
-                    marker = character * (len(stripped) - len(stripped.lstrip(character)))
-                    break
-        elif stripped.startswith(marker) and set(stripped) == {marker[0]}:
-            marker = None
+    for line in text.split("\n"):
+        marker = _fence_after(marker, line)
     return marker
+
+
+def _closer_room(line: str) -> int:
+    """Room to reserve for closing a fence that a CUT of `line` could open.
+
+    Any prefix's opening run is a prefix of the whole line's, so the whole line
+    bounds it — and the bound is needed even when the whole line opens nothing:
+    ` ```a`b ` is a paragraph, but ` ```a `, a cut of it, is a fence.
+    """
+    body = line.rstrip()
+    indent = len(body) - len(body.lstrip(" "))
+    body = body.lstrip(" ")
+    if indent > 3 or not body or body[0] not in "`~":
+        return 0
+    run = len(body) - len(body.lstrip(body[0]))
+    return run + 1 if run >= 3 else 0
 
 
 def _without_a_dangling_heading(text: str) -> str:
     """`text` with any trailing heading that has nothing under it removed.
 
     Ending on `## v1.163.0-Public` and then the trailer says a release is
-    coming and then does not deliver it (fourth cold review, 2026-09-21).
+    coming and then does not deliver it (fourth cold review, 2026-09-21). A
+    heading is only dangling when nothing follows it, so a heading with a cut
+    line under it stays.
     """
-    lines = text.splitlines()
+    lines = text.split("\n")
     while lines and (not lines[-1].strip() or lines[-1].lstrip().startswith("#")):
         lines.pop()
     return "\n".join(lines)
@@ -590,28 +634,61 @@ def clipped_notes(text: str, limit: int = MAX_NOTES_CHARS) -> str:
       heading.
     * **It never ends on a heading** with nothing under it.
 
-    A single line longer than the cap is cut hard: there is no boundary to
-    prefer and the bound is the point.
+    **One pass, and it keeps everything that fits.** The version that replaced
+    the first one guessed a budget, measured the overflow and retried four
+    times — and when every reduced budget found the same newline, the same
+    overflow repeated and it gave up and returned the trailer alone. Not a
+    corner: 2,000 lines of one width did it for 11 of the widths between 60 and
+    130, and 400 releases of 12 bullets left the reader told an update existed
+    and shown not one word of it (fifth cold review, 2026-09-21). So there is
+    no budget, no retry and no giving up while content exists: the tail and the
+    worst-case closing fence are both known before a line is kept, and the walk
+    stops at the first line that will not fit inside what is left.
+
+    A line too long to fit wherever it fell is cut into what is left rather
+    than dropped — whether it is the only line there is, or the one under a
+    heading that did fit. A line that merely ran out of room is dropped whole,
+    so an ordinary body still ends on a whole line.
     """
     if len(text) <= limit:
         return text
-    budget = limit
-    for _ in range(4):
-        head = text[: max(0, budget)]
-        cut = head.rfind("\n")
-        if cut > 0:
-            head = head[:cut]
-        head = _without_a_dangling_heading(head.rstrip())
-        marker = _open_fence(head)
-        tail = f"\n{marker}" if marker else ""
-        tail += f"\n\n{TRUNCATED_NOTE}"
-        if len(head) + len(tail) <= limit:
-            return head + tail
-        budget -= len(head) + len(tail) - limit
-        if budget <= 0:
+
+    tail = f"\n\n{TRUNCATED_NOTE}"
+    lines = text.split("\n")
+    kept: list[str] = []
+    used = 0
+    fence: str | None = None
+    stopped = len(lines)
+    for index, line in enumerate(lines):
+        after = _fence_after(fence, line)
+        cost = len(line) + (1 if kept else 0)
+        if used + cost + (len(after) + 1 if after else 0) + len(tail) > limit:
+            stopped = index
             break
-    # Nothing of the notes fits beside the trailer; say only the true part.
-    return TRUNCATED_NOTE[:limit]
+        kept.append(line)
+        used += cost
+        fence = after
+
+    # A line that could not fit WHEREVER it fell still gives what it can:
+    # there is no boundary to prefer inside it and the bound is the point.
+    # Without this, a body that is one enormous line comes back empty, and so
+    # does `Intro` plus 100,000 characters — the cut fell on the newline after
+    # `Intro` and left 16,000 characters of room unused. A line that merely ran
+    # out of room here is still dropped whole, because the last thing shown
+    # being a whole line is what this cap promises.
+    partial = ""
+    if stopped < len(lines):
+        reserve = len(fence) + 1 if fence else _closer_room(lines[stopped])
+        if len(lines[stopped]) + reserve + len(tail) > limit:
+            room = limit - len(tail) - used - (1 if kept else 0) - reserve
+            partial = lines[stopped][:room] if room > 0 else ""
+
+    body = _without_a_dangling_heading("\n".join([*kept, partial] if partial else kept))
+    if not body.strip():
+        # Not one line fits beside the trailer; say only the part that is true.
+        return TRUNCATED_NOTE[:limit]
+    closer = _open_fence(body)
+    return body + (f"\n{closer}" if closer else "") + tail
 
 
 def _assets(release: dict[str, object]) -> tuple[ReleaseAsset, ...]:

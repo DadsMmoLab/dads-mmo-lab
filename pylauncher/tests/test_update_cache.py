@@ -384,9 +384,12 @@ def a_server_that(shape: str, *, seconds: float = 8.0, gap: float = 0.05) -> Ite
         stop.set()
         listener.close()
         thread.join(timeout=HANG_BOUND)
-        assert not thread.is_alive(), "the trickling server thread outlived the test"
-        if trouble:
-            raise AssertionError(f"the test server failed: {trouble[0]!r}") from trouble[0]
+    # Outside the `finally`, or a tired server masks the failure the test came
+    # to report: an exception thrown in at the `yield` never reaches here
+    # (fifth cold review, 2026-09-21).
+    assert not thread.is_alive(), "the trickling server thread outlived the test"
+    if trouble:
+        raise AssertionError(f"the test server failed: {trouble[0]!r}") from trouble[0]
 
 
 @pytest.mark.parametrize("shape", ["body", "chunked", "headers"])
@@ -454,8 +457,9 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
         stop.set()
         listener.close()
         thread.join(timeout=HANG_BOUND)
-        assert not thread.is_alive(), "the test server thread outlived the test"
 
+    # After the `finally`, so this cannot mask the assertion that failed first.
+    assert not thread.is_alive(), "the test server thread outlived the test"
     assert not trouble, f"the test server failed: {trouble[0]!r}"
     assert answer.status == 200
     assert answer.text == FEED
@@ -524,8 +528,9 @@ def test_many_fetches_leave_no_watchdogs_behind() -> None:
         stop.set()
         listener.close()
         thread.join(timeout=HANG_BOUND)
-        assert not thread.is_alive(), "the test server thread outlived the test"
 
+    # After the `finally`, so this cannot mask the assertion that failed first.
+    assert not thread.is_alive(), "the test server thread outlived the test"
     assert _live_watchdogs() == [], "watchdog timers piled up across fetches"
 
 

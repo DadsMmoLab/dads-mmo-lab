@@ -5,6 +5,7 @@ from __future__ import annotations
 import email.message
 import importlib.util
 import json
+import random
 import urllib.error
 from fractions import Fraction
 from pathlib import Path
@@ -19,6 +20,7 @@ from yulon.update import (
     RELEASES_PAGE,
     RELEASES_REPO,
     TRUNCATED_NOTE,
+    _open_fence,
     check_for_update,
     clipped_notes,
     evaluate_feed,
@@ -460,6 +462,252 @@ def test_seven_hundred_releases_come_out_capped_once(qapp: object) -> None:
     assert len(notes) <= MAX_NOTES_CHARS
     assert notes.count(TRUNCATED_NOTE) == 1, "the notes were capped twice"
     assert clipped_notes(notes, MAX_NOTES_CHARS) == notes, "the dialog would cut it again"
+
+
+TAIL = f"\n\n{TRUNCATED_NOTE}"
+"""What `clipped_notes` puts after the last line it kept."""
+
+
+def _widest_fence(text: str) -> int:
+    """The most a closing fence for `text` could ever cost, newline included."""
+    widest = 0
+    for line in text.split("\n"):
+        stripped = line.lstrip(" ")
+        if stripped[:1] in ("`", "~"):
+            widest = max(widest, len(stripped) - len(stripped.lstrip(stripped[0])))
+    return widest + 1 if widest else 0
+
+
+def _survives(text: str, limit: int) -> None:
+    """`clipped_notes` kept everything that fits: one line's worth of slack, no more.
+
+    The floor is the loop's own invariant read backwards. It stops at the first
+    line that does not fit, so what it returns is short of the limit by at most
+    that line, the trailer, and a closing fence.
+    """
+    result = clipped_notes(text, limit)
+    floor = limit - len(TAIL) - _widest_fence(text) - max(len(line) for line in text.split("\n"))
+
+    assert len(result) <= limit, f"{len(result)} characters against a {limit} cap"
+    assert len(result) > floor, (
+        f"only {len(result)} of {limit} characters used: "
+        f"{result[:60]!r} — content that fits was thrown away"
+    )
+
+
+def test_a_body_of_lines_one_width_is_not_thrown_away_whole() -> None:
+    """Measured on the round-4 cap: every note gone, the newest release included.
+
+    The budget loop retried four times, each round subtracting the overflow —
+    but every reduced budget found the SAME last newline, so the same overflow
+    repeated and the fallback returned the trailer alone. It needs no unusual
+    input: 2,000 lines of one width, and 68 is one of the widths that does it
+    (fifth cold review, 2026-09-21).
+    """
+    text = "\n".join(["a" * 68] * 2000)
+
+    assert clipped_notes(text, MAX_BODY_CHARS) != TRUNCATED_NOTE, "the whole body was dropped"
+    _survives(text, MAX_BODY_CHARS)
+
+
+@pytest.mark.parametrize("width", range(60, 130))
+def test_no_line_width_loses_the_body(width: int) -> None:
+    """68 was found by sweeping; the sweep is the test, so the next one cannot hide."""
+    _survives("\n".join(["a" * width] * 2000), MAX_BODY_CHARS)
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+@pytest.mark.parametrize("limit", [MAX_BODY_CHARS, MAX_NOTES_CHARS])
+def test_random_bodies_keep_what_fits(fenced: bool, limit: int) -> None:
+    """Seeded, so a failure reproduces. Measured before the fix: 208/2000 lost everything."""
+    rnd = random.Random(20260921)
+    for _ in range(200):
+        lines = ["- " + "w" * rnd.randint(20, 110) for _ in range(1500)]
+        text = ("```\n" if fenced else "") + "\n".join(lines)
+        _survives(text, limit)
+
+
+def test_the_newest_release_is_never_the_one_that_is_dropped() -> None:
+    """Whatever else is cut, the release the banner is about has to be in there.
+
+    Four hundred releases of twelve bullets each: the round-4 cap answered with
+    the trailer and nothing else, so the reader was told an update existed and
+    shown not one word about it.
+    """
+    for width in (63, 64, 65, 100):
+        body = "### Fixed\n" + "\n".join("- " + "w" * width for _ in range(12))
+        feed = json.dumps([release(f"v1.{n}.0-Public", body=body) for n in range(400, 0, -1)])
+
+        notes = evaluate_feed(feed, "1.0.0-Public").notes_markdown
+
+        assert "v1.400.0-Public" in notes, f"the newest release's heading is gone (width {width})"
+        assert "### Fixed" in notes, f"the newest release's notes are gone (width {width})"
+        assert "- " + "w" * width in notes, f"not one bullet survived (width {width})"
+
+
+def test_seven_hundred_releases_still_show_the_newest() -> None:
+    """The count that first overflowed the cap, now asked what it kept."""
+    feed = json.dumps([release(f"v1.{n}.0-Public", body="x" * 100) for n in range(700, 0, -1)])
+
+    notes = evaluate_feed(feed, "1.0.0-Public").notes_markdown
+
+    assert notes.startswith("## v1.700.0-Public")
+    assert "x" * 100 in notes
+
+
+def test_a_short_line_before_a_giant_one_keeps_both() -> None:
+    """`Intro` then 100,000 characters came back as `Intro` and the trailer.
+
+    The cut fell on the last newline before the limit, which was the one after
+    `Intro`, and the enormous line was dropped whole — 16,000 characters of
+    room left unused (fifth cold review, finding 3).
+    """
+    capped = clipped_notes("Intro\n" + "x" * 100000, MAX_BODY_CHARS)
+
+    assert capped.startswith("Intro\n")
+    assert len(capped) > MAX_BODY_CHARS - 100, f"only {len(capped)} of {MAX_BODY_CHARS} used"
+    assert capped.endswith(TRUNCATED_NOTE)
+
+
+def test_a_heading_keeps_the_giant_line_under_it() -> None:
+    """`## v2` then 100,000 characters lost the heading as well: nothing was left under it.
+
+    A heading is only dangling when nothing follows. Cut the long line into the
+    room that is left and the heading has something under it again.
+    """
+    capped = clipped_notes("## v2\n\n" + "x" * 100000, MAX_NOTES_CHARS)
+
+    assert capped.startswith("## v2\n\n"), f"the heading was dropped: {capped[:40]!r}"
+    assert len(capped) > MAX_NOTES_CHARS - 100, f"only {len(capped)} of {MAX_NOTES_CHARS} used"
+
+
+def test_one_giant_line_on_its_own_is_still_cut_to_the_limit() -> None:
+    """No newline anywhere: there is no boundary to prefer and the bound is the point."""
+    _survives("x" * 100000, MAX_BODY_CHARS)
+
+
+@pytest.mark.parametrize(
+    ("line", "opens"),
+    [
+        ("```", "```"),
+        ("~~~", "~~~"),
+        ("````", "````"),
+        ("~~~~~", "~~~~~"),
+        ("```python", "```"),
+        ("~~~ sh", "~~~"),
+        ("   ```", "```"),
+        ("``` ", "```"),
+        ("~~~ a`b", "~~~"),
+        # CommonMark: a BACKTICK fence's info string may not hold a backtick,
+        # so md4c reads this as a paragraph. The round-4 helper called it a
+        # fence, appended a closer, and that closer opened a REAL fence: the
+        # trailer rendered as code and the next release's heading vanished —
+        # worse than not closing anything (fifth cold review, finding 2).
+        ("```a`b", None),
+        ("``", None),
+        ("    ```", None),  # four spaces is an indented code block, not a fence
+        ("\t```", None),
+        ("> ```", None),
+        ("- ```", None),
+        ("text", None),
+    ],
+)
+def test_what_opens_a_fence_is_commonmarks_rule_not_a_near_miss(
+    line: str, opens: str | None
+) -> None:
+    assert _open_fence(line) == opens
+
+
+@pytest.mark.parametrize(
+    ("closer", "closes"),
+    [
+        ("```", True),
+        ("````", True),  # a closer may be longer than its opener
+        ("   ```", True),
+        ("``` ", True),
+        ("``", False),
+        ("    ```", False),
+        ("~~~", False),  # a different character closes nothing
+        ("``` js", False),  # a closer carries no info string
+        ("```a", False),
+    ],
+)
+def test_what_closes_a_fence_is_commonmarks_rule_too(closer: str, closes: bool) -> None:
+    assert (_open_fence(f"```\ncode\n{closer}") is None) is closes
+
+
+FENCE_OPENERS = [
+    "```",
+    "~~~",
+    "````",
+    "~~~~~",
+    "```python",
+    "   ```",
+    "    ```",
+    "```a`b",
+    "~~~ a`b",
+    "> ```",
+    "- ```",
+    "``` ",
+    "\t```",
+]
+
+
+@pytest.mark.parametrize("opener", FENCE_OPENERS)
+def test_a_cut_fence_never_swallows_what_comes_after_it(opener: str, qapp: object) -> None:
+    """The only answer that counts is the rendered one, so this renders it.
+
+    **The newest release's body must be past `MAX_BODY_CHARS`**, or this test
+    proves nothing. The first version of it cut 50–900 code lines, which never
+    reaches the per-release cap: the only cut was the one at the very end of
+    the notes, where a closer has nothing left to swallow. It stayed green with
+    ` ```a`b ` counted as a fence — the defect it was written for. What breaks
+    is a closer in the MIDDLE, with an older release's heading after it.
+
+    Seeded random sizes rather than one: the round-4 bug needed a cut at a
+    particular place, and a single fixed input is the shape of test that let it
+    through.
+    """
+    from yulon.ui.widgets.update_dialog import _NotesView
+
+    rnd = random.Random(hash(opener) & 0xFFFF)
+    view = _NotesView()
+    try:
+        for _ in range(4):
+            lines = rnd.randint(1500, 3500)
+            body = opener + "\n" + "\n".join(f"code line {n}" for n in range(lines))
+            assert len(body) > MAX_BODY_CHARS, "the per-release cap would not fire"
+            feed = json.dumps(
+                [
+                    release("v1.2.0-Public", body=body),
+                    release("v1.1.0-Public", body="### Fixed\n- older."),
+                ]
+            )
+
+            notes = evaluate_feed(feed, "1.0.0-Public").notes_markdown
+
+            assert TRUNCATED_NOTE in notes, "the newest release was not cut at all"
+            assert "v1.1.0-Public" in notes, "the older release did not survive the cap"
+            view.set_release_body(notes)
+            blocks = _blocks(view.document())
+            trailer = [b for b in blocks if TRUNCATED_NOTE in b.text()]
+
+            assert trailer, f"{opener!r}: the trailer disappeared"
+            assert not trailer[0].charFormat().fontFixedPitch(), (
+                f"{opener!r}: the trailer rendered as code — the fence was left open, "
+                "or a closer was appended that opened one"
+            )
+            assert trailer[0].blockFormat().headingLevel() == 0
+            headings = {
+                b.text(): b.blockFormat().headingLevel()
+                for b in blocks
+                if b.blockFormat().headingLevel() > 0
+            }
+            assert (
+                headings.get("v1.1.0-Public") == 2
+            ), f"{opener!r}: the older release's heading rendered as code or text"
+    finally:
+        view.deleteLater()
 
 
 def test_a_feed_with_no_public_release_says_so() -> None:
