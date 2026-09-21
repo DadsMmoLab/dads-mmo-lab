@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 from yulon import __version__
@@ -116,17 +117,49 @@ HttpFetch = Callable[[str, str | None], HttpAnswer]
 """`(url, if_none_match) -> HttpAnswer`. The seam `check_with_cache` is tested through."""
 
 
-def parse_version(text: str) -> tuple[int, int, int] | None:
-    """`v1.2.3` / `1.2.3` / `1.2.3-beta` → (1, 2, 3); anything else → None."""
+def version_key(text: str) -> tuple[int, int, Fraction] | None:
+    """What orders two Yu'lon versions. `v1.2.3` / `1.2.3` / `1.2.3-beta`; else None.
+
+    **Major and minor are whole numbers; the LAST number is a decimal fraction
+    of its digits** (owner, 2026-09-21). `65` is 65/100 and `7` is 7/10, so
+    `.6 < .65 < .66 < .69 < .7`, and `.7 == .70` — equal, therefore not newer.
+
+    This is not a house style, it is what this project's tags MEAN, and the
+    measurement is the tag dates: `v0.8.7-Public` was cut on **2026-09-19**,
+    after `v0.8.65-Public` on **2026-09-13**. The whole history reads the same
+    way —
+
+        0.6.5 → 0.6.51 → 0.6.52 → 0.6.53 → 0.6.55 → 0.6.57 → 0.6.58 →
+        0.6.59 → 0.8.0 → 0.8.4 → 0.8.5 → 0.8.6 → 0.8.65 → 0.8.7
+
+    — and the fork's `-fixtest` tags .66 .67 .68 .69 sit between .65 and .7.
+    Compared as integers 65 > 7, so nobody running 0.8.65 or 0.8.66 would ever
+    be offered 0.8.7; and picking the newest BY VERSION made that worse than
+    the first-in-feed rule it replaced, because it actively named v0.8.65 the
+    newest release in a feed that had v0.8.7 in it.
+
+    `Fraction`, never a float: `0.65` and `0.7` are both inexact in binary, and
+    an ordering that decides releases may not be decided by a rounding.
+
+    **The known cost, stated rather than worked around:** `0.8.10` orders
+    BEFORE `0.8.9`, because `.10` is a tenth and `.9` is nine tenths. This
+    scheme has never produced a tag like that, and every rule that would
+    special-case it also changes the meaning of the tags that do exist.
+
+    There is deliberately no second ordering in this module. The triple-valued
+    `parse_version()` this replaces is gone rather than kept beside it: two
+    orderings that disagree about `0.8.7` is the defect, not the fix.
+    """
     match = _VERSION.match(text.strip())
     if not match:
         return None
-    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+    last = match.group(3)
+    return int(match.group(1)), int(match.group(2)), Fraction(int(last), 10 ** len(last))
 
 
 def is_newer(latest: str, current: str) -> bool:
-    """True if `latest` parses and is strictly greater than `current`."""
-    a, b = parse_version(latest), parse_version(current)
+    """True if `latest` parses and is strictly greater than `current`. See `version_key`."""
+    a, b = version_key(latest), version_key(current)
     return a is not None and b is not None and a > b
 
 
@@ -186,7 +219,11 @@ def is_public_tag(tag: str) -> bool:
     return PUBLIC_TAG.match(tag.strip()) is not None
 
 
-def _public_releases(feed: object) -> list[tuple[tuple[int, int, int], dict[str, object]]]:
+VersionKey = tuple[int, int, Fraction]
+"""What `version_key()` answers, and the only thing this module sorts releases by."""
+
+
+def _public_releases(feed: object) -> list[tuple[VersionKey, dict[str, object]]]:
     """Published `-Public` releases, highest version first.
 
     `/releases` and not `/releases/latest`: that endpoint means "latest
@@ -197,16 +234,18 @@ def _public_releases(feed: object) -> list[tuple[tuple[int, int, int], dict[str,
 
     Sorted by version rather than taken in feed order. `/releases` is
     newest-first *by creation date*, which is not the same thing: a re-cut of an
-    old tag arrives at the top, and so does every test build.
+    old tag arrives at the top, and so does every test build. Sorted by
+    `version_key`, so `v0.8.7` outranks `v0.8.65` — which is what their dates
+    say and what an integer comparison got backwards.
     """
     if not isinstance(feed, list):
         return []
-    found: list[tuple[tuple[int, int, int], dict[str, object]]] = []
+    found: list[tuple[VersionKey, dict[str, object]]] = []
     for entry in feed:
         if not isinstance(entry, dict) or entry.get("draft"):
             continue
         tag = str(entry.get("tag_name") or "")
-        version = parse_version(tag)
+        version = version_key(tag)
         if is_public_tag(tag) and version is not None:
             found.append((version, entry))
     found.sort(key=lambda pair: pair[0], reverse=True)
@@ -260,7 +299,7 @@ def evaluate_feed(feed_text: str, current: str) -> UpdateCheck:
     if not is_newer(tag, current):
         logger.info(f"update check: current={current} latest={tag} newer=False")
         return UpdateCheck(current, tag, False, url)
-    mine = parse_version(current)
+    mine = version_key(current)
     sections = [
         f"## {entry.get('tag_name')}\n\n{str(entry.get('body') or '').strip()}\n"
         for version, entry in releases

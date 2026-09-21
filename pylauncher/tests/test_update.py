@@ -5,6 +5,7 @@ from __future__ import annotations
 import email.message
 import json
 import urllib.error
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -18,9 +19,33 @@ from yulon.update import (
     evaluate_feed,
     is_newer,
     is_public_tag,
-    parse_version,
     safe_release_url,
+    version_key,
 )
+
+THE_REAL_TAG_HISTORY = [
+    "v0.6.5",
+    "v0.6.51",
+    "v0.6.52",
+    "v0.6.53",
+    "v0.6.55",
+    "v0.6.57",
+    "v0.6.58",
+    "v0.6.59",
+    "v0.8.0",
+    "v0.8.4",
+    "v0.8.5",
+    "v0.8.6",
+    "v0.8.65",
+    "v0.8.7",
+]
+"""Every version this project has tagged, oldest first, as the owner listed it.
+
+The fixture is the real history and not a made-up one because the ordering rule
+is a fact about THIS project's tags: `v0.8.7-Public` was cut on 2026-09-19,
+after `v0.8.65-Public` on 2026-09-13, and the fork's `-fixtest` tags .66 .67
+.68 .69 sit between them.
+"""
 
 
 def fake_github(url: str) -> str:
@@ -37,21 +62,85 @@ def fake_github(url: str) -> str:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("v1.2.3", (1, 2, 3)),
-        ("1.2.3", (1, 2, 3)),
-        ("v0.1.4-rc1", (0, 1, 4)),
+        ("v1.2.3", (1, 2, Fraction(3, 10))),
+        ("1.2.3", (1, 2, Fraction(3, 10))),
+        ("v0.1.4-rc1", (0, 1, Fraction(4, 10))),
+        ("v0.8.65", (0, 8, Fraction(65, 100))),
+        ("v0.8.7", (0, 8, Fraction(7, 10))),
+        ("v0.8.70", (0, 8, Fraction(7, 10))),
+        ("v0.8.0", (0, 8, Fraction(0, 1))),
         ("nightly", None),
         ("", None),
     ],
 )
-def test_parse_version(text: str, expected: tuple[int, int, int] | None) -> None:
-    assert parse_version(text) == expected
+def test_version_key_reads_the_last_number_as_a_decimal(
+    text: str, expected: tuple[int, int, Fraction] | None
+) -> None:
+    """`65` is .65 and `7` is .7, so `.7` is the newer of the two."""
+    assert version_key(text) == expected
+
+
+def test_the_key_is_exact_arithmetic_and_not_a_float() -> None:
+    """Floats would make `.1 + .2` style comparisons answer by luck rather than by rule."""
+    key = version_key("v0.8.65")
+    assert key is not None
+    assert isinstance(key[2], Fraction)
+
+
+def test_the_real_tag_history_sorts_into_the_order_it_was_cut_in() -> None:
+    """The whole point, against every tag this project has actually published."""
+    keys = [version_key(tag) for tag in THE_REAL_TAG_HISTORY]
+    assert None not in keys
+
+    assert sorted(THE_REAL_TAG_HISTORY, key=lambda tag: version_key(tag) or ()) == (
+        THE_REAL_TAG_HISTORY
+    )
+
+
+def test_the_fork_test_tags_sit_between_the_two_public_releases_they_were_cut_between() -> None:
+    """.66 .67 .68 .69 are after 0.8.65 and before 0.8.7, which is what the dates say."""
+    between = [version_key(f"v0.8.{n}") for n in (66, 67, 68, 69)]
+    low, high = version_key("v0.8.65"), version_key("v0.8.7")
+
+    assert low is not None and high is not None
+    assert all(key is not None and low < key < high for key in between)
 
 
 def test_is_newer_compares_numerically_not_lexically() -> None:
     assert is_newer("v0.10.0", "0.9.9") is True
     assert is_newer("v0.1.4", "0.1.4") is False
     assert is_newer("garbage", "0.1.4") is False
+
+
+def test_a_shorter_last_number_can_still_be_newer() -> None:
+    """The defect: as integers 65 > 7, so 0.8.7 was never offered to anybody on 0.8.65."""
+    assert is_newer("v0.8.7", "0.8.65") is True
+    assert is_newer("v0.8.65", "0.8.7") is False
+
+
+def test_trailing_zeroes_do_not_make_a_version_newer() -> None:
+    """`.7` and `.70` are the same number, so neither is an update to the other."""
+    assert is_newer("v0.8.70", "0.8.7") is False
+    assert is_newer("v0.8.7", "0.8.70") is False
+    assert version_key("v0.8.70") == version_key("v0.8.7")
+
+
+def test_the_minor_number_is_still_a_whole_number() -> None:
+    """Only the LAST number is a fraction; 0.9.0 outranks every 0.8.x there can be."""
+    assert is_newer("v0.9.0", "0.8.99") is True
+    assert is_newer("v0.8.99", "0.9.0") is False
+
+
+def test_the_known_cost_of_the_scheme_is_recorded_rather_than_worked_around() -> None:
+    """`0.8.10` orders BEFORE `0.8.9`, because .10 is a tenth and .9 is nine tenths.
+
+    Stated, not fixed (owner, 2026-09-21): the scheme has never produced a tag
+    like that, and every rule that would special-case it also changes the
+    meaning of the tags that do exist. A test so the next reader finds the
+    decision instead of the surprise.
+    """
+    assert is_newer("v0.8.10", "0.8.9") is False
+    assert is_newer("v0.8.9", "0.8.10") is True
 
 
 @pytest.mark.parametrize(
@@ -118,6 +207,45 @@ def test_up_to_date_is_not_an_error() -> None:
 def test_a_test_build_newer_than_every_public_release_is_offered_nothing() -> None:
     """A developer running `0.8.71-fixtest` is not told to downgrade to 0.8.70."""
     assert not evaluate_feed(FEED, "0.8.71-fixtest").available
+
+
+# ----------------------------------------- the real feed, ordered the real way
+
+REAL_ORDER_FEED = json.dumps(
+    [
+        release("v0.8.7-Public", body="### New\n- Seven."),
+        release("v0.8.65-Public", body="### New\n- Sixty-five."),
+    ]
+)
+"""The two releases the ordering defect was measured on, newest BY DATE first."""
+
+
+def test_the_release_cut_after_the_longer_numbered_one_is_the_one_offered() -> None:
+    """Upstream cut v0.8.7-Public (2026-09-19) after v0.8.65-Public (2026-09-13).
+
+    Compared as integers, 65 > 7, so nobody on 0.8.65 or 0.8.66 was ever
+    offered it — and picking the newest BY VERSION made that worse than the old
+    first-in-feed rule, which would at least have found the top entry.
+    """
+    result = evaluate_feed(REAL_ORDER_FEED, "0.8.66-Public")
+
+    assert result.latest == "v0.8.7-Public"
+    assert result.available
+
+
+def test_the_version_that_was_offered_is_not_offered_again() -> None:
+    assert not evaluate_feed(REAL_ORDER_FEED, "0.8.7-Public").available
+
+
+def test_the_notes_hold_only_what_is_newer_under_the_decimal_rule() -> None:
+    """From 0.8.65 the only newer public release is 0.8.7, and .65 itself is not in it."""
+    notes = evaluate_feed(REAL_ORDER_FEED, "0.8.65-Public").notes_markdown
+
+    assert "Seven." in notes
+    assert "Sixty-five." not in notes
+    # One `## <tag>` section. Counted on whole lines: `### New` inside a body
+    # contains `## ` too, and the first spelling of this test read 2.
+    assert [line for line in notes.splitlines() if line.startswith("## ")] == ["## v0.8.7-Public"]
 
 
 def test_a_feed_with_no_public_release_says_so() -> None:
