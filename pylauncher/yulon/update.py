@@ -21,6 +21,7 @@ import json
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -214,7 +215,34 @@ def _urllib_get_text(url: str) -> str:
         return str(resp.read().decode("utf-8", errors="replace"))
 
 
-def _urllib_fetch(url: str, if_none_match: str | None) -> HttpAnswer:
+TOTAL_FETCH_SECONDS = 15.0
+"""A wall-clock bound on the WHOLE fetch, which `timeout=` is not.
+
+`urlopen(timeout=…)` is per socket operation: a server that sends a byte every
+four seconds never trips it, and the launch check's thread lives for as long as
+it keeps sending. While that thread is alive the header button answers "Yu'lon
+is already checking for updates" — for ever (second cold review, 2026-09-21).
+Fifteen seconds is three times the per-read bound and far past any real answer.
+"""
+
+MAX_FEED_BYTES = 4 * 1024 * 1024
+"""How much body is read before the answer is refused as not-a-feed.
+
+A hundred releases with their notes is a few hundred kB. Four megabytes is an
+order of magnitude past that and still small enough to hold twice over while
+`json.loads` runs.
+"""
+
+_READ_CHUNK = 64 * 1024
+
+
+def _urllib_fetch(
+    url: str,
+    if_none_match: str | None,
+    *,
+    now: Callable[[], float] = time.monotonic,
+    deadline: float = TOTAL_FETCH_SECONDS,
+) -> HttpAnswer:
     """The same GET with `If-None-Match`, over the same verified context.
 
     urllib RAISES on a 304, and here that is an answer rather than a failure: a
@@ -222,6 +250,11 @@ def _urllib_fetch(url: str, if_none_match: str | None) -> HttpAnswer:
     unauthenticated limit, so it is the cheapest thing this app can ask for.
     Every other status keeps raising, so a 403 (rate limited) or a 500 still
     reaches the caller's `except` and is reported as the failure it is.
+
+    The body is read in chunks against `TOTAL_FETCH_SECONDS` and
+    `MAX_FEED_BYTES` rather than in one `read()`, because neither a trickle nor
+    a flood is a thing `timeout=` can see. `now` is injected so a test can say
+    what a slow server costs without waiting for it.
     """
     headers = {"User-Agent": f"yulon/{__version__}", "Accept": "application/vnd.github+json"}
     if if_none_match:
@@ -233,13 +266,30 @@ def _urllib_fetch(url: str, if_none_match: str | None) -> HttpAnswer:
         ) as resp:
             return HttpAnswer(
                 int(resp.status),
-                str(resp.read().decode("utf-8", errors="replace")),
+                _read_bounded(resp, now, now() + deadline),
                 resp.headers.get("ETag"),
             )
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
             return HttpAnswer(304, "", exc.headers.get("ETag") if exc.headers else if_none_match)
         raise
+
+
+def _read_bounded(resp: object, now: Callable[[], float], stop_at: float) -> str:
+    """Read a response body under a wall clock and a size cap. See `_urllib_fetch`."""
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = resp.read(_READ_CHUNK)  # type: ignore[attr-defined]
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_FEED_BYTES:
+            raise ValueError(f"the releases feed is too large: over {MAX_FEED_BYTES} bytes")
+        if now() >= stop_at:
+            raise TimeoutError(f"the releases feed was still arriving after {TOTAL_FETCH_SECONDS}s")
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def is_public_tag(tag: str) -> bool:
@@ -365,6 +415,7 @@ def check_for_update(
         return _log_check(evaluate_feed(http_get(api_url), current), ASKED_GITHUB)
     except Exception as exc:  # boundary: "never raises" is the whole contract
         logger.info(f"update check skipped: {type(exc).__name__}: {exc}")
+        logger.debug("the update check's exception", exc_info=exc)
         return UpdateCheck(current, None, False, RELEASES_PAGE, error=str(exc))
 
 
@@ -383,12 +434,49 @@ def safe_release_url(url: str, *, page: str = RELEASES_PAGE) -> str:
     that a gate build which points `api_url` at the fork points this at the
     fork too. Exact match, or the prefix followed by `/` — otherwise
     `…/dads-mmo-lab-evil/x` would pass on a plain `startswith`.
+
+    **A prefix is not a destination**, which is the second cold review's point:
+    `…/dads-mmo-lab/../../other` starts with the right string and a browser
+    normalises it to `github.com/other` before it asks for anything. So the URL
+    is parsed and judged, not just matched — https, host exactly the one the
+    page names, no userinfo, no port — and any of `/../`, `/./`, a `%2e` in any
+    case, a backslash or a whitespace/control character is refused outright
+    rather than normalised by this app, because normalising is how the two
+    readings of a URL come apart in the first place.
     """
     repo = page[: -len("/releases")] if page.endswith("/releases") else page
-    if url == repo or url.startswith(repo + "/"):
+    if _can_only_go_where_it_says(url, urllib.parse.urlsplit(repo).hostname) and (
+        url == repo or url.startswith(repo + "/")
+    ):
         return url
     logger.info(f"update: refusing to open {url!r}, which is not under {repo!r}")
     return page
+
+
+_SUSPICIOUS = ("/../", "/./", "%2e", "%2E", "\\")
+"""Spellings that make a URL mean one thing here and another to a browser."""
+
+
+def _can_only_go_where_it_says(url: str, host: str | None) -> bool:
+    """Is `url` a plain https URL on exactly `host`, with nothing that re-points it?"""
+    if not url or host is None:
+        return False
+    if any(mark in url for mark in _SUSPICIOUS):
+        return False
+    if any(character.isspace() or ord(character) < 0x20 for character in url):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme != "https" or parts.username or parts.password:
+        return False
+    try:
+        if parts.port is not None:
+            return False
+    except ValueError:  # a port that is not a number at all
+        return False
+    return parts.hostname == host
 
 
 ASKED_GITHUB = "asked GitHub"
@@ -488,6 +576,7 @@ def check_with_cache(
         # "Checking for updates…" for the rest of the session. "Never raises"
         # is this function's whole contract with `_UpdateWorker`.
         logger.info(f"update check failed: {type(exc).__name__}: {exc}")
+        logger.debug("the update check's exception", exc_info=exc)
         if cached is not None:
             # Offline with a cache still knows about the update; the error says
             # why the answer might be old, and a manual check shows it.
@@ -497,7 +586,11 @@ def check_with_cache(
         )
     if fresh.error:
         # A rate-limit body parses as JSON and holds no release. Caching it over
-        # a good feed would throw away the only answer this app has.
+        # a good feed would throw away the only answer this app has — but the
+        # ATTEMPT still happened, and not recording it left the check asking on
+        # every launch for as long as the feed stayed empty. Only the stamp
+        # moves; the good feed and its ETag stay where they are.
+        remember({"last_checked": moment}, state_path)
         if cached is not None:
             return _log_check(cached, NOTHING_ON_OFFER)
         return _log_check(fresh, ASKED_GITHUB)

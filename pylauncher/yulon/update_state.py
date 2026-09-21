@@ -19,6 +19,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -81,6 +82,7 @@ def load_update_state(path: Path | None = None) -> UpdateState:
     UTF-8 it raises "Unexpected UTF-8 BOM".
     """
     target = path if path is not None else update_state_path()
+    _sweep_stale_temporaries(target, time.time())
     try:
         with target.open(encoding="utf-8-sig") as fh:
             return UpdateState.model_validate(json.load(fh))
@@ -109,19 +111,48 @@ def save_update_state(state: UpdateState, path: Path | None = None) -> bool:
     happen between two copies of the app either.
     """
     target = path if path is not None else update_state_path()
-    handle = None
+    tmp: Path | None = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         handle, name = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
         os.close(handle)
-        handle = None
         tmp = Path(name)
         tmp.write_text(state.model_dump_json(indent=2) + "\n", encoding="utf-8")
         tmp.replace(target)
     except OSError as exc:
         logger.info(f"update state not saved to {target}: {exc}")
+        # Or every failed save leaves another copy of the whole feed behind.
+        # The shape to expect is Windows: a `PermissionError` on the rename
+        # while a second instance or an antivirus scanner holds `update.json`.
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
         return False
     return True
+
+
+STALE_TMP_SECONDS = 24 * 60 * 60
+"""How old a leftover temporary file must be before a load may delete it.
+
+Old enough that it cannot belong to a write still in flight — including one in
+ANOTHER copy of the app, which this process's lock knows nothing about.
+"""
+
+
+def _sweep_stale_temporaries(target: Path, now: float) -> None:
+    """Delete `update.json.*.tmp` files old enough to be nobody's. Never raises.
+
+    A crash or a kill between the write and the rename leaves one, and nothing
+    else in this app would ever come back for it.
+    """
+    try:
+        for leftover in target.parent.glob(target.name + ".*.tmp"):
+            try:
+                if now - leftover.stat().st_mtime > STALE_TMP_SECONDS:
+                    leftover.unlink(missing_ok=True)
+            except OSError:  # gone already, or not ours to remove
+                continue
+    except OSError as exc:  # an unreadable directory is not this function's problem
+        logger.debug(f"could not sweep temporary files beside {target}: {exc}")
 
 
 @contextmanager

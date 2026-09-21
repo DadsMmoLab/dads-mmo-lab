@@ -396,6 +396,36 @@ def test_only_this_repositorys_own_pages_are_ever_opened(url: str, allowed: bool
     assert safe_release_url(url) == (url if allowed else RELEASES_PAGE)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        # A browser normalises this to github.com/other — the prefix check alone
+        # never saw it leave (second cold review, 2026-09-21).
+        "https://github.com/DadsMmoLab/dads-mmo-lab/../../other",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/./x",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/%2e%2e/%2e%2e/other",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/%2E%2E/other",
+        "https://github.com/DadsMmoLab/dads-mmo-lab\\..\\other",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v1 2",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/releases\nSet-Cookie: x",
+        "https://github.com/DadsMmoLab/dads-mmo-lab/releases\tx",
+        "https://user@github.com/DadsMmoLab/dads-mmo-lab/releases",
+        "https://user:pw@github.com/DadsMmoLab/dads-mmo-lab/releases",
+        "https://github.com:8443/DadsMmoLab/dads-mmo-lab/releases",
+        "https://GitHub.com.evil.example/DadsMmoLab/dads-mmo-lab/releases",
+    ],
+)
+def test_a_url_that_could_normalise_somewhere_else_is_refused(url: str) -> None:
+    """Prefix-matching a URL is not the same as knowing where it goes."""
+    assert safe_release_url(url) == RELEASES_PAGE
+
+
+def test_the_ordinary_release_url_still_passes_the_stricter_rule() -> None:
+    good = "https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v0.8.7-Public"
+
+    assert safe_release_url(good) == good
+
+
 def test_the_allowed_prefix_follows_the_configured_repository() -> None:
     """A fork gate points the feed at pjerra; the opener has to move with it."""
     fork = "https://github.com/pjerra/dads-mmo-lab/releases"

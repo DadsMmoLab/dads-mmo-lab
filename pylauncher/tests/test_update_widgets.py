@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
+from typing import Any
 
 import pytest
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QImage, QTextDocument, qRgb
 from PySide6.QtWidgets import QLabel, QPushButton, QTextBrowser
 
 from tests.conftest import process_events
-from yulon.ui.widgets import update_dialog
 from yulon.ui.widgets.dadcraft_decorations import DadcraftHeader
 from yulon.ui.widgets.update_bar import UpdateBar
 from yulon.ui.widgets.update_dialog import (
@@ -24,7 +24,7 @@ from yulon.ui.widgets.update_dialog import (
     UpdateChoice,
     UpdateDialog,
     _NotesView,
-    as_shown_markdown,
+    _strip_resources,
 )
 from yulon.update import UpdateCheck
 
@@ -274,14 +274,120 @@ def _image_fragments_in(document: QTextDocument) -> int:
     return found
 
 
+def _resources_in(document: QTextDocument) -> list[str]:
+    """Every format in `document` that still names something Qt would go and load.
+
+    Not just image char-formats: `<table background=…>` and `<td background=…>`
+    put the file on the format's BRUSH, which `isImageFormat()` never sees and
+    `loadResource` does not stop — the second cold review's finding, and the
+    reason this helper walks formats rather than counting images.
+    """
+    from PySide6.QtGui import QTextTable
+
+    found: list[str] = []
+
+    def textured(brush: Any) -> bool:
+        return bool(brush.style() == Qt.BrushStyle.TexturePattern) or not (
+            brush.textureImage().isNull()
+        )
+
+    frames = [document.rootFrame()]
+    while frames:
+        frame = frames.pop()
+        frames.extend(frame.childFrames())
+        if textured(frame.frameFormat().background()):
+            found.append(f"frame background {frame.frameFormat().background()}")
+        if isinstance(frame, QTextTable):
+            for row in range(frame.rows()):
+                for column in range(frame.columns()):
+                    cell = frame.cellAt(row, column)
+                    if cell.isValid() and textured(cell.format().background()):
+                        found.append(f"table cell background at {row},{column}")
+
+    block = document.begin()
+    while block.isValid():
+        if textured(block.blockFormat().background()):
+            found.append(f"block background at {block.position()}")
+        iterator = block.begin()
+        while not iterator.atEnd():
+            fragment = iterator.fragment()
+            if fragment.isValid():
+                char_format = fragment.charFormat()
+                if char_format.isImageFormat():
+                    found.append(f"image {char_format.toImageFormat().name()!r}")
+                if textured(char_format.background()):
+                    found.append("char background")
+            iterator += 1
+        block = block.next()
+
+    if document.baseUrl().toString():
+        found.append(f"baseUrl {document.baseUrl().toString()!r}")
+    return found
+
+
 @pytest.fixture
 def a_red_png(tmp_path: Path) -> Path:
     """A file the notes box must never render, in a colour a screenshot can count."""
-    image = QImage(40, 40, QImage.Format.Format_RGB32)
+    image = QImage(300, 200, QImage.Format.Format_RGB32)
     image.fill(qRgb(255, 0, 0))
     path = tmp_path / "red.png"
     assert image.save(str(path)), "the probe image was not written"
     return path
+
+
+def _bodies_that_must_load_nothing(png: Path) -> dict[str, str]:
+    """Every shape the two cold reviews found, in one place.
+
+    The first five were door 1's and door 2's; the rest are the second review's
+    — where a regex and md4c disagreed about what a fence is, so raw block HTML
+    reached `setMarkdown` and `<table background=…>` painted the file as a
+    BRUSH, which no image walk and no `loadResource` could see.
+    """
+    table = f"<table background='{png}' width=300 height=200><tr><td>x</td></tr></table>"
+    return {
+        "inline-file-url": f"![i](file://{png})",
+        "bare-absolute-path": f"![i]({png})",
+        "reference-style": f"![i][ref]\n\n[ref]: file://{png}",
+        "unc-path": "![i](//host/share/x.png)",
+        "html-img": f"<img src='file://{png}' width=300 height=200>",
+        # The regex read line 1 as a fence opener; md4c read it as a paragraph,
+        # because a backtick in an info string is not a fence.
+        "backtick-in-info-string": f"``` a`b\n\n{table}\n\n```\n",
+        # md4c closes a fence indented up to three spaces; the regex did not.
+        "closing-fence-indented": f"```\ncode\n   ```\n\n{table}\n\n```\n",
+        "td-background": (
+            f"<table><tr><td background='{png}' width=300 height=200>x</td></tr></table>"
+        ),
+        "body-background": f"<body background='{png}'><p>x</p></body>",
+        "double-bang-image": f"!![i]({png})",
+        "image-in-unbalanced-backticks": f"`` ![i]({png}) `",
+        "never-closed-fence-then-html": f"```\n\n{table}\n",
+        "indented-code-block-html": f"    {table}\n",
+        "qrc-image": "![i](qrc:/x/red.png)",
+        "unc-file-url": "![i](file://host/share/x.png)",
+        "data-uri": (
+            "![i](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+            "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==)"
+        ),
+    }
+
+
+@pytest.mark.parametrize("shape", list(_bodies_that_must_load_nothing(Path("/x/red.png"))))
+def test_nothing_in_a_release_body_makes_the_dialog_load_a_file(
+    qapp: object, a_red_png: Path, shape: str
+) -> None:
+    """Rendered and counted, not reasoned about. 0 red pixels and no resource left.
+
+    Measured before the fix, through the real dialog: the two fence shapes put
+    **59,978 red pixels** on screen the moment the dialog opened.
+    """
+    body = _bodies_that_must_load_nothing(a_red_png)[shape]
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+
+    notes = _notes(dialog)
+
+    assert _red_pixels(notes) == 0, "the notes box painted a file off the disk"
+    assert _resources_in(notes.document()) == []
 
 
 @pytest.mark.parametrize(
@@ -314,36 +420,115 @@ def test_no_image_in_a_release_body_is_ever_rendered(
     assert _image_fragments(notes) == 0, "an image fragment is a name Qt will resolve"
 
 
-def test_the_second_door_takes_an_image_the_first_one_missed(
-    qapp: object, a_red_png: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_strip_runs_at_the_call_site_and_says_what_it_took(
+    qapp: object, a_red_png: Path
 ) -> None:
-    """The strip, at the call site that has to do it, with the first door taken off.
+    """`set_release_body` is where the walk has to happen, and it reports the count.
 
-    The two doors are belt and braces, and a brace nothing exercises is not a
-    brace: with `as_shown_markdown` in front of it no image syntax survives to
-    reach the document, so the strip has nothing to do — deleting the CALL left
-    39 of 39 tests green (measured twice, the second time with a test that
-    called `_strip_images` itself, which is the "reviews check functions, not
-    call sites" trap). Here the rewrite is a pass-through, which is what any
-    shape md4c turns into an image that the rewrite did not anticipate looks
-    like from `set_release_body`'s side.
+    Not a test of `_strip_resources` on its own — deleting the CALL and keeping
+    the function is a thing that has already passed a mutation here once
+    ("reviews check functions, not call sites"). A markdown image is the one
+    shape `MarkdownNoHTML` does NOT stop, so this drives the real method.
     """
-    monkeypatch.setattr(update_dialog, "as_shown_markdown", lambda body: body)
     notes = _NotesView()
 
     removed = notes.set_release_body(f"![i](file://{a_red_png})")
 
     assert removed == 1, "set_release_body did not strip the image"
-    assert _image_fragments(notes) == 0
+    assert _resources_in(notes.document()) == []
     assert _red_pixels(notes) == 0
     assert IMAGE_REMOVED in notes.toPlainText()
 
 
-def test_strip_images_reports_nothing_to_do_on_an_ordinary_body(qapp: object) -> None:
-    """The count is the wiring's own evidence: normally the first door left it none."""
+def test_the_strip_reports_nothing_to_do_on_an_ordinary_body(qapp: object) -> None:
     notes = _NotesView()
 
     assert notes.set_release_body("### New\n- Ten.\n") == 0
+
+
+def test_a_fenced_block_shows_its_angle_brackets_literally(qapp: object) -> None:
+    """`MarkdownNoHTML` means no escaping pre-pass, so code is code again.
+
+    The `<`-escaping this replaces showed the reader `&lt;config_dir>` inside a
+    code span until the first review, and then needed a regex that had to agree
+    with md4c about what a fence is — which is the bug the second review found.
+    """
+    body = "- the dir is `<config_dir>` on Linux\n\n```\n<not a tag>\nif x < 3: pass\n```\n"
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+
+    shown = _notes(dialog).toPlainText()
+
+    assert "<config_dir>" in shown
+    assert "<not a tag>" in shown
+    assert "if x < 3: pass" in shown
+    assert "&lt;" not in shown
+
+
+def test_raw_html_is_shown_as_text_and_swallows_nothing(qapp: object) -> None:
+    """The md4c "the rest of the body disappears" finding, fixed at its cause.
+
+    With `MarkdownNoHTML` md4c never treats the tags as HTML at all, so there
+    is no HTML block to swallow the bullet under it.
+    """
+    body = "## v0.8.70-Public\n\n<img src='http://example.invalid/x.png'><script>x</script>\n- Ten."
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+
+    shown = _notes(dialog).toPlainText()
+
+    assert "Ten." in shown
+    assert "<script>x</script>" in shown
+
+
+def test_an_autolink_survives_and_is_still_a_link(qapp: object) -> None:
+    """`<https://…>` is not HTML, and NoHTML must not take it for HTML."""
+    body = "see <https://github.com/DadsMmoLab/dads-mmo-lab> for more"
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+
+    notes = _notes(dialog)
+
+    assert "https://github.com/DadsMmoLab/dads-mmo-lab" in notes.toPlainText()
+    assert "https://github.com/DadsMmoLab/dads-mmo-lab" in notes.document().toHtml()
+
+
+def test_the_github_dialect_is_kept(qapp: object) -> None:
+    """NoHTML is added to the GitHub dialect, not used instead of it."""
+    body = "| a | b |\n|---|---|\n| 1 | 2 |\n\n~~gone~~\n"
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+
+    shown = _notes(dialog).toPlainText()
+
+    assert "1" in shown and "2" in shown, "the table was not parsed"
+    assert "gone" in shown
+
+
+def test_the_walk_clears_a_textured_brush_no_markdown_can_currently_make(
+    qapp: object, a_red_png: Path
+) -> None:
+    """The belt-and-braces half of door 2, driven directly because nothing else reaches it.
+
+    With `MarkdownNoHTML` no release body can put a texture on a format any
+    more — that is what the flag is for — so this builds the document by hand
+    and hands it to the walk. Without this the widened walk would be code that
+    nothing exercises.
+    """
+    from PySide6.QtGui import QBrush, QPixmap, QTextCursor
+
+    document = QTextDocument()
+    cursor = QTextCursor(document)
+    cursor.insertText("x")
+    block_format = cursor.blockFormat()
+    block_format.setBackground(QBrush(QPixmap(str(a_red_png))))
+    cursor.setBlockFormat(block_format)
+    frame_format = document.rootFrame().frameFormat()
+    frame_format.setBackground(QBrush(QPixmap(str(a_red_png))))
+    document.rootFrame().setFrameFormat(frame_format)
+    document.setBaseUrl(QUrl.fromLocalFile(str(a_red_png.parent)))
+    assert _resources_in(document), "the premise: this document names a file"
+
+    cleared = _strip_resources(document)
+
+    assert cleared >= 2
+    assert _resources_in(document) == []
 
 
 def test_an_image_leaves_a_mark_rather_than_disappearing(qapp: object, a_red_png: Path) -> None:
@@ -436,12 +621,6 @@ def test_the_notes_box_refuses_every_resource_it_is_asked_for(qapp: object) -> N
     assert notes.loadResource(2, QUrl("http://example.invalid/x.png")) is None
 
 
-def test_escaping_leaves_ordinary_markdown_alone() -> None:
-    """Only `<` is neutralised: `&` would turn every deliberate entity into source."""
-    assert as_shown_markdown("### New\n- Ten & more.") == "### New\n- Ten & more."
-    assert as_shown_markdown("<b>x</b>") == "&lt;b>x&lt;/b>"
-
-
 @pytest.mark.parametrize(
     "body",
     [
@@ -451,34 +630,19 @@ def test_escaping_leaves_ordinary_markdown_alone() -> None:
         "``a span with a ` in it and <b>``",
     ],
 )
-def test_code_is_left_exactly_as_the_author_wrote_it(body: str) -> None:
-    """`<` means `<` inside code. Escaping it showed the reader `&lt;config_dir>`."""
-    assert as_shown_markdown(body) == body
+def test_code_reaches_the_reader_as_the_author_wrote_it(qapp: object, body: str) -> None:
+    """Measured through the rendered document, not through an intermediate string.
 
-
-def test_code_spans_survive_into_the_rendered_notes(qapp: object) -> None:
-    """The measurement that matters is what the reader sees, not the intermediate text."""
-    body = "- it lives at `<config_dir>/update.json`"
+    The `<`-escaping this replaces had to know where a fence began to leave it
+    alone, which is precisely what it got wrong. `MarkdownNoHTML` means nothing
+    has to know.
+    """
     dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
 
-    assert "<config_dir>/update.json" in _notes(dialog).toPlainText()
+    shown = _notes(dialog).toPlainText()
 
-
-def test_an_autolink_stays_a_link(qapp: object) -> None:
-    """`<https://…>` is how a bare URL is made clickable; escaping it made it prose."""
-    body = "see <https://example.invalid/x> for more"
-
-    assert as_shown_markdown(body) == body
-
-    document = QTextDocument()
-    document.setMarkdown(as_shown_markdown(body))
-    assert "https://example.invalid/x" in document.toHtml()
-
-
-def test_an_image_is_turned_into_a_link_not_deleted_from_the_source() -> None:
-    """`![` → `[`: inert until clicked, and then `_NotesView` decides."""
-    assert as_shown_markdown("![alt](file:///x.png)") == "[alt](file:///x.png)"
-    assert as_shown_markdown("a `![keep](x)` span") == "a `![keep](x)` span"
+    assert "&lt;" not in shown
+    assert "<" in shown
 
 
 def test_the_header_takes_an_action_left_of_the_badge(qapp: object) -> None:

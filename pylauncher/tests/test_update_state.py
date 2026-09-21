@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -121,6 +123,44 @@ def test_remember_changes_only_the_fields_it_is_given(tmp_path: Path) -> None:
         "[]",
         "v1.0.0-Public",
     )
+
+
+def test_a_write_that_fails_leaves_no_temporary_file_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each one holds the whole 100-release feed, and nothing ever came back for them.
+
+    The likely shape is Windows: `PermissionError` on the rename while a second
+    instance or an antivirus scanner has `update.json` open. Every failed save
+    left another `update.json.*.tmp` in the config dir, for ever (second cold
+    review, 2026-09-21).
+    """
+    path = tmp_path / "update.json"
+
+    def refuse(self: Path, target: Path) -> Path:
+        raise PermissionError("the file is open in another process")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+
+    assert save_update_state(UpdateState(feed="[]" * 1000), path) is False
+
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_a_temporary_file_older_than_a_day_is_swept_up_on_load(tmp_path: Path) -> None:
+    """A crash between the write and the rename leaves one nothing else would remove."""
+    path = tmp_path / "update.json"
+    save_update_state(UpdateState(etag="x"), path)
+    stale = tmp_path / "update.json.abcdef.tmp"
+    stale.write_text("a feed nobody wants", encoding="utf-8")
+    os.utime(stale, (time.time() - 2 * 24 * 3600, time.time() - 2 * 24 * 3600))
+    fresh = tmp_path / "update.json.ghijkl.tmp"
+    fresh.write_text("a write that may still be in flight", encoding="utf-8")
+
+    assert load_update_state(path).etag == "x"
+
+    assert not stale.exists(), "the day-old temporary file was left behind"
+    assert fresh.exists(), "a temporary file this young may belong to a live write"
 
 
 def test_remember_does_not_raise_when_it_cannot_write(tmp_path: Path) -> None:

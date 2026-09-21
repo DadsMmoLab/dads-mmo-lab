@@ -11,9 +11,9 @@ window manager are all "not now" and none of them is a skip.
 
 **The body is text from the network and this file is where that is contained.**
 Three separate doors, because each of them was measured open (see
-`as_shown_markdown`, `_NotesView` and `_strip_images`): markdown that renders an
-image, a document that still holds an image fragment, and a link whose scheme
-is not http.
+`SAFE_MARKDOWN`, `_strip_resources` and `_NotesView`): markdown that renders a
+file, a document that still names one in a format, and a link whose scheme is
+not http.
 
 Not themed here: `apply_dadcraft_theme(window)` styles `QDialog` through the
 top-level stylesheet, which a dialog parented to the window inherits — the same
@@ -26,11 +26,17 @@ is up.
 from __future__ import annotations
 
 import enum
-import re
 from collections.abc import Callable
 
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices, QTextCharFormat, QTextCursor, QTextDocument
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import (
+    QBrush,
+    QDesktopServices,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
+    QTextTable,
+)
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -86,105 +92,133 @@ path is an SMB connection, which is an NTLM handshake with a host the release
 body named.
 """
 
-_LEAVE_ALONE = re.compile(
-    r"""
-      (?P<fence>^(?P<ticks>`{3,}|~{3,})[^\n]*\n.*?(?:^(?P=ticks)[^\n]*$|\Z))
-    | (?P<code>(?P<span>`+)(?!`)[^\n]*?(?<!`)(?P=span)(?!`))
-    | (?P<autolink><https?://[^>\s]+>)
-    """,
-    re.DOTALL | re.MULTILINE | re.VERBOSE,
+SAFE_MARKDOWN = (
+    QTextDocument.MarkdownFeature.MarkdownDialectGitHub
+    | QTextDocument.MarkdownFeature.MarkdownNoHTML
 )
-"""The three runs of a release body that must reach markdown exactly as written.
+"""How a release body is parsed: GitHub's dialect, with raw HTML not interpreted.
 
-A fenced block and a code span because they are the one place `<` means `<` —
-`` `<config_dir>` `` read as prose and escaped shows the reader `&lt;config_dir>`,
-which is what this file did until the cold review of 2026-09-21. An autolink
-because `<https://…>` is the spelling that makes a bare URL clickable, and
-escaping its first character turned every one of them into plain text.
+**This replaced a regex that tried to escape every `<` outside code**, and it
+replaced it because that regex had to agree with md4c about where a fenced
+block begins and ends — and did not. Measured through the real dialog on 6.11
+(second cold review, 2026-09-21), each of these painted a file off the disk the
+moment the dialog opened, **59,978 red pixels** in a `grab()`:
+
+* a backtick in the info string of the opening fence, so md4c reads a paragraph
+  where the regex read a fence opener, and everything the regex then left alone
+  arrived at `setMarkdown` as raw HTML;
+* a closing fence indented three spaces, which md4c honours and the regex did
+  not.
+
+And what arrived was not an image: `<table background='…'>` and
+`<td background='…'>` put the file on the format's **brush**. A brush is not an
+image char-format, so the walk below never saw it, and `loadResource` returning
+None does not stop Qt painting it.
+
+`MarkdownNoHTML` ends the whole class of bug at its cause — nothing has to
+guess where a fence is, because no HTML is interpreted anywhere. Measured on
+the same build, with it: all of the above render as literal text and load
+nothing; `` `<config_dir>` `` and a fenced `<not a tag>` finally show their
+angle brackets instead of `&lt;`; `<https://…>` autolinks keep their href (an
+autolink is not HTML); the GitHub dialect's tables and strikethrough still
+parse; and the older "a raw HTML block swallows the rest of the body" defect is
+gone with its cause rather than worked around.
+
+It does NOT stop a markdown image (`![i](file:///…)` still loaded, 60,000 red
+pixels) — that is what `_strip_resources` is for.
 """
 
 
-def as_shown_markdown(body: str) -> str:
-    """A release body that markdown may render: no raw HTML, and no image.
+def _is_textured(brush: QBrush) -> bool:
+    """Does this brush name something Qt would have to go and load?"""
+    return brush.style() == Qt.BrushStyle.TexturePattern or not brush.textureImage().isNull()
 
-    Two rewrites, and both were measured rather than assumed, on PySide6 6.11:
 
-    * **`<` outside code becomes `&lt;`.** `setMarkdown()` hands a raw HTML
-      block straight through to the document, and md4c swallows everything up
-      to the next blank line with it — a body reading
+def _strip_resources(document: QTextDocument) -> int:
+    """Clear every format in `document` that names a resource. Returns how many.
 
-          <img src='...'><script>x</script>
-          - Ten.
+    Walks more than images, and the second cold review is why: an image lives on
+    a char format, but a background lives on a **brush**, and a brush can hang
+    off a frame, a table, a table cell, a block or a run of characters.
+    `isImageFormat()` sees none of those, and neither does `loadResource`.
 
-      rendered as the heading alone. The bullet was GONE from the dialog with
-      nothing to say it had been dropped. `&lt;` is an entity markdown renders
-      as a literal `<`, so the tag is shown to the reader as text and the rest
-      of the body survives.
-    * **`![` becomes `[`,** which turns an image into an ordinary link. An
-      image is the one markdown construct that reaches outside the process
-      with no click at all: `![i](file:///…)` rendered the file (measured:
-      1600 red pixels in a `grab()` of the notes box), and `![](//host/x.png)`
-      on Windows is an SMB connection to a host the release body chose. As a
-      link it is inert until clicked, and `_NotesView` decides what a click may
-      open.
+    Run while the document belongs to no widget, so nothing has been laid out
+    and no name has been resolved when the formats go.
 
-    `&` is left alone: escaping it too would turn every deliberate entity in a
-    body into visible source, and an entity cannot start a tag.
+    **Which door catches what, measured rather than assumed** (red pixels in a
+    `grab()` of the notes box, one 300x200 red PNG named by the body):
 
-    This is the FIRST of the two doors on images. `_strip_images` is the other,
-    and it exists because this one is a text rewrite and text rewrites are
-    guesses about a parser (`_NotesView.setMarkdown`).
+        case              no doors   flag only   walk only   both
+        fence-a + table     59,978           0           0      0
+        fence-b + table     59,978           0           0      0
+        bare table          59,978           0           0      0
+        markdown image      60,000      60,000           0      0
+
+    So the IMAGE half of this walk is load-bearing — a markdown image is not
+    HTML and the flag does not touch it — and the BRUSH half is belt and
+    braces: with the flag on, no release body can put a texture on a format at
+    all, and dropping the flag alone leaves the table cases green because this
+    walk catches them too. That is the point of having two, and it is why
+    dropping the flag reddens the "swallows nothing" tests rather than the
+    table ones. The brush half is driven directly by
+    `test_the_walk_clears_a_textured_brush_no_markdown_can_currently_make`,
+    which builds a document Qt cannot currently be talked into building.
     """
-    out: list[str] = []
-    last = 0
-    for match in _LEAVE_ALONE.finditer(body):
-        out.append(_neutralise(body[last : match.start()]))
-        out.append(match.group())
-        last = match.end()
-    out.append(_neutralise(body[last:]))
-    return "".join(out)
+    cleared = 0
+    cursor = QTextCursor(document)
 
+    frames = [document.rootFrame()]
+    while frames:
+        frame = frames.pop()
+        frames.extend(frame.childFrames())
+        frame_format = frame.frameFormat()
+        if _is_textured(frame_format.background()):
+            frame_format.clearBackground()
+            frame.setFrameFormat(frame_format)
+            cleared += 1
+        if isinstance(frame, QTextTable):
+            for row in range(frame.rows()):
+                for column in range(frame.columns()):
+                    cell = frame.cellAt(row, column)
+                    cell_format = cell.format()
+                    if cell.isValid() and _is_textured(cell_format.background()):
+                        cell_format.clearBackground()
+                        cell.setFormat(cell_format)
+                        cleared += 1
 
-def _neutralise(text: str) -> str:
-    """The rewrite of one run of ordinary prose. See `as_shown_markdown`."""
-    return text.replace("<", "&lt;").replace("![", "[")
-
-
-def _strip_images(document: QTextDocument) -> int:
-    """Replace every image fragment in `document` with a character. Returns how many.
-
-    The second door, and the one that does not depend on reading markdown the
-    way md4c reads it: whatever syntax produced it, an image in the document is
-    a `QTextCharFormat` that `isImageFormat()`, and Qt resolves its name when
-    the document is laid out. Overriding `loadResource` is NOT enough and that
-    was measured: with it returning None, `![i](file:///…/red.png)`, a bare
-    absolute path and a reference-style image each still rendered the file
-    (1600 red pixels in a `grab()`), because Qt's own image handling opens the
-    path when the resource comes back null.
-
-    Applied to a document that no widget owns yet, so nothing has been laid out
-    and no name has been resolved when the fragments go.
-    """
     spots: list[tuple[int, int]] = []
     block = document.begin()
     while block.isValid():
+        block_format = block.blockFormat()
+        if _is_textured(block_format.background()):
+            block_format.clearBackground()
+            cursor.setPosition(block.position())
+            cursor.setBlockFormat(block_format)
+            cleared += 1
         iterator = block.begin()
         while not iterator.atEnd():
             fragment = iterator.fragment()
-            if fragment.isValid() and fragment.charFormat().isImageFormat():
-                spots.append((fragment.position(), fragment.length()))
+            if fragment.isValid():
+                char_format = fragment.charFormat()
+                if char_format.isImageFormat() or _is_textured(char_format.background()):
+                    spots.append((fragment.position(), fragment.length()))
             iterator += 1
         block = block.next()
-    cursor = QTextCursor(document)
-    # Back to front: every removal moves the positions after it.
+
+    # Back to front: every replacement moves the positions after it.
     for position, length in reversed(spots):
         cursor.setPosition(position)
         cursor.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
-        # An empty format, or the replacement inherits the image format it replaced.
+        # An empty format, or the replacement inherits the one it replaced.
         cursor.insertText(IMAGE_REMOVED, QTextCharFormat())
-    if spots:
-        logger.info(f"release notes: {len(spots)} image(s) replaced, none fetched")
-    return len(spots)
+        cleared += 1
+
+    # Nothing may leave a base that a relative name could be resolved against.
+    document.setBaseUrl(QUrl())
+    document.setMetaInformation(QTextDocument.MetaInformation.DocumentUrl, "")
+    if cleared:
+        logger.info(f"release notes: {cleared} resource(s) cleared, none fetched")
+    return cleared
 
 
 class _NotesView(QTextBrowser):
@@ -192,7 +226,7 @@ class _NotesView(QTextBrowser):
 
     `loadResource` returning None is kept as the last of the three doors, and
     its docstring no longer claims to be the first: it does not stop an image
-    (measured — see `_strip_images`). What it does stop is a resource this
+    (measured — see `_strip_resources`). What it does stop is a resource this
     widget would fetch for any OTHER reason, which costs nothing to refuse.
 
     Links are NOT handed to `setOpenLinks`/`setOpenExternalLinks`, and both
@@ -228,8 +262,8 @@ class _NotesView(QTextBrowser):
         held the document could resolve an image name on the way.
         """
         document = QTextDocument(self)
-        document.setMarkdown(as_shown_markdown(markdown))
-        removed = _strip_images(document)
+        document.setMarkdown(markdown, SAFE_MARKDOWN)
+        removed = _strip_resources(document)
         self.setDocument(document)
         return removed
 
@@ -246,7 +280,10 @@ class _NotesView(QTextBrowser):
         The answer is returned rather than dropped: an opener that cannot open
         anything is the yulon-arch case, and somebody has to tell the player.
         """
-        if url.scheme().lower() not in _OPENABLE_SCHEMES:
+        # No `.lower()`: `QUrl` lower-cases a scheme when it parses one, so the
+        # call did nothing and removing it left every test green. Dead defence
+        # reads like a guard and defends nothing.
+        if url.scheme() not in _OPENABLE_SCHEMES:
             logger.info(f"release notes: refused to open a {url.scheme()!r} link")
             return False
         return bool(self.open_url(url.toString()))

@@ -83,10 +83,18 @@ class UpdateBar(QWidget):
         self.details_button.setVisible(True)
         self.setVisible(True)
 
-    def show_message(self, text: str) -> None:
-        """Say one thing with nothing to open — the manual check's answers live here."""
+    def show_message(self, text: str, *, keep_details: bool = False) -> None:
+        """Say one thing. `keep_details` leaves "See what's new" where it is.
+
+        The default hides it, because most messages ("You have the newest
+        version") have nothing to open. `keep_details=True` is for a message
+        shown while an offer is still standing — the browser that would not
+        open, where hiding the button would take away the player's only
+        remaining route back to the release notes.
+        """
         self._say(text)
-        self.details_button.setVisible(False)
+        if not keep_details:
+            self.details_button.setVisible(False)
         self.setVisible(True)
 
     def clear(self) -> None:

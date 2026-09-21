@@ -181,6 +181,31 @@ def test_a_failed_check_does_not_start_the_day_again(tmp_path: Path) -> None:
     assert server.calls == 2, "the next launch asks again rather than waiting another day"
 
 
+def test_a_feed_with_nothing_in_it_still_counts_as_having_asked(tmp_path: Path) -> None:
+    """Otherwise every launch asks again for as long as the feed stays empty.
+
+    The rate-limit body is the case: it parses, it holds no public release, the
+    good cached feed keeps answering — and `last_checked` never moved, so the
+    once-a-day rule was off for the duration (second cold review, 2026-09-21).
+    Only the stamp moves; the good feed and its ETag stay.
+    """
+    server, clock, path = Server(FEED), Clock(1000.0), tmp_path / "update.json"
+    _check(server, clock, path)
+    server.feed = json.dumps({"message": "API rate limit exceeded"})
+    server.etag = 'W/"two"'
+    clock.t += CHECK_INTERVAL_SECONDS
+
+    assert _check(server, clock, path).available, "the good cached feed still answers"
+
+    state = load_update_state(path)
+    assert state.last_checked == clock.t, "the attempt was not recorded"
+    assert state.feed == FEED, "the good feed was thrown away"
+    assert state.etag == 'W/"one"', "the ETag of the good feed was thrown away"
+
+    _check(server, clock, path)
+    assert server.calls == 2, "it asked again inside the same day"
+
+
 def test_a_304_with_no_cached_feed_asks_again_without_the_etag(tmp_path: Path) -> None:
     """An ETag without the body it describes is worse than no ETag at all."""
     path = tmp_path / "update.json"
@@ -243,6 +268,90 @@ def test_urllib_turns_a_304_into_an_answer_not_an_exception(
     assert update._urllib_fetch("https://example.invalid", 'W/"one"') == HttpAnswer(
         304, "", 'W/"one"'
     )
+
+
+class _Trickle:
+    """A response that answers, slowly, for ever. What a socket timeout does not catch."""
+
+    def __init__(self, chunk: bytes = b"x" * 1024, gap: float = 0.0) -> None:
+        self.chunk = chunk
+        self.gap = gap
+        self.status = 200
+        self.headers = {"ETag": None}
+        self.served = 0
+        self.clock = 0.0
+
+    def read(self, size: int = -1) -> bytes:
+        # Each read "takes" a second of the injected clock: a server that sends
+        # something before every socket timeout keeps the connection alive for
+        # as long as it likes.
+        self.clock += 1.0
+        self.served += len(self.chunk)
+        return self.chunk
+
+    def __enter__(self) -> _Trickle:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+def test_a_server_that_trickles_for_ever_is_cut_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 5 s timeout is per socket read, so it never fires on a slow drip.
+
+    The launch check runs on its own thread and the header button answers
+    "already checking" while it does — for ever, on a server like this (second
+    cold review, 2026-09-21).
+    """
+    trickle = _Trickle()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: trickle)
+
+    with pytest.raises(TimeoutError):
+        update._urllib_fetch(
+            "https://example.invalid", None, now=lambda: trickle.clock, deadline=15.0
+        )
+
+    assert trickle.clock >= 15.0, "it gave up before the bound"
+    assert trickle.clock < 60.0, "it read far past the bound"
+
+
+def test_a_body_too_big_to_be_a_feed_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hundred releases is a few hundred kB; anything past a few MB is not a feed."""
+    flood = _Trickle(chunk=b"y" * (1024 * 1024))
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: flood)
+
+    with pytest.raises(ValueError, match="too large"):
+        update._urllib_fetch("https://example.invalid", None, now=lambda: flood.clock)
+
+    assert flood.served <= update.MAX_FEED_BYTES + len(flood.chunk)
+
+
+def test_an_ordinary_answer_is_read_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bound must not truncate a feed that arrives normally."""
+
+    class Once:
+        status = 200
+        headers = {"ETag": 'W/"one"'}
+
+        def __init__(self) -> None:
+            self.left = [FEED.encode()]
+
+        def read(self, size: int = -1) -> bytes:
+            return self.left.pop() if self.left else b""
+
+        def __enter__(self) -> Once:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Once())
+
+    answer = update._urllib_fetch("https://example.invalid", None)
+
+    assert answer.status == 200
+    assert answer.text == FEED
+    assert answer.etag == 'W/"one"'
 
 
 def test_any_other_http_error_is_still_an_error(monkeypatch: pytest.MonkeyPatch) -> None:

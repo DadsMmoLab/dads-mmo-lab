@@ -757,7 +757,7 @@ def build_window() -> object:
             self.check: Callable[[], object] = lambda: check_with_cache(force=True)
             self.run_job = threaded_job_runner(window)
             self.make_dialog: Callable[[UpdateCheck], UpdateDialog] = lambda result: UpdateDialog(
-                result, parent=window, open_url=self.open_or_say
+                result, parent=window, open_url=self.open_a_notes_link
             )
             self.open_url: Callable[[str], bool] = default_open_url
             self._offered: UpdateCheck | None = None
@@ -803,6 +803,16 @@ def build_window() -> object:
             self._checking = False
             check_button.setEnabled(True)
 
+        def open_a_notes_link(self, url: str) -> bool:
+            """A link the release body carried. Neutral wording: it is not our page.
+
+            "The download page is: https://evil.example/x" would lend this
+            app's own update flow as a character reference to a host the
+            release body chose, and put it on the clipboard under that sentence
+            (second cold review, 2026-09-21).
+            """
+            return self.open_or_say(url, what="The link")
+
         def open_or_say(self, url: str, what: str = "The download page") -> bool:
             """Open `url`, or put it on the bar where the player can get at it.
 
@@ -816,6 +826,10 @@ def build_window() -> object:
             `safe_release_url` for the action button, through the scheme check
             for a link in the notes. The raw `html_url` never reaches this, so
             it can never reach the screen or the clipboard either.
+
+            `keep_details` when an offer is standing: the message must not take
+            away "See what's new", which was the only route left back to the
+            release notes once the browser had refused.
             """
             try:
                 opened = bool(self.open_url(url))
@@ -826,7 +840,10 @@ def build_window() -> object:
                 return True
             copied = self._copy(url)
             tail = " It is on your clipboard." if copied else ""
-            update_bar.show_message(f"Could not open a browser. {what} is: {url}{tail}")
+            update_bar.show_message(
+                f"Could not open a browser. {what} is: {url}{tail}",
+                keep_details=self._offered is not None,
+            )
             return False
 
         @staticmethod

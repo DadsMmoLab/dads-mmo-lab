@@ -920,6 +920,59 @@ def test_the_message_arrives_even_for_a_version_the_player_skipped(
     assert A_RELEASE.url in bar.text()
 
 
+def test_a_failed_open_does_not_cost_the_player_the_offer(window: Any, update_host: Any) -> None:
+    """The message must not be the end of the road to the release.
+
+    `show_message` hides "See what's new", so after the browser failed the only
+    way back to the dialog was another manual check — and the modal dialog is
+    up while the message is put on the bar.
+    """
+    update_host.open_url = lambda url: False
+
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert not bar.isHidden()
+    assert not bar.details_button.isHidden(), "the way back to the release notes is gone"
+
+    bar.details_button.click()  # and it still opens the dialog
+    assert "Could not open a browser" in bar.text()
+
+
+def test_a_message_with_no_offer_behind_it_keeps_no_button(window: Any, update_host: Any) -> None:
+    """The ordinary case is unchanged: nothing to open, no button."""
+    update_host.manual_result(
+        dataclasses.replace(A_RELEASE, available=False, latest="v0.8.66-Public")
+    )
+
+    bar = window.property("update_bar")
+    assert "You have the newest version" in bar.text()
+    assert bar.details_button.isHidden()
+
+
+def test_a_link_in_the_notes_is_not_announced_as_the_download_page(
+    window: Any, update_host: Any
+) -> None:
+    """A release body can link anywhere; "The download page is: …" would vouch for it.
+
+    The label has to stay neutral, or a host the body chose is put on the
+    clipboard under a sentence the app's own update flow lends its authority to.
+    """
+    update_host.open_url = lambda url: False
+    dialog = update_host.make_dialog(A_RELEASE)
+    try:
+        from PySide6.QtCore import QUrl
+
+        dialog.notes.anchorClicked.emit(QUrl("https://evil.example/x"))
+    finally:
+        dialog.deleteLater()
+        _collect_deleted()
+
+    text = window.property("update_bar").text()
+    assert "The link is: https://evil.example/x" in text
+    assert "download page" not in text
+
+
 def test_a_link_in_the_notes_falls_back_the_same_way(window: Any, update_host: Any) -> None:
     """The other route out of the dialog, through the host's REAL dialog factory.
 
