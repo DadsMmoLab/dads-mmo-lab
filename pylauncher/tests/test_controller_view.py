@@ -793,7 +793,13 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
         asked.append(str(manifest.id))  # type: ignore[attr-defined]
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
 
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    services = _services(ps, tmp_path, [])
+    # T62: five of these manifests also write into the game client, and with no
+    # client folder on the install each of them now stops at the client notice
+    # before any question is asked. This test is about the PROMPTS, so the
+    # install is given a folder and every row reaches the applier as before.
+    services.client_dir = tmp_path / "client"
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
     catalogued = [
         r.data.id for r in view.modules_panel.rows() if r.data.catalogued and r.data.installable
     ]
@@ -10160,3 +10166,3758 @@ def test_every_game_wires_the_database_seam_to_its_own_container_and_daemon(
         # report healthy within 180s, so no backup was taken" knows the state
         # their server is in, which is the whole job of that sentence.
         assert reasons[-1] == "no backup was taken", game
+
+
+# --------------------------------------------------------------------------
+# T47: the question that stands between a custom install and a `reset --hard`
+# over a checkout this app already owns. The dialog is the view's; every
+# refusal stays the engine's.
+# --------------------------------------------------------------------------
+
+_REPLACE_QUESTION = (
+    "modules/mod-my-thing is a checkout of https://github.com/them/mod-my-thing.git, not of "
+    "https://github.com/you/mod-my-thing.git.\n\nReplace it?"
+)
+
+
+def _asked(monkeypatch: pytest.MonkeyPatch, answer: object) -> list[tuple[str, str]]:
+    """Record every `QMessageBox.question` this view opens and answer them all the same.
+
+    The answer is a plain `int` where a caller passes the enum member, because
+    that is what this PySide6's static `question()` really returns (T33) and a
+    fake handing back the member hides a comparison made with `is`.
+    """
+    seen: list[tuple[str, str]] = []
+
+    def question(_parent: object, title: str, text: str, *_a: object, **_k: object) -> object:
+        seen.append((title, text))
+        return answer
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    return seen
+
+
+def test_cancelling_the_replace_question_installs_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default answer starts no job at all -- `route` is never called.
+
+    Cancel, Escape and the window's close button all arrive as `NoButton`, and
+    `said_yes()` is what makes all three mean no; the `int` below is the No
+    button itself, which is the one a mis-spelled comparison would read as yes.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    route.question = _REPLACE_QUESTION
+    seen = _asked(monkeypatch, int(controller_view_module.QMessageBox.StandardButton.No))
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    assert [title for title, _text in seen] == ["Replace the checkout of mod-my-thing?"]
+    assert seen[0][1] == _REPLACE_QUESTION, "the engine's sentence, not one written here"
+    assert route.installed == [], "the install seam was never reached"
+    assert view.module_report.toPlainText() == (
+        "install from link mod-my-thing: cancelled — nothing on this machine was changed."
+    )
+
+
+def test_answering_the_replace_question_installs_with_the_agreement_carried(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Yes reaches the engine as `replacing=True`, which is the only thing it buys.
+
+    The flag is asserted on the seam rather than on the report: an install that
+    ran with `replacing=False` after the user said yes would be refused by the
+    engine, and the tab would show a refusal for a question they had answered.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    route.question = _REPLACE_QUESTION
+    _asked(monkeypatch, int(controller_view_module.QMessageBox.StandardButton.Yes))
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    assert route.installed == [("mod-my-thing", None)]
+    assert route.replacing == [True]
+
+
+def test_an_ordinary_custom_install_opens_no_dialog_and_agrees_to_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing at the clone path means no question -- asserted by making one fatal.
+
+    The commonest press must not grow a dialog, and the way to prove that is
+    not to check a message: `QMessageBox.question` itself raises here, so a
+    guard that asked anyway fails this test rather than changing its wording.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    assert route.question is None
+
+    def never(*_a: object, **_k: object) -> NoReturn:
+        raise AssertionError("an install with nothing to replace must ask nothing")
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", never)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    assert route.installed == [("mod-my-thing", None)]
+    assert route.replacing == [False]
+
+
+def test_a_seam_that_cannot_answer_asks_nothing_and_leaves_the_refusal_to_the_engine(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A question that cannot be computed must not crash the GUI thread.
+
+    `replacement_question()` reads a claim file and asks git what a checkout is
+    a checkout of, and both can fail. The press goes ahead without the question
+    -- which is safe in one direction only, and it is this one: the install
+    runs with `replacing=False`, so the engine's own guard refuses anything it
+    would have asked about and says "Nothing was changed."
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+
+    def boom(_manifest: object) -> NoReturn:
+        raise OSError("git went away")
+
+    services.module_replacement_question = boom
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("nothing to ask")),
+    )
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    assert route.replacing == [False]
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    """Every file under `root`, by relative path, as bytes. `.git` included."""
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+@pytest.mark.skipif(
+    not apply_module.git_available(), reason="needs a host git to make a real checkout"
+)
+def test_cancelling_leaves_a_real_clone_of_another_repository_byte_for_byte(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole route with no fake in the middle: a real checkout, and Cancel.
+
+    `modules/mod-my-thing` here is a real git clone with this app's own claim
+    inside it, of a repository that is not the one the pasted link names -- the
+    shape a user reaches by installing two forks of the same module. The seams
+    are the real `controller_wow_wotlk.modules` bindings over a real `Applier`
+    and a real `RunnerGit`, so the question comes from `Applier.
+    replacement_question()` and the id from `module_source.derive_link()`.
+
+    What it asserts is the only thing a user cares about: the folder is
+    byte-identical afterwards, `.git` included. A `git fetch` + `reset --hard`
+    rewrites `.git/FETCH_HEAD` even when it lands on the same commit, so this
+    fails for a run that reached the clone seam at all.
+    """
+    server_dir = tmp_path / "server"
+    theirs = tmp_path / "theirs"
+    theirs.mkdir(parents=True)
+    (theirs / "src").mkdir()
+    (theirs / "src" / "Thing.cpp").write_text("// theirs\n", encoding="utf-8")
+    author = ["-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=theirs, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=theirs, check=True)
+    subprocess.run([*["git", *author], "commit", "-qm", "v1"], cwd=theirs, check=True)
+    clone = server_dir / "modules" / "mod-my-thing"
+    clone.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", str(theirs), str(clone)], check=True)
+    apply_module.write_clone_claim(
+        clone, item_id="mod-my-thing", url="https://github.com/them/mod-my-thing.git"
+    )
+    applier = Applier(
+        server_dir,
+        git=RunnerGit(),
+        remote_url=lambda _dest: "https://github.com/them/mod-my-thing.git",
+    )
+    services = _services(ps, tmp_path, [])
+    services.store = modules.store()
+    services.module_from_link = modules.derive_link
+    services.module_install_custom = modules.install_custom(applier)
+    services.module_replacement_question = modules.replacement_question(applier)
+    seen = _asked(monkeypatch, int(controller_view_module.QMessageBox.StandardButton.No))
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+    # The `ps` fixture fakes `runner.run` so a `Controller` works without
+    # Docker, and a real `RunnerGit` runs through the same seam. Put the real
+    # one back now that the view is built: from here on the only subprocess this
+    # test starts is git, against a repository on this disk.
+    monkeypatch.setattr(runner, "run", _REAL_RUN)
+    before = _tree(clone)
+    assert before, "the fixture must be a real checkout"
+
+    view.install_module_from_link()
+
+    assert len(seen) == 1, "the real seam found the clone and asked about it"
+    assert "https://github.com/them/mod-my-thing.git" in seen[0][1]
+    assert "https://github.com/you/mod-my-thing" in seen[0][1]
+    assert _tree(clone) == before, "the checkout was not touched"
+    assert "cancelled" in view.module_report.toPlainText()
+
+
+# ------------------------------- T68: a clone whose install never finished keeps Install
+
+
+class _ClonesFromNothing:
+    """A `Git` that fills the destination with `files` instead of cloning.
+
+    The real `Applier` runs here, over a real server directory, so the claim
+    these tests read is the one `install()` wrote and not a fixture's idea of
+    one. Only the network is faked.
+    """
+
+    def __init__(self, files: dict[str, str], origin: str | None = None) -> None:
+        self.files = files
+        self.clones: list[Path] = []
+        # What a checkout at the clone path says it is a checkout OF. `None` is
+        # "git would not say", which since T47 (#174) refuses every install
+        # over a folder that is already there -- the guard's own subject, and
+        # not what these tests are about. A caller that presses Install twice
+        # passes the manifest's own URL, which is what a real clone answers.
+        self.origin = origin
+
+    def clone(self, spec: object) -> None:
+        dest = cast(Path, spec.dest)  # type: ignore[attr-defined]
+        self.clones.append(dest)
+        for name, text in self.files.items():
+            path = dest / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+    def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
+        # `None` while there is no origin to compare against, and "clean" once
+        # there is: a caller that presses Install twice is pressing it over the
+        # checkout this fake itself just made, and T47's guard asks all three
+        # questions before it would reset one. A guard answered `None` refuses,
+        # under its own sentence, a press these tests need to reach the applier.
+        return None if self.origin is None else True
+
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        return None if self.origin is None else True
+
+    def remote_url(self, dest: Path) -> str | None:
+        return self.origin
+
+
+class _RecordingSql:
+    def __init__(self) -> None:
+        self.files: list[tuple[str, str]] = []
+        self.statements: list[tuple[str, str]] = []
+
+    def run_file(self, db: str, path: Path) -> None:
+        self.files.append((db, path.name))
+
+    def run_statement(self, db: str, statement: str) -> None:
+        self.statements.append((db, statement))
+
+
+# `mod-arac` is the shipped module this is measured on: family `module`, no
+# prompts, nothing in `requires`, and one install-time `direct` world SQL file —
+# which is exactly what the T7 guard refuses while the world is up.
+ARAC = "mod-arac"
+ARAC_SQL = "data/sql/db-world/arac.sql"
+ARAC_URL = (
+    ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME).load("module", ARAC).source.url
+)
+"""Read off the shipped manifest, never spelled here: T47's repository question
+compares this against what the checkout's origin says, and a URL typed into a
+fixture would go stale the day the module moves."""
+
+
+def _arac_view(
+    ps: _Ps, tmp_path: Path, *, world_running: bool
+) -> tuple[ControllerView, _ClonesFromNothing, _RecordingSql]:
+    """The real Modules tab over a real applier and a real server directory.
+
+    Both readings come from `yulon.apply` itself rather than from a mapping this
+    test holds: the row is drawn from what the install really left on disk,
+    which is the whole question T68 asks.
+    """
+    # The SQL file the T7 guard refuses, and the two sources the module's other
+    # steps copy: `client: Patch-A.MPQ` and `server_dbc: patch-contents/
+    # DBFilesContent` both came in with T62 (#171) and raise "client source
+    # missing in clone" if the clone this fake makes does not carry them — which
+    # would leave every install here UNFINISHED and hide what T68 measures.
+    git = _ClonesFromNothing(
+        {
+            ARAC_SQL: "UPDATE creature_template SET name = 'x';\n",
+            "Patch-A.MPQ": "not really an MPQ\n",
+            "patch-contents/DBFilesContent/CharBaseInfo.dbc": "not really a DBC\n",
+        },
+        origin=ARAC_URL,
+    )
+    sql = _RecordingSql()
+    services = _services(ps, tmp_path, [])
+    # T62 (#171): `mod-arac` also writes into the game client, so with no client
+    # folder set the install now stops at the client notice before it reaches
+    # the world-running guard T68 is measured on. The folder is the fixture's
+    # own; nothing here asserts anything about what lands in it.
+    client_dir = tmp_path / "client"
+    (client_dir / "Data").mkdir(parents=True, exist_ok=True)
+    object.__setattr__(services, "client_dir", client_dir)
+    object.__setattr__(
+        services,
+        "applier",
+        Applier(
+            tmp_path,
+            git=git,
+            sql=sql,
+            world_running=lambda: world_running,
+            client_dir=client_dir,
+        ),
+    )
+    object.__setattr__(
+        services, "installed_modules", lambda: apply_module.installed_clones(tmp_path)
+    )
+    object.__setattr__(
+        services, "unfinished_modules", lambda: apply_module.unfinished_clones(tmp_path)
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0), git, sql
+
+
+def test_an_install_the_running_world_refused_keeps_the_rows_install_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T68, measured on the tab: press Install with the world up, and press it again.
+
+    Before this the clone was on disk by the time the guard refused, so the row
+    redrew as `Remove` and the refusal's own *"Press Stop, then install again"*
+    named a press that was not on the row at all — only in the context menu.
+
+    Three assertions, and the second is the one that keeps the first honest:
+    the button says Install, the folder is STILL listed as installed (nothing
+    here pretends the clone left), and pressing the button reaches the applier's
+    `install()` a second time — read off the clone seam, which is the artefact
+    that route leaves behind, not off the report sentence.
+    """
+    view, git, sql = _arac_view(ps, tmp_path, world_running=True)
+
+    view.modules_panel.row(ARAC).install_button.click()
+
+    assert "the world server is running" in view.module_report.toPlainText()
+    assert sql.files == []
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is True
+    assert row.remove_button is None
+    assert row.install_button is not None and row.install_button.text() == "Install"
+    assert row.install_button.isEnabled()
+
+    row.install_button.click()
+
+    assert git.clones == [tmp_path / "modules" / ARAC] * 2
+
+
+def test_an_install_that_finished_leaves_the_row_offering_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The control for the test above: same tab, same module, world stopped.
+
+    Only `world_running` differs, so a rule that put Install on every installed
+    row — or one that never wrote the finished mark — fails here while the test
+    above still passes.
+    """
+    view, _git, sql = _arac_view(ps, tmp_path, world_running=False)
+
+    view.modules_panel.row(ARAC).install_button.click()
+
+    assert sql.files == [("world", "arac.sql")]
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is False
+    assert row.install_button is None
+    assert row.remove_button is not None and row.remove_button.text() == "Remove"
+
+
+def test_a_clone_from_a_build_before_the_mark_still_offers_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An older build's clone must not flip to Install the day this ships.
+
+    Every previous build wrote the claim right after the clone and nothing
+    else, so its record carries no completion key at all. The fixture is this
+    app's own writer with that one key removed — the older record rather than a
+    guess at it — and the row it produces is the one the user had yesterday.
+    """
+    clone = tmp_path / "modules" / ARAC
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(clone, item_id=ARAC, url="https://github.com/x/mod-arac.git")
+    claim = clone / apply_module.CLAIM_FILE
+    old = json.loads(claim.read_text(encoding="utf-8"))
+    del old[apply_module.COMPLETED_KEY]
+    claim.write_text(json.dumps(old), encoding="utf-8")
+
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=True)
+
+    row = view.modules_panel.row(ARAC)
+    assert row.data.installed is True and row.data.install_incomplete is False
+    assert row.install_button is None
+    assert row.remove_button is not None and row.remove_button.text() == "Remove"
+
+
+def _half_installed(server_dir: Path, folder: str, item_id: str) -> Path:
+    """A clone whose claim says this app's install of it never finished.
+
+    Written with the app's own writer rather than hand-rolled JSON, so it is the
+    record `install()` leaves behind when a step raises and not a guess at one.
+    """
+    clone = server_dir / folder / item_id
+    clone.mkdir(parents=True)
+    apply_module.write_clone_claim(
+        clone, item_id=item_id, url=f"https://github.com/x/{item_id}.git", completed=False
+    )
+    return clone
+
+
+def test_an_unfinished_clone_whose_requirement_is_gone_offers_a_locked_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Round 1's must-fix: T68's Install is still T69's Install, locks and all.
+
+    `mod-city-bots` names `mod-playerbots` in `requires`. A clone of it whose
+    install never finished, on a server where that requirement is no longer
+    there, now offers Install again — and the applier would refuse that press in
+    `_requires_refusal()`. The row therefore has to lock it and say why, which is
+    the invariant T55 and T69 established and which the first version of T68
+    broke by asking the locks of `not here` rows alone.
+
+    The last assertion is the half that keeps the first honest: the very press
+    this row offers is put to the REAL applier, and it refuses. A locked button
+    whose applier would have allowed the press would be a different defect.
+    """
+    _half_installed(tmp_path, "modules", "mod-city-bots")
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    row = view.modules_panel.row("mod-city-bots")
+    assert row.data.installed is True and row.data.install_incomplete is True
+    assert row.install_button is not None and row.install_button.text() == "Install"
+    assert row.install_button.isEnabled() is False
+    assert row.data.installable is False
+    assert row.data.install_reason == apply_module.requirement_refusal(
+        "mod-city-bots", "mod-playerbots"
+    )
+    assert [b.text() for b in row.chip_buttons if "mod-playerbots" in b.text()] == [
+        modules_panel.chip_needs_label("mod-playerbots")
+    ]
+
+    applier = view.services.applier
+    assert isinstance(applier, Applier)
+    with pytest.raises(apply_module.ApplyError, match="mod-playerbots"):
+        applier.install(view._manifests[("module", "mod-city-bots")])
+
+
+def test_an_unfinished_clone_that_conflicts_with_an_installed_module_locks_its_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The other lock, on the other family, and refused by the other guard.
+
+    `buff-mobs` and `nerf-mobs` are declared alternatives. A half-installed
+    `buff-mobs` beside a finished `nerf-mobs` offers Install — which
+    `_conflict_refusal()` refuses — so the row locks it in the conflict's own
+    words.
+    """
+    clones = "sql_scripts/clones"
+    _half_installed(tmp_path, clones, "buff-mobs")
+    nerf = tmp_path / clones / "nerf-mobs"
+    nerf.mkdir(parents=True)
+    apply_module.write_clone_claim(
+        nerf, item_id="nerf-mobs", url="https://github.com/x/nerf.git", completed=True
+    )
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    nerf_name = view._manifests[("mod", "nerf-mobs")].name
+    row = view.modules_panel.row("buff-mobs")
+    assert row.data.install_incomplete is True
+    assert row.install_button is not None and row.install_button.isEnabled() is False
+    assert row.data.install_reason == modules_panel.conflict_reason(nerf_name)
+    assert [b.text() for b in row.chip_buttons if nerf_name in b.text()] == [
+        modules_panel.chip_conflicts_with_label(nerf_name)
+    ]
+
+    applier = view.services.applier
+    assert isinstance(applier, Applier)
+    with pytest.raises(apply_module.ApplyError, match="nerf-mobs"):
+        applier.install(view._manifests[("mod", "buff-mobs")])
+
+
+def test_an_unfinished_clone_with_nothing_in_its_way_offers_a_live_install(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The control for the two above: the lock is the exception, not the rule.
+
+    `mod-arac` declares neither a requirement nor a conflict, so its
+    half-installed row offers the press with no reason attached — which is what
+    T68 is for. A lock arm that locked every unfinished row would pass both
+    tests above and fail here.
+    """
+    _half_installed(tmp_path, "modules", ARAC)
+    view, _git, _sql = _arac_view(ps, tmp_path, world_running=False)
+
+    row = view.modules_panel.row(ARAC)
+    assert row.data.install_incomplete is True
+    assert row.data.installable is True and row.data.install_reason is None
+    assert row.install_button is not None and row.install_button.isEnabled() is True
+
+
+def test_a_broken_custom_manifest_costs_its_own_row_and_the_family_still_draws(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The tab keeps every shipped module and names the one file it could not read (T46).
+
+    Driven through `reload_modules()` against a REAL file on disk rather than a
+    `Manifest` handed to the builder: the defect lived in the store, surfaced in
+    `_load_manifests()`, and was only ever visible at this call site -- a test
+    that injected a broken manifest into the panel would have proved nothing
+    about either.
+
+    Before T46 the `!!` line was the ONLY thing this tab drew for the family:
+    `list(store.load_all(kind))` is forced inside one `try`, so ~21 shipped
+    WotLK modules disappeared behind one file the user's own custom-module route
+    had written.
+    """
+    user = tmp_path / "user-manifests"
+    items = user / modules.GAME / "modules"
+    items.mkdir(parents=True)
+    (user / modules.GAME / "modules.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game": modules.GAME,
+                "type": "module",
+                # Both bad ones sort FIRST, so a store that stopped at the raise
+                # stopped before `mod-kept` -- the user row after the bad one is
+                # the half of the family a family-scoped catch never reached.
+                "items": ["mod-broken", "mod-bad-shape", "mod-kept"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (items / "mod-broken.json").write_text("{not json", encoding="utf-8")
+    # Valid JSON that fails the SCHEMA. It is the realistic bad file -- this app
+    # persisted these itself, so an older build's shape is what ages badly -- and
+    # it does not arrive as `ManifestError`: pydantic raises it, straight through
+    # `load_manifest()`, and the skip has to be wide enough to hold it.
+    (items / "mod-bad-shape.json").write_text(
+        json.dumps(
+            {
+                "id": "mod-bad-shape",
+                "name": 5,
+                "type": "module",
+                "game": modules.GAME,
+                "source": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (items / "mod-kept.json").write_text(
+        json.dumps(
+            {
+                "id": "mod-kept",
+                "name": "Kept",
+                "type": "module",
+                "game": modules.GAME,
+                "source": {"repo": "you/mod-kept"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    services = _services(ps, tmp_path, [])
+    services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    # The report box accumulates: constructing the view already reloaded once.
+    # Cleared so what is counted below is ONE reload's worth, not the session's.
+    view.module_report.clear()
+
+    view.reload_modules()
+
+    # The family is still there. Counted, not sampled: a test that looked for one
+    # known id would pass on a tab that drew only that one.
+    shipped = services.store.load_index("module").items
+    drawn = {r.data.id for r in view.modules_panel.rows()}
+    assert set(shipped) <= drawn
+    assert len(shipped) >= 20
+    # And the USER row that comes after the bad one, which is the half of the
+    # loss `module_updates()` used to take silently: the skip has to continue
+    # the pass, not merely survive the rows already yielded.
+    assert "mod-kept" in drawn
+    assert "mod-broken" not in drawn
+    assert "mod-bad-shape" not in drawn
+
+    # And the file that would not read is named, once, where every other refusal
+    # on this tab is read.
+    report = view.module_report.toPlainText()
+    # Counted by LINE, not by substring: the id appears twice in its own sentence
+    # -- once as the id and once inside the filename -- so `report.count(...)`
+    # measures the sentence's shape rather than how many times it was written.
+    named = [line for line in report.splitlines() if "mod-broken" in line]
+    assert len(named) == 1, report
+    assert "is not valid JSON" in named[0]
+    # The schema failure gets ONE line too, which is the assertion that fails if
+    # the skip is narrowed: a `ValidationError` reaching the report unflattened
+    # is five lines, and reaching `_load_manifests()` uncaught is none of them
+    # and the family-wide line instead.
+    shaped = [line for line in report.splitlines() if "mod-bad-shape" in line]
+    assert len(shaped) == 1, report
+    assert "name" in shaped[0]
+    # Not as the family-wide failure, which is what it used to be.
+    assert "could not load modules" not in report
+
+    # And the skips outlive the one thing on this tab that CLEARS the box rather
+    # than appending to it. `check_module_updates()` `setPlainText`s its result,
+    # which would erase the lines above -- except that `_module_updates_done()`
+    # ends in `reload_modules()`, which re-reads the store and appends them
+    # again. Asserted rather than reasoned, because the order of those two
+    # statements is the whole of it and nothing else pins it.
+    view._module_updates_done(())
+    after = view.module_report.toPlainText()
+    assert "mod-broken" in after and "mod-bad-shape" in after
+
+
+def test_a_foreign_game_manifest_is_a_reported_skip_and_never_a_row(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Why `Not for this game` is declined, as a test rather than as a comment (T46 item 4).
+
+    T44 item 5 asked for the badge and T46 item 4 carried the ask; the owner
+    declined it on 2026-09-15 because every `ManifestStore` path is
+    `<root>/<game>/...` and the game is the store's. The only file this tab can
+    read already lives in THIS game's directory, so one declaring another game is
+    a mis-declared file, not a module that belongs somewhere else -- the badge
+    would have labelled the row with something untrue of it.
+
+    What the file gets instead is the skip T46 built: named, with the path and
+    what it declared, and no row. The assertion is on the ROW SET, not on the
+    absence of a badge string: a test that only checked the badge text would pass
+    on a tab that drew the row with any other badge on it.
+
+    The fixture is a real file written to a real user root. T44's round 1 proved
+    this row by handing `build_module_rows()` a `Manifest` it built in memory --
+    coverage of a row nothing on disk can produce, which is what this replaces.
+    """
+    user = tmp_path / "user-manifests"
+    items = user / modules.GAME / "modules"
+    items.mkdir(parents=True)
+    (user / modules.GAME / "modules.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "game": modules.GAME, "type": "module", "items": ["mod-foreign"]}
+        ),
+        encoding="utf-8",
+    )
+    # Valid JSON and a valid manifest -- the ONE thing wrong with it is the game,
+    # so nothing but the game check can be what refuses it.
+    (items / "mod-foreign.json").write_text(
+        json.dumps(
+            {
+                "id": "mod-foreign",
+                "name": "Foreign",
+                "type": "module",
+                "game": "wow-tbc",
+                "source": {"repo": "you/mod-foreign"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    services = _services(ps, tmp_path, [])
+    services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.module_report.clear()
+
+    view.reload_modules()
+
+    drawn = {r.data.id for r in view.modules_panel.rows()}
+    assert "mod-foreign" not in drawn
+    # The family it would have replaced is drawn, which is the T46 half of this.
+    assert set(services.store.load_index("module").items) <= drawn
+
+    report = view.module_report.toPlainText()
+    named = [line for line in report.splitlines() if "mod-foreign" in line]
+    assert len(named) == 1, report
+    # The sentence says what it declared and what was expected, so a reader can
+    # tell a mis-declared game from an unparseable file without opening either.
+    assert "wow-tbc" in named[0] and modules.GAME in named[0]
+    assert "could not load modules" not in report
+
+
+# ---------------------------------------------------------------------------
+# T73: who gets the height on the Modules tab.
+#
+# Measured live on 2026-09-16, maximised at 1920x1080: the module list showed
+# about two and a half rows of forty while the report box and the rebuild log
+# under it took the rest; reaching City Bots from the top took eleven
+# page-downs. T44's approved mockup shows ten rows at once.
+#
+# EVERY measurement here is made with the theme applied and re-applied at the
+# window's width, because that is the only way these numbers mean anything:
+# `apply_dadcraft_theme(width=...)` regenerates the stylesheet at a font scale
+# derived from the width (`main._Window._restyle_for_width`), and the fonts,
+# paddings and `min-height`s it sets are most of what the tab spends. An
+# unthemed window says the list has 42% and 5 rows where the themed one says
+# 35% and 2 -- the first version of these tests measured the unthemed one and
+# was wrong about every number in it.
+#
+# And through `main.build_catalog_tab()` -- the SAME function `build_window()`
+# calls -- with the controller view added to the tab bar the way
+# `build_window()` adds it, for the reason `test_catalog_view.py`'s width matrix
+# does the same (T28 round 2): the tab bar's frame and the central widget's
+# `QVBoxLayout` eat into the budget before a single row is measured.
+
+MODULE_LIST_SHARE_AT_1080P = 0.42
+"""How much of the Modules tab's height the list must have, maximised at 1080p.
+
+Measured themed: 311px of the tab's 900 (35%) when T73 was filed, 397 (44%)
+now. The tab is exactly full at this size -- every widget is at its own hint or
+minimum and there is no surplus for a stretch factor to share -- so the whole
+difference is the empty rebuild log no longer asking for 266px to say nothing.
+"""
+
+ROWS_VISIBLE_AT_1080P = 8
+"""Whole module rows on screen at once, maximised at 1920x1080.
+
+Two before T73, three after it, eight after T75. T73 raised this by giving the
+list the height (397px of the tab's 900) and could go no further: a row was
+85px, so the list held three whichever way its 397 were shared. T75 is the other
+half -- the row is 39px now -- and this number is the two tickets multiplied
+rather than either of them alone, which is why both still assert it.
+"""
+
+MODULE_LIST_SHARE_WITH_ROOM_TO_SPARE = 0.58
+"""And the share on a window big enough to have a surplus (2560x1440).
+
+This is the size at which the stretch factor is the thing being tested: at 1080p
+the tab is full and the factor has nothing to share, at 1440p there are ~360
+spare pixels and the question is who gets them. The list: 522px/41% and 5 whole
+rows before, 757/60% and 7 now. Drop the `1` from `addWidget(self.modules_panel,
+1)` and the spare pixels go to the expanding widgets instead.
+"""
+
+ROWS_VISIBLE_WITH_ROOM_TO_SPARE = 13
+"""Whole rows at 2560x1440: five before T73, seven after it, seventeen after T75.
+
+Thirteen and not seventeen for `ROW_HEIGHT_CEILING`'s reason: the assertion is
+the promise (a 1440p screen shows most of the catalog at once), and pinning the
+measurement would fail on any honest change to a font. Four rows of headroom is
+one card's chrome -- enough that a family growing a header does not turn this
+red, and not enough for the row to go back over 60px unnoticed.
+"""
+
+TUNING_CARDS_SHARE_AT_1080P = 0.76
+"""The Tuning tab's share of its own tab, maximised at 1080p: 73% before, 79%.
+
+Smaller than the Modules tab's gain because there is only one box under the
+cards, and it is the box that gained the most from being sized to its text: 164
+px of twelve-line hint for a sentence, against the 106 the theme's floor under
+any report box gives it.
+"""
+
+READABLE_REPORT_LINES = 6
+"""The lines a report box must show without scrolling once it holds that many.
+
+Spelled here and NOT read back out of `controller_view.REPORT_LINES`: an
+assertion that takes its line count from the constant that sizes the box agrees
+with itself whatever that constant says, and three lines would pass it.
+"""
+
+A_BOX_THAT_GAVE_NOTHING_BACK = 12
+"""What an unsized `QPlainTextEdit` shows -- and so what a report must NOT.
+
+The other half of the same assertion, and the half that says the six is a
+CEILING: without it, a box that grows to whatever it holds satisfies "six lines
+are readable" by showing twelve, and a report pasted into the tab takes the
+rows with it. Twelve because that is the default `sizeHint`, which is what the
+boxes here were before.
+"""
+
+
+def _themed_window() -> Any:
+    """A window styled the way `build_window()` styles it, before anything is in it."""
+    from PySide6.QtWidgets import QMainWindow
+
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    window = QMainWindow()
+    apply_dadcraft_theme(window)
+    return window
+
+
+def _controller_in_the_real_window(view: ControllerView, tab_title: str) -> tuple[Any, Any]:
+    """Lay `view` out inside the window `build_window()` builds, and show it.
+
+    Returns the window -- so the caller can drive it across the range a user can
+    drag it to -- and `view`'s now-current sub-tab.
+    """
+    import main
+    from yulon.ui.catalog_view import CatalogView
+    from yulon.ui.widgets.log_panel import LogPanel
+
+    window = _themed_window()
+    panel = LogPanel()
+    catalog_view = CatalogView(load_catalog(), lambda _entry: None, panel, pick_dir=lambda *_: None)
+    tabs, _banner, _splitter = main.build_catalog_tab(window, catalog_view, panel)
+    tabs.addTab(view, WOTLK.name)
+    tabs.setCurrentWidget(view)
+    index = next(i for i in range(view._tabs.count()) if view._tabs.tabText(i) == tab_title)
+    view._tabs.setCurrentIndex(index)
+    window.setMinimumSize(*main.MINIMUM_WINDOW_SIZE)
+    window.show()
+    return window, view._tabs.widget(index)
+
+
+def _at(window: Any, size: tuple[int, int]) -> None:
+    """Put the window at `size`, restyle as the app does, and let it settle."""
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    window.resize(*size)
+    # `main._Window._restyle_for_width`, which is what makes the fonts -- and so
+    # every height measured here -- a function of the window's width.
+    apply_dadcraft_theme(window, width=window.width())
+    process_events()
+
+
+def _whole_rows_on_screen(panel: modules_panel.ModulesPanel) -> int:
+    """How many module rows are completely inside the list's viewport."""
+    from PySide6.QtWidgets import QScrollArea
+
+    area = panel.findChild(QScrollArea)
+    assert isinstance(area, QScrollArea)
+    viewport = area.viewport()
+    whole = 0
+    for row in panel.rows():
+        top = row.mapTo(viewport, row.rect().topLeft()).y()
+        if top >= 0 and top + row.height() <= viewport.height():
+            whole += 1
+    return whole
+
+
+def _lines_readable_without_scrolling(box: Any, count: int) -> bool:
+    """Put `count` lines in `box` and answer whether all of them are on screen.
+
+    Measured against the box's own laid-out viewport rather than recomputed from
+    the font: the height under test is itself computed from the font, so a check
+    that did the same arithmetic would agree with itself whatever the box did.
+    """
+    from PySide6.QtGui import QTextCursor
+
+    was = box.toPlainText()
+    box.setPlainText("\n".join(f"line {n}" for n in range(1, count + 1)))
+    process_events()
+    cursor = box.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    bottom_of_the_last_line = box.cursorRect(cursor).bottom()
+    nothing_to_scroll = box.verticalScrollBar().maximum() == 0
+    box.setPlainText(was)
+    return bool(bottom_of_the_last_line <= box.viewport().height() and nothing_to_scroll)
+
+
+def _a_sentence_wrapping_to(box: Any, lines: int) -> str:
+    """ONE paragraph, long enough to wrap to exactly `lines` lines in `box`.
+
+    Built by asking the box's own document how many lines it has made of the
+    text so far, because that number depends on the box's width and the theme's
+    font and cannot be written down here. One paragraph and not `lines` of them:
+    the whole point is a sentence that wraps, which is what every refusal and
+    every `TUNING_SAVED` on these tabs is.
+    """
+    words = ["word"]
+    while True:
+        box.setPlainText(" ".join(words))
+        process_events()
+        made = round(box.document().documentLayout().documentSize().height())
+        if made >= lines or len(words) > 2000:
+            return " ".join(words)
+        words.append("word")
+
+
+def _squeezed(tab: Any) -> list[str]:
+    """Everything on `tab` drawn shorter than it says it needs -- i.e. clipped."""
+    from PySide6.QtWidgets import QVBoxLayout
+
+    box = tab.layout()
+    assert isinstance(box, QVBoxLayout)
+    return [
+        f"{type(w).__name__}: {w.height()} < {w.minimumSizeHint().height()}"
+        for w in (box.itemAt(i).widget() for i in range(box.count()))
+        if w is not None and w.isVisible() and w.height() < w.minimumSizeHint().height()
+    ]
+
+
+def test_the_module_list_gets_the_height_on_a_maximised_1080p_window(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The list, not the two boxes under it, is what the tab's height is for.
+
+    The defect this pins: `QVBoxLayout` hands every widget its `sizeHint` before
+    it shares anything by stretch factor, so the 3:1:2 this tab was written with
+    -- which reads as "the list wins" -- was decided entirely by what the two
+    boxes asked for, and an empty `LogPanel` asks for 266px.
+
+    Three assertions, because each on its own is satisfied by the wrong thing: a
+    share is met by a list of shorter rows, a row count by a taller window, and
+    both by a log that has quietly been made unusable rather than small.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1920, 1080))
+
+    share = view.modules_panel.height() / tab.height()
+    assert share >= MODULE_LIST_SHARE_AT_1080P, (
+        f"the list has {view.modules_panel.height()}px of the tab's {tab.height()} "
+        f"({share:.0%}); the report has {view.module_report.height()} and the log "
+        f"{view.rebuild_log.height()}"
+    )
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert (
+        whole >= ROWS_VISIBLE_AT_1080P
+    ), f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen"
+    assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
+        f"the idle log is CLIPPED at {view.rebuild_log.height()}px, not merely small: "
+        f"it says it needs {view.rebuild_log.minimumSizeHint().height()}"
+    )
+    assert _lines_readable_without_scrolling(view.module_report, READABLE_REPORT_LINES), (
+        f"the report cannot show {READABLE_REPORT_LINES} lines: "
+        f"it is {view.module_report.height()}px"
+    )
+    assert not _lines_readable_without_scrolling(
+        view.module_report, A_BOX_THAT_GAVE_NOTHING_BACK
+    ), f"a long report takes the rows with it: the box grew to {view.module_report.height()}px"
+
+
+def test_a_bigger_screens_spare_height_goes_to_the_module_list(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """At 2560x1440 the tab has pixels to spare, and the list is what spends them.
+
+    The other half of the 1080p test and the half that tests the stretch factor:
+    at 1080p this tab is exactly full, every widget on its own hint, and a
+    stretch factor decides nothing. Here there are some 360 spare pixels. They
+    used to be split with the report and the log -- which have nothing to put in
+    them -- and the list came out at 41%.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (2560, 1440))
+
+    share = view.modules_panel.height() / tab.height()
+    assert share >= MODULE_LIST_SHARE_WITH_ROOM_TO_SPARE, (
+        f"the list has {view.modules_panel.height()}px of the tab's {tab.height()} "
+        f"({share:.0%}); the report has {view.module_report.height()} and the log "
+        f"{view.rebuild_log.height()}"
+    )
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert (
+        whole >= ROWS_VISIBLE_WITH_ROOM_TO_SPARE
+    ), f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen"
+
+
+def test_the_modules_tab_fits_at_the_size_the_app_opens_at(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """1280x800 is the hard case, not 1920x1080: there is nothing spare at all.
+
+    A height given to the list at the top of the range is taken from somewhere at
+    the bottom of it, and the way that is paid for is silent -- Qt draws the
+    widgets it cannot fit shorter than their own minimum, and the text inside
+    them is simply cut off. Met once already: a report box pinned to six lines
+    as a MINIMUM (rather than as a ceiling) clipped itself by 21px here, in the
+    window the app opens at, while the 1080p test stayed green.
+
+    Then again at 960x600, the smallest the window can be dragged to, where this
+    tab has been over-subscribed since long before T73: the assertion there is
+    the narrower one that the report box in particular is not the widget being
+    cut, and that the list is never drawn under its OWN minimum.
+
+    That second one said something stronger until T83 -- that the list gets the
+    whole of `MODULE_LIST_MIN_HEIGHT` here, which is above its own 70px -- and
+    that is no longer true at this one size, on purpose. With the action bar
+    wrapped to two lines the tab is four pixels short at 960x600 even with both
+    boxes folded away, and the list's floor is the last thing in `_TabFit`'s
+    order because a list scrolls: four pixels off it is four pixels of a row
+    somebody can still reach, where the same four off the custom-module card is
+    a cut word. The floor is still asserted in full at the size the app opens
+    at, above, and by
+    `test_the_report_box_is_what_gives_after_the_log_and_before_the_list`.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+    assert (
+        _squeezed(tab) == []
+    ), f"clipped at the size the app opens at {main.DEFAULT_WINDOW_SIZE}: {_squeezed(tab)}"
+
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    report = view.module_report
+    assert report.height() >= report.minimumSizeHint().height(), (
+        f"the report is clipped at the smallest window: {report.height()}px against the "
+        f"{report.minimumSizeHint().height()} it says it needs"
+    )
+    # And the list is not CUT here, which is the line between giving height up
+    # and being short of it: `_TabFit` may lower the floor to what is left, and
+    # may not lower it under what the widget itself says it needs.
+    assert view.modules_panel.height() >= view.modules_panel.minimumSizeHint().height(), (
+        f"the list is drawn at {view.modules_panel.height()}px against the "
+        f"{view.modules_panel.minimumSizeHint().height()} it says it needs at the smallest "
+        "window: it was cut rather than asked to give"
+    )
+
+
+def test_a_report_that_wraps_does_not_take_the_list_with_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """What the report box holds is a paragraph, not a tidy list of short lines.
+
+    A refusal on this tab is `str(exc)` -- one long sentence that wraps to
+    whatever the box's width makes of it, and the narrower the window the more
+    lines that is. The cap has to be counted in LINES ON SCREEN for that, and
+    the first version of it was not: it multiplied a whole paragraph's height by
+    the number of wrapped lines in it, so one 120-word sentence asked for 967px
+    and the list above it was laid out at nothing at all. Every value in the
+    `TUNING_SAVED` and `MODULE_SQL_FINISHED` family wraps like this.
+
+    At the size the app OPENS at, because that is where the box is narrow enough
+    to wrap and the tab has nothing spare to absorb it.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+    was = view.modules_panel.height()
+
+    view.module_report.setPlainText("word " * 120)
+    process_events()
+
+    assert view.module_report.height() <= was, (
+        f"one wrapped paragraph took {view.module_report.height()}px, more than the list "
+        f"had to start with ({was})"
+    )
+    assert view.modules_panel.height() >= controller_view_module.MODULE_LIST_MIN_HEIGHT, (
+        f"the list is down to {view.modules_panel.height()}px with one sentence in the "
+        f"report box, which is {view.module_report.height()}px tall"
+    )
+    assert _squeezed(tab) == [], f"clipped once the report had something in it: {_squeezed(tab)}"
+    assert not _lines_readable_without_scrolling(
+        view.module_report, A_BOX_THAT_GAVE_NOTHING_BACK
+    ), "the wrapped report is over the ceiling the short-line one is held to"
+
+    # And the other direction, at the size where the tab can afford the box its
+    # whole ceiling: a sentence wrapping to exactly the number of lines the box
+    # is allowed is a sentence that must be READ, not scrolled. Counting
+    # paragraphs instead of the lines they wrap to gets this wrong the quiet
+    # way -- the box asks for one line, the theme's floor gives it five, and the
+    # sixth is behind a scrollbar nobody looks for.
+    _at(window, (1920, 1080))
+    view.module_report.setPlainText(
+        _a_sentence_wrapping_to(view.module_report, READABLE_REPORT_LINES)
+    )
+    process_events()
+    assert view.module_report.verticalScrollBar().maximum() == 0, (
+        f"a sentence wrapping to six lines is scrolled in a box sized for six: "
+        f"{view.module_report.height()}px, {view.module_report.verticalScrollBar().maximum()} "
+        f"lines of travel"
+    )
+
+
+def test_the_rebuild_log_takes_its_height_back_when_a_job_starts(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The log is small because it is empty, not because it was made small.
+
+    The list's height comes out of a log with nothing in it, which is only honest
+    while that stays true: the moment a rebuild or a database update writes to
+    the panel, its output is the thing worth the pixels. Driven through
+    `LogPanel.run()` -- the call `rebuild_server()` itself makes -- rather than by
+    setting the flag, so the cap is lifted by the same signal the app raises.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1920, 1080))
+    idle = view.rebuild_log.height()
+    assert (
+        idle == view.rebuild_log.minimumSizeHint().height()
+    ), f"an empty log is not at its smallest: {idle}px"
+
+    assert view.rebuild_log.run(lambda: iter(["compiling"]), title="rebuild") is True
+    pump_until(lambda: not view.rebuild_log.running, "the job finished")
+    process_events()
+
+    assert (
+        view.rebuild_log.height() > idle
+    ), f"the log is still capped at {view.rebuild_log.height()}px with a job's output in it"
+
+
+def test_the_tuning_cards_get_the_height_their_report_used_to_take(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The Tuning tab is the same shape, so it gets the same rule.
+
+    One list of cards over one report box, and that box asked for twelve lines of
+    a sentence. It is the clearest case of the two: there is no log here, so the
+    whole difference between 73% and 79% is the report being as tall as its text.
+    """
+    view = _tuning_view(ps, tmp_path)
+    window, tab = _controller_in_the_real_window(view, "Tuning")
+    _at(window, (1920, 1080))
+
+    share = view.tuning_panel.height() / tab.height()
+    assert share >= TUNING_CARDS_SHARE_AT_1080P, (
+        f"the cards have {view.tuning_panel.height()}px of the tab's {tab.height()} "
+        f"({share:.0%}); the report has {view.tuning_report.height()}"
+    )
+    assert _lines_readable_without_scrolling(view.tuning_report, READABLE_REPORT_LINES), (
+        f"the report cannot show {READABLE_REPORT_LINES} lines: "
+        f"it is {view.tuning_report.height()}px"
+    )
+    assert not _lines_readable_without_scrolling(
+        view.tuning_report, A_BOX_THAT_GAVE_NOTHING_BACK
+    ), f"a long report takes the cards with it: the box grew to {view.tuning_report.height()}px"
+    assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
+
+
+# ------------------ the press that ran the updater over SQL the app had applied
+#
+# T78, round-3 live gate press 9c. These go through the REAL binding --
+# `controller_wow_wotlk.modules.apply_module_sql()` -- with only Docker faked, so
+# what is asserted is the argument the importer would really have been started
+# with. A `_FakeImporter` in its place could not see it: the whole defect is in
+# the binding these two tests are the only callers of.
+
+
+ARAC_FILE = "modules/mod-arac/data/sql/db-world/arac.sql"
+AOE_FILE = "modules/mod-aoe-loot/data/sql/db-world/aoe_loot_module_string.sql"
+APPLYING_AOE = ">> Applying update aoe_loot_module_string.sql"
+
+
+def _two_modules_on_disk(server_dir: Path) -> None:
+    """One shipped module of each route, with its SQL where its manifest says.
+
+    `mod-arac` declares `data/sql/db-world/arac.sql` as `applied_by="direct"`
+    and `mod-aoe-loot` declares `data/sql/db-world/*.sql` as `db-import`, in the
+    bundled manifests these tests read through the real store.
+    """
+    for rel in (ARAC_FILE, AOE_FILE):
+        path = server_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("-- x\n", encoding="utf-8")
+
+
+def _real_module_sql(
+    ps: _Ps,
+    tmp_path: Path,
+    fake: Callable[..., docker.AttachedRun],
+    monkeypatch: pytest.MonkeyPatch,
+) -> ControllerView:
+    monkeypatch.setattr(docker, "apply_module_sql", fake)
+    services = _services(ps, tmp_path, [])
+    services.module_sql = lambda output: modules.apply_module_sql(tmp_path, output=output)
+    return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def test_the_module_sql_press_never_hands_the_updater_a_file_this_app_applied(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix, asserted on what was SENT rather than on what the panel says about it.
+
+    `AC_UPDATES_ALLOWED_MODULES` is the whole mechanism: a module that is not in
+    it is one `UpdateFetcher` never joins a path for, so its `arac.sql` is never
+    opened and the exit 1 the gate met cannot happen. The panel's sentences are
+    checked too, but the first assertion is the argument itself.
+    """
+    _two_modules_on_disk(tmp_path)
+    handed: list[str | None] = []
+
+    def fake(
+        spec: object,
+        server_dir: Path,
+        *,
+        output: Callable[[str], None],
+        modules: str | None,
+        **kw: object,
+    ) -> docker.AttachedRun:
+        handed.append(modules)
+        output(APPLYING_AOE)
+        return docker.AttachedRun(0, (APPLYING_AOE,))
+
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    view.apply_module_sql()
+
+    assert handed == ["mod-aoe-loot"]
+    text = view.module_report.toPlainText()
+    assert (
+        "sql data/sql/db-world/arac.sql -> world: not handed to the updater: this app "
+        "applies it itself at install" in text
+    )
+    assert "sql data/sql/db-world/aoe_loot_module_string.sql -> world: applied" in text
+    assert "FAILED" not in text, text
+
+
+def test_a_refused_import_still_says_which_file_this_app_owns(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal path reports per file too, and the withheld file is not blamed.
+
+    An importer that exits 1 for a reason of its own must not leave the user
+    guessing which of the files on screen it was about -- and the one file this
+    app applied itself is the one it was NOT about, because it was never given.
+    """
+    _two_modules_on_disk(tmp_path)
+    words = "ac-db-import exited 1: Could not update the World database"
+
+    def fake(
+        spec: object,
+        server_dir: Path,
+        *,
+        output: Callable[[str], None],
+        modules: str | None,
+        **kw: object,
+    ) -> docker.AttachedRun:
+        raise docker.DockerCommandError(words)
+
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.apply_module_sql()
+
+    text = view.module_report.toPlainText()
+    assert f"aoe_loot_module_string.sql -> world: refused: {words}" in text
+    assert "arac.sql -> world: not handed to the updater: this app applies it itself" in text
+    assert "arac.sql -> world: refused" not in text
+    assert failures and words in failures[0]
+
+
+def test_an_install_with_only_direct_sql_asks_for_none_and_still_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`""` has to reach the importer as an empty value, not as an absent one.
+
+    Upstream reads three meanings out of `Updates.AllowedModules`, and the one
+    this needs -- `Loading modules: none` -- is the empty string.
+    `run_one_shot()` branches on `allowed_modules is None`, so `""` still
+    travels as `-e AC_UPDATES_ALLOWED_MODULES=`; a falsy check anywhere on this
+    path would turn it into "all", which after a rebuild is the CMake list with
+    ARAC compiled in, and the press would apply `arac.sql` again by the other
+    door. The run still happens: the core's own updates are the importer's main
+    job and this app's direct SQL has nothing to do with them.
+    """
+    path = tmp_path / ARAC_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("-- x\n", encoding="utf-8")
+    handed: list[str | None] = []
+
+    def fake(
+        spec: object,
+        server_dir: Path,
+        *,
+        output: Callable[[str], None],
+        modules: str | None,
+        **kw: object,
+    ) -> docker.AttachedRun:
+        handed.append(modules)
+        return docker.AttachedRun(0, ())
+
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    view.apply_module_sql()
+
+    assert handed == [""], handed
+    assert handed != ["all"]
+
+
+# ---- T78 round 3: the module the 2026-09-17 live gate found withheld
+#
+# mod-city-bots is the only shipped manifest where "withhold the file" and
+# "withhold the module" differ, and withholding it whole left the world in a
+# restart loop on `Table 'acore_world.city_bot_poi' doesn't exist` with the
+# app's own remedy -- "Press Apply module SQL" -- unreachable from the button
+# that prints it. The assertion below is the argument the importer is started
+# with, because that argument IS the mechanism.
+
+CITY_BOTS_SQL: list[dict[str, object]] = [
+    {
+        "db": "auth",
+        "path": "data/sql/db-auth/updates/*.sql",
+        "applied_by": "db-import",
+    },
+    {
+        "db": "characters",
+        "path": "data/sql/db-characters/updates/*.sql",
+        "applied_by": "db-import",
+    },
+    {"db": "world", "path": "data/sql/db-world/updates/*.sql", "applied_by": "db-import"},
+    {
+        "db": "playerbots",
+        "path": "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql",
+        "applied_by": "direct",
+    },
+]
+"""mod-city-bots' `sql` block, path for path and route for route.
+
+The manifest itself arrives with T63 and is not on this branch, so the shipped
+tree is copied and this one file added to it -- every other manifest the plan
+reads here, `mod-arac` included, is the real one, and `ManifestStore`,
+`module_sql_plan()`, `module_sql_report()` and the binding are all real too.
+"""
+
+CITY_BOTS_FILES = (
+    "data/sql/db-auth/updates/2026_07_16_03_stage_cast_one_account_per_bot.sql",
+    "data/sql/db-characters/updates/2026_08_22_01_stage_cast_outfits.sql",
+    "data/sql/db-world/updates/2026_07_13_01_city_bot_poi.sql",
+    "data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql",
+)
+
+
+def _manifests_with_city_bots(tmp_path: Path) -> Path:
+    """The bundled manifest tree, plus mod-city-bots, at a path of our own."""
+    root = tmp_path / "manifests"
+    shutil.copytree(modules.BUNDLED_MANIFESTS_DIR, root)
+    game = root / "wow-wotlk"
+    index_file = game / "modules.json"
+    index = json.loads(index_file.read_text(encoding="utf-8"))
+    index["items"] = sorted([*index["items"], "mod-city-bots"])
+    index_file.write_text(json.dumps(index), encoding="utf-8")
+    (game / "modules" / "mod-city-bots.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "id": "mod-city-bots",
+                "name": "City Bots",
+                "type": "module",
+                "game": "wow-wotlk",
+                "description": "x",
+                "source": {"repo": "pjerra/mod-city-bots"},
+                "sql": CITY_BOTS_SQL,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_the_module_sql_press_hands_over_city_bots_and_withholds_only_arac(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's FAIL row 3d, as a press: `mod-city-bots` is in the list again.
+
+    Two modules on disk that differ in one thing only -- where their `direct`
+    `.sql` lives. `mod-arac`'s is `data/sql/db-world/arac.sql`, inside a
+    directory the updater walks, so it is still withheld and its file still
+    reads "not handed to the updater". City Bots' is
+    `data/sql/playerbots/updates/…`, which the updater joins no path for, so the
+    module goes to the importer and its three db-import groups are applied --
+    which is what "Press Apply module SQL, then Start" has to mean for the
+    world to come up at all.
+    """
+    root = _manifests_with_city_bots(tmp_path)
+    monkeypatch.setattr(modules, "store", lambda *a, **k: ManifestStore(root, modules.GAME))
+    path = tmp_path / ARAC_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("-- x\n", encoding="utf-8")
+    for rel in CITY_BOTS_FILES:
+        found = tmp_path / "modules" / "mod-city-bots" / rel
+        found.parent.mkdir(parents=True, exist_ok=True)
+        found.write_text("-- x\n", encoding="utf-8")
+    handed: list[str | None] = []
+    applying = [
+        f">> Applying update {Path(rel).name}" for rel in CITY_BOTS_FILES if "playerbots" not in rel
+    ]
+
+    def fake(
+        spec: object,
+        server_dir: Path,
+        *,
+        output: Callable[[str], None],
+        modules: str | None,
+        **kw: object,
+    ) -> docker.AttachedRun:
+        handed.append(modules)
+        for line in applying:
+            output(line)
+        return docker.AttachedRun(0, tuple(applying))
+
+    view = _real_module_sql(ps, tmp_path, fake, monkeypatch)
+    view.apply_module_sql()
+
+    assert handed == ["mod-city-bots"], handed
+    text = view.module_report.toPlainText()
+    for rel, db in (
+        (CITY_BOTS_FILES[0], "auth"),
+        (CITY_BOTS_FILES[1], "characters"),
+        (CITY_BOTS_FILES[2], "world"),
+    ):
+        assert f"sql {rel} -> {db}: applied" in text, text
+    assert (
+        f"sql {CITY_BOTS_FILES[3]} -> playerbots: not handed to the updater: this app "
+        f"applies it itself at install" in text
+    ), text
+    # The sentence the gate photographed, and the module it was wrong about.
+    assert "mod-city-bots: not given to ac-db-import" not in text, text
+    assert "mod-city-bots was not given to ac-db-import" not in text, text
+    # ARAC is untouched by the change, and its reason now names its file.
+    assert (
+        "mod-arac: not given to ac-db-import -- this app runs data/sql/db-world/arac.sql "
+        "itself, and the updater refuses a file it holds no ledger row for." in text
+    ), text
+
+
+# ---------------------------------------------------------------------------
+# T75: the row itself, which is what T73 left behind.
+#
+# T73 gave the list 397px of a 900px tab at 1920x1080 and the list still showed
+# three rows, because a row was 85px. Measured themed, the same way and for the
+# same reason as everything above: through `main.build_catalog_tab()` with
+# `apply_dadcraft_theme(width=...)` re-applied at each width.
+#
+# Where the 85 went (row `mod-1v1-arena`, 1920x1080, themed):
+#
+#   | part                              | before | after |
+#   | --------------------------------- | -----: | ----: |
+#   | outer padding, top + bottom       |     16 |     4 |
+#   | name line (name, version, link)   |     22 |    17 |
+#   | description (wrapped, 1-2 lines)  |     21 |    17 |
+#   | conf paths (one line per file)    |     22 |     0 |
+#   | badge line                        |     17 |     0 |
+#   | chip line                         |     36 |     0 |
+#   | action column (51px button + 18)  |     69 |    35 |
+#   | ROW (the tallest column + padding)|     85 |    39 |
+#
+# The three text lines became two, the badge and the chips moved onto one line
+# BESIDE the name instead of two lines under the badge, and the action column
+# stopped adding a `QVBoxLayout`'s default 9px margin to a button that was
+# already the tallest thing on the row. What is left -- 35px -- is the button,
+# and the button is `theme.TOUCH_TARGET_PX` plus the 3px of bevel
+# `panel_style.py` records as fixed. The row cannot go under that without
+# taking the handheld floor with it, which is why the ceiling below is 60 and
+# the row is 39: there is nothing left to spend.
+
+ROW_HEIGHT_CEILING = 60
+"""What a module row's minimum height must not exceed at the 1080p font scale.
+
+The owner's number is "about 55" (T75) and the row measures 39. The ceiling is
+asserted rather than the measurement, because a test that pinned 39 would fail
+on every honest change to a font or a bevel; what must not happen is the row
+going back over ~60, which is the height at which eight rows stop fitting.
+"""
+
+CHIPS_A_ROW_CAN_CARRY = 8
+"""Every chip `_chips_for()` can put on one row, counted from that function.
+
+No install of any catalog produces all eight at once -- `asks a question` and
+`needs the client folder` are for a row that is NOT installed, `required by` is
+for one that is -- and that is exactly why the widget is tested with all eight
+directly. This is a test of the STRIP: the question "what does it do when it is
+handed more than fits" has to be asked with more than fits, and the builder's
+own worst case (five, on a half-installed row) does not overflow at 1920 wide.
+The number is kept in step with `_chips_for()` by
+`test_the_chip_strip_is_handed_every_chip_the_builder_can_make`.
+"""
+
+
+def _every_chip() -> tuple[modules_panel.Chip, ...]:
+    """One of each chip `_chips_for()` can build, in that function's own order."""
+    return (
+        modules_panel.Chip(
+            "owed", modules_panel.CHIP_REBUILD_PENDING, "not compiled since this changed", "rebuild"
+        ),
+        modules_panel.Chip("owed", modules_panel.CHIP_SQL_PENDING, "sql on disk, not run", "sql"),
+        modules_panel.Chip(
+            "owed", modules_panel.chip_update_label(3), "three commits behind", "update"
+        ),
+        modules_panel.Chip(
+            "lock", modules_panel.chip_conflicts_with_label("AH Bot"), "AH Bot is installed here"
+        ),
+        modules_panel.Chip(
+            "lock", modules_panel.chip_needs_label("Playerbots"), "Playerbots is not installed"
+        ),
+        modules_panel.Chip(
+            "fact", modules_panel.CHIP_ASKS_A_QUESTION, "installing opens one dialog first"
+        ),
+        modules_panel.Chip(
+            "fact", modules_panel.CHIP_NEEDS_CLIENT_FOLDER, "no client folder is recorded"
+        ),
+        modules_panel.Chip(
+            "fact", modules_panel.chip_required_by_label(["Solocraft"]), "Solocraft needs this"
+        ),
+    )
+
+
+def _a_row_carrying(chips: tuple[modules_panel.Chip, ...], width: int) -> tuple[Any, Any]:
+    """A themed `RowWidget` with `chips` on it, laid out `width` pixels wide.
+
+    Themed and SHOWN, because both halves of what is under test are functions of
+    the width the widget is really given: a chip's own size hint comes from the
+    theme's font and padding, and the strip decides what fits from the width the
+    layout hands it. An unparented row answers both questions from a size hint
+    nothing has applied.
+
+    The HOST is returned with the row and every caller keeps it in a local, which
+    is not tidiness: the row is a child of a top-level widget nothing else holds,
+    so dropping the host drops the last Python reference to it, Qt deletes the
+    C++ object under the row, and the next line reads
+    `Internal C++ object (_ElidedLabel) already deleted` (met on the first run of
+    these three tests).
+    """
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    host = QWidget()
+    apply_dadcraft_theme(host, width=1920)
+    box = QVBoxLayout(host)
+    row = modules_panel.RowWidget(
+        modules_panel.ModuleRow(
+            id="mod-solocraft",
+            family="module",
+            name="Solocraft",
+            description="Scales dungeons for a small group.",
+            url=None,
+            installed=True,
+            catalogued=True,
+            paths=("env/dist/etc/modules/solocraft.conf",),
+            chips=chips,
+            removable=True,
+            remove_reason=None,
+            badge=BADGE_INSTALLED,
+        ),
+        host,
+    )
+    box.addWidget(row)
+    box.addStretch(1)
+    host.resize(width, 400)
+    host.show()
+    process_events()
+    return host, row
+
+
+def test_a_module_row_is_short_enough_that_a_1080p_screen_shows_eight(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The row's own height, which is the half of T44's ten rows T73 could not reach.
+
+    Two assertions and they are different questions. The ROW's minimum is what
+    this ticket changed: 85px of layout around a 51px button, measured themed at
+    every width from 960 to 2560 and the same 85 at all of them. The COUNT is
+    what the owner asked for and it is not implied by the first -- the list is
+    397px at this size, and how many rows that holds depends on the card chrome
+    above them as well as on the rows.
+
+    The count is also asserted in `test_the_module_list_gets_the_height_...`
+    above, through `ROWS_VISIBLE_AT_1080P`, and deliberately so: that test reads
+    it as a share of the tab and this one as a property of the row, and the two
+    fail for different reasons.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1920, 1080))
+
+    tallest = max(view.modules_panel.rows(), key=lambda row: row.minimumSizeHint().height())
+    assert tallest.minimumSizeHint().height() <= ROW_HEIGHT_CEILING, (
+        f"{tallest.data.id} asks for {tallest.minimumSizeHint().height()}px, over the "
+        f"{ROW_HEIGHT_CEILING} a row may take at this font scale"
+    )
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert whole >= ROWS_VISIBLE_AT_1080P, (
+        f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen; the "
+        f"tallest row asks for {tallest.minimumSizeHint().height()}px"
+    )
+
+
+def test_a_bigger_screen_shows_thirteen_module_rows(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """2560x1440, where the list has 757px and the rows are the only thing spending it.
+
+    Beside the 1080p count rather than instead of it: at 1080p the tab is full
+    and the card chrome above the first row is a fifth of what the list has, so
+    a change that made rows taller and the chrome shorter could hold the 1080p
+    number while losing here, where the chrome is 8% of the list.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (2560, 1440))
+
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert (
+        whole >= ROWS_VISIBLE_WITH_ROOM_TO_SPARE
+    ), f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen"
+
+
+def test_no_module_row_is_drawn_shorter_than_it_needs_at_the_smallest_window(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """960x600: the row got shorter, and nothing on it may be CUT to make that true.
+
+    The way a compacted row goes wrong is silent. An elided label reports a
+    minimum width of its whole string, so the first version of this row made the
+    card wider than the window and the scroll area grew a horizontal bar; the
+    fix -- `_ElidedLabel.minimumSizeHint` -- can equally hide a row that is being
+    squeezed vertically. So both are asked here: no row is drawn under its own
+    minimum, and no row is drawn under the button it carries, which is the
+    handheld floor `theme.TOUCH_TARGET_PX` sets and the one size on this row
+    that is not this ticket's to spend.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (960, 600))
+
+    squeezed = [
+        f"{row.data.id}: {row.height()} < {row.minimumSizeHint().height()}"
+        for row in view.modules_panel.rows()
+        if row.height() < row.minimumSizeHint().height()
+    ]
+    assert squeezed == [], f"rows drawn shorter than they say they need: {squeezed}"
+    pressable = [
+        row.install_button or row.remove_button
+        for row in view.modules_panel.rows()
+        if row.install_button is not None or row.remove_button is not None
+    ]
+    assert pressable, "no row on the shipped WotLK catalog offers a press"
+    from yulon.ui.theme import TOUCH_TARGET_PX
+
+    too_small = [b.text() for b in pressable if b.height() < TOUCH_TARGET_PX]
+    assert too_small == [], f"a press under the handheld floor at the smallest window: {too_small}"
+
+
+def test_a_row_carrying_every_chip_shows_them_all_when_the_width_allows(
+    qapp: object,
+) -> None:
+    """Eight chips on one line at a width that fits them, and every one of them drawn.
+
+    The first half of the overflow contract and the half that must not be
+    forgotten: a strip that answered "too many, here is the …" at every width
+    would satisfy the test below and would have hidden the row's whole state on
+    a 4K screen.
+    """
+    _host, row = _a_row_carrying(_every_chip(), width=3000)
+
+    assert len(row.chip_buttons) == CHIPS_A_ROW_CAN_CARRY
+    assert row.chip_strip.visible_chip_labels() == tuple(
+        chip.label for chip in _every_chip()
+    ), f"only {row.chip_strip.visible_chip_labels()} of the eight are drawn at 3000px"
+    assert row.chip_strip.overflow is not None
+    assert (
+        row.chip_strip.overflow.isVisibleTo(row.chip_strip) is False
+    ), "an overflow chip with nothing behind it"
+
+
+def test_the_chips_a_narrow_row_cannot_fit_are_in_the_overflow_chips_tooltip(
+    qapp: object,
+) -> None:
+    """And at a width that fits some of the eight, the rest are reachable rather than gone.
+
+    1200px because that is a width at which the strip really is short of room
+    and really does draw chips -- the assertions below say "some shown, some
+    hidden" rather than naming a number, so the test survives a font change; the
+    width is what makes both halves non-empty and it is checked as such.
+
+    Four things, because dropping any one of them is a row that lies. Chips must
+    still be DRAWN, or "it all fits" and "nothing fits" pass the same test. The
+    mark itself must be drawn, or the row simply reads as having three chips.
+    What it hides must be all of what is not on screen, label AND sentence,
+    because the sentence is the whole of what a fact chip is for. And the chips
+    that SURVIVE must be the first ones -- `_chips_for()` puts the jobs somebody
+    still has to run before the facts that only explain the row, and an overflow
+    that dropped from the front would hide `Rebuild pending` behind a mark while
+    showing `conflicts with AH Bot`.
+
+    "The first ones" gained one exception in T83 and exactly one: the LOCK is
+    pinned, so it appears in place of the last prefix chip that would otherwise
+    have fitted. The fourth assertion is written as "a prefix, plus the lock" for
+    that reason -- and both halves are asserted, because a strip that simply
+    reordered its chips would satisfy either alone.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=1200)
+
+    strip = row.chip_strip
+    shown = strip.visible_chip_labels()
+    hidden = strip.hidden_chips()
+    assert shown, "the strip drew no chip at all at a width meant to fit some of them"
+    assert hidden, f"1200px fitted all eight chips, so nothing overflowed: {shown}"
+    assert (
+        strip.overflow is not None and strip.overflow.isVisibleTo(strip) is True
+    ), f"{len(hidden)} chips are hidden and the '…' that says so is not drawn"
+    # A PREFIX, plus the lock -- which is the whole of T83's change to this
+    # rule. The strip draws the first chips that fit and the mark stands for the
+    # rest, except that the lock is never what the mark stands for: when the
+    # width cannot hold both, the lock takes the place of the last prefix chip
+    # that would have fitted (`_ChipStrip._plan()`). Dropping the lock out of
+    # `shown` here must leave a prefix and nothing else, or the strip is
+    # reordering chips rather than pinning one.
+    lock = modules_panel.chip_needs_label("Playerbots")
+    prefix = tuple(label for label in shown if label != lock)
+    everything = tuple(chip.label for chip in chips)
+    assert (
+        prefix == everything[: len(prefix)]
+    ), f"the chips on screen are not the FIRST ones: {shown}"
+    assert lock in shown, f"the lock is behind the mark at this width: {shown}"
+    tooltip = strip.overflow.toolTip()
+    missing = [
+        chip.label for chip in hidden if chip.label not in tooltip or chip.detail not in tooltip
+    ]
+    assert missing == [], f"hidden with nothing to find them by: {missing}"
+
+
+def test_the_overflow_chip_is_drawn_inside_the_strip_at_every_width(qapp: object) -> None:
+    """Dragged across the whole range, the "…" never hangs off the right edge.
+
+    Written because the mutation it kills SURVIVED the two tests above: drop the
+    overflow chip's own width from the room `_how_many_fit()` shares out and one
+    more real chip fits, which puts the mark past the edge -- where
+    `isVisibleTo()` still answers True, the tooltip is still on it, and the user
+    simply sees a row that has stopped saying it is hiding anything. No single
+    width catches that (at most one extra chip fits, so most widths still have
+    room for the mark); a SWEEP does, because somewhere in the range the slack
+    after that extra chip is narrower than the mark.
+
+    Every 20px from a strip that fits nothing to one that fits all eight, which
+    is also the only assertion here that the strip survives being resized at
+    all: `resizeEvent` is what re-places its children and the row is inside a
+    list a user drags.
+    """
+    _host, row = _a_row_carrying(_every_chip(), width=400)
+    strip = row.chip_strip
+    assert strip.overflow is not None
+
+    hanging = []
+    for width in range(400, 3001, 20):
+        _host.resize(width, 400)
+        process_events()
+        if not strip.overflow.isVisibleTo(strip):
+            continue
+        right = strip.overflow.x() + strip.overflow.width()
+        if right > strip.width():
+            hanging.append(f"{width}: the '…' ends at {right} in a {strip.width()}px strip")
+    assert hanging == [], f"the overflow mark is drawn outside the strip at {hanging[:3]}"
+
+
+def test_a_locked_row_keeps_the_reason_on_screen_on_a_handheld(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """1280x800 is the Steam Deck, and a Steam Deck cannot hover.
+
+    The defect this pins, measured on the shipped WotLK catalog before the chip
+    order was changed: `battlepass` declares a client addon and requires
+    `mod-ale`, so at this size it drew `needs the client folder` and put
+    `needs AzerothCore Lua Engine (ALE), not installed` behind the overflow mark
+    -- the one sentence saying why its Install is dead, in a tooltip a touch
+    user has no way to open. `_chips_for()` now ranks the locks ahead of the
+    other facts, so the lock is the last fact to go.
+
+    The lock chip is found by its DETAIL matching `row.data.install_reason`,
+    which is the sentence the applier would refuse with, rather than by
+    re-spelling a label here: the chip and the refusal are meant to be the same
+    words, and a test that spelled them itself would pass while they drifted.
+
+    Two things were needed and the second is the one that finished it: the chip
+    order alone still left `battlepass` drawing NOTHING at this size, because an
+    even split between the row's text column and its status column gave the strip
+    373px against a 341px lock chip plus the mark. The status column now takes
+    two shares to the text column's one.
+
+    960x600 -- the smallest the window can be DRAGGED to, which is not a device
+    -- still puts every long lock chip behind the mark, and this test does not
+    claim otherwise. The handheld that ships is 1280x800.
+
+    What stops the first assertion from being vacuous is the test below it, which
+    asks the same question of a row carrying all eight chips at a width that
+    really is short of room: this one says the shipped catalog is fine on the
+    Deck, that one says the RULE is what makes it fine.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1280, 800))
+
+    locked = [row for row in view.modules_panel.rows() if row.data.install_reason is not None]
+    assert locked, "no row on the shipped WotLK catalog has a locked Install"
+    hidden_reasons = []
+    for row in locked:
+        lock = next(chip for chip in row.data.chips if chip.detail == row.data.install_reason)
+        if lock.label not in row.chip_strip.visible_chip_labels():
+            hidden_reasons.append(f"{row.data.id}: {lock.label}")
+    assert hidden_reasons == [], (
+        "the reason Install is locked is behind a tooltip on a touch screen: " f"{hidden_reasons}"
+    )
+
+    # The row the review was filed about, by name, because a general assertion
+    # over "every locked row" is satisfied by a catalog that happens to have no
+    # long lock chips in it today.
+    battlepass = view.modules_panel.row("battlepass")
+    assert battlepass.data.install_reason is not None, "`battlepass` is no longer a locked row"
+    assert modules_panel.chip_needs_label("AzerothCore Lua Engine (ALE)") in (
+        battlepass.chip_strip.visible_chip_labels()
+    ), (
+        "`battlepass` does not say why its Install is dead: "
+        f"{battlepass.chip_strip.visible_chip_labels()}"
+    )
+
+
+def test_a_row_too_narrow_for_its_chips_drops_the_facts_before_the_locks(qapp: object) -> None:
+    """The RULE behind the test above, asked of a row carrying all eight chips.
+
+    The catalog's own locked rows fit their chips at 1280x800 now, so they cannot
+    say what happens when a row does not fit: this one is narrowed until it does
+    not. What must survive is owed chips first and the two locks after them; what
+    may go is `asks a question`, `needs the client folder` and `required by …`,
+    which explain the row rather than explain a dead button.
+
+    Swept rather than fixed at one width, because a single width proves the rule
+    only for the one number of chips that happens to fit there.
+
+    Half of the claim and not all of it, deliberately: this hands the strip
+    `_every_chip()` and so tests that the strip drops from the END, while the
+    test below is what says the BUILDER's end is the plain facts. Reverting the
+    order in `_chips_for()` leaves this one green and turns that one and the
+    handheld test red -- which is the right split, because the two halves fail
+    for different reasons and a strip that dropped from the front would pass
+    neither.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=600)
+    strip = row.chip_strip
+    locks = {
+        modules_panel.chip_conflicts_with_label("AH Bot"),
+        modules_panel.chip_needs_label("Playerbots"),
+    }
+    plain_facts = {
+        modules_panel.CHIP_ASKS_A_QUESTION,
+        modules_panel.CHIP_NEEDS_CLIENT_FOLDER,
+        modules_panel.chip_required_by_label(["Solocraft"]),
+    }
+
+    squeezed = 0
+    wrong = []
+    for width in range(600, 3001, 20):
+        _host.resize(width, 400)
+        process_events()
+        hidden = {chip.label for chip in strip.hidden_chips()}
+        if not hidden:
+            continue
+        squeezed += 1
+        # A lock may only be hidden once every plain fact already is.
+        if hidden & locks and not plain_facts <= hidden:
+            wrong.append(f"{width}: hid {sorted(hidden & locks)} while keeping a plain fact")
+    assert squeezed, "the row fitted all eight chips at every width in the sweep"
+    assert wrong == [], f"the drop order puts a lock before an ordinary fact: {wrong[:3]}"
+
+
+def test_the_chip_strip_is_handed_every_chip_the_builder_can_make(qapp: object) -> None:
+    """`_every_chip()` is every chip `_chips_for()` really returns, and in its order.
+
+    Run through the BUILDER with the shipped WotLK manifests rather than counting
+    `chips.append(` in its source, which is what the first version of this did: a
+    string count agrees with itself whatever the function returns, and it would
+    have stayed green through the reordering this ticket's review asked for --
+    the one thing about these chips that is load-bearing.
+
+    Three calls and not one, because the eight contradict each other by
+    construction: `asks a question` and `needs the client folder` are only built
+    for a row that is NOT installed and `required by` only for one that is, and
+    no shipped manifest both asks a question and copies into the client. So the
+    reachable cases are asked for separately and unioned, and the ORDER -- which
+    is the row's drop order -- is asserted on each of them.
+
+    The manifests come from the shipped store and are picked by the PROPERTY each
+    chip needs rather than by id: a test pinned to `mod-ah-bot` says nothing the
+    day that module stops asking a question.
+    """
+    store = modules.store()
+    shipped = [m for kind in manifest_store.FAMILY_FILES for m in store.load_all(kind)]
+    asks = next(
+        m
+        for m in shipped
+        if any(p.default is None for p in apply_module.required_prompts(m, "install"))
+    )
+    client_side = next(m for m in shipped if m.client)
+
+    def _built(manifest: Manifest, installed: bool, lock: str) -> tuple[modules_panel.Chip, ...]:
+        key = (manifest.type, manifest.id)
+        return modules_panel._chips_for(
+            manifest,
+            manifest.type,
+            manifest.id,
+            installed,
+            modules_panel.SessionState(
+                rebuild_owed=frozenset({key}), sql_owed={key: ("one.sql",)}, behind={key: 3}
+            ),
+            client_dir=None,
+            dependants=["Solocraft"],
+            blocked_by="AH Bot" if lock == "conflict" else None,
+            needs="Playerbots" if lock == "requires" else None,
+        )
+
+    asking = _built(asks, False, "conflict")  # owed three, conflict lock, question
+    client = _built(client_side, False, "requires")  # owed three, requires lock, client folder
+    here = _built(asks, True, "conflict")  # owed three, conflict lock, required by
+
+    expected = [chip.label for chip in _every_chip()]
+    made = asking + client + here
+    assert {chip.label for chip in made} == set(expected), (
+        f"the builder makes {sorted({chip.label for chip in made})}, "
+        f"_every_chip() says {sorted(expected)}"
+    )
+    assert len(expected) == CHIPS_A_ROW_CAN_CARRY
+    for built in (asking, client, here):
+        labels = [chip.label for chip in built]
+        assert labels == [label for label in expected if label in labels], (
+            f"the builder's order is {labels}, which is not _every_chip()'s "
+            f"({expected}) — and that order is the row's drop order"
+        )
+    # And the promise the order exists for: after the owed chips, a LOCK comes
+    # before any other fact, so the last thing a narrow row hides is the reason
+    # Install cannot be pressed (T55/T69, and there is no tooltip on a touch
+    # screen). Matched on the DETAIL, which is the applier's own refusal, so the
+    # chip and the sentence behind the locked button cannot drift apart.
+    locks = {
+        modules_panel.conflict_reason("AH Bot"),
+        apply_module.requirement_refusal(asks.id, "Playerbots"),
+        apply_module.requirement_refusal(client_side.id, "Playerbots"),
+    }
+    for built in (asking, client, here):
+        first_fact = next(chip for chip in built if chip.kind != "owed")
+        assert first_fact.kind == "lock" and first_fact.detail in locks, (
+            f"the first fact on the row is a {first_fact.kind} reading {first_fact.label}, "
+            "which is not the lock"
+        )
+
+
+def test_a_rows_long_description_and_conf_paths_are_a_hover_away(qapp: object) -> None:
+    """What the row stopped drawing in full is what its tooltips now carry.
+
+    The description was a WRAPPED label -- two lines at 1280x800 -- and the conf
+    files were one line each. Both are one elided line now, which is only honest
+    if the whole text is still reachable; an elided label with no tooltip is
+    text the app has silently thrown away.
+    """
+    _host, row = _a_row_carrying((), width=400)
+
+    assert row.description_label.toolTip() == "Scales dungeons for a small group."
+    assert row.paths_label is not None
+    assert row.paths_label.toolTip() == "env/dist/etc/modules/solocraft.conf"
+    assert row.description_label.full_text == "Scales dungeons for a small group."
+
+
+# ---------------------------------------------------------------------------
+# T80: what is left of the tab AFTER a job, and the handles that give it back.
+#
+# T73 and T75 measured an app that had never run anything. Gate A ran one job on
+# a maximised 1080p desktop and the list came back as a row and a half: T73's
+# lifted cap is permanent by design, so the log kept ~400px for the rest of the
+# session and the hand restarted the app to reach the next row.
+#
+# Everything below is measured at the DESKTOP shape as well as the bare screen,
+# because the two are not the same window and the difference is a row.
+
+
+DESKTOP_1080P = (1920, 1080 - 47)
+"""A window MAXIMISED on a real 1080p desktop, which is not a 1080px window.
+
+47px of the screen belong to the desktop and not to the app: GNOME's top bar and
+the window's own title bar, measured on yulon-ubuntu during gate A (round 3,
+2026-09-16). Every number T73 and T75 published was taken at the bare 1920x1080,
+so each of them was one row optimistic about what a maximised window shows --
+T73's "three whole rows" read two live, which is half of why T80 was filed.
+
+Beside the bare screen rather than instead of it: 1920x1080 is also what a
+borderless or a non-GNOME desktop really gives, and the pair of them is what says
+the 47px no longer costs a row.
+"""
+
+ROWS_VISIBLE_AT_DESKTOP_1080P = 8
+"""Whole module rows on the maximised desktop with nothing having run yet.
+
+The SAME number as `ROWS_VISIBLE_AT_1080P`, and that is the assertion: before
+T80 the desktop's 47px took the bare screen's 8 down to 7, and now both measure
+well over it (12 at the desktop shape, 13 at the bare screen) because the two
+empty boxes under the list start folded -- an empty report costs 106px of the
+theme's own floor and an empty log 180.
+"""
+
+ROWS_VISIBLE_AFTER_A_JOB = 5
+"""And the count once a rebuild has written to the log, at the desktop shape.
+
+Measured 4 before T80 and 5 after it; 6 at the bare 1920x1080 either way. This
+is the number the ticket is about, so it is the one with the least headroom in
+this file: one row. The ticket's own first suggestion -- capping the log at a
+THIRD of the tab -- measures 4 here, which is why `LOG_SHARE_OF_THE_TAB` is 4
+and not 3.
+"""
+
+
+def _the_handle_on(panel: Any) -> Any:
+    """The collapse handle on a log panel's strip, found the way a user finds it."""
+    from yulon.ui.widgets.log_panel import CollapseHandle
+
+    handle = panel.findChild(CollapseHandle)
+    assert handle is not None, "the log panel has no collapse handle on its strip"
+    return handle
+
+
+def _click(widget: Any) -> None:
+    """Press `widget` with the real mouse, then let the layout settle."""
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtTest import QTest
+
+    QTest.mouseClick(widget, _Qt.MouseButton.LeftButton)
+    process_events()
+
+
+def _ran_a_job(view: ControllerView, last_line: str = "Compile finished.") -> None:
+    """Put a finished rebuild's output in the Modules tab's log.
+
+    Through `LogPanel.run()` -- the call `rebuild_server()` itself makes -- so
+    the panel is opened by the same signal the app raises and not by a flag set
+    here.
+    """
+    assert view.rebuild_log.run(lambda: iter(["compiling", last_line]), title="rebuild") is True
+    pump_until(lambda: not view.rebuild_log.running, "the job finished")
+    process_events()
+
+
+def _a_rebuild_is_owed(view: ControllerView) -> None:
+    """Put the "A rebuild is owed" banner on the Modules tab, the way a press does.
+
+    Through `_deliver_report()` with `rebuild_required=True`, which is the
+    `ApplyReport` a real install returns and the only thing that raises this
+    banner: `_module_done` notes the fact, `_refresh_rebuild_banner` shows the
+    widget. A test that called `setVisible(True)` on `view.rebuild_banner`
+    instead would still show a banner and would say nothing about the state a
+    user is really in -- and it is the state that matters here, because it is
+    also what fills the report box under it.
+
+    It leaves a populated report behind, which is deliberate and is what gate
+    round 6 photographed: the install that owes the rebuild is the same press
+    whose answer is in the box.
+    """
+    _deliver_report(
+        view, ApplyReport("install", "mod-solocraft", family="module", rebuild_required=True)
+    )
+    process_events()
+    assert view.rebuild_banner.isHidden() is False, "the banner is not on screen, so nothing is set"
+
+
+def _a_rebuild_is_not_owed(view: ControllerView) -> None:
+    """Take the banner back off, through the same session state that raised it."""
+    view._rebuild_owed.clear()
+    view._refresh_rebuild_banner()
+    process_events()
+    assert view.rebuild_banner.isHidden() is True, "the banner is still on screen"
+
+
+def test_the_module_list_keeps_five_rows_after_a_job_at_the_desktop_shape(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The defect gate A found: one rebuild, and the list is a row and a half.
+
+    Four assertions, and each is here because the other three are satisfied by
+    something that would not fix this:
+
+    * the ROW COUNT is the complaint, and it is measured at the desktop shape
+      rather than the bare screen because that is the window the complaint was
+      made about;
+    * the log is NOT CLIPPED, so the count cannot be met by squeezing the panel
+      under its own minimum -- which is what the tab does on its own when it is
+      over-subscribed, and it would read as a fix here while showing a log with
+      its strip cut off;
+    * the log still HOLDS ITS LAST LINE and is showing it, so the count cannot be
+      met by a panel that has been made useless rather than smaller;
+    * and the cap is really the thing doing it -- the panel is at its share of
+      the tab and not at whatever a job's output happened to ask for.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+
+    _ran_a_job(view)
+    # And a report in the box under it, because a press that starts a rebuild
+    # writes one: the two boxes take the tab together or not at all.
+    view.module_report.setPlainText("Rebuild finished.")
+    process_events()
+
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert whole >= ROWS_VISIBLE_AFTER_A_JOB, (
+        f"after one job only {whole} of {len(view.modules_panel.rows())} rows are wholly on "
+        f"screen at {DESKTOP_1080P}: the list has {view.modules_panel.height()}px of the "
+        f"tab's {tab.height()}, the log {view.rebuild_log.height()} and the report "
+        f"{view.module_report.height()}"
+    )
+    assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
+        f"the log is CLIPPED at {view.rebuild_log.height()}px, not merely capped: it says "
+        f"it needs {view.rebuild_log.minimumSizeHint().height()}"
+    )
+    assert not view.rebuild_log.collapsed, "a finished job left its own output folded away"
+    assert (
+        "Compile finished." in view.rebuild_log.text()
+    ), f"the log does not hold the job's last line: {view.rebuild_log.text()!r}"
+    share = tab.height() // controller_view_module.LOG_SHARE_OF_THE_TAB
+    assert view.rebuild_log.maximumHeight() == share, (
+        f"the log is not held to its share of the tab: its cap is "
+        f"{view.rebuild_log.maximumHeight()}px against the {share} a quarter of "
+        f"{tab.height()} comes to"
+    )
+
+
+def test_the_desktop_shapes_missing_47px_no_longer_costs_a_module_row(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Maximised on a real desktop shows what the bare screen does, idle.
+
+    T73 and T75 both measured 1920x1080 exactly, and a maximised GNOME window is
+    47px shorter than that, so both published a count a live hand could not
+    reproduce. Asserted against the same constant as the bare screen on purpose:
+    the claim is that the two shapes agree, and a separate smaller number here
+    would let them drift apart again silently.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+
+    whole = _whole_rows_on_screen(view.modules_panel)
+    assert whole >= ROWS_VISIBLE_AT_DESKTOP_1080P, (
+        f"only {whole} of {len(view.modules_panel.rows())} rows are wholly on screen "
+        f"maximised at {DESKTOP_1080P}: the list has {view.modules_panel.height()}px of "
+        f"the tab's {tab.height()}"
+    )
+    assert _squeezed(tab) == [], f"clipped on the maximised desktop: {_squeezed(tab)}"
+
+
+def test_the_log_strip_folds_the_output_away_and_the_list_takes_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A click on the handle, and the height the log kept goes to the list.
+
+    Driven with `QTest.mouseClick` on the handle the panel really builds -- found
+    through `findChild`, which is as much as a user has -- rather than by calling
+    `set_collapsed()`: a toggle nothing on screen can reach is not a toggle.
+
+    Both directions, because a fold that cannot be undone is a hidden panel:
+    the second click must bring the output back, with the job's line still in it.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    open_log = view.rebuild_log.height()
+    open_list = view.modules_panel.height()
+    handle = _the_handle_on(view.rebuild_log)
+
+    _click(handle)
+
+    assert view.rebuild_log.collapsed, "the click did not fold the log"
+    assert (
+        view.rebuild_log.height() < open_log
+    ), f"the log is folded but still {view.rebuild_log.height()}px, against {open_log} open"
+    assert view.modules_panel.height() > open_list, (
+        f"the log folded and the list did not grow: {view.modules_panel.height()}px, "
+        f"against {open_list} with the log open"
+    )
+    assert view.rebuild_log.status_text() != "", "folding the log took its strip with it"
+
+    _click(handle)
+
+    assert not view.rebuild_log.collapsed, "the second click did not bring the log back"
+    assert (
+        view.rebuild_log.height() == open_log
+    ), f"the log came back at {view.rebuild_log.height()}px, not the {open_log} it had"
+    assert "Compile finished." in view.rebuild_log.text(), "folding the log lost its output"
+
+
+def test_a_folded_log_unfolds_itself_when_the_next_job_starts(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Whatever the user folded away, the next job's output is worth showing.
+
+    The one thing the fold must not do is make a rebuild silent. Two jobs, the
+    fold between them, and the second one drives the panel through `run()` -- so
+    what unfolds it is `run_started`, the signal the app raises, and not a call
+    this test makes.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view, last_line="the first job")
+    _click(_the_handle_on(view.rebuild_log))
+    assert view.rebuild_log.collapsed, "the fold this test is about did not happen"
+
+    _ran_a_job(view, last_line="the second job")
+
+    assert not view.rebuild_log.collapsed, "a new job ran with its output still folded away"
+    assert "the second job" in view.rebuild_log.text()
+
+
+def test_an_empty_report_box_is_folded_and_a_report_unfolds_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The report box is 106px of nothing until there is a report, and then it is not.
+
+    Two halves of one rule and they fail for different reasons: the box is folded
+    while empty (which is every start, and the moment the list most needs the
+    height), and it is open the moment anything is written to it (a press whose
+    answer is hidden is a press that looks like it did nothing).
+
+    The unfold is driven by `setPlainText` -- what `_format_report` and every
+    refusal on this tab do -- and not by the strip, because the strip is not what
+    the app calls.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+
+    assert view.module_report_strip.collapsed, "an empty report box is open on a fresh tab"
+    assert not view.module_report.isVisible(), "the folded report box is still drawn"
+    folded_list = view.modules_panel.height()
+
+    view.module_report.setPlainText("solocraft: installed.")
+    process_events()
+
+    assert not view.module_report_strip.collapsed, "a report arrived and the box stayed folded"
+    assert view.module_report.isVisible()
+    assert (
+        view.modules_panel.height() < folded_list
+    ), "the report box unfolded and took nothing from the list, so it is not on screen"
+
+    _click(view.module_report_strip)
+
+    assert view.module_report_strip.collapsed, "the click did not fold the report away"
+    assert view.modules_panel.height() == folded_list, (
+        f"the folded report gave the list {view.modules_panel.height()}px, not the "
+        f"{folded_list} it had before the report arrived"
+    )
+    assert (
+        view.module_report.toPlainText() == "solocraft: installed."
+    ), "folding the report box threw its text away"
+
+
+def test_the_tuning_report_folds_the_same_way_and_the_cards_take_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The Tuning tab is the same shape, so it gets the same handle.
+
+    Its own test and not a parametrisation of the Modules one: the two tabs build
+    their strips separately, and the way this goes wrong is one of them being
+    wired and the other not.
+    """
+    view = _tuning_view(ps, tmp_path)
+    window, _tab = _controller_in_the_real_window(view, "Tuning")
+    _at(window, DESKTOP_1080P)
+
+    assert view.tuning_report_strip.collapsed, "an empty tuning report is open on a fresh tab"
+    folded_cards = view.tuning_panel.height()
+
+    view.tuning_report.setPlainText("solocraft: wrote 2 keys.")
+    process_events()
+    assert not view.tuning_report_strip.collapsed, "a report arrived and the box stayed folded"
+    open_cards = view.tuning_panel.height()
+    assert open_cards < folded_cards
+
+    _click(view.tuning_report_strip)
+
+    assert view.tuning_report_strip.collapsed
+    assert view.tuning_panel.height() > open_cards, (
+        f"the tuning report folded and the cards did not grow: {view.tuning_panel.height()}px, "
+        f"against {open_cards} with it open"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T83: the two things the Modules tab does below the handheld width, measured
+# at `main.MINIMUM_WINDOW_SIZE` -- which is a width a user can really drag to
+# and which nothing before round 4's gate had ever been measured at.
+#
+# Both defects are the same shape and it is the silent one: Qt's answer to "this
+# does not fit" is to draw it smaller than it says it needs and cut the text
+# off. There is no ellipsis, no tooltip and no warning. Measured themed at 960
+# before the fix: the toolbar's `Check for updates` was drawn in 114px against
+# the 144 it asked for and read `heck for update`, and `accountwide`'s chip
+# strip was 281px against a 316px lock chip, so the row that says why its
+# Install is dead drew nothing at all.
+
+
+TOOLBAR_WIDTHS = ((960, 600), (1000, 700), (1280, 800))
+"""The three widths the Modules toolbar is measured at, narrowest first.
+
+960x600 is `main.MINIMUM_WINDOW_SIZE` and the hard case. 1000x700 is the window
+gate A2 was taken in, and it is here because it is the one a human reported --
+a test that only covered the extreme would not have failed on the screenshot
+the ticket was filed from. 1280x800 is the shape the app opens at, where the bar
+has always fitted on one line and must go on doing so.
+"""
+
+
+def _module_toolbar_buttons(view: ControllerView) -> list[Any]:
+    """Every button on the Modules action bar, read off the BAR and not listed here.
+
+    Off `view.module_actions`' own layout, because a list written out here would
+    be a second opinion about what is on that bar: a seventh button added to it
+    is exactly where this ticket's defect would come back, and a hand-written
+    list would go on passing about the six it knew.
+
+    **The ones the bar is SHOWING**, which is not a narrowing of that rule but
+    the whole of what it is about. T64 put two more buttons on this bar --
+    "Update the server to latest…" and "Return to the tested pin…" -- and both
+    are hidden until the entry has a route and the install has something to
+    return from. `FlowLayout` does not lay a hidden item out at all, so those
+    two keep the 100x30 every Qt widget starts at, and `_clipped()` read that
+    default as a label cut in half on a button nobody can see. The moment
+    either is shown it is laid out, comes back here, and is measured like the
+    rest; a button added to this bar and left visible is still caught.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    bar = view.module_actions.layout()
+    found = [bar.itemAt(i).widget() for i in range(bar.count())]
+    buttons = [w for w in found if isinstance(w, QPushButton)]
+    assert len(buttons) == len(found), f"something on the action bar is not a button: {found}"
+    return [b for b in buttons if b.isVisibleTo(view.module_actions)]
+
+
+def _clipped(button: Any) -> str | None:
+    """Why `button`'s label does not fit its width, or `None` when it does.
+
+    The button's own font metrics against its own geometry, with the chrome
+    taken from the difference between its size hint and the width of its text:
+    the padding is the theme's, the border is the theme's, and a number typed in
+    here would be a third opinion that agrees with itself whatever the theme
+    does.
+    """
+    text = button.text()
+    advance = button.fontMetrics().horizontalAdvance(text)
+    chrome = max(0, button.sizeHint().width() - advance)
+    if button.width() >= advance + chrome:
+        return None
+    return f"{text!r}: {button.width()}px for {advance}px of text plus {chrome}px of chrome"
+
+
+def _bar_holds_every_line(view: ControllerView) -> list[str]:
+    """The buttons drawn outside the action bar they are on, which must be none."""
+    bar = view.module_actions
+    return [
+        f"{b.text()!r} at ({b.x()},{b.y()}) {b.width()}x{b.height()} "
+        f"in a {bar.width()}x{bar.height()} bar"
+        for b in _module_toolbar_buttons(view)
+        if b.y() < 0 or b.y() + b.height() > bar.height() or b.x() + b.width() > bar.width()
+    ]
+
+
+def test_every_modules_toolbar_button_reads_whole_at_every_width(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The defect gate A2 photographed: `Check for updates` drawn as `heck for update`.
+
+    Three assertions at each width, and the second and third are here because a
+    "fix" that met only the first is worse than the bug:
+
+    * every label FITS, which is the complaint;
+    * every button is inside the bar it is on, so the labels cannot be made to
+      fit by letting the bar overflow the tab -- which is what a `QHBoxLayout`
+      given a minimum width would do, moving the clipping one widget out, and it
+      is also what a wrapped bar does the moment `flow_bar()`'s size policy stops
+      declaring `heightForWidth` (the second line is then painted over the module
+      list, and every other assertion here stays green);
+    * and at 1280 the bar is still ONE line, which is what stops the whole thing
+      being "solved" by wrapping at every window shape and spending a row of the
+      list to do it.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+
+    for size in TOOLBAR_WIDTHS:
+        _at(window, size)
+        buttons = _module_toolbar_buttons(view)
+        assert len(buttons) >= 6, f"only {len(buttons)} buttons on the Modules action bar"
+        clipped = [why for why in (_clipped(b) for b in buttons) if why is not None]
+        assert clipped == [], f"toolbar text cut off at {size}: {clipped}"
+        outside = _bar_holds_every_line(view)
+        assert outside == [], f"a button is drawn outside the action bar at {size}: {outside}"
+
+    _at(window, (1280, 800))
+    tops = sorted({b.y() for b in _module_toolbar_buttons(view)})
+    assert len(tops) == 1, f"the bar wrapped at the size the app opens at: {tops}"
+
+
+def test_the_modules_toolbar_wraps_rather_than_shrinking_at_the_smallest_window(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """And the mechanism, because "nothing is clipped" has other solutions.
+
+    A bar whose buttons were given shorter labels would pass the test above, and
+    so would one that dropped four of them into a `More…` menu. What is asserted
+    here is that the same six buttons are all still DRAWN, on more than one line,
+    and each at its own full size hint -- which is the difference between
+    wrapping and the `QHBoxLayout` this replaced, whose only answer to a bar that
+    does not fit is to shrink every item in it.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+
+    buttons = _module_toolbar_buttons(view)
+    tops = sorted({b.y() for b in buttons})
+    assert len(tops) > 1, (
+        f"the bar is still one line at {main.MINIMUM_WINDOW_SIZE}, so it did not wrap: "
+        f"{[(b.text(), b.width(), b.sizeHint().width()) for b in buttons]}"
+    )
+    shrunk = [
+        f"{b.text()!r}: {b.width()} < {b.sizeHint().width()}"
+        for b in buttons
+        if b.width() < b.sizeHint().width()
+    ]
+    assert shrunk == [], f"a wrapped bar still squeezed its buttons: {shrunk}"
+    assert all(b.isVisible() for b in buttons), "wrapping hid a button instead of moving it"
+    assert _bar_holds_every_line(view) == [], "the bar is shorter than the lines it drew"
+
+
+def _a_flow_bar_in_a_tight_column(labels: list[str], width: int, spare: int) -> tuple[Any, Any]:
+    """A `FlowBar` of buttons in a column that has `spare` pixels to give away.
+
+    The bar is tested through a `QVBoxLayout` and not on its own, because every
+    claim it makes is a claim about what a PARENT layout does with it: the size
+    policy decides whether it is asked for `heightForWidth()` at all, and the
+    minimum decides what happens when there is not enough height to go round.
+
+    The second widget is what makes the column tight. It has a minimum height
+    and it expands, so the column's demand is its minimum plus the bar's, and
+    `spare` says how many pixels over that the host is made -- zero is a column
+    with nothing to give away, which is the state in which the bar's claim on
+    the height has to be honoured rather than merely preferred.
+
+    Returns the host (which every caller must keep in a local: dropping it
+    deletes the C++ objects under the bar) and the bar.
+    """
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+
+    from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.widgets.flow_layout import flow_bar
+
+    host = QWidget()
+    apply_dadcraft_theme(host, width=1280)
+    column = QVBoxLayout(host)
+    column.setContentsMargins(0, 0, 0, 0)
+    column.setSpacing(0)
+    bar = flow_bar(host)
+    for label in labels:
+        bar.flow().addWidget(QPushButton(label, bar))
+    column.addWidget(bar)
+    filler = QWidget(host)
+    filler.setMinimumHeight(200)
+    column.addWidget(filler, 1)
+    host.resize(width, 400)
+    host.show()
+    process_events()
+    host.resize(width, bar.flow().heightForWidth(width) + 200 + spare)
+    process_events()
+    return host, bar
+
+
+THE_SIX_ON_THE_MODULES_BAR = [
+    "Check for updates",
+    "Refresh",
+    "Adopt as imported…",
+    "Apply pending database updates…",
+    "Apply module SQL",
+    "Rebuild the server…",
+]
+"""The Modules action bar's own labels, for the widget tests below.
+
+Copied deliberately rather than imported: these are tests of `FlowBar`, and what
+they need is a realistic set of button widths, not today's Modules tab. The tab
+is asserted separately and through the real window.
+"""
+
+
+def test_a_column_gives_a_flow_bar_the_height_its_lines_need(qapp: object) -> None:
+    """The claim a wrapping bar lives or dies by, asked of the COLUMN it is in.
+
+    Everything else about wrapping can be right and still produce a bar drawn
+    one line tall with its second line painted over the widget beneath it: the
+    buttons are at their hints, visible and unclipped horizontally, and every
+    assertion that looks at the bar alone stays green. What decides it is
+    whether the parent layout asks for `heightForWidth()` and honours the
+    answer, and that is a question about `FlowLayout.hasHeightForWidth()` and
+    `_lay()` agreeing with `setGeometry()` -- which is why they are one function
+    (see `FlowLayout._lay`).
+
+    Asked with a column that has nothing spare, so the answer cannot come from
+    surplus height the bar was handed for another reason.
+    """
+    host, bar = _a_flow_bar_in_a_tight_column(THE_SIX_ON_THE_MODULES_BAR, width=700, spare=0)
+    flow = bar.flow()
+    needed = flow.heightForWidth(bar.width())
+
+    assert len(flow._lines(bar.width())) > 1, "700px did not wrap the bar, so nothing is tested"
+    assert bar.height() >= needed, (
+        f"the column gave the bar {bar.height()}px for the {needed} its "
+        f"{len(flow._lines(bar.width()))} lines take"
+    )
+    buttons = [flow.itemAt(i).widget() for i in range(flow.count())]
+    assert max(b.y() + b.height() for b in buttons) <= bar.height(), (
+        "a button is drawn below the bottom of the bar: "
+        f"{[(b.text(), b.y(), b.height()) for b in buttons]}"
+    )
+    host.hide()
+
+
+def test_a_flow_bar_re_states_its_height_when_a_drag_changes_the_line_count(
+    qapp: object,
+) -> None:
+    """Dragged from a width that fits one line to one that does not, and back.
+
+    What makes the bar itself the right height is the parent `QBoxLayout`
+    re-asking `heightForWidth()` on every layout pass, and a resize is one -- so
+    the drag alone is enough for the GEOMETRY, which is all this test looks at.
+    The bar's MINIMUM is a separate question with a separate answer
+    (`FlowBar.resizeEvent`, and
+    `test_a_wrap_reaches_the_tabs_own_minimum_without_a_restyle` is where that
+    is asserted); removing `updateGeometry()` leaves this test green, and saying
+    so here is the point -- it is what stopped this docstring citing a mechanism
+    it does not exercise.
+
+    Both directions, because a bar that re-stated its height on the way down and
+    never on the way back would hold a two-line floor forever and take a row of
+    whatever is under it on every window.
+    """
+    host, bar = _a_flow_bar_in_a_tight_column(THE_SIX_ON_THE_MODULES_BAR, width=1400, spare=-40)
+    flow = bar.flow()
+    assert len(flow._lines(bar.width())) == 1, "1400px already wrapped, so the drag proves nothing"
+    one_line = bar.height()
+
+    host.resize(700, host.height())
+    process_events()
+
+    assert len(flow._lines(bar.width())) > 1, "700px did not wrap the bar"
+    assert bar.height() >= flow.heightForWidth(bar.width()), (
+        f"the drag wrapped the bar and it was left {bar.height()}px tall, against the "
+        f"{flow.heightForWidth(bar.width())} its lines now take"
+    )
+
+    host.resize(1400, host.height())
+    process_events()
+
+    assert len(flow._lines(bar.width())) == 1
+    assert bar.height() <= one_line, (
+        f"the bar came back to one line and kept {bar.height()}px of the two, against the "
+        f"{one_line} it started at"
+    )
+    host.hide()
+
+
+def test_a_flow_bar_puts_a_single_lines_leftover_at_the_gap(qapp: object) -> None:
+    """`add_gap()`, which is the `addStretch(1)` the Modules bar used to carry.
+
+    The bar reads as "the two that only READ this install" and then "the four
+    that change it", and on one line that grouping is a gap between the second
+    button and the third. Asserted as the gap being WIDER than the ordinary
+    spacing on a wide bar and gone on a wrapped one -- the second half matters,
+    because a gap that survived wrapping would push the last button of a line
+    off the end.
+    """
+    from PySide6.QtWidgets import QPushButton, QWidget
+
+    from yulon.ui.widgets.flow_layout import FLOW_SPACING, flow_bar
+
+    host = QWidget()
+    bar = flow_bar(host)
+    flow = bar.flow()
+    for index, label in enumerate(THE_SIX_ON_THE_MODULES_BAR):
+        if index == 2:
+            flow.add_gap()
+        flow.addWidget(QPushButton(label, bar))
+    host.resize(2000, 200)
+    host.show()
+    bar.resize(2000, flow.heightForWidth(2000))
+    process_events()
+
+    buttons = [flow.itemAt(i).widget() for i in range(flow.count())]
+    assert len({b.y() for b in buttons}) == 1, "2000px wrapped the bar, so there is no leftover"
+    at_the_gap = buttons[2].x() - (buttons[1].x() + buttons[1].width())
+    elsewhere = buttons[1].x() - (buttons[0].x() + buttons[0].width())
+    assert elsewhere == FLOW_SPACING, f"ordinary spacing is {elsewhere}, not {FLOW_SPACING}"
+    assert at_the_gap > elsewhere, (
+        f"the gap is {at_the_gap}px, the same as the spacing between any two buttons, so a "
+        "2000px bar is not putting its leftover width there"
+    )
+
+    bar.resize(700, flow.heightForWidth(700))
+    process_events()
+    buttons = [flow.itemAt(i).widget() for i in range(flow.count())]
+    assert len({b.y() for b in buttons}) > 1, "700px did not wrap the bar"
+    for button in buttons:
+        assert button.x() + button.width() <= bar.width(), (
+            f"{button.text()!r} runs off the end of a wrapped bar: it ends at "
+            f"{button.x() + button.width()} in {bar.width()}px"
+        )
+    host.hide()
+
+
+def test_a_locked_row_keeps_its_reason_on_screen_at_every_width(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T75's handheld promise, asked of every width the window can be dragged to.
+
+    T75 said the lock survives down to 1280x800 and meant it: below that the
+    row's status column is narrower than a lock chip plus the overflow mark, and
+    the strip dropped the lock. Measured themed at 960 on the shipped WotLK
+    catalog, `accountwide` drew NO chip at all -- the `…` and nothing else -- so
+    the one sentence saying why its Install is dead was behind a hover on the
+    row most in need of it.
+
+    Swept from `main.MINIMUM_WINDOW_SIZE` to 3000 rather than asked at 960
+    alone, because the strip's rule changes shape twice across that range (the
+    lock displaces the mark, then the lock itself has to be elided) and a single
+    width only ever exercises one of them.
+
+    Three assertions, and the last two are what keep the first honest. A lock
+    drawn is not a lock READ: it may have been given a width its label does not
+    fit, and the promise then is that the whole sentence is one hover away. And
+    the sweep must really reach the narrow case -- a fix that made the strip
+    wider instead would satisfy "the lock is drawn" at every width while leaving
+    the rule it was meant to add untested, so the elided case is asserted to
+    have happened at least once.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+
+    locked = [row for row in view.modules_panel.rows() if row.data.install_reason is not None]
+    assert locked, "no row on the shipped WotLK catalog has a locked Install"
+    # The row the ticket was filed about, by name, because a sweep over "every
+    # locked row" is satisfied by a catalog whose lock chips all happen to be
+    # short today. `accountwide`'s is the longest one shipped.
+    assert any(row.data.id == "accountwide" for row in locked), "`accountwide` is no longer locked"
+
+    gone: list[str] = []
+    silent: list[str] = []
+    elided_somewhere = False
+    for width in range(main.MINIMUM_WINDOW_SIZE[0], 3001, 40):
+        _at(window, (width, 800))
+        for row in locked:
+            lock = next(chip for chip in row.data.chips if chip.detail == row.data.install_reason)
+            strip = row.chip_strip
+            if lock.label not in strip.visible_chip_labels():
+                gone.append(f"{width}: {row.data.id} hid {lock.label!r}")
+                continue
+            if lock.label not in strip.elided_chip_labels():
+                continue
+            elided_somewhere = True
+            button = next(
+                b for b, chip in zip(row.chip_buttons, row.data.chips, strict=True) if chip is lock
+            )
+            # The whole refusal, and it is matched against `install_reason` --
+            # the sentence the APPLIER would refuse with -- rather than against
+            # a string spelled here, so the chip and the refusal cannot drift.
+            if row.data.install_reason not in button.toolTip():
+                silent.append(f"{width}: {row.data.id}'s elided lock says nothing on hover")
+    assert gone == [], f"the reason Install is locked left the screen at {gone[:3]}"
+    assert silent == [], f"an elided lock with the sentence nowhere: {silent[:3]}"
+    assert elided_somewhere, (
+        "no lock chip was ever drawn narrower than its label in the whole sweep, so the "
+        "elision this test is about was never exercised"
+    )
+
+
+def test_a_narrow_row_spends_the_overflow_mark_on_its_lock(qapp: object) -> None:
+    """The RULE behind the sweep, asked of a row carrying all eight chips.
+
+    The catalog's own locked rows carry two chips at most, so they cannot say
+    what the strip does when the lock is one of six things competing for the
+    width. This one is narrowed until only the mark would have fitted, and what
+    must happen is that the mark is not drawn at all: it is the one chip whose
+    whole job is to say others exist, and a lock is the one chip that has to be
+    on screen, so below the width that holds both, the mark is what goes.
+
+    Which makes the mark's tooltip somebody else's to carry, and that is the
+    other half asserted here -- every chip the width hid is still findable, on
+    the lock instead of on the mark. Dropping that line leaves a row that has
+    silently stopped mentioning three of its chips, and the assertion above it
+    stays green.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=700)
+    strip = row.chip_strip
+    lock = modules_panel.chip_needs_label("Playerbots")
+
+    assert (
+        lock in strip.visible_chip_labels()
+    ), f"the lock is not drawn on a strip this narrow: {strip.visible_chip_labels()}"
+    assert lock not in strip.elided_chip_labels(), (
+        "this width is narrow enough to ELIDE the lock, so it is exercising the step below "
+        "the one this test names; the mark going is what happens first"
+    )
+    assert strip.overflow is not None
+    assert not strip.overflow.isVisibleTo(
+        strip
+    ), "the '…' took the room the lock needed; it is the chip that must go first"
+    hidden = strip.hidden_chips()
+    assert hidden, "700px fitted every chip, so nothing was displaced and this proves nothing"
+    button = next(b for b, chip in zip(row.chip_buttons, chips, strict=True) if chip.label == lock)
+    missing = [
+        chip.label
+        for chip in hidden
+        if chip.label not in button.toolTip() or chip.detail not in button.toolTip()
+    ]
+    assert missing == [], f"the mark is gone and nothing took over what it said: {missing}"
+    # And the lock's own sentence is still the first thing on that tooltip: it
+    # is the reason the chip exists, and a tooltip that opened with somebody
+    # else's chips would have buried it.
+    needs = next(chip for chip in chips if chip.label == lock)
+    assert button.toolTip().startswith(needs.detail)
+
+
+def test_a_strip_dragged_narrow_and_back_stops_eliding(qapp: object) -> None:
+    """The lock is drawn short at 360px and whole again at 3000, on the same widget.
+
+    A row lives in a list a user drags, so every rule here is applied twice: once
+    on the way down and once on the way back. This is the half that is easy to
+    leave out -- an implementation that shortened the label by SETTING it would
+    pass every assertion above and keep the shortened label for good, because the
+    size hint it is measured against is computed from the text it was given.
+    """
+    chips = _every_chip()
+    host, row = _a_row_carrying(chips, width=360)
+    strip = row.chip_strip
+    lock = modules_panel.chip_needs_label("Playerbots")
+    assert lock in strip.elided_chip_labels(), "the lock fits at 360px, so nothing is proved"
+
+    host.resize(3000, 400)
+    process_events()
+
+    assert strip.elided_chip_labels() == (), f"still elided at 3000px: {strip.elided_chip_labels()}"
+    assert strip.visible_chip_labels() == tuple(chip.label for chip in chips)
+    assert strip.hidden_chips() == ()
+    needs = next(chip for chip in chips if chip.label == lock)
+    button = next(b for b, chip in zip(row.chip_buttons, chips, strict=True) if chip is needs)
+    assert (
+        button.toolTip() == needs.detail
+    ), "the lock is still carrying the overflow mark's tooltip at a width that draws the mark"
+    assert button.text() == needs.label, "a chip button's text is not the chip's own label"
+
+
+def test_a_pinned_lock_draws_an_elided_label_and_keeps_its_own(qapp: object) -> None:
+    """What a narrowed lock chip PAINTS, and what it still answers when asked.
+
+    Two different questions and the split between them is the design. `text()`
+    is the chip's whole label at every width, because `RowWidget.chip_buttons` is
+    published and read by the row's own menu and by half a dozen tests, and a
+    button whose text depended on today's geometry would make every one of those
+    readers a question about the window. `drawn_text()` is the other one, and it
+    is what `paintEvent` puts on screen.
+
+    Asserted as a PREFIX of the label plus Qt's own ellipsis rather than as a
+    literal string: how many characters fit is the font's business, and a test
+    that spelled `needs AzerothCore Lua Eng…` would fail on any honest change to
+    a font while proving nothing extra.
+
+    And the mark is checked to be absent, because a strip that drew both would
+    have squeezed the lock for a reason this test cannot see.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=400)
+    strip = row.chip_strip
+    needs = next(
+        chip for chip in chips if chip.label == modules_panel.chip_needs_label("Playerbots")
+    )
+    button = next(b for b, chip in zip(row.chip_buttons, chips, strict=True) if chip is needs)
+
+    assert needs.label in strip.elided_chip_labels(), (
+        f"the lock is not being squeezed at 400px, so this proves nothing: "
+        f"{strip.elided_chip_labels()}"
+    )
+    assert button.text() == needs.label, "the chip's own label is gone, not just its drawing"
+    drawn = button.drawn_text()
+    assert (
+        drawn != needs.label
+    ), "the button paints its whole label into a width that cannot hold it"
+    assert drawn.endswith("…"), f"the label was cut rather than elided: {drawn!r}"
+    assert needs.label.startswith(
+        drawn[:-1]
+    ), f"what is drawn is not the start of the label: {drawn!r}"
+    # Measured against the style's own text area, asked for HERE rather than read
+    # back out of `text_room()`: an assertion that used the function under test
+    # to say how much room there was would hold whatever that function returned
+    # -- it stayed green against `text_room()` answering the button's whole
+    # width, which puts the last characters under the border.
+    from PySide6.QtWidgets import QStyle, QStyleOptionButton
+
+    option = QStyleOptionButton()
+    button.initStyleOption(option)
+    area = button.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, button)
+    assert (
+        button.fontMetrics().horizontalAdvance(drawn) <= area.width()
+    ), f"{drawn!r} is wider than the {area.width()}px the style gives this button for text"
+    assert needs.detail in button.toolTip(), "an elided lock with its sentence nowhere"
+
+
+def test_a_chip_that_fits_is_painted_by_qt_itself(qapp: object) -> None:
+    """The other side of `drawn_text()`, and what stops it being always-elide.
+
+    A `drawn_text()` that returned a shortened string at every width would pass
+    the test above and would put `Rebuild pendin…` on a 4K screen. At a width
+    that fits, what is drawn is exactly what the chip says, for every chip on
+    the row -- which is also the assertion that `text_room()`'s chrome
+    arithmetic is not quietly one pixel short.
+    """
+    chips = _every_chip()
+    _host, row = _a_row_carrying(chips, width=3000)
+
+    painted = {chip.label: b.drawn_text() for b, chip in zip(row.chip_buttons, chips, strict=True)}
+    assert painted == {
+        chip.label: chip.label for chip in chips
+    }, f"a chip is drawn shortened at a width that fits all eight: {painted}"
+
+
+def test_a_failed_jobs_folded_strip_says_what_failed_on_one_line(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T80's strip, at the width gate A2 was taken in and after a job that FAILED.
+
+    A refusal on these tabs is `str(exc)` -- one paragraph -- and the strip's
+    status field used to WRAP it. Folded, the strip is the whole panel, so those
+    extra lines were the panel's whole height and the tab had nothing spare to
+    give them: the gate caught a three-line sentence with its third line cut in
+    half.
+
+    Four assertions. The first two are the defect, and they are asked of
+    `heightForWidth()` -- how tall the field's own text is at the width it is
+    really drawn in -- against the font's line spacing. Not against the field's
+    HEIGHT, which is 50px either way because the field is stretched to the row
+    that holds the Stop button, and not against the panel's `minimumSizeHint()`,
+    which is a wrapping `QLabel`'s small one and does not move: both were tried
+    and both stayed green against the wrapping label this replaced (measured:
+    the refusal needs 56px of the 50 it has at 285px wide, four lines where
+    there is room for three and a half -- which is the half-line the gate
+    photographed).
+
+    The last two are what stop that being met by a field that simply keeps
+    less: the whole refusal is still what the panel reports and what a hover
+    shows.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, (1000, 700))
+    refusal = (
+        "that compose file was not written by Yu'lon, so this app will not rebuild the "
+        "server it describes; move it aside and install again, and nothing here is touched."
+    )
+    assert view.rebuild_log.run(lambda: _raise(RuntimeError(refusal)), title="rebuild") is True
+    pump_until(lambda: not view.rebuild_log.running, "the failed job finished")
+    process_events()
+    view.rebuild_log.set_collapsed(True)
+    process_events()
+
+    field = view.rebuild_log._status
+    assert (
+        refusal in view.rebuild_log.status_text()
+    ), f"the panel no longer reports what failed: {view.rebuild_log.status_text()!r}"
+    assert refusal in field.toolTip(), "the refusal is neither on screen in full nor on hover"
+    needed = field.heightForWidth(field.width())
+    one_line = field.fontMetrics().lineSpacing()
+    assert needed <= one_line, (
+        f"the folded strip's sentence needs {needed}px at the {field.width()}px it is drawn "
+        f"in -- {needed / one_line:.1f} lines of {one_line}px -- so it is wrapping"
+    )
+    assert (
+        needed <= field.height()
+    ), f"the field is {field.height()}px and its text needs {needed}: the bottom line is cut"
+    # One line is not enough on its own: a field that kept the whole paragraph
+    # on one line and let the style cut it at the edge measures the same height
+    # and says nothing about having been cut. What is DRAWN has to fit, and it
+    # has to be elided rather than chopped -- the ellipsis is the only mark on
+    # screen that tells the reader there is more to hover for.
+    drawn = field.text()
+    assert drawn != refusal, "the whole paragraph is on one line, so it is being cut at the edge"
+    assert drawn.endswith("…"), f"the sentence was chopped rather than elided: {drawn!r}"
+    assert (
+        field.fontMetrics().horizontalAdvance(drawn) <= field.width()
+    ), f"{drawn!r} is wider than the {field.width()}px field it is drawn in"
+    assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
+        f"the folded log is CLIPPED at {view.rebuild_log.height()}px against the "
+        f"{view.rebuild_log.minimumSizeHint().height()} it says it needs"
+    )
+
+
+def _raise(exc: Exception) -> Iterator[str]:
+    """A line source that fails the way a refusing job fails: it raises."""
+    yield "starting"
+    raise exc
+
+
+LOG_OPEN_WIDTHS = ((1000, 700), (960, 600))
+"""The two windows the Modules tab is measured at with a job's output in the log.
+
+1000x700 is the window gate A2 was taken in and the one this case was found in;
+960x600 is `main.MINIMUM_WINDOW_SIZE`. Both are here because they fail
+differently: 1000x700 has room for everything except the last 13px, and 960x600
+is 112px short -- a fix sized to either one alone misses the other.
+"""
+
+
+def _drawn_under_their_minimum(tab: Any) -> list[str]:
+    """Every widget on `tab` drawn shorter than it says it needs.
+
+    `_squeezed()` above asks the same question and is kept separate on purpose:
+    that one is called at sizes where the tab is expected to fit outright, and
+    this one at sizes where something has to give -- the assertion is that what
+    gives is a widget's own choice (the log folds) and never Qt's proportional
+    cut, which takes the bottom off whatever is in the way.
+    """
+    from PySide6.QtWidgets import QVBoxLayout
+
+    box = tab.layout()
+    assert isinstance(box, QVBoxLayout)
+    return [
+        f"{type(w).__name__}: {w.height()} < {w.minimumSizeHint().height()}"
+        for w in (box.itemAt(i).widget() for i in range(box.count()))
+        if w is not None and w.isVisible() and w.height() < w.minimumSizeHint().height()
+    ]
+
+
+def test_a_job_leaves_nothing_on_the_modules_tab_cut_at_the_narrow_windows(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The wrapped bar's second line must not be paid for out of the log's text pane.
+
+    T83 round 1's defect, and it is what a minimum that under-reports buys.
+    `FlowLayout.minimumSize()` answered one line at every width, so with the bar
+    wrapped at 1000x700 the tab's own layout claimed it needed 482px when the
+    real need was 538 -- and `QBoxLayout`, told the tab fitted, drew
+    `_IdleLogPanel` at 153px of the 180 it needs and cut its text pane. That is
+    the state T80's cap docstring exists to prevent, and it came back one ticket
+    later through a widget that had nothing to do with logs.
+
+    Three assertions, each of which the other two are satisfied without:
+
+    * nothing on the tab is drawn under its own minimum, which is the defect;
+    * every toolbar label is still whole, so the height cannot be found by
+      un-wrapping the bar and clipping the text again;
+    * and the log is USABLE at whatever height it ended up with -- folded is
+      fine, because a folded `LogPanel` is its strip and the strip carries the
+      job's status line and Stop; drawn-but-cut is not, and the two are a few
+      pixels apart on screen.
+
+    Run AFTER a job, because that is the only state in which this tab has an
+    open log at all: `_IdleLogPanel` starts folded and it is `run_started` that
+    asks for the room (T80).
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    assert not view.rebuild_log.collapsed, "the job did not open the log, so nothing is tested"
+
+    for size in LOG_OPEN_WIDTHS:
+        _at(window, size)
+        assert _drawn_under_their_minimum(tab) == [], (
+            f"something on the Modules tab is drawn under its own minimum at {size} with "
+            f"the log open: {_drawn_under_their_minimum(tab)}"
+        )
+        clipped = [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
+        assert clipped == [], f"toolbar text cut off at {size}: {clipped}"
+        assert _bar_holds_every_line(view) == [], (
+            f"a toolbar button is drawn outside the action bar at {size}: "
+            f"{_bar_holds_every_line(view)}"
+        )
+        log = view.rebuild_log
+        assert log.height() >= log.minimumSizeHint().height(), (
+            f"the log is drawn at {log.height()}px against the {log.minimumSizeHint().height()} "
+            f"it needs at {size}: it was cut rather than folded"
+        )
+        assert log.status_text() != "", f"the log's strip is empty at {size}"
+
+
+def test_the_modules_log_takes_its_height_back_when_the_window_grows(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The fold the panel does for room is undone when the room comes back.
+
+    The other half of the test above, and the one that says the fold is a
+    response to a width rather than a one-way door. It is easy to get wrong in
+    exactly one way: a panel that remembers "I folded myself" and clears that
+    memory on its own `set_collapsed()` never re-opens -- measured, with the log
+    left folded at 1280x800 where there were 312px of room for it.
+
+    And the last assertion is the other direction: a fold the USER asked for
+    survives a window that grows, or the app re-opens a panel somebody has just
+    put away.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.rebuild_log.collapsed, (
+        f"the log is open at {main.MINIMUM_WINDOW_SIZE}, where the tab has "
+        f"{view.rebuild_log.height()}px for the {view.rebuild_log.minimumSizeHint().height()} "
+        "an open one needs"
+    )
+
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+
+    assert not view.rebuild_log.collapsed, (
+        "the log was folded to fit a narrow window and never came back at "
+        f"{main.DEFAULT_WINDOW_SIZE}"
+    )
+    assert "Compile finished." in view.rebuild_log.text(), "the fold lost the job's output"
+
+    _click(_the_handle_on(view.rebuild_log))
+    assert view.rebuild_log.collapsed, "the handle did not fold the log"
+    _at(window, (1920, 1080))
+
+    assert view.rebuild_log.collapsed, (
+        "a bigger window re-opened a log the user had folded; only a fold the PANEL did "
+        "for room is its own to undo"
+    )
+
+
+def _what_the_tab_owes(tab: Any) -> int:
+    """The height every widget on `tab` needs, added up the way its layout does.
+
+    Recomputed from the children rather than read off the tab, because the whole
+    question is whether the tab's OWN answer has kept up with them.
+    """
+    from PySide6.QtWidgets import QVBoxLayout
+
+    box = tab.layout()
+    assert isinstance(box, QVBoxLayout)
+    margins = box.contentsMargins()
+    owed = margins.top() + margins.bottom()
+    shown = 0
+    for index in range(box.count()):
+        item = box.itemAt(index)
+        widget = item.widget()
+        if widget is not None and not widget.isVisible():
+            continue
+        shown += 1
+        owed += widget.minimumSizeHint().height() if widget is not None else 0
+    return owed + box.spacing() * max(0, shown - 1)
+
+
+def test_a_wrap_reaches_the_tabs_own_minimum_without_a_restyle(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The bar wrapping has to move the TAB's minimum, and a plain resize is the test.
+
+    A parent `QBoxLayout` works its children's minimums out when it is
+    invalidated and re-uses them until a child says they have moved.
+    `FlowLayout.minimumSize()` answers for the width the layout was last GIVEN,
+    so a bar that wraps has a new minimum and no way to say so --
+    `FlowBar.resizeEvent`'s `updateGeometry()` is the saying.
+
+    **Resized without `_at()`, and that is the whole point.** `_at()` re-applies
+    the theme, which invalidates every layout on the window and makes the parent
+    re-ask anyway; so does a real drag, most of the time
+    (`main._Window._restyle_for_width`). Measured through `_at()`, removing
+    `updateGeometry()` changes nothing and reads as dead code -- it was removed
+    once on exactly that evidence. Through a plain `resize()` the tab's minimum
+    stays at the 376px it had with the bar on one line while the bar itself says
+    106, and everything downstream -- `_IdleLogPanel`'s room, and so whether the
+    log is folded or cut -- is decided from that stale number.
+
+    Two assertions: the tab's minimum went UP by at least a line when the bar
+    wrapped, and it is at least what its children add up to. The second is the
+    invariant and the first is what makes it non-vacuous -- a tab whose minimum
+    was already generous would satisfy the second at both widths.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    bar = view.module_actions
+
+    window.resize(1400, 800)
+    process_events()
+    assert len(bar.flow()._lines(bar.width())) == 1, "1400px already wrapped the bar"
+    on_one_line = tab.minimumSizeHint().height()
+    line = bar.flow()._line_height()
+
+    window.resize(960, 800)
+    process_events()
+
+    assert len(bar.flow()._lines(bar.width())) > 1, "960px did not wrap the bar"
+    wrapped = tab.minimumSizeHint().height()
+    assert wrapped >= on_one_line + line, (
+        f"the bar wrapped and the tab's minimum went {on_one_line} -> {wrapped}, less than the "
+        f"{line}px line it gained: the tab is still being laid out against the old one"
+    )
+    assert wrapped >= _what_the_tab_owes(tab), (
+        f"the tab says it needs {wrapped}px and its own children add up to "
+        f"{_what_the_tab_owes(tab)}"
+    )
+
+
+A_REFUSAL_IN_THE_REPORT_BOX = (
+    "mod-city-bots: FAILED. the applier refused: mod-playerbots is not installed, and this "
+    "module declares it in requires. Install it first, then press Install again."
+)
+"""What the Modules report box holds after any press that did not work.
+
+A paragraph and not a word, because the box is sized to its TEXT: an empty box
+is folded away by its strip (T80) and a one-word one is a line, so a fixture
+that put `no` in it would be measuring a tab that still had the height. Wrapped
+at these widths this is what `_module_failed` really leaves behind.
+"""
+
+
+def _counting_folds(panel: Any) -> tuple[list[str], Callable[[], None]]:
+    """Watch `panel`'s real fold transitions; returns the log and a restore.
+
+    Patched on the CLASS and not the instance, because the calls being counted
+    are the panel's own `self.set_collapsed(...)` -- an instance attribute would
+    be found by those too, but so would any other panel of the same type in the
+    same test, and counting one widget's flicker is the whole point. Only a call
+    that CHANGES the state is recorded: `set_collapsed` is a documented no-op
+    otherwise, and counting no-ops would make this a test of how often the
+    method is reached rather than of what the user sees.
+    """
+    kind = type(panel)
+    real = kind.set_collapsed
+    seen: list[str] = []
+
+    def counting(self: Any, collapsed: bool) -> None:
+        if self is panel and collapsed != self.collapsed:
+            seen.append("fold" if collapsed else "open")
+        real(self, collapsed)
+
+    kind.set_collapsed = counting  # type: ignore[method-assign]
+    return seen, lambda: setattr(kind, "set_collapsed", real)
+
+
+def test_a_populated_report_leaves_nothing_on_the_modules_tab_cut(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The state after ANY press on this tab, at the two narrow windows.
+
+    Round 2 folded the log and stopped there, and the tab still did not fit: a
+    report box is 90px of minimum and it is populated the moment anything on
+    this tab is pressed. Measured with the log already folded -- at 1000x700 the
+    custom-module card was drawn 109 of the 122 it needs, and at 960x600 the
+    ACTION BAR was drawn 74 of its 106, its second row of buttons sliced through
+    horizontally, which is this ticket's own defect arriving from underneath.
+
+    The order is what is asserted, not just the absence of clipping: the things
+    that may give are the two that fold to a strip and the list that scrolls,
+    and a "fix" that met the first assertion by letting the card or a toolbar
+    line be short would be the bug with a passing test.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    process_events()
+    assert not view.module_report_strip.collapsed, "the report box did not open for its text"
+    assert not view.rebuild_log.collapsed, "the job did not open the log"
+
+    for size in LOG_OPEN_WIDTHS:
+        _at(window, size)
+        assert _drawn_under_their_minimum(tab) == [], (
+            f"something on the Modules tab is drawn under its own minimum at {size} with a "
+            f"report in the box: {_drawn_under_their_minimum(tab)}"
+        )
+        clipped = [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
+        assert clipped == [], f"toolbar text cut off at {size}: {clipped}"
+        assert _bar_holds_every_line(view) == [], (
+            f"a toolbar button is drawn outside the action bar at {size}: "
+            f"{_bar_holds_every_line(view)}"
+        )
+        # The report is still REACHABLE where it has been folded for room: the
+        # strip names it and one press brings it back, which is the difference
+        # between a box that gave its height up and a box that was cut.
+        assert view.module_report_strip.isVisible(), f"the report's strip is gone at {size}"
+        assert (
+            view.module_report.toPlainText() == A_REFUSAL_IN_THE_REPORT_BOX
+        ), f"folding the report for room at {size} lost what it said"
+
+
+def test_the_report_box_is_what_gives_after_the_log_and_before_the_list(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The ORDER, asked as three questions the absence of clipping does not ask.
+
+    A tab that folded everything at every width would pass the test above, and
+    so would one that took the height out of the list first and left the user
+    with two rows on a window that could have shown six. What is asserted is
+    that each step is only taken when the one before it was not enough:
+
+    * at the smallest window with a report in the box AND a rebuild owed, BOTH
+      boxes are folded and the list is at its own floor -- the narrowest case,
+      where all three steps are needed;
+    * at 1280x800 NEITHER is folded and the list floor is back, so none of this
+      is a one-way door;
+    * and the list never gives while a box is still open, which is the order
+      itself.
+
+    The banner is what makes the first case reach step 3 at all since T85: the
+    minimum window went up to hold the wrapped bar and the card whole with one on
+    screen, and without one the smallest window now fits with the list at its
+    full `MODULE_LIST_MIN_HEIGHT`.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    _a_rebuild_is_owed(view)
+    process_events()
+
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.rebuild_log.collapsed, "the log is open at the smallest window"
+    assert view.module_report_strip.collapsed, "the report is open at the smallest window"
+    assert view.modules_panel.minimumHeight() < controller_view_module.MODULE_LIST_MIN_HEIGHT, (
+        "both boxes are folded and the tab STILL does not fit at this size -- the action bar "
+        "takes two lines, the card needs 136px of wrapped sentence and the banner 62 -- so the "
+        f"list's floor is the one thing left to give: it is still "
+        f"{view.modules_panel.minimumHeight()} of {controller_view_module.MODULE_LIST_MIN_HEIGHT}"
+    )
+    # Strictly less, and that is a claim about the shipped catalog and theme at
+    # this one size rather than about the rule. If a future theme makes the
+    # smallest window fit outright this goes red, and that is the right red: the
+    # ladder's last rung would no longer be exercised anywhere, and this is the
+    # test that says so rather than quietly covering nothing.
+    #
+    # `_LIST_FLOOR_FLOOR` and NOT the list's own `minimumSizeHint()`, which is
+    # what this asserted until T85 on the belief that Qt ignores a minimum under
+    # a widget's hint. It does not -- `qSmartMinSize` prefers an explicit
+    # `minimumHeight()` at any value above zero -- and the hint was 70 where the
+    # ladder needed 40, so the last rung was 30px shorter than it reads and the
+    # shortfall went on to the toolbar and the card instead.
+    assert view.modules_panel.minimumHeight() >= controller_view_module._LIST_FLOOR_FLOOR, (
+        f"the floor was lowered to {view.modules_panel.minimumHeight()}, under the "
+        f"{controller_view_module._LIST_FLOOR_FLOOR} that is the bottom of this ladder -- "
+        "below it the honest answer is a tab that scrolls, not a shorter list"
+    )
+
+    _a_rebuild_is_not_owed(view)
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+
+    assert not view.rebuild_log.collapsed, "the log never came back at the default window"
+    assert not view.module_report_strip.collapsed, "the report never came back"
+    assert view.modules_panel.minimumHeight() == controller_view_module.MODULE_LIST_MIN_HEIGHT, (
+        f"the list's floor is still {view.modules_panel.minimumHeight()} at a window with "
+        f"room for the {controller_view_module.MODULE_LIST_MIN_HEIGHT} it asks for"
+    )
+
+    # And the order: wherever the list has given anything, both boxes are away.
+    for width in range(960, 1400, 20):
+        _at(window, (width, 700))
+        if view.modules_panel.minimumHeight() < controller_view_module.MODULE_LIST_MIN_HEIGHT:
+            assert view.rebuild_log.collapsed and view.module_report_strip.collapsed, (
+                f"at {width}px the list gave height while a box was still open: log "
+                f"folded={view.rebuild_log.collapsed}, report "
+                f"folded={view.module_report_strip.collapsed}"
+            )
+
+
+THE_WRAPPED_WIDTHS = tuple(range(960, 1120, 10))
+"""Every width at the minimum window's height where the action bar takes two lines.
+
+960 is `main.MINIMUM_WINDOW_SIZE`'s width and 1120 is where the bar goes back to
+one line; between them the theme's font grows with the width while the bar still
+wraps, so the tab wants MORE height as the window gets wider. Swept rather than
+asked at 960 because the worst case is not at either end: with the rebuild banner
+up, the smallest height at which nothing is cut is 634 at 960 and 637 at 1090,
+and a test that asked only at the minimum width would have passed on a 634 that
+clips the custom-module card thirteen widths later (T85).
+
+Every ten pixels rather than every twenty, so that 1090 is really asked: a
+twenty-pixel step from 960 lands on 1080 and 1100 and steps over the worst one.
+"""
+
+
+def _cut_on_the_modules_tab(view: ControllerView, tab: Any) -> list[str]:
+    """Everything on the Modules tab that is drawn too short to read, which must be none.
+
+    Four questions, and the list is exempt from the first of them BY DESIGN: it
+    is the one widget here that is complete at any height because it scrolls, and
+    `_TabFit`'s last rung takes it under its own `minimumSizeHint()` on purpose.
+    Every other widget drawn under its minimum is text somebody cannot read.
+
+    The card's BUTTONS are asked for separately from the card's height because
+    they fail separately: `QGroupBox` is happy to be drawn shorter than its own
+    layout and lets the children hang out of the bottom of the frame, which is
+    what gate round 6 photographed -- two buttons below the card's own edge, on a
+    card whose height on its own looked only a little short.
+    """
+    from PySide6.QtWidgets import QGroupBox, QPushButton
+
+    cut = [
+        why
+        for why in _drawn_under_their_minimum(tab)
+        if not why.startswith(type(view.modules_panel).__name__)
+    ]
+    cut += [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
+    cut += _bar_holds_every_line(view)
+    for card in tab.findChildren(QGroupBox):
+        for button in card.findChildren(QPushButton):
+            if button.y() < 0 or button.y() + button.height() > card.height():
+                cut.append(
+                    f"{button.text()!r} ends at {button.y() + button.height()}px of the "
+                    f"{card.height()}px card {card.title()!r}"
+                )
+    return cut
+
+
+def test_the_smallest_window_draws_the_toolbar_and_the_card_whole_with_a_rebuild_owed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T85's first half: the size the app PROMISES, in the state gate 6 found it in.
+
+    The banner is the whole of what was new. It costs this tab 62px plus the
+    spacing above it, it is on screen for as long as it takes a user to press
+    Rebuild, and at the 960x600 the app used to allow it put the tab 82px past
+    what `_TabFit`'s whole ladder could give: the wrapped action bar was drawn
+    82px of its 106 with `Rebuild the server…` sliced through its own border, and
+    the custom-module card 82 of 122 with both its buttons hanging below the
+    frame. `QBoxLayout` shares a shortfall over every child, so the two widgets
+    whose only way of being shorter is to cut the words in them paid it.
+
+    Two things had to change and this test needs both. The ladder's last rung was
+    30px shorter than it read -- `_TabFit` floored the list at its own
+    `minimumSizeHint()` of 70 on the belief that Qt ignores anything under it,
+    and Qt does not -- and even with the list at `_LIST_FLOOR_FLOOR` the tab was
+    48px short, so `MINIMUM_WINDOW_SIZE` went from 600 to 640.
+
+    Swept across `THE_WRAPPED_WIDTHS` rather than asked at the minimum, because
+    the worst case is at 1090 and not at 960: see that constant.
+
+    After a job AND with a report in the box, which is the state that puts every
+    rung of the ladder under load at once.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    _a_rebuild_is_owed(view)
+    assert view.module_report.toPlainText() != "", "the report box is empty, so a rung is unloaded"
+
+    for width in THE_WRAPPED_WIDTHS:
+        _at(window, (width, main.MINIMUM_WINDOW_SIZE[1]))
+        assert (
+            view.rebuild_banner.isHidden() is False
+        ), f"the banner left the screen at {width}px, so this is not the case under test"
+        assert (
+            len({b.y() for b in _module_toolbar_buttons(view)}) > 1
+        ), f"the action bar is one line at {width}px, so the hard case is not being measured"
+        assert _cut_on_the_modules_tab(view, tab) == [], (
+            f"something on the Modules tab is cut at {width}x{main.MINIMUM_WINDOW_SIZE[1]} with a "
+            f"rebuild owed: {_cut_on_the_modules_tab(view, tab)}"
+        )
+
+
+def test_the_logs_minimum_in_the_state_it_is_not_in_is_the_one_it_really_has(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`open_minimum()` folded must equal what the panel really needs open, and back.
+
+    Those two methods exist because `_TabFit` has to ask an open panel what it
+    would need folded and a folded one what it would need open -- that IS the
+    question it is deciding -- so both are DERIVED from the state the panel is
+    not in. A derivation that is 16px light is a tab that finds room it does not
+    have: it opens the log, is asked again with the honest number now that the
+    pane is showing, and folds it. One resize, two transitions, and the panel
+    ends up where it started with a flash in between.
+
+    Sixteen is not a guess. The theme gives every `QPlainTextEdit` a 90px
+    `min-height` and the pane really holds back 106, and a layout item's minimum
+    is the larger of the widget's hint and its explicit `minimumHeight()` --
+    `_ReportStrip.box_minimum()` already carries that scar (T45), and
+    `_IdleLogPanel` was written next to it with the hint alone.
+
+    Asserted as an EQUALITY between two numbers computed by different code: the
+    panel's arithmetic on one side and Qt's own laid-out answer on the other. A
+    test that recomputed the derivation would agree with itself whatever it said.
+
+    Maximised, so neither answer is a cap's or a shortfall's.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    log = view.rebuild_log
+
+    assert log.collapsed, "the log did not start folded, so `open_minimum()` is not derived here"
+    derived_open = log.open_minimum()
+
+    _ran_a_job(view)
+    assert not log.collapsed, "the job did not open the log"
+    really_open = log.minimumSizeHint().height()
+    derived_folded = log.folded_minimum()
+
+    assert derived_open == really_open, (
+        f"folded, the panel said an open one needs {derived_open}px; open, it needs "
+        f"{really_open}. The tab decides whether to unfold from the first number"
+    )
+
+    _click(_the_handle_on(log))
+    assert log.collapsed, "the handle did not fold the log"
+    really_folded = log.minimumSizeHint().height()
+
+    assert derived_folded == really_folded, (
+        f"open, the panel said a folded one needs {derived_folded}px; folded, it needs "
+        f"{really_folded}"
+    )
+
+
+THE_CLIENT_INSIDE_A_1280x800_FRAME = (1252, 734)
+"""What `main.DEFAULT_WINDOW_SIZE` leaves the app when the number is the FRAME.
+
+`xdotool search` returns mutter's frame rather than the client, and on the box
+gate round 6 ran on the frame is 28px wider and 66px taller than what the app
+gets. Round 6 corrected for it and sized every shot against the client, so the
+1280x800 in T85 really is a 1280x800 client -- and this size is asserted beside
+it because the correction is one line of a recipe and the failure mode is
+silent: a run that sizes the frame instead is measuring a 554px tab where the
+test measures 620, which is the difference between an open log needing the
+report to give and needing the report AND the list's floor.
+"""
+
+
+def test_a_press_on_the_log_reopens_it_at_the_window_the_app_opens_at(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T85's second half: the fold that went one way, and the chevron that did nothing.
+
+    Live at 1280x800 with a rebuild owed, a log left open while maximised folded
+    itself on the way down and its chevron was then dead -- it came back only on
+    a window big enough that nothing had to give. The banner is why: it costs
+    this tab 52px at this width, and with it an open log and a populated report
+    want 668px of a 620px tab. One of them has to fold, the published order sends
+    the log, and pressing its handle did nothing at all, because `_apply()`
+    derives the fold from `_has_room` and `set_room(False)` is a no-op when the
+    answer has not changed.
+
+    The answer is that a press REORDERS the ladder (`_TabFit._give_order`): the
+    panel a person last asked for goes last, so the other one gives for it, and
+    a press may spend the list's floor where folding the other one is not
+    enough. Both directions are asserted, and the second is what stops this being
+    "the log always wins" -- a press on the REPORT's strip takes it back, and
+    neither panel is privileged over the other.
+
+    Asked at two sizes: 1280x800, which is what gate round 6 photographed, and
+    the 1252x734 a 1280x800 FRAME leaves the client on that box. At 620px of tab
+    folding the report is enough; at 554 it leaves the log two pixels short, so
+    the second case is the one that needs the list's floor as well.
+
+    The last assertion is the one the live defect would still pass without: the
+    log is not merely un-collapsed but drawn at the height it needs. A panel
+    opened at a size that cannot hold it is a cut panel, which is what T83's
+    round 3 measured when the press showed the box itself.
+    """
+    import main
+
+    for size in (main.DEFAULT_WINDOW_SIZE, THE_CLIENT_INSIDE_A_1280x800_FRAME):
+        view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+        window, _tab = _controller_in_the_real_window(view, "Modules")
+        _at(window, DESKTOP_1080P)
+        _ran_a_job(view)
+        _a_rebuild_is_owed(view)
+        assert not view.rebuild_log.collapsed, "the job did not open the log while maximised"
+
+        _at(window, size)
+        assert view.rebuild_log.collapsed, (
+            f"the log is still open at {size} with a rebuild owed, so the press below is not "
+            "the press this ticket is about"
+        )
+
+        _click(_the_handle_on(view.rebuild_log))
+
+        assert not view.rebuild_log.collapsed, (
+            f"the chevron did nothing: the log is still folded at {size}, where the tab can "
+            "hold it once the report and the list's floor give"
+        )
+        assert view.module_report_strip.collapsed, (
+            f"both are open at {size}, so nothing gave -- either the tab grew or this is "
+            "measuring a size where the question does not arise"
+        )
+        assert view.rebuild_log.height() >= view.rebuild_log.minimumSizeHint().height(), (
+            f"the log was opened at {view.rebuild_log.height()}px against the "
+            f"{view.rebuild_log.minimumSizeHint().height()} it needs at {size}: open and cut"
+        )
+        assert "Compile finished." in view.rebuild_log.text(), "the fold lost the job's output"
+
+        # And back the other way: the report's own strip takes the height back.
+        _click(view.module_report_strip)
+
+        assert not view.module_report_strip.collapsed, (
+            f"a press on the report's strip did not reopen it at {size} -- the log is being "
+            "privileged rather than the panel the user last asked for"
+        )
+        assert view.rebuild_log.collapsed, f"the report reopened without the log giving at {size}"
+
+
+def test_folding_the_log_by_hand_gives_the_report_its_height_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The other side of the reorder: what the user puts AWAY costs the tab nothing.
+
+    `_TabFit` used to ask "can this tab hold both panels open?" whatever anybody
+    wanted, and that question has no answer that helps here. Once a press has put
+    the log at the end of the give order, a tab asking it keeps refusing the
+    report for a log that is folded and that nobody is asking for -- the user
+    presses the log shut to get the report back and gets neither.
+
+    So `settle()` starts from what is ASKED FOR (`wants_open()`) rather than from
+    both panels open. The log folded by hand is not asked for, the sum drops by
+    the whole of an open log, and the report fits with room over.
+
+    Three presses, and the third is the assertion: the first proves the size is
+    one where they do not both fit, the second is the reorder, the third is this.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    _a_rebuild_is_owed(view)
+    _at(window, main.DEFAULT_WINDOW_SIZE)
+
+    assert view.rebuild_log.collapsed and not view.module_report_strip.collapsed, (
+        "the tab holds both at this size, so there is nothing for either press to cost: "
+        f"log folded={view.rebuild_log.collapsed}, report "
+        f"folded={view.module_report_strip.collapsed}"
+    )
+
+    _click(_the_handle_on(view.rebuild_log))
+    assert not view.rebuild_log.collapsed, "the press did not open the log"
+    assert view.module_report_strip.collapsed, "the report did not give for it"
+
+    _click(_the_handle_on(view.rebuild_log))
+
+    assert view.rebuild_log.collapsed, "the second press did not fold the log"
+    assert not view.module_report_strip.collapsed, (
+        "the report is still folded for a log the user has just put away: the room is being "
+        "worked out from what the tab COULD hold rather than from what is asked for"
+    )
+    assert view.module_report.toPlainText() != "", "the report came back empty"
+
+
+def test_a_restyle_at_an_unchanged_width_folds_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The flicker: a themed restyle used to unfold the log and refold it.
+
+    Every height on this tab is a function of the theme, the theme is
+    regenerated at every width the window settles at
+    (`main._Window._restyle_for_width`), and a widget's size hint is stale until
+    it has been polished. Decided inside the layout pass that asks for it, the
+    fold was taken against half-updated numbers: the action bar's minimum still
+    said one line, so the tab looked 56px roomier than it was, the log opened,
+    the bar was re-laid, and the log folded again. Two transitions per settle at
+    every width from 940 to 1110 -- a visible flash on every drag below the fold
+    width, measured before `_TabFit`'s coalescing timer.
+
+    Asserted as ZERO at an unchanged size and at most one per step across the
+    sweep, for BOTH of the strips that fold for room. One is the honest bound for
+    a step that really does cross a fold width: the state has to change once, and
+    it is the SECOND transition that is the flicker.
+    """
+    from yulon.ui.theme import apply_dadcraft_theme
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, _tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    process_events()
+    _at(window, (1000, 700))
+    assert view.rebuild_log.collapsed, "1000x700 does not fold the log, so this proves nothing"
+    assert view.module_report_strip.collapsed, "1000x700 does not fold the report either"
+
+    # BOTH strips, because they are two objects running the same derivation and
+    # a flicker in either is the same flash on the same tab. Counted with the
+    # report POPULATED, which is also what gives the report strip a fold to
+    # flicker: an empty box is folded by its text and never consulted about room.
+    log_seen, restore_log = _counting_folds(view.rebuild_log)
+    report_seen, restore_report = _counting_folds(view.module_report_strip)
+    try:
+        apply_dadcraft_theme(window, width=window.width())
+        process_events()
+        assert log_seen == [], f"a restyle at an unchanged size folded the log {log_seen}"
+        assert report_seen == [], f"a restyle at an unchanged size folded the report {report_seen}"
+
+        worst: list[str] = []
+        moved = 0
+        # Up to 1200 and not 1110: the report's own fold width is 1120 at this
+        # height, and a sweep that stopped short of it counted a strip that
+        # never moves -- which cannot flicker, so half of this test would have
+        # been green about nothing. `moved` is what says so out loud.
+        for width in range(940, 1201, 10):
+            log_seen.clear()
+            report_seen.clear()
+            window.resize(width, 700)
+            apply_dadcraft_theme(window, width=window.width())
+            process_events()
+            moved += len(log_seen) + len(report_seen)
+            if len(log_seen) > 1:
+                worst.append(f"{width}: log {log_seen}")
+            if len(report_seen) > 1:
+                worst.append(f"{width}: report {report_seen}")
+        assert worst == [], f"a strip flickered during a drag at {worst[:3]}"
+        assert moved, (
+            "neither strip folded or unfolded anywhere in the sweep, so 'at most one "
+            "transition per step' is a bound on nothing"
+        )
+    finally:
+        restore_log()
+        restore_report()
+
+
+def test_opening_the_report_by_hand_cannot_cut_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A press on a strip is a request, not a `setVisible()`.
+
+    `_TabFit` folds the report for room and then answers the same way for as
+    long as the width holds -- `set_room(False)` is a no-op when the answer has
+    not changed -- so anything that shows the box behind its back stays shown.
+    Until round 3 the strip's own handler did exactly that, and one click at
+    960x600 with a refusal in the box drew the action bar at 76px of the 106 its
+    two lines need, `Rebuild the server…` sliced through, and the custom-module
+    card's label at 9px of 28.
+
+    Either outcome is allowed and only one of them is asserted for, because the
+    rule is about what must not happen: the box may stay folded (it does), or it
+    may open with the list's floor giving the difference. What may not happen is
+    the tab being cut. The click is a real mouse press on the strip, because the
+    defect was in the handler that press reaches.
+
+    The second half is the one that keeps this from passing for the wrong
+    reason: the press must still be LIVE. A strip that had been made unclickable,
+    or one that never folds at all, satisfies "nothing is cut" and is a
+    different bug -- so the same press is made again at a width with the room,
+    and there it opens.
+    """
+    import main
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    process_events()
+
+    _at(window, main.MINIMUM_WINDOW_SIZE)
+    assert view.module_report_strip.collapsed, "the report is not folded here, so no press to test"
+
+    _click(view.module_report_strip)
+    process_events()
+
+    assert _drawn_under_their_minimum(tab) == [], (
+        "a click on the report's strip at the smallest window cut the tab: "
+        f"{_drawn_under_their_minimum(tab)}"
+    )
+    clipped = [why for why in (_clipped(b) for b in _module_toolbar_buttons(view)) if why]
+    assert clipped == [], f"the click cut the toolbar's text: {clipped}"
+    assert (
+        _bar_holds_every_line(view) == []
+    ), f"the click pushed a toolbar button outside the bar: {_bar_holds_every_line(view)}"
+
+    _at(window, DESKTOP_1080P)
+    was = view.module_report_strip.collapsed
+    _click(view.module_report_strip)
+    process_events()
+    assert view.module_report_strip.collapsed is not was, (
+        "the report's strip no longer answers a press at a window with the room for it, so "
+        "the assertions above are about a dead control"
+    )
+
+
+def test_an_open_report_is_counted_at_the_height_the_layout_holds_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`_owed()` has to count the report box the way the layout counts it.
+
+    A layout item's minimum is the larger of its widget's hint and any explicit
+    `minimumHeight()`, and the theme puts one on every text field (T45). Counted
+    by the hint alone the box came to 90 against the 106 the layout really holds
+    back, so `_owed()` under-reported an open report by 16px -- and between 1030
+    and 1080 wide that is the whole margin: the sum came to 522 against a tab of
+    525 while the tab's real minimum was 538, the report stayed open, and the
+    custom-module card was drawn 108 of its 122.
+
+    1040x700 and not a sweep, because this is an arithmetic error with an exact
+    window where it shows: wider and the card fits anyway, narrower and the
+    report folds for other reasons. The card is named because it is the widget
+    that pays -- it is the one thing on this tab with a wrapped sentence in it
+    and no way to be shorter except by cutting the words.
+    """
+    from PySide6.QtWidgets import QGroupBox
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    window, tab = _controller_in_the_real_window(view, "Modules")
+    _at(window, DESKTOP_1080P)
+    _ran_a_job(view)
+    view.module_report.setPlainText(A_REFUSAL_IN_THE_REPORT_BOX)
+    process_events()
+    _at(window, (1040, 700))
+
+    card = tab.findChild(QGroupBox)
+    assert card is not None, "the custom-module card is gone from the Modules tab"
+    assert card.height() >= card.minimumSizeHint().height(), (
+        f"the custom-module card is drawn {card.height()}px against the "
+        f"{card.minimumSizeHint().height()} it needs at 1040x700"
+    )
+    assert (
+        _drawn_under_their_minimum(tab) == []
+    ), f"something on the tab is cut at 1040x700: {_drawn_under_their_minimum(tab)}"
+    # And the arithmetic itself, at the seam the defect was in: what the strip
+    # says the box needs is what the box's own layout item holds back for it.
+    box = tab.layout().itemAt(_index_of(tab, view.module_report))
+    assert box is not None
+    assert view.module_report_strip.box_minimum() >= box.minimumSize().height(), (
+        f"the strip says its box needs {view.module_report_strip.box_minimum()}px and its "
+        f"layout item holds back {box.minimumSize().height()}"
+    )
+
+
+def _index_of(tab: Any, widget: Any) -> int:
+    """Where `widget` sits in `tab`'s layout."""
+    box = tab.layout()
+    for index in range(box.count()):
+        item = box.itemAt(index)
+        if item is not None and item.widget() is widget:
+            return index
+    raise AssertionError(f"{widget} is not in {tab}'s layout")
