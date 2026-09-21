@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import email.message
+import importlib.util
 import json
 import urllib.error
 from fractions import Fraction
@@ -129,6 +130,81 @@ def test_the_minor_number_is_still_a_whole_number() -> None:
     """Only the LAST number is a fraction; 0.9.0 outranks every 0.8.x there can be."""
     assert is_newer("v0.9.0", "0.8.99") is True
     assert is_newer("v0.8.99", "0.9.0") is False
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        # A fourth number is not this scheme, and reading it as `.7` was silent.
+        ("v0.8.7.1", None),
+        ("v1.2.3.4-Public", None),
+        ("v0.8.7.", None),
+        # `PUBLIC_TAG` is case-insensitive, so a `V` tag passes the filter. It
+        # has to key too, or the release is dropped without a word.
+        ("V0.8.7-Public", (0, 8, Fraction(7, 10))),
+        ("V1.2.3", (1, 2, Fraction(3, 10))),
+        # A suffix is fine here: deciding what is a PUBLIC tag is not this
+        # function's job, it is `is_public_tag`'s.
+        ("v0.8.7-Public-rc1", (0, 8, Fraction(7, 10))),
+        ("v1.2.3-Public-rc1", (1, 2, Fraction(3, 10))),
+        ("v0.6.59Public", (0, 6, Fraction(59, 100))),
+        ("0.8.70-Public", (0, 8, Fraction(7, 10))),
+        # Nine digits is the cap, and the tenth is refused rather than trimmed.
+        ("v0.8.999999999", (0, 8, Fraction(999999999, 10**9))),
+        ("v0.8.9999999999", None),
+        ("v999999999.2.3", (999999999, 2, Fraction(3, 10))),
+        ("v9999999999.2.3", None),
+        ("v0.9999999999.3", None),
+    ],
+)
+def test_version_key_refuses_what_it_cannot_read_rather_than_guessing(
+    tag: str, expected: tuple[int, int, Fraction] | None
+) -> None:
+    assert version_key(tag) == expected
+
+
+def test_a_capital_v_release_is_not_dropped_in_silence() -> None:
+    """`is_public_tag` accepts it, so the key has to as well or it vanishes.
+
+    The two filters are ANDed in `_public_releases`: a tag that passes one and
+    keys to None is skipped with nothing said about it.
+    """
+    assert is_public_tag("V0.8.7-Public") is True
+    assert version_key("V0.8.7-Public") is not None
+
+    feed = json.dumps([release("V0.8.7-Public", body="### New\n- Seven.")])
+    assert evaluate_feed(feed, "0.8.65-Public").latest == "V0.8.7-Public"
+
+
+def test_a_number_too_long_to_be_a_version_does_not_raise_out_of_the_check() -> None:
+    """CPython refuses `int()` on a string of more than 4300 digits (a ValueError).
+
+    Measured before the cap: a tag of `v0.8.` + 5000 nines raised that straight
+    out of `evaluate_feed`, whose contract is "ValueError on non-JSON only" —
+    and out of `_from_cache`, where it reads as a corrupt cache and re-fetches
+    every launch for as long as the feed holds the tag.
+    """
+    monstrous = "v0.8." + "9" * 5000
+
+    assert version_key(monstrous) is None
+
+    feed = json.dumps([release(f"{monstrous}-Public"), release("v0.8.7-Public")])
+    result = evaluate_feed(feed, "0.8.65-Public")
+
+    assert result.latest == "v0.8.7-Public", "the sane release is still found"
+
+
+@pytest.mark.parametrize(
+    ("lower", "higher"),
+    [("v0.8.05", "v0.8.1"), ("v0.8.05", "v0.8.06"), ("v0.8.0", "v0.8.05")],
+)
+def test_a_leading_zero_is_a_smaller_fraction_and_that_is_intended(lower: str, higher: str) -> None:
+    """`.05` is five hundredths, so it sits below `.1` — the digits are the number."""
+    a, b = version_key(lower), version_key(higher)
+
+    assert a is not None and b is not None and a < b
+    assert is_newer(higher, lower) is True
+    assert is_newer(lower, higher) is False
 
 
 def test_the_known_cost_of_the_scheme_is_recorded_rather_than_worked_around() -> None:
@@ -369,11 +445,73 @@ def test_check_degrades_cleanly_offline_or_on_odd_payloads() -> None:
     assert empty.available is False and empty.latest is None and empty.error is not None
 
 
+RELEASE_NOTES_SCRIPT = Path(__file__).resolve().parents[1] / "build" / "release_notes.py"
+"""Plan 1's half of T90. Absent on this branch alone; present once both are merged."""
+
+
+def _release_notes_module() -> object:
+    """Plan 1's script, loaded from its path, or a skip. It is a script, not a package."""
+    if not RELEASE_NOTES_SCRIPT.exists():
+        pytest.skip("plan 1's build/release_notes.py is not in this tree")
+    spec = importlib.util.spec_from_file_location("t90_release_notes", RELEASE_NOTES_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_the_build_script_agrees_on_what_public_means() -> None:
     """One definition of `-Public`, or the release notes describe a different release."""
-    script = Path(__file__).resolve().parents[1] / "build" / "release_notes.py"
-    if not script.exists():
-        pytest.skip("plan 1 not merged into this tree")
-    assert 'r"^v(\\d+)\\.(\\d+)\\.(\\d+)-public$", re.IGNORECASE' in script.read_text(
+    if not RELEASE_NOTES_SCRIPT.exists():
+        pytest.skip("plan 1's build/release_notes.py is not in this tree")
+    assert 'r"^v(\\d+)\\.(\\d+)\\.(\\d+)-public$", re.IGNORECASE' in RELEASE_NOTES_SCRIPT.read_text(
         encoding="utf-8"
     )
+
+
+def test_the_build_script_orders_versions_exactly_as_the_app_does() -> None:
+    """Two implementations of one rule, compared tag by tag rather than by reading.
+
+    The workflow picks the previous `-Public` tag with its own copy of this
+    function, and the app decides what to offer with mine. A disagreement about
+    a single tag means the release notes describe a range the update check
+    never offers — and the pair that would show it is exactly the pair this
+    rule exists for, `v0.8.65` and `v0.8.7`.
+
+    Edge cases are in the list on purpose: a fourth number, a capital `V`, a
+    suffix, a leading zero and a number too long to be one. Those are where two
+    hand-written copies drift apart first.
+    """
+    module = _release_notes_module()
+    their_key = module.version_key  # type: ignore[attr-defined]
+
+    tags = [
+        *THE_REAL_TAG_HISTORY,
+        *(f"{tag}-Public" for tag in THE_REAL_TAG_HISTORY),
+        "V0.8.7-Public",
+        "v0.8.70-Public",
+        "v0.8.7-Public-rc1",
+        "v0.6.59Public",
+        "v0.8.05",
+        "v0.8.7.1",
+        "v1.2.3.4-Public",
+        "v0.8.9999999999",
+        "v0.8." + "9" * 5000,
+        "nightly",
+        "",
+    ]
+
+    def theirs(tag: str) -> object:
+        """Their answer, or the exception as a value — a raise IS a disagreement.
+
+        Not left to propagate: the uncapped `int()` this rule now guards
+        against raises here, and a test that dies inside the other
+        implementation reports its traceback instead of the tag that caused it.
+        """
+        try:
+            return their_key(tag)
+        except Exception as exc:  # noqa: BLE001 - the point is that it must not
+            return f"raised {type(exc).__name__}"
+
+    disagreements = {tag: (theirs(tag), version_key(tag)) for tag in tags}
+    assert {tag: pair for tag, pair in disagreements.items() if pair[0] != pair[1]} == {}

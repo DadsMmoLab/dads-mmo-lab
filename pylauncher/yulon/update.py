@@ -60,7 +60,27 @@ and every release this project has ever cut is flagged `Pre-release`, so that
 page answered 404 for every user the fallback ever ran for.
 """
 
-_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
+_VERSION = re.compile(r"^[vV]?(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?![\d.])")
+r"""Three numbers, and nothing that would make them mean something else.
+
+Every part of this was a defect before the review of 2026-09-21, and the same
+pattern goes into plan 1's `build/release_notes.py` verbatim — two copies of
+one rule, pinned against each other by
+`test_the_build_script_orders_versions_exactly_as_the_app_does`.
+
+* `(?![\d.])` — without it there was no end anchor, so `v0.8.7.1` parsed
+  SILENTLY as `.7` and `v1.2.3.4-Public` as `.3`. A fourth number is not this
+  scheme, and reading one as though it were is how a release gets offered under
+  the wrong number.
+* `[vV]` — `PUBLIC_TAG` is `re.IGNORECASE`, so a `V0.8.7-Public` tag passes the
+  public-tag filter and then keyed to None, and `_public_releases` ANDs the
+  two: the release was dropped without a word.
+* `{1,9}` — a tag is not a promise to be sane. CPython refuses `int()` on more
+  than 4300 digits, so `v0.8.` + 5000 nines raised `ValueError` straight out of
+  `evaluate_feed`, whose contract is "ValueError on non-JSON only". Nine digits
+  is far past any real version, and the tenth digit is REFUSED rather than
+  trimmed, because the lookahead sees it.
+"""
 PUBLIC_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)-public$", re.IGNORECASE)
 CHECKSUMS_NAME = "SHA256SUMS"
 _TIMEOUT_SECONDS = 5.0
@@ -138,13 +158,27 @@ def version_key(text: str) -> tuple[int, int, Fraction] | None:
     the first-in-feed rule it replaced, because it actively named v0.8.65 the
     newest release in a feed that had v0.8.7 in it.
 
+    The bump that proves the rule is upstream's own: commit `3534587b` sets
+    `__version__ = "0.8.70-Public"` and its tag is **`v0.8.7-Public`**. To the
+    person cutting the release those are one release, which is exactly what
+    `.7 == .70` says — and it is why a build calling itself `0.8.70-Public` is
+    correctly offered nothing (measured: `current=0.8.70-Public
+    latest=v0.8.7-Public newer=False`).
+
     `Fraction`, never a float: `0.65` and `0.7` are both inexact in binary, and
     an ordering that decides releases may not be decided by a rounding.
+
+    **A leading zero is meant literally:** `.05` is five hundredths, so
+    `0.8.0 < 0.8.05 < 0.8.1`. The digits ARE the number — that is the whole
+    rule — and a zero is a digit like any other.
 
     **The known cost, stated rather than worked around:** `0.8.10` orders
     BEFORE `0.8.9`, because `.10` is a tenth and `.9` is nine tenths. This
     scheme has never produced a tag like that, and every rule that would
     special-case it also changes the meaning of the tags that do exist.
+
+    What `_VERSION` refuses — a fourth number, a tenth digit — is refused
+    rather than read as something smaller; its docstring has each case.
 
     There is deliberately no second ordering in this module. The triple-valued
     `parse_version()` this replaces is gone rather than kept beside it: two
