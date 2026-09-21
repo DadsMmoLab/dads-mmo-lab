@@ -2324,6 +2324,15 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("selfupdate/stage.py", "_the_one_yulon_directory"): (
+        "T90 plan 3. Lists the folder this app just extracted an update archive INTO, inside a "
+        "folder it created itself moments earlier, to find the single top-level `yulon/` "
+        "directory a Yu'lon tarball carries. It decides a REFUSAL and never a write: anything "
+        "other than exactly one `yulon/` directory is `not a Yu'lon package` and nothing is "
+        "installed, and an OSError reading it is the same refusal rather than a traceback. The "
+        "write it guards -- the rename of that directory to `<install>.new` -- happens only on "
+        "the one answer it gives, and the running install is not touched by any of it"
+    ),
     ("steam.py", "find_profile"): (
         "8.8. Lists `userdata/` to count Steam profiles. It decides a REFUSAL and never a "
         "write: zero and two are both named refusals, so a listing that came back short "
