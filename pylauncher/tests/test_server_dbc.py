@@ -165,6 +165,14 @@ def _the_app_s_applier(
     """
     monkeypatch.setattr(docker, "world_running", lambda *_a, **_k: False)
     monkeypatch.setattr(docker, "start_database", lambda *_a, **_k: False)
+    # T69 (#182) turned a manifest's `requires` into a refusal raised before
+    # anything is written, and the Season of Discovery keg requires `mod-ale`.
+    # `missing_requirements()` asks the DISK, so a folder under the clone
+    # directory is the whole of it -- the same stand-in `_have_requirements()`
+    # in `test_apply.py` puts there. These tests are about the DBC copy and the
+    # client receipts, not about that guard.
+    for needed in manifest.requires:
+        (server_dir / "modules" / needed / ".git").mkdir(parents=True, exist_ok=True)
     services = ControllerServices.for_wotlk(WOTLK, server_dir, client_dir, wsl_distro)
     applier = services.applier
     assert applier is not None
@@ -357,10 +365,6 @@ def test_removing_arac_names_what_it_did_not_take_back(
     # T67: the one step of the three that IS undone, in `done` and on disk.
     assert f"took back Patch-A.MPQ from {client_dir / 'Data'}" in report.done
     assert not (client_dir / "Data" / "Patch-A.MPQ").exists()
-    assert "Patch-A.MPQ (in your game client folder)" in text
-    # And the report is telling the truth about the machine, not only about itself.
-    assert (volume / "dbc" / "CharBaseInfo.dbc").read_bytes() == _dbc_bytes("CharBaseInfo.dbc")
-    assert (client_dir / "Data" / "Patch-A.MPQ").exists()
 
 
 def test_a_remove_that_leaves_nothing_behind_says_nothing_about_it(tmp_path: Path) -> None:

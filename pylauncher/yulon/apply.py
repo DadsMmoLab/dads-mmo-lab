@@ -380,57 +380,6 @@ def read_client_copies(clone: Path, *, item_id: str) -> tuple[ClientCopy, ...]:
             out.append(ClientCopy(step=step, path=path, sha256=digest))
     return tuple(out)
 
-COMPLETED_KEY = "install_completed"
-"""The claim's key for "every step of `install()` ran", written by `install()` twice.
-
-`False` when the claim goes in, right after the clone or the copy; `True` from
-the LAST thing `install()` does. Between those two writes the folder exists and
-the install has not finished, which is the state T68 is about: the T7 direct-SQL
-guard refuses while the world runs, the clone is already at `modules/<id>`, and
-the row read `Remove` with no Install left to press.
-
-**Additive, and deliberately NOT a `CLAIM_VERSION` bump.** A bump makes every
-older claim unreadable, which answers `UNKNOWN`, which refuses both install and
-remove — a permanent lockout on every clone an older build made, for a key that
-says nothing about ownership. So the version stays 1 and this key is read as a
-three-state: `False` is this build saying the install stopped, `True` is this
-build saying it finished, and ABSENT is a claim written before this key existed.
-
-Absent counts as finished (`clone_install_unfinished()` answers False), and that
-is the only reading that cannot make things worse. Older builds wrote the claim
-in the same place this one does — immediately after the clone and before
-`_deploy`/`_sql`/`_conf`/`_client`/`_dbc` — so an older half-install and an
-older whole install leave byte-identical claims and nothing on disk tells them
-apart. Reading absent as UNFINISHED would therefore flip every module installed
-by every previous build back to an Install button; reading it as finished leaves
-those rows exactly as they are today.
-"""
-
-COMPLETED_KEY = "install_completed"
-"""The claim's key for "every step of `install()` ran", written by `install()` twice.
-
-`False` when the claim goes in, right after the clone or the copy; `True` from
-the LAST thing `install()` does. Between those two writes the folder exists and
-the install has not finished, which is the state T68 is about: the T7 direct-SQL
-guard refuses while the world runs, the clone is already at `modules/<id>`, and
-the row read `Remove` with no Install left to press.
-
-**Additive, and deliberately NOT a `CLAIM_VERSION` bump.** A bump makes every
-older claim unreadable, which answers `UNKNOWN`, which refuses both install and
-remove — a permanent lockout on every clone an older build made, for a key that
-says nothing about ownership. So the version stays 1 and this key is read as a
-three-state: `False` is this build saying the install stopped, `True` is this
-build saying it finished, and ABSENT is a claim written before this key existed.
-
-Absent counts as finished (`clone_install_unfinished()` answers False), and that
-is the only reading that cannot make things worse. Older builds wrote the claim
-in the same place this one does — immediately after the clone and before
-`_deploy`/`_sql`/`_conf`/`_client`/`_dbc` — so an older half-install and an
-older whole install leave byte-identical claims and nothing on disk tells them
-apart. Reading absent as UNFINISHED would therefore flip every module installed
-by every previous build back to an Install button; reading it as finished leaves
-those rows exactly as they are today.
-"""
 
 COMPLETED_KEY = "install_completed"
 """The claim's key for "every step of `install()` ran", written by `install()` twice.
@@ -653,7 +602,14 @@ and inside that signature the name is the parameter. This is how the default
 still reaches the function."""
 
 
-def write_clone_claim(clone: Path, *, item_id: str, url: str, completed: bool = False) -> None:
+def write_clone_claim(
+    clone: Path,
+    *,
+    item_id: str,
+    url: str,
+    completed: bool = False,
+    client_files: Sequence[ClientCopy] = (),
+) -> None:
     """Record that this app put `item_id`'s clone here. Raises `OSError` if it cannot.
 
     `url` is written for a human reading the file; it is never what ownership is
@@ -1845,6 +1801,12 @@ class Applier:
         # row. A clone this app has no claim on (`None`) is a fresh install and
         # starts unfinished.
         was_completed = clone_install_completed(clone, item_id=manifest.id) is True
+        # Read BEFORE the clone or the copy fills that folder, because `update()`
+        # runs this whole method again and the claim write below would otherwise
+        # drop the receipts of the files ALREADY in the user's client — leaving
+        # them "no record", i.e. never taken back, if any later step raised
+        # before `_record_client_copies()` wrote the new ones (round 1 review).
+        previous_copies = read_client_copies(clone, item_id=manifest.id)
         if folder is not None and manifest.source is not None:
             raise ApplyError(
                 f"{manifest.id}: one source, not two — this manifest is cloned from "
@@ -1905,13 +1867,22 @@ class Applier:
             # stopped finding it would report a write site that had gone.
             url = manifest.source.url if manifest.source is not None else ""
             try:
-                # `completed` is `False` for a new clone — the folder is filled
-                # and not one of the steps below has run — and whatever it
+                # `completed` is `False` for a new clone -- the folder is filled
+                # and not one of the steps below has run -- and whatever it
                 # already was for a clone this app has installed before. The
-                # matching `True` is the last thing this function does, and
-                # between the two writes the claim is what tells the Modules tab
-                # to keep offering Install (T68).
-                write_clone_claim(clone, item_id=manifest.id, url=url, completed=was_completed)
+                # matching `True` is the last thing this function does, in
+                # `_finish_claim()`, and between the two writes the claim is what
+                # tells the Modules tab to keep offering Install (T68).
+                # `client_files` carries T67's receipts for the copies ALREADY in
+                # the user's client forward, because every write replaces the
+                # whole record.
+                write_clone_claim(
+                    clone,
+                    item_id=manifest.id,
+                    url=url,
+                    completed=was_completed,
+                    client_files=previous_copies,
+                )
                 claimed = True
             except OSError as exc:
                 # Never fatal — the clone is on disk and the rest of the install
@@ -1936,16 +1907,22 @@ class Applier:
         self._conf(manifest, clone, vals, log)
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
-        self._finish_claim(manifest, clone, url, claimed, log)
+        self._finish_claim(manifest, clone, url, claimed, log, log.client_copies or previous_copies)
         return self._report("install", manifest, log)
 
     def _finish_claim(
-        self, manifest: Manifest, clone: Path, url: str, claimed: bool, log: _Log
+        self,
+        manifest: Manifest,
+        clone: Path,
+        url: str,
+        claimed: bool,
+        log: _Log,
+        client_files: Sequence[ClientCopy] = (),
     ) -> None:
         """The ONE claim write that happens after the steps: this install finished (T68).
 
         LAST, after every step that can raise. `_sql()` is the one T68 was
-        reported for — the T7 direct-SQL guard refuses while the world runs —
+        reported for -- the T7 direct-SQL guard refuses while the world runs --
         but deploy, patches, conf, client files and DBCs all leave through the
         same exception, and each of them leaves the clone on disk with its
         install unfinished. This is the one point reached only when all of them
@@ -1956,8 +1933,12 @@ class Applier:
         method.** `write_clone_claim()` writes the WHOLE record, so a second
         after-the-steps write carrying its own key and defaulting this one's
         would erase whichever ran first. Anything else a step learns and the
-        claim must carry goes into THIS call as another keyword — never into a
-        write of its own.
+        claim must carry goes into THIS call as another keyword -- never into a
+        write of its own. T67's `client_files` receipts are the first such fact
+        and they come in here: the copies this run landed if it landed any, and
+        otherwise the ones the claim already carried, because a run that copied
+        nothing into the client (no client folder set) has not taken back what
+        an earlier run put there.
 
         `claimed` is False for a manifest this app never wrote a claim for (no
         source, no folder) and for one whose first write failed. Neither may be
@@ -1968,14 +1949,26 @@ class Applier:
         if not claimed:
             return
         try:
-            write_clone_claim(clone, item_id=manifest.id, url=url, completed=True)
+            write_clone_claim(
+                clone,
+                item_id=manifest.id,
+                url=url,
+                completed=True,
+                client_files=client_files,
+            )
         except OSError as exc:
             # Not fatal for the same reason the first write is not: the install
             # DID happen and the user is owed the report of it. The cost is one
             # row that keeps offering Install for an install that finished, and
             # pressing it re-runs steps this applier already re-runs from the
-            # menu — so the failure is visible and harmless, where raising here
-            # would report a finished install as a failure.
+            # menu -- so the failure is visible and harmless, where raising here
+            # would report a finished install as a failure. One write carries
+            # both facts, so one failure loses both and says so twice.
+            if client_files:
+                log.skipped.append(
+                    f"{CLAIM_FILE}: the record of what went into your game client could not be "
+                    f"written ({exc}), so removing {manifest.id} will leave those files in place"
+                )
             log.skipped.append(
                 f"{CLAIM_FILE}: the finished mark could not be written ({exc}), so "
                 f"{_rel(self.server_dir, clone)} will keep offering Install"
@@ -2011,10 +2004,14 @@ class Applier:
            and running its SQL over the result. A local read (`git remote
            get-url`), so it is asked first and both names go in the refusal.
         2. **The working tree.** `reset --hard` destroys precisely what `git
-           status` reports, minus this app's own `CLAIM_FILE`, which it wrote
-           and rewrites (T66 — see `git._status_pathspec()`; until it was fixed
-           that one untracked file refused an update on every clone this app
-           had ever made). Also a local read.
+           status` reports, minus the two files this app itself put in the
+           checkout: its own `CLAIM_FILE` (T66 — see `git._status_pathspec()`;
+           until it was fixed that one untracked file refused an update on
+           every clone this app had ever made) and an untracked, EMPTY
+           `include.sh` it touched into a C++ module whose upstream ships none
+           (T47 — `git._without_the_generated_include()`, which reads the
+           status CODE so that a tracked `include.sh` somebody changed is still
+           their work). Also a local read.
         3. **HEAD.** `status` compares the tree and the index against HEAD and
            says nothing about what HEAD itself carries, so a user who
            COMMITTED their work passes 1 and 2. `no_local_commits()` counts
@@ -2816,20 +2813,30 @@ class Applier:
         module clone this app can point at as the one that matters. That also
         means an UNTRACKED file blocks adoption, which is stricter than the harm
         requires — a hard reset does not delete untracked files — and it is the
-        `include.sh` case above. `CLAIM_FILE` is the one name `unmodified()`
-        does not count (T66, `git._status_pathspec()`), and it changes nothing
-        here: this method is reached only for `UNCLAIMED`, and the two ways to
-        be `UNCLAIMED` are no such file at all and one the REPOSITORY tracks —
+        `include.sh` case above.
+
+        **Two names `unmodified()` does not count, and the argument this
+        paragraph used to make against the second one.** `CLAIM_FILE` is the
+        first (T66, `git._status_pathspec()`), and it changes nothing here:
+        this method is reached only for `UNCLAIMED`, and the two ways to be
+        `UNCLAIMED` are no such file at all and one the REPOSITORY tracks —
         which `status` already reports as unchanged. A claim this app wrote but
         cannot read as its own is `UNKNOWN`, and `_require_own_clone()` raises
         on that before ever getting here.
-        Deliberate, and NOT allowlisted even for that
-        one generated name: the file this app writes is empty, a user's
-        `include.sh` need not be, so an exact-name allowlist would have to
-        become a content check to be safe, and a content check is the first step
-        of deciding which of somebody's untracked files are innocent. The
-        direction of this error is a re-clone; the direction of that one is lost
-        work.
+
+        The second is an untracked, EMPTY `include.sh` (T47,
+        `git._without_the_generated_include()`). This paragraph refused it for
+        years on the grounds that "an exact-name allowlist would have to become
+        a content check to be safe, and a content check is the first step of
+        deciding which of somebody's untracked files are innocent" — and the
+        first half was right, which is why it IS a content check and not a
+        name. Two conditions, both read from the checkout: `?? ` in the status
+        line, so the repository does not track the file, and zero bytes, so
+        there is nothing in it to lose. Nothing decides that somebody's file is
+        innocent; a file with anything at all in it is counted, and so is one
+        the repository tracks, however small. What it buys is the case that
+        made the rule wrong: the app touches that file itself, into a folder it
+        created, and then refused to update it because of what it had done.
         """
         if self.server_dir_claim(self.server_dir) is not Ownership.OWNED:
             return _NoAdoption.NO_RECORD
@@ -3373,6 +3380,8 @@ class Applier:
                 target = self.client_dir / "Data"
             if src.is_dir():
                 shutil.copytree(src, target, dirs_exist_ok=True, ignore=_NOT_FOR_THE_CLIENT)
+                if step.dest == "data":
+                    log.client_copies += self._receipts(step.src, src, target)
             elif src.is_file():
                 target.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target / src.name)
@@ -3572,6 +3581,34 @@ class Applier:
 
 
 # --------------------------------------------------------------- functions
+
+
+def _left_behind(manifest: Manifest, client: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """The steps `remove()` did not take back (see `ApplyReport.left_behind`).
+
+    The server DBC and SQL halves are read off the MANIFEST, because the rows and
+    the files in question were put there by an INSTALL, possibly long ago, and a
+    remove run has no record of that install — only of what the manifest says it
+    does.
+
+    The client half is the opposite and is passed IN, because since T67 there is
+    such a record: `_unclient()` has just been through every `client` step with
+    the receipts the install wrote, deleted what it could show was its own, and
+    written a sentence for each one it did not. Reading `manifest.client` here as
+    well would name the file it had just deleted.
+    """
+    out = [
+        f"the server DBC files from {step.src} (in the server's data volume)"
+        for step in manifest.server_dbc
+    ]
+    out += client
+    if not any(step.when == "remove" for step in manifest.sql):
+        out += [
+            f"what {step.path or 'its SQL'} wrote into the {step.db} database"
+            for step in manifest.sql
+            if step.when == "install" and step.applied_by == "direct"
+        ]
+    return tuple(out)
 
 
 def _sql_files(clone: Path, path: str) -> tuple[str, ...] | None:
