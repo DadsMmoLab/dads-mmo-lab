@@ -26,15 +26,19 @@ is up.
 from __future__ import annotations
 
 import enum
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import (
     QBrush,
     QDesktopServices,
+    QFont,
+    QTextBlockFormat,
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
+    QTextDocumentFragment,
+    QTextFormat,
     QTextTable,
 )
 from PySide6.QtWidgets import (
@@ -48,11 +52,58 @@ from PySide6.QtWidgets import (
 )
 
 from yulon.log import get_logger
-from yulon.update import MAX_NOTES_CHARS, UpdateCheck, clipped_notes
+from yulon.update import (
+    MAX_BODY_CHARS,
+    MAX_NOTES_CHARS,
+    ReleaseNotes,
+    UpdateCheck,
+    clipped_body,
+)
 
 logger = get_logger(__name__)
 
 _NO_NOTES = "No release notes were published for this version."
+
+BODY_CUT_NOTE = "… the rest of this release is on the release page."
+OLDER_CUT_NOTE = "… older releases are on the releases page."
+"""Said as paragraphs of the assembled document, never written into markdown.
+
+Written into the markdown they were text a release body could counterfeit, and
+text a cut could land inside; as blocks this file inserts they are neither.
+"""
+
+MAX_SECTIONS = 200
+"""How many releases the dialog will lay out, whatever it is handed.
+
+`MAX_NOTES_CHARS` bounds the characters but not the number of documents, and
+each section costs a `setMarkdown` and a fragment insert. A feed of 700
+one-line releases is inside the character budget and still 700 parses.
+"""
+
+
+def _heading_block() -> QTextBlockFormat:
+    """The block format that makes a tag a real level-2 heading."""
+    block = QTextBlockFormat()
+    block.setHeadingLevel(2)
+    block.setTopMargin(12)
+    return block
+
+
+def _heading_text() -> QTextCharFormat:
+    """What a level-2 heading's characters look like, set here rather than parsed."""
+    char = QTextCharFormat()
+    char.setFontWeight(QFont.Weight.Bold)
+    # The same property `setMarkdown` sets on a heading; the enum member is not
+    # exposed on `QTextFormat` in PySide6 6.11, so the value is named directly.
+    char.setProperty(QTextFormat.Property.FontSizeAdjustment, 1)
+    return char
+
+
+def _say(cursor: QTextCursor, text: str) -> None:
+    """Add `text` as an ordinary paragraph, in this file's own formats."""
+    cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
+    cursor.insertText(text)
+
 
 _SERVERS_KEEP_RUNNING = "Your game servers keep running while Yu'lon updates."
 """Said in the dialog because it is the question a player has.
@@ -307,21 +358,80 @@ class _NotesView(QTextBrowser):
         self.setOpenExternalLinks(False)
         self.anchorClicked.connect(self._clicked)
 
-    def set_release_body(self, markdown: str) -> int:
-        """Show `markdown`, with the images taken out before this widget owns it.
+    def set_release_notes(self, notes: Sequence[ReleaseNotes], *, notes_cut: bool = False) -> int:
+        """Show each release's notes in its own parsed document. Returns resources cleared.
 
-        Built in a document of its own and handed over afterwards, so the
-        stripping happens while nothing is laid out — a widget that already
-        held the document could resolve an image name on the way.
+        **One markdown parse per release, never one over all of them**, and
+        that is the whole shape of the sixth cold review's fix. Gluing the
+        bodies together with `## tag` headings made `update.py` responsible for
+        agreeing with md4c about fences, list items and block quotes, which it
+        could not do; the plainest case needed no cap at all — a body of
+        ` ``` ` and one unclosed line put every later release's heading inside
+        a code block. A fence left open in one body now ends with that body's
+        document.
+
+        The tag goes in as a REAL heading block, set programmatically and
+        inserted as plain text. A tag is remote text like any other: rendering
+        `v1.0.0-Public\\n``` ` as markdown would let it open a fence of its own.
+
+        Each section is parsed and stripped while it belongs to no widget, then
+        inserted as a fragment. `_strip_resources` runs over the assembled
+        document as well, and **which of the two actually catches was measured
+        rather than assumed** (red pixels in a `grab()` / image fragments left,
+        one 300x200 red PNG named by the body):
+
+            case             no strip   section only   assembled only   both
+            markdown image    60000/1            0/0              0/0    0/0
+            td background         0/0            0/0              0/0    0/0
+            UNC path              0/1            0/0              0/0    0/0
+
+        So the pair is load-bearing and **neither half is on its own**:
+        removing either one alone is invisible to every test here, and that is
+        reported rather than papered over with a test that could not fail.
+        They are kept because they answer different questions — the section
+        pass is what guarantees nothing unstripped ever enters the target, and
+        the assembled pass is what would catch `insertFragment` carrying a
+        format across, which is Qt's code rather than this file's. That the
+        assembled pass finds nothing left to do is itself pinned, by
+        `test_the_assembled_document_needs_no_second_strip`.
         """
-        # Capped again here. `evaluate_feed` caps what it assembles, but
-        # `notes_markdown` is an ordinary field and this widget is public: a
-        # caller that built an `UpdateCheck` by hand would otherwise hand Qt a
-        # body that takes minutes to lay out on the GUI thread.
-        document = QTextDocument(self)
-        document.setMarkdown(clipped_notes(markdown, MAX_NOTES_CHARS), SAFE_MARKDOWN)
-        removed = _strip_resources(document)
-        self.setDocument(document)
+        # Capped again here, because this widget is public and does not trust
+        # its caller: `notes` is an ordinary field, and an `UpdateCheck` built
+        # by hand would otherwise hand Qt a body that takes minutes to lay out
+        # on the GUI thread.
+        target = QTextDocument(self)
+        target.setUndoRedoEnabled(False)
+        cursor = QTextCursor(target)
+        cursor.beginEditBlock()
+        removed = 0
+        try:
+            total = 0
+            for index, release in enumerate(notes[:MAX_SECTIONS]):
+                body, cut = clipped_body(release.body, MAX_BODY_CHARS)
+                if index and total + len(body) > MAX_NOTES_CHARS:
+                    notes_cut = True
+                    break
+                total += len(body)
+                if index:
+                    cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
+                cursor.insertBlock(_heading_block(), _heading_text())
+                cursor.insertText(release.tag)
+                section = QTextDocument()
+                section.setMarkdown(body, SAFE_MARKDOWN)
+                removed += _strip_resources(section)
+                if not section.isEmpty():
+                    cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
+                    cursor.insertFragment(QTextDocumentFragment(section))
+                if cut or release.cut:
+                    _say(cursor, BODY_CUT_NOTE)
+            if not notes:
+                cursor.insertText(_NO_NOTES)
+            elif notes_cut or len(notes) > MAX_SECTIONS:
+                _say(cursor, OLDER_CUT_NOTE)
+        finally:
+            cursor.endEditBlock()
+        removed += _strip_resources(target)
+        self.setDocument(target)
         return removed
 
     def _clicked(self, url: QUrl) -> None:
@@ -380,7 +490,7 @@ class UpdateDialog(QDialog):
         # a link in the notes — so one place decides what happens when it fails.
         if open_url is not None:
             notes.open_url = open_url
-        notes.set_release_body(result.notes_markdown.strip() or _NO_NOTES)
+        notes.set_release_notes(result.notes, notes_cut=result.notes_cut)
         self.notes = notes
         column.addWidget(notes, 1)
 

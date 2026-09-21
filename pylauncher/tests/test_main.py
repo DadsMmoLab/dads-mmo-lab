@@ -589,7 +589,7 @@ A_RELEASE = update.UpdateCheck(
     "v0.8.70-Public",
     True,
     "https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v0.8.70-Public",
-    notes_markdown="## v0.8.70-Public\n\n- Ten.\n",
+    notes=(update.ReleaseNotes("v0.8.70-Public", "- Ten.", False),),
 )
 
 

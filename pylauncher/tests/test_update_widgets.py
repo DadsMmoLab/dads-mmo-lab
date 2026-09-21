@@ -22,13 +22,16 @@ from yulon.ui.widgets import update_dialog
 from yulon.ui.widgets.dadcraft_decorations import DadcraftHeader
 from yulon.ui.widgets.update_bar import UpdateBar
 from yulon.ui.widgets.update_dialog import (
+    BODY_CUT_NOTE,
     IMAGE_REMOVED,
+    MAX_SECTIONS,
+    OLDER_CUT_NOTE,
     UpdateChoice,
     UpdateDialog,
     _NotesView,
     _strip_resources,
 )
-from yulon.update import UpdateCheck
+from yulon.update import MAX_BODY_CHARS, MAX_NOTES_CHARS, ReleaseNotes, UpdateCheck
 
 STRIP_BOUND = 10.0
 """A deadlock/quadratic breaker for the strip, not a claim about how fast Qt is.
@@ -44,10 +47,15 @@ RESULT = UpdateCheck(
     "v0.8.70-Public",
     True,
     "https://example.invalid/r",
-    notes_markdown="## v0.8.70-Public\n\n### New\n- Ten.\n",
+    notes=(ReleaseNotes("v0.8.70-Public", "### New\n- Ten.", False),),
     assets=(),
     has_checksums=False,
 )
+
+
+def _with_body(body: str, *, cut: bool = False) -> UpdateCheck:
+    """`RESULT` with one release whose notes are `body`. The usual shape here."""
+    return dataclasses.replace(RESULT, notes=(ReleaseNotes("v0.8.70-Public", body, cut),))
 
 
 def test_the_bar_is_hidden_until_there_is_something_to_say(qapp: object) -> None:
@@ -202,7 +210,7 @@ def test_the_dialog_shows_both_versions_and_the_notes(qapp: object) -> None:
 
 
 def test_no_notes_says_so_instead_of_an_empty_box(qapp: object) -> None:
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=""))
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes=()))
 
     notes = dialog.findChild(QTextBrowser, "update-notes")
     assert notes is not None and "No release notes" in notes.toPlainText()
@@ -396,7 +404,7 @@ def test_nothing_in_a_release_body_makes_the_dialog_load_a_file(
     **59,978 red pixels** on screen the moment the dialog opened.
     """
     body = _bodies_that_must_load_nothing(a_red_png)[shape]
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    dialog = UpdateDialog(_with_body(body))
 
     notes = _notes(dialog)
 
@@ -426,7 +434,7 @@ def test_no_image_in_a_release_body_is_ever_rendered(
         "unc-path": "![i](//host/share/x.png)",
         "html-img": f"<img src='file://{a_red_png}'>",
     }
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=bodies[shape]))
+    dialog = UpdateDialog(_with_body(bodies[shape]))
 
     notes = _notes(dialog)
 
@@ -437,7 +445,7 @@ def test_no_image_in_a_release_body_is_ever_rendered(
 def test_the_strip_runs_at_the_call_site_and_says_what_it_took(
     qapp: object, a_red_png: Path
 ) -> None:
-    """`set_release_body` is where the walk has to happen, and it reports the count.
+    """`set_release_notes` is where the walk has to happen, and it reports the count.
 
     Not a test of `_strip_resources` on its own — deleting the CALL and keeping
     the function is a thing that has already passed a mutation here once
@@ -446,9 +454,11 @@ def test_the_strip_runs_at_the_call_site_and_says_what_it_took(
     """
     notes = _NotesView()
 
-    removed = notes.set_release_body(f"![i](file://{a_red_png})")
+    removed = notes.set_release_notes(
+        [ReleaseNotes("v1.0.0-Public", f"![i](file://{a_red_png})", False)]
+    )
 
-    assert removed == 1, "set_release_body did not strip the image"
+    assert removed == 1, "set_release_notes did not strip the image"
     assert _resources_in(notes.document()) == []
     assert _red_pixels(notes) == 0
     assert IMAGE_REMOVED in notes.toPlainText()
@@ -489,7 +499,7 @@ def test_the_cap_keeps_that_body_away_from_the_dialog_in_the_first_place(
     """
     notes = _NotesView()
 
-    removed = notes.set_release_body("![a](x) " * 20000)
+    removed = notes.set_release_notes([ReleaseNotes("v1.0.0-Public", "![a](x) " * 20000, False)])
 
     assert 0 < removed < 20000, f"the cap let {removed} images through"
 
@@ -529,7 +539,7 @@ def test_qt_itself_drops_a_badge_links_href_before_this_app_sees_it(qapp: object
     assert _anchors_in(raw) == [], "Qt kept an anchor after all — then this app must too"
     assert "github.com/DadsMmoLab" not in raw.toHtml()
 
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    dialog = UpdateDialog(_with_body(body))
     assert _resources_in(_notes(dialog).document()) == []
     assert IMAGE_REMOVED in _notes(dialog).toPlainText()
 
@@ -584,7 +594,7 @@ def test_a_textured_run_of_text_keeps_its_text(qapp: object, a_red_png: Path) ->
 def test_the_strip_reports_nothing_to_do_on_an_ordinary_body(qapp: object) -> None:
     notes = _NotesView()
 
-    assert notes.set_release_body("### New\n- Ten.\n") == 0
+    assert notes.set_release_notes([ReleaseNotes("v1.0.0-Public", "### New\n- Ten.", False)]) == 0
 
 
 def test_a_fenced_block_shows_its_angle_brackets_literally(qapp: object) -> None:
@@ -595,7 +605,7 @@ def test_a_fenced_block_shows_its_angle_brackets_literally(qapp: object) -> None
     with md4c about what a fence is — which is the bug the second review found.
     """
     body = "- the dir is `<config_dir>` on Linux\n\n```\n<not a tag>\nif x < 3: pass\n```\n"
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    dialog = UpdateDialog(_with_body(body))
 
     shown = _notes(dialog).toPlainText()
 
@@ -612,7 +622,7 @@ def test_raw_html_is_shown_as_text_and_swallows_nothing(qapp: object) -> None:
     is no HTML block to swallow the bullet under it.
     """
     body = "## v0.8.70-Public\n\n<img src='http://example.invalid/x.png'><script>x</script>\n- Ten."
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    dialog = UpdateDialog(_with_body(body))
 
     shown = _notes(dialog).toPlainText()
 
@@ -623,7 +633,7 @@ def test_raw_html_is_shown_as_text_and_swallows_nothing(qapp: object) -> None:
 def test_an_autolink_survives_and_is_still_a_link(qapp: object) -> None:
     """`<https://…>` is not HTML, and NoHTML must not take it for HTML."""
     body = "see <https://github.com/DadsMmoLab/dads-mmo-lab> for more"
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    dialog = UpdateDialog(_with_body(body))
 
     notes = _notes(dialog)
 
@@ -634,7 +644,7 @@ def test_an_autolink_survives_and_is_still_a_link(qapp: object) -> None:
 def test_the_github_dialect_is_kept(qapp: object) -> None:
     """NoHTML is added to the GitHub dialect, not used instead of it."""
     body = "| a | b |\n|---|---|\n| 1 | 2 |\n\n~~gone~~\n"
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    dialog = UpdateDialog(_with_body(body))
 
     shown = _notes(dialog).toPlainText()
 
@@ -822,7 +832,7 @@ def test_the_walk_clears_a_textured_brush_no_markdown_can_currently_make(
 def test_an_image_leaves_a_mark_rather_than_disappearing(qapp: object, a_red_png: Path) -> None:
     """The reader is told something was there; they are not shown it."""
     body = f"### New\n\n![the shiny new tab]({a_red_png})\n\n- Ten."
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    dialog = UpdateDialog(_with_body(body))
 
     shown = _notes(dialog).toPlainText()
     assert "Ten." in shown, "the text after the image survived"
@@ -891,7 +901,7 @@ def test_raw_html_in_a_release_body_is_shown_and_eats_nothing_after_it(qapp: obj
     `<img>` was simply not in the dialog.
     """
     body = "## v0.8.70-Public\n\n<img src='http://example.invalid/x.png'><script>x</script>\n- Ten."
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    dialog = UpdateDialog(_with_body(body))
 
     shown = _notes(dialog).toPlainText()
     assert "Ten." in shown, "the bullet after the HTML was dropped"
@@ -904,7 +914,7 @@ def test_the_notes_box_has_no_load_resource_override_because_it_never_helped(
     """Deleting it was invisible to every test — so it was measured instead.
 
     A document holding an image, set on the widget without going through
-    `set_release_body` (so the strip never runs), renders **60,000 red pixels**
+    `set_release_notes` (so the strip never runs), renders **60,000 red pixels**
     with the override and 60,000 without it: Qt's own image handling opens the
     path when the resource comes back null. The defence was dead, and dead
     defence reads like a guard.
@@ -936,7 +946,7 @@ def test_code_reaches_the_reader_as_the_author_wrote_it(qapp: object, body: str)
     alone, which is precisely what it got wrong. `MarkdownNoHTML` means nothing
     has to know.
     """
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_markdown=body))
+    dialog = UpdateDialog(_with_body(body))
 
     shown = _notes(dialog).toPlainText()
 
@@ -953,3 +963,174 @@ def test_the_header_takes_an_action_left_of_the_badge(qapp: object) -> None:
     layout = header.layout()
     assert layout.indexOf(button) == layout.indexOf(header._badge) - 1
     assert button.parent() is header
+
+
+# ------------------------------------ one document per release, sealed from the rest
+
+
+def _document_blocks(document: QTextDocument) -> list:
+    out = []
+    block = document.begin()
+    while block.isValid():
+        out.append(block)
+        block = block.next()
+    return out
+
+
+def _sections(hostile: str, position: int, count: int = 3) -> tuple[ReleaseNotes, ...]:
+    """`count` releases, with `hostile` in slot `position` and harmless notes elsewhere."""
+    bodies = [f"### Fixed\n- release {n}." for n in range(count)]
+    bodies[position] = hostile
+    return tuple(
+        ReleaseNotes(f"v1.{count - n}.0-Public", body, False) for n, body in enumerate(bodies)
+    )
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])
+@pytest.mark.parametrize(
+    "shape", ["inline-file-url", "unc-path", "html-img", "td-background", "qrc-image"]
+)
+def test_a_resource_in_any_section_still_resolves_to_nothing(
+    qapp: object, a_red_png: Path, position: int, shape: str
+) -> None:
+    """The strip runs per section, and `insertFragment` must not undo it.
+
+    Copying a fragment between documents is Qt's code rather than this file's,
+    and a format carried across would be a name Qt resolves at layout — a file
+    off the disk on screen. Measured in the first, middle and last section,
+    because a defence that only holds in slot 0 is not a defence.
+    """
+    hostile = _bodies_that_must_load_nothing(a_red_png)[shape]
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes=_sections(hostile, position)))
+
+    notes = _notes(dialog)
+
+    assert _red_pixels(notes) == 0, f"slot {position}: a file off the disk was painted"
+    assert _image_fragments(notes) == 0, f"slot {position}: an image fragment survived"
+    assert _resources_in(notes.document()) == [], f"slot {position}: a format still names a file"
+
+
+def test_every_section_gets_its_tag_as_a_heading_of_its_own(qapp: object) -> None:
+    """The tag is inserted as a block, not parsed, so a release cannot reach past it."""
+    dialog = UpdateDialog(
+        dataclasses.replace(
+            RESULT,
+            notes=(
+                ReleaseNotes("v1.2.0-Public", "```\nunclosed", False),
+                ReleaseNotes("v1.1.0-Public", "### Fixed\n- older.", False),
+            ),
+        )
+    )
+
+    levels = {
+        block.text().strip(): block.blockFormat().headingLevel()
+        for block in _document_blocks(_notes(dialog).document())
+        if "-Public" in block.text()
+    }
+
+    assert levels == {"v1.2.0-Public": 2, "v1.1.0-Public": 2}
+
+
+def test_a_tag_that_is_markdown_is_shown_as_text(qapp: object) -> None:
+    """A tag is remote text. Rendered as markdown it could open a fence of its own."""
+    dialog = UpdateDialog(
+        dataclasses.replace(
+            RESULT,
+            notes=(
+                ReleaseNotes("v1.0.0-Public\n```", "### Fixed\n- one.", False),
+                ReleaseNotes("v0.9.0-Public", "### Fixed\n- older.", False),
+            ),
+        )
+    )
+
+    blocks = _document_blocks(_notes(dialog).document())
+    older = [b for b in blocks if b.text().strip() == "v0.9.0-Public"]
+
+    assert older and older[0].blockFormat().headingLevel() == 2, "the hostile tag reached the next"
+    assert "```" in _notes(dialog).toPlainText(), "the backticks were interpreted, not shown"
+
+
+def test_a_cut_release_says_so_once_and_as_a_paragraph(qapp: object) -> None:
+    dialog = UpdateDialog(_with_body("### Fixed\n- one.", cut=True))
+
+    shown = _notes(dialog).toPlainText()
+    blocks = [b for b in _document_blocks(_notes(dialog).document()) if BODY_CUT_NOTE in b.text()]
+
+    assert shown.count(BODY_CUT_NOTE) == 1
+    assert blocks[0].blockFormat().headingLevel() == 0
+    assert not blocks[0].charFormat().fontFixedPitch()
+
+
+def test_dropped_releases_say_so_once_and_as_a_paragraph(qapp: object) -> None:
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes_cut=True))
+
+    shown = _notes(dialog).toPlainText()
+    blocks = [b for b in _document_blocks(_notes(dialog).document()) if OLDER_CUT_NOTE in b.text()]
+
+    assert shown.count(OLDER_CUT_NOTE) == 1
+    assert blocks[0].blockFormat().headingLevel() == 0
+    assert not blocks[0].charFormat().fontFixedPitch()
+
+
+def test_neither_notice_appears_when_nothing_was_left_out(qapp: object) -> None:
+    """The glued assembly said "the rest is on the release page" TWICE in 62 of 200 feeds."""
+    shown = _notes(UpdateDialog(RESULT)).toPlainText()
+
+    assert BODY_CUT_NOTE not in shown and OLDER_CUT_NOTE not in shown
+
+
+def test_the_dialog_caps_what_it_is_handed_rather_than_trusting_it(qapp: object) -> None:
+    """`notes` is an ordinary field and this widget is public.
+
+    An `UpdateCheck` built by hand — a test, or a plan-3 code path — would
+    otherwise hand Qt bodies that take minutes to lay out on the GUI thread.
+    """
+    handed = tuple(ReleaseNotes(f"v1.{n}.0-Public", "x" * 100000, False) for n in range(400, 0, -1))
+
+    shown = _notes(UpdateDialog(dataclasses.replace(RESULT, notes=handed))).toPlainText()
+
+    assert len(shown) <= MAX_NOTES_CHARS + MAX_BODY_CHARS
+    assert OLDER_CUT_NOTE in shown, "it dropped releases and said nothing"
+    assert BODY_CUT_NOTE in shown, "it cut a body and said nothing"
+
+
+def test_more_sections_than_it_will_lay_out_are_not_laid_out(qapp: object) -> None:
+    """`MAX_NOTES_CHARS` bounds characters, not documents: 700 one-line releases fit."""
+    handed = tuple(ReleaseNotes(f"v1.{n}.0-Public", "- one line", False) for n in range(700, 0, -1))
+
+    shown = _notes(UpdateDialog(dataclasses.replace(RESULT, notes=handed))).toPlainText()
+
+    assert shown.count("-Public") == MAX_SECTIONS
+    assert OLDER_CUT_NOTE in shown
+
+
+def test_no_notes_at_all_still_says_something(qapp: object) -> None:
+    shown = _notes(UpdateDialog(dataclasses.replace(RESULT, notes=()))).toPlainText()
+
+    assert "No release notes" in shown
+    assert BODY_CUT_NOTE not in shown and OLDER_CUT_NOTE not in shown
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])
+def test_the_assembled_document_needs_no_second_strip(
+    qapp: object, a_red_png: Path, position: int
+) -> None:
+    """`insertFragment` must not carry a resource across, and this measures that.
+
+    Copying a fragment between documents is Qt's code, not this file's. If it
+    resurrected a format the per-section strip had cleared, a strip of the
+    finished document would find something — so this asserts it finds nothing,
+    in every slot.
+
+    Measured while writing it (red pixels / image fragments left, one red PNG):
+    with NEITHER strip the notes box paints 60,000 red pixels, and with either
+    one alone it paints none. Removing just one is therefore invisible, which
+    is said out loud in `_NotesView.set_release_notes` rather than pinned by a
+    test that could not fail.
+    """
+    hostile = _bodies_that_must_load_nothing(a_red_png)["inline-file-url"]
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes=_sections(hostile, position)))
+
+    left = _strip_resources(_notes(dialog).document())
+
+    assert left == 0, f"slot {position}: insertFragment brought {left} resource(s) back"

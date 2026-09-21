@@ -111,6 +111,21 @@ class ReleaseAsset:
 
 
 @dataclass(frozen=True)
+class ReleaseNotes:
+    """One release's notes, kept apart from every other release's.
+
+    `body` is the GitHub release body and nothing else: no `## tag` heading is
+    prepended, no trailer is appended, no fence is closed. Whatever it does to
+    markdown, it does to its own document and stops there.
+    """
+
+    tag: str
+    body: str
+    cut: bool
+    """True when `body` is only the start of what the release said."""
+
+
+@dataclass(frozen=True)
 class UpdateCheck:
     """Outcome of one check. `available` is True only when a newer release exists."""
 
@@ -119,12 +134,21 @@ class UpdateCheck:
     available: bool
     url: str
     error: str | None = None
-    notes_markdown: str = ""
+    notes: tuple[ReleaseNotes, ...] = ()
     """Every public release between the running version and the offered one, newest first.
 
-    Markdown, because that is what the GitHub release body already is and what
-    the dialog renders. Empty when there is nothing to offer.
+    **A tuple and not one markdown string, and that is the whole point.** Until
+    the sixth cold review these bodies were glued together with `## tag`
+    headings between them and cut as text, which made this module responsible
+    for agreeing with md4c about where a fenced block, a list item or a block
+    quote begins and ends. It did not, and could not: five separate defects,
+    and every one of them was one release's markdown reaching into the next.
+    The plainest was a release whose body is ` ``` ` and one unclosed line —
+    no cap involved at all — which put every later release's heading inside a
+    code block. GitHub renders each release on its own; nothing glued can.
     """
+    notes_cut: bool = False
+    """True when older releases were left out to stay inside `MAX_NOTES_CHARS`."""
     assets: tuple[ReleaseAsset, ...] = ()
     has_checksums: bool = False
 
@@ -526,169 +550,64 @@ and all inside one GitHub release body:
 
 Nothing in this app can make `QTextDocument` faster at those, so it is handed
 less. Counted in CHARACTERS rather than bytes because that is what the layout
-cost scales with. Cut at a line boundary, so the last thing shown is a whole
-line, and followed by `TRUNCATED_NOTE` — the release page is one click away on
-the dialog's own action button, which carries the vetted URL.
+cost scales with.
+
+This one is a budget over WHOLE releases and never cuts inside one: releases
+are taken newest first while the running total fits, and the rest are left out
+with `notes_cut` set. The newest is always taken — it is already inside
+`MAX_BODY_CHARS`, and it is the release the banner is about. The dialog says
+what was left out; the release page is one click away on its action button,
+which carries the vetted URL.
 """
 
-TRUNCATED_NOTE = "… the rest is on the release page."
 
+def clipped_body(body: str, limit: int = MAX_BODY_CHARS) -> tuple[str, bool]:
+    """`body` cut to at most `limit` characters on a line boundary. `(text, was_cut)`.
 
-def _fence_after(marker: str | None, line: str) -> str | None:
-    """The fence `line` leaves open, given `marker` open before it. CommonMark's rule.
+    **Markdown-blind, and that is the fix.** Every version of this before the
+    sixth cold review had to know where a fenced block began and ended, because
+    the cut text was about to be glued to the next release's notes and an
+    unclosed fence would swallow them. Five defects came out of that one
+    decision, and the last three could not be fixed by a better fence parser:
+    md4c closes a fence when the LIST holding it ends, treats U+00A0 after a
+    closer differently from a space, and reads `#123 fixed` as a paragraph
+    where a `startswith("#")` rule read a heading.
 
-    Not "CommonMark-ish": the near-miss version of this cost the reader the
-    notes. ` ```a`b ` is a PARAGRAPH — a backtick fence's info string may not
-    contain a backtick — and calling it a fence made this module append a
-    closer that opened a real one, so the trailer rendered as code and the
-    next release's heading came out at level 0 (fifth cold review,
-    2026-09-21). Four spaces of indent is an indented code block rather than a
-    fence, and a tab is four columns, so neither opens one either.
+    Nothing here has to agree with md4c any more. Each body is parsed on its
+    own and rendered into its own document (`update_dialog._NotesView`), so a
+    fence this leaves open ends with that release's document and reaches
+    nothing. The only job left is the size bound, which is a fact about
+    characters:
 
-    A lone `\\r` is not treated as a line break: GitHub sends `\\n` or
-    `\\r\\n`, and `clipped_notes` splits on `\\n` so that what it rejoins is
-    byte for byte what it was given.
+        "`a" * 62500       125 KB     8.3 s to lay out (10.2 s re-measured)
+        "`a" * 100000      200 KB   108.9 s
+        a 2000x20 table    164 KB     7.8 s
+
+    Whole lines are kept, so the last thing shown is a whole line — except for
+    a single line longer than the whole limit, which is cut into it, because
+    there is no boundary to prefer inside one line and the bound is the point.
+    Idempotent: what comes back is within the limit, so capping it again
+    returns it unchanged.
+
+    Splits on `"\n"` only. A lone `\r` is not a line break here; GitHub sends
+    `\n` or `\r\n`, and splitting on exactly what is rejoined is what makes
+    an uncut body come back byte for byte.
     """
-    body = line.rstrip()
-    indent = len(body) - len(body.lstrip(" "))
-    body = body.lstrip(" ")
-    if indent > 3 or not body or body[0] not in "`~":
-        return marker
-    character = body[0]
-    run = len(body) - len(body.lstrip(character))
-    if run < 3:
-        return marker
-    rest = body[run:]
-    if marker is not None:
-        # A closer: the same character, at least as long, and nothing after it.
-        if character == marker[0] and run >= len(marker) and not rest.strip():
-            return None
-        return marker
-    if character == "`" and "`" in rest:
-        return marker  # an info string with a backtick in it: not a fence at all
-    return character * run
-
-
-def _open_fence(text: str) -> str | None:
-    """The fence marker `text` leaves unclosed, or None.
-
-    The marker itself is carried rather than a flag because a closing fence
-    must be at least as long as the one that opened it.
-    """
-    marker: str | None = None
-    for line in text.split("\n"):
-        marker = _fence_after(marker, line)
-    return marker
-
-
-def _closer_room(line: str) -> int:
-    """Room to reserve for closing a fence that a CUT of `line` could open.
-
-    Any prefix's opening run is a prefix of the whole line's, so the whole line
-    bounds it — and the bound is needed even when the whole line opens nothing:
-    ` ```a`b ` is a paragraph, but ` ```a `, a cut of it, is a fence.
-    """
-    body = line.rstrip()
-    indent = len(body) - len(body.lstrip(" "))
-    body = body.lstrip(" ")
-    if indent > 3 or not body or body[0] not in "`~":
-        return 0
-    run = len(body) - len(body.lstrip(body[0]))
-    return run + 1 if run >= 3 else 0
-
-
-def _without_a_dangling_heading(text: str) -> str:
-    """`text` with any trailing heading that has nothing under it removed.
-
-    Ending on `## v1.163.0-Public` and then the trailer says a release is
-    coming and then does not deliver it (fourth cold review, 2026-09-21). A
-    heading is only dangling when nothing follows it, so a heading with a cut
-    line under it stays.
-    """
-    lines = text.split("\n")
-    while lines and (not lines[-1].strip() or lines[-1].lstrip().startswith("#")):
-        lines.pop()
-    return "\n".join(lines)
-
-
-def clipped_notes(text: str, limit: int = MAX_NOTES_CHARS) -> str:
-    """`text` cut to at most `limit` characters, whole. The ONE cap in this app.
-
-    Used for a single release body and for all of them together, and called
-    again by the dialog on whatever it is handed — so it has to be
-    **idempotent**: `clipped_notes(clipped_notes(x)) == clipped_notes(x)`,
-    which the `len(text) <= limit` short-circuit gives, because everything this
-    returns is within the limit.
-
-    Three things it does that the first version did not (all from the fourth
-    cold review, all measured):
-
-    * **It counts what it emits.** `evaluate_feed` used to add up sections only
-      — not the newlines joining them, not the trailer — so 700 releases of 100
-      characters assembled to 66,038 against a 65,536 cap, the dialog clipped
-      the result a second time, and the reader got a cut-off trailer, a bare
-      heading and a second trailer.
-    * **It closes a fence it cut inside.** A body of ` ``` ` plus 3,000 code
-      lines left the fence open, so the trailer rendered as code and the next
-      release's `## v1.1.0-Public` showed as literal text rather than a
-      heading.
-    * **It never ends on a heading** with nothing under it.
-
-    **One pass, and it keeps everything that fits.** The version that replaced
-    the first one guessed a budget, measured the overflow and retried four
-    times — and when every reduced budget found the same newline, the same
-    overflow repeated and it gave up and returned the trailer alone. Not a
-    corner: 2,000 lines of one width did it for 11 of the widths between 60 and
-    130, and 400 releases of 12 bullets left the reader told an update existed
-    and shown not one word of it (fifth cold review, 2026-09-21). So there is
-    no budget, no retry and no giving up while content exists: the tail and the
-    worst-case closing fence are both known before a line is kept, and the walk
-    stops at the first line that will not fit inside what is left.
-
-    A line too long to fit wherever it fell is cut into what is left rather
-    than dropped — whether it is the only line there is, or the one under a
-    heading that did fit. A line that merely ran out of room is dropped whole,
-    so an ordinary body still ends on a whole line.
-    """
-    if len(text) <= limit:
-        return text
-
-    tail = f"\n\n{TRUNCATED_NOTE}"
-    lines = text.split("\n")
+    if len(body) <= limit:
+        return body, False
+    lines = body.split("\n")
     kept: list[str] = []
     used = 0
-    fence: str | None = None
-    stopped = len(lines)
-    for index, line in enumerate(lines):
-        after = _fence_after(fence, line)
+    for line in lines:
         cost = len(line) + (1 if kept else 0)
-        if used + cost + (len(after) + 1 if after else 0) + len(tail) > limit:
-            stopped = index
+        if used + cost > limit:
             break
         kept.append(line)
         used += cost
-        fence = after
-
-    # A line that could not fit WHEREVER it fell still gives what it can:
-    # there is no boundary to prefer inside it and the bound is the point.
-    # Without this, a body that is one enormous line comes back empty, and so
-    # does `Intro` plus 100,000 characters — the cut fell on the newline after
-    # `Intro` and left 16,000 characters of room unused. A line that merely ran
-    # out of room here is still dropped whole, because the last thing shown
-    # being a whole line is what this cap promises.
-    partial = ""
-    if stopped < len(lines):
-        reserve = len(fence) + 1 if fence else _closer_room(lines[stopped])
-        if len(lines[stopped]) + reserve + len(tail) > limit:
-            room = limit - len(tail) - used - (1 if kept else 0) - reserve
-            partial = lines[stopped][:room] if room > 0 else ""
-
-    body = _without_a_dangling_heading("\n".join([*kept, partial] if partial else kept))
-    if not body.strip():
-        # Not one line fits beside the trailer; say only the part that is true.
-        return TRUNCATED_NOTE[:limit]
-    closer = _open_fence(body)
-    return body + (f"\n{closer}" if closer else "") + tail
+    if not kept:
+        # One line longer than the whole limit: there is no boundary to prefer.
+        return lines[0][:limit], True
+    return "\n".join(kept), True
 
 
 def _assets(release: dict[str, object]) -> tuple[ReleaseAsset, ...]:
@@ -738,24 +657,31 @@ def evaluate_feed(feed_text: str, current: str) -> UpdateCheck:
     if not is_newer(tag, current):
         return UpdateCheck(current, tag, False, url)
     mine = version_key(current)
-    # Each body capped, then the whole thing capped by the SAME function the
-    # dialog calls. One cap, counting everything it emits — the two used to
-    # disagree by the joining newlines and the trailer, and the dialog then cut
-    # the result a second time (fourth cold review). `clipped_notes` is
-    # idempotent, so the dialog's own guard changes nothing here.
-    sections = [
-        f"## {entry.get('tag_name')}\n\n"
-        f"{clipped_notes(str(entry.get('body') or '').strip(), MAX_BODY_CHARS)}\n"
-        for version, entry in releases
-        if mine is not None and version > mine
-    ]
+    notes: list[ReleaseNotes] = []
+    notes_cut = False
+    total = 0
+    for version, entry in releases:
+        if mine is None or version <= mine:
+            continue
+        body, cut = clipped_body(str(entry.get("body") or "").strip(), MAX_BODY_CHARS)
+        # The newest release is taken whatever it costs — it is already inside
+        # MAX_BODY_CHARS, and it is the one the banner is about. Older ones are
+        # dropped WHOLE from the old end rather than cut in the middle: the
+        # budget is over releases, so nothing here needs an opinion about
+        # markdown.
+        if notes and total + len(body) > MAX_NOTES_CHARS:
+            notes_cut = True
+            break
+        total += len(body)
+        notes.append(ReleaseNotes(str(entry.get("tag_name")), body, cut))
     assets = _assets(newest)
     return UpdateCheck(
         current,
         tag,
         True,
         url,
-        notes_markdown=clipped_notes("\n".join(sections), MAX_NOTES_CHARS),
+        notes=tuple(notes),
+        notes_cut=notes_cut,
         assets=assets,
         has_checksums=any(a.name == CHECKSUMS_NAME for a in assets),
     )
