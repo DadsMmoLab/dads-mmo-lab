@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QImage, QTextDocument, qRgb
+from PySide6.QtGui import QImage, QTextDocument, QTextFormat, qRgb
 from PySide6.QtWidgets import QLabel, QPushButton, QTextBrowser
 
 from tests.conftest import process_events
@@ -26,6 +26,9 @@ from yulon.ui.widgets.update_dialog import (
     IMAGE_REMOVED,
     MAX_SECTIONS,
     OLDER_CUT_NOTE,
+    SAFE_MARKDOWN,
+    TAG_CHARS,
+    TAG_SIZE_ADJUSTMENT,
     UpdateChoice,
     UpdateDialog,
     _NotesView,
@@ -1112,25 +1115,295 @@ def test_no_notes_at_all_still_says_something(qapp: object) -> None:
 
 
 @pytest.mark.parametrize("position", [0, 1, 2])
-def test_the_assembled_document_needs_no_second_strip(
-    qapp: object, a_red_png: Path, position: int
+@pytest.mark.parametrize("images", [1, 3])
+def test_a_resource_is_cleared_exactly_once(
+    qapp: object, a_red_png: Path, position: int, images: int
 ) -> None:
-    """`insertFragment` must not carry a resource across, and this measures that.
+    """The COUNT is the pin, and the previous version of this test was not one.
 
-    Copying a fragment between documents is Qt's code, not this file's. If it
-    resurrected a format the per-section strip had cleared, a strip of the
-    finished document would find something — so this asserts it finds nothing,
-    in every slot.
+    It stripped a document the production assembled pass had already stripped,
+    so it read 0 whether or not `insertFragment` had resurrected anything
+    (seventh cold review, 2026-09-21). `set_release_notes` adds up both passes,
+    so a resource carried across by the fragment copy is counted TWICE: one
+    image must report exactly one cleared resource, three must report three.
 
-    Measured while writing it (red pixels / image fragments left, one red PNG):
-    with NEITHER strip the notes box paints 60,000 red pixels, and with either
-    one alone it paints none. Removing just one is therefore invisible, which
-    is said out loud in `_NotesView.set_release_notes` rather than pinned by a
-    test that could not fail.
+    What this does NOT pin, said plainly: **neither strip is pinnable on its
+    own.** Removing either one leaves this count right, and leaves every test
+    here green, because the other one does the clearing. Measured (red pixels
+    in a `grab()` / image fragments left, one 300x200 red PNG):
+
+        case             no strip   section only   assembled only   both
+        markdown image    60000/1            0/0              0/0    0/0
+        td background         0/0            0/0              0/0    0/0
+        UNC path              0/1            0/0              0/0    0/0
+
+    Both are kept for the different questions they answer — the section pass
+    guarantees nothing unstripped ever enters the target, the assembled pass
+    is what would catch Qt's fragment copy carrying a format across — and the
+    fact that either alone suffices is written down rather than dressed up as
+    a test that cannot fail.
     """
-    hostile = _bodies_that_must_load_nothing(a_red_png)["inline-file-url"]
-    dialog = UpdateDialog(dataclasses.replace(RESULT, notes=_sections(hostile, position)))
+    hostile = " ".join(f"![i](file://{a_red_png})" for _ in range(images))
+    view = _NotesView()
+    try:
+        cleared = view.set_release_notes(_sections(hostile, position))
 
-    left = _strip_resources(_notes(dialog).document())
+        assert cleared == images, (
+            f"slot {position}: {cleared} cleared for {images} image(s) — "
+            "more means the fragment copy brought one back and both passes counted it"
+        )
+        assert _strip_resources(view.document()) == 0
+    finally:
+        view.deleteLater()
 
-    assert left == 0, f"slot {position}: insertFragment brought {left} resource(s) back"
+
+# ------------------------------ a section's blocks, compared with the same body alone
+
+BODY_OPENINGS = {
+    "atx h1": "# Release one\n\nafter",
+    "atx h2": "## What's new\n\n- item one\n- item two",
+    "atx h3": "### Fixed\n\nafter",
+    "setext heading": "Underlined\n==========\n\nafter",
+    "fenced code": "```sh\nyulon --update\n```\n\nafter",
+    "indented code": "    indented code\n\nafter",
+    "block quote": "> quoted first\n\nafter",
+    "bullet list": "- first item\n- second",
+    "ordered list": "1. one\n2. two",
+    "task list": "- [x] done\n- [ ] not done",
+    "table": "| a | b |\n| - | - |\n| 1 | 2 |\n\nafter",
+    "rule": "---\n\nafter",
+    "paragraph": "just a paragraph\n\nand another",
+}
+"""Every block type a release body can begin with. The real ones begin with a heading."""
+
+
+def _shape(block: object) -> tuple:
+    """Everything about a block that `insertFragment` was measured to drop."""
+    block_format = block.blockFormat()  # type: ignore[attr-defined]
+    iterator = block.begin()  # type: ignore[attr-defined]
+    char = (
+        iterator.fragment().charFormat()
+        if not iterator.atEnd()
+        else block.charFormat()  # type: ignore[attr-defined]
+    )
+    return (
+        block.text(),  # type: ignore[attr-defined]
+        block_format.headingLevel(),
+        block.textList() is not None,  # type: ignore[attr-defined]
+        block_format.intProperty(QTextFormat.Property.BlockQuoteLevel),
+        block_format.hasProperty(QTextFormat.Property.BlockCodeFence),
+        block_format.hasProperty(QTextFormat.Property.BlockCodeLanguage),
+        block_format.hasProperty(QTextFormat.Property.BlockTrailingHorizontalRulerWidth),
+        block_format.topMargin(),
+        block_format.bottomMargin(),
+        block_format.indent(),
+        char.fontFixedPitch(),
+        char.fontWeight(),
+        char.property(QTextFormat.Property.FontSizeAdjustment),
+    )
+
+
+def _section_shapes(document: QTextDocument, tag: str) -> list[tuple]:
+    """Every block after `tag`'s heading, described the same way."""
+    blocks = _document_blocks(document)
+    start = next(n for n, b in enumerate(blocks) if b.text().strip() == tag)
+    return [_shape(b) for b in blocks[start + 1 :]]
+
+
+@pytest.mark.parametrize("opening", list(BODY_OPENINGS))
+def test_a_body_renders_in_the_dialog_as_it_renders_alone(qapp: object, opening: str) -> None:
+    """Block for block, format for format. The splice may change nothing.
+
+    `insertFragment` merges the fragment's first block into the block the
+    cursor is in and keeps the TARGET's block format, so before the seventh
+    cold review a body's opening block arrived stripped: `## What's new` at
+    heading level 0, a ` ```sh ` block with no code-fence property, `> quoted`
+    with no quote level and no margins. Every release body this project cuts
+    starts with a heading, so every real release hit it — and nothing in the
+    suite compared the two renderings, which is the only way to see it.
+    """
+    body = BODY_OPENINGS[opening]
+    alone = QTextDocument()
+    alone.setMarkdown(body, SAFE_MARKDOWN)
+    dialog = UpdateDialog(_with_body(body))
+
+    spliced = _section_shapes(_notes(dialog).document(), "v0.8.70-Public")
+
+    assert spliced == [
+        _shape(b) for b in _document_blocks(alone)
+    ], f"{opening}: the body renders differently inside the dialog"
+
+
+@pytest.mark.parametrize("opening", list(BODY_OPENINGS))
+def test_nothing_of_the_dialogs_own_sits_between_a_tag_and_its_notes(
+    qapp: object, opening: str
+) -> None:
+    """A list or a table does not merge, and the block prepared for it stayed behind.
+
+    The gap under the tag then depended on what the body began with, which is
+    a difference the reader sees and nothing else explains. Asserted against
+    the body's OWN first block rather than "is it empty": a `---` rule and a
+    table both begin with a block that holds no text, and both are the body's.
+    """
+    body = BODY_OPENINGS[opening]
+    alone = QTextDocument()
+    alone.setMarkdown(body, SAFE_MARKDOWN)
+    dialog = UpdateDialog(_with_body(body))
+
+    blocks = _document_blocks(_notes(dialog).document())
+    after_tag = blocks[[b.text().strip() for b in blocks].index("v0.8.70-Public") + 1]
+
+    assert _shape(after_tag) == _shape(
+        alone.firstBlock()
+    ), f"{opening}: what sits under the tag is not the body's own first block"
+
+
+def test_the_document_does_not_open_on_a_blank_line(qapp: object) -> None:
+    """A `QTextDocument` is born holding one empty block; the first tag goes IN it."""
+    blocks = _document_blocks(_notes(UpdateDialog(RESULT)).document())
+
+    assert blocks[0].text().strip() == "v0.8.70-Public"
+
+
+def test_a_tag_outranks_every_heading_a_body_can_hold(qapp: object) -> None:
+    """md4c gives `#` adjustment 3; a tag set to 1 rendered smaller than a body's `##`."""
+    dialog = UpdateDialog(_with_body("# Body heading\n\n## Smaller\n\ntext"))
+
+    blocks = _document_blocks(_notes(dialog).document())
+    sizes = {
+        b.text()
+        .strip(): b.begin()
+        .fragment()
+        .charFormat()
+        .property(QTextFormat.Property.FontSizeAdjustment)
+        for b in blocks
+        if b.text().strip() in {"v0.8.70-Public", "Body heading", "Smaller"}
+    }
+
+    assert sizes["v0.8.70-Public"] > sizes["Body heading"] > sizes["Smaller"]
+    assert sizes["v0.8.70-Public"] >= TAG_SIZE_ADJUSTMENT
+
+
+# ------------------------- what this file writes is never what a body left behind
+
+BODY_ENDINGS = [
+    "### Fixed\n- one.",
+    "```\nan unclosed fence",
+    "```sh\ncode\n```",
+    "- a bullet",
+    "- outer\n  - nested\n    - deeper",
+    "- [x] a task",
+    "1. numbered",
+    "> a quote",
+    "> - a quote holding a list",
+    "| a | b |\n| - | - |\n| 1 | 2 |",
+    "    indented code",
+    "# a heading",
+    "---",
+    "a paragraph",
+    "",
+]
+"""Every shape a release body can END with, which is what `_say` inherits from."""
+
+
+def _is_plain(block: object, what: str) -> None:
+    """A block this file wrote: no list, no fence, no quote, no indent, no texture."""
+    block_format = block.blockFormat()  # type: ignore[attr-defined]
+    char = block.charFormat()  # type: ignore[attr-defined]
+    assert block.textList() is None, f"{what} became a list item"  # type: ignore[attr-defined]
+    assert not block_format.hasProperty(
+        QTextFormat.Property.BlockCodeFence
+    ), f"{what} became a code block"
+    assert not block_format.hasProperty(
+        QTextFormat.Property.BlockCodeLanguage
+    ), f"{what} became a code block"
+    assert (
+        block_format.intProperty(QTextFormat.Property.BlockQuoteLevel) == 0
+    ), f"{what} became a quotation"
+    assert block_format.indent() == 0, f"{what} was indented by the block before it"
+    assert block_format.background().style() == Qt.BrushStyle.NoBrush, f"{what} took a background"
+    assert not char.fontFixedPitch(), f"{what} came out monospaced"
+
+
+@pytest.mark.parametrize("cut", [False, True])
+@pytest.mark.parametrize("ending", BODY_ENDINGS)
+def test_what_this_file_writes_never_inherits_the_body_above_it(
+    qapp: object, ending: str, cut: bool
+) -> None:
+    """The notes, the tags and the separator are this file's blocks, not the body's.
+
+    A bare `insertBlock()` inherits the block before it, and the block before
+    these is the last block of a release body. Measured on the endings above:
+    a body ending inside a fence made "the rest of this release…" a code
+    block, and one ending in a list made it another bullet (seventh cold
+    review, 2026-09-21). All 216 tests were green while that was true.
+
+    **Both with and without the cut note**, because that note resets the
+    formats itself: with `cut=True` it sits between the body and the
+    separator, so the separator inherits from a block this file already wrote
+    and an inheriting separator looks correct. The first spelling of this test
+    ran only the cut case and stayed green on exactly that mutation.
+    """
+    dialog = UpdateDialog(
+        dataclasses.replace(
+            RESULT,
+            notes=(
+                ReleaseNotes("v1.2.0-Public", ending, cut),
+                ReleaseNotes("v1.1.0-Public", ending, cut),
+            ),
+            notes_cut=True,
+        )
+    )
+
+    blocks = _document_blocks(_notes(dialog).document())
+    for block in blocks:
+        text = block.text().strip()
+        if text == BODY_CUT_NOTE:
+            _is_plain(block, f"{ending!r}: the cut note")
+            assert block.blockFormat().headingLevel() == 0
+        elif text == OLDER_CUT_NOTE:
+            _is_plain(block, f"{ending!r}: the older-releases note")
+            assert block.blockFormat().headingLevel() == 0
+        elif text in {"v1.2.0-Public", "v1.1.0-Public"}:
+            _is_plain(block, f"{ending!r}: the tag heading")
+            assert block.blockFormat().headingLevel() == 2
+        elif not text:
+            _is_plain(block, f"{ending!r}: the separator")
+
+
+# --------------------------------------------- a tag is remote text like any other
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "v1.2.0-Public\nv9.9.9-Public",
+        "v1.2.0-Public\r\nsecond line",
+        "v1.2.0-Public second",
+        "v1.2.0-Public second",
+        "v1.2.0-Public\x00hidden",
+        "v1.2.0-Public‮cilbuP-0.0.9v",
+        "v1.2.0-Public" + "\n" * 5000,
+        "v" + "9" * 5000,
+    ],
+)
+def test_a_tag_is_one_heading_however_it_is_spelled(qapp: object, tag: str) -> None:
+    """A newline in a tag does not make a long heading, it makes SEVERAL headings.
+
+    Which is the one thing the per-release design promises cannot happen, so
+    the count is what this asserts.
+    """
+    notes = (
+        ReleaseNotes(tag, "### Fixed\n- one.", False),
+        ReleaseNotes("v1.1.0-Public", "b", False),
+    )
+    dialog = UpdateDialog(dataclasses.replace(RESULT, notes=notes))
+
+    headings = [
+        b
+        for b in _document_blocks(_notes(dialog).document())
+        if b.blockFormat().headingLevel() == 2
+    ]
+
+    assert len(headings) == len(notes), f"{tag!r} made {len(headings)} headings"
+    assert all(len(b.text()) <= TAG_CHARS for b in headings)

@@ -498,14 +498,32 @@ def is_public_tag(tag: str) -> bool:
     (T90). `v0.6.59Public`, with no dash, is older than every build that can
     carry this code, so it is left out rather than special-cased in.
     """
-    return PUBLIC_TAG.match(tag.strip()) is not None
+    return public_tag(tag) is not None
+
+
+def public_tag(tag: str) -> str | None:
+    """The `v1.2.3-Public` text inside `tag`, or None. **Use this, not the raw field.**
+
+    A `tag_name` is remote text of any length and any shape. `evaluate_feed`
+    used to store it as it arrived, and it becomes the window title, the
+    banner's sentence and a heading in the dialog: a feed whose tag ended in a
+    million newlines — 2 MB, well inside `MAX_FEED_BYTES` — made a million
+    blocks, 3.3 s on the GUI thread, and a `latest` of 1,000,030 characters
+    (seventh cold review, 2026-09-21).
+
+    What comes back is the matched text, which cannot hold whitespace or a
+    control character and is short, because `PUBLIC_TAG` says so. The case is
+    the feed's own: `V0.8.7-Public` passes and is stored as it was written.
+    """
+    found = PUBLIC_TAG.match(tag.strip())
+    return found.group(0) if found else None
 
 
 VersionKey = tuple[int, int, Fraction]
 """What `version_key()` answers, and the only thing this module sorts releases by."""
 
 
-def _public_releases(feed: object) -> list[tuple[VersionKey, dict[str, object]]]:
+def _public_releases(feed: object) -> list[tuple[VersionKey, str, dict[str, object]]]:
     """Published `-Public` releases, highest version first.
 
     `/releases` and not `/releases/latest`: that endpoint means "latest
@@ -522,20 +540,41 @@ def _public_releases(feed: object) -> list[tuple[VersionKey, dict[str, object]]]
     """
     if not isinstance(feed, list):
         return []
-    found: list[tuple[VersionKey, dict[str, object]]] = []
+    found: list[tuple[VersionKey, str, dict[str, object]]] = []
     for entry in feed:
         if not isinstance(entry, dict) or entry.get("draft"):
             continue
-        tag = str(entry.get("tag_name") or "")
-        version = version_key(tag)
-        if is_public_tag(tag) and version is not None:
-            found.append((version, entry))
+        raw = str(entry.get("tag_name") or "")
+        tag = public_tag(raw)
+        version = version_key(raw)
+        if tag is not None and version is not None:
+            found.append((version, tag, entry))
     found.sort(key=lambda pair: pair[0], reverse=True)
     return found
 
 
 MAX_BODY_CHARS = 16 * 1024
-"""How much of ONE release's notes is shown before the reader is sent to the page."""
+"""How much of ONE release's notes is shown before the reader is sent to the page.
+
+**What this cap actually buys, measured through the real widget** (this dev
+box, 2026-09-21; the seventh cold review's box was up to 4x slower on the same
+shapes, so read these as the floor). Four sections, each a full 16 KB of the
+worst thing that shape can be:
+
+    20-column table    0.37 s      one paragraph      0.01 s
+    one-column table   0.31 s      images             0.07 s
+    backticks          0.30 s      bullets            0.12 s
+    headings           0.08 s      10,000 releases    0.01 s
+
+That is a one-off stall while the dialog opens, on hostile input at the cap,
+and it is accepted. **Do not raise this without re-measuring**: the cost is
+Qt's layout, it is not linear in the character count, and a table is the shape
+that grows fastest.
+
+Counted in CODE POINTS, which is not what Qt counts: 16,384 astral characters
+are 32,768 UTF-16 units to `QTextDocument`. The cap is therefore a bound on
+what is parsed rather than an exact bound on what Qt holds.
+"""
 
 MAX_NOTES_CHARS = 64 * 1024
 """How much of ALL the notes between two versions is shown, together.
@@ -651,8 +690,7 @@ def evaluate_feed(feed_text: str, current: str) -> UpdateCheck:
         # not a feed at all — a rate-limit body is valid JSON too.
         logger.info("update check: no public release in the feed")
         return UpdateCheck(current, None, False, RELEASES_PAGE, error="no public release")
-    _, newest = releases[0]
-    tag = str(newest.get("tag_name"))
+    _, tag, newest = releases[0]
     url = str(newest.get("html_url") or RELEASES_PAGE)
     if not is_newer(tag, current):
         return UpdateCheck(current, tag, False, url)
@@ -660,7 +698,7 @@ def evaluate_feed(feed_text: str, current: str) -> UpdateCheck:
     notes: list[ReleaseNotes] = []
     notes_cut = False
     total = 0
-    for version, entry in releases:
+    for version, entry_tag, entry in releases:
         if mine is None or version <= mine:
             continue
         body, cut = clipped_body(str(entry.get("body") or "").strip(), MAX_BODY_CHARS)
@@ -673,7 +711,7 @@ def evaluate_feed(feed_text: str, current: str) -> UpdateCheck:
             notes_cut = True
             break
         total += len(body)
-        notes.append(ReleaseNotes(str(entry.get("tag_name")), body, cut))
+        notes.append(ReleaseNotes(entry_tag, body, cut))
     assets = _assets(newest)
     return UpdateCheck(
         current,

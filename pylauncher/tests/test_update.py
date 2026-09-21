@@ -6,6 +6,7 @@ import email.message
 import importlib.util
 import json
 import random
+import time
 import urllib.error
 from fractions import Fraction
 from pathlib import Path
@@ -24,6 +25,7 @@ from yulon.update import (
     evaluate_feed,
     is_newer,
     is_public_tag,
+    public_tag,
     safe_release_url,
     version_key,
 )
@@ -871,3 +873,53 @@ def test_the_build_script_orders_versions_exactly_as_the_app_does() -> None:
 
     disagreements = {tag: (theirs(tag), version_key(tag)) for tag in tags}
     assert {tag: pair for tag, pair in disagreements.items() if pair[0] != pair[1]} == {}
+
+
+# ------------------------------------------ a tag_name is remote text of any shape
+
+
+def test_the_stored_tag_is_the_matched_text_not_the_field() -> None:
+    """`tag_name` is whatever the feed said; what this app keeps is what matched."""
+    feed = json.dumps([release("  v1.2.0-Public\n", body="### Fixed\n- one.")])
+
+    result = evaluate_feed(feed, "1.0.0-Public")
+
+    assert result.latest == "v1.2.0-Public"
+    assert result.notes[0].tag == "v1.2.0-Public"
+
+
+def test_a_tag_of_two_megabytes_does_not_become_the_window_title() -> None:
+    """Measured before the fix: `latest` 1,000,030 characters, 3.3 s on the GUI thread.
+
+    A tag ending in a million newlines is 2 MB, well inside `MAX_FEED_BYTES`,
+    and `latest` is what the bar says and what the dialog puts in its title
+    bar (seventh cold review, 2026-09-21).
+    """
+    feed = json.dumps([release("v1.2.0-Public" + "\n" * 1000000, body="- one.")])
+
+    started = time.monotonic()
+    result = evaluate_feed(feed, "1.0.0-Public")
+    elapsed = time.monotonic() - started
+
+    assert result.latest == "v1.2.0-Public"
+    assert result.notes[0].tag == "v1.2.0-Public"
+    assert elapsed < 1.0, f"a 2 MB tag cost {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "v1.2.0-Public\nv9.9.9-Public",
+        "v1.2.0-Public\r\nmore",
+        "v1.2.0-Public more",
+        "v1.2.0-Public more",
+        "v1.2.0-Public\x00more",
+        "v1.2.0-Public more",
+        "v1.2.0-Public\n```\nx",
+    ],
+)
+def test_a_tag_with_anything_after_it_is_not_a_public_release(tag: str) -> None:
+    """`PUBLIC_TAG` is anchored at both ends, and the anchors are load-bearing."""
+    assert is_public_tag(tag) is False
+    assert public_tag(tag) is None
+    assert evaluate_feed(json.dumps([release(tag, body="x")]), "1.0.0-Public").notes == ()

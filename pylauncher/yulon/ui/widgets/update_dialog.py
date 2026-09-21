@@ -26,6 +26,7 @@ is up.
 from __future__ import annotations
 
 import enum
+import re
 from collections.abc import Callable, Sequence
 
 from PySide6.QtCore import Qt, QUrl
@@ -81,6 +82,41 @@ one-line releases is inside the character budget and still 700 parses.
 """
 
 
+TAG_SIZE_ADJUSTMENT = 4
+"""How much larger a tag is than the body text — larger than anything md4c makes.
+
+md4c gives `#` adjustment 3 and `##` adjustment 2, so a tag set to 1 came out
+SMALLER than a body's own `## Added` (seventh cold review, 2026-09-21). The tag
+names the release the section is about and has to outrank every heading inside
+it, so it takes one more than the largest md4c will produce.
+"""
+
+TAG_CHARS = 64
+"""How much of a tag the dialog will draw. Nothing about a tag is trusted here.
+
+`evaluate_feed` stores the text `PUBLIC_TAG` matched, which is short and has no
+whitespace in it by construction — but this widget is public and takes an
+`UpdateCheck` from whoever built one. A tag ending in a million newlines made
+a million blocks and a 3.3 s stall on the GUI thread.
+"""
+
+_NOT_IN_A_TAG = re.compile(
+    r"[\s\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]+"
+)
+"""Whitespace, control and bidi-format characters: a tag is drawn as one line.
+
+A newline or U+2029 in a tag does not make a long heading, it makes SEVERAL
+headings — which is the one thing the per-release design promises cannot
+happen. U+202E, the right-to-left override, is in here because a tag is a name
+the reader compares against their own version.
+"""
+
+
+def _one_line(tag: str) -> str:
+    """`tag` as a single short line: no line breaks, no controls, no bidi tricks."""
+    return _NOT_IN_A_TAG.sub(" ", tag).strip()[:TAG_CHARS]
+
+
 def _heading_block() -> QTextBlockFormat:
     """The block format that makes a tag a real level-2 heading."""
     block = QTextBlockFormat()
@@ -90,17 +126,78 @@ def _heading_block() -> QTextBlockFormat:
 
 
 def _heading_text() -> QTextCharFormat:
-    """What a level-2 heading's characters look like, set here rather than parsed."""
+    """What a tag's characters look like, set here rather than parsed."""
     char = QTextCharFormat()
     char.setFontWeight(QFont.Weight.Bold)
-    # The same property `setMarkdown` sets on a heading; the enum member is not
-    # exposed on `QTextFormat` in PySide6 6.11, so the value is named directly.
-    char.setProperty(QTextFormat.Property.FontSizeAdjustment, 1)
+    # The property `setMarkdown` uses for heading size — the property, not the
+    # value: md4c's own values are 3 for `#` down to -2 for `#6`.
+    char.setProperty(QTextFormat.Property.FontSizeAdjustment, TAG_SIZE_ADJUSTMENT)
     return char
 
 
+def _open_block(
+    cursor: QTextCursor, block_format: QTextBlockFormat, char_format: QTextCharFormat
+) -> None:
+    """Start a block with exactly these formats, reusing the document's first one.
+
+    A `QTextDocument` is born holding one empty block. Inserting on top of it
+    left that block in front of the first tag, so every dialog opened on a
+    blank line.
+    """
+    if cursor.position() == 0 and cursor.document().blockCount() == 1:
+        cursor.setBlockFormat(block_format)
+        cursor.setBlockCharFormat(char_format)
+        cursor.setCharFormat(char_format)
+    else:
+        cursor.insertBlock(block_format, char_format)
+
+
+def _insert_section(cursor: QTextCursor, section: QTextDocument) -> None:
+    """Splice `section`'s blocks in, with its FIRST block's format intact.
+
+    `insertFragment` merges the fragment's first block into the block the
+    cursor sits in and keeps the TARGET's block format, so a body's opening
+    block arrived stripped of everything the block format carries. Measured
+    against the same body parsed alone (seventh cold review, 2026-09-21):
+    `## What's new` came out at heading level 0, a fenced ` ```sh ` block lost
+    its code-fence property, and `> quoted` lost its quote level and its
+    margins. Every release body this project cuts is made from `CHANGELOG.md`
+    and starts with a heading, so every real release hit it.
+
+    A body that starts with a list or a table does NOT merge — it brings its
+    own block — and then the empty block prepared for it stayed behind, so the
+    gap under the tag depended on what the body began with. Both are handled
+    here, and which happened is read off the document rather than guessed from
+    the markdown.
+    """
+    first = section.firstBlock()
+    cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
+    at = cursor.position()
+    cursor.insertFragment(QTextDocumentFragment(section))
+    document = cursor.document()
+    landed = document.findBlock(at)
+    mender = QTextCursor(document)
+    if landed.length() == first.length() and landed.text() == first.text():
+        mender.setPosition(at)
+        mender.setBlockFormat(first.blockFormat())
+        mender.setBlockCharFormat(first.charFormat())
+    elif not landed.text():
+        # Delete the separator BEFORE the empty block: that merges it into the
+        # tag block above, which keeps the tag's format and loses the empty
+        # one. Deleting the separator after it would give the body's first
+        # block this empty block's format instead — the bug, again.
+        mender.setPosition(at - 1)
+        mender.deleteChar()
+
+
 def _say(cursor: QTextCursor, text: str) -> None:
-    """Add `text` as an ordinary paragraph, in this file's own formats."""
+    """Add `text` as an ordinary paragraph, in this file's own formats.
+
+    Both formats are passed explicitly. A bare `insertBlock()` inherits the
+    block before it, and the block before this one is the last block of a
+    release body: a body ending inside a fence made this sentence code, and one
+    ending in a list made it another bullet.
+    """
     cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
     cursor.insertText(text)
 
@@ -391,9 +488,15 @@ class _NotesView(QTextBrowser):
         They are kept because they answer different questions — the section
         pass is what guarantees nothing unstripped ever enters the target, and
         the assembled pass is what would catch `insertFragment` carrying a
-        format across, which is Qt's code rather than this file's. That the
-        assembled pass finds nothing left to do is itself pinned, by
-        `test_the_assembled_document_needs_no_second_strip`.
+        format across, which is Qt's code rather than this file's.
+
+        **The count returned is the pin.** Both passes add into it, so a
+        resource the fragment copy brought back would be cleared twice and
+        counted twice: `test_a_resource_is_cleared_exactly_once` asserts one
+        image reports one and three report three. The test this replaced
+        stripped the finished document a third time and asserted it found
+        nothing — which it does whether or not anything was resurrected,
+        because the production assembled pass had already run.
         """
         # Capped again here, because this widget is public and does not trust
         # its caller: `notes` is an ordinary field, and an `UpdateCheck` built
@@ -414,17 +517,17 @@ class _NotesView(QTextBrowser):
                 total += len(body)
                 if index:
                     cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
-                cursor.insertBlock(_heading_block(), _heading_text())
-                cursor.insertText(release.tag)
+                _open_block(cursor, _heading_block(), _heading_text())
+                cursor.insertText(_one_line(release.tag))
                 section = QTextDocument()
                 section.setMarkdown(body, SAFE_MARKDOWN)
                 removed += _strip_resources(section)
                 if not section.isEmpty():
-                    cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
-                    cursor.insertFragment(QTextDocumentFragment(section))
+                    _insert_section(cursor, section)
                 if cut or release.cut:
                     _say(cursor, BODY_CUT_NOTE)
             if not notes:
+                _open_block(cursor, QTextBlockFormat(), QTextCharFormat())
                 cursor.insertText(_NO_NOTES)
             elif notes_cut or len(notes) > MAX_SECTIONS:
                 _say(cursor, OLDER_CUT_NOTE)
