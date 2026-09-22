@@ -184,7 +184,52 @@ MODULE: dict[str, Any] = {
 }
 
 
-def test_ale_install_deploys_patches_on_configure_and_removes(tmp_path: Path) -> None:
+def test_ale_install_writes_the_answer_it_was_given(tmp_path: Path) -> None:
+    """The person's answer, not the prompt's default, lands in the script at install (T92)."""
+    git = _FakeGit({"SitMeansRest.lua": "local DURATION = 5\n", "sql/tables.sql": "CREATE ..."})
+    applier = Applier(tmp_path, git=git, sql=_FakeSql())
+    m = parse_manifest(ALE)
+    _have_requirements(tmp_path, m)
+
+    applier.install(m, {"duration": "45"})
+    assert (tmp_path / LUA / "SitMeansRest.lua").read_text(
+        encoding="utf-8"
+    ) == "local DURATION = 45\n"
+
+
+def test_install_asks_for_a_configure_time_answer_it_has_no_default_for() -> None:
+    """`required_prompts(m, "install")` counts the configure-time templates (T92).
+
+    The Modules tab opens its dialog from this list; before T92 a `.lua`
+    manifest rendered nothing at install, so nothing was asked and nothing
+    written -- and the chip that says "installing this opens one dialog"
+    reads the same list, so the two cannot disagree.
+    """
+    m = parse_manifest(
+        {**ALE, "prompts": [{"key": "duration", "question": "seconds", "kind": "int"}]}
+    )
+    assert [p.key for p in apply_module.required_prompts(m, "install")] == ["duration"]
+    assert apply_module.required_prompts(m, "remove") == ()
+
+
+def test_every_shipped_value_bearing_step_runs_at_install() -> None:
+    """No shipped manifest may carry a value only `configure()` -- which nothing calls -- writes."""
+    for manifest in _shipped_all():
+        for patch in manifest.patches:
+            if patch.when == "configure":
+                assert patch.replace in apply_module._action_templates(
+                    manifest, "install"
+                ), f"{manifest.id}: {patch.find!r} is not run by install"
+
+
+def test_ale_install_deploys_runs_its_first_configure_and_removes(tmp_path: Path) -> None:
+    """Install writes the configure-time patch with the prompt's default (T92).
+
+    Until 2026-09-22 this test pinned the opposite -- `local DURATION = 5`
+    after install, "configure-time patch" -- and that was the bug, not the
+    spec: nothing in the app calls `configure()`, so every ALE script shipped
+    with the upstream value whatever the person answered.
+    """
     git = _FakeGit({"SitMeansRest.lua": "local DURATION = 5\n", "sql/tables.sql": "CREATE ..."})
     sql = _FakeSql()
     applier = Applier(tmp_path, git=git, sql=sql)
@@ -195,16 +240,17 @@ def test_ale_install_deploys_patches_on_configure_and_removes(tmp_path: Path) ->
     assert git.calls[0].url == "https://github.com/Brytenwally/SitMeansRest.git"
     assert git.calls[0].dest == tmp_path / "ale_scripts" / "sitmeanrest"
     deployed = tmp_path / LUA / "SitMeansRest.lua"
-    assert deployed.read_text(encoding="utf-8") == "local DURATION = 5\n"  # configure-time patch
+    assert deployed.read_text(encoding="utf-8") == "local DURATION = 20\n"  # prompt default
     assert sql.files == [("characters", "tables.sql")]
     assert report.rebuild_required is False and report.restart_recommended is True
     assert report.skipped == ()
+    assert any(step.startswith("patch ") for step in report.done)
 
-    # configure: prompt default applies when no value is given; explicit value wins.
-    applier.configure(m)
-    assert deployed.read_text(encoding="utf-8") == "local DURATION = 20\n"
+    # configure re-applies: default when no value is given; an explicit value wins.
     applier.configure(m, {"duration": "45"})
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 45\n"
+    applier.configure(m)
+    assert deployed.read_text(encoding="utf-8") == "local DURATION = 20\n"
 
     removed = applier.remove(m)
     assert not deployed.exists()

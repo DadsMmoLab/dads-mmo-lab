@@ -1505,6 +1505,22 @@ def _fields(template: str) -> set[str]:
     }
 
 
+def _whens(action: When) -> tuple[When, ...]:
+    """Which `when` labels an action runs.
+
+    Install runs the configure-time steps too, as the item's FIRST configure
+    (T92). Every value-bearing step in the shipped catalog is `when:
+    configure` -- the six ALE scripts' Lua keys, `mod-ale`'s conf, `xp-rates`'
+    worldserver.conf lines, `battlepass`'s enable row -- and nothing in the
+    app calls `configure()`, so until this an install deployed the upstream
+    defaults, asked no question (`required_prompts` counted install-time
+    templates only, and there were none) and, for `xp-rates`, did nothing at
+    all. Measured on yulon-ubuntu 2026-09-22: `sitmeanrest` installed with
+    DELAY 10 / RATE 60 answered still read 30 / 5.0 on disk.
+    """
+    return ("install", "configure") if action == "install" else (action,)
+
+
 def _action_templates(manifest: Manifest, action: When) -> list[str]:
     """Every string this action would put through `_render()`, in the engine's own order.
 
@@ -1517,9 +1533,10 @@ def _action_templates(manifest: Manifest, action: When) -> list[str]:
     step, and `test_required_prompts_are_only_the_ones_the_action_actually_renders`
     is what says they are.
     """
-    out = [patch.replace for patch in manifest.patches if patch.when == action]
+    whens = _whens(action)
+    out = [patch.replace for patch in manifest.patches if patch.when in whens]
     for step in manifest.sql:
-        if step.when != action or step.applied_by != "direct":
+        if step.when not in whens or step.applied_by != "direct":
             continue
         out.append(step.statement if step.statement is not None else step.path or "")
     if action in ("install", "configure"):
@@ -1827,7 +1844,9 @@ class Applier:
             # the case that needs the question asked most, not least. Gated on
             # such a patch actually existing, like `configure()`, so a refusal
             # is never about a folder this run would not have touched.
-            if clone.exists() and any(p.in_clone and p.when == "install" for p in manifest.patches):
+            if clone.exists() and any(
+                p.in_clone and p.when in _whens("install") for p in manifest.patches
+            ):
                 self._require_own_clone(manifest, clone, "install")
         else:
             self._require_own_clone(manifest, clone, "install")
@@ -1905,6 +1924,13 @@ class Applier:
         self._patches(manifest, clone, vals, "install", log)
         self._sql(manifest, clone, vals, "install", log)
         self._conf(manifest, clone, vals, log)
+        # Then the configure-time steps, as this item's first configure
+        # (`_whens`): a value the person answered is written now, not left for
+        # a `configure()` nothing calls. After `_conf()`, because a configure
+        # patch may target the conf that step activates (`mod-ale`'s does),
+        # which is the state a later `configure()` always finds.
+        self._patches(manifest, clone, vals, "configure", log)
+        self._sql(manifest, clone, vals, "configure", log)
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
         self._finish_claim(manifest, clone, url, claimed, log, log.client_copies or previous_copies)
