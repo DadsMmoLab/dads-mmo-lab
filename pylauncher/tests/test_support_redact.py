@@ -96,3 +96,20 @@ def test_database_info_passwords_reads_the_fourth_field_of_every_line() -> None:
         'LogsDatabaseInfo = "h;3306;mangos;;logs"\n'
     )
     assert database_info_passwords(conf) == {"first-secret", "second-secret"}
+
+
+def test_the_dotted_key_spelling_of_a_native_tortoise_conf_is_read_and_masked() -> None:
+    """Tortoise's native `mangosd.conf` spells the keys `LoginDatabase.Info` (catalog.json)."""
+    conf = (
+        'LoginDatabase.Info = "h;3306;mangos;dotted-secret;realmd"\n'
+        "CharacterDatabase.Info = h;3306;mangos;bare-secret;characters\n"
+        '# WorldDatabase.Info = "h;3306;mangos;commented;world"\n'
+        'LogsDatabase.Info = "h;3306;mangos;;logs"\n'
+    )
+    assert database_info_passwords(conf) == {"dotted-secret", "bare-secret"}
+    assert Redactor.build([]).redact(conf) == (
+        f'LoginDatabase.Info = "h;3306;mangos;{MASK};realmd"\n'
+        f"CharacterDatabase.Info = h;3306;mangos;{MASK};characters\n"
+        f'# WorldDatabase.Info = "h;3306;mangos;{MASK};world"\n'
+        'LogsDatabase.Info = "h;3306;mangos;;logs"\n'
+    )

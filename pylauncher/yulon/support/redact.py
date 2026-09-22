@@ -58,9 +58,12 @@ lookbehind lets a match START only after whitespace, a quote, `=`, `:`, `,`,
 """
 
 _DATABASE_INFO_LINE = re.compile(
-    r"(?m)^[ \t]*\w*DatabaseInfo[ \t]*=[ \t]*\"?(?P<value>[^\"\r\n]*)\"?"
+    r"(?m)^[ \t]*\w*Database\.?Info[ \t]*=[ \t]*\"?(?P<value>[^\"\r\n]*)\"?"
 )
-"""An ACTIVE `*DatabaseInfo = ...` conf line. A commented one starts with `#` and is skipped."""
+"""An ACTIVE `*DatabaseInfo = ...` conf line; Tortoise spells the key `*Database.Info`.
+
+A commented line starts with `#` and is skipped.
+"""
 
 _PASSWORD_SETTING = re.compile(
     r"(?i)(?<![\w.-])(?P<head>[\w.-]{0,64}?password[\w.-]{0,64}[\"']?[ \t]*[=:][ \t]*)"
