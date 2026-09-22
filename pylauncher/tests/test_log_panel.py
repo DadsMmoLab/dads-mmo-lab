@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sys
 import threading
@@ -23,6 +24,7 @@ from tests.conftest import (
     wait_for_panel,
 )
 from yulon import runner
+from yulon.support import runlog
 from yulon.ui import lines
 from yulon.ui.widgets.log_panel import PALETTE, LogPanel, Seams, _StreamWorker, tone_colour
 
@@ -1409,3 +1411,140 @@ def test_a_rebuilds_own_rollback_lines_survive_a_stop_too(qapp: object) -> None:
 
     assert steps == ["Putting the build you had back.", "The containers were replaced."]
     assert "The containers were replaced." in panel.text()
+
+
+# ------------------------------------------------------------ T93: record_as
+
+
+def _recorded(path: object) -> list[str]:
+    assert path is not None
+    return path.read_text(encoding="utf-8").splitlines()  # type: ignore[attr-defined]
+
+
+def test_a_recorded_run_keeps_every_line_and_its_verdict_on_disk(qapp: object) -> None:
+    panel = LogPanel()
+
+    def source() -> Iterator[str]:
+        yield "cloning"
+        yield "\x1b[36mbuilding\x1b[0m"
+        raise RuntimeError("boom")
+
+    assert panel.run(source, title="Installing X", record_as="install-wow-tbc") is True
+    path = panel.recording
+    assert path is not None and path.parent == runlog.runs_dir()
+    wait_for_panel(panel)
+    assert panel.recording is None, "the record was left open after the job ended"
+    lines_on_disk = _recorded(path)
+    assert lines_on_disk[0] == "--- Installing X"
+    assert [STAMP.sub("", line, count=1) for line in lines_on_disk[1:3]] == ["cloning", "building"]
+    assert lines_on_disk[-1] == "--- FAILED: RuntimeError: boom"
+
+
+def test_a_stopped_recorded_run_keeps_its_cleanup_lines_and_says_cancelled(qapp: object) -> None:
+    panel = LogPanel()
+    cancel = threading.Event()
+
+    def source() -> Iterator[str]:
+        yield "started"
+        while not cancel.wait(JOB_PACE):
+            pass
+        yield "put the sources back"
+
+    panel.run(source, title="Rebuilding", cancel=cancel, record_as="rebuild-wow-tbc-0badc0de")
+    pump_until(lambda: "started" in panel.text(), "the first line reached the panel")
+    path = panel.recording
+    panel.stop()
+    wait_for_panel(panel)
+    lines_on_disk = _recorded(path)
+    assert any(line.endswith("put the sources back") for line in lines_on_disk)
+    assert lines_on_disk[-1] == "--- cancelled"
+
+
+def test_an_unrecorded_run_writes_nothing_and_a_refused_run_opens_nothing(qapp: object) -> None:
+    panel = LogPanel()
+    gate = threading.Event()
+
+    def source() -> Iterator[str]:
+        yield "one"
+        gate.wait(HANG_BOUND)
+
+    assert panel.run(source) is True
+    assert panel.recording is None
+    assert panel.run(lambda: iter(["x"]), record_as="install-wow-tbc") is False  # busy
+    gate.set()
+    wait_for_panel(panel)
+    runs = runlog.runs_dir()
+    assert not runs.exists() or list(runs.iterdir()) == [], "a run nobody asked to record was kept"
+
+
+def test_a_progress_reading_is_not_a_recorded_line(qapp: object) -> None:
+    panel = LogPanel()
+    reading = lines.PROGRESS + "clone-core 42 Receiving objects:  42% (420/1000)"
+    assert lines.parse(reading).kind == "progress", "the fixture is not a progress line any more"
+    panel.run(lambda: iter(["before", reading, "after"]), record_as="install-wow-tbc")
+    path = panel.recording
+    wait_for_panel(panel)
+    body = [STAMP.sub("", line, count=1) for line in _recorded(path)[1:-1]]
+    assert body == ["before", "after"]
+
+
+def test_a_record_that_cannot_be_written_never_fails_the_run(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class _Full:
+        def write(self, text: str, /) -> int:
+            raise OSError(28, "No space left on device")
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    real_open = runlog.RunLog.open
+    monkeypatch.setattr(
+        runlog.RunLog,
+        "open",
+        classmethod(
+            lambda cls, directory, kind, **_: real_open(directory, kind, opener=lambda p: _Full())
+        ),
+    )
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+    with caplog.at_level(logging.WARNING, logger="yulon.support.runlog"):
+        panel.run(lambda: iter(["a", "b", "c"]), record_as="install-wow-tbc")
+        wait_for_panel(panel)
+    assert finished == [(True, "done")]
+    assert _unstamped(panel) == ["a", "b", "c"]
+    assert len([r for r in caplog.records if r.name == "yulon.support.runlog"]) == 1
+
+
+def test_every_record_write_and_close_runs_on_the_gui_thread(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`RunLog` has no lock, so the panel may only touch it from the thread it lives on.
+
+    The lines are produced on the worker's thread; the tee is only safe because
+    `worker.line` and `worker.finished` reach `append()` and `_on_finished()` by
+    a QUEUED connection. Asserted on the calls themselves, so a direct
+    connection (or a tee moved into the worker) fails here by thread name.
+    """
+    seen: list[tuple[str, threading.Thread]] = []
+    real_write, real_close = runlog.RunLog.write, runlog.RunLog.close
+
+    def write(self: runlog.RunLog, line: str) -> None:
+        seen.append(("write", threading.current_thread()))
+        real_write(self, line)
+
+    def close(self: runlog.RunLog) -> None:
+        seen.append(("close", threading.current_thread()))
+        real_close(self)
+
+    monkeypatch.setattr(runlog.RunLog, "write", write)
+    monkeypatch.setattr(runlog.RunLog, "close", close)
+    panel = LogPanel()
+    panel.run(lambda: iter(["a", "b"]), record_as="install-wow-tbc")
+    wait_for_panel(panel)
+    assert [name for name, _ in seen] == ["write", "write", "write", "write", "close"], seen
+    assert {thread for _, thread in seen} == {threading.main_thread()}, seen

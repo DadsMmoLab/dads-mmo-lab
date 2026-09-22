@@ -16,6 +16,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
 
 from yulon import runner
 from yulon.log import get_logger
+from yulon.support import runlog
 from yulon.ui import lines
 from yulon.ui.widgets.job import in_flight
 
@@ -668,6 +670,13 @@ class LogPanel(QWidget):
         self._thread: QThread | None = None
         self._worker: _StreamWorker | None = None
         self._stop_requested = False
+        # T93. The run being kept on disk, if its owner asked for one. Opened by
+        # `run()` after the busy check, closed by `_on_finished()`; flushed per
+        # line, so the two ways out that never deliver `_on_finished` (app exit;
+        # a panel deleted with its finish still queued) lose nothing. Written
+        # and closed ONLY on the GUI thread -- from `append()`, `run()` and
+        # `_on_finished()` -- because `RunLog` has no lock.
+        self._record: runlog.RunLog | None = None
 
     # -- public ---------------------------------------------------------
 
@@ -675,6 +684,11 @@ class LogPanel(QWidget):
     def running(self) -> bool:
         """True while a job is streaming into the panel."""
         return self._thread is not None and self._thread.isRunning()
+
+    @property
+    def recording(self) -> Path | None:
+        """Where this job's lines are being kept (T93), or None when they are not."""
+        return self._record.path if self._record is not None else None
 
     @property
     def cancelled(self) -> bool:
@@ -787,6 +801,11 @@ class LogPanel(QWidget):
         """
         clean = runner.strip_ansi(line).replace("\x1b", "")
         parsed = lines.parse(clean)
+        now = time.time()
+        if self._record is not None and parsed.kind != "progress":
+            # T93: the ANSI-stripped line, unredacted -- the file is evidence,
+            # and redaction happens on the way out (the Logs tab, the zip).
+            self._record.write(f"[{_clock(now)}] {clean}")
         if parsed.kind == "progress":
             self._show_progress(parsed)
             return
@@ -794,7 +813,7 @@ class LogPanel(QWidget):
             self._show_step(parsed.text)
         scrollbar = self._text.verticalScrollBar()
         following = scrollbar.value() >= scrollbar.maximum() - _STICK_SLACK_PX
-        self._write(f"[{_clock(time.time())}] {parsed.text}", parsed.kind)
+        self._write(f"[{_clock(now)}] {parsed.text}", parsed.kind)
         if following:
             scrollbar.setValue(scrollbar.maximum())
 
@@ -877,17 +896,26 @@ class LogPanel(QWidget):
         *,
         title: str = "running",
         cancel: threading.Event | None = None,
+        record_as: str | None = None,
     ) -> bool:
         """Start streaming `source()` into the panel. Returns False if a job is already running.
 
         `cancel`, when given, is set by `stop()` so a source that supports it
         (e.g. an engine's `run(cancel=...)`) can be interrupted even while blocked
         between lines (review finding, 2026-08-21).
+
+        `record_as`, when given, keeps every appended line in
+        `logs/runs/<record_as>-<stamp>.log` until the job ends (T93). The
+        console does not pass it: it follows `docker logs -f` and never ends.
         """
         if self.running:
             logger.debug("log panel busy; run() ignored")
             return False
         self._dispose_last_job()
+        self._close_record("--- ended without a finish reaching the panel")
+        if record_as is not None:
+            self._record = runlog.RunLog.open(runlog.runs_dir(), record_as)
+            self._record.write(f"--- {title}")
         self._cancel = cancel
         self._stop_requested = False
         # The zero the elapsed clock counts from. Set on the RUN, not on the
@@ -1012,9 +1040,11 @@ class LogPanel(QWidget):
         # panel does not know whether it was following a log or building a
         # server.
         if self._stop_requested:
-            self._status.say("cancelled")
+            verdict = "cancelled"
         else:
-            self._status.say(("finished: " if ok else "FAILED: ") + message)
+            verdict = ("finished: " if ok else "FAILED: ") + message
+        self._status.say(verdict)
+        self._close_record(f"--- {verdict}")
         # Stopped, then shown ONE more time. The ticker is what makes the field
         # live, and a job that has ended must not go on counting; but the last
         # value is the run's total, which is the number somebody wants after a
@@ -1030,6 +1060,14 @@ class LogPanel(QWidget):
             self._bar.setStyleSheet(_bar_style(self._text.palette()))
         self._stop_button.setEnabled(False)
         self.run_finished.emit(ok, message)
+
+    def _close_record(self, last_line: str) -> None:
+        """Write the run's last line and close its record, if one is open (T93)."""
+        record, self._record = self._record, None
+        if record is None:
+            return
+        record.write(last_line)
+        record.close()
 
     def _show_elapsed(self) -> None:
         """Put the run's elapsed time in the header field."""

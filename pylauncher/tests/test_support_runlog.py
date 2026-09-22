@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ import pytest
 from yulon import platform
 from yulon.support import runlog
 from yulon.support.runlog import KEEP, RunLog
+from yulon.ui import catalog_view
 
 
 def _at(second: int) -> datetime:
@@ -108,3 +110,25 @@ def test_a_folder_that_cannot_be_made_gives_an_inactive_log_not_an_exception(
 def test_runs_live_under_the_snapshot_folder_of_the_config_dir() -> None:
     assert runlog.logs_dir() == platform.config_dir() / "logs"
     assert runlog.runs_dir() == platform.config_dir() / "logs" / "runs"
+
+
+def _panel_runs(path: Path) -> list[tuple[str, bool]]:
+    """`(owner, passes record_as)` for every `.run(` on a log panel in one module."""
+    found: list[tuple[str, bool]] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "run":
+            continue
+        owner = ast.unparse(node.func.value)
+        if owner in {"self._log", "self.rebuild_log", "self.console_log"}:
+            found.append((owner, any(k.arg == "record_as" for k in node.keywords)))
+    return found
+
+
+def test_every_install_and_rebuild_run_is_recorded_and_the_console_is_not() -> None:
+    """The six callers, by name. The console follows `docker logs -f` forever and is not a run."""
+    ui = Path(catalog_view.__file__).parent
+    calls = _panel_runs(ui / "catalog_view.py") + _panel_runs(ui / "controller_view.py")
+    expected = [("self._log", True), ("self.console_log", False)] + [("self.rebuild_log", True)] * 5
+    assert sorted(calls) == sorted(expected), calls
