@@ -2548,11 +2548,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "unreadable folder answers the empty list, which the tab shows as nothing to view "
         "and the zip as a file it did not have -- never a claim about a folder of the user's"
     ),
-    ("support/sources.py", "conf_files"): (
+    ("support/sources.py", "_conf_listing"): (
         "T93. Lists an install's conf folders to name the live `*.conf` files a support zip "
-        "copies and reads `DatabaseInfo` passwords from; reads only, writes nothing. It lets "
-        "`OSError` out on purpose: its callers name the unlistable folder in the zip's "
-        "manifest rather than letting 'could not look' pass for 'nothing there'"
+        "copies and reads `DatabaseInfo` passwords from, and sets apart the ones reached "
+        "through a link so the zip cannot be made to carry a file from outside the install; "
+        "reads only, writes nothing. It lets `OSError` out on purpose: its callers name the "
+        "unlistable folder in the zip's manifest rather than letting 'could not look' pass "
+        "for 'nothing there'"
     ),
     ("support/sources.py", "gather_known"): (
         "T93. Lists `db-secrets/` and `credentials/` to find every password this machine has "

@@ -16,6 +16,7 @@ from yulon.catalog.catalog import load_catalog
 from yulon.state import KnownInstall
 from yulon.support import runlog
 from yulon.support.sources import (
+    SKIPPED,
     InstallFacts,
     Sources,
     collect_live_logs,
@@ -173,9 +174,80 @@ def test_a_tail_that_took_the_whole_bound_is_reported_as_a_timeout(
 ) -> None:
     monkeypatch.setattr(docker, "compose_container_id", lambda s, d, *, wsl_distro=None: "id")
     monkeypatch.setattr(docker, "log_tail", lambda *a, **k: None)
-    clock = itertools.cycle([0.0, 21.0])
+    clock = itertools.cycle([0.0, 1.0, 0.0, 21.0])  # compose ps: 1 s; docker logs: 21 s
     got = collect_live_logs(_tbc_install(tmp_path), monotonic=lambda: next(clock))
-    assert {live.problem for live in got} == {"timed out after 20 s"}
+    assert [live.problem for live in got] == ["timed out after 20 s"] + [SKIPPED] * 2
+
+
+def test_a_wedged_docker_is_asked_once_per_target_across_every_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung daemon must cost one bound, not three per install (T93 review, fix round 1)."""
+    now = [0.0]
+    asked: list[tuple[str, str | None]] = []
+
+    def container_id(
+        service: str, server_dir: Path, *, wsl_distro: str | None = None
+    ) -> str | None:
+        asked.append(("ps", wsl_distro))
+        if wsl_distro is None:
+            now[0] += 31.0  # `compose ps` ran into its own 30 s bound
+            return None
+        return f"id-{service}"
+
+    def tail(
+        container: str, lines: int = 0, *, wsl_distro: str | None = None, timeout: float = 0.0
+    ) -> str | None:
+        asked.append(("logs", wsl_distro))
+        return f"log of {container}\n"
+
+    monkeypatch.setattr(docker, "compose_container_id", container_id)
+    monkeypatch.setattr(docker, "log_tail", tail)
+    native = [_tbc_install(tmp_path / "a"), _tbc_install(tmp_path / "b")]
+    in_wsl = InstallFacts("wow-tbc", "0badc0de", tmp_path / "w", "Ubuntu", TBC)
+    silent: set[str | None] = set()
+    got = [
+        collect_live_logs(install, monotonic=lambda: now[0], silent_targets=silent)
+        for install in (*native, in_wsl)
+    ]
+    assert [call for call in asked if call[1] is None] == [("ps", None)]
+    first, *rest = [live.problem for live in got[0] + got[1]]
+    assert first == "timed out after 30 s finding its container"
+    assert rest == [SKIPPED] * 5
+    assert [live.text is not None for live in got[2]] == [True, True, True]
+    assert asked.count(("ps", "Ubuntu")) == 3 and asked.count(("logs", "Ubuntu")) == 3
+    assert silent == {None}
+
+
+def test_a_linked_conf_is_left_out_of_the_bundle_list_and_named(tmp_path: Path) -> None:
+    """Task 5 zips `conf_files()` by content: a link could bring in a file from anywhere."""
+    install = _tbc_install(tmp_path)
+    etc = install.server_dir / "etc"
+    etc.mkdir(parents=True)
+    (etc / "mangosd.conf").write_text("x = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside.conf"
+    linked_pw = "Link" + secrets.token_hex(6)
+    outside.write_text(
+        f'LoginDatabaseInfo = "tbc-db;3306;mangos;{linked_pw};tbcrealmd"\n', encoding="utf-8"
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "bots.conf").write_text("x = 1\n", encoding="utf-8")
+    try:
+        (etc / "realmd.conf").symlink_to(outside)
+        (etc / "modules").symlink_to(elsewhere, target_is_directory=True)
+    except OSError:
+        pytest.skip("this machine cannot make a symlink")
+    assert conf_files(install.server_dir) == [etc / "mangosd.conf"]
+    (install.server_dir / ".db_password").write_text("tbc-pw-1234\n", encoding="utf-8")
+    known = gather_known(
+        Sources(config_dir=platform.config_dir(), app_log=None, installs=(install,))
+    )
+    assert known.missing == (
+        f"{install.label}: etc/realmd.conf is a link, not a file: left out",
+        f"{install.label}: etc/modules/bots.conf is a link, not a file: left out",
+    )
+    assert linked_pw in known.values, "masking reads the linked file all the same"
 
 
 def test_the_docker_seams_carry_their_bound_and_ask_the_daemon(

@@ -28,9 +28,12 @@ FILE_CAP = 2 * 1024 * 1024
 
 LIVE_TAIL_LINES = 2000
 LIVE_TIMEOUT_S = 20.0
-"""Per `docker logs` read. Finding the container first is `compose_container_id()`'s own
-30 s bound, so a wedged daemon costs up to 50 s per container; one that is simply not
-running answers both at once."""
+"""Per `docker logs` read. Finding the container first is `docker.COMPOSE_PS_TIMEOUT`.
+The first ask that takes its whole bound stops every later ask of that docker (see
+`collect_live_logs`), so a wedged daemon costs one bound per docker, not per container."""
+
+SKIPPED = "skipped: docker did not answer"
+"""A container not asked about because its docker already ran into a bound this run."""
 
 CONF_DIRS: tuple[str, ...] = ("etc", "etc/modules", "env/dist/etc", "env/dist/etc/modules")
 """Where an install's live confs are: CMaNGOS `etc/`, AzerothCore's `env/dist/etc/`.
@@ -190,16 +193,41 @@ def snapshots(config_dir: Path) -> list[Path]:
     return _logs_in(runlog.logs_dir(config_dir))
 
 
-def conf_files(server_dir: Path) -> list[Path]:
-    """This install's live `*.conf` files under `CONF_DIRS`. Raises `OSError` if unlistable."""
-    found: list[Path] = []
+def _through_a_link(server_dir: Path, folder: str) -> bool:
+    """Whether any folder from `server_dir` down to `server_dir/folder` is a link."""
+    here = server_dir
+    for part in Path(folder).parts:
+        here = here / part
+        if here.is_symlink():
+            return True
+    return False
+
+
+def _conf_listing(server_dir: Path) -> tuple[list[Path], list[Path]]:
+    """`CONF_DIRS`' `*.conf` files, split into real files and links. Raises `OSError`.
+
+    A conf reached through a link -- the file itself, or a folder on the way to
+    it -- is a link: Task 5's zip copies `conf_files()` by content, and a link
+    could bring a file from anywhere on the machine into it.
+    """
+    files: list[Path] = []
+    links: list[Path] = []
     for folder in CONF_DIRS:
         here = server_dir / folder
-        if here.is_dir():
-            found += sorted(
-                path for path in here.iterdir() if path.suffix == ".conf" and path.is_file()
-            )
-    return found
+        if not here.is_dir():
+            continue
+        linked_folder = _through_a_link(server_dir, folder)
+        for path in sorted(p for p in here.iterdir() if p.suffix == ".conf" and p.is_file()):
+            (links if linked_folder or path.is_symlink() else files).append(path)
+    return files, links
+
+
+def conf_files(server_dir: Path) -> list[Path]:
+    """This install's live `*.conf` files under `CONF_DIRS`, links left out. Raises `OSError`.
+
+    `gather_known()` names every link it leaves out in `Known.missing`.
+    """
+    return _conf_listing(server_dir)[0]
 
 
 def _secret(value: str | None) -> str | None:
@@ -267,14 +295,21 @@ def gather_known(sources: Sources) -> Known:
                     f"{install.label}: its generated database password could not be read"
                 )
         try:
-            confs = conf_files(install.server_dir)
+            confs, links = _conf_listing(install.server_dir)
         except OSError as exc:
             missing.append(
                 f"{install.label}: its conf folders could not be listed "
                 f"({exc.strerror or type(exc).__name__})"
             )
             continue
-        for path in confs:
+        missing += [
+            f"{install.label}: {path.relative_to(install.server_dir).as_posix()} "
+            "is a link, not a file: left out"
+            for path in links
+        ]
+        # A link is still READ for its passwords: masking more is harmless, and
+        # the value it holds may well turn up in a log that is bundled.
+        for path in confs + links:
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -327,7 +362,10 @@ def keep_tail(text: str, limit: int = FILE_CAP) -> str:
 
 
 def collect_live_logs(
-    install: InstallFacts, *, monotonic: Callable[[], float] = time.monotonic
+    install: InstallFacts,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    silent_targets: set[str | None] | None = None,
 ) -> list[LiveLog]:
     """A fresh `docker logs --tail 2000` of each of this install's containers.
 
@@ -336,15 +374,39 @@ def collect_live_logs(
     installs. A container that cannot be found or read is a `LiveLog` with a
     problem, never an exception. An install this catalog does not know has no
     container names to ask for, and gives none.
+
+    A wedged daemon is when people make a support file, and every ask of one
+    costs a whole bound. So the first ask that takes its whole bound marks the
+    docker it went to -- this machine's (`None`) or one WSL distro's -- in
+    `silent_targets`, and every later container on that docker is `SKIPPED`
+    without asking. Pass one set for every install of a bundle; the default is
+    a fresh set, which still spares the rest of this install.
     """
     if install.entry is None:
         return []
+    silent = silent_targets if silent_targets is not None else set()
+    target = install.wsl_distro
     spec = install.entry.container_spec()
     found: list[LiveLog] = []
     for name in (spec.world, spec.auth, spec.db):
+        if target in silent:
+            found.append(LiveLog(name, None, SKIPPED))
+            continue
+        started = monotonic()
         container = docker.compose_container_id(
-            spec.service_for(name), install.server_dir, wsl_distro=install.wsl_distro
+            spec.service_for(name), install.server_dir, wsl_distro=target
         )
+        took = monotonic() - started
+        if container is None and took >= docker.COMPOSE_PS_TIMEOUT:
+            silent.add(target)
+            found.append(
+                LiveLog(
+                    name,
+                    None,
+                    f"timed out after {docker.COMPOSE_PS_TIMEOUT:.0f} s finding its container",
+                )
+            )
+            continue
         if container is None:
             found.append(
                 LiveLog(
@@ -357,16 +419,14 @@ def collect_live_logs(
             continue
         started = monotonic()
         text = docker.log_tail(
-            container, LIVE_TAIL_LINES, wsl_distro=install.wsl_distro, timeout=LIVE_TIMEOUT_S
+            container, LIVE_TAIL_LINES, wsl_distro=target, timeout=LIVE_TIMEOUT_S
         )
         if text is None:
-            took = monotonic() - started
-            problem = (
-                f"timed out after {LIVE_TIMEOUT_S:.0f} s"
-                if took >= LIVE_TIMEOUT_S
-                else "docker could not read its log"
-            )
-            found.append(LiveLog(name, None, problem))
+            if monotonic() - started >= LIVE_TIMEOUT_S:
+                silent.add(target)
+                found.append(LiveLog(name, None, f"timed out after {LIVE_TIMEOUT_S:.0f} s"))
+            else:
+                found.append(LiveLog(name, None, "docker could not read its log"))
             continue
         found.append(LiveLog(name, text))
     return found

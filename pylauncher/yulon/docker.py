@@ -1124,6 +1124,12 @@ never do.
 """
 
 
+COMPOSE_PS_TIMEOUT = 30.0
+"""`compose_container_id()`'s bound. Named so the support bundle (T93) can tell a
+`None` that took the whole bound -- a daemon that did not answer -- from one that
+came back at once."""
+
+
 def compose_container_id(
     service: str, server_dir: Path, *, wsl_distro: str | None = None
 ) -> str | None:
@@ -1143,7 +1149,10 @@ def compose_container_id(
     it was collected for.
     """
     proc = _docker(
-        ["compose", "ps", "-a", "-q", service], cwd=server_dir, wsl_distro=wsl_distro, timeout=30.0
+        ["compose", "ps", "-a", "-q", service],
+        cwd=server_dir,
+        wsl_distro=wsl_distro,
+        timeout=COMPOSE_PS_TIMEOUT,
     )
     if proc.returncode != 0:
         logger.warning(f"could not resolve {service} in {server_dir}: {proc.stderr.strip()}")
