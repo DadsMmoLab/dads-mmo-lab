@@ -2534,6 +2534,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "most an unpruned folder; its own `except OSError` logs and returns, because "
         "retention failing must not fail the stop it runs in front of"
     ),
+    ("support/runlog.py", "_prune"): (
+        "T93. The same retention as `logsnap._prune`, for the run logs under `logs/runs/`: "
+        "lists that folder to keep the newest ten of one kind, matched by exact name so a "
+        "longer kind sharing the prefix is not pruned with it. It decides a DELETE of the "
+        "app's own run logs and never a write; the file just opened is excluded by identity, "
+        "and its own `except OSError` logs and returns, because retention failing must not "
+        "fail the install or rebuild whose output is being kept"
+    ),
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"
