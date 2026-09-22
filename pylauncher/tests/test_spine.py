@@ -2542,6 +2542,25 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "and its own `except OSError` logs and returns, because retention failing must not "
         "fail the install or rebuild whose output is being kept"
     ),
+    ("support/sources.py", "_logs_in"): (
+        "T93. Lists `logs/` or `logs/runs/` to name the app's own log files for the Logs tab "
+        "and the support zip, newest first; decides no write and no delete anywhere. An "
+        "unreadable folder answers the empty list, which the tab shows as nothing to view "
+        "and the zip as a file it did not have -- never a claim about a folder of the user's"
+    ),
+    ("support/sources.py", "conf_files"): (
+        "T93. Lists an install's conf folders to name the live `*.conf` files a support zip "
+        "copies and reads `DatabaseInfo` passwords from; reads only, writes nothing. It lets "
+        "`OSError` out on purpose: its callers name the unlistable folder in the zip's "
+        "manifest rather than letting 'could not look' pass for 'nothing there'"
+    ),
+    ("support/sources.py", "gather_known"): (
+        "T93. Lists `db-secrets/` and `credentials/` to find every password this machine has "
+        "kept, so the support zip can remove them; reads only, writes nothing. A folder "
+        "that is not there has nothing kept; one that cannot be listed is named in "
+        "`Known.missing`, because a password it could not see is one it cannot promise to "
+        "have removed"
+    ),
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"

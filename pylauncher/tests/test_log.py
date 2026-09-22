@@ -928,3 +928,20 @@ def test_a_file_handler_that_was_already_there_keeps_file_logging_marked_done(
         root.removeHandler(survivor)
         survivor.close()
         log_module._file_configured = False
+
+
+def test_file_path_names_the_log_this_process_really_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T93: the Logs tab must find the log even when it fell back to the temp dir."""
+    from yulon.log import file_path
+
+    assert file_path() is None
+    configure(config_dir=tmp_path / "config")
+    assert file_path() == tmp_path / "config" / "yulon.log"
+
+    _reset_for_tests()
+    elsewhere = tmp_path / "temp"
+    monkeypatch.setattr(log_module.tempfile, "gettempdir", lambda: str(elsewhere))
+    configure(config_dir=_a_directory_nothing_can_be_created_under(tmp_path / "blocked"))
+    assert file_path() == elsewhere / "yulon" / "yulon.log"

@@ -1156,7 +1156,11 @@ def compose_container_id(
 
 
 def log_tail(
-    container: str, lines: int = LOG_TAIL_LINES, *, wsl_distro: str | None = None
+    container: str,
+    lines: int = LOG_TAIL_LINES,
+    *,
+    wsl_distro: str | None = None,
+    timeout: float = _LOG_TAIL_TIMEOUT,
 ) -> str | None:
     """The last `lines` of a container's log, or `None` if it could not be read.
 
@@ -1171,16 +1175,33 @@ def log_tail(
     zero-byte file, presented as evidence, on every stop whose log driver was
     wedged (retrospective audit, 2026-09-08). A log that is genuinely empty is
     `""`; a log that could not be read is nothing at all.
+
+    `timeout` is the snapshot's 30 s unless a caller has a tighter budget: the
+    support bundle reads three containers per install and gives each 20 s (T93).
     """
     proc = _docker(
         ["logs", "--tail", str(lines), container],
         wsl_distro=wsl_distro,
-        timeout=_LOG_TAIL_TIMEOUT,
+        timeout=timeout,
     )
     if proc.returncode != 0:
         logger.warning(f"could not read the logs of {container}: {proc.stderr.strip()}")
         return None
     return proc.stdout
+
+
+def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> str | None:
+    """The Docker daemon's version, or `None` when it does not answer (T93's system-info.txt).
+
+    A read, bounded, never raising: `_docker` turns a missing CLI and a timeout
+    into a non-zero result, and both are "not reachable" to the one caller.
+    """
+    proc = _docker(
+        ["version", "--format", "{{.Server.Version}}"], wsl_distro=wsl_distro, timeout=timeout
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
 
 
 def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
