@@ -1548,3 +1548,25 @@ def test_every_record_write_and_close_runs_on_the_gui_thread(
     wait_for_panel(panel)
     assert [name for name, _ in seen] == ["write", "write", "write", "write", "close"], seen
     assert {thread for _, thread in seen} == {threading.main_thread()}, seen
+
+
+def test_a_recorded_line_carries_no_t35_marker(qapp: object) -> None:
+    """The record holds what the panel shows: `lines.parse().text`, never the `\\x1e` prefixes.
+
+    `strip_ansi` removes escape sequences and nothing else, so a tee of the
+    stripped line put `\\x1etool ` in front of every relayed compiler, docker and
+    git line, and kept `\\x1eprogress ` on a reading whose payload would not
+    parse. `install_wiring`'s transcript settled the same question the same way.
+    """
+    panel = LogPanel()
+    relayed = lines.TOOL + "compiling"
+    unparsed_reading = lines.PROGRESS + "not a reading"
+    assert lines.parse(unparsed_reading).kind != "progress", "the fixture parses as progress now"
+    panel.run(lambda: iter([relayed, unparsed_reading]), record_as="rebuild-wow-tbc-0badc0de")
+    path = panel.recording
+    wait_for_panel(panel)
+    assert path is not None
+    assert "\x1e" not in path.read_text(encoding="utf-8")
+    body = _recorded(path)[1:-1]
+    assert all(STAMP.match(line) for line in body), body
+    assert [STAMP.sub("", line, count=1) for line in body] == ["compiling", "not a reading"]

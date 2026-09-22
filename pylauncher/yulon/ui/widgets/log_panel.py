@@ -803,9 +803,15 @@ class LogPanel(QWidget):
         parsed = lines.parse(clean)
         now = time.time()
         if self._record is not None and parsed.kind != "progress":
-            # T93: the ANSI-stripped line, unredacted -- the file is evidence,
-            # and redaction happens on the way out (the Logs tab, the zip).
-            self._record.write(f"[{_clock(now)}] {clean}")
+            # T93: the DISPLAY text, `parsed.text`, and not `clean`. T35's
+            # markers are not escape sequences, so `strip_ansi` leaves them:
+            # a tee of `clean` put `\x1etool ` in front of every relayed
+            # compiler, docker and git line, greppable by nothing that reads
+            # a log -- `install_wiring`'s transcript settled the same question
+            # the same way. `parse()` redacts nothing, so the file is still
+            # raw evidence; redaction happens on the way out (the Logs tab,
+            # the zip).
+            self._record.write(f"[{_clock(now)}] {parsed.text}")
         if parsed.kind == "progress":
             self._show_progress(parsed)
             return
