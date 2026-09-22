@@ -294,6 +294,22 @@ def test_system_info_names_the_versions_and_every_install_and_survives_a_raising
     assert "(not in this version's catalog)" in text
 
 
+def test_system_info_does_not_ask_a_docker_that_already_went_silent(tmp_path: Path) -> None:
+    """A daemon that ran into a bound during the live logs costs no second 20 s here."""
+    wsl = InstallFacts("wow-tbc", "0badc0de", tmp_path / "w", "Ubuntu", TBC)
+    sources = Sources(platform.config_dir(), None, (wsl,))
+    asked: list[str | None] = []
+
+    def version(distro: str | None) -> str | None:
+        asked.append(distro)
+        return "27.0.1"
+
+    text = system_info(sources, version, silent_targets={None})
+    assert asked == ["Ubuntu"]
+    assert f"Docker on this machine: {SKIPPED}" in text
+    assert "Docker in WSL distro Ubuntu: 27.0.1" in text
+
+
 def test_sources_for_app_hashes_each_folder_and_learns_the_public_passwords(
     tmp_path: Path,
 ) -> None:

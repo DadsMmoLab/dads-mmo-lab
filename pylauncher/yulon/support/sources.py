@@ -12,7 +12,7 @@ import os
 import platform as host_platform
 import sys
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -437,7 +437,13 @@ def docker_version(wsl_distro: str | None) -> str | None:
     return docker.server_version(wsl_distro=wsl_distro, timeout=LIVE_TIMEOUT_S)
 
 
-def _ask_version(ask: Callable[[str | None], str | None], distro: str | None) -> str:
+def _ask_version(
+    ask: Callable[[str | None], str | None],
+    distro: str | None,
+    silent: Collection[str | None],
+) -> str:
+    if distro in silent:
+        return SKIPPED
     try:
         answer = ask(distro)
     except Exception as exc:  # boundary: system-info.txt is always written
@@ -445,18 +451,28 @@ def _ask_version(ask: Callable[[str | None], str | None], distro: str | None) ->
     return answer or "not reachable"
 
 
-def system_info(sources: Sources, docker_version: Callable[[str | None], str | None]) -> str:
-    """`system-info.txt`: versions, Docker, and every install in place of `state.json`."""
+def system_info(
+    sources: Sources,
+    docker_version: Callable[[str | None], str | None],
+    *,
+    silent_targets: Collection[str | None] = frozenset(),
+) -> str:
+    """`system-info.txt`: versions, Docker, and every install in place of `state.json`.
+
+    A docker in `silent_targets` -- one that already ran into a bound while the
+    bundle read its containers (`collect_live_logs`) -- is not asked again: its
+    line says `SKIPPED` instead of costing another `LIVE_TIMEOUT_S`.
+    """
     lines = [
         f"Yu'lon {__version__}",
         f"Operating system: {host_platform.platform()}",
         f"Python: {sys.version.split()[0]}",
         f"Qt: {sources.qt_version or 'not reported'}",
-        f"Docker on this machine: {_ask_version(docker_version, None)}",
+        f"Docker on this machine: {_ask_version(docker_version, None, silent_targets)}",
     ]
     distros = sorted({distro for install in sources.installs if (distro := install.wsl_distro)})
     lines += [
-        f"Docker in WSL distro {distro}: {_ask_version(docker_version, distro)}"
+        f"Docker in WSL distro {distro}: {_ask_version(docker_version, distro, silent_targets)}"
         for distro in distros
     ]
     lines += ["", f"Servers Yu'lon knows about: {len(sources.installs)}"]
