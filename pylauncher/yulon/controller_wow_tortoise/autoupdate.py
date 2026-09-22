@@ -492,6 +492,7 @@ class GuardedApplier(Applier):
         folder: FolderSource | None = None,
         complete: Completer | None = None,
         replacing: bool = False,
+        first_configure_sql: bool = True,
     ) -> ApplyReport:
         # `folder` and `complete` are the base class's second way to fill
         # `modules/<id>` (a module from a link or a folder). Passed THROUGH,
@@ -503,7 +504,12 @@ class GuardedApplier(Applier):
         note = self._guard(manifest, "install")
         return _with_note(
             super().install(
-                manifest, values, folder=folder, complete=complete, replacing=replacing
+                manifest,
+                values,
+                folder=folder,
+                complete=complete,
+                replacing=replacing,
+                first_configure_sql=first_configure_sql,
             ),
             note,
         )

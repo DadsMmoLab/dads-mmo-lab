@@ -212,7 +212,112 @@ def test_install_asks_for_a_configure_time_answer_it_has_no_default_for() -> Non
     assert apply_module.required_prompts(m, "remove") == ()
 
 
-def test_every_shipped_value_bearing_step_runs_at_install() -> None:
+BATTLEPASS_LIKE: dict[str, Any] = {
+    **ALE,
+    "id": "bp",
+    "patches": [],
+    "sql": [
+        {"db": "characters", "path": "sql/tables.sql"},
+        {
+            "db": "characters",
+            "statement": "UPDATE bp_config SET value='{scale}' WHERE name='scale'",
+            "when": "configure",
+        },
+    ],
+    "prompts": [{"key": "scale", "question": "scale", "kind": "float", "default": "1.1"}],
+}
+
+
+def test_install_runs_configure_time_sql_once_and_update_leaves_those_rows_alone(
+    tmp_path: Path,
+) -> None:
+    """`battlepass`'s enable rows: written at install with the answer, not re-written by update.
+
+    Two halves, both from review 2026-09-22: the configure-time `_sql` line in
+    `install()` was unreached by any test (deleting it left 211 green), and
+    `update()` -- which is `install()` -- would have put `battlepass_config`
+    back to the prompt defaults on every update, over whatever the person had
+    changed in that table since.
+    """
+    git = _FakeGit({"SitMeansRest.lua": "x\n", "sql/tables.sql": "CREATE ..."})
+    sql = _FakeSql()
+    applier = Applier(
+        tmp_path,
+        git=git,
+        sql=sql,
+        remote_url=_Origins("https://github.com/Brytenwally/SitMeansRest.git"),
+        unmodified=lambda p, r: True,
+        no_local_commits=lambda p, r: True,
+    )
+    m = parse_manifest(BATTLEPASS_LIKE)
+    _have_requirements(tmp_path, m)
+
+    applier.install(m, {"scale": "2.5"})
+    assert sql.files == [("characters", "tables.sql")]
+    assert sql.statements == [("characters", "UPDATE bp_config SET value='2.5' WHERE name='scale'")]
+
+    applier.update(m)
+    assert len(sql.statements) == 1, "an update re-deploys but does not reset the rows"
+    assert len(sql.files) == 2, "the update did run, and ran its install-time file"
+
+
+def test_configure_time_sql_is_refused_before_the_install_time_sql_runs(tmp_path: Path) -> None:
+    """One refusal for both passes, and it comes before either wrote a row.
+
+    Without the early check the install-time file would run, and only then
+    would the configure-time pass raise a sentence saying no rows were written.
+    """
+    sql = _FakeSql()
+    applier = Applier(
+        tmp_path,
+        git=_FakeGit({"SitMeansRest.lua": "x\n", "sql/tables.sql": "C"}),
+        sql=sql,
+        world_running=lambda: True,
+    )
+    m = parse_manifest(BATTLEPASS_LIKE)
+    _have_requirements(tmp_path, m)
+
+    with pytest.raises(ApplyError, match="No SQL was run and no rows were written"):
+        applier.install(m)
+    assert sql.files == [] and sql.statements == []
+
+
+def test_a_bool_answer_is_spelled_true_or_false_in_a_lua_file(tmp_path: Path) -> None:
+    """The dialog answers a bool as "1"/"0" (conf spelling); Lua reads `= 0` as TRUE.
+
+    So the patch into a `.lua` target spells the answer `true`/`false`, and
+    the manifest's `(true|false)` regex keeps matching the line on the next
+    configure. A `.conf` target keeps the conf spelling.
+    """
+    git = _FakeGit({"SitMeansRest.lua": "ENABLED = true,\n", "sql/tables.sql": "C"})
+    applier = Applier(tmp_path, git=git, sql=_FakeSql())
+    m = parse_manifest(
+        {
+            **ALE,
+            "patches": [
+                {
+                    "file": f"{LUA}/SitMeansRest.lua",
+                    "find": r"(ENABLED\s*=\s*)(true|false)",
+                    "replace": r"\g<1>{on}",
+                    "regex": True,
+                    "when": "configure",
+                }
+            ],
+            "prompts": [{"key": "on", "question": "on?", "kind": "bool", "default": "true"}],
+        }
+    )
+    _have_requirements(tmp_path, m)
+    deployed = tmp_path / LUA / "SitMeansRest.lua"
+
+    applier.install(m, {"on": "0"})
+    assert deployed.read_text(encoding="utf-8") == "ENABLED = false,\n"
+    applier.configure(m, {"on": "1"})
+    assert deployed.read_text(encoding="utf-8") == "ENABLED = true,\n"
+    applier.configure(m, {"on": "no"})
+    assert deployed.read_text(encoding="utf-8") == "ENABLED = false,\n"
+
+
+def test_every_shipped_configure_patch_is_among_the_templates_install_asks_for() -> None:
     """No shipped manifest may carry a value only `configure()` -- which nothing calls -- writes."""
     for manifest in _shipped_all():
         for patch in manifest.patches:

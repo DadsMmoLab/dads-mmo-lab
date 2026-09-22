@@ -58,7 +58,7 @@ class _Applier:
     def __init__(self) -> None:
         self.installed: list[str] = []
 
-    def install(self, manifest: Manifest, values: object = None) -> ApplyReport:
+    def install(self, manifest: Manifest, values: object = None, **kw: object) -> ApplyReport:
         self.installed.append(manifest.id)
         return ApplyReport("install", manifest.id, family=manifest.type, done=("clone",))
 

@@ -1486,6 +1486,26 @@ def _destroys_message(found: _Reset, rel: str, item_id: str, url: str, doing: st
 _INT = re.compile(r"[+-]?\d+")
 
 _BOOL_WORDS = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+
+
+def _lua_spelling(manifest: Manifest, vals: Mapping[str, str]) -> dict[str, str]:
+    """`vals`, with every `bool` prompt's answer spelled `true`/`false` for a Lua file.
+
+    The dialog answers a `bool` as `"1"`/`"0"` because that is what a
+    worldserver conf holds (`manifest_prompt._BOOL_CHOICES`), and `check_answer`
+    takes either spelling. A `.lua` target reads `ENABLED = 0` as TRUE -- only
+    `nil` and `false` are false in Lua -- so a "no" written in conf spelling
+    turns a feature ON, and the manifest's `(true|false)` regex then never
+    matches that line again.
+    """
+    kinds = {prompt.key: prompt.kind for prompt in manifest.prompts}
+    out = dict(vals)
+    for key, value in vals.items():
+        if kinds.get(key) == "bool":
+            out[key] = "true" if value.strip().lower() in _TRUE_WORDS else "false"
+    return out
+
 
 _SAFE_IN_QUERY = re.compile(r"^[A-Za-z0-9_.-]+$")
 """What an answer may contain before it is pasted into an `ExistsCheck.query`.
@@ -1756,8 +1776,15 @@ class Applier:
         folder: FolderSource | None = None,
         complete: Completer | None = None,
         replacing: bool = False,
+        first_configure_sql: bool = True,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
+
+        `first_configure_sql` is False from `update()` only: a fresh deploy
+        just replaced the script, so its configure-time PATCHES are re-run,
+        but the configure-time SQL writes rows the person may have changed by
+        hand since (`battlepass_config`), and an update is not a reason to
+        put those back to the prompt defaults.
 
         `folder` is the second way to fill `modules/<id>`: the bytes come from a
         directory on the user's own disk through `FolderSource.copier` instead
@@ -1922,6 +1949,11 @@ class Applier:
             manifest = self._completed(manifest, clone, complete)
         self._deploy(manifest, clone, log)
         self._patches(manifest, clone, vals, "install", log)
+        # Both SQL passes are refused as one, BEFORE either runs: the guard's
+        # own sentence says no rows were written, and after the install-time
+        # pass that would be false of the configure-time one.
+        if first_configure_sql:
+            self._refuse_direct_sql_into_a_running_world(manifest, "configure")
         self._sql(manifest, clone, vals, "install", log)
         self._conf(manifest, clone, vals, log)
         # Then the configure-time steps, as this item's first configure
@@ -1930,7 +1962,8 @@ class Applier:
         # patch may target the conf that step activates (`mod-ale`'s does),
         # which is the state a later `configure()` always finds.
         self._patches(manifest, clone, vals, "configure", log)
-        self._sql(manifest, clone, vals, "configure", log)
+        if first_configure_sql:
+            self._sql(manifest, clone, vals, "configure", log)
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
         self._finish_claim(manifest, clone, url, claimed, log, log.client_copies or previous_copies)
@@ -2059,7 +2092,7 @@ class Applier:
         refusal = self._update_refusal(manifest)
         if refusal is not None:
             raise ApplyError(refusal)
-        return self.install(manifest, values)
+        return self.install(manifest, values, first_configure_sql=False)
 
     def _update_refusal(self, manifest: Manifest) -> str | None:
         """Why this clone must not be fast-forwarded, in the user's words, or `None`.
@@ -2964,7 +2997,8 @@ class Applier:
                 continue
             base = clone if patch.in_clone else self.server_dir
             files = sorted(base.glob(patch.file)) if _is_glob(patch.file) else [base / patch.file]
-            replacement = _render(patch.replace, vals, f"patch {patch.file}")
+            spelled = _lua_spelling(manifest, vals) if patch.file.endswith(".lua") else vals
+            replacement = _render(patch.replace, spelled, f"patch {patch.file}")
             for path in files:
                 if not path.is_file():
                     raise ApplyError(f"patch target missing: {path}")
