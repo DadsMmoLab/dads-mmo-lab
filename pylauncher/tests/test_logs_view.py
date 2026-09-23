@@ -5,16 +5,22 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
+from PySide6.QtCore import Qt
 
+from tests.conftest import HANG_BOUND, process_events, pump_until
 from yulon import platform
 from yulon.catalog.catalog import load_catalog
 from yulon.support import bundle, runlog
+from yulon.support import sources as support_sources
 from yulon.support.sources import InstallFacts, LiveLog
-from yulon.ui.logs_view import COPY_LINES, LogsView
+from yulon.ui.logs_view import COPY_LINES, OPEN_FOLDER_TIP, READING, LogsView
 from yulon.ui.widgets.job import run_inline
 
 CATALOG = load_catalog()
@@ -222,3 +228,139 @@ def test_a_long_run_log_name_does_not_widen_the_tab(qapp: object) -> None:
     view = _view()
     view.refresh()
     assert view.minimumSizeHint().width() <= 600, view.minimumSizeHint()
+
+
+def test_the_open_folder_tooltip_says_those_files_are_not_cleaned(qapp: object) -> None:
+    """Lead ruling: a player must not read "log folder" as "safe to send"."""
+    view = _view()
+    assert view.open_folder_button.toolTip() == OPEN_FOLDER_TIP
+    assert OPEN_FOLDER_TIP == (
+        "Your run logs and server snapshots, as written \u2014 passwords are NOT taken out "
+        "of these. Send the support file instead; Yu'lon's own log goes into it too."
+    )
+
+
+Held = list[tuple[Callable[[], object], Callable[[object], None], Callable[[object], None]]]
+
+
+def _holding(held: Held) -> Callable[..., None]:
+    return lambda work, done, failed: held.append((work, done, failed))
+
+
+def test_reading_shows_until_the_read_lands_and_copy_waits_for_it(qapp: object) -> None:
+    _seed_app_log(1)
+    held: Held = []
+    copied: list[str] = []
+    view = _view(jobs=_holding(held), clipboard=copied.append)
+    view.refresh()
+    assert view.shown_text() == READING
+    view.copy_last_lines()
+    assert copied == [], "copied the placeholder while the read was in flight"
+    work, done, _failed = held[0]
+    done(work())
+    assert view.shown_text().splitlines() == ["line 0 ***"]
+    view.copy_last_lines()
+    assert copied == ["line 0 ***"]
+
+
+def test_a_slower_earlier_read_never_paints_over_a_newer_one(qapp: object) -> None:
+    config = platform.config_dir()
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "yulon.log").write_text("newer\n", encoding="utf-8")
+    held: Held = []
+    view = _view(jobs=_holding(held))
+    view.refresh()
+    view.refresh()
+    work, done, _failed = held[1]
+    done(work())
+    assert view.shown_text().splitlines() == ["newer"]
+    (config / "yulon.log").write_text("stale\n", encoding="utf-8")
+    work, done, _failed = held[0]
+    done(work())
+    assert view.shown_text().splitlines() == ["newer"], "the older read painted over the newer one"
+
+
+def test_a_secret_stored_after_the_first_read_is_masked_after_a_picker_change(
+    qapp: object,
+) -> None:
+    """Lead ruling: every read rebuilds the redactor, a picker change included."""
+    _seed_app_log(1)
+    late = "Chan" + secrets.token_hex(8)
+    runs = runlog.runs_dir()
+    runs.mkdir(parents=True)
+    (runs / "install-wow-vanilla-20260922T101010Z.log").write_text(
+        f"settled {late}\n", encoding="utf-8"
+    )
+    view = _view()
+    view.refresh()
+    assert view.source_picker.currentText() == "App log (yulon.log)"
+    # What the end of an install does: a channel credential appears.
+    (platform.config_dir() / "credentials" / "wow-vanilla-0badc0de.json").write_text(
+        json.dumps({"account": "OWNER", "password": late, "host": "localhost", "port": 7878}),
+        encoding="utf-8",
+    )
+    view.source_picker.setCurrentIndex(
+        view.source_picker.findText("Run: ", Qt.MatchFlag.MatchStartsWith)
+    )
+    assert view.source_picker.currentText().startswith("Run: ")
+    assert view.shown_text().splitlines() == ["settled ***"]
+
+
+def test_no_source_is_read_on_the_gui_thread(qapp: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A WSL server's folder boots its distro, a network drive blocks: never on the GUI thread."""
+    _seed_app_log(1)
+    seen: list[threading.Thread] = []
+    real_sources, real_known = support_sources.sources_for_app, support_sources.gather_known
+
+    def sources_for_app(*args: Any, **kwargs: Any) -> Any:
+        seen.append(threading.current_thread())
+        return real_sources(*args, **kwargs)
+
+    def gather_known(*args: Any, **kwargs: Any) -> Any:
+        seen.append(threading.current_thread())
+        return real_known(*args, **kwargs)
+
+    monkeypatch.setattr(support_sources, "sources_for_app", sources_for_app)
+    monkeypatch.setattr(support_sources, "gather_known", gather_known)
+    view = LogsView(lambda: [], CATALOG, bundle_seams=_seams())
+    view.show()
+    try:
+        pump_until(lambda: view.shown_text().splitlines() == ["line 0 ***"], "the read lands")
+    finally:
+        view.hide()
+    assert len(seen) >= 2
+    assert all(thread is not threading.main_thread() for thread in seen), seen
+
+
+def test_a_read_that_lands_after_the_tab_is_gone_is_dropped_quietly(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The view is deleted mid-read (the window closed): the late result must reach nothing."""
+    import shiboken6
+
+    _seed_app_log(1)
+    started, gate, returned = threading.Event(), threading.Event(), threading.Event()
+    real_known = support_sources.gather_known
+
+    def gather_known(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        gate.wait(HANG_BOUND)
+        try:
+            return real_known(*args, **kwargs)
+        finally:
+            returned.set()
+
+    monkeypatch.setattr(support_sources, "gather_known", gather_known)
+    raised: list[object] = []
+    monkeypatch.setattr(sys, "excepthook", lambda kind, value, tb: raised.append(value))
+    monkeypatch.setattr(threading, "excepthook", lambda hook: raised.append(hook.exc_value))
+    monkeypatch.setattr(sys, "unraisablehook", lambda hook: raised.append(hook.exc_value))
+    view = LogsView(lambda: [], CATALOG, bundle_seams=_seams())
+    view.refresh()
+    pump_until(started.is_set, "the read starts")
+    shiboken6.delete(view)
+    assert not shiboken6.isValid(view)
+    gate.set()
+    pump_until(returned.is_set, "the read finishes")
+    process_events(50)
+    assert raised == []

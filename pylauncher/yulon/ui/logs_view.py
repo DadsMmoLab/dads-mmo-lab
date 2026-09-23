@@ -8,6 +8,17 @@ Refresh). A window is built before a test has pointed `config_dir()` at a
 scratch folder (`test_main.py`'s module-scoped window), and the first thing a
 refresh reads is the credential store.
 
+**Every read is a job, never GUI-thread work** (T93 review). A read lists the
+credential stores and every install's conf folders, and an adopted server's
+folder is a path under `wsl.localhost`: touching it boots a stopped distro, and
+a server on an unplugged drive blocks for the OS timeout. So each read --
+sources, known passwords, redactor, file tail, redaction -- runs through the
+`JobRunner` as one `_read_logs()` call, and the viewer says `READING` until
+it lands. Each read carries a generation number and only the newest one is
+painted, so a slow read never overwrites a newer one. Each read also builds its
+own redactor, so a password stored since the last read (a channel credential at
+the end of an install) is masked when the next file is picked.
+
 "Open log folder" opens `logs/` (runs and snapshots) and never the folder that
 holds `yulon.log`: that one also holds `credentials/` and `db-secrets/` in
 clear text, and a player who zips the folder they were shown must not be able
@@ -18,6 +29,7 @@ the zip, redacted.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -51,7 +63,15 @@ Discord cuts a message at 2000 characters, so a paste is for a quick look; the
 support file is the real route.
 """
 
-OPEN_FOLDER_TIP = "Your run logs and server snapshots. Yu'lon's own log goes into the support file."
+OPEN_FOLDER_TIP = (
+    "Your run logs and server snapshots, as written \u2014 passwords are NOT taken out of "
+    "these. Send the support file instead; Yu'lon's own log goes into it too."
+)
+
+READING = "Reading…"
+"""What the viewer says while a read is in flight. Copy refuses to copy it."""
+
+NOTHING_LOGGED = "Nothing has been logged yet."
 
 SavePicker = Callable[[QWidget, Path], Path | None]
 
@@ -77,6 +97,48 @@ def _set_clipboard(text: str) -> None:
 
 def _open_folder(folder: Path) -> None:
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+
+@dataclass(frozen=True)
+class _Read:
+    """One read's result, painted only if `generation` is still the newest."""
+
+    generation: int
+    items: tuple[support_sources.Viewable, ...]
+    shown: Path | None
+    text: str
+
+
+def _read_logs(
+    installs: Sequence[KnownInstall],
+    catalog: Catalog,
+    qt_version: str,
+    wanted: str | None,
+    generation: int,
+) -> _Read:
+    """List what can be shown and read `wanted` (else the first), redacted. Never raises.
+
+    Runs on a worker thread. The redactor is built HERE, for this read, from
+    the passwords known now.
+    """
+    try:
+        sources = support_sources.sources_for_app(installs, catalog, qt_version=qt_version)
+        known = support_sources.gather_known(sources)
+        redactor = Redactor.build(known.values, home=Path.home())
+        items = tuple(support_sources.viewables(sources))
+    except Exception as exc:  # boundary: the tab says so rather than losing the read
+        logger.warning(f"the Logs tab could not list its files: {type(exc).__name__}")
+        return _Read(generation, (), None, f"The logs could not be listed ({type(exc).__name__}).")
+    shown = next((item.path for item in items if str(item.path) == wanted), None)
+    if shown is None and items:
+        shown = items[0].path
+    if shown is None:
+        return _Read(generation, items, None, "")
+    try:
+        text = support_sources.read_tail(shown)
+    except OSError as exc:
+        text = f"This file could not be read: {exc.strerror or type(exc).__name__}"
+    return _Read(generation, items, shown, redactor.redact(text))
 
 
 def _size_text(size: int) -> str:
@@ -129,7 +191,9 @@ class LogsView(QWidget):
         self._open_folder = open_folder
         self._bundle_seams = bundle_seams
         self._now = now
-        self._redactor: Redactor | None = None
+        self._generation = 0
+        """The newest read started; a result from any other is dropped."""
+        self._reading = False
         self._saving_to: Path | None = None
 
         intro = QLabel(
@@ -145,10 +209,11 @@ class LogsView(QWidget):
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
         self.source_picker.setMinimumContentsLength(24)
-        self.source_picker.currentIndexChanged.connect(self._show_selected)
+        self.source_picker.currentIndexChanged.connect(self._on_pick)
         self.viewer = QPlainTextEdit(self)
         self.viewer.setReadOnly(True)
         self.viewer.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.viewer.setPlaceholderText(NOTHING_LOGGED)
         self.save_button = QPushButton("Save logs for support…", self)
         self.save_button.setToolTip(
             "One zip of every log and settings file, passwords taken out, to send to support"
@@ -181,47 +246,63 @@ class LogsView(QWidget):
 
     # -- reading ----------------------------------------------------------
 
-    def _sources(self) -> support_sources.Sources:
-        return support_sources.sources_for_app(
-            self._installs(), self._catalog, qt_version=qVersion()
-        )
-
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802  (Qt's own name)
         super().showEvent(event)
         self.refresh()
 
     @Slot()
     def refresh(self) -> None:
-        """Re-read what exists, rebuild the redactor, keep the selection where it was."""
-        sources = self._sources()
-        known = support_sources.gather_known(sources)
-        self._redactor = Redactor.build(known.values, home=Path.home())
-        chosen = self.source_picker.currentData()
+        """Re-list what exists and re-read the picked file, keeping the selection."""
+        self._start_read(self.source_picker.currentData())
+
+    @Slot(int)
+    def _on_pick(self, index: int) -> None:
+        if index >= 0:
+            self._start_read(self.source_picker.itemData(index))
+
+    def _start_read(self, wanted: object) -> None:
+        """Start a read on the job runner; the viewer says `READING` until it lands."""
+        self._generation += 1
+        generation = self._generation
+        # Taken on this thread, where they live: the install list and the Qt version.
+        installs = list(self._installs())
+        catalog = self._catalog
+        qt_version = qVersion()
+        chosen = str(wanted) if wanted else None
+        self._reading = True
+        self.viewer.setPlainText(READING)
+        self._jobs(
+            lambda: _read_logs(installs, catalog, qt_version, chosen, generation),
+            self._read_done,
+            self._read_failed,
+        )
+
+    @Slot(object)
+    def _read_done(self, result: object) -> None:
+        if not isinstance(result, _Read) or result.generation != self._generation:
+            return
+        self._reading = False
         self.source_picker.blockSignals(True)
         try:
             self.source_picker.clear()
-            for item in support_sources.viewables(sources):
+            for item in result.items:
                 self.source_picker.addItem(item.label, str(item.path))
-            index = self.source_picker.findData(chosen) if chosen else -1
-            self.source_picker.setCurrentIndex(max(index, 0))
+            if result.shown is not None:
+                self.source_picker.setCurrentIndex(self.source_picker.findData(str(result.shown)))
         finally:
             self.source_picker.blockSignals(False)
-        self._show_selected()
-
-    @Slot()
-    def _show_selected(self) -> None:
-        data = self.source_picker.currentData()
-        if not data or self._redactor is None:
-            self.viewer.setPlainText("")
-            self.viewer.setPlaceholderText("Nothing has been logged yet.")
-            return
-        try:
-            text = support_sources.read_tail(Path(str(data)))
-        except OSError as exc:
-            text = f"This file could not be read: {exc.strerror or type(exc).__name__}"
-        self.viewer.setPlainText(self._redactor.redact(text))
+        self.viewer.setPlainText(result.text)
         scrollbar = self.viewer.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    @Slot(object)
+    def _read_failed(self, error: object) -> None:
+        # `_read_logs` catches everything it can meet, so this is the boundary
+        # behind it. It carries no generation, so it only replaces `READING`.
+        logger.debug(f"a Logs tab read failed: {type(error).__name__}")
+        if self._reading:
+            self._reading = False
+            self.viewer.setPlainText(f"The logs could not be read ({type(error).__name__}).")
 
     def shown_text(self) -> str:
         """What the viewer shows -- already redacted."""
@@ -231,7 +312,10 @@ class LogsView(QWidget):
 
     @Slot()
     def copy_last_lines(self) -> None:
-        """Put the viewer's last `COPY_LINES` lines on the clipboard."""
+        """Put the viewer's last `COPY_LINES` lines on the clipboard: what it shows, redacted."""
+        if self._reading:
+            self.status.setText("Still reading this log; copy again in a moment.")
+            return
         lines = self.shown_text().splitlines()[-COPY_LINES:]
         if not lines:
             self.status.setText("Nothing to copy yet.")
@@ -262,11 +346,19 @@ class LogsView(QWidget):
         if dest is None:
             logger.debug("support file: the save dialog was cancelled")
             return False
-        sources = self._sources()
+        installs = list(self._installs())
+        catalog = self._catalog
+        qt_version = qVersion()
         seams = self._bundle_seams
+
+        def work() -> bundle.BundleReport:
+            # Worker thread, like every other read here (see the module docstring).
+            sources = support_sources.sources_for_app(installs, catalog, qt_version=qt_version)
+            return bundle.save(dest, sources, seams=seams)
+
         self._set_saving(dest)
         self.status.setText("Saving the support file… reading each server's log can take a minute.")
-        self._jobs(lambda: bundle.save(dest, sources, seams=seams), self._saved, self._save_failed)
+        self._jobs(work, self._saved, self._save_failed)
         return True
 
     @Slot(object)
