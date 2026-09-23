@@ -57,6 +57,22 @@ the choice here is about what a worldserver reads, not about what passes.
 """
 
 
+RUN_AGAIN_CHOICE_NOTE = (
+    "This is already installed, and running it again applies the answer below as "
+    "the new setting. Yu'lon does not remember what you picked last time, so what "
+    "is selected now is the default: pick the one you want now."
+)
+"""Shown when an installed module's choice is asked again: an Update, or Install over it (T100).
+
+The dialog pre-selects the manifest's DEFAULT, and no earlier answer is kept
+anywhere, so clicking OK on an Update of Hearthstone Tweaks set back to
+30 minutes a player who had picked 5 -- without a word. Remembering the answer
+is a general feature and the owner's call (T104); until then the dialog says
+what OK will do. Only for a `choice`: that is the kind a player picks once and
+expects to stay picked.
+"""
+
+
 class ManifestPromptDialog(QDialog):
     """One row per prompt, the manifest's own question as the label.
 
@@ -71,6 +87,8 @@ class ManifestPromptDialog(QDialog):
         parent: QWidget | None,
         manifest: Manifest,
         prompts: Sequence[Prompt],
+        *,
+        again: bool = False,
     ) -> None:
         super().__init__(parent)
         self._manifest = manifest
@@ -82,11 +100,14 @@ class ManifestPromptDialog(QDialog):
         self.setModal(True)
 
         box = QVBoxLayout(self)
-        intro = QLabel(
-            f"{manifest.name} ({manifest.id}) asks for this before it can be installed.", self
-        )
-        intro.setWordWrap(True)
-        box.addWidget(intro)
+        when = "its steps run again" if again else "it can be installed"
+        self._notes: list[str] = [f"{manifest.name} ({manifest.id}) asks for this before {when}."]
+        if again and any(prompt.kind == "choice" for prompt in self._prompts):
+            self._notes.append(RUN_AGAIN_CHOICE_NOTE)
+        for text in self._notes:
+            note = QLabel(text, self)
+            note.setWordWrap(True)
+            box.addWidget(note)
         form = QFormLayout()
         for prompt in self._prompts:
             label = QLabel(prompt.question, self)
@@ -117,6 +138,10 @@ class ManifestPromptDialog(QDialog):
     def questions(self) -> tuple[str, ...]:
         """The question text shown for each prompt, in the manifest's order."""
         return tuple(self._questions)
+
+    def notes(self) -> str:
+        """The sentences shown above the questions, one per line."""
+        return "\n".join(self._notes)
 
     def answers(self) -> dict[str, str]:
         """What is currently filled in, as the `values` mapping the applier takes."""
@@ -195,7 +220,11 @@ class ManifestPromptDialog(QDialog):
 
 
 def ask_manifest_prompts(
-    parent: QWidget | None, manifest: Manifest, prompts: Sequence[Prompt]
+    parent: QWidget | None,
+    manifest: Manifest,
+    prompts: Sequence[Prompt],
+    *,
+    again: bool = False,
 ) -> Mapping[str, str] | None:
     """Put the manifest's questions to the user. `None` means they cancelled.
 
@@ -203,7 +232,7 @@ def ask_manifest_prompts(
     cancelling must change nothing on disk, whereas an empty mapping is what a
     manifest with nothing to ask produces.
     """
-    dialog = ManifestPromptDialog(parent, manifest, prompts)
+    dialog = ManifestPromptDialog(parent, manifest, prompts, again=again)
     if dialog.exec() != int(QDialog.DialogCode.Accepted):
         logger.info(f"{manifest.id}: the user cancelled the questions; nothing was applied")
         return None

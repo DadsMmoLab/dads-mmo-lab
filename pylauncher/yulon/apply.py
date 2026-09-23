@@ -1557,7 +1557,12 @@ def must_ask(prompt: Prompt) -> bool:
     upstream's RESET file, and while only a missing default opened the dialog
     every GUI install applied that and changed nothing. The dialog is handed
     every required prompt with its default filled in, so clicking straight
-    through installs exactly what the old silent path did.
+    through a FIRST install applies exactly what the old silent path did.
+
+    It is asked only of a prompt `required_prompts()` returned: a `choice` a
+    manifest declares but no template renders is never put to anyone. Which
+    shipped manifests end up asking is pinned by the view's sweep test, not
+    listed here.
 
     One function because two places answer "will Install ask me something?" --
     the dialog gate in `ControllerView._module_values()` and the Modules row's

@@ -44,8 +44,9 @@
   "notes": [
     "Applies after a restart or .reload spells.",
     "The five choices are the five files upstream ships (AsgavinYT/hearthstone-cooldowns);",
-    "30_Min is its reset. A `choice` opens the Install dialog even with a default (T100),",
-    "and Update asks again, so changing the cooldown is Update with another answer.",
+    "30_Min is its reset. A `choice` opens the Install dialog even with a default (T100).",
+    "Update or a second Install asks again with the DEFAULT selected -- the earlier answer",
+    "is not remembered (T104) -- and applies whatever is picked then; the dialog says so.",
     "Remove used to UPDATE spell_dbc row 8690 (ported from wow-manage.sh), a table install",
     "never wrote; it now runs the reset file against item_template, where install wrote."
   ]
