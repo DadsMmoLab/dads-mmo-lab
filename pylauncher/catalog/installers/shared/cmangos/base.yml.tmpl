@@ -49,6 +49,54 @@ services:
     volumes:
       - db-data:/var/lib/mysql
     restart: unless-stopped
+    # THE DATABASE OUTLIVES THE WORLD ON EVERY STOP PATH (T98). The app's Stop
+    # is `compose stop`, which stops mangosd first and this service last. A
+    # Docker DAEMON shutdown -- a PC shutdown, a Docker Desktop quit,
+    # `systemctl stop docker` -- does not read depends_on: it signals all three
+    # containers at once. Measured on yulon-ubuntu (2026-09-23) with this
+    # file: mariadbd was gone 1.8 s after the signal, and the world, still
+    # draining its save queue, got 0 saves in and 9 refused. Tortoise keeps its
+    # character tables on MyISAM, where a save cut between its DELETE and its
+    # INSERT leaves a character without those rows.
+    #
+    # So SIGTERM is held here while any server container is still connected
+    # (a TCP client from off this container; the app's own `docker exec`
+    # queries and the healthcheck are loopback or socket and do not count),
+    # then passed on to mariadbd. The hold is bounded at 240 s: the app's
+    # stops all pass `-t 300`, which overrides stop_grace_period, and 60 s is
+    # left for mariadbd's own shutdown (measured 1.8-2.6 s). A count that
+    # fails stops the database at once rather than hold it. The grace is the
+    # world's 5m so a daemon shutdown never SIGKILLs the database mid-wait.
+    # tests/test_db_outlives_world.py runs this script. `$$` is compose's
+    # escape for a literal `$`.
+    stop_grace_period: 5m
+    entrypoint:
+      - bash
+      - -c
+      - |
+        db=
+        held=
+        hold() {
+          [ -n "$$held" ] && return
+          held=1
+          i=0
+          while [ $$i -lt 240 ]; do
+            left=$$(MYSQL_PWD="$$MARIADB_ROOT_PASSWORD" mariadb -uroot -N -B -e "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID() AND HOST LIKE '%:%' AND HOST NOT LIKE '127.%' AND HOST NOT LIKE '::1%' AND HOST NOT LIKE '[::1]%'" 2>/dev/null) || break
+            [ "$${left:-0}" = 0 ] && break
+            echo "yulon: holding shutdown, $$left server connection(s) still open"
+            sleep 1
+            i=$$((i + 1))
+          done
+          kill -TERM "$$db" 2>/dev/null
+        }
+        trap hold TERM INT
+        docker-entrypoint.sh "$$@" &
+        db=$$!
+        [ -n "$$held" ] && kill -TERM "$$db"
+        while kill -0 "$$db" 2>/dev/null; do wait "$$db"; done
+        wait "$$db"
+      - yulon-db
+    command: ["mariadbd"]
     healthcheck:
       # mariadb's own probe, shipped in the official 10.6 and 11 images: it
       # connects over TCP as the image's healthcheck user and waits for InnoDB
