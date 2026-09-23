@@ -259,10 +259,11 @@ def build_window() -> object:
     from PySide6.QtGui import QDesktopServices, QGuiApplication
     from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QPushButton, QWidget
 
-    from yulon import __version__
+    from yulon import __version__, forgetting
     from yulon.catalog.catalog import load_catalog
     from yulon.install_wiring import installer_for_app
     from yulon.state import KnownInstall, load_state
+    from yulon.ui.answers import said_yes
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.icons import get_app_icon, get_tab_icon
@@ -468,8 +469,10 @@ def build_window() -> object:
 
         def forget() -> None:
             # Remembered before forgetting, and put back on a failed save
-            # (review, T34 round 2): `ControllerView.forget_install()` catches
-            # `OSError` and keeps the tab open, which promises the record is
+            # (review, T34 round 2): `finish_removal()` (T95; before it,
+            # `ControllerView.forget_install()`) catches `OSError` and keeps the
+            # tab open, and `purge.run()` catches it for an uninstall. Keeping
+            # the tab promises the record is
             # still there — a promise the live `AppState` broke the moment
             # `state.forget()` ran, before this ever tried to write anything.
             # Nothing else calls `remember()` between here and the raise, so a
@@ -545,6 +548,113 @@ def build_window() -> object:
             # title longer than it needs to be.
             retitle_controller_tabs(tabs, controllers.values())
         catalog_view.forget_installed(game, state.installed_dirs())
+
+    removal_pending: set[tuple[str, Path]] = set()
+    """Removals waiting on their stop (T95). A key is added right before
+    `stop_for_removal()` and taken out by the first answer to it."""
+
+    def request_removal(game: str, server_dir: object) -> None:
+        """Take one server off Yu'lon's list, deleting nothing (T95). THE entry point.
+
+        Three routes land here and nowhere else: the × on the server's sidebar
+        tab, "Remove from Yu'lon…" in that tab's right-click menu, and the
+        Server tab's button of the same name (`ControllerView.remove_requested`,
+        T34's "Forget this install…" renamed). One path is one refusal rule,
+        one dialog and one forget, so the routes cannot drift apart.
+
+        Refused, with the tab's own reason, while anything runs on it
+        (`forget_refusal()`). Dropping the tab is `drop_controller()`, and a
+        teardown during an import is the abort `busy_reason()` exists to
+        prevent. Asked once, default No, read through `said_yes` (T33).
+
+        A server the last poll saw running, or one no poll has answered for,
+        is stopped first on the tab's own job runner, and the rest continues in
+        `on_stopped_for_removal()`. A folder that is gone is never stopped:
+        without the folder, no project name can be proved (T34's rule).
+
+        If the window is closed during that stop, the record stays. The stop's
+        answer is queued into a loop that has already ended
+        (`_stop_background_threads()`), which is the same thing an interrupted
+        install does. Nothing half-forgotten is left behind.
+        """
+        key = (game, Path(str(server_dir)))
+        view = controllers.get(key)
+        if view is None or key in removal_pending:
+            return
+        refusal = view.forget_refusal()
+        if refusal is not None:
+            QMessageBox.information(window, forgetting.REFUSED_TITLE, refusal)
+            return
+        folder_gone = view.folder_is_gone()
+        facts = forgetting.Facts(
+            name=view.entry.name,
+            server_dir=key[1],
+            wsl_distro=view.services.controller.wsl_distro,
+            folder_gone=folder_gone,
+            stop_first=not folder_gone and view.last_seen_running() is not False,
+            built_here=not folder_gone and forgetting.built_here(key[1]),
+        )
+        answer = QMessageBox.question(
+            window,
+            forgetting.TITLE,
+            forgetting.question(facts),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if not said_yes(answer):
+            return
+        if facts.stop_first:
+            removal_pending.add(key)
+            view.stop_for_removal()
+            return
+        finish_removal(key)
+
+    def on_stopped_for_removal(game: str, server_dir: object, ok: bool, why: str) -> None:
+        """The stop a removal asked for has ended. Forget, or ask once more if it failed (T95)."""
+        key = (game, Path(str(server_dir)))
+        if key not in removal_pending:
+            return
+        removal_pending.discard(key)
+        view = controllers.get(key)
+        if view is None:
+            return
+        if not ok:
+            answer = QMessageBox.question(
+                window,
+                forgetting.STOP_FAILED_TITLE,
+                forgetting.stop_failed_question(view.entry.name, why),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if not said_yes(answer):
+                return
+        finish_removal(key)
+
+    def finish_removal(key: tuple[str, Path]) -> None:
+        """Forget the record, then drop the tab: `_forget_live_record()` + `on_uninstalled()`.
+
+        These are the same two steps an uninstall ends in, called by the window
+        itself rather than through `services.uninstall.forget`, which exists
+        only on the two families with an Uninstall.
+
+        A failed write keeps the tab. `_forget_live_record()` has already put
+        the record back into the live state, and a tab dropped over a record
+        that is still in `state.json` would come back at the next launch.
+        """
+        game, folder = key
+        try:
+            _forget_live_record(game, folder)()
+        except OSError as exc:
+            logger.error(f"could not forget {game} at {folder}: {exc}")
+            QMessageBox.warning(
+                window, forgetting.SAVE_FAILED_TITLE, forgetting.save_failed(folder, exc)
+            )
+            return
+        logger.info(
+            f"{game} at {folder} removed from Yu'lon's list; "
+            "nothing on disk or in Docker was deleted"
+        )
+        on_uninstalled(game, folder)
 
     def on_client_dir_changed(game: str, server_dir: object, client_dir: object) -> None:
         """This install's client folder was set, changed or cleared (T36): rebuild its tab.
@@ -647,6 +757,9 @@ def build_window() -> object:
         view = ControllerView(entry, services)
         view.uninstalled.connect(on_uninstalled)
         view.client_dir_changed.connect(on_client_dir_changed)
+        # T95: the Server tab's "Remove from Yu'lon…", and the stop a removal waits for.
+        view.remove_requested.connect(request_removal)
+        view.stopped_for_removal.connect(on_stopped_for_removal)
         # Every failure this view reports also lands in the app log. Each one is
         # already shown on its own tab, but the log is what a user pastes into a
         # bug report, and until now none of them reached it (review, 2026-08-22).

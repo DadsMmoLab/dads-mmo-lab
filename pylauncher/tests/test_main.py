@@ -1592,11 +1592,11 @@ def test_the_tabs_uninstaller_forgets_the_windows_own_live_state(
 def test_a_failing_save_restores_the_forgotten_record_in_the_live_state(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`ControllerView.forget_install()` catches `OSError` and keeps the tab open — a
-    promise about the record that the live `AppState` broke the moment
-    `state.forget()` ran, before the write that never landed (review, T34
-    round 2). Object identity, not a fresh load: the state this asserts on is
-    the same one every other tab still writes into.
+    """`main.finish_removal()` (T95; `ControllerView.forget_install()` until then)
+    catches `OSError` and keeps the tab open — a promise about the record that
+    the live `AppState` broke the moment `state.forget()` ran, before the write
+    that never landed (review, T34 round 2). Object identity, not a fresh load:
+    the state this asserts on is the same one every other tab still writes into.
     """
     server_dir = tmp_path / "forget-restore-me"
     seen_states: list[Any] = []
@@ -1618,6 +1618,233 @@ def test_a_failing_save_restores_the_forgotten_record_in_the_live_state(
     # Mutation: drop the `state.remember(install)` restore in
     # `main._forget_live_record()`'s `except OSError` and this fails — the
     # live state stays forgotten even though nothing was ever written.
+
+
+# --------------------------------------------- T95: removing a server from Yu'lon
+#
+# One path for the ×, the tab's right-click entry and the Server tab's button:
+# `request_removal()` refuses while busy, asks once, stops a running server
+# first, forgets through `_forget_live_record()` and drops the tab through
+# `on_uninstalled()`. Driven through the widgets a user presses.
+
+
+def _answer(monkeypatch: pytest.MonkeyPatch, *replies: bool) -> list[tuple[str, str, object]]:
+    """Answer each `QMessageBox.question` in turn, as the plain int the static call gives (T33)."""
+    from PySide6.QtWidgets import QMessageBox
+
+    asked: list[tuple[str, str, object]] = []
+    queue = list(replies)
+
+    def question(
+        _parent: object, title: str, text: str, _buttons: object = None, default: object = None
+    ) -> int:
+        asked.append((title, text, default))
+        yes = queue.pop(0) if queue else False
+        return int(QMessageBox.StandardButton.Yes if yes else QMessageBox.StandardButton.No)
+
+    monkeypatch.setattr(QMessageBox, "question", question)
+    return asked
+
+
+def _told(monkeypatch: pytest.MonkeyPatch, kind: str) -> list[str]:
+    from PySide6.QtWidgets import QMessageBox
+
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, kind, lambda *a, **k: told.append(a[2]))
+    return told
+
+
+def _removable_tab(
+    window: Any, monkeypatch: pytest.MonkeyPatch, server_dir: Path, game: str = "wow-tbc"
+) -> tuple[Any, list[int]]:
+    """A tab over a real folder, its jobs run inline, and its Stop recorded rather than run."""
+    from yulon.ui import controller_view as controller_view_module
+    from yulon.ui.widgets.job import run_inline
+
+    # Read at view construction (`ControllerView.__init__`), so it must be set before the emit.
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", lambda _parent: run_inline)
+    server_dir.mkdir(parents=True, exist_ok=True)
+    (server_dir / "keep-me.txt").write_text("the player's own file\n", encoding="utf-8")
+    _catalog_view(window).installed.emit(game, server_dir, None)
+    view = _tab_for(window, server_dir)
+    stops: list[int] = []
+
+    def stop() -> bool:
+        stops.append(1)
+        return True
+
+    view.services.controller.stop = stop
+    return view, stops
+
+
+def _remembered(window: Any, game: str, server_dir: Path) -> bool:
+    """The window's LIVE state: `saved_states[-1]` is the one `AppState` every tab writes into."""
+    return window.saved_states[-1].find(game, server_dir) is not None
+
+
+def test_the_server_tab_button_on_a_tbc_tab_asks_stops_forgets_and_keeps_every_file(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TBC has no Uninstall seam, so `services.uninstall.forget` never existed on it.
+
+    The window's own `_forget_live_record()` is what forgets. The tab was never
+    polled, so whether it runs is unknown, and unknown is stopped first.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, True)
+    server_dir = tmp_path / "t95-tbc"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+    assert view.services.uninstall is None
+    tabs = window.property("tabs")
+
+    view.forget_install_button.click()
+
+    assert len(asked) == 1
+    title, text, default = asked[0]
+    assert title == forgetting.TITLE
+    assert "Nothing is deleted" in text and "stopped first" in text
+    assert default == QMessageBox.StandardButton.No, "the dialog must default to No"
+    assert stops == [1], "a server that may be running was forgotten without a stop"
+    assert tabs.indexOf(view) == -1
+    assert view not in window.yulon_controllers
+    assert not _remembered(window, "wow-tbc", server_dir)
+    assert (server_dir / "keep-me.txt").is_file(), "removing from Yu'lon deleted a file"
+
+
+def test_answering_no_keeps_the_tab_the_record_and_the_server(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _answer(monkeypatch, False)
+    server_dir = tmp_path / "t95-no"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+
+    view.forget_install_button.click()
+
+    assert len(asked) == 1
+    assert stops == []
+    assert window.property("tabs").indexOf(view) != -1
+    assert _remembered(window, "wow-tbc", server_dir)
+    # Mutation: compare the answer with `is StandardButton.Yes` in `request_removal()`
+    # and the Yes test above fails: the fake returns a plain int (T33).
+
+
+def test_a_server_the_last_poll_saw_stopped_is_forgotten_without_a_stop(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon.controller import InstallStatus
+
+    asked = _answer(monkeypatch, True)
+    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t95-stopped")
+    view.services.controller.status = lambda: InstallStatus(db=False, auth=False, world=False)
+    view.refresh_status()
+
+    view.forget_install_button.click()
+
+    assert "stopped first" not in asked[0][1]
+    assert stops == []
+    assert window.property("tabs").indexOf(view) == -1
+
+
+def test_a_busy_tab_refuses_with_its_own_reason_and_asks_nothing(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _answer(monkeypatch, True)
+    told = _told(monkeypatch, "information")
+    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t95-busy")
+    monkeypatch.setattr(
+        type(view), "busy_reason", lambda _self: "The database import is still running."
+    )
+
+    view.forget_install_button.click()
+
+    assert told == ["The database import is still running."]
+    assert asked == [] and stops == []
+    assert window.property("tabs").indexOf(view) != -1
+
+
+def test_a_failed_stop_asks_again_and_no_keeps_everything(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from yulon import docker, forgetting
+
+    asked = _answer(monkeypatch, True, False)
+    server_dir = tmp_path / "t95-stop-fails"
+    view, _ = _removable_tab(window, monkeypatch, server_dir)
+
+    def refuse() -> bool:
+        raise docker.DockerCommandError("Docker would not say which project owns tbc-mangosd")
+
+    view.services.controller.stop = refuse
+
+    view.forget_install_button.click()
+
+    assert [title for title, _, _ in asked] == [forgetting.TITLE, forgetting.STOP_FAILED_TITLE]
+    assert "Docker would not say" in asked[1][1]
+    assert asked[1][2] == QMessageBox.StandardButton.No
+    assert window.property("tabs").indexOf(view) != -1
+    assert _remembered(window, "wow-tbc", server_dir)
+    assert "Docker would not say" in view.problem_label.text()
+
+
+def test_a_failed_stop_overridden_by_a_second_yes_forgets_anyway(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import docker
+
+    _answer(monkeypatch, True, True)
+    server_dir = tmp_path / "t95-stop-fails-yes"
+    view, _ = _removable_tab(window, monkeypatch, server_dir)
+
+    def refuse() -> bool:
+        raise docker.DockerCommandError("cannot stop")
+
+    view.services.controller.stop = refuse
+
+    view.forget_install_button.click()
+
+    assert window.property("tabs").indexOf(view) == -1
+    assert not _remembered(window, "wow-tbc", server_dir)
+
+
+def test_a_record_that_cannot_be_written_keeps_the_tab_and_the_live_record(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T34's OSError test, moved to the one path that now forgets."""
+    _answer(monkeypatch, True)
+    told = _told(monkeypatch, "warning")
+    server_dir = tmp_path / "t95-unwritable"
+    view, _ = _removable_tab(window, monkeypatch, server_dir)
+
+    def _refuse(app_state: Any, path: Any = None) -> None:
+        raise PermissionError(13, "Access is denied", "state.json")
+
+    monkeypatch.setattr(state, "save_state", _refuse)
+
+    view.forget_install_button.click()
+
+    assert told and "Access is denied" in told[0]
+    assert window.property("tabs").indexOf(view) != -1, "the tab went over a record still on disk"
+    assert _remembered(window, "wow-tbc", server_dir), "the failed forget was not undone"
+
+
+def test_a_gone_folder_is_forgotten_without_a_stop_and_with_t34s_words(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _answer(monkeypatch, True)
+    server_dir = tmp_path / "t95-gone"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+    shutil.rmtree(server_dir)
+
+    view.forget_install_button.click()
+
+    assert "no longer exists" in asked[0][1] and "NOT touched" in asked[0][1]
+    assert stops == [], "a folder that is gone was stopped by a project-name guess (T34's rule)"
+    assert window.property("tabs").indexOf(view) == -1
 
 
 # ------------------------------------------------ T36: the client-folder seam
