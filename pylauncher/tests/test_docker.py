@@ -3730,17 +3730,19 @@ _DAEMON_AGNOSTIC: dict[str, str] = {
         "chance to disagree with the argv it is already holding"
     ),
     "copy_from_image": (
-        "only an INSTALL reaches it - the conf stage, pulling `*.conf.dist` out of an image "
-        "this run just built - and an install is local by construction: "
-        "`install_wiring.installer_for_app()` passes no distro and says why ('an install "
-        "creates the server here'), because only an EXISTING install can live in a distro "
-        "the app has to name. Reaching a WSL daemon would also change what `dest` means: "
+        "two callers reach it and neither passes it a distro: the conf stage, pulling "
+        "`*.conf.dist` out of an image this run just built (an install is local by "
+        "construction: `install_wiring.installer_for_app()` passes no distro and says why - "
+        "'an install creates the server here' - because only an EXISTING install can live "
+        "in a distro the app has to name), and T94's reset (`reset_defaults._from_image`), "
+        "which refuses a server living in a WSL distro BEFORE it asks, for exactly the "
+        "`dest` reason below. Reaching a WSL daemon would also change what `dest` means: "
         "`docker cp` resolves its host side wherever the CLI runs, so the same argv would "
         "write the conf files into the distro's filesystem instead of the user's server "
         "folder - and unlike `run_container`, whose mount sources are sealed inside an "
         "opaque argv, there IS a translation for `dest` (`platform.wsl_linux_path()`). It "
-        "belongs to whoever holds the distro, not here: that is the caller, and no caller "
-        "has one yet."
+        "belongs to whoever holds the distro, not here: that is the caller, and the one "
+        "caller that holds one (the reset) refuses rather than translating."
     ),
 }
 
