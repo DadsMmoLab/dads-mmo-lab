@@ -872,6 +872,19 @@ def _regain_docker_group() -> None:
 
 def main() -> int:
     """Start the launcher."""
+    # BEFORE ANYTHING ELSE, including logging: this is how a packaged build is
+    # asked what version it is without a display, a config directory or Qt
+    # (T90). The release job runs it on all three runners and compares the
+    # answer with the tag, because v0.8.69-fixtest shipped a bundle that was
+    # stamped correctly and still reported the hand-written fallback - the
+    # stamp module had not reached the bundle, and nothing could see that from
+    # outside. `--provision` below is the precedent for an argument answered
+    # before PySide6 is imported.
+    if "--version" in sys.argv[1:]:
+        from yulon import __version__
+
+        print(__version__)
+        return 0
     configure(config_dir=platform.config_dir())
     _regain_docker_group()
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):

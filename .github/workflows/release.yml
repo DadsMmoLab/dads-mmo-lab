@@ -103,6 +103,18 @@ jobs:
 
       - run: pip install -r requirements.txt pyinstaller
 
+      # T90: the bundle carries the tag it was built from, so a forgotten bump of
+      # `yulon/__init__.py` cannot make the update check compare the wrong
+      # version - v0.8.68 shipped reporting 0.8.66. The stamp is a gitignored
+      # `yulon/_build_version.py` that `yulon.__init__` prefers over its
+      # hand-written fallback, and `collect_submodules("yulon")` in the spec is
+      # what carries it into the bundle. It must therefore be written BEFORE
+      # PyInstaller reads the package. A dispatch build of a branch writes
+      # nothing and keeps the fallback. Never fails.
+      - name: Stamp the version from the tag
+        shell: bash
+        run: python build/stamp_version.py "${GITHUB_REF_NAME}"
+
       # PYINSTALLER BUNDLES WHAT IT FINDS ON THE BUILDER, so a library missing
       # from the runner is a library missing from the artifact. Qt 6.5+ needs
       # libxcb-cursor0 to load its `xcb` platform plugin, the runner does not
@@ -150,6 +162,93 @@ jobs:
 
       - name: Build with PyInstaller
         run: pyinstaller build/pylauncher.spec --noconfirm --clean
+
+      # ASK THE BUILT BUNDLE, on every runner. v0.8.69-fixtest was cut with the
+      # stamp step already in this job: all three builds logged "stamped
+      # 0.8.69-fixtest", every job was green, and the published app reported
+      # 0.8.66-Public - the stamp module had not reached the bundle
+      # (`collect_submodules` returns nothing here; see build/pylauncher.spec).
+      # Nothing in the workflow could see that, because nothing ever asked the
+      # artifact what it thought it was.
+      #
+      # It cannot fail the release: `continue-on-error`, a `--version` that is
+      # allowed to come back empty, and a `::warning::` rather than an exit
+      # code, because the owner's rule is that a tag never fails over its
+      # version. A warning is visible on the run and in the annotations list.
+      - name: The built bundle reports the version it was stamped with
+        continue-on-error: true
+        # A HANG HERE WOULD COST THE TAG ITS ARTIFACTS. This step is the first
+        # thing in the workflow that ever RUNS the bundle, and on Windows it is
+        # a windowed exe: an unhandled exception in one of those is reported in
+        # a modal message box, which nothing on a headless runner will ever
+        # close. Left alone it would sit until GitHub's six-hour job limit, and
+        # a cancelled job never reaches "Attach to the GitHub Release" - so the
+        # release would lose the artifacts it was building. `continue-on-error`
+        # does not save that: it forgives a failure the step returns, not a
+        # step that never returns. Hence a bound on the step as well as on the
+        # call below.
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -uo pipefail
+          exe="dist/yulon/yulon"
+          [ "$RUNNER_OS" = "Windows" ] && exe="dist/yulon/yulon.exe"
+          # `--version` is answered before PySide6 is imported, so this needs no
+          # display and no Qt libraries on the runner.
+          #
+          # NOT `timeout(1)`: that is coreutils, and the macOS runner does not
+          # ship it - the step would die with "timeout: command not found" on
+          # one of the three platforms this has to work on. kill, sleep and
+          # `$!` are in every one of their shells.
+          #
+          # The kill takes the whole TREE, not just the process that was
+          # started. Measured locally against a stand-in that spawns a child:
+          # killing the parent alone left the child running, and a frozen
+          # bundle is exactly the case where there is something under it. `ps
+          # -o pid=,ppid=` and `awk` are on all three runners; `pkill -P`,
+          # `setsid` and a negative-PID group kill are not.
+          kill_tree() {
+            local parent="$1" child
+            for child in $(ps -o pid=,ppid= 2>/dev/null | awk -v p="$parent" '$2 == p {print $1}'); do
+              kill_tree "$child"
+            done
+            kill -9 "$parent" 2>/dev/null || true
+          }
+          answer="${RUNNER_TEMP}/version.txt"
+          : > "$answer"
+          "$exe" --version > "$answer" 2>/dev/null &
+          asked=$!
+          waited=0
+          while kill -0 "$asked" 2>/dev/null && [ "$waited" -lt 120 ]; do
+            sleep 1
+            waited=$((waited + 1))
+          done
+          if kill -0 "$asked" 2>/dev/null; then
+            kill_tree "$asked"
+            echo "::warning title=The built bundle did not answer in time::${exe} --version was still running after ${waited}s and was killed; a windowed build reports a crash in a modal box no runner can close"
+          fi
+          wait "$asked" 2>/dev/null || true
+          # `tr -d '\r'` on BOTH sides. On Windows the bundle and python both
+          # end their lines CRLF, `$(...)` strips the LF and leaves the CR, and
+          # a lone "\r" is not empty - so a dispatch build of a branch compared
+          # a real version against "\r" and warned that the stamp had not
+          # reached the bundle. Tag builds only passed because both sides
+          # carried the same stray byte.
+          built="$(tr -d '\r' < "$answer" | tail -1)"
+          expected="$(python build/stamp_version.py --derive "${GITHUB_REF_NAME}" 2>/dev/null | tr -d '\r' || true)"
+          if [ -z "$built" ]; then
+            # Its own case rather than a mismatch, because one plausible cause is
+            # not a stamp problem at all: the Windows build is a windowed exe,
+            # and whether it writes to a redirected pipe is a fact about the
+            # runner that this step is the first thing here to measure.
+            echo "::warning title=The built bundle did not answer --version::${exe} printed nothing; the release is published anyway"
+          elif [ -z "$expected" ]; then
+            echo "branch build: the bundle reports '${built}', and there is no tag to compare it with"
+          elif [ "$built" = "$expected" ]; then
+            echo "the bundle reports ${built}, which is the tag it was built from"
+          else
+            echo "::warning title=The bundle does not know its own version::built='${built}' tag='${expected}' - the stamp did not reach the bundle; the release is published anyway"
+          fi
 
       # The gate that closes this class instead of the instance.
       #
@@ -276,4 +375,143 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: pylauncher/release/*
+          # Stays as the FALLBACK. `notes-and-checksums` below replaces this
+          # body with the CHANGELOG entries the tag gained, and only when it
+          # found any; a release whose changelog says nothing new keeps
+          # GitHub's generated list rather than an empty page.
           generate_release_notes: true
+
+  # T90: ONE job for what belongs to the release as a whole. Each build job
+  # attaches its own artifact and cannot see the other two, so none of them can
+  # checksum the others, and none of them can own the body either - three
+  # concurrent writers of one release body is how it ends up being whichever
+  # runner finished last.
+  #
+  # `!cancelled()` rather than the default `success()`: fail-fast is off, so a
+  # release with two good artifacts still gets their checksums. The app refuses
+  # to self-install an artifact `SHA256SUMS` does not list, which is the whole
+  # point of publishing it, and a missing third line is honest.
+  #
+  # NOT gated on the tag as a whole (only the two attach steps are), so that a
+  # `workflow_dispatch` run proves this job the same way it proves the matrix -
+  # without publishing anything. `SHA256SUMS` then lands as a run artifact.
+  notes-and-checksums:
+    needs: build
+    if: ${{ !cancelled() }}
+    # EVERYTHING HERE IS ADDITIVE, so nothing here may turn a release that is
+    # already published red. The three build jobs have attached the artifacts
+    # by the time this starts; what this job adds is a checksum file and a
+    # better body. A directory in the release folder, or a transient GitHub API
+    # error in either attach step, would otherwise mark a finished release as
+    # failed and send whoever cut it looking for a broken build.
+    #
+    # It fails safe on the other side too: the app refuses to self-install an
+    # artifact `SHA256SUMS` does not list, so a release that did not get one
+    # offers the download page instead of installing something unproven. The
+    # step logs still show what went wrong, and the run is marked with it.
+    continue-on-error: true
+    # ubuntu-latest, unlike the build matrix: nothing here is compiled or
+    # bundled, so the glibc floor the `build` job pins 22.04 for does not apply,
+    # and this job does not inherit that label's dated expiry.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # release_notes.py reads CHANGELOG.md at the previous -Public tag with
+          # `git show`; the default shallow clone has neither that tag nor that
+          # blob, and the script would degrade to "no notes" on every release.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/download-artifact@v4
+        with:
+          # THE BUILD ARTIFACTS ONLY. `download-artifact` sees every artifact of
+          # the RUN, and this job uploads one of its own - so on "Re-run failed
+          # jobs" an unfiltered download drops the first attempt's SHA256SUMS
+          # back into the release folder, and the new file lists the old file
+          # under the hash it had before: a checksum line for a name no release
+          # carries. The upload below is deliberately named so that this
+          # pattern cannot match it, and the test pins that relationship in
+          # both directions - including that this pattern still matches all
+          # three `yulon-${{ matrix.artifact }}` names above.
+          pattern: yulon-*
+          # An action's inputs are never subject to `defaults.run`, so this path
+          # is from the repository root; the `run:` steps below are in
+          # `pylauncher/` and see the same directory as `release/`.
+          path: pylauncher/release
+          merge-multiple: true
+
+      - name: SHA256SUMS over every artifact this release carries
+        id: sums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cd release
+          ls -l
+          # The second stop for the re-run trap above, in case a future edit
+          # loosens the download pattern: whatever is here under this name is
+          # this job's own previous answer, never an artifact of the release.
+          rm -f SHA256SUMS
+          # REGULAR FILES ONLY, and never the file being written. `sha256sum`
+          # exits 1 on a directory, and under `set -e` that would fail a job
+          # whose whole output is optional. `-printf '%f\n'` keeps the bare
+          # names the format needs (a name with a newline in it would break
+          # this, and would break `sha256sum`'s own format as well; no artifact
+          # this workflow builds has one). `LC_ALL=C sort` so the file reads the
+          # same whatever the runner's locale is, and `-r` so an empty list runs
+          # nothing rather than leaving `sha256sum` reading stdin.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+            | LC_ALL=C sort > ../artifacts.txt
+          # All three builds failed, or the folder holds nothing but
+          # directories: a checksum file with no lines would read as "this
+          # release lists no artifact" rather than as "there is nothing here".
+          if [ ! -s ../artifacts.txt ]; then
+            echo "no artifact was built: nothing to checksum"
+            rm -f ../artifacts.txt
+            exit 0
+          fi
+          # Written OUTSIDE the directory and moved in, so the list cannot
+          # include the file being written half-made.
+          xargs -d '\n' -r sha256sum -- < ../artifacts.txt > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
+          rm -f ../artifacts.txt
+          cat SHA256SUMS
+          echo "have=true" >> "$GITHUB_OUTPUT"
+
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        shell: bash
+        run: |
+          python build/release_notes.py --tag "${GITHUB_REF_NAME}" --out "${RUNNER_TEMP}/notes.md"
+          if [ -s "${RUNNER_TEMP}/notes.md" ]; then echo "have=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Keep SHA256SUMS where a dispatch run can be read
+        if: steps.sums.outputs.have == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          # NOT `yulon-...`: that is the prefix the download pattern above
+          # matches, and this job must never be able to download its own
+          # answer on a re-run.
+          name: checksums-SHA256SUMS
+          # A re-run of this job finds the first attempt's artifact still in the
+          # run, and `upload-artifact@v4` refuses a name the run already holds
+          # unless it is told to replace it.
+          overwrite: true
+          path: pylauncher/release/SHA256SUMS
+
+      - name: Attach SHA256SUMS and the changelog body
+        if: startsWith(github.ref, 'refs/tags/v') && steps.sums.outputs.have == 'true' && steps.notes.outputs.have == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pylauncher/release/SHA256SUMS
+          body_path: ${{ runner.temp }}/notes.md
+
+      - name: Attach SHA256SUMS (the changelog gained nothing; generated notes stay)
+        if: startsWith(github.ref, 'refs/tags/v') && steps.sums.outputs.have == 'true' && steps.notes.outputs.have != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pylauncher/release/SHA256SUMS

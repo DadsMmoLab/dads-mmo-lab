@@ -427,6 +427,7 @@ Users download this app directly (AppImage/exe/dmg) with no package manager trac
 - If found, show a non-blocking banner/dialog with a link/button to download the new artifact for the user's platform.
 - **v1 scope:** check + notify only. Auto-download/auto-replace-the-running-binary is deferred — replacing a running AppImage/exe from within itself is fiddly per-platform and not worth the risk before the core app is stable.
 - Revisit in-place auto-update once Phase 5 packaging is proven reliable.
+- **What a release carries (T90):** every `v*` tag publishes a `SHA256SUMS` file beside its artifacts, so an update can be proved before it is trusted, and a release body made from `CHANGELOG.md` — the entries the tag added since the previous `-Public` tag, under their own headings. A tag whose changelog gained nothing keeps GitHub's generated notes, and a release is never refused over either. A packaged build also reports the tag it was built from rather than a hand-edited string, so the version the check compares is the version that was shipped. Whoever cuts the release does nothing new. The app does not yet install an update itself.
 
 ---
 
