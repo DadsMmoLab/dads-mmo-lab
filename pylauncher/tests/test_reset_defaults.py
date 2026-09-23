@@ -14,6 +14,7 @@ INSTALL instead.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import shutil
 import sys
@@ -554,7 +555,7 @@ def test_a_reset_writes_the_install_default_and_backs_each_file_up_first(tmp_pat
 
 
 def test_undo_brings_back_the_file_the_reset_replaced_byte_for_byte(tmp_path: Path) -> None:
-    """Spec Test 4, through the existing `tuning.restore`."""
+    """Spec Test 4, through `reset_defaults.restore` (atomic; not `tuning.restore`)."""
     server, _, _, tuned = _tuned_tbc(tmp_path)
     report = reset_defaults.reset(
         TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
@@ -952,27 +953,39 @@ def test_a_key_the_install_table_writes_is_never_carried_even_if_a_module_declar
 
 
 def test_no_bundled_manifest_declares_a_key_an_install_table_writes() -> None:
-    """Tripwire: today the ruling above changes nothing. A hit here is a report, not a fix."""
-    tables = {
-        f"{ETC_DIR}/{name}": frozenset(patch.keys)
-        for game in ("wow-tbc", "wow-vanilla", "wow-tortoise")
-        for name, patch in CATALOG.get(game).install.native.cmangos.conf.files.items()  # type: ignore[union-attr]
-    }
+    """Tripwire: today the ruling above changes nothing. A hit here is a report, not a fix.
+
+    Per GAME: each game's manifests against that game's own table, file by
+    file. One table keyed by file alone let a later game's table overwrite an
+    earlier one's, so TBC's own keys were never compared (review, round 2).
+    Spelled from the catalog, not through `install_keys()`, so a bug there
+    cannot hide here.
+    """
+    games = ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise")
+    tables: dict[tuple[str, str], frozenset[str]] = {}
+    for game in games:
+        native_block = CATALOG.get(game).install.native
+        if native_block is None or native_block.cmangos is None:
+            continue  # WotLK: its install writes no conf keys
+        for name, patch in native_block.cmangos.conf.files.items():
+            tables[(game, f"{ETC_DIR}/{name}")] = frozenset(k.casefold() for k in patch.keys)
+    assert {game for game, _ in tables} == {"wow-tbc", "wow-vanilla", "wow-tortoise"}  # control
     overlaps: list[str] = []
-    checked = 0
-    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"):
+    checked: dict[str, int] = dict.fromkeys(games, 0)
+    for game in games:
         store = ManifestStore(resources.manifests_dir(), game)
         for kind in FAMILY_FILES:
             for manifest in store.load_all(kind):
                 for block in manifest.conf:
+                    written = tables.get((game, block.file))
+                    if written is None:
+                        continue
                     for key in block.keys:
-                        for file, written in tables.items():
-                            if block.file != file:
-                                continue
-                            checked += 1
-                            if key.key.casefold() in {k.casefold() for k in written}:
-                                overlaps.append(f"{game}/{manifest.id}: {file} {key.key}")
-    assert checked > 0, "control: some manifest declares a key in a core conf"
+                        checked[game] += 1
+                        if key.key.casefold() in written:
+                            overlaps.append(f"{game}/{manifest.id}: {block.file} {key.key}")
+    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        assert checked[game] > 0, f"control: some {game} manifest declares a key in a core conf"
     assert overlaps == []
 
 
@@ -1007,3 +1020,46 @@ def test_an_undo_whose_copy_dies_half_way_leaves_the_file_whole(
     assert [r.outcome for r in again.results] == ["restored"] * 4
     if sys.platform != "win32":
         assert {f: (server / f).stat().st_mode for f in installed} == before
+
+
+def test_a_rollback_puts_a_file_back_through_the_atomic_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rollback path with the REAL `restore`, not an injected one: a rename, not a copy-over."""
+    server, _, _, tuned = _tuned_tbc(tmp_path)
+    modes = {file: (server / file).stat().st_mode for file in tuned}
+    renames: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def spy(src: object, dst: object) -> None:
+        renames.append((Path(str(src)).name, Path(str(dst)).name))
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", spy)
+    writes: list[Path] = []
+
+    def second_write_fails(path: Path, text: str) -> None:
+        if writes:
+            raise OSError(28, "No space left on device")
+        writes.append(path)
+        conf.replace_file(path, text)
+
+    report = reset_defaults.reset(
+        TBC,
+        server,
+        reset_defaults.core_files(TBC),
+        seams=_seams(
+            FakeImage(TEMPLATES["wow-tbc"]),
+            write=second_write_fails,
+            restore=reset_defaults.restore,
+        ),
+    )
+    monkeypatch.undo()
+
+    assert {r.file: r.outcome for r in report.results}["etc/mangosd.conf"] == "held"
+    assert report.refused and report.written == ()
+    assert _bytes(server, tuned) == tuned
+    assert ("mangosd.conf.yulon-restore-tmp", "mangosd.conf") in renames
+    assert not list((server / "etc").glob("*.yulon-restore-tmp"))
+    if sys.platform != "win32":
+        assert {file: (server / file).stat().st_mode for file in tuned} == modes
