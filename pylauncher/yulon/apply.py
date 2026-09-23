@@ -1548,6 +1548,24 @@ def required_prompts(manifest: Manifest, action: When) -> tuple[Prompt, ...]:
     return tuple(prompt for prompt in manifest.prompts if prompt.key in wanted)
 
 
+def must_ask(prompt: Prompt) -> bool:
+    """Whether Install has to put this required prompt to a person before it runs.
+
+    A prompt with no default cannot be filled in by the app at all. A `choice`
+    can -- and must not be, because choosing is the whole of what it is for
+    (T100): `hearthstone-cd`'s `cooldown` defaults to `30_Min`, which is
+    upstream's RESET file, and while only a missing default opened the dialog
+    every GUI install applied that and changed nothing. The dialog is handed
+    every required prompt with its default filled in, so clicking straight
+    through installs exactly what the old silent path did.
+
+    One function because two places answer "will Install ask me something?" --
+    the dialog gate in `ControllerView._module_values()` and the Modules row's
+    "asks a question" chip -- and they must not disagree.
+    """
+    return prompt.default is None or prompt.kind == "choice"
+
+
 def check_answer(prompt: Prompt, value: str) -> str:
     """Why this answer cannot be used, or `""` if it can. Never raises.
 

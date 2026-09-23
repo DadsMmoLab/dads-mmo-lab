@@ -779,8 +779,15 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
     assert "cancelled" in view.module_report.toPlainText().lower()
 
 
-def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """Every manifest but the two ah-bots must behave exactly as it did — no new dialog.
+def test_only_the_two_ah_bots_and_the_hearthstone_choice_are_asked_about(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Every manifest but these three must behave exactly as it did — no new dialog.
+
+    The two ah-bots ask because their prompt has no default. `hearthstone-cd`
+    asks since T100 because its prompt is a `choice`: it has a default, and
+    the dialog used to skip it, so every GUI install applied the default —
+    upstream's reset file — and changed nothing (reported on Discord 2026-09-20).
 
     Rows whose Install is LOCKED are left out of the loop rather than counted
     as installs (T69): eleven shipped manifests declare a `requires`, nothing
@@ -811,7 +818,7 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
         view.modules_panel.select(item_id)
         view._module_action("install")
 
-    assert sorted(asked) == ["mod-ah-bot", "mod-ah-bot-plus"], asked
+    assert sorted(asked) == ["hearthstone-cd", "mod-ah-bot", "mod-ah-bot-plus"], asked
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier)
     assert len(applier.installed) == len(catalogued)
@@ -908,6 +915,62 @@ def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path)
     assert asked == []
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier) and applier.removed == ["mod-ah-bot"]
+
+
+def test_installing_hearthstone_tweaks_asks_which_cooldown(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T100: a `choice` is put to the player even though it has a default.
+
+    `hearthstone-cd` ships five alternative SQL files and one `choice` prompt
+    whose default, `30_Min`, is upstream's reset. `_module_values()` opened the
+    dialog only for a prompt with NO default, so Install asked nothing and the
+    applier was called with `None` — every GUI install of Hearthstone Cooldown
+    Tweaks applied the reset and changed nothing.
+
+    The dialog is handed the question with its default, so clicking straight
+    through still installs what it always did.
+
+    Mutation: gate `_module_values()` on `default is None` again and `asked`
+    is empty and the applier is given `None`.
+    """
+    asked: list[tuple[str, tuple[tuple[str, str | None], ...]]] = []
+
+    def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
+        asked.append(
+            (
+                str(manifest.id),  # type: ignore[attr-defined]
+                tuple((p.key, p.default) for p in prompts),  # type: ignore[attr-defined]
+            )
+        )
+        return {"cooldown": "5_Min"}
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "hearthstone-cd")
+    view._module_action("install")
+
+    assert asked == [("hearthstone-cd", (("cooldown", "30_Min"),))]
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == ["hearthstone-cd"]
+    assert applier.values == [{"cooldown": "5_Min"}]
+
+
+def test_removing_hearthstone_tweaks_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Remove runs the reset file and renders no `{cooldown}`, so there is no question."""
+    asked: list[str] = []
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: asked.append(manifest.id) or {},
+    )
+    _select_module(view, "hearthstone-cd")
+    view._module_action("remove")
+
+    assert asked == []
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.removed == ["hearthstone-cd"]
 
 
 # ------------------------------- the module SQL that no other button reaches

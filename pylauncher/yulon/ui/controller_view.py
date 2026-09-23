@@ -79,7 +79,14 @@ from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon import play as play_module
 from yulon import steam as steam_module
-from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
+from yulon.apply import (
+    Applier,
+    ApplyReport,
+    DockerSql,
+    PendingSql,
+    must_ask,
+    required_prompts,
+)
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import clientdir
@@ -7620,12 +7627,13 @@ class ControllerView(QWidget):
         that did not, after the clone. See `widgets/manifest_prompt.py`.
 
         The gate is deliberately narrow. A dialog opens only when this action
-        would really render a value the manifest has no default for, so 39 of
-        the 41 manifests get no new window and the applier gets `None` rather
-        than `{}` — the call it has always been given.
+        would really render a value the manifest has no default for, or a
+        `choice` (T100, `apply.must_ask()`): `hearthstone-cd` is the one shipped
+        manifest that adds, and every other one gets no new window and the
+        applier gets `None` rather than `{}` — the call it has always been given.
         """
         needed = required_prompts(manifest, action)
-        if not any(prompt.default is None for prompt in needed):
+        if not any(must_ask(prompt) for prompt in needed):
             return True, None
         answers = self._prompt_asker(self, manifest, needed)
         return (False, None) if answers is None else (True, answers)
