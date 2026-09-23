@@ -109,6 +109,34 @@ class _Read:
     text: str
 
 
+class _ReadFailed(Exception):
+    """A read that raised past `_read_logs`, tagged with its generation like a `_Read`.
+
+    The job runner hands `_read_failed` only the exception, and its callbacks
+    must be the view's own bound slots (`widgets/job.py`), so the generation
+    travels on the exception rather than in a closure.
+    """
+
+    def __init__(self, generation: int, cause: Exception) -> None:
+        super().__init__(f"{type(cause).__name__}: {cause}")
+        self.generation = generation
+        self.cause = cause
+
+
+def _read_tagged(
+    installs: Sequence[KnownInstall],
+    catalog: Catalog,
+    qt_version: str,
+    wanted: str | None,
+    generation: int,
+) -> _Read:
+    """`_read_logs`, with anything it lets out raised again as `_ReadFailed(generation)`."""
+    try:
+        return _read_logs(installs, catalog, qt_version, wanted, generation)
+    except Exception as exc:  # boundary: tag it, `_read_failed` decides whether it is shown
+        raise _ReadFailed(generation, exc) from exc
+
+
 def _read_logs(
     installs: Sequence[KnownInstall],
     catalog: Catalog,
@@ -276,7 +304,7 @@ class LogsView(QWidget):
         self._reading = True
         self.viewer.setPlainText(READING)
         self._jobs(
-            lambda: _read_logs(installs, catalog, qt_version, chosen, generation),
+            lambda: _read_tagged(installs, catalog, qt_version, chosen, generation),
             self._read_done,
             self._read_failed,
         )
@@ -302,7 +330,12 @@ class LogsView(QWidget):
     @Slot(object)
     def _read_failed(self, error: object) -> None:
         # `_read_logs` catches everything it can meet, so this is the boundary
-        # behind it. It carries no generation, so it only replaces `READING`.
+        # behind it. Like `_read_done`, only the newest read may speak: an older
+        # one failing while a newer one is in flight must leave `READING` up.
+        if isinstance(error, _ReadFailed):
+            if error.generation != self._generation:
+                return
+            error = error.cause
         logger.debug(f"a Logs tab read failed: {type(error).__name__}")
         if self._reading:
             self._reading = False

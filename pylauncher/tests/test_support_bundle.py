@@ -96,6 +96,52 @@ def test_empty_folders_and_a_missing_app_log_are_said_not_silent(tmp_path: Path)
         assert line in manifest, line
 
 
+def _unlistable(monkeypatch: pytest.MonkeyPatch, folder: Path) -> None:
+    """`folder.iterdir()` raises what an unreadable folder raises; every other folder lists."""
+    real = Path.iterdir
+
+    def iterdir(self: Path) -> object:
+        if self == folder:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+
+
+def test_an_unreadable_runs_folder_is_named_with_its_reason_never_said_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'Could not look' must never read as 'nothing was recorded' (T93 final review)."""
+    config = platform.config_dir()
+    runs = src.runlog.runs_dir(config)
+    runs.mkdir(parents=True)
+    (runs / "install-wow-tbc-20260922T101010Z.log").write_text("x\n", encoding="utf-8")
+    _unlistable(monkeypatch, runs)
+    report = bundle.build(
+        tmp_path / "s.zip", Sources(config, None, ()), Redactor.build([]), seams=_seams()
+    )
+    manifest = _read(tmp_path / "s.zip")["MANIFEST.txt"]
+    assert "no install or rebuild has been recorded yet" not in manifest
+    assert ("runs/", f"{runs} could not be listed (Permission denied)") in report.skipped
+    assert f"runs/  {runs} could not be listed (Permission denied)" in manifest
+    # The snapshots folder above it still lists: one bad source never kills the rest.
+    assert "snapshots/  no server has been stopped" in manifest
+
+
+def test_an_unreadable_logs_folder_is_named_for_the_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = platform.config_dir()
+    logs = src.runlog.logs_dir(config)
+    logs.mkdir(parents=True)
+    _unlistable(monkeypatch, logs)
+    report = bundle.build(
+        tmp_path / "s.zip", Sources(config, None, ()), Redactor.build([]), seams=_seams()
+    )
+    assert ("snapshots/", f"{logs} could not be listed (Permission denied)") in report.skipped
+    assert not any("no server has been stopped" in why for _name, why in report.skipped)
+
+
 def test_a_file_that_vanishes_before_it_is_read_is_a_skip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

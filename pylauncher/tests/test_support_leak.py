@@ -1,10 +1,11 @@
 """THE test of T93: no planted secret survives into any byte or any NAME of what leaves.
 
-Six secrets, each in the shape it really takes -- two generated `<prefix>-<16 hex>`
+Eight secrets, each in the shape it really takes -- two generated `<prefix>-<16 hex>`
 database passwords, a custom one a user typed into a conf's `DatabaseInfo`
 line, another in Tortoise's dotted `LoginDatabase.Info` spelling, a SOAP
-credential minted by the channel, and a kept copy from an uninstall -- are
-planted in every source a support file reads: the app log and its rotation, a
+credential minted by the channel, a kept copy from an uninstall, and one each
+of a kept copy and a live `.db_password` that are NOT in the generated shape --
+are planted in every source a support file reads: the app log and its rotation, a
 run log (its name and its lines), a worldserver snapshot (its name and its
 lines), the fake `docker logs` of the containers, a container read that fails,
 a docker that raises, each install's confs, and the home folder in all of them.
@@ -18,7 +19,11 @@ are built at runtime, never written here (`test_no_secrets_in_evidence`). Both
 the whole value and its last ten characters are searched, so a secret masked
 only at its start still fails. Most of the lines carry the secrets bare, with no
 `DatabaseInfo` field or `password =` key around them, so only the passwords
-`gather_known` found can catch the custom, dotted and SOAP ones.
+`gather_known` found can catch the custom, dotted and SOAP ones. The two
+unshaped stores' values (`kept-unshaped`, `live-unshaped`) are in no conf and do
+not match the generated shape, so only READING `db-secrets/` and `.db_password`
+can catch them: the shaped `kept`, `generated` and `tortoise` would be masked
+by the pattern even if those stores were never opened (T93 final review).
 """
 
 from __future__ import annotations
@@ -70,6 +75,8 @@ def _plant(tmp_path: Path) -> _Planted:
         "dotted": "Dotted" + secrets.token_hex(5) + "Pw",
         "soap": channel_setup.generate_password(),
         "kept": "vanilla-" + secrets.token_hex(8),
+        "kept-unshaped": "Kept" + secrets.token_hex(5) + "Pw",
+        "live-unshaped": "Live" + secrets.token_hex(5) + "Pw",
     }
     # Bare values: no `password =` key and no `DatabaseInfo` field around them.
     every = " ".join(f"{label}: {value}" for label, value in planted.items())
@@ -96,6 +103,11 @@ def _plant(tmp_path: Path) -> _Planted:
         encoding="utf-8",
     )
 
+    # A third install: its `.db_password` is in no conf, so only reading the file knows it.
+    vanilla_dir = tmp_path / "srv-vanilla"
+    vanilla_dir.mkdir()
+    (vanilla_dir / ".db_password").write_text(planted["live-unshaped"] + "\n", encoding="utf-8")
+
     (config / "credentials").mkdir(parents=True)
     (config / "credentials" / f"wow-tbc-{tbc_id}.json").write_text(
         json.dumps(
@@ -112,6 +124,9 @@ def _plant(tmp_path: Path) -> _Planted:
     (config / "db-secrets").mkdir()
     (config / "db-secrets" / "wow-vanilla-0badc0de.json").write_text(
         json.dumps({"volume": "v", "password": planted["kept"]}), encoding="utf-8"
+    )
+    (config / "db-secrets" / "wow-tortoise-0dd0beef.json").write_text(
+        json.dumps({"volume": "v", "password": planted["kept-unshaped"]}), encoding="utf-8"
     )
 
     (config / "yulon.log").write_text(
@@ -153,13 +168,14 @@ def _plant(tmp_path: Path) -> _Planted:
     installs = (
         KnownInstall(game="wow-tbc", server_dir=tbc_dir),
         KnownInstall(game="wow-tortoise", server_dir=tortoise_dir, wsl_distro=WSL_DISTRO),
+        KnownInstall(game="wow-vanilla", server_dir=vanilla_dir),
     )
     return _Planted(
         installs=installs,
         secrets=planted,
         homes=homes,
         seams=bundle.Seams(live_logs=live_logs, docker_version=docker_version),
-        raw_roots=(config, tbc_dir, tortoise_dir),
+        raw_roots=(config, tbc_dir, tortoise_dir, vanilla_dir),
     )
 
 
@@ -196,7 +212,7 @@ def test_no_planted_secret_survives_into_any_byte_or_name_of_the_zip(tmp_path: P
         ("app/", b"ROTATED", 1),
         ("runs/", b"RUNLOG", 2),
         ("snapshots/", b"SNAPSHOT", 2),
-        ("live/", b"LIVE", 2),
+        ("live/", b"LIVE", 4),
         ("conf/", b"# note", 2),
     ):
         holding = [n for n in names if n.startswith(folder) and marker in contents[n]]
@@ -209,7 +225,7 @@ def test_no_planted_secret_survives_into_any_byte_or_name_of_the_zip(tmp_path: P
     info = contents["system-info.txt"]
     assert b"Docker on this machine: not reachable (RuntimeError)" in info
     assert f"Docker in WSL distro {WSL_DISTRO}: 27.0.1".encode() in info
-    assert b"Servers Yu'lon knows about: 2" in info
+    assert b"Servers Yu'lon knows about: 3" in info
 
     shown = repr(report)
     for label, value in planted.secrets.items():
@@ -253,10 +269,12 @@ def test_nothing_the_logs_tab_shows_or_copies_carries_a_planted_secret(
         assert text != READING and "***" in text, f"control: {label} was not read: {text!r}"
         view.copy_last_lines()
         assert len(copied) == index + 1, f"control: nothing copied from {label}"
+        for secret, value in planted.secrets.items():
+            for needle in _needles(value):
+                assert needle not in label, f"{secret} in the picker's label {label!r}"
         for where, seen in (("the viewer", text), ("the clipboard", copied[-1])):
             for secret, value in planted.secrets.items():
                 for needle in _needles(value):
                     assert needle not in seen, f"{secret} in {where} for {label}"
-                    assert needle not in label, f"{secret} in the picker's label {label!r}"
             for spelling in planted.homes:
                 assert spelling not in seen, f"the home folder in {where} for {label}"

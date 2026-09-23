@@ -24,6 +24,7 @@ from yulon.support.sources import (
     gather_known,
     keep_tail,
     read_tail,
+    run_logs,
     sources_for_app,
     system_info,
     viewables,
@@ -336,3 +337,37 @@ def test_viewables_list_the_app_log_then_runs_then_snapshots_newest_first() -> N
         "Run: install-wow-tbc-20260922T101010Z.log",
         "Worldserver snapshot: wow-tbc-0badc0de-20260922T101010Z.log",
     ]
+
+
+def test_viewables_leave_out_an_unreadable_folder_and_keep_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = platform.config_dir()
+    runs = runlog.runs_dir(config)
+    runs.mkdir(parents=True)
+    (config / "yulon.log").write_text("app\n", encoding="utf-8")
+    (runs / "install-wow-tbc-20260922T101010Z.log").write_text("run\n", encoding="utf-8")
+    (config / "logs" / "wow-tbc-0badc0de-20260922T101010Z.log").write_text(
+        "snap\n", encoding="utf-8"
+    )
+    real = Path.iterdir
+
+    def iterdir(self: Path) -> object:
+        if self == runs:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    labels = [item.label for item in viewables(Sources(config, config / "yulon.log", ()))]
+    assert labels == [
+        "App log (yulon.log)",
+        "Worldserver snapshot: wow-tbc-0badc0de-20260922T101010Z.log",
+    ]
+
+
+def test_a_folder_named_like_a_log_is_not_offered_as_one() -> None:
+    config = platform.config_dir()
+    runs = runlog.runs_dir(config)
+    (runs / "odd.log").mkdir(parents=True)
+    (runs / "install-wow-tbc-20260922T101010Z.log").write_text("run\n", encoding="utf-8")
+    assert [path.name for path in run_logs(config)] == ["install-wow-tbc-20260922T101010Z.log"]

@@ -2544,9 +2544,10 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("support/sources.py", "_logs_in"): (
         "T93. Lists `logs/` or `logs/runs/` to name the app's own log files for the Logs tab "
-        "and the support zip, newest first; decides no write and no delete anywhere. An "
-        "unreadable folder answers the empty list, which the tab shows as nothing to view "
-        "and the zip as a file it did not have -- never a claim about a folder of the user's"
+        "and the support zip, newest first; decides no write and no delete anywhere. A "
+        "missing folder answers the empty list (nothing was recorded); an unreadable one "
+        "raises, which the tab shows as nothing to view and the zip names in its manifest "
+        "with the reason -- never a claim about a folder of the user's"
     ),
     ("support/sources.py", "_conf_listing"): (
         "T93. Lists an install's conf folders to name the live `*.conf` files a support zip "

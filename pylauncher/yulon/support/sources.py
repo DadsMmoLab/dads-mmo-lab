@@ -175,22 +175,47 @@ def _newest_first(paths: Iterable[Path]) -> list[Path]:
     return [path for _mtime, path in sorted(dated, key=lambda pair: pair[0], reverse=True)]
 
 
-def _logs_in(folder: Path) -> list[Path]:
-    """The `*.log` files directly in `folder`, newest first; none if it cannot be listed."""
+def _is_log(path: Path) -> bool:
+    """A `*.log` FILE: a folder named `x.log` is not one to show or zip."""
     try:
-        return _newest_first(path for path in folder.iterdir() if path.suffix == ".log")
+        return path.suffix == ".log" and path.is_file()
     except OSError:
+        return False
+
+
+def _logs_in(folder: Path) -> list[Path]:
+    """The `*.log` files directly in `folder`, newest first. Raises `OSError`.
+
+    A folder that is not there holds none, which is true: nothing was recorded.
+    One that is there and cannot be listed raises, so the zip says so rather
+    than letting "could not look" read as "nothing there" (`_conf_listing`'s rule).
+    """
+    try:
+        found = list(folder.iterdir())
+    except FileNotFoundError:
         return []
+    return _newest_first(path for path in found if _is_log(path))
 
 
 def run_logs(config_dir: Path) -> list[Path]:
-    """Every kept run log, newest first."""
+    """Every kept run log, newest first. Raises `OSError` if `logs/runs/` cannot be listed."""
     return _logs_in(runlog.runs_dir(config_dir))
 
 
 def snapshots(config_dir: Path) -> list[Path]:
-    """Every worldserver snapshot (`logsnap`), newest first. Non-recursive: runs are apart."""
+    """Every worldserver snapshot (`logsnap`), newest first. Raises `OSError` like `run_logs`.
+
+    Non-recursive: runs are apart.
+    """
     return _logs_in(runlog.logs_dir(config_dir))
+
+
+def _listed(list_logs: Callable[[Path], list[Path]], config_dir: Path) -> list[Path]:
+    """`list_logs(config_dir)`, or none: the tab shows nothing from a folder it cannot list."""
+    try:
+        return list_logs(config_dir)
+    except OSError:
+        return []
 
 
 def _through_a_link(server_dir: Path, folder: str) -> bool:
@@ -487,9 +512,9 @@ def system_info(
 def viewables(sources: Sources) -> list[Viewable]:
     """What the Logs tab offers: the app log, then runs, then snapshots, newest first."""
     items = [Viewable(f"App log ({path.name})", path) for path in app_log_files(sources.app_log)]
-    items += [Viewable(f"Run: {path.name}", path) for path in run_logs(sources.config_dir)]
+    items += [Viewable(f"Run: {path.name}", path) for path in _listed(run_logs, sources.config_dir)]
     items += [
         Viewable(f"Worldserver snapshot: {path.name}", path)
-        for path in snapshots(sources.config_dir)
+        for path in _listed(snapshots, sources.config_dir)
     ]
     return items

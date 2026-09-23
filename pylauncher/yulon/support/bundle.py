@@ -34,6 +34,7 @@ from pathlib import Path
 
 from yulon import __version__
 from yulon.log import get_logger
+from yulon.support import runlog
 from yulon.support import sources as src
 from yulon.support.redact import Redactor
 from yulon.support.sources import InstallFacts, LiveLog, Sources
@@ -162,6 +163,19 @@ class _Collector:
         for path in paths:
             self.file(f"{group}/{path.name}", path, group)
 
+    def logs(
+        self, group: str, folder: Path, list_logs: Callable[[], list[Path]], *, empty: str
+    ) -> None:
+        """`files()` of a folder of the app's logs. One it cannot list is named, never empty."""
+        try:
+            paths = list_logs()
+        except OSError as exc:
+            self.skip(
+                f"{group}/", f"{folder} could not be listed ({exc.strerror or type(exc).__name__})"
+            )
+            return
+        self.files(group, paths, empty=empty)
+
     def live(
         self,
         install: InstallFacts,
@@ -231,14 +245,17 @@ def build(
     collector.files("app", src.app_log_files(sources.app_log))
     if sources.app_log is None:
         collector.skip("app/yulon.log", "this session keeps no log file")
-    collector.files(
+    config = sources.config_dir
+    collector.logs(
         "runs",
-        src.run_logs(sources.config_dir),
+        runlog.runs_dir(config),
+        lambda: src.run_logs(config),
         empty="no install or rebuild has been recorded yet",
     )
-    collector.files(
+    collector.logs(
         "snapshots",
-        src.snapshots(sources.config_dir),
+        runlog.logs_dir(config),
+        lambda: src.snapshots(config),
         empty="no server has been stopped, removed or uninstalled since snapshots began",
     )
     if not sources.installs:

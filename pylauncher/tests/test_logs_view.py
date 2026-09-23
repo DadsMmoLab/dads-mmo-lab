@@ -20,6 +20,7 @@ from yulon.catalog.catalog import load_catalog
 from yulon.support import bundle, runlog
 from yulon.support import sources as support_sources
 from yulon.support.sources import InstallFacts, LiveLog
+from yulon.ui import logs_view
 from yulon.ui.logs_view import COPY_LINES, OPEN_FOLDER_TIP, READING, LogsView
 from yulon.ui.widgets.job import run_inline
 
@@ -278,6 +279,56 @@ def test_a_slower_earlier_read_never_paints_over_a_newer_one(qapp: object) -> No
     work, done, _failed = held[0]
     done(work())
     assert view.shown_text().splitlines() == ["newer"], "the older read painted over the newer one"
+
+
+def _settle(
+    job: tuple[Callable[[], object], Callable[[object], None], Callable[[object], None]],
+) -> None:
+    """What `_JobWorker.run` does with a held job: `done(result)`, or `failed(exc)` if it raised."""
+    work, done, failed = job
+    try:
+        result = work()
+    except Exception as exc:
+        failed(exc)
+    else:
+        done(result)
+
+
+def test_an_older_read_that_fails_never_replaces_a_newer_read_in_flight(
+    qapp: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the newest read speaks, whether it lands or fails (T93 final review)."""
+    config = platform.config_dir()
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "yulon.log").write_text("newer\n", encoding="utf-8")
+    real = logs_view._read_logs
+
+    def read_logs(*args: Any) -> object:
+        if args[-1] == 1:  # the first read's generation
+            raise RuntimeError("the old read broke")
+        return real(*args)
+
+    monkeypatch.setattr(logs_view, "_read_logs", read_logs)
+    held: Held = []
+    view = _view(jobs=_holding(held))
+    view.refresh()
+    view.refresh()
+    _settle(held[0])
+    assert view.shown_text() == READING, "the older read's failure replaced the newer read"
+    _settle(held[1])
+    assert view.shown_text().splitlines() == ["newer"]
+
+
+def test_the_newest_read_that_fails_says_so(qapp: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    def read_logs(*args: Any) -> object:
+        raise RuntimeError("broke")
+
+    monkeypatch.setattr(logs_view, "_read_logs", read_logs)
+    held: Held = []
+    view = _view(jobs=_holding(held))
+    view.refresh()
+    _settle(held[0])
+    assert view.shown_text() == "The logs could not be read (RuntimeError)."
 
 
 def test_a_secret_stored_after_the_first_read_is_masked_after_a_picker_change(

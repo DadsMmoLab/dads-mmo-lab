@@ -113,3 +113,49 @@ def test_the_dotted_key_spelling_of_a_native_tortoise_conf_is_read_and_masked() 
         f'# WorldDatabase.Info = "h;3306;mangos;{MASK};world"\n'
         'LogsDatabase.Info = "h;3306;mangos;;logs"\n'
     )
+
+
+def test_mysql_access_denied_keeps_whether_a_password_was_sent() -> None:
+    """MySQL 1045 is the commonest database failure; `YES`/`NO` is its one useful word.
+
+    The value is not a password, and the `)` after it is not part of one.
+    """
+    redactor = Redactor.build([])
+    for sent in ("YES", "NO", "yes"):
+        line = (
+            "ERROR 1045 (28000): Access denied for user 'mangos'@'172.18.0.3' "
+            f"(using password: {sent})"
+        )
+        assert redactor.redact(line) == line
+
+
+def test_a_password_setting_still_masks_a_real_value_and_leaves_a_closing_paren() -> None:
+    redactor = Redactor.build([])
+    assert redactor.redact("Password = hunter2x") == f"Password = {MASK}"
+    assert redactor.redact("password: s3cret") == f"password: {MASK}"
+    assert redactor.redact("--password=abcdef12") == f"--password={MASK}"
+    assert redactor.redact("(password: s3cret)") == f"(password: {MASK})"
+    assert redactor.redact("Password = NOPE") == f"Password = {MASK}"
+
+
+def test_a_semicolon_list_that_is_not_database_info_is_left_alone() -> None:
+    """A build log's module list has five `;` fields too, but no port in the second."""
+    line = "modules: mod-a;mod-b;mod-c;mod-d;mod-e"
+    assert Redactor.build([]).redact(line) == line
+    assert Redactor.build([]).redact("MODULES=mod-a;mod-b;mod-c;mod-d;mod-e") == (
+        "MODULES=mod-a;mod-b;mod-c;mod-d;mod-e"
+    )
+
+
+def test_database_info_is_masked_by_address_hostname_and_socket() -> None:
+    redactor = Redactor.build([])
+    assert redactor.redact("127.0.0.1;3306;mangos;Pw9unknown;realmd") == (
+        f"127.0.0.1;3306;mangos;{MASK};realmd"
+    )
+    assert redactor.redact("x=ac-database;3306;acore;Pw9unknown;acore_auth") == (
+        f"x=ac-database;3306;acore;{MASK};acore_auth"
+    )
+    # AzerothCore's own conf documents `.;/path/to/unix_socket;user;password;database`.
+    assert redactor.redact('".;/var/run/mysqld/mysqld.sock;acore;Pw9unknown;acore_auth"') == (
+        f'".;/var/run/mysqld/mysqld.sock;acore;{MASK};acore_auth"'
+    )

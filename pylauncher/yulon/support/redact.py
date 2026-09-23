@@ -43,11 +43,15 @@ _FIELD = r"[^\s;\"']{1,255}"
 
 _DATABASE_INFO = re.compile(
     r"(?<![^\s\"'=:,(\[])"
-    rf"(?P<head>[^\s;\"'=]{{1,255}};{_FIELD};{_FIELD};)"
+    rf"(?P<head>(?:[^\s;\"'=]{{1,255}};\d{{1,5}}|\.;{_FIELD});{_FIELD};)"
     r"(?P<password>[^\s;\"']{0,255})"
     rf"(?=;{_FIELD})"
 )
 """`host;port;user;PASSWORD;schema` wherever it appears. The lookahead keeps the schema.
+
+The second field is a port (`\\d{1,5}`), or anything after the host `.`, which
+is how AzerothCore's conf spells a unix socket or a Windows named pipe. Without
+that a build log's `mod-a;mod-b;mod-c;mod-d;mod-e` lost its fourth entry.
 
 **Linear, and that is why it looks like this.** The obvious spelling
 (`[^;]+;[^;]+;...` with no anchor) restarts at every character of a long run
@@ -67,14 +71,21 @@ A commented line starts with `#` and is skipped.
 
 _PASSWORD_SETTING = re.compile(
     r"(?i)(?<![\w.-])(?P<head>[\w.-]{0,64}?password[\w.-]{0,64}[\"']?[ \t]*[=:][ \t]*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s\"',;]+)"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s\"',;]*[^\s\"',;)])"
 )
 """`Key.Password = value`, `DB_ROOT_PASSWORD=value`, `"password": "value"`.
+
+A bare value never ends in `)`: MySQL's `(using password: YES)` closes its
+bracket there. `YES` and `NO` themselves are left alone (`_mask_setting`) -- they
+say whether a password was sent, which is the point of that line.
 
 Starts only at the start of a token and bounds the key, for `_DATABASE_INFO`'s
 reason: an unbounded run of word characters before `password` is quadratic on a
 long line.
 """
+
+_NOT_A_PASSWORD = frozenset({"YES", "NO"})
+"""Bare setting values that only say whether there is a password: MySQL's error 1045."""
 
 _GENERATED = re.compile(r"\b[a-z]+-[0-9a-f]{16}\b")
 """The shape `resolve_secrets()` mints: `prefix + token_hex(8)` (`catalog/native.py`)."""
@@ -98,7 +109,7 @@ def _mask_field(match: re.Match[str]) -> str:
 
 def _mask_setting(match: re.Match[str]) -> str:
     value = match.group("value")
-    if value in ('""', "''"):
+    if value in ('""', "''") or value.upper() in _NOT_A_PASSWORD:
         return match.group(0)
     return match.group("head") + MASK
 
