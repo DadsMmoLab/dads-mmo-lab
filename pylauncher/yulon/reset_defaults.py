@@ -21,7 +21,9 @@ the channel's own keys while its press is live.
 **Only the server's own files.** A game's set is exactly its install conf
 table, or for WotLK `AZEROTHCORE_CORE_FILES` plus the override. A module's own
 conf file is never touched (the owner's decision); `reset()` refuses a file
-outside the set as a caller bug.
+outside the set as a caller bug. Inside a core conf, the keys an installed
+module declares (the Tuning tab's own rows) keep their current value (owner
+decision 5, `carry_module_keys()`).
 
 Nothing here imports Qt. The Tuning tab (`ui/controller_view.py`) draws the
 button and runs `reset()` on its job runner.
@@ -30,7 +32,7 @@ button and runs `reset()` on its job runner.
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -475,6 +477,79 @@ class ResetReport:
         return (head, *(r.line() for r in self.results))
 
 
+ModuleKeys = Mapping[str, Sequence[str]]
+"""Server-relative file -> the keys INSTALLED modules declare in it (owner decision 5)."""
+
+
+def module_keys(
+    rows: Iterable[tuning.TuningRow], files: Sequence[str]
+) -> dict[str, tuple[str, ...]]:
+    """Which keys installed modules keep in each of `files`, from the Tuning tab's own rows.
+
+    `tuning.rows_for()` is the one answer to "which keys does an installed
+    module declare in which file" (it yields rows for installed modules only),
+    so this filters its rows rather than reading manifests a second way. Only
+    `conf`-backend rows: a Lua or table setting is never inside a core conf.
+    Manifest order, once each.
+    """
+    found: dict[str, list[str]] = {}
+    for row in rows:
+        if not (row.installed and row.backend == "conf" and row.file in files):
+            continue
+        keys = found.setdefault(row.file, [])
+        if row.key not in keys:
+            keys.append(row.key)
+    return {file: tuple(keys) for file, keys in found.items()}
+
+
+def _active_key(line: str) -> str | None:
+    """The key an ACTIVE `Key = value` line sets, else `None`.
+
+    `tuning.conf_value()`'s rule (`tuning.py:171-225`), so the line carried is
+    the line the Tuning tab reads the current value from: trimmed; an empty,
+    `#` or `[` line says nothing; the key is everything before the first `=`.
+    """
+    body = line.rstrip("\r\n").strip()
+    if not body or body[:1] in ("#", "["):
+        return None
+    head, sep, _ = body.partition("=")
+    key = head.strip()
+    return key if sep and key else None
+
+
+def carry_module_keys(default: str, live: str, keys: Sequence[str]) -> str:
+    """`default` with each module key's line carried over from `live`, byte for byte.
+
+    Pure (owner decision 5). For each key, the FIRST active line in `live` --
+    the one the server reads -- replaces every active line for that key in
+    `default`, each keeping the ending of the line it replaces, so a CRLF
+    default stays CRLF. A key with no active line in `live` (absent, or only
+    commented) leaves `default` as it is. A key `default` has no active line
+    for is appended with the file's ending, `conf.patch()`'s absent-key rule
+    (`conf.py:182-185`), because a conf the emulator reads with the key missing
+    silently takes the compiled default -- which is not what the module set.
+    """
+    lines = default.splitlines(keepends=True)
+    live_lines = live.splitlines(keepends=True)
+    for key in keys:
+        carried = next(
+            (line.rstrip("\r\n") for line in live_lines if _active_key(line) == key), None
+        )
+        if carried is None:
+            continue
+        hit = False
+        for index, line in enumerate(lines):
+            if _active_key(line) == key:
+                lines[index] = carried + line[len(line.rstrip("\r\n")) :]
+                hit = True
+        if not hit:
+            newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                lines[-1] += newline
+            lines.append(carried + newline)
+    return "".join(lines)
+
+
 def apply_rule(file: str) -> tuning.ApplyRule:
     """What a reset of `file` owes before the server uses it (spec correction 21).
 
@@ -501,6 +576,7 @@ def reset(
     server_dir: Path,
     files: Sequence[str],
     *,
+    module_keys: ModuleKeys | None = None,
     wsl_distro: str | None = None,
     seams: Seams | None = None,
 ) -> ResetReport:
@@ -513,6 +589,13 @@ def reset(
     from those backups, every file this press had already written. A file
     already equal to its default is not touched and gets no backup; a file not
     on disk is reported and never created; another tool's override is left.
+
+    `module_keys` (owner decision 5): for each file, the keys installed
+    modules declare in it, from `module_keys()`. Their live lines are carried
+    into the default before anything is compared or written, so a module's
+    setting keeps its current value while every core key goes back. A file
+    holding such keys that is not UTF-8 refuses the press: its lines cannot be
+    carried without guessing at its bytes.
 
     Raises:
         ValueError: a file outside this game's set -- a caller bug, and the
@@ -542,6 +625,15 @@ def reset(
             current[file] = (server_dir / file).read_bytes()
         except OSError as exc:
             reasons[file] = UNREADABLE.format(what=label(file), exc=exc)
+            continue
+        carry = (module_keys or {}).get(file)
+        if carry:
+            try:
+                live = current[file].decode("utf-8")
+            except UnicodeDecodeError as exc:
+                reasons[file] = NOT_UTF8.format(what=label(file), exc=exc)
+                continue
+            texts[file] = carry_module_keys(texts[file], live, carry)
     if reasons:
         return ResetReport(tuple(_before_writing(file, skipped, reasons) for file in files))
 
@@ -676,7 +768,8 @@ def question(files: Sequence[str], modules: Sequence[str]) -> str:
     return "\n\n".join(parts)
 
 
-ResetRoute = Callable[[Sequence[str]], ResetReport]
+ResetRoute = Callable[[Sequence[str], ModuleKeys], ResetReport]
+"""The press: the files asked for, and the keys installed modules keep in them."""
 
 
 def route_for_app(
@@ -692,7 +785,7 @@ def route_for_app(
     SELinux; the app passes none.
     """
 
-    def run(files: Sequence[str]) -> ResetReport:
-        return reset(entry, server_dir, files, wsl_distro=wsl_distro, seams=seams)
+    def run(files: Sequence[str], keys: ModuleKeys) -> ResetReport:
+        return reset(entry, server_dir, files, module_keys=keys, wsl_distro=wsl_distro, seams=seams)
 
     return run

@@ -27,6 +27,7 @@ from yulon.catalog.families import conf
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError
+from yulon.controller_wow_tbc import modules as tbc_modules
 
 CATALOG = load_catalog()
 WOTLK = CATALOG.get("wow-wotlk")
@@ -779,3 +780,139 @@ def test_an_undo_that_fails_says_the_undo_failed_not_the_reset(tmp_path: Path) -
     assert undone.lines()[0].startswith("The undo")
     assert "reset was not done" not in text and "NOT reset" not in text
     assert "mangosd.conf: NOT put back" in text and "Permission denied" in text
+
+
+# -- owner decision 5: installed modules' keys in a core conf are kept ------------
+
+
+def _tbc_rows(server: Path, installed: dict[str, frozenset[str]]) -> tuple[tuning.TuningRow, ...]:
+    """The Tuning tab's own rows for this TBC server -- the source, never re-derived."""
+    manifests = list(tbc_modules.store().load_all("mod"))
+    return tuning.rows_for(manifests, installed, server)
+
+
+XP_RATES = {"mod": frozenset({"xp-rates"})}
+
+
+def test_carry_takes_the_live_line_byte_for_byte_and_keeps_the_default_lines_ending() -> None:
+    default = "A = 1\r\nRate.XP.Kill = 1\r\nB = 2\r\n"
+    live = 'Rate.XP.Kill   =  "3"\nA = 9\n'
+    assert reset_defaults.carry_module_keys(default, live, ["Rate.XP.Kill"]) == (
+        'A = 1\r\nRate.XP.Kill   =  "3"\r\nB = 2\r\n'
+    )
+
+
+def test_a_key_absent_or_only_commented_in_the_live_file_leaves_the_default() -> None:
+    default = "Rate.XP.Kill = 1\n"
+    assert (
+        reset_defaults.carry_module_keys(default, "# Rate.XP.Kill = 9\n", ["Rate.XP.Kill"])
+        == default
+    )
+    assert reset_defaults.carry_module_keys(default, "", ["Rate.XP.Kill"]) == default
+
+
+def test_the_first_active_live_line_wins_and_a_key_the_default_lacks_is_appended() -> None:
+    live = "Creatures.CustomIDs = 90001\nCreatures.CustomIDs = 1\n"
+    assert reset_defaults.carry_module_keys("Key = 1\r\n", live, ["Creatures.CustomIDs"]) == (
+        "Key = 1\r\nCreatures.CustomIDs = 90001\r\n"
+    )
+
+
+def test_module_keys_come_from_installed_modules_rows_only(tmp_path: Path) -> None:
+    server, _ = _server(tmp_path, "wow-tbc")
+    files = reset_defaults.core_files(TBC)
+    assert reset_defaults.module_keys(_tbc_rows(server, XP_RATES), files) == {
+        "etc/mangosd.conf": ("Rate.XP.Kill", "Rate.XP.Quest", "Rate.XP.Explore")
+    }
+    assert reset_defaults.module_keys(_tbc_rows(server, {}), files) == {}, "not installed: no keys"
+
+
+def _tuned_xp(tmp_path: Path) -> tuple[Path, str, dict[str, bytes]]:
+    """A fresh TBC install whose XP rate (a module key) and world port (a core key) were changed."""
+    server, password = _server(tmp_path, "wow-tbc")
+    installed = _fresh_install("wow-tbc", server, FakeImage(TEMPLATES["wow-tbc"]))
+    mangosd = installed["etc/mangosd.conf"].decode("utf-8")
+    assert "Rate.XP.Kill = 1\n" in mangosd and "WorldServerPort = 8085\n" in mangosd  # control
+    tuned = mangosd.replace("Rate.XP.Kill = 1\n", "Rate.XP.Kill    = 5\n").replace(
+        "WorldServerPort = 8085\n", "WorldServerPort = 9999\n"
+    )
+    (server / "etc/mangosd.conf").write_bytes(tuned.encode("utf-8"))
+    return server, password, installed
+
+
+def test_an_installed_modules_key_survives_the_reset_while_a_core_key_goes_back(
+    tmp_path: Path,
+) -> None:
+    server, _, _ = _tuned_xp(tmp_path)
+    keys = reset_defaults.module_keys(_tbc_rows(server, XP_RATES), reset_defaults.core_files(TBC))
+    report = reset_defaults.reset(
+        TBC,
+        server,
+        reset_defaults.core_files(TBC),
+        module_keys=keys,
+        seams=_seams(FakeImage(TEMPLATES["wow-tbc"])),
+    )
+    text = (server / "etc/mangosd.conf").read_text(encoding="utf-8")
+    assert "Rate.XP.Kill    = 5\n" in text, "the module's line was not kept byte for byte"
+    assert "WorldServerPort = 8085\n" in text and "9999" not in text
+    assert {r.file: r.outcome for r in report.results}["etc/mangosd.conf"] == "reset"
+
+
+def test_a_module_that_is_not_installed_has_no_effect(tmp_path: Path) -> None:
+    server, _, installed = _tuned_xp(tmp_path)
+    keys = reset_defaults.module_keys(_tbc_rows(server, {}), reset_defaults.core_files(TBC))
+    reset_defaults.reset(
+        TBC,
+        server,
+        reset_defaults.core_files(TBC),
+        module_keys=keys,
+        seams=_seams(FakeImage(TEMPLATES["wow-tbc"])),
+    )
+    assert (server / "etc/mangosd.conf").read_bytes() == installed["etc/mangosd.conf"]
+
+
+def test_a_live_file_that_is_not_utf8_is_refused_when_it_holds_module_keys(tmp_path: Path) -> None:
+    server, _, _ = _tuned_xp(tmp_path)
+    before = (server / "etc/mangosd.conf").read_bytes() + b"# caf\xe9\n"
+    (server / "etc/mangosd.conf").write_bytes(before)
+    report = reset_defaults.reset(
+        TBC,
+        server,
+        reset_defaults.core_files(TBC),
+        module_keys={"etc/mangosd.conf": ("Rate.XP.Kill",)},
+        seams=_seams(FakeImage(TEMPLATES["wow-tbc"])),
+    )
+    assert report.refused and report.written == ()
+    assert (server / "etc/mangosd.conf").read_bytes() == before
+    assert _baks(server) == []
+
+
+def test_carrying_module_keys_leaks_no_password(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Spec Test 8 again, down the decision-5 path: the carried text sits beside the logins."""
+    server, password, _ = _tuned_xp(tmp_path)
+    keys = reset_defaults.module_keys(_tbc_rows(server, XP_RATES), reset_defaults.core_files(TBC))
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="yulon"):
+        report = reset_defaults.reset(
+            TBC,
+            server,
+            reset_defaults.core_files(TBC),
+            module_keys=keys,
+            seams=_seams(FakeImage(TEMPLATES["wow-tbc"])),
+        )
+    assert f";{password};" in (server / "etc/mangosd.conf").read_text(encoding="utf-8")  # control
+    assert password not in "\n".join(report.lines()) and password not in repr(report)
+    assert password not in caplog.text
+
+
+def test_the_apps_route_is_lazy_and_carries_the_module_keys_to_the_reset(tmp_path: Path) -> None:
+    server, _, _ = _tuned_xp(tmp_path)
+    image = FakeImage(TEMPLATES["wow-tbc"])
+    route = reset_defaults.route_for_app(TBC, server, seams=_seams(image))
+    assert image.copies == [], "binding the route built nothing"
+    keys = reset_defaults.module_keys(_tbc_rows(server, XP_RATES), reset_defaults.core_files(TBC))
+    report = route(reset_defaults.core_files(TBC), keys)
+    assert len(image.copies) == 1 and not report.refused
+    assert "Rate.XP.Kill    = 5\n" in (server / "etc/mangosd.conf").read_text(encoding="utf-8")
