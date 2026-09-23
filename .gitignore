@@ -43,6 +43,13 @@ launcher/.svelte-kit/
 # on any branch.
 pylauncher/build/gate-*.json
 
+# The version stamp `build/stamp_version.py` writes in the release job, from the
+# tag being built (T90). It exists only inside a packaged build: a checkout must
+# not carry one, or every developer's `yulon.__version__` would report whatever
+# tag they last built. `tests/test_build_version.py` fails if one is ever
+# committed here. Never tracked on any branch.
+pylauncher/yulon/_build_version.py
+
 # Byte-code from running a gate harness in place. `pylauncher/.gitignore` has
 # covered its own tree since the start; `.notes/gates/` holds runnable scripts
 # too, and importing one leaves a `__pycache__` beside it (2026-09-04).

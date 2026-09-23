@@ -2591,6 +2591,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "and the index write leaves a file the next persist picks up rather than an index "
         "naming a file that is not there"
     ),
+    ("update_state.py", "_sweep_stale_temporaries"): (
+        "lists the config dir for `update.json.*.tmp` left behind by a save that was killed "
+        "or refused (T90); decides a delete, but only of a file this app named itself, in "
+        "this app's own directory, that is more than a day old - old enough that it cannot "
+        "belong to a write still in flight in another copy of Yu'lon. It touches nothing of "
+        "a server's and answers an empty listing by doing nothing"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 

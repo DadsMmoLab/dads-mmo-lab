@@ -4,7 +4,7 @@
   "name": "Sit Means Rest",
   "type": "ale",
   "game": "wow-wotlk",
-  "description": "Regen buff while sitting (/sit or the X key); stripped on movement or standing up.",
+  "description": "Regen buff while sitting (/sit or the X key); stripped on movement or standing up. Sitting still also builds rested XP, at a rate you choose.",
   "source": {
     "repo": "pjerra/SitMeansRest"
   },
@@ -40,6 +40,39 @@
           "type": "int",
           "min": 1,
           "max": 999999
+        },
+        {
+          "key": "REST_XP_ENABLED",
+          "default": "{rest_xp_enabled}",
+          "label": "Rested XP while sitting",
+          "explain": "When on, sitting still also builds rested XP -- the blue part of the XP bar. Bots and max-level characters get none.",
+          "type": "bool"
+        },
+        {
+          "key": "REST_XP_DELAY",
+          "default": "{rest_xp_delay}",
+          "note": "seconds",
+          "label": "Rested XP starts after (seconds)",
+          "explain": "How long a player has to sit still before rested XP starts to build. Moving, standing up or combat starts the wait again.",
+          "type": "int",
+          "min": 0,
+          "max": 86400
+        },
+        {
+          "key": "REST_XP_RATE",
+          "default": "{rest_xp_rate}",
+          "note": "percent of a level per minute",
+          "label": "Rested XP rate (% of a level per minute)",
+          "explain": "How fast rested XP builds. 5 means a ten-minute break is worth half a level; an inn gives 5 percent per eight hours.",
+          "type": "text"
+        },
+        {
+          "key": "REST_XP_MAX_LEVELS",
+          "default": "{rest_xp_max_levels}",
+          "note": "levels",
+          "label": "Rested XP ceiling (levels)",
+          "explain": "Stop building at this many levels' worth. The server's own ceiling (0.75 of a level at stock Rate.Rest.MaxBonus) always applies as well, so this only matters when set below it.",
+          "type": "text"
         }
       ]
     }
@@ -58,6 +91,34 @@
       "replace": "\\g<1>{regen_aura}",
       "regex": true,
       "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/SitMeansRest.lua",
+      "find": "(REST_XP_ENABLED\\s*=\\s*)(true|false)",
+      "replace": "\\g<1>{rest_xp_enabled}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/SitMeansRest.lua",
+      "find": "(REST_XP_DELAY\\s*=\\s*)\\d+",
+      "replace": "\\g<1>{rest_xp_delay}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/SitMeansRest.lua",
+      "find": "(REST_XP_RATE\\s*=\\s*)\\d+(?:\\.\\d+)?",
+      "replace": "\\g<1>{rest_xp_rate}",
+      "regex": true,
+      "when": "configure"
+    },
+    {
+      "file": "env/dist/etc/modules/lua_scripts/SitMeansRest.lua",
+      "find": "(REST_XP_MAX_LEVELS\\s*=\\s*)\\d+(?:\\.\\d+)?",
+      "replace": "\\g<1>{rest_xp_max_levels}",
+      "regex": true,
+      "when": "configure"
     }
   ],
   "prompts": [
@@ -72,6 +133,30 @@
       "question": "Regen aura spell id",
       "kind": "int",
       "default": "25990"
+    },
+    {
+      "key": "rest_xp_enabled",
+      "question": "Build rested XP while sitting?",
+      "kind": "bool",
+      "default": "true"
+    },
+    {
+      "key": "rest_xp_delay",
+      "question": "Seconds of sitting before rested XP starts",
+      "kind": "int",
+      "default": "30"
+    },
+    {
+      "key": "rest_xp_rate",
+      "question": "Rested XP rate (% of a level per minute)",
+      "kind": "float",
+      "default": "5.0"
+    },
+    {
+      "key": "rest_xp_max_levels",
+      "question": "Rested XP ceiling, in levels",
+      "kind": "float",
+      "default": "1.5"
     }
   ]
 }

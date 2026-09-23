@@ -216,7 +216,8 @@ pylauncher/
 │   ├── log.py                    # shared logging convention (get_logger/configure — Phase 0.6)
 │   ├── state.py                  # per-user app state (state.json under config_dir: remembered installs) (Phase 4)
 │   ├── resources.py              # bundle_root/manifests_dir/installers_dir for source checkouts AND PyInstaller builds (Phase 5.2, 6.0)
-│   ├── update.py                 # GitHub Releases version check → UpdateCheck; check + notify only (Phase 5.4)
+│   ├── update.py                 # GitHub Releases check → UpdateCheck; -Public tags only, once a day, decimal version order (Phase 5.4, T90)
+│   ├── update_state.py           # update.json under config_dir: last check, ETag, cached feed, skipped version (T90)
 │   ├── manifest.py               # the manifest schema: pydantic models + repo allow-list (Phase 2.1)
 │   ├── manifest_store.py         # load manifests from a tree + refresh from GitHub with ETags (Phase 2.3)
 │   ├── apply.py                  # declarative apply engine: manifest → install/configure/remove steps (Phase 2.3)
@@ -276,7 +277,10 @@ pylauncher/
 │   ├── test_catalog_view.py      # covers ui/catalog_view.py (Phase 4.2)
 │   ├── test_controller_view.py   # covers ui/controller_view.py (Phase 4.3)
 │   ├── test_resources.py         # covers yulon/resources.py (source + frozen layouts)
-│   ├── test_update.py            # covers yulon/update.py (Phase 5.4)
+│   ├── test_update.py            # covers yulon/update.py: what one answer means (Phase 5.4, T90)
+│   ├── test_update_state.py      # covers yulon/update_state.py: update.json, two writers, one file (T90)
+│   ├── test_update_cache.py      # covers check_with_cache: once a day, ETag, skip (T90)
+│   ├── test_update_widgets.py    # covers the update bar and the what's-new dialog (T90)
 │   ├── test_provision.py         # covers platform.ensure_docker/ensure_wsl2 plans per OS through seams (Phase 5.1)
 │   └── integration/              # live-Docker suite, marked `integration`, self-skipping without a daemon (Phase 1.5)
 │       ├── conftest.py           # docker gate + throwaway busybox compose project shaped like an install
@@ -423,10 +427,12 @@ the reversal is visible.
 
 Users download this app directly (AppImage/exe/dmg) with no package manager tracking updates, so the app must check for new versions itself.
 
-- On launch, check the GitHub Releases API for a newer tag than the running `__version__`.
-- If found, show a non-blocking banner/dialog with a link/button to download the new artifact for the user's platform.
-- **v1 scope:** check + notify only. Auto-download/auto-replace-the-running-binary is deferred — replacing a running AppImage/exe from within itself is fiddly per-platform and not worth the risk before the core app is stable.
+- On launch, ask the GitHub Releases API which `-Public` tag is newest — at most once a day, revalidated with `If-None-Match` so the usual answer is a 304 and costs nothing against the rate limit. Only `v1.2.3-Public` counts: this repository's feed also carries the `-fixtest` and `-DeckTest` builds the gates are cut from, and before T90 they were offered to players.
+- **Versions order decimal-style in the last number** (owner, 2026-09-21): major and minor are whole numbers, the last number is a decimal fraction of its digits, so `.6 < .65 < .66 < .7` and `.7 == .70`. `v0.8.7-Public` was cut after `v0.8.65-Public`; compared as integers nobody on 0.8.65 was ever offered it. One ordering, in `update.version_key()`, in exact `Fraction` arithmetic.
+- If found, a quiet line under the header says so, and a dialog shows the release notes of every public release between the running version and the one offered: `Update now` / `Later` / `Skip this version`. A `Check for updates` control in the header asks straight away and answers either way, failures included. The notes are shown and never run — images are replaced rather than fetched, and a link is opened only when it is `http(s)` and under this project's own repository.
+- **v1 scope:** check + notify. `Update now` opens the download page; the in-place swap is T90 plan 3. Replacing a running AppImage/exe from within itself is fiddly per-platform and not worth the risk before the core app is stable.
 - Revisit in-place auto-update once Phase 5 packaging is proven reliable.
+- **What a release carries (T90):** every `v*` tag publishes a `SHA256SUMS` file beside its artifacts, so an update can be proved before it is trusted, and a release body made from `CHANGELOG.md` — the entries the tag added since the previous `-Public` tag, under their own headings. A tag whose changelog gained nothing keeps GitHub's generated notes, and a release is never refused over either. A packaged build also reports the tag it was built from rather than a hand-edited string, so the version the check compares is the version that was shipped. Whoever cuts the release does nothing new. The app does not yet install an update itself.
 
 ---
 
@@ -440,7 +446,7 @@ The app needs a per-OS location to persist its own state — remembered server i
 | Windows | `%APPDATA%\yulon\` |
 | macOS | `~/Library/Application Support/yulon/` |
 
-- Store: known install locations per game, chosen client paths, last-checked update version, cached copies of fetched manifests (with an ETag/timestamp for refresh).
+- Store: known install locations per game, chosen client paths, cached copies of fetched manifests (with an ETag/timestamp for refresh), and `update.json` — when the releases feed was last asked for, its ETag, the feed itself (so a cached answer is re-judged against whatever version is running now) and a skipped version. `update.json` is its own file and never part of `state.json`: `AppState` is `extra="forbid"`, so a build older than the one that wrote it would call the whole file corrupt and open with an empty list of installs (T90).
 - This directory is **not** the server directory — never conflate app state with server/database files. Server files stay wherever the user chose during install (matching existing script behavior, e.g. `choose_install_dir()` in `install-wow-wotlk.sh`).
 - Owned by `platform.py` (add a `config_dir()` helper alongside `detect()`); implemented in Phase 1, consumed by Catalog/Controller from Phase 3 onward.
 

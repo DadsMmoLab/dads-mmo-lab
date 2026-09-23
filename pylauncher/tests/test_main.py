@@ -15,8 +15,10 @@ survived review in the first place.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -27,7 +29,7 @@ from typing import Any
 import pytest
 
 import main
-from tests.conftest import process_events
+from tests.conftest import process_events, pump_until
 from yulon import platform, state, update
 
 
@@ -495,13 +497,33 @@ def _app_window(qapp: object) -> Iterator[Any]:
     neutralised here: it reads the user's real `state.json`, writes it back
     whenever a tab is added, and starts a thread that asks GitHub for the
     latest release.
+
+    **The update check is patched HERE and not in a test**, and so is
+    `update.json`. `build_window()` imports `check_with_cache` into its own
+    namespace on the way in, so a patch applied after the window exists is
+    never seen by it — the window would already have asked GitHub. And this
+    fixture is MODULE-scoped, so pytest builds it BEFORE the function-scoped
+    autouse fixture in `conftest.py` that points `platform.config_dir()` at a
+    scratch directory. Measured on this box, 2026-09-20, with a probe module
+    that printed both: at module-fixture time `config_dir()` answered
+    `~/.local/share/yulon` — the developer's own — and inside the test body it
+    answered a `tmp_path`. So the redirect every other test relies on is simply
+    not up yet here, and an unpatched check would have written the real
+    `update.json`. Both doors are shut before `build_window()` is called.
     """
+    import tempfile
+
     from PySide6.QtWidgets import QApplication
 
+    from yulon import update_state
     from yulon.ui.controller_view import ControllerView
 
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(update, "check_for_update", lambda: None)
+    monkeypatch.setattr(update, "check_with_cache", lambda **kwargs: None)
+    scratch = Path(tempfile.mkdtemp(prefix="yulon-test-update-state-"))
+    monkeypatch.setattr(
+        update_state, "update_state_path", lambda config_dir=None: scratch / "update.json"
+    )
     monkeypatch.setattr(state, "load_state", lambda path=None: state.AppState(installs=[]))
     # Captured here rather than in the test that reads it: `build_window()`
     # imports `save_state` into its own namespace on the way in, so a patch
@@ -521,6 +543,7 @@ def _app_window(qapp: object) -> Iterator[Any]:
 
     window = main.build_window()
     window.saved_states = saved
+    window.update_state_dir = scratch
     yield window
 
     # `_stop_background_threads` itself, not a hand-rolled equivalent: a QThread
@@ -529,6 +552,7 @@ def _app_window(qapp: object) -> Iterator[Any]:
     main._stop_background_threads(window)
     QApplication.processEvents()
     monkeypatch.undo()
+    shutil.rmtree(scratch, ignore_errors=True)
 
 
 @pytest.fixture
@@ -556,6 +580,637 @@ def _tab_for(window: Any, server_dir: Any) -> Any:
         if view.services.controller.server_dir == server_dir:
             return view
     raise AssertionError(f"no tab for {server_dir}")
+
+
+# ------------------------------------------------------------- the update check
+
+A_RELEASE = update.UpdateCheck(
+    "0.8.66-Public",
+    "v0.8.70-Public",
+    True,
+    "https://github.com/DadsMmoLab/dads-mmo-lab/releases/tag/v0.8.70-Public",
+    notes=(update.ReleaseNotes("v0.8.70-Public", "- Ten.", False),),
+)
+
+
+class _FakeDialog:
+    """`UpdateDialog` with a non-blocking `exec()`.
+
+    A real one is application-modal, and `conftest.py`'s `_no_modal_dialogs`
+    covers `QMessageBox` only — a `QDialog.exec()` in an offscreen run waits for
+    a click that never comes, at zero CPU, with no failure and no output. The
+    factory is injectable for exactly this.
+
+    `deleteLater` is here because the host calls it on whatever the factory
+    returned, which is the fix for the dialog that used to be left parented to
+    the window on every click.
+    """
+
+    def __init__(self, choice: Any) -> None:
+        self.choice = choice
+        self.shown = 0
+        self.deleted = 0
+
+    def exec(self) -> int:
+        self.shown += 1
+        return 1
+
+    def deleteLater(self) -> None:
+        self.deleted += 1
+
+
+def _opens_into(opened: list[str]) -> Any:
+    """An opener that records and says it worked. `Callable[[str], bool]`.
+
+    The `True` is the contract, not decoration: an opener that answers False —
+    which `QDesktopServices.openUrl()` really does on a box with no browser —
+    puts the URL on the bar instead.
+    """
+
+    def opener(url: str) -> bool:
+        opened.append(url)
+        return True
+
+    return opener
+
+
+@pytest.fixture
+def update_host(window: Any) -> Iterator[Any]:
+    """The window's update host, with its bar and its `update.json` clean at both ends.
+
+    One window is shared by this whole module (`_app_window`), so a test that
+    skipped a version or left the bar up would be handing the next one a state
+    it never set. The four injectable attributes are put back too — a stand-in
+    `make_dialog` left on a shared window is how a later test ends up asserting
+    about a dialog this one built.
+    """
+    host = window.property("update_host")
+    assert host is not None
+    # The launch check has its own QThread and refuses a manual check while it
+    # runs (by design). Every test below is about the settled app, which is the
+    # state a user reaches long before they find the button.
+    startup = host.startup_thread
+    if startup is not None:
+        pump_until(lambda: not startup.isRunning(), "the launch update check finished")
+    seams = {name: getattr(host, name) for name in ("check", "run_job", "make_dialog", "open_url")}
+    path = window.update_state_dir / "update.json"
+    path.unlink(missing_ok=True)
+    yield host
+    window.property("update_bar").clear()
+    for name, seam in seams.items():
+        setattr(host, name, seam)
+    # What a test can leave behind on the host itself: the release the dialog
+    # would open on, and a check it never let finish — which would make every
+    # test after it click a dead button.
+    host._offered = None
+    host._checking = False
+    _check_button(window).setEnabled(True)
+    path.unlink(missing_ok=True)
+
+
+def test_a_startup_check_shows_the_bar_for_a_release_that_is_newer(
+    window: Any, update_host: Any
+) -> None:
+    update_host.startup_result(A_RELEASE)
+
+    bar = window.property("update_bar")
+    assert not bar.isHidden()
+    assert "v0.8.70-Public" in bar.text() and "0.8.66-Public" in bar.text()
+
+
+def test_a_skipped_version_is_not_announced_at_startup(window: Any, update_host: Any) -> None:
+    """ "Skip this version" is about the launch after it, which is this one."""
+    update.skip_version("v0.8.70-Public")
+
+    update_host.startup_result(A_RELEASE)
+
+    assert window.property("update_bar").isHidden()
+
+
+def test_a_startup_check_that_failed_says_nothing(window: Any, update_host: Any) -> None:
+    """Offline at launch is the normal case, not news."""
+    update_host.startup_result(dataclasses.replace(A_RELEASE, available=False, error="dns"))
+
+    assert window.property("update_bar").isHidden()
+
+
+def test_a_manual_check_that_failed_says_so(window: Any, update_host: Any) -> None:
+    """The 2026-08-31 post-mortem was a check that failed silently."""
+    update_host.manual_result(dataclasses.replace(A_RELEASE, available=False, error="dns"))
+
+    assert window.property("update_bar").text() == "Could not check for updates: dns"
+
+
+def test_a_manual_check_that_raised_says_so_too(window: Any, update_host: Any) -> None:
+    """`job.py`'s `on_error` carries the exception itself, not a string."""
+    update_host.manual_failed(OSError("no route"))
+
+    assert "no route" in window.property("update_bar").text()
+
+
+def test_a_manual_check_with_nothing_newer_says_which_version_you_have(
+    window: Any, update_host: Any
+) -> None:
+    update_host.manual_result(
+        dataclasses.replace(A_RELEASE, available=False, latest="v0.8.66-Public")
+    )
+
+    assert window.property("update_bar").text() == "You have the newest version (0.8.66-Public)."
+
+
+def test_a_manual_check_shows_a_version_the_player_skipped(window: Any, update_host: Any) -> None:
+    """They pressed the button: hiding the answer to a question just asked is the same bug."""
+    update.skip_version("v0.8.70-Public")
+
+    update_host.manual_result(A_RELEASE)
+
+    assert "v0.8.70-Public" in window.property("update_bar").text()
+
+
+def test_the_button_in_the_header_runs_a_forced_check_and_shows_its_answer(
+    window: Any, update_host: Any
+) -> None:
+    """Through the real button, not the slot: the wiring is what this pins."""
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.widgets.job import run_inline
+
+    asked: list[int] = []
+
+    def check() -> object:
+        asked.append(1)
+        return A_RELEASE
+
+    update_host.check = check
+    update_host.run_job = run_inline
+
+    button = window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    button.click()
+
+    assert asked == [1]
+    assert "v0.8.70-Public" in window.property("update_bar").text()
+
+
+def test_skip_in_the_dialog_is_written_down_and_takes_the_bar_away(
+    window: Any, update_host: Any
+) -> None:
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(A_RELEASE)
+    dialog = _FakeDialog(UpdateChoice.SKIP)
+    update_host.make_dialog = lambda result: dialog
+
+    window.property("update_bar").details_button.click()
+
+    assert dialog.shown == 1
+    assert update.load_update_state().skipped_version == "v0.8.70-Public"
+    assert window.property("update_bar").isHidden()
+
+
+def test_later_in_the_dialog_changes_nothing(window: Any, update_host: Any) -> None:
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(A_RELEASE)
+    update_host.make_dialog = lambda result: _FakeDialog(UpdateChoice.LATER)
+    opened: list[str] = []
+    update_host.open_url = _opens_into(opened)
+
+    window.property("update_bar").details_button.click()
+
+    assert opened == []
+    assert update.load_update_state().skipped_version is None
+    assert not window.property("update_bar").isHidden()
+
+
+def test_update_now_opens_the_release_page_and_replaces_nothing(
+    window: Any, update_host: Any
+) -> None:
+    """Plan 2 offers the download page; plan 3 is what installs it."""
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(A_RELEASE)
+    update_host.make_dialog = lambda result: _FakeDialog(UpdateChoice.UPDATE)
+    opened: list[str] = []
+    update_host.open_url = _opens_into(opened)
+
+    window.property("update_bar").details_button.click()
+
+    assert opened == [A_RELEASE.url]
+
+
+def test_a_release_url_from_somewhere_else_is_never_handed_to_the_desktop(
+    window: Any, update_host: Any
+) -> None:
+    """`html_url` is the feed's string, and the desktop starts whatever its scheme says.
+
+    Driven through the button, not through `safe_release_url` — the rule was
+    already unit-tested, and what this pins is that the click goes through it.
+    """
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    hostile = dataclasses.replace(A_RELEASE, url="file:///etc/passwd")
+    update_host.startup_result(hostile)
+    update_host.make_dialog = lambda result: _FakeDialog(UpdateChoice.UPDATE)
+    opened: list[str] = []
+    update_host.open_url = _opens_into(opened)
+
+    window.property("update_bar").details_button.click()
+
+    assert opened == [update.RELEASES_PAGE]
+
+
+# ------------------------------- when there is no browser to open (yulon-arch)
+
+
+def _press_update_now(window: Any, update_host: Any, result: Any = None) -> None:
+    """The real path: a release is offered, the dialog opens, "Update now" is pressed."""
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(result if result is not None else A_RELEASE)
+    update_host.make_dialog = lambda offered: _FakeDialog(UpdateChoice.UPDATE)
+    window.property("update_bar").details_button.click()
+
+
+def _clipboard() -> Any:
+    from PySide6.QtGui import QGuiApplication
+
+    return QGuiApplication.clipboard()
+
+
+def test_a_browser_that_will_not_open_leaves_the_player_the_url(
+    window: Any, update_host: Any
+) -> None:
+    """Measured on yulon-arch, 2026-09-21: no browser and no `xdg-open` on the box.
+
+    The dialog closed and nothing happened and nothing was said — the player
+    had no route to the release at all. `QDesktopServices.openUrl()` returns a
+    bool and the app threw it away.
+    """
+    _clipboard().setText("something else")
+    update_host.open_url = lambda url: False
+
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert not bar.isHidden()
+    assert A_RELEASE.url in bar.text()
+    assert "Could not open a browser" in bar.text()
+    assert "clipboard" in bar.text(), "the message has to say the URL was copied"
+    assert _clipboard().text() == A_RELEASE.url
+
+
+def test_an_opener_that_raises_is_the_same_as_one_that_refuses(
+    window: Any, update_host: Any
+) -> None:
+    """A desktop helper that is missing can raise instead of answering False."""
+
+    def explodes(url: str) -> bool:
+        raise OSError("no xdg-open on this machine")
+
+    update_host.open_url = explodes
+
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert A_RELEASE.url in bar.text() and "Could not open a browser" in bar.text()
+    assert _clipboard().text() == A_RELEASE.url
+
+
+def test_a_browser_that_opens_says_nothing(window: Any, update_host: Any) -> None:
+    """The bar keeps the offer; success is not news."""
+    opened: list[str] = []
+    update_host.open_url = _opens_into(opened)
+
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert opened == [A_RELEASE.url]
+    assert "Could not open" not in bar.text()
+    assert A_RELEASE.latest in bar.text(), "the bar still shows the offer"
+
+
+def test_the_url_on_the_bar_is_the_vetted_one_and_never_the_feeds(
+    window: Any, update_host: Any
+) -> None:
+    """A hostile `html_url` must not be put on screen, or in the clipboard, either."""
+    update_host.open_url = lambda url: False
+    hostile = dataclasses.replace(A_RELEASE, url="file:///etc/passwd")
+
+    _press_update_now(window, update_host, hostile)
+
+    bar = window.property("update_bar")
+    assert update.RELEASES_PAGE in bar.text()
+    assert "/etc/passwd" not in bar.text()
+    assert _clipboard().text() == update.RELEASES_PAGE
+
+
+def test_the_message_arrives_even_for_a_version_the_player_skipped(
+    window: Any, update_host: Any
+) -> None:
+    """They asked for it by pressing the button; the bar may not stay hidden."""
+    update.skip_version(str(A_RELEASE.latest))
+    update_host.open_url = lambda url: False
+
+    update_host.manual_result(A_RELEASE)
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert not bar.isHidden()
+    assert A_RELEASE.url in bar.text()
+
+
+def test_a_failed_open_does_not_cost_the_player_the_offer(window: Any, update_host: Any) -> None:
+    """The message must not be the end of the road to the release.
+
+    `show_message` hides "See what's new", so after the browser failed the only
+    way back to the dialog was another manual check — and the modal dialog is
+    up while the message is put on the bar.
+    """
+    update_host.open_url = lambda url: False
+
+    _press_update_now(window, update_host)
+
+    bar = window.property("update_bar")
+    assert not bar.isHidden()
+    assert not bar.details_button.isHidden(), "the way back to the release notes is gone"
+
+    bar.details_button.click()  # and it still opens the dialog
+    assert "Could not open a browser" in bar.text()
+
+
+def test_a_message_with_no_offer_behind_it_keeps_no_button(window: Any, update_host: Any) -> None:
+    """The ordinary case is unchanged: nothing to open, no button."""
+    update_host.manual_result(
+        dataclasses.replace(A_RELEASE, available=False, latest="v0.8.66-Public")
+    )
+
+    bar = window.property("update_bar")
+    assert "You have the newest version" in bar.text()
+    assert bar.details_button.isHidden()
+
+
+def test_a_link_in_the_notes_is_not_announced_as_the_download_page(
+    window: Any, update_host: Any
+) -> None:
+    """A release body can link anywhere; "The download page is: …" would vouch for it.
+
+    The label has to stay neutral, or a host the body chose is put on the
+    clipboard under a sentence the app's own update flow lends its authority to.
+    """
+    update_host.open_url = lambda url: False
+    dialog = update_host.make_dialog(A_RELEASE)
+    try:
+        from PySide6.QtCore import QUrl
+
+        dialog.notes.anchorClicked.emit(QUrl("https://evil.example/x"))
+    finally:
+        dialog.deleteLater()
+        _collect_deleted()
+
+    text = window.property("update_bar").text()
+    assert "The link is: https://evil.example/x" in text
+    assert "download page" not in text
+
+
+def test_an_enormous_link_is_shortened_on_the_bar_but_whole_on_the_clipboard(
+    window: Any, update_host: Any
+) -> None:
+    """A release body chooses this string, and the bar is one elided line.
+
+    Shown short so the message stays readable; copied whole, because the
+    clipboard is what the player actually uses (third cold review,
+    2026-09-21).
+    """
+    long_url = "https://example.invalid/" + "a" * 900
+    update_host.open_url = lambda url: False
+    dialog = update_host.make_dialog(A_RELEASE)
+    try:
+        from PySide6.QtCore import QUrl
+
+        dialog.notes.anchorClicked.emit(QUrl(long_url))
+    finally:
+        dialog.deleteLater()
+        _collect_deleted()
+
+    text = window.property("update_bar").text()
+    assert len(text) < 400, f"the bar was handed {len(text)} characters"
+    assert "…" in text
+    assert text.startswith("Could not open a browser. The link is: https://example.invalid/")
+    assert _clipboard().text() == long_url, "the clipboard keeps the whole vetted URL"
+
+
+def test_an_absurd_link_is_refused_without_putting_it_anywhere(
+    window: Any, update_host: Any
+) -> None:
+    """Past a few thousand characters it is not a link anyone is going to use."""
+    absurd = "https://example.invalid/" + "b" * 5000
+    _clipboard().setText("untouched")
+    update_host.open_url = lambda url: False
+    dialog = update_host.make_dialog(A_RELEASE)
+    try:
+        from PySide6.QtCore import QUrl
+
+        dialog.notes.anchorClicked.emit(QUrl(absurd))
+    finally:
+        dialog.deleteLater()
+        _collect_deleted()
+
+    text = window.property("update_bar").text()
+    assert "could not open the link" in text.lower()
+    assert "b" * 100 not in text
+    assert _clipboard().text() == "untouched", "an absurd URL was put on the clipboard"
+
+
+def test_a_link_in_the_notes_falls_back_the_same_way(window: Any, update_host: Any) -> None:
+    """The other route out of the dialog, through the host's REAL dialog factory.
+
+    Not the fake: what this pins is that `make_dialog`'s default hands the
+    notes view the host's opener, so both routes share one fallback.
+    """
+    update_host.open_url = lambda url: False
+    dialog = update_host.make_dialog(A_RELEASE)
+    try:
+        from PySide6.QtCore import QUrl
+
+        dialog.notes.anchorClicked.emit(QUrl("https://example.invalid/notes"))
+    finally:
+        dialog.deleteLater()
+        # Or the next test's child count starts at one (the leak test found it).
+        _collect_deleted()
+
+    bar = window.property("update_bar")
+    assert "https://example.invalid/notes" in bar.text()
+    assert "Could not open a browser" in bar.text()
+    assert _clipboard().text() == "https://example.invalid/notes"
+
+
+def test_the_details_button_does_nothing_before_a_check_has_answered(
+    window: Any, update_host: Any
+) -> None:
+    """The bar is hidden then, but a signal is not a guarantee about what raised it."""
+    made: list[int] = []
+    update_host.make_dialog = lambda result: made.append(1) or _FakeDialog(None)
+
+    update_host.open_details()
+
+    assert made == []
+
+
+def _collect_deleted() -> None:
+    """Deliver the `DeferredDelete` events `deleteLater()` posted.
+
+    `processEvents()` does NOT deliver them, measured on this build: two
+    widgets `deleteLater()`-ed and then pumped were both still children
+    afterwards, and `sendPostedEvents(None, DeferredDelete)` took them. A test
+    that pumped and then asserted "nothing was leaked" would be asserting about
+    Qt's event filter, not about the code.
+    """
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    process_events()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_every_dialog_is_handed_back_when_it_closes(window: Any, update_host: Any) -> None:
+    """A real `UpdateDialog`, parented to the window, on the real path.
+
+    Not the fake: the leak is Qt ownership, and a plain Python object cannot
+    have it. `exec()` is the only thing overridden, because a modal one would
+    block the run forever.
+    """
+    from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog
+
+    class _NoBlockDialog(UpdateDialog):
+        def exec(self) -> int:
+            self.choice = UpdateChoice.LATER
+            return 0
+
+    update_host.startup_result(A_RELEASE)
+    update_host.make_dialog = lambda result: _NoBlockDialog(result, parent=window)
+    before = len(window.findChildren(UpdateDialog))
+
+    for _ in range(2):
+        window.property("update_bar").details_button.click()
+        _collect_deleted()
+
+    # A dialog left parented to the window means every click adds one.
+    assert len(window.findChildren(UpdateDialog)) == before
+
+
+def test_the_fake_dialog_is_handed_back_too(window: Any, update_host: Any) -> None:
+    """The host calls `deleteLater()` on whatever the factory returned."""
+    from yulon.ui.widgets.update_dialog import UpdateChoice
+
+    update_host.startup_result(A_RELEASE)
+    dialog = _FakeDialog(UpdateChoice.LATER)
+    update_host.make_dialog = lambda result: dialog
+
+    window.property("update_bar").details_button.click()
+
+    assert dialog.deleted == 1
+
+
+# ------------------------------------------------- one check at a time
+
+
+class _HeldRunner:
+    """A `JobRunner` that starts nothing and keeps the callbacks for the test to fire."""
+
+    def __init__(self) -> None:
+        self.work: list[Any] = []
+        self.done: list[Any] = []
+        self.failed: list[Any] = []
+
+    def __call__(self, work: Any, on_done: Any, on_error: Any) -> None:
+        self.work.append(work)
+        self.done.append(on_done)
+        self.failed.append(on_error)
+
+
+def _check_button(window: Any) -> Any:
+    from PySide6.QtWidgets import QPushButton
+
+    button = window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    return button
+
+
+def test_a_second_click_while_a_check_is_running_starts_nothing(
+    window: Any, update_host: Any
+) -> None:
+    """Two checks in flight are two writers of update.json, and one wasted request."""
+    runner = _HeldRunner()
+    update_host.run_job = runner
+    update_host.check = lambda: A_RELEASE
+    button = _check_button(window)
+
+    button.click()
+    assert button.isEnabled() is False, "the button stays pressable during a check"
+    button.click()
+
+    assert len(runner.work) == 1
+
+    runner.done[0](A_RELEASE)
+    assert button.isEnabled() is True, "the button never came back"
+
+
+def test_the_slot_refuses_a_second_check_even_when_nothing_disabled_it(
+    window: Any, update_host: Any
+) -> None:
+    """The flag, not the button.
+
+    Disabling the button hides the second click from a USER, and a test that
+    clicks twice cannot tell the two mechanisms apart — measured: removing the
+    flag left all 51 tests green. `check_now` is a slot, and a slot is callable
+    by anything that can reach the host.
+    """
+    runner = _HeldRunner()
+    update_host.run_job = runner
+    update_host.check = lambda: A_RELEASE
+
+    update_host.check_now()
+    _check_button(window).setEnabled(True)  # as if something re-enabled it
+    update_host.check_now()
+
+    assert len(runner.work) == 1
+
+
+def test_a_check_that_fails_gives_the_button_back(window: Any, update_host: Any) -> None:
+    """Both outcomes settle it; only one of them was the happy path."""
+    runner = _HeldRunner()
+    update_host.run_job = runner
+    update_host.check = lambda: A_RELEASE
+    button = _check_button(window)
+
+    button.click()
+    runner.failed[0](OSError("no route"))
+
+    assert button.isEnabled() is True
+    assert "no route" in window.property("update_bar").text()
+
+
+def test_a_manual_check_while_the_launch_check_is_still_asking_is_refused(
+    window: Any, update_host: Any
+) -> None:
+    """The same question is already in flight; a second one is a second writer."""
+
+    class _Busy:
+        def isRunning(self) -> bool:
+            return True
+
+    runner = _HeldRunner()
+    update_host.run_job = runner
+    update_host.check = lambda: A_RELEASE
+    was, update_host.startup_thread = update_host.startup_thread, _Busy()
+    try:
+        _check_button(window).click()
+    finally:
+        update_host.startup_thread = was
+
+    assert runner.work == []
+    assert window.property("update_bar").text() == "Yu'lon is already checking for updates."
+    assert _check_button(window).isEnabled() is True, "a refusal is not a check in flight"
 
 
 def test_adopting_a_server_that_already_has_a_tab_rebuilds_it_for_the_new_distro(
