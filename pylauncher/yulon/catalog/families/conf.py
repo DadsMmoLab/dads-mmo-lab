@@ -304,6 +304,20 @@ def apply_table(
     return tuple(changed)
 
 
+def replace_file(path: Path, text: str) -> None:
+    """Replace the file at `path` with `text`, atomically and owner-only (T94's reset).
+
+    `_write()` under a public name, because a second caller now exists and it
+    needs every rule `_write` keeps: the text a reset writes carries the
+    database password (`CONF_MODE`), and a reset interrupted half-way through a
+    file must leave the old file, not half of the new one. One writer, not two.
+
+    Raises:
+        InstallerError: the file could not be written; it was left as it was.
+    """
+    _write(path, text)
+
+
 def _line(key: str, raw: str, tokens: Mapping[str, str]) -> str:
     """The whole `Key = value` line, refused if it would be more than one line.
 

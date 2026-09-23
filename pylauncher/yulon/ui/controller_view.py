@@ -71,6 +71,7 @@ from yulon import (
     party,
     platform,
     purge,
+    reset_defaults,
     resources,
     tuning,
     useraccounts,
@@ -3581,16 +3582,13 @@ TUNING_CORE_FILE = (
 )
 """Why `worldserver.conf` is listed but not editable here (T43's own follow-up)."""
 
-TUNING_CORE_FILES: tuple[str, ...] = (
-    "env/dist/etc/worldserver.conf",
-    "env/dist/etc/authserver.conf",
-    "env/dist/etc/modules/playerbots.conf",
-)
+TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
 """The install's own conf files, listed read-only beside the module ones.
 
-Named here and not discovered by a glob of `env/dist/etc`: a glob would also
-list every module conf a second time, and the point of the list is that these
-three are the ones this tab deliberately will not write.
+Named (in `reset_defaults`, since T94) and not discovered by a glob of
+`env/dist/etc`: a glob would also list every module conf a second time, and
+the point of the list is that these three are the ones this tab deliberately
+will not write.
 """
 
 MODULE_SQL_BUTTON_LABEL = "Apply module SQL"
