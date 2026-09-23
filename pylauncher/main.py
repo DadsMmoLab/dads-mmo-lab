@@ -235,6 +235,7 @@ def build_window() -> object:
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.icons import get_app_icon, get_tab_icon
+    from yulon.ui.logs_view import LogsView
     from yulon.ui.tab_titles import retitle_controller_tabs
     from yulon.ui.theme import apply_dadcraft_theme
     from yulon.ui.widgets.log_panel import LogPanel
@@ -258,6 +259,8 @@ def build_window() -> object:
 
         yulon_controllers: list[QWidget]
         yulon_log_panels: list[LogPanel]
+        # The Logs tab (T93), read by `_busy_reasons()`: a support save holds the close.
+        yulon_logs_view: LogsView
 
         # The input sources, so `_stop_background_threads()` can shut them down.
         # Typed as `Any`-free references to their concrete classes, imported in
@@ -349,6 +352,15 @@ def build_window() -> object:
         installed_games=state.installed_dirs(),
     )
     tabs, banner, _splitter = build_catalog_tab(window, catalog_view, log_panel)
+    # T93: directly under Catalog, the owner's placement. INSERTED rather than
+    # added: every server tab is appended by `add_controller()` and found by
+    # `indexOf()`, so index 1 is this tab's for the life of the window. The
+    # tab reads nothing until it is shown (see `logs_view.py`). The lambda reads
+    # `state.installs` at each call, so an install made later is in the next save.
+    logs_view = LogsView(lambda: list(state.installs), catalog)
+    tabs.insertTab(1, logs_view, get_tab_icon("console"), "Logs")
+    tabs.setTabToolTip(1, "Yu'lon's own logs, and a file to send when something goes wrong")
+    navigator.invalidate()
 
     def _on_tab_bar_context_menu(pos: QPoint) -> None:
         tab_bar = tabs.tabBar()
@@ -361,24 +373,24 @@ def build_window() -> object:
             act.setEnabled(False)
         else:
             widget = tabs.widget(index)
-            if isinstance(widget, ControllerView):
-                cv = widget
-                sd = cv.services.controller.server_dir
-                open_dir_act = menu.addAction("Open Server Folder in File Manager")
-                open_dir_act.triggered.connect(
-                    lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(sd)))
-                )
-                copy_path_act = menu.addAction("Copy Server Path")
-                copy_path_act.triggered.connect(
-                    lambda: QGuiApplication.clipboard().setText(str(sd))
-                )
-                menu.addSeparator()
-                if cv.start_button.isEnabled() and cv.start_button.isVisible():
-                    start_act = menu.addAction("Start Server")
-                    start_act.triggered.connect(cv.start_server)
-                if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
-                    stop_act = menu.addAction("Stop Server")
-                    stop_act.triggered.connect(cv.stop_server)
+            if not isinstance(widget, ControllerView):
+                # The Logs tab (T93): nothing to open or start from its handle.
+                return
+            cv = widget
+            sd = cv.services.controller.server_dir
+            open_dir_act = menu.addAction("Open Server Folder in File Manager")
+            open_dir_act.triggered.connect(
+                lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(sd)))
+            )
+            copy_path_act = menu.addAction("Copy Server Path")
+            copy_path_act.triggered.connect(lambda: QGuiApplication.clipboard().setText(str(sd)))
+            menu.addSeparator()
+            if cv.start_button.isEnabled() and cv.start_button.isVisible():
+                start_act = menu.addAction("Start Server")
+                start_act.triggered.connect(cv.start_server)
+            if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
+                stop_act = menu.addAction("Stop Server")
+                stop_act.triggered.connect(cv.stop_server)
         menu.exec(tab_bar.mapToGlobal(pos))
 
     tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -753,6 +765,7 @@ def build_window() -> object:
     # The live lists themselves, not a copy of either - see `_Window`.
     window.yulon_log_panels = panels
     window.yulon_controllers = controller_views
+    window.yulon_logs_view = logs_view
     assert isinstance(window, QWidget)
     return window
 
@@ -870,6 +883,22 @@ def _regain_docker_group() -> None:
     platform.restart_under_docker_group()
 
 
+def _busy_reasons(window: object) -> list[str]:
+    """Every reason the window must not close now: each server tab's, and the Logs tab's.
+
+    Module-level so a test can ask it of the real window; `main()`'s close
+    guard is the one caller. The Logs tab is here because a support save can sit
+    in a docker read for longer than the exit join waits (`in_flight().wait_all(8000)`
+    in `_stop_background_threads()`), and a QThread destroyed while running
+    aborts the process (T93).
+    """
+    views: list[object] = [*getattr(window, "yulon_controllers", [])]
+    logs_view = getattr(window, "yulon_logs_view", None)
+    if logs_view is not None:
+        views.append(logs_view)
+    return [reason for view in views if (reason := getattr(view, "busy_reason", lambda: None)())]
+
+
 def main() -> int:
     """Start the launcher."""
     configure(config_dir=platform.config_dir())
@@ -916,7 +945,7 @@ def main() -> int:
         class _RefuseCloseWhileBusy(QObject):
             """Decline to close the window while something is running that cannot be stopped.
 
-            There is exactly one such thing today: the database import, which runs for
+            The first such thing was the database import, which runs for
             10-30 minutes. Closing during one used to freeze the window for
             `STOP_GRACE_SECONDS + 30` seconds — `ControllerView.shutdown()` joins its
             worker, `_JobWorker.run()` calls its work synchronously so `thread.quit()`
@@ -928,16 +957,15 @@ def main() -> int:
             be stopped part-way without leaving the databases half-written, so the only
             choice that ever existed was between waiting and a crash; this makes that
             choice visible and takes the crash off the table (review, 2026-08-23).
+
+            T93 added a support-file save on the Logs tab; `_busy_reasons()` is
+            the list the guard reads.
             """
 
             def eventFilter(self, watched: QObject, event: QEvent) -> bool:
                 if event.type() is not QEvent.Type.Close:
                     return False
-                reasons = [
-                    reason
-                    for view in getattr(watched, "yulon_controllers", [])
-                    if (reason := getattr(view, "busy_reason", lambda: None)())
-                ]
+                reasons = _busy_reasons(watched)
                 if not reasons:
                     return False
                 logger.info(f"close refused: {reasons[0]}")
