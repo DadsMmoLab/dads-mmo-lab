@@ -125,7 +125,11 @@ def _read_logs(
         sources = support_sources.sources_for_app(installs, catalog, qt_version=qt_version)
         known = support_sources.gather_known(sources)
         redactor = Redactor.build(known.values, home=Path.home())
-        items = tuple(support_sources.viewables(sources))
+        # A label is a file name and is shown too, so it is redacted like a line.
+        items = tuple(
+            support_sources.Viewable(redactor.redact(item.label), item.path)
+            for item in support_sources.viewables(sources)
+        )
     except Exception as exc:  # boundary: the tab says so rather than losing the read
         logger.warning(f"the Logs tab could not list its files: {type(exc).__name__}")
         return _Read(generation, (), None, f"The logs could not be listed ({type(exc).__name__}).")
