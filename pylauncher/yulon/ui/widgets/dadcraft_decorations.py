@@ -180,7 +180,8 @@ class DadcraftHeader(QFrame):
                 }
             )
 
-        layout = QHBoxLayout(self)
+        self._row = QHBoxLayout(self)
+        layout = self._row
         layout.setContentsMargins(14, 6, 14, 6)
 
         left_col = QVBoxLayout()
@@ -208,6 +209,19 @@ class DadcraftHeader(QFrame):
     def set_realm_status(self, status: str) -> None:
         """Forward realm status to the embedded badge."""
         self._badge.set_status(status)
+
+    def add_action(self, widget: QWidget) -> None:
+        """Place a small control left of the realm badge (the update check's home, T90).
+
+        There is no menu bar in this app, so the header is where a control that
+        belongs to the whole window goes. Left of the badge rather than right:
+        the badge is the rightmost thing in every screenshot of this app, and
+        moving it would move the one element a user looks for by position.
+        """
+        widget.setParent(self)
+        self._row.insertWidget(
+            self._row.indexOf(self._badge), widget, 0, Qt.AlignmentFlag.AlignVCenter
+        )
 
     def _tick(self) -> None:
         """Advance the firepit animation clock and rise the ember particles."""
