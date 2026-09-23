@@ -3576,10 +3576,10 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     module-type write this guard stands in front of, and the count moving is
     what says the new step joined the guarded set rather than slipping past it.
 
-    45 since T100: `hearthstone-cd` runs upstream's reset file before the
-    chosen one on install (so a second choice is not a no-op), and its remove
-    became that file instead of an inline `spell_dbc` statement -- one step
-    more, both into `world`, both still behind this guard.
+    Still 44 after T100, by a route worth saying: `hearthstone-cd` runs
+    upstream's reset and then the chosen file as ONE `then` step (one
+    transaction), and its remove became that reset file instead of an inline
+    `spell_dbc` statement -- two steps before, two after, all into `world`.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -3600,7 +3600,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        45,
+        44,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )

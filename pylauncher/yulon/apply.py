@@ -1522,6 +1522,7 @@ def _action_templates(manifest: Manifest, action: When) -> list[str]:
         if step.when != action or step.applied_by != "direct":
             continue
         out.append(step.statement if step.statement is not None else step.path or "")
+        out += list(step.then)
     if action in ("install", "configure"):
         for conf in manifest.conf:
             if _is_glob(conf.file) or not conf.file.endswith(_CONF_KEY_WRITE_SUFFIXES):
@@ -2973,6 +2974,7 @@ class Applier:
     def _sql(
         self, manifest: Manifest, clone: Path, vals: Mapping[str, str], when: When, log: _Log
     ) -> None:
+        self._refuse_missing_sql_files(manifest, clone, vals, when)
         self._refuse_direct_sql_into_a_running_world(manifest, when)
         # Second, and never first: a press against a live world is refused above
         # having started nothing. Starting containers under a world this guard
@@ -3197,11 +3199,79 @@ class Applier:
         assert step.path is not None
         return PendingSql(db=step.db, path=step.path, files=_sql_files(clone, step.path))
 
+    def _refuse_missing_sql_files(
+        self, manifest: Manifest, clone: Path, vals: Mapping[str, str], when: When
+    ) -> None:
+        """Look for every named file this press will run BEFORE the first one runs (T100).
+
+        Without it a press of several SQL steps ran them in order until one was
+        missing, and the ones before it stayed applied: `hearthstone-cd`'s reset
+        landed and then "sql file missing in clone" was reported, with a custom
+        cooldown already gone. A glob is left alone -- it names no file that
+        can be missing, and what it matches is the step's own business.
+        """
+        if self.sql is None:
+            return
+        missing: list[str] = []
+        for step in manifest.sql:
+            if step.when != when or step.applied_by != "direct" or step.path is None:
+                continue
+            for template in (step.path, *step.then):
+                name = _render(template, vals, "sql path")
+                if not _is_glob(name) and not (clone / name).is_file():
+                    missing.append(name)
+        if missing:
+            raise ApplyError(
+                f"{manifest.id}: {', '.join(missing)} is not in the module's files, so nothing "
+                f"was run. Its upstream may have renamed or removed it."
+            )
+
+    def _run_transaction(
+        self, step: SqlStep, clone: Path, vals: Mapping[str, str], log: _Log
+    ) -> None:
+        """`path` and every `then` file as ONE text inside one transaction (T100 review).
+
+        Sent over `run_statement()` -- the runner every inline step already
+        uses, which pipes the text into `mysql` on stdin. `mysql` reading a
+        script stops at the first error, and the session it ends rolls back the
+        transaction still open, so a chosen file that fails takes the reset
+        before it with it. That holds only for statements that do not commit on
+        their own (DDL, LOCK TABLES, a nested BEGIN/COMMIT...), and a file with
+        one is refused here, before anything is sent, rather than sent and
+        called atomic. `item_template` is InnoDB on AzerothCore -- read on the
+        live world database, see the T100 gate -- which is what makes the
+        rollback real.
+        """
+        assert self.sql is not None and step.path is not None
+        names = [_render(t, vals, "sql path") for t in (step.path, *step.then)]
+        texts: list[str] = []
+        for name in names:
+            path = clone / name
+            if not path.is_file():
+                raise ApplyError(f"sql file missing in clone: {path}")
+            try:
+                text = path.read_bytes().decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                raise ApplyError(f"{name}: not UTF-8 text, so nothing was run ({exc})") from exc
+            found = _IMPLICIT_COMMIT.search(text)
+            if found:
+                raise ApplyError(
+                    f"{name}: `{found.group(1).strip()}` commits on its own in MySQL, so this "
+                    f"step cannot run as one transaction; nothing was run"
+                )
+            texts.append(text if text.endswith("\n") else text + "\n")
+        self.sql.run_statement(step.db, "START TRANSACTION;\n" + "".join(texts) + "COMMIT;\n")
+        for name in names:
+            log.done.append(f"sql {name} → {step.db}")
+
     def _run_sql(self, step: SqlStep, clone: Path, vals: Mapping[str, str], log: _Log) -> None:
         assert self.sql is not None
         if step.statement is not None:
             self.sql.run_statement(step.db, _render(step.statement, vals, "sql statement"))
             log.done.append(f"sql inline → {step.db}")
+            return
+        if step.then:
+            self._run_transaction(step, clone, vals, log)
             return
         assert step.path is not None
         pattern = _render(step.path, vals, "sql path")
@@ -3658,6 +3728,19 @@ def _sql_files(clone: Path, path: str) -> tuple[str, ...] | None:
         return None
     matches = sorted(clone.glob(path)) if _is_glob(path) else [clone / path]
     return tuple(p.relative_to(clone).as_posix() for p in matches if p.is_file())
+
+
+_IMPLICIT_COMMIT = re.compile(
+    r"^\s*(create|alter|drop|truncate|rename|lock\s+tables?|unlock\s+tables?|"
+    r"start\s+transaction|begin|commit|rollback|grant|revoke|set\s+autocommit)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+"""A statement MySQL commits around by itself, at the start of a line.
+
+A line-start check, not a parser: a file whose statements start mid-line
+passes it. It exists so a `then` step cannot be SAID to be one transaction
+while a DDL line inside it quietly commits the half before it.
+"""
 
 
 def _render(template: str, values: Mapping[str, str], what: str) -> str:

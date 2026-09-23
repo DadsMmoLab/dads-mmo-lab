@@ -12,12 +12,10 @@
     {
       "db": "world",
       "path": "Hearthstone_30_Min.sql",
-      "note": "upstream's reset, first: every other file only moves a Hearthstone still on the stock cooldown (WHERE spellcooldown_1=-1), so without it a second choice matched no row"
-    },
-    {
-      "db": "world",
-      "path": "Hearthstone_{cooldown}.sql",
-      "note": "one of Hearthstone_1_Sec / _1_Min / _5_Min / _15_Min / _30_Min"
+      "then": [
+        "Hearthstone_{cooldown}.sql"
+      ],
+      "note": "upstream's reset, then the chosen file (one of _1_Sec/_1_Min/_5_Min/_15_Min/_30_Min), as ONE transaction: every other file only moves a Hearthstone still on the stock cooldown (WHERE spellcooldown_1=-1), so the reset must come first -- and a chosen file that fails must take the reset with it"
     },
     {
       "db": "world",
