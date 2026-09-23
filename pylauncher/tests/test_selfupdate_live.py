@@ -409,7 +409,12 @@ def test_a_new_update_stands_the_previous_helper_down_before_it_discards_anythin
     was never once stood down, and only the script's own owner check kept the
     install whole. This test drives the REAL `apply_update`, and what it
     asserts is the ORDER: by the time `.yulon-old` is discarded, the helper
-    that was working in it has exited.
+    that was working in it has let go of it.
+
+    Let go, not exited: the helper's EXIT trap removes its lock and then
+    deletes its own script, which lives outside the install. Asserting on
+    `poll()` failed 2 runs in 15 on 2026-09-24, every time with the lock
+    already gone and only that last step left, so what is checked is the lock.
     """
     install = _install(tmp_path, "OLD")
     target = install.target
@@ -428,8 +433,9 @@ def test_a_new_update_stands_the_previous_helper_down_before_it_discards_anythin
     real_discard = layout.discard_ours
 
     def watched(inst: Install, name: str) -> bool:
-        # Was the helper already gone when this directory was removed?
-        seen.append((name, helper.poll() is not None))  # type: ignore[attr-defined]
+        # Had the first helper let go of its lock when this directory was removed?
+        holder = layout.lock_holder(inst)
+        seen.append((name, holder is None or holder.nonce != plan.nonce))
         return real_discard(inst, name)
 
     monkeypatch.setattr(layout, "discard_ours", watched)
@@ -446,7 +452,7 @@ def test_a_new_update_stands_the_previous_helper_down_before_it_discards_anythin
 
     removals = [gone for name, gone in seen if name == layout.OLD_NAME]
     assert removals, "the backup directory was never discarded"
-    assert all(removals), "the backup was discarded while its helper was still running"
+    assert all(removals), "the backup was discarded while its helper still held the lock"
     assert not plan.script.exists(), "the stood-down helper left its script behind"
 
     # And the update it was blocking goes through.
