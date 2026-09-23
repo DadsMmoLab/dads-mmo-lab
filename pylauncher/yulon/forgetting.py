@@ -36,6 +36,45 @@ REFUSED_TITLE = "This server cannot be removed yet"
 STOP_FAILED_TITLE = "The server could not be stopped"
 SAVE_FAILED_TITLE = "Yu'lon could not forget this server"
 
+# Why a removal is refused, one sentence per kind of job (`ControllerView.forget_refusal()`).
+# Removing drops the tab, and dropping it joins that tab's jobs for a bounded
+# time only; a restore stopped half-way leaves its databases half-written.
+
+UPDATE_BACKUP_RUNNING = (
+    "This server is being backed up before an update. Wait for the backup to finish, "
+    "then try again. Nothing was removed."
+)
+PANEL_RUNNING = (
+    "A rebuild, a database update or an adopt is running on this server's Modules tab. "
+    "Wait for it to finish, then try again. Nothing was removed."
+)
+SERVER_ACTION_RUNNING = (
+    "Another action is running on this server's tab. Wait for it to finish on the "
+    "Server tab, then try again. Nothing was removed."
+)
+BACKUP_RUNNING = (
+    "A backup of this server is running on its Maintenance tab. Wait for it to finish, "
+    "then try again. Nothing was removed."
+)
+RESTORE_RUNNING = (
+    "A restore is writing into this server's databases on its Maintenance tab, and "
+    "stopping the server now would leave them half-written. Wait for it to finish, then "
+    "try again. Nothing was removed."
+)
+NETWORK_RUNNING = (
+    "A network change is being applied on this server's Networking tab. Wait for it to "
+    "finish, then try again. Nothing was removed."
+)
+
+
+def module_running(what: str) -> str:
+    """The Modules tab's job, by the name its own report line gives it ("install mod-ah-bot")."""
+    return (
+        f'"{what}" is running on this server\'s Modules tab. Wait for it to finish, then try '
+        "again. Nothing was removed."
+    )
+
+
 _FOLDER_GONE = (
     "{server_dir} no longer exists. Any Docker containers, volumes or images named for it are "
     "NOT touched, because without the folder Yu'lon cannot prove which ones were its own; "

@@ -5426,6 +5426,8 @@ def test_the_press_asks_the_window_and_decides_nothing_itself(
 def test_a_removal_is_refused_while_anything_runs_and_each_refusal_names_it(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from yulon import forgetting
+
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     assert view.forget_refusal() is None
 
@@ -5434,16 +5436,16 @@ def test_a_removal_is_refused_while_anything_runs_and_each_refusal_names_it(
     view._import_running = False
 
     view._backup_before_update = True
-    assert "backed up before an update" in (view.forget_refusal() or "")
+    assert view.forget_refusal() == forgetting.UPDATE_BACKUP_RUNNING
     view._backup_before_update = False
 
     view._set_busy(True)
-    assert "Another action is running" in (view.forget_refusal() or "")
+    assert view.forget_refusal() == forgetting.SERVER_ACTION_RUNNING
     view._set_busy(False)
 
     # Last, because it is patched on the class for the rest of this test.
     monkeypatch.setattr(type(view.rebuild_log), "running", property(lambda _self: True))
-    assert "Modules tab" in (view.forget_refusal() or "")
+    assert view.forget_refusal() == forgetting.PANEL_RUNNING
 
 
 def test_the_last_poll_is_what_says_whether_the_server_runs(
@@ -5506,6 +5508,178 @@ def test_a_failed_stop_before_a_removal_says_why_here_and_to_the_window(
     ]
     assert "Docker would not say" in view.problem_label.text()
     assert view.refresh_button.isEnabled()
+    assert (
+        "stopping before it is removed" not in view.status_label.text()
+    ), "the status line kept saying a stop was running after it had failed"
+
+
+class _Gate:
+    """A job runner that runs inline until `hold` is set, then keeps the jobs for `release()`.
+
+    What a threaded runner looks like from the GUI thread: the job has been
+    handed over and its answer has not come back yet (T95).
+    """
+
+    def __init__(self) -> None:
+        self.hold = False
+        self.queued: list[tuple[Any, Any, Any]] = []
+
+    def __call__(self, work: Any, on_done: Any, on_error: Any) -> None:
+        if self.hold:
+            self.queued.append((work, on_done, on_error))
+        else:
+            run_inline(work, on_done, on_error)
+
+    def release(self) -> None:
+        self.hold = False
+        queued, self.queued = self.queued, []
+        for work, on_done, on_error in queued:
+            run_inline(work, on_done, on_error)
+
+
+def test_a_poll_still_in_flight_is_not_an_answer(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    ps.names = ""
+    view.refresh_status()
+    assert view.last_seen_running() is False
+    gate.hold = True
+    view.refresh_status()
+    assert view.last_seen_running() is None, "an answer older than the poll in flight was trusted"
+    ps.names = "ac-worldserver\n"
+    gate.release()
+    assert view.last_seen_running() is True
+
+
+def test_a_poll_asked_while_an_action_ran_is_not_an_answer(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The 5 s poll runs through a Start; its "stopped" can be read before the containers came up.
+
+    It answers after the Start has finished, and the Start's own refresh
+    returned early because that poll was still pending. Stored, that stale
+    "stopped" let a removal forget a running server without stopping it (T95
+    review, round 1).
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    ps.names = "ac-worldserver\n"
+    view.refresh_status()
+    assert view.last_seen_running() is True
+    view._set_busy(True)
+    gate.hold = True
+    ps.names = ""
+    view.refresh_status()  # read "stopped" before the containers came up
+    view._set_busy(False)
+    gate.release()
+    assert view.last_seen_running() is None
+    view.refresh_status()
+    assert view.last_seen_running() is False, "a poll asked while idle is an answer again"
+
+
+def test_a_poll_answered_while_an_action_runs_is_not_an_answer(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Asked just before Start was pressed, answered in the middle of it."""
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    view.refresh_status()
+    view._set_busy(True)
+    gate.release()
+    view._set_busy(False)
+    assert view.last_seen_running() is None
+
+
+def _refusal_while_held(view: ControllerView, gate: _Gate, press: Callable[[], None]) -> str | None:
+    """Press with the job held, read the refusal, let the job finish, and prove it lifts."""
+    gate.hold = True
+    press()
+    assert gate.queued, "the press started no job"
+    refusal = view.forget_refusal()
+    gate.release()
+    assert view.forget_refusal() is None, "the refusal outlived the job"
+    return refusal
+
+
+def test_a_removal_is_refused_while_a_backup_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    assert _refusal_while_held(view, gate, view.back_up) == forgetting.BACKUP_RUNNING
+
+    def refuse() -> NoReturn:
+        raise OSError("disk full")
+
+    view.services.backup = refuse
+    assert _refusal_while_held(view, gate, view.back_up) == forgetting.BACKUP_RUNNING
+
+
+def test_a_removal_is_refused_while_a_restore_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The one that matters most: a stop under a half-written restore."""
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    _add_backup(view, tmp_path)
+    view.show_restore_plan()
+    assert _refusal_while_held(view, gate, view.run_restore) == forgetting.RESTORE_RUNNING
+
+
+def test_a_removal_is_refused_while_a_module_action_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        job_runner=gate,
+        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+    )
+    view.modules_panel.select("mod-ah-bot")
+    refusal = _refusal_while_held(view, gate, lambda: view._module_action("install"))
+    assert refusal == forgetting.module_running("install mod-ah-bot")
+
+
+def test_a_removal_is_refused_while_a_custom_module_installs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        job_runner=gate,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+    refusal = _refusal_while_held(view, gate, view.install_module_from_link)
+    assert refusal == forgetting.module_running("install from link mod-my-thing")
+
+
+def test_a_removal_is_refused_while_a_network_change_applies(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    from yulon import forgetting
+
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    view.show_network_plan()
+    assert _refusal_while_held(view, gate, view.apply_network_plan) == forgetting.NETWORK_RUNNING
+
+    def refuse(_plan: object) -> NoReturn:
+        raise OSError("permission denied")
+
+    view.services.network_apply = refuse
+    view.show_network_plan()
+    assert _refusal_while_held(view, gate, view.apply_network_plan) == forgetting.NETWORK_RUNNING
 
 
 # -- the rebuild control (the action `_format_report` has always named) --------

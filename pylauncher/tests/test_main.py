@@ -1674,6 +1674,13 @@ def _removable_tab(
         return True
 
     view.services.controller.stop = stop
+
+    def no_docker() -> Any:
+        # The failed-stop path re-polls, as `_stop_failed()` does; the real
+        # status would shell out to docker (`conftest.py`'s guard).
+        raise RuntimeError("Docker is not asked in a unit test")
+
+    view.services.controller.status = no_docker
     return view, stops
 
 
@@ -1699,6 +1706,11 @@ def test_the_server_tab_button_on_a_tbc_tab_asks_stops_forgets_and_keeps_every_f
     view, stops = _removable_tab(window, monkeypatch, server_dir)
     assert view.services.uninstall is None
     tabs = window.property("tabs")
+    # What the Catalog's own install does before it emits `installed`; the
+    # emit above is the window's half only.
+    _catalog_view(window)._remember_installed("wow-tbc", server_dir)
+    assert str(server_dir) in _catalog_view(window).button_for("wow-tbc").toolTip()
+    saves_before = len(window.saved_states)
 
     view.forget_install_button.click()
 
@@ -1712,6 +1724,11 @@ def test_the_server_tab_button_on_a_tbc_tab_asks_stops_forgets_and_keeps_every_f
     assert view not in window.yulon_controllers
     assert not _remembered(window, "wow-tbc", server_dir)
     assert (server_dir / "keep-me.txt").is_file(), "removing from Yu'lon deleted a file"
+    assert len(window.saved_states) > saves_before, "the forget was never written to state.json"
+    tile = _catalog_view(window).button_for("wow-tbc")
+    assert str(server_dir) not in tile.toolTip(), "the Catalog still names the removed server"
+    survivors = window.saved_states[-1].installed_dirs()
+    assert tile.text() == ("Installed" if "wow-tbc" in survivors else "Install")
 
 
 def test_answering_no_keeps_the_tab_the_record_and_the_server(
@@ -1809,6 +1826,37 @@ def test_a_failed_stop_overridden_by_a_second_yes_forgets_anyway(
 
     assert window.property("tabs").indexOf(view) == -1
     assert not _remembered(window, "wow-tbc", server_dir)
+
+
+def test_a_job_started_during_the_stop_refuses_the_forget_after_it(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the Server buttons are locked while the removal's stop runs; a Restore is not.
+
+    So the refusal is asked again when the stop answers, and a restore
+    started in that gap keeps the tab, the record and the job's own thread.
+    """
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, True)
+    told = _told(monkeypatch, "information")
+    server_dir = tmp_path / "t95-restore-in-the-gap"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+
+    def stop_while_a_restore_starts() -> bool:
+        stops.append(1)
+        view._restore_running = True  # pressed on the Maintenance tab mid-stop
+        return True
+
+    view.services.controller.stop = stop_while_a_restore_starts
+
+    view.forget_install_button.click()
+
+    assert len(asked) == 1 and stops == [1]
+    assert told == [forgetting.RESTORE_RUNNING]
+    assert window.property("tabs").indexOf(view) != -1
+    assert _remembered(window, "wow-tbc", server_dir)
+    view._restore_running = False
 
 
 def test_a_record_that_cannot_be_written_keeps_the_tab_and_the_live_record(

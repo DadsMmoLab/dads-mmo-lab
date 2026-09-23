@@ -3858,6 +3858,14 @@ class ControllerView(QWidget):
         # (never polled, or docker unreachable). The window reads it to decide
         # whether a removal stops the server first.
         self._last_status: InstallStatus | None = None
+        # Whether the poll in flight was asked while a Server action ran. Its
+        # answer may predate what that action did (T95 review, round 1).
+        self._status_asked_busy = False
+        # T95. Jobs that run through `_run()` without `_busy`, so neither
+        # `busy_reason()` nor `_busy` sees them, and a removal must.
+        self._backup_running = False
+        self._restore_running = False
+        self._network_applying = False
         self._import_running = False
         self._uninstall_running = False
         self._uninstall_plan: purge.PurgePlan | None = None
@@ -4267,6 +4275,7 @@ class ControllerView(QWidget):
         if self._status_pending:
             return  # a poll is already in flight; never queue them up
         self._status_pending = True
+        self._status_asked_busy = self._busy
         self._run(self.services.controller.status, self._status_ready, self._status_failed)
 
     @Slot()
@@ -4441,7 +4450,10 @@ class ControllerView(QWidget):
             self._last_status = None
             self._update_forget_visibility()
             return
-        self._last_status = status
+        # T95: an answer is kept only if no Server action ran while it was
+        # read. A poll asked mid-Start can answer "stopped" for a server that
+        # came up a second later; unknown is what makes a removal stop first.
+        self._last_status = None if self._status_asked_busy or self._busy else status
         if not self._busy:
             # Only while nothing of ours is running. The five-second poll used to
             # overwrite the label unconditionally, which was invisible at a
@@ -4477,16 +4489,17 @@ class ControllerView(QWidget):
         self.client_dir_label.setText(_client_dir_row_text(self.services.client_dir))
 
     def _forget_is_eligible(self) -> bool:
-        """The Forget control's whole rule, asked wherever it has to hold (T34).
+        """Whether this server's folder is confirmed gone on this host (T34; T95).
 
-        One predicate rather than three separate checks copied around: the
-        button's visibility, the press that opens the confirmation, and the
-        press that actually forgets all have to agree, and a folder that comes
-        back between any two of those moments must be read the same way each
-        time it is asked (review, T34 round 2).
+        One predicate for the two things that depend on it: the highlight on
+        "Remove from Yu'lon…" (`_update_forget_visibility()`) and, through
+        `folder_is_gone()`, which question the window asks and whether it
+        stops the server first. Asked fresh each time, never cached, because
+        a folder can come back between a poll and a press (review, T34 round 2).
 
         Every tab since T95: the rule is about the folder, not about whether an
-        Uninstall is wired.
+        Uninstall is wired. `wsl_distro` answers False for a distro install,
+        whose `server_dir` is not a path on this process's filesystem.
         """
         controller = self.services.controller
         return controller.wsl_distro is None and platform.folder_is_gone(controller.server_dir)
@@ -4516,39 +4529,50 @@ class ControllerView(QWidget):
         return self._forget_is_eligible()
 
     def last_seen_running(self) -> bool | None:
-        """Whether the last status poll saw this server running; None if none answered (T95)."""
-        return None if self._last_status is None else self._last_status.any_running
+        """Whether the last status poll saw this server running; None if unknown (T95).
+
+        Unknown while a poll is in flight too: the answer on file is older than
+        the question already asked, and something made it worth asking.
+        """
+        if self._status_pending or self._last_status is None:
+            return None
+        return self._last_status.any_running
 
     def forget_refusal(self) -> str | None:
         """Why this server may not be removed from Yu'lon right now, or None (T95).
 
-        Removing drops this tab through `drop_controller()`, which is a teardown.
-        So everything that refuses a teardown refuses this too, and so does
-        anything that would be torn down in the middle. The checks run in
-        `_update_route_busy()`'s order. `busy_reason()` comes first because its
-        sentences are the long ones the close guard already shows. The T64
-        backup is next, because nothing else on the tab knows about it. Then
-        the Modules tab's panel, which a rebuild, a database update or an
-        adopt runs in. Last is any Server action, including the stop a removal
-        is already waiting for.
+        Removing drops this tab through `drop_controller()`, which is a teardown
+        that joins this tab's jobs for a bounded time only. So everything that
+        refuses a teardown refuses this too, and so does every job that would
+        be cut off in the middle. `busy_reason()` comes first because its
+        sentences are the long ones the close guard already shows. Then the
+        jobs that run through `_run()` with nothing but their own flag: the
+        T64 backup, a manual backup, a restore (stopped half-way it leaves the
+        databases half-written), a Modules tab job (`_module_pending`, which a
+        custom-module install sets too) and a network apply. Then the Modules
+        tab's panel, which a rebuild, a database update or an adopt runs in.
+        Last is any Server action, including the stop a removal is already
+        waiting for. The sentences are `forgetting`'s; the import is local
+        so this module's import block stays as it is.
         """
+        from yulon import forgetting
+
         if (reason := self.busy_reason()) is not None:
             return reason
         if self._backup_before_update:
-            return (
-                "This server is being backed up before an update. Wait for the backup to finish, "
-                "then try again. Nothing was removed."
-            )
+            return forgetting.UPDATE_BACKUP_RUNNING
+        if self._backup_running:
+            return forgetting.BACKUP_RUNNING
+        if self._restore_running:
+            return forgetting.RESTORE_RUNNING
+        if self._module_pending is not None:
+            return forgetting.module_running(self._module_pending)
+        if self._network_applying:
+            return forgetting.NETWORK_RUNNING
         if self.rebuild_log.running:
-            return (
-                "A rebuild, a database update or an adopt is running on this server's Modules tab. "
-                "Wait for it to finish, then try again. Nothing was removed."
-            )
+            return forgetting.PANEL_RUNNING
         if self._busy:
-            return (
-                "Another action is running on this server's tab. Wait for it to finish on the "
-                "Server tab, then try again. Nothing was removed."
-            )
+            return forgetting.SERVER_ACTION_RUNNING
         return None
 
     def _ask_about_the_import(self, status: InstallStatus) -> None:
@@ -5146,6 +5170,9 @@ class ControllerView(QWidget):
         message = str(exc)
         self.problem_label.setText(message)
         self.action_failed.emit(message)
+        # As `_stop_failed()` does: the status line said "stopping…", and the
+        # tab may be kept (the second question can be answered No).
+        self.refresh_status()
         # Last, for the reason above.
         self.stopped_for_removal.emit(
             self.entry.id, self.services.controller.server_dir, False, message
@@ -5433,7 +5460,7 @@ class ControllerView(QWidget):
     def forget_client_dir(self) -> None:
         """Clear this install's recorded client folder (T36).
 
-        No confirmation: unlike "Forget this install…" this drops no tab and
+        No confirmation: unlike "Remove from Yu'lon…" this drops no tab and
         touches no Docker object, and the folder is one press away from being
         set again -- the cost of a mistaken press is one more press, not a
         server nobody can get back.
@@ -6843,10 +6870,17 @@ class ControllerView(QWidget):
     def back_up(self) -> None:
         self.backup_button.setEnabled(False)
         self.maintenance_report.setPlainText("Backing up… this can take minutes on a full world.")
-        self._run(self._backup_with_the_database, self._backup_done, self._maintenance_failed)
+        self._backup_running = True  # T95: `forget_refusal()` reads it
+        self._run(self._backup_with_the_database, self._backup_done, self._backup_failed)
+
+    @Slot(object)
+    def _backup_failed(self, exc: object) -> None:
+        self._backup_running = False
+        self._maintenance_failed(exc)
 
     @Slot(object)
     def _backup_done(self, result: object) -> None:
+        self._backup_running = False
         self.backup_button.setEnabled(True)
         if not isinstance(result, wotlk_maintenance.BackupReport):
             return
@@ -6930,10 +6964,17 @@ class ControllerView(QWidget):
             return
         self.restore_button.setEnabled(False)
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
-        self._run(lambda: self.services.restore(plan), self._restore_done, self._maintenance_failed)
+        self._restore_running = True  # T95: `forget_refusal()` reads it
+        self._run(lambda: self.services.restore(plan), self._restore_done, self._restore_failed)
+
+    @Slot(object)
+    def _restore_failed(self, exc: object) -> None:
+        self._restore_running = False
+        self._maintenance_failed(exc)
 
     @Slot(object)
     def _restore_done(self, result: object) -> None:
+        self._restore_running = False
         self._restore_plan = None
         if not isinstance(result, wotlk_maintenance.RestoreReport):
             return
@@ -8450,8 +8491,9 @@ class ControllerView(QWidget):
     def _start_update_to_latest(self) -> bool:
         """Run the update in the shared panel. The one place either answer ends up.
 
-        The gates are asked AGAIN here and not trusted from the press, for
-        `forget_install()`'s reason one size larger: on the backup path minutes
+        The gates are asked AGAIN here and not trusted from the press, for the
+        reason `main.on_stopped_for_removal()` asks `forget_refusal()` again,
+        one size larger: on the backup path minutes
         of `mysqldump` have gone by since they were last true, and this is the
         last point at which nothing has been fetched.
         """
@@ -9349,16 +9391,19 @@ class ControllerView(QWidget):
         if plan is None:
             return
         self.apply_button.setEnabled(False)
+        self._network_applying = True  # T95: `forget_refusal()` reads it
         self._run(lambda: self.services.network_apply(plan), self._apply_done, self._apply_failed)
 
     @Slot(object)
     def _apply_done(self, result: object) -> None:
+        self._network_applying = False
         if isinstance(result, NetworkReport):
             self.network_text.appendPlainText("\n" + _format_network_report(result))
         self.apply_button.setEnabled(True)
 
     @Slot(object)
     def _apply_failed(self, exc: object) -> None:
+        self._network_applying = False
         self.network_text.appendPlainText(f"\nAPPLY FAILED: {exc}")
         self.action_failed.emit(str(exc))
         self.apply_button.setEnabled(True)

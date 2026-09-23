@@ -610,7 +610,10 @@ def build_window() -> object:
         finish_removal(key)
 
     def on_stopped_for_removal(game: str, server_dir: object, ok: bool, why: str) -> None:
-        """The stop a removal asked for has ended. Forget, or ask once more if it failed (T95)."""
+        """The stop a removal asked for has ended. Forget, or ask once more if it failed (T95).
+
+        The refusal is asked again before the forget, for the reason noted there.
+        """
         key = (game, Path(str(server_dir)))
         if key not in removal_pending:
             return
@@ -628,6 +631,13 @@ def build_window() -> object:
             )
             if not said_yes(answer):
                 return
+        # Asked again: only the Server buttons were locked during the stop, so
+        # a Restore, a backup or a module job may have started in that gap, and
+        # dropping the tab now would cut it off (T95 review, round 1).
+        refusal = view.forget_refusal()
+        if refusal is not None:
+            QMessageBox.information(window, forgetting.REFUSED_TITLE, refusal)
+            return
         finish_removal(key)
 
     def finish_removal(key: tuple[str, Path]) -> None:
