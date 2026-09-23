@@ -10,8 +10,11 @@ error anywhere.
 
 from __future__ import annotations
 
+import ast
+import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QObject, Slot
@@ -164,3 +167,98 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
     appending `gate.wait(5.0)` to it left 7 passed on m910q that day.
     """
     assert spelled_bounds(__file__) == {"HANG_BOUND_MS", "STILL_RUNNING"}
+
+
+_UI = Path(__file__).resolve().parents[1] / "yulon" / "ui"
+
+_HANDS_TO_THE_RUNNER = frozenset({"_run", "_jobs", "_read_alongside"})
+"""The names a view or panel hands a job to the runner through.
+
+`_jobs` is the runner itself; `_run` and `_read_alongside` are the one-line
+wrappers that pass their callbacks straight on to it.
+"""
+
+
+def _job_callbacks_that_are_not_bound_slots() -> list[str]:
+    """Every callback handed to the runner in `yulon/ui` that is not `self.<a @Slot>`."""
+    found = []
+    for path in sorted(_UI.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        slots = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and any("Slot" in ast.unparse(d) for d in node.decorator_list)
+        }
+        for function in ast.walk(tree):
+            if not isinstance(function, ast.FunctionDef):
+                continue
+            passing_on = (
+                {a.arg for a in function.args.args}
+                if function.name in _HANDS_TO_THE_RUNNER
+                else set()
+            )
+            for call in ast.walk(function):
+                if not (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "self"
+                    and call.func.attr in _HANDS_TO_THE_RUNNER
+                ):
+                    continue
+                for callback in [*call.args[1:], *(k.value for k in call.keywords)]:
+                    bound = (
+                        isinstance(callback, ast.Attribute)
+                        and isinstance(callback.value, ast.Name)
+                        and callback.value.id == "self"
+                        and callback.attr in slots
+                    )
+                    handed_on = isinstance(callback, ast.Name) and callback.id in passing_on
+                    if not (bound or handed_on):
+                        found.append(
+                            f"{path.relative_to(_UI.parent.parent)}:{call.lineno} "
+                            f"{ast.unparse(callback)[:70]}"
+                        )
+    return found
+
+
+def test_every_job_callback_in_the_ui_is_a_bound_slot() -> None:
+    """T97. The rule this module's docstring states, checked rather than trusted.
+
+    A lambda or a closure handed to the runner as `on_done` is delivered on the
+    WORKER thread, and whatever it does to a widget it does from there. Two
+    call sites broke the rule: the Characters tab's list refresh -- measured on
+    m910q 2026-09-23 segfaulting the app in 4 of 5 Send gold runs on a
+    900-character bot server, the worker's frame in `character_list.clear()` --
+    and the Tuning panel's restart/recreate completion, which set widget text
+    and started a thread from the worker. Both read as ordinary code at the call
+    site; this names each one.
+    """
+    assert _job_callbacks_that_are_not_bound_slots() == []
+
+
+def test_the_callback_guard_sees_a_lambda(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard above answers [] -- which is also what a guard that looks at
+    nothing answers. So it is pointed at a file with the defect in it."""
+    ui = tmp_path / "ui"
+    ui.mkdir()
+    (ui / "view.py").write_text(
+        "class V:\n"
+        "    @Slot(object)\n"
+        "    def good(self, x): ...\n"
+        "    def plain(self, x): ...\n"
+        "    def press(self):\n"
+        "        self._run(work, self.good, self.good)\n"
+        "        self._run(work, lambda r: self.good(r), self.good)\n"
+        "        self._jobs(work, self.plain, self.good)\n"
+        "        self._run(work, self.make('x'), self.good)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_UI", ui)
+    found = _job_callbacks_that_are_not_bound_slots()
+    assert [line.split(" ", 1)[1] for line in found] == [
+        "lambda r: self.good(r)",
+        "self.plain",
+        "self.make('x')",
+    ]

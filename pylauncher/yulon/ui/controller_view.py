@@ -6088,11 +6088,22 @@ class ControllerView(QWidget):
             return
         self._character_generation += 1
         generation = self._character_generation
+        # The generation rides WITH the answer rather than in a lambda around the
+        # callback (T97). A lambda handed to the runner is delivered on the
+        # worker thread, so the list was cleared and refilled there while this
+        # thread painted it: on m910q, 2026-09-23, Send gold on a 900-character
+        # bot server segfaulted the app in 4 of 5 runs.
         self._run(
-            play.listing,  # type: ignore[attr-defined]
-            lambda listed: self._characters_listed_at(generation, listed),
+            lambda: (generation, play.listing()),  # type: ignore[attr-defined]
+            self._characters_arrived,
             self._characters_failed,
         )
+
+    @Slot(object)
+    def _characters_arrived(self, answer: object) -> None:
+        """A list read, on the GUI thread, with the generation it was asked at."""
+        generation, listed = cast(tuple[int, object], answer)
+        self._characters_listed_at(generation, listed)
 
     def _characters_listed_at(self, generation: int, listed: object) -> None:
         """Take this answer only if it is the newest one asked for.
@@ -8871,7 +8882,9 @@ class ControllerView(QWidget):
             return
         self._set_busy(True)
         self.tuning_report.setPlainText("restarting the server…")
-        self._run(self._do_restart, self._tuning_job_done("restart"), self._tuning_job_failed)
+        self._run(
+            lambda: ("restart", self._do_restart()), self._tuning_job_done, self._tuning_job_failed
+        )
 
     @Slot()
     def recreate_containers(self) -> None:
@@ -8891,7 +8904,11 @@ class ControllerView(QWidget):
             return
         self._set_busy(True)
         self.tuning_report.setPlainText("recreating the containers…")
-        self._run(self._do_recreate, self._tuning_job_done("recreate"), self._tuning_job_failed)
+        self._run(
+            lambda: ("recreate", self._do_recreate()),
+            self._tuning_job_done,
+            self._tuning_job_failed,
+        )
 
     def _do_restart(self) -> bool:
         """Stop, then start. ONE worker job: a stop the user then has to follow with a
@@ -8910,24 +8927,27 @@ class ControllerView(QWidget):
         controller.start()
         return removed
 
-    def _tuning_job_done(self, job: str) -> Callable[[object], None]:
+    @Slot(object)
+    def _tuning_job_done(self, answer: object) -> None:
         """The handler for a finished restart or recreate: forget what it covered.
 
         A recreate covers a restart as well -- the containers are new, so they
         have both the current environment and the current conf files -- which
         is why it clears both and a restart clears only its own.
+
+        A bound slot that is told which job it was, not a closure made per job
+        (T97): the closure was a plain callable, so the runner delivered it on
+        the worker thread, and this wrote the report and started the status
+        read from there.
         """
-
-        def done(_result: object) -> None:
-            self._set_busy(False)
-            self._tuning_owed.pop("restart", None)
-            if job == "recreate":
-                self._tuning_owed.pop("recreate", None)
-            self._refresh_tuning_owed()
-            self.tuning_report.setPlainText(f"{job}: done.")
-            self.refresh_status()
-
-        return done
+        job = cast(tuple[str, object], answer)[0]
+        self._set_busy(False)
+        self._tuning_owed.pop("restart", None)
+        if job == "recreate":
+            self._tuning_owed.pop("recreate", None)
+        self._refresh_tuning_owed()
+        self.tuning_report.setPlainText(f"{job}: done.")
+        self.refresh_status()
 
     @Slot(object)
     def _tuning_job_failed(self, exc: object) -> None:
