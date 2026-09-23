@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import shutil
 import sys
 from pathlib import Path
 
@@ -25,9 +26,10 @@ from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import conf
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
-from yulon.catalog.families.cmangos import CmangosInstaller
+from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
 from yulon.catalog.installer import InstallerError
 from yulon.controller_wow_tbc import modules as tbc_modules
+from yulon.manifest_store import FAMILY_FILES, ManifestStore
 
 CATALOG = load_catalog()
 WOTLK = CATALOG.get("wow-wotlk")
@@ -916,3 +918,92 @@ def test_the_apps_route_is_lazy_and_carries_the_module_keys_to_the_reset(tmp_pat
     report = route(reset_defaults.core_files(TBC), keys)
     assert len(image.copies) == 1 and not report.refused
     assert "Rate.XP.Kill    = 5\n" in (server / "etc/mangosd.conf").read_text(encoding="utf-8")
+
+
+# -- fix round 1 ------------------------------------------------------------
+
+
+def test_every_active_default_line_for_a_carried_key_takes_the_live_line() -> None:
+    """Two active lines in the DEFAULT: both become the carried line, each keeping its ending."""
+    default = "Rate.XP.Kill = 1\nA = 2\nRate.XP.Kill = 3\r\n"
+    assert reset_defaults.carry_module_keys(default, "Rate.XP.Kill = 9\n", ["Rate.XP.Kill"]) == (
+        "Rate.XP.Kill = 9\nA = 2\nRate.XP.Kill = 9\r\n"
+    )
+
+
+def test_a_key_the_install_table_writes_is_never_carried_even_if_a_module_declares_it(
+    tmp_path: Path,
+) -> None:
+    """Lead ruling: the install's table WINS over decision 5's carry-over."""
+    server, _, installed = _tuned_xp(tmp_path)  # WorldServerPort tuned to 9999
+    table_keys = TBC.install.native.cmangos.conf.files["mangosd.conf"].keys  # type: ignore[union-attr]
+    assert "WorldServerPort" in table_keys, "control: the install writes the port"
+    report = reset_defaults.reset(
+        TBC,
+        server,
+        reset_defaults.core_files(TBC),
+        module_keys={"etc/mangosd.conf": ("Rate.XP.Kill", "worldserverport", "WorldServerPort")},
+        seams=_seams(FakeImage(TEMPLATES["wow-tbc"])),
+    )
+    assert not report.refused
+    text = (server / "etc/mangosd.conf").read_text(encoding="utf-8")
+    assert "WorldServerPort = 8085\n" in text and "9999" not in text
+    assert "Rate.XP.Kill    = 5\n" in text, "control: the module key itself was still carried"
+
+
+def test_no_bundled_manifest_declares_a_key_an_install_table_writes() -> None:
+    """Tripwire: today the ruling above changes nothing. A hit here is a report, not a fix."""
+    tables = {
+        f"{ETC_DIR}/{name}": frozenset(patch.keys)
+        for game in ("wow-tbc", "wow-vanilla", "wow-tortoise")
+        for name, patch in CATALOG.get(game).install.native.cmangos.conf.files.items()  # type: ignore[union-attr]
+    }
+    overlaps: list[str] = []
+    checked = 0
+    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"):
+        store = ManifestStore(resources.manifests_dir(), game)
+        for kind in FAMILY_FILES:
+            for manifest in store.load_all(kind):
+                for block in manifest.conf:
+                    for key in block.keys:
+                        for file, written in tables.items():
+                            if block.file != file:
+                                continue
+                            checked += 1
+                            if key.key.casefold() in {k.casefold() for k in written}:
+                                overlaps.append(f"{game}/{manifest.id}: {file} {key.key}")
+    assert checked > 0, "control: some manifest declares a key in a core conf"
+    assert overlaps == []
+
+
+def test_an_undo_whose_copy_dies_half_way_leaves_the_file_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lead: `copy2` truncates, then writes; ENOSPC half-way would leave half a conf."""
+    server, _, installed, _ = _tuned_tbc(tmp_path)
+    report = reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+    before = {file: (server / file).stat().st_mode for file in installed}
+
+    def half_then_full(src: object, dst: object, **kwargs: object) -> object:
+        data = Path(str(src)).read_bytes()
+        Path(str(dst)).write_bytes(data[: len(data) // 2])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(shutil, "copy2", half_then_full)
+    undone = reset_defaults.undo(server, report.written)
+    monkeypatch.undo()
+
+    assert [r.outcome for r in undone.results] == ["refused"] * 4
+    assert _bytes(server, installed) == installed, "a half-copied file replaced the reset one"
+    assert sorted(p.name for p in (server / "etc").iterdir() if not p.name.endswith(".bak")) == [
+        "ahbot.conf",
+        "aiplayerbot.conf",
+        "mangosd.conf",
+        "realmd.conf",
+    ], "a temp file was left beside the confs"
+    again = reset_defaults.undo(server, report.written)
+    assert [r.outcome for r in again.results] == ["restored"] * 4
+    if sys.platform != "win32":
+        assert {f: (server / f).stat().st_mode for f in installed} == before

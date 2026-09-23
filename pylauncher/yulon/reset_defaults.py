@@ -31,6 +31,7 @@ button and runs `reset()` on its job runner.
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -126,6 +127,33 @@ def _host_bind_label(server_dir: Path) -> str:
     )
 
 
+RESTORE_TEMP_SUFFIX = ".yulon-restore-tmp"
+"""What a file being put back from its backup is called until the rename lands."""
+
+
+def restore(from_backup: Path, target: Path) -> None:
+    """Put a backup back over `target` atomically, for the rollback and Undo. Raises `OSError`.
+
+    Not `tuning.restore()`: that is `shutil.copy2` straight onto the target,
+    which truncates it first, so a copy that dies half-way (ENOSPC is the usual
+    one) leaves half a conf -- neither the reset text nor the old one, with a
+    report saying otherwise. Here the copy goes to a sibling (`copy2`, so the
+    backup's mode and times come too -- the backup is itself a `copy2` of the
+    original) and is `os.replace`d on; a failure removes the sibling and leaves
+    `target` exactly as it was.
+    """
+    tmp = target.with_name(f"{target.name}{RESTORE_TEMP_SUFFIX}")
+    try:
+        shutil.copy2(from_backup, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"could not remove {tmp}: {exc}")
+        raise
+
+
 @dataclass(frozen=True)
 class Seams:
     """Everything a reset reaches outside itself through. Real by default; filled by tests.
@@ -140,7 +168,7 @@ class Seams:
     bind_label: Callable[[Path], str] = _host_bind_label
     write: Callable[[Path, str], None] = conf.replace_file
     backup: Callable[[Path], Path] = tuning.backup
-    restore: Callable[[Path, Path], None] = tuning.restore
+    restore: Callable[[Path, Path], None] = restore
 
 
 Built = tuple[dict[str, str], dict[str, str]]
@@ -563,6 +591,25 @@ def apply_rule(file: str) -> tuning.ApplyRule:
     return tuning.file_rule(file)
 
 
+def install_keys(entry: CatalogEntry, file: str) -> frozenset[str]:
+    """The keys this game's install table writes into `file`, casefolded (lead ruling).
+
+    They WIN over decision 5's carry-over: a module that declared, say,
+    `WorldServerPort` or `SOAP.Enabled` in `mangosd.conf` must not keep a live
+    value the install sets, or a reset could leave the server off its own port
+    or its command channel. Casefolded so a spelling that differs only in case
+    is dropped too -- dropping more is the safe side. WotLK's confs have no
+    table, so none.
+    """
+    native_block = entry.install.native
+    if native_block is None or native_block.cmangos is None:
+        return frozenset()
+    patch = native_block.cmangos.conf.files.get(file.removeprefix(f"{ETC_DIR}/"))
+    if patch is None or not file.startswith(f"{ETC_DIR}/"):
+        return frozenset()
+    return frozenset(key.casefold() for key in patch.keys)
+
+
 def _foreign(server_dir: Path, file: str) -> bool:
     """The override of a compose stack Yu'lon did not generate (spec correction 20)."""
     if file != composegen.OVERRIDE_FILE:
@@ -593,7 +640,8 @@ def reset(
     `module_keys` (owner decision 5): for each file, the keys installed
     modules declare in it, from `module_keys()`. Their live lines are carried
     into the default before anything is compared or written, so a module's
-    setting keeps its current value while every core key goes back. A file
+    setting keeps its current value while every core key goes back. A key the
+    install table writes into that file is never carried (`install_keys()`). A file
     holding such keys that is not UTF-8 refuses the press: its lines cannot be
     carried without guessing at its bytes.
 
@@ -626,7 +674,8 @@ def reset(
         except OSError as exc:
             reasons[file] = UNREADABLE.format(what=label(file), exc=exc)
             continue
-        carry = (module_keys or {}).get(file)
+        owned = install_keys(entry, file)
+        carry = [key for key in (module_keys or {}).get(file, ()) if key.casefold() not in owned]
         if carry:
             try:
                 live = current[file].decode("utf-8")
@@ -705,12 +754,12 @@ def undo(
     server_dir: Path,
     written: Sequence[FileResult],
     *,
-    restore: Callable[[Path, Path], None] = tuning.restore,
+    restore: Callable[[Path, Path], None] = restore,
 ) -> ResetReport:
     """Copy back, from the backups a reset made, every file that reset wrote.
 
-    A copy (`tuning.restore`), so the backup survives and a second undo still
-    has something to restore.
+    A copy (`restore()`, atomic), so the backup survives and a second undo
+    still has something to restore, and a copy that fails leaves the file whole.
     """
     results: list[FileResult] = []
     for item in written:
