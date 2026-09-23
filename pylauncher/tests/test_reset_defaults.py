@@ -13,13 +13,14 @@ INSTALL instead.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import sys
 from pathlib import Path
 
 import pytest
 
-from yulon import channel_setup, reset_defaults, resources
+from yulon import channel_setup, dbsecret, platform, reset_defaults, resources, tuning
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families import conf
@@ -417,3 +418,364 @@ def test_a_catalog_the_engine_refuses_is_a_reason_not_a_traceback(
     )
     assert texts == {}
     assert reasons == dict.fromkeys(files, f"{seam} refused: a bug in the app")
+
+
+# -- the lead's rulings on Task 2 (review of f9163dee) -------------------------
+
+
+def test_a_password_file_that_is_gone_takes_the_copy_yulon_kept_like_the_install(
+    tmp_path: Path,
+) -> None:
+    """The install's own rule (`native.py` `_secrets`): absent file -> the kept copy."""
+    server, _ = _server(tmp_path, "wow-tbc")
+    (server / ".db_password").unlink()
+    kept = "tbc-" + secrets.token_hex(8)
+    dbsecret.remember(
+        TBC.id,
+        composegen.install_id(server, platform_id=_linux),
+        password=kept,
+        volume="tbc-db-data",
+        config_dir=platform.config_dir(),
+    )
+    texts, reasons = reset_defaults.default_texts(
+        TBC, server, ["etc/mangosd.conf"], seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+    assert reasons == {}
+    assert f";{kept};" in texts["etc/mangosd.conf"]
+
+
+@pytest.mark.parametrize("state", ["not utf-8", "empty", "a folder"])
+def test_a_password_file_that_is_there_but_unusable_refuses_even_with_a_kept_copy(
+    tmp_path: Path, state: str
+) -> None:
+    """A stale kept value must never be written into the confs over a file that exists."""
+    server, _ = _server(tmp_path, "wow-tbc")
+    path = server / ".db_password"
+    if state == "not utf-8":
+        path.write_bytes(b"tbc-\xff\xfe\n")
+    elif state == "empty":
+        path.write_bytes(b"\n")
+    else:
+        path.unlink()
+        path.mkdir()
+    dbsecret.remember(
+        TBC.id,
+        composegen.install_id(server, platform_id=_linux),
+        password="tbc-" + secrets.token_hex(8),
+        volume="tbc-db-data",
+        config_dir=platform.config_dir(),
+    )
+    texts, reasons = reset_defaults.default_texts(
+        TBC, server, ["etc/mangosd.conf"], seams=_seams(_never, image_present=_never)
+    )
+    assert texts == {}
+    assert ".db_password" in reasons["etc/mangosd.conf"]
+
+
+def test_the_image_is_staged_beside_the_server_folder_and_cleared_after(tmp_path: Path) -> None:
+    """Not the system temp dir: snap-packaged Docker has a private /tmp it writes into."""
+    server, _ = _server(tmp_path, "wow-tbc")
+    leftover = server / reset_defaults.RESET_STAGING
+    leftover.mkdir()
+    (leftover / "stale.conf.dist").write_text("x\n", encoding="utf-8")
+    seen: list[Path] = []
+    image = FakeImage(TEMPLATES["wow-tbc"])
+
+    def copy(ref: str, src: str, dest: Path) -> None:
+        seen.append(dest)
+        assert not dest.exists(), "docker cp needs a dest that does not exist"
+        image(ref, src, dest)
+
+    texts, reasons = reset_defaults.default_texts(
+        TBC, server, ["etc/realmd.conf"], seams=_seams(copy)
+    )
+    assert reasons == {} and set(texts) == {"etc/realmd.conf"}
+    assert seen == [server / reset_defaults.RESET_STAGING]
+    assert not (server / reset_defaults.RESET_STAGING).exists()
+    assert sorted(p.name for p in server.iterdir()) == [".db_password"]
+
+
+def test_a_file_outside_the_games_table_is_a_reason_not_a_key_error(tmp_path: Path) -> None:
+    server, _ = _server(tmp_path, "wow-tbc")
+    texts, reasons = reset_defaults.default_texts(
+        TBC,
+        server,
+        ["etc/realmd.conf", "etc/modules/extra.conf", OVERRIDE],
+        seams=_seams(FakeImage(TEMPLATES["wow-tbc"])),
+    )
+    assert set(texts) == {"etc/realmd.conf"}
+    assert set(reasons) == {"etc/modules/extra.conf", OVERRIDE}
+    assert all(TBC.name in reason for reason in reasons.values())
+
+
+def test_no_file_in_the_games_table_asks_no_docker(tmp_path: Path) -> None:
+    server, _ = _server(tmp_path, "wow-tbc")
+    texts, reasons = reset_defaults.default_texts(
+        TBC, server, ["etc/modules/extra.conf"], seams=_seams(_never, image_present=_never)
+    )
+    assert texts == {} and set(reasons) == {"etc/modules/extra.conf"}
+
+
+# -- spec Tests 3-6 and 8: the operation ---------------------------------------
+
+
+def _tuned_tbc(tmp_path: Path) -> tuple[Path, str, dict[str, bytes], dict[str, bytes]]:
+    """A TBC install as the install wrote it, then tuned: (server, password, installed, tuned)."""
+    server, password = _server(tmp_path, "wow-tbc")
+    installed = _fresh_install("wow-tbc", server, FakeImage(TEMPLATES["wow-tbc"]))
+    tuned: dict[str, bytes] = {}
+    for file, data in installed.items():
+        tuned[file] = data + b"Tuned.By.Hand = 7\r\n"
+        (server / file).write_bytes(tuned[file])
+    return server, password, installed, tuned
+
+
+def _bytes(server: Path, files: object) -> dict[str, bytes]:
+    return {file: (server / file).read_bytes() for file in files}  # type: ignore[attr-defined]
+
+
+def _baks(server: Path) -> list[Path]:
+    return sorted(server.rglob("*.bak"))
+
+
+def test_a_reset_writes_the_install_default_and_backs_each_file_up_first(tmp_path: Path) -> None:
+    server, _, installed, tuned = _tuned_tbc(tmp_path)
+    report = reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+    assert [r.outcome for r in report.results] == ["reset"] * 4
+    assert _bytes(server, installed) == installed
+    for result in report.results:
+        assert result.backup is not None and result.backup.read_bytes() == tuned[result.file]
+        assert tuning.backups_of(server / result.file)[-1] == result.backup
+
+
+def test_undo_brings_back_the_file_the_reset_replaced_byte_for_byte(tmp_path: Path) -> None:
+    """Spec Test 4, through the existing `tuning.restore`."""
+    server, _, _, tuned = _tuned_tbc(tmp_path)
+    report = reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+    undone = reset_defaults.undo(server, report.written)
+    assert [r.outcome for r in undone.results] == ["restored"] * 4
+    assert _bytes(server, tuned) == tuned
+
+
+def test_one_file_that_cannot_be_built_means_no_file_is_written(tmp_path: Path) -> None:
+    """Spec Test 3: build first, write second, all or nothing."""
+    server, _, _, tuned = _tuned_tbc(tmp_path)
+    templates = dict(TEMPLATES["wow-tbc"])
+    del templates["ahbot.conf.dist"]
+    report = reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(templates))
+    )
+    assert report.refused and report.written == ()
+    assert {r.file: r.outcome for r in report.results} == {
+        "etc/mangosd.conf": "held",
+        "etc/realmd.conf": "held",
+        "etc/aiplayerbot.conf": "held",
+        "etc/ahbot.conf": "refused",
+    }
+    assert _bytes(server, tuned) == tuned
+    assert _baks(server) == []
+    assert any("ahbot.conf.dist" in line for line in report.lines())
+
+
+def test_a_write_that_fails_half_way_puts_back_what_it_had_already_written(
+    tmp_path: Path,
+) -> None:
+    server, _, _, tuned = _tuned_tbc(tmp_path)
+    written: list[Path] = []
+
+    def second_write_fails(path: Path, text: str) -> None:
+        if written:
+            raise OSError(28, "No space left on device")
+        written.append(path)
+        conf.replace_file(path, text)
+
+    report = reset_defaults.reset(
+        TBC,
+        server,
+        reset_defaults.core_files(TBC),
+        seams=_seams(FakeImage(TEMPLATES["wow-tbc"]), write=second_write_fails),
+    )
+    assert report.refused and report.written == ()
+    assert _bytes(server, tuned) == tuned, "the first file was not put back"
+    assert any("No space left" in line for line in report.lines())
+
+
+def test_a_file_already_at_default_is_left_alone_with_no_backup(tmp_path: Path) -> None:
+    """Spec Test 5."""
+    server, _, installed, _ = _tuned_tbc(tmp_path)
+    seams = _seams(FakeImage(TEMPLATES["wow-tbc"]))
+    reset_defaults.reset(TBC, server, reset_defaults.core_files(TBC), seams=seams)
+    baks = _baks(server)
+    mtimes = {f: (server / f).stat().st_mtime_ns for f in installed}
+
+    again = reset_defaults.reset(TBC, server, reset_defaults.core_files(TBC), seams=seams)
+
+    assert [r.outcome for r in again.results] == ["already"] * 4
+    assert _baks(server) == baks
+    assert {f: (server / f).stat().st_mtime_ns for f in installed} == mtimes
+
+
+def test_a_file_not_on_disk_is_reported_and_never_created(tmp_path: Path) -> None:
+    """Spec correction 8: WotLK normally has no playerbots.conf, and must not get one."""
+    _dist_install(tmp_path)
+    (tmp_path / "env/dist/etc/modules/playerbots.conf").unlink()
+    report = reset_defaults.reset(
+        WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES, seams=_seams()
+    )
+    assert [r.outcome for r in report.results] == ["reset", "reset", "absent"]
+    assert not (tmp_path / "env/dist/etc/modules/playerbots.conf").exists()
+
+
+def test_module_confs_and_scripts_are_never_touched(tmp_path: Path) -> None:
+    """Spec Test 6: "All server settings" is the game's set and nothing else."""
+    server, _, _, _ = _tuned_tbc(tmp_path)
+    module_conf = server / "etc" / "modules" / "extra.conf"
+    module_conf.parent.mkdir(parents=True, exist_ok=True)
+    module_conf.write_bytes(b"Extra.Enable = 1\n")
+    script = server / "lua" / "extra.lua"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_bytes(b"local x = 1\n")
+    stamps = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (module_conf, script)}
+
+    reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+
+    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in stamps} == stamps
+    with pytest.raises(ValueError, match="extra.conf"):
+        reset_defaults.reset(TBC, server, ["etc/modules/extra.conf"], seams=_seams())
+
+
+def test_a_wotlk_reset_all_writes_the_override_too_and_backs_it_up(tmp_path: Path) -> None:
+    """Owner decision 4, through the operation: backup first, so Undo works."""
+    installed = _wotlk_stack(tmp_path)
+    _dist_install(tmp_path)
+    broken = b"services:\n  ac-worldserver:\n    environment:\n      TZ: Europe/Oslo\n"
+    (tmp_path / OVERRIDE).write_bytes(broken)
+
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.core_files(WOTLK), seams=_seams())
+
+    assert [r.outcome for r in report.results] == ["reset"] * 4
+    assert (tmp_path / OVERRIDE).read_bytes() == installed
+    override = next(r for r in report.results if r.file == OVERRIDE)
+    assert override.backup is not None and override.backup.read_bytes() == broken
+    reset_defaults.undo(tmp_path, report.written)
+    assert (tmp_path / OVERRIDE).read_bytes() == broken
+
+
+def test_the_override_of_a_stack_yulon_did_not_make_is_left_alone(tmp_path: Path) -> None:
+    """Correction 20: an adopted server's compose files are another tool's."""
+    _dist_install(tmp_path)
+    (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    theirs = b"services:\n  theirs: {}\n"
+    (tmp_path / OVERRIDE).write_bytes(theirs)
+
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.core_files(WOTLK), seams=_seams())
+
+    assert [r.outcome for r in report.results] == ["reset", "reset", "reset", "foreign"]
+    assert (tmp_path / OVERRIDE).read_bytes() == theirs
+    assert not report.refused
+
+
+def test_the_override_owes_a_recreate_and_a_conf_what_file_rule_says() -> None:
+    """Correction 21: `file_rule` alone would call the override read-only, and raise no banner."""
+    assert tuning.file_rule(OVERRIDE) == "read-only", "control: the gap this closes"
+    assert reset_defaults.apply_rule(OVERRIDE) == "recreate"
+    assert reset_defaults.apply_rule("env/dist/etc/worldserver.conf") == "restart"
+    assert reset_defaults.apply_rule("etc/mangosd.conf") == tuning.file_rule("etc/mangosd.conf")
+
+
+def test_no_password_reaches_a_report_or_a_log_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Spec Test 8: the texts carry the password; nothing the player or the log sees does."""
+    server, password, _, _ = _tuned_tbc(tmp_path)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="yulon"):
+        done = reset_defaults.reset(
+            TBC,
+            server,
+            reset_defaults.core_files(TBC),
+            seams=_seams(FakeImage(TEMPLATES["wow-tbc"])),
+        )
+        undone = reset_defaults.undo(server, done.written)
+
+        def fails(path: Path, text: str) -> None:
+            raise OSError(13, f"denied writing {len(text)} characters")
+
+        refused = reset_defaults.reset(
+            TBC,
+            server,
+            reset_defaults.core_files(TBC),
+            seams=_seams(FakeImage(TEMPLATES["wow-tbc"]), write=fails),
+        )
+    for report in (done, undone, refused):
+        assert password not in "\n".join(report.lines())
+        assert password not in repr(report)
+    assert password not in caplog.text
+    assert "\n".join(refused.lines()), "control: the refusal said something"
+
+
+def test_the_question_names_the_files_the_backup_the_undo_and_the_restart() -> None:
+    one = reset_defaults.question(["etc/mangosd.conf"], [])
+    assert "mangosd.conf" in one and "backup" in one
+    assert "Undo the last reset" in one and "restarted" in one
+    assert "installed modules" not in one and "RECREATED" not in one
+    many = reset_defaults.question(["env/dist/etc/worldserver.conf", OVERRIDE], ["NPC Beastmaster"])
+    assert "worldserver.conf" in many and OVERRIDE in many
+    assert "NPC Beastmaster" in many and "are kept as they are now" in many
+    assert "RECREATED" in many and "by hand" in many
+
+
+def test_a_file_the_rollback_could_not_put_back_stays_undoable_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """Its text is the default and its backup is the only record: Undo must still reach it."""
+    server, _, _, tuned = _tuned_tbc(tmp_path)
+    writes: list[Path] = []
+
+    def second_write_fails(path: Path, text: str) -> None:
+        if writes:
+            raise OSError(28, "No space left on device")
+        writes.append(path)
+        conf.replace_file(path, text)
+
+    def restore_fails(backup: Path, target: Path) -> None:
+        raise OSError(13, "Permission denied")
+
+    report = reset_defaults.reset(
+        TBC,
+        server,
+        reset_defaults.core_files(TBC),
+        seams=_seams(
+            FakeImage(TEMPLATES["wow-tbc"]), write=second_write_fails, restore=restore_fails
+        ),
+    )
+    assert report.refused
+    assert [r.file for r in report.written] == ["etc/mangosd.conf"]
+    text = "\n".join(report.lines())
+    assert "mangosd.conf: NOT put back" in text and "NOT reset: it was reset" not in text
+    assert "part-way" in report.lines()[0]
+    reset_defaults.undo(server, report.written)
+    assert _bytes(server, tuned) == tuned
+
+
+def test_an_undo_that_fails_says_the_undo_failed_not_the_reset(tmp_path: Path) -> None:
+    server, _, _, _ = _tuned_tbc(tmp_path)
+    report = reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+
+    def restore_fails(backup: Path, target: Path) -> None:
+        raise OSError(13, "Permission denied")
+
+    undone = reset_defaults.undo(server, report.written, restore=restore_fails)
+    assert undone.refused and undone.written == ()
+    text = "\n".join(undone.lines())
+    assert undone.lines()[0].startswith("The undo")
+    assert "reset was not done" not in text and "NOT reset" not in text
+    assert "mangosd.conf: NOT put back" in text and "Permission denied" in text
