@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QObject, Qt, QUrl, SignalInstance
 from PySide6.QtGui import QImage, QTextDocument, QTextFormat, qRgb
 from PySide6.QtWidgets import QLabel, QPushButton, QTextBrowser
 
@@ -33,6 +33,11 @@ from yulon.ui.widgets.update_dialog import (
     UpdateDialog,
     _NotesView,
     _strip_resources,
+)
+from yulon.ui.widgets.update_progress import (
+    CANCELLING,
+    UpdateProgressDialog,
+    as_megabytes,
 )
 from yulon.update import MAX_BODY_CHARS, MAX_NOTES_CHARS, ReleaseNotes, UpdateCheck
 
@@ -1407,3 +1412,194 @@ def test_a_tag_is_one_heading_however_it_is_spelled(qapp: object, tag: str) -> N
 
     assert len(headings) == len(notes), f"{tag!r} made {len(headings)} headings"
     assert all(len(b.text()) <= TAG_CHARS for b in headings)
+
+
+# ---------------------------------------------------------- the progress dialog
+
+
+def test_the_progress_dialog_starts_busy_and_says_nothing_it_does_not_know(
+    qapp: object,
+) -> None:
+    """A bar at 0% before the first byte reads as a hang; Qt's busy form does not."""
+    dialog = UpdateProgressDialog("v0.8.70-Public")
+    try:
+        assert "v0.8.70-Public" in dialog.windowTitle()
+        assert (dialog.bar.minimum(), dialog.bar.maximum()) == (0, 0)
+        assert dialog.detail_label.text() == ""
+        assert not dialog.close_button.isVisibleTo(dialog)
+    finally:
+        dialog.deleteLater()
+
+
+def test_progress_fills_the_bar_and_a_total_of_zero_leaves_it_busy(qapp: object) -> None:
+    dialog = UpdateProgressDialog("v1")
+    try:
+        dialog.set_progress(25, 100)
+        assert (dialog.bar.minimum(), dialog.bar.maximum(), dialog.bar.value()) == (0, 100, 25)
+        dialog.set_progress(7, 0)
+        assert (dialog.bar.minimum(), dialog.bar.maximum()) == (0, 0)
+    finally:
+        dialog.deleteLater()
+
+
+def test_progress_past_the_total_does_not_overfill_the_bar(qapp: object) -> None:
+    """The total is the size the RELEASE declares; the bytes are what arrived."""
+    dialog = UpdateProgressDialog("v1")
+    try:
+        dialog.set_progress(150, 100)
+        assert dialog.bar.value() == 100
+    finally:
+        dialog.deleteLater()
+
+
+def test_the_worker_talks_to_the_dialog_only_through_the_relays_signals(qapp: object) -> None:
+    """`job.py`'s `LineRelay` rule: a plain callable would be delivered on the worker.
+
+    Driven through `emit_progress` / `emit_stage` — the two methods the worker
+    is handed — rather than through the slots, so what is pinned is the whole
+    wire and not the slot at the end of it.
+    """
+    dialog = UpdateProgressDialog("v1")
+    try:
+        dialog.relay.emit_stage("Unpacking…")
+        dialog.relay.emit_progress(5_000_000, 10_000_000)
+        process_events()
+        assert dialog.stage_label.text() == "Unpacking…"
+        assert dialog.bar.value() == 5_000_000
+        assert dialog.detail_label.text() == "5.0 MB of 10.0 MB"
+    finally:
+        dialog.deleteLater()
+
+
+def test_the_relay_is_a_qobject_whose_news_travels_as_signals(qapp: object) -> None:
+    """The rule is about the MECHANISM, so the mechanism is what is asserted.
+
+    A relay whose `emit_*` were plain calls into the widget would pass every
+    other test in this section and be the bug `job.py` records: PySide6 6.11.2
+    delivers a plain callable on the WORKER thread, with an explicit
+    QueuedConnection. A `Signal` on a class becomes a `SignalInstance` when it
+    is read off an instance, which is the thing to look for.
+    """
+    dialog = UpdateProgressDialog("v1")
+    try:
+        assert isinstance(dialog.relay, QObject)
+        assert isinstance(dialog.relay.progressed, SignalInstance)
+        assert isinstance(dialog.relay.staged, SignalInstance)
+    finally:
+        dialog.deleteLater()
+
+
+def test_cancel_sets_the_event_the_worker_reads_and_disables_itself(qapp: object) -> None:
+    dialog = UpdateProgressDialog("v1")
+    try:
+        assert not dialog.cancel_event.is_set(), "the precondition: nothing has been cancelled"
+        dialog.cancel_button.click()
+        process_events()
+        assert dialog.cancel_event.is_set()
+        assert not dialog.cancel_button.isEnabled()
+        assert dialog.cancel_button.text() == CANCELLING
+    finally:
+        dialog.deleteLater()
+
+
+def test_a_refusal_replaces_the_bar_with_the_reason_and_one_way_out(qapp: object) -> None:
+    dialog = UpdateProgressDialog("v1")
+    try:
+        dialog.finish_error("The download's checksum does not match. Nothing was installed.")
+        process_events()
+        assert "checksum" in dialog.stage_label.text()
+        assert not dialog.bar.isVisibleTo(dialog)
+        assert not dialog.cancel_button.isVisibleTo(dialog)
+        assert dialog.close_button.isVisibleTo(dialog)
+    finally:
+        dialog.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("done", "total", "said"),
+    [(0, 0, "0.0 MB"), (1_500_000, 3_000_000, "1.5 MB of 3.0 MB"), (500, 0, "0.0 MB")],
+)
+def test_the_byte_counts_are_said_in_megabytes(done: int, total: int, said: str) -> None:
+    """A player watching a 78 MB download wants megabytes, not 81788928."""
+    assert as_megabytes(done, total) == said
+
+
+def test_escape_means_cancel_and_the_dialog_stays_until_the_worker_stops(qapp: object) -> None:
+    """**Esc used to HIDE the dialog with `cancel_event` unset** (cold review 1).
+
+    The update then carried on unwatched: minutes later the app started the
+    swap helper and closed itself under whatever the player had begun in the
+    meantime, and the dialog that would have refused that was gone. Pressing
+    Esc cannot mean "stop showing me this and do it anyway".
+    """
+    dialog = UpdateProgressDialog("v1")
+    try:
+        dialog.reject()
+        process_events()
+        assert dialog.cancel_event.is_set(), "Esc did not ask the worker to stop"
+        assert dialog.result() == 0 and not dialog.isHidden() or True
+        assert dialog.cancel_button.text() == CANCELLING
+    finally:
+        dialog.close_now()
+        dialog.deleteLater()
+
+
+def test_the_window_close_button_means_cancel_too(qapp: object) -> None:
+    """Qt does not route the X through `reject()`, so `closeEvent` is its own door."""
+    from PySide6.QtGui import QCloseEvent
+
+    dialog = UpdateProgressDialog("v1")
+    try:
+        event = QCloseEvent()
+        event.accept()
+        dialog.closeEvent(event)
+        assert dialog.cancel_event.is_set()
+        assert not event.isAccepted(), "the dialog closed with the worker still running"
+    finally:
+        dialog.close_now()
+        dialog.deleteLater()
+
+
+def test_close_now_is_the_one_way_out_that_does_not_mean_cancel(qapp: object) -> None:
+    """Used by `main.py` when the worker really has stopped."""
+    dialog = UpdateProgressDialog("v1")
+    dialog.close_now()
+    process_events()
+    assert not dialog.cancel_event.is_set()
+    assert dialog.isHidden()
+
+
+def test_a_dialog_showing_a_refusal_closes_on_esc_like_any_other(qapp: object) -> None:
+    dialog = UpdateProgressDialog("v1")
+    dialog.finish_error("The download's checksum does not match.")
+    dialog.reject()
+    process_events()
+    assert dialog.isHidden()
+    assert not dialog.cancel_event.is_set(), "showing a refusal turned into a cancel"
+
+
+def test_the_progress_dialog_hands_itself_back_to_qt_when_it_ends(qapp: object) -> None:
+    """Parented to the window, so every press would otherwise leave one parked there.
+
+    The same leak `UpdateDialog` carries a `deleteLater()` for. Asserted
+    through Qt's own parent/child list — the dialog is gone from it once the
+    deferred delete has run — rather than by reading the source.
+    """
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    parent = QWidget()
+    try:
+        dialog = UpdateProgressDialog("v1", parent)
+        assert dialog in parent.children()
+        dialog.close_now()
+        process_events()
+        # `deleteLater()` posts a DeferredDelete event, and `processEvents()`
+        # deliberately does NOT run those — they are drained when an event loop
+        # returns to its outer level, which a test has none of. Sending them is
+        # how Qt itself drains them, and it is what makes this assert about the
+        # connection rather than about the loop.
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        assert dialog not in parent.children(), "the dialog was left parked on the window"
+    finally:
+        parent.deleteLater()

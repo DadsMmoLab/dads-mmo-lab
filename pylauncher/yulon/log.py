@@ -69,6 +69,19 @@ def file_log_problem() -> str | None:
     return _file_problem
 
 
+def file_path() -> Path | None:
+    """The `yulon.log` this process is writing, or `None` when it keeps no log file.
+
+    Read off the root logger rather than rebuilt from `config_dir()`, because
+    `configure()` falls back to the temp dir when the config dir cannot be
+    written, and the Logs tab (T93) must show the file that exists.
+    """
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, RotatingFileHandler):
+            return Path(handler.baseFilename)
+    return None
+
+
 def get_logger(name: str) -> logging.Logger:
     """Return a logger, ensuring the root logger has at least a stderr handler.
 
