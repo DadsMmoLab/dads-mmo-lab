@@ -802,6 +802,25 @@ def recreate_argv(spec: ContainerSpec) -> list[str]:
     return staged_up_argv(spec, force_recreate=True)
 
 
+def recreate_stop_argv(spec: ContainerSpec) -> list[str]:
+    """What the rebuild stops before its recreate: the servers, not the database (T98).
+
+    `compose up --force-recreate` replaces the database FIRST (dependency
+    order) while the world is still running on it. Measured on yulon-ubuntu's
+    WotLK install with 500 bots, 2026-09-24: before T98 the database went in
+    under 4 s and the old worldserver logged `[2013] Lost connection` and
+    `Waiting for 0 queries` -- its saves gone -- in a 19.6 s replace; with
+    T98's database, which holds SIGTERM while a server is connected, the same
+    command sat out the whole 240 s hold and then took the database from
+    under the world anyway, 270.2 s. Stopping the servers first, with the
+    grace every other stop here uses, lets the world drain onto a live
+    database, and then the database has nobody to wait for.
+    """
+    database = spec.service_for(spec.db)
+    servers = [service for service in spec.compose_services() if service != database]
+    return ["compose", "stop", "-t", str(STOP_GRACE_SECONDS), *reversed(servers)]
+
+
 def recreate_staged(
     spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None
 ) -> bool:
@@ -816,7 +835,12 @@ def recreate_staged(
     The named volumes are untouched: this replaces containers, not data. That
     is the same guarantee `start_staged()` already relies on every time compose
     recreates a service whose configuration changed.
+
+    The servers are stopped first (`recreate_stop_argv()`), for the reason
+    given there. Compose's stop of services that are not running is a no-op,
+    so the rebuild of a stopped install pays nothing for it.
     """
+    _run(recreate_stop_argv(spec), cwd=server_dir, wsl_distro=wsl_distro)
     return start_staged(spec, server_dir, wsl_distro=wsl_distro, force_recreate=True)
 
 

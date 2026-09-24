@@ -137,7 +137,7 @@ cat "$T98_DIR/connections"
 """
 
 
-def _start(game: str, tmp_path: Path) -> tuple[subprocess.Popen[str], Path]:
+def _start(game: str, tmp_path: Path, *, widen: bool = False) -> tuple[subprocess.Popen[str], Path]:
     db, _ = _db_and_world(load_catalog().get(game), tmp_path)
     client, _ = CLIENT[_family(db)]
     stubs = tmp_path / "bin"
@@ -148,11 +148,25 @@ def _start(game: str, tmp_path: Path) -> tuple[subprocess.Popen[str], Path]:
         path.chmod(0o755)
     (tmp_path / "connections").write_text("1\n", encoding="utf-8")
     env = {"PATH": f"{stubs}:/usr/bin:/bin", "T98_DIR": str(tmp_path)}
-    proc = subprocess.Popen(
-        ["bash", "-c", _script(db), "yulon-db", *db["command"]], env=env, text=True
-    )
-    _until(lambda: "started" in _log(tmp_path), "the server never started")
+    script = _script(db)
+    if widen:
+        script = _widen_the_early_window(script)
+    proc = subprocess.Popen(["bash", "-c", script, "yulon-db", *db["command"]], env=env, text=True)
+    if not widen:
+        _until(lambda: "started" in _log(tmp_path), "the server never started")
     return proc, tmp_path
+
+
+def _widen_the_early_window(script: str) -> str:
+    """Hold the script for a second between installing its trap and starting the server.
+
+    A signal in that window is real -- Docker can stop a container the instant it starts -- but
+    it lasts microseconds, so no test could land in it by timing. The one line added here marks
+    the window (`trapped`) and sleeps in it; everything else is the rendered script unchanged.
+    """
+    trap = "trap hold TERM INT\n"
+    assert script.count(trap) == 1, "the trap line moved; this test must move with it"
+    return script.replace(trap, trap + ': > "$T98_DIR/trapped"; sleep 1\n')
 
 
 def _log(where: Path) -> str:
@@ -232,3 +246,33 @@ def test_the_count_leaves_out_this_containers_own_connections(tmp_path: Path) ->
     assert "ID <> CONNECTION_ID()" in query
     assert "HOST LIKE '%:%'" in query  # TCP only: a socket client's HOST is plain `localhost`
     assert "HOST NOT LIKE '127.%'" in query
+
+
+@needs_bash
+@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+def test_a_signal_before_the_server_started_still_stops_it(game: str, tmp_path: Path) -> None:
+    """The early-signal line: TERM before `db=$!` exists must reach the server once it does.
+
+    Without it `hold()` runs with no server to signal (the count fails -- nothing is up yet --
+    so it gives up at once), the server then starts, and nothing ever stops it: the container
+    is SIGKILLed at the end of its grace, which is the abrupt stop this whole change exists
+    to prevent.
+    """
+    (tmp_path / "unreachable").write_text("", encoding="utf-8")
+    proc, where = _start(game, tmp_path, widen=True)
+    try:
+        _until(lambda: (where / "trapped").exists(), "the script never reached its trap")
+        proc.send_signal(signal.SIGTERM)
+        # Any exit status: the signal can reach the stub server before its own trap is set, and
+        # then it dies of SIGTERM rather than exiting 0 -- a real entrypoint would too. What
+        # matters is that the script is not left holding a running server.
+        proc.wait(timeout=10)
+        still = subprocess.run(
+            ["pgrep", "-f", str(where / "bin" / "docker-entrypoint.sh")],
+            capture_output=True,
+            text=True,
+        )
+        assert still.stdout == "", "the server outlived the script that should have stopped it"
+    finally:
+        proc.kill()
+        subprocess.run(["pkill", "-f", str(where / "bin" / "docker-entrypoint.sh")])

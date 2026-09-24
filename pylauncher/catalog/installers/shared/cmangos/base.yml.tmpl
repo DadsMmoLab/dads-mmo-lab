@@ -60,9 +60,10 @@ services:
     # INSERT leaves a character without those rows.
     #
     # So SIGTERM is held here while any server container is still connected
-    # (a TCP client from off this container; the app's own `docker exec`
-    # queries and the healthcheck are loopback or socket and do not count),
-    # then passed on to mariadbd. The hold is bounded at 240 s: the app's
+    # (a TCP client from off loopback), then passed on to mariadbd. Neither
+    # of this container's own clients counts: the app's `docker exec` queries
+    # name no host and ride the socket, and the image's healthcheck.sh
+    # connects with `-h localhost --protocol tcp`, which is 127.0.0.1. The hold is bounded at 240 s: the app's
     # stops all pass `-t 300`, which overrides stop_grace_period, and 60 s is
     # left for mariadbd's own shutdown (measured 1.8-2.6 s). A count that
     # fails stops the database at once rather than hold it. The grace is the
