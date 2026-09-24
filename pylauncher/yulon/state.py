@@ -91,13 +91,21 @@ def state_path(config_dir: Path | None = None) -> Path:
     return (config_dir if config_dir is not None else platform.config_dir()) / STATE_FILE_NAME
 
 
-def load_state(path: Path | None = None) -> AppState:
+def load_state(path: Path | None = None, *, repair: bool = True) -> AppState:
     """Read the state file; a missing file is an empty state.
 
     A broken file (bad JSON, or schema drift - `extra="forbid"` makes every
     future field fatal) must never stop the app from opening a window: it is
     moved aside as `state.json.broken` and an empty state is returned
     (review finding, 2026-08-21).
+
+    `repair=False` does everything except move the file aside, and exists for
+    exactly one caller: the run that PROVES a staged update opens
+    (`YULON_SMOKE_TEST`). That run is a build which is not installed yet,
+    started while the old one still is, with the player's real config directory
+    in reach — so the one write on this path has to be off for it. Reading is
+    unchanged; only the repair is skipped, and it is logged either way (T90
+    plan 3, cold review 1).
     """
     target = path if path is not None else state_path()
     if not target.is_file():
@@ -113,6 +121,9 @@ def load_state(path: Path | None = None) -> AppState:
         with target.open(encoding="utf-8-sig") as fh:
             return AppState.model_validate(json.load(fh))
     except (OSError, ValueError, ValidationError) as exc:
+        if not repair:
+            logger.error(f"unreadable state file left at {target} (no repair asked for): {exc}")
+            return AppState()
         backup = target.with_name(target.name + ".broken")
         try:
             target.replace(backup)

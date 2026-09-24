@@ -274,3 +274,39 @@ def test_the_checksums_are_taken_over_regular_files_only() -> None:
     sums = _step_with(NOTES_JOB, "sha256sum")
     assert "-type f" in sums
     assert "sha256sum -- *" not in sums
+
+
+def test_the_build_records_the_top_level_names_it_ships() -> None:
+    """`_internal/yulon-shipped.txt` is what lets the swap refuse to move a player's file.
+
+    Read off the STEP, comments stripped, for this file's own reason: the step
+    has a comment explaining itself and a pin on the raw text would hold with
+    the shell deleted.
+
+    Measured against the real published bundle of `v0.8.712-fixtest`
+    (2026-09-21): unpacked, the step writes exactly `_internal` and `yulon`,
+    and the file is still there after `tar -czf … -C dist yulon` repacks it.
+    """
+    step = _step_with(BUILD_JOB, "yulon-shipped.txt")
+    assert "dist/yulon/_internal/yulon-shipped.txt" in step
+    assert "basename" in step and "dist/yulon/*" in step
+    assert "matrix.os != 'macos-latest'" in step, (
+        "the macOS job builds a .app, which is never swapped in place and has no "
+        "dist/yulon to list"
+    )
+
+
+def test_the_shipped_names_are_recorded_before_anything_is_packaged() -> None:
+    """All three artifacts have to carry it, so it is written after the build and before them."""
+    code = _code(WORKFLOW)
+    wrote = code.index("yulon-shipped.txt")
+    assert code.index("run: pyinstaller build/pylauncher.spec") < wrote
+    for packaging in ("tar -czf", "Compress-Archive", "appimagetool"):
+        assert wrote < code.index(packaging), f"{packaging} runs before the manifest is written"
+
+
+def test_the_app_and_the_workflow_agree_on_the_manifests_name() -> None:
+    """Two files name it; joined here rather than left to match by eye."""
+    from yulon.selfupdate.layout import SHIPPED_MANIFEST
+
+    assert SHIPPED_MANIFEST in _code(WORKFLOW)
