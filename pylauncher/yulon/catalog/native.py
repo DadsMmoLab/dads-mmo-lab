@@ -5464,13 +5464,9 @@ class StagedInstaller:
         """
         if not state.has("build"):
             return preflight.NOTHING_SPENT
-        refs = composegen.built_image_refs(
-            self.entry, server_dir, platform_id=self._seams.platform_id
-        )
-        if self._seams.images_built(refs) is not True:
+        if self._seams.images_built(self.image_refs_at(server_dir)) is not True:
             return preflight.NOTHING_SPENT
-        recorded = [stage.name for stage in self.stages() if stage.recorded]
-        return preflight.Spent(build=True, everything=all(state.has(name) for name in recorded))
+        return preflight.Spent(build=True)
 
     # -- the guard -------------------------------------------------------
 
@@ -6002,8 +5998,18 @@ class StagedInstaller:
         `docker image rm` on the wrong tag either does nothing or removes
         somebody else's build -- neither of which says which happened.
         """
+        return self.image_refs_at(ctx.server_dir)
+
+    def image_refs_at(self, server_dir: Path) -> tuple[str, ...]:
+        """`built_image_refs()` for a caller with a folder and no stage context.
+
+        The ONE spelling of `composegen.built_image_refs(...)` in this class.
+        Preflight asks it before any stage context exists (T112, `_spent()`), and
+        lowering the free-space floor on a tag the build stage would not check
+        is the two-spellings defect above, pointed at a disk.
+        """
         return composegen.built_image_refs(
-            self.entry, ctx.server_dir, platform_id=self._seams.platform_id
+            self.entry, server_dir, platform_id=self._seams.platform_id
         )
 
     def built_images(self, ctx: StageContext) -> bool | None:

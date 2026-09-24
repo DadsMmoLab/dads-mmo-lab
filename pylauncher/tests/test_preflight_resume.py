@@ -13,9 +13,11 @@ engine is what decides what has been spent):
 - nothing spent (no record, or a recorded build whose images the daemon does
   not hold): the fresh-install floor, unchanged;
 - the build spent (recorded AND every image present, `stage_build`'s own skip
-  rule): the build's share of the floor is not asked for again;
-- every recorded stage done as well: a shortfall is a warning that still names
-  the number, never a refusal, and never silence.
+  rule): the build's share of the floor is not asked for again, and what is
+  left is judged against the server-folder pair -- and REFUSED below it, even
+  when every stage is recorded done. The record is a hint: stages re-check
+  their own evidence and can write maps, mmaps or client data again (fix wave,
+  Codex review, 2026-09-24).
 """
 
 from __future__ import annotations
@@ -114,22 +116,47 @@ def test_a_reinstall_into_a_finished_built_install_is_not_refused_for_the_build_
     assert "21 GB free" in rows[0], "the number is still said"
 
 
-def test_a_finished_install_on_a_nearly_full_drive_warns_with_the_number_rather_than_refusing(
+def test_a_finished_install_on_a_drive_below_the_server_folder_floor_is_still_refused(
     tmp_path: Path,
 ) -> None:
-    """Nothing large is left to write, so a short drive is said, not refused and not hidden."""
+    """Every stage recorded is a hint, not room: a stage that finds its output gone writes it again.
+
+    The first cut of T112 turned this into a warning at any free space, 0 GB
+    included (Codex review, 2026-09-24). Only the build's share is spent; the
+    server-folder floor still refuses.
+    """
     rec = Recorder(images=True)
     installer = _engine(rec, 5)
     server_dir = tmp_path / "tbc-server"
     _lay_record(installer, server_dir, _recorded(installer))
 
-    lines = _preflight(installer, server_dir)
+    with pytest.raises(InstallerError) as caught:
+        _preflight(installer, server_dir)
+    said = str(caught.value)
+    assert "5 GB free" in said, said
+    assert f"needs {NATIVE.min_server_dir_gb:.0f} GB" in said, said
 
-    rows = _space_rows(lines)
-    assert len(rows) == 1, lines
-    assert rows[0].startswith("[warn]"), rows[0]
-    assert "5 GB free" in rows[0], rows[0]
-    assert f"{NATIVE.min_server_dir_gb:.0f} GB" in rows[0], "the floor it fell short of is named"
+
+def test_preflight_asks_the_daemon_about_exactly_the_refs_the_build_stage_asks_about(
+    tmp_path: Path,
+) -> None:
+    """One spelling of this install's images: a second could lower the floor on the wrong tag."""
+    rec = Recorder(images=True)
+    installer = _engine(rec, 21)
+    server_dir = tmp_path / "tbc-server"
+    _lay_record(installer, server_dir, _recorded(installer))
+
+    _preflight(installer, server_dir)
+
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(TBC.id, installer._install_id(server_dir)),
+        cancel=None,
+        secrets=native.Secrets("unused"),
+    )
+    assert rec.images_asked == [installer.built_image_refs(ctx)]
+    assert rec.images_asked[0], "an empty ref tuple would be a question nobody can answer"
 
 
 def test_a_half_done_resume_past_the_build_is_asked_only_for_what_the_remaining_stages_need(
@@ -252,24 +279,18 @@ def test_the_one_drive_floors_stop_adding_once_the_build_is_spent() -> None:
     assert "add up" not in " ".join(check.detail for check in spent.checks)
 
 
-@pytest.mark.parametrize("platform_id", ["linux", "macos"])
-def test_everything_spent_turns_every_space_refusal_into_a_warning_with_its_number(
-    platform_id: str,
-) -> None:
-    """Both drives, and macOS's bounded Docker row, which has a refusal of its own."""
-    spent = preflight.Spent(build=True, everything=True)
-    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(2, 3, platform_id), spent)
-    assert report.ok(), report.message()
-    docker_row = _row(report, "free space on Docker's disk")
-    folder_row = _row(report, "free space on the server folder")
-    for row, gb in ((docker_row, 2), (folder_row, 3)):
-        assert row.verdict == "warn", row
-        assert f"{gb} GB free" in row.detail and "not a refusal" in row.detail, row.detail
+def test_a_spent_build_on_macos_still_refuses_below_the_server_folder_floor() -> None:
+    """macOS's bounded Docker row refuses on its own; a spent build lowers it, never lifts it."""
+    spent = preflight.Spent(build=True)
+    report = preflight.evaluate(ENTRY, Path("/srv/wow"), _two_drives(2, 200, "macos"), spent)
+    row = _row(report, "free space on Docker's disk")
+    assert row.verdict == "refuse", row
+    assert f"needs {WOTLK.min_server_dir_gb:.0f} GB" in row.detail, row.detail
 
 
 def test_an_unmeasured_drive_stays_unchecked_whatever_was_spent() -> None:
     """The tri-state discipline: a reading that was not taken is not rounded to a pass."""
     facts = replace(_two_drives(0, 0), data_root_free=None)
-    spent = preflight.Spent(build=True, everything=True)
+    spent = preflight.Spent(build=True)
     report = preflight.evaluate(ENTRY, Path("/srv/wow"), facts, spent)
     assert _row(report, "free space on Docker's disk").verdict == "unchecked"

@@ -168,13 +168,13 @@ class Spent:
     follows, so the floor is lowered on exactly the presses that skip the
     compile. A recorded build whose images are gone, or a daemon that will not
     say, compiles again and is asked for the whole floor.
-    """
-    everything: bool = False
-    """`build`, and every stage the family records is recorded done as well.
 
-    Nothing large is left to write, so a shortfall is said as a warning with the
-    number in it rather than refused. Each stage still checks its own evidence
-    on disk, which is why this is a warning and not a pass.
+    **The only thing spent that lowers a floor.** A first cut also had an
+    `everything` flag (every recorded stage done) that turned any shortfall
+    into a warning, 0 GB included. The record is a hint: each stage re-checks
+    its own evidence and writes maps, mmaps or client data again when it finds
+    them gone -- AzerothCore's client-data runs on every press -- so a full
+    drive is refused whatever the record says (Codex review, 2026-09-24).
     """
 
 
@@ -489,7 +489,8 @@ def evaluate(
     data-root pair is documented as the build's (images and build cache), and
     no catalog number sizes the stages after it on their own, so the smaller,
     remaining half of the same unmeasured floor stands in for them. That is a
-    stand-in, not a measurement. With everything spent, a shortfall warns.
+    stand-in, not a measurement, and it still refuses: nothing spent turns a
+    shortfall into a warning.
     """
     native = entry.install.native
     if native is None:
@@ -1052,8 +1053,6 @@ def _space_check(
         note = " (the server folder and Docker's disk share one drive, so both needs add up)"
     else:
         note = ""
-    if gigabytes < refuse_gb and spent.everything:
-        return _finished_shortfall(f"free space on {what}", f"{gigabytes:.0f} GB free", refuse_gb)
     if gigabytes < refuse_gb:
         return Check(
             f"free space on {what}",
@@ -1068,23 +1067,6 @@ def _space_check(
             f"{gigabytes:.0f} GB free; {warn_gb:.0f} GB is the comfortable figure{note}",
         )
     return Check(f"free space on {what}", "pass", f"{gigabytes:.0f} GB free")
-
-
-def _finished_shortfall(name: str, measured: str, refuse_gb: float) -> Check:
-    """A finished, built install on a short drive: said with its number, never refused (T112).
-
-    Every stage is recorded done and the images exist, so a reinstall into this
-    folder writes nothing large. A warning rather than a pass because the
-    record is a hint and each stage re-checks its own evidence on disk — a
-    stage that finds its output gone would write it again into this room.
-    """
-    return Check(
-        name,
-        "warn",
-        f"{measured}, less than the {refuse_gb:.0f} GB the stages after the build are asked "
-        "for; every stage of this install is already recorded done and its images exist, so "
-        "nothing large is left to write and this is not a refusal",
-    )
 
 
 FOLDER_SPACE_REMEDY = "Free some space, or install to a drive that has room, then try again."
@@ -1193,10 +1175,6 @@ def _space_check_macos_bounded(
         )
     gigabytes = free / GIB
     note = BUILD_SPENT_NOTE if spent.build else ""
-    if gigabytes < refuse_gb and spent.everything:
-        return _finished_shortfall(
-            "free space on Docker's disk", f"{gigabytes:.0f} GB free on the drive", refuse_gb
-        )
     if gigabytes < refuse_gb:
         return Check(
             "free space on Docker's disk",
