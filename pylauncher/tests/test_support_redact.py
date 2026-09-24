@@ -159,3 +159,50 @@ def test_database_info_is_masked_by_address_hostname_and_socket() -> None:
     assert redactor.redact('".;/var/run/mysqld/mysqld.sock;acore;Pw9unknown;acore_auth"') == (
         f'".;/var/run/mysqld/mysqld.sock;acore;{MASK};acore_auth"'
     )
+
+
+SHORT_PASSWORDS = ("q", "Zq", "x9!")
+"""One to three characters: below `TOKEN_FLOOR`, so never masked in free text."""
+
+
+def _password_positions(value: str) -> list[tuple[str, str]]:
+    """Every place a password is WRITTEN, with `value` there and the line it must become."""
+    return [
+        (
+            f'LoginDatabaseInfo = "db;3306;mangos;{value};realmd"',
+            f'LoginDatabaseInfo = "db;3306;mangos;{MASK};realmd"',
+        ),
+        (
+            f"Cannot connect to world database db;3306;mangos;{value};mangos",
+            f"Cannot connect to world database db;3306;mangos;{MASK};mangos",
+        ),
+        (f"AdminPassword = {value}", f"AdminPassword = {MASK}"),
+        (f'Ra.Password = "{value}"', f"Ra.Password = {MASK}"),
+        (f"DB_ROOT_PASSWORD={value}", f"DB_ROOT_PASSWORD={MASK}"),
+        (f"mysql --password={value} acore", f"mysql --password={MASK} acore"),
+        (f"password: {value}", f"password: {MASK}"),
+        (f'{{"password": "{value}"}}', f'{{"password": {MASK}}}'),
+    ]
+
+
+def test_a_one_to_three_character_password_is_masked_in_every_password_position() -> None:
+    """Codex T93 review: a short known value is dropped from the known list, so the
+    positions a password is written in must catch it -- known or not."""
+    for value in SHORT_PASSWORDS:
+        for redactor in (Redactor.build([value]), Redactor.build([])):
+            for line, masked in _password_positions(value):
+                assert redactor.redact(line) == masked, (value, line)
+
+
+def test_a_known_short_password_that_reads_like_yes_or_no_is_still_masked() -> None:
+    """`YES`/`NO` are kept for MySQL's `(using password: YES)` -- unless one IS the password."""
+    for value in ("no", "YES", "No"):
+        assert Redactor.build([value]).redact(f"AdminPassword = {value}") == (
+            f"AdminPassword = {MASK}"
+        )
+    assert Redactor.build([]).redact("(using password: NO)") == "(using password: NO)"
+
+
+def test_a_short_known_password_in_free_text_is_left_there() -> None:
+    """The cost the bundle's warning names: masking `x9` everywhere would wreck every log."""
+    assert Redactor.build(["x9"]).redact("port x9 up") == "port x9 up"

@@ -415,3 +415,46 @@ def test_a_read_that_lands_after_the_tab_is_gone_is_dropped_quietly(
     pump_until(returned.is_set, "the read finishes")
     process_events(50)
     assert raised == []
+
+
+def _seed_short_password() -> None:
+    """A channel credential of two characters: under the redactor's free-text floor."""
+    config = platform.config_dir()
+    (config / "credentials").mkdir(parents=True, exist_ok=True)
+    (config / "credentials" / "wow-tbc-0badf00d.json").write_text(
+        json.dumps({"account": "OWNER", "password": "Zq", "host": "localhost", "port": 7878}),
+        encoding="utf-8",
+    )
+
+
+def test_a_short_password_is_named_on_read_copy_and_save_and_never_promised_away(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Codex T93 review: 'passwords already taken out' must not be said unconditionally."""
+    _seed_app_log(3)
+    _seed_short_password()
+    copied: list[str] = []
+    dest = tmp_path / "out.zip"
+    view = _view(clipboard=copied.append, pick_save_path=lambda parent, suggested: dest)
+    view.refresh()
+    for action in (lambda: None, view.copy_last_lines, view.save_for_support):
+        action()
+        text = view.status.text()
+        assert "very short password" in text and "longer password" in text, text
+        assert "already taken out" not in text, text
+        assert "Zq" not in text
+    assert copied and dest.is_file()
+    assert "credentials/wow-tbc-0badf00d.json" in view.status.text()
+
+
+def test_without_a_short_password_the_tab_warns_of_nothing(qapp: object, tmp_path: Path) -> None:
+    _seed_app_log(3)
+    dest = tmp_path / "out.zip"
+    view = _view(clipboard=lambda text: None, pick_save_path=lambda parent, suggested: dest)
+    view.refresh()
+    assert "very short password" not in view.status.text()
+    view.copy_last_lines()
+    assert "passwords already taken out" in view.status.text()
+    view.save_for_support()
+    assert "already taken out" in view.status.text()
+    assert "very short password" not in view.status.text()

@@ -278,3 +278,87 @@ def test_nothing_the_logs_tab_shows_or_copies_carries_a_planted_secret(
                     assert needle not in seen, f"{secret} in {where} for {label}"
             for spelling in planted.homes:
                 assert spelling not in seen, f"the home folder in {where} for {label}"
+
+
+def _plant_short(tmp_path: Path) -> tuple[KnownInstall, str, list[tuple[str, str]]]:
+    """A 1-3 character password, set for real and written in every password position.
+
+    Returns the install, the value, and each written line with the line it must become.
+    """
+    config = platform.config_dir()
+    short = "Q" + secrets.choice("XZJ") + secrets.choice("789")
+    server_dir = tmp_path / "srv-short"
+    (server_dir / "etc").mkdir(parents=True)
+    (server_dir / ".db_password").write_text(short + "\n", encoding="utf-8")
+    conf_line = f'LoginDatabaseInfo = "tbc-db;3306;mangos;{short};tbcrealmd"'
+    (server_dir / "etc" / "realmd.conf").write_text(conf_line + "\n", encoding="utf-8")
+    (config / "credentials").mkdir(parents=True)
+    (config / "credentials" / "wow-tbc-0badf00d.json").write_text(
+        json.dumps({"account": "OWNER", "password": short, "host": "localhost", "port": 7878}),
+        encoding="utf-8",
+    )
+    positions = [
+        (conf_line, 'LoginDatabaseInfo = "tbc-db;3306;mangos;***;tbcrealmd"'),
+        (
+            f"Cannot connect to world database tbc-db;3306;mangos;{short};tbcmangos",
+            "Cannot connect to world database tbc-db;3306;mangos;***;tbcmangos",
+        ),
+        (f"Ra.Password = {short}", "Ra.Password = ***"),
+        (f"mysql --password={short} -e select", "mysql --password=*** -e select"),
+        (f"password: {short}", "password: ***"),
+        (f'{{"password": "{short}"}}', '{"password": ***}'),
+    ]
+    lines = [written for written, _ in positions] + [f"FREE the short one is {short} here"]
+    (config / "yulon.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return KnownInstall(game="wow-tbc", server_dir=server_dir), short, positions
+
+
+def test_a_short_password_is_masked_where_it_is_written_and_named_where_it_is_not(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Codex T93 review [high]: a 1-3 character password was left in free text while the
+    zip and the tab said every password was taken out. It is still left in free text --
+    masking it there would wreck every log -- but every password POSITION masks it, and
+    the manifest and the tab now say plainly that it is set and must be looked for."""
+    install, short, positions = _plant_short(tmp_path)
+    sources = sources_for_app((install,), CATALOG, qt_version=QT_VERSION)
+    seams = bundle.Seams(
+        live_logs=lambda i, s: [LiveLog("tbc-mangosd", f"Ra.Password = {short}\n")],
+        docker_version=lambda distro: None,
+    )
+    dest = tmp_path / "out" / "support.zip"
+    dest.parent.mkdir()
+    report = bundle.save(dest, sources, seams=seams)
+    with zipfile.ZipFile(dest) as archive:
+        contents = {name: archive.read(name).decode("utf-8") for name in archive.namelist()}
+
+    app_lines = contents["app/yulon.log"].splitlines()
+    for written, masked in positions:
+        assert written not in app_lines, f"{written!r} reached the zip"
+        assert masked in app_lines, f"{masked!r} missing"
+    conf = next(text for name, text in contents.items() if name.endswith("realmd.conf"))
+    assert conf.splitlines() == [positions[0][1]]
+    live = next(text for name, text in contents.items() if name.startswith("live/"))
+    assert live == "Ra.Password = ***\n"
+    # Free text keeps it (the known cost), so the manifest must say so -- never print it.
+    assert f"FREE the short one is {short} here" in app_lines, "control: free text was planted"
+    manifest = contents["MANIFEST.txt"]
+    assert "WARNING" in manifest and "very short password" in manifest
+    assert "Every password Yu'lon knows of" not in manifest
+    assert short not in manifest
+    assert report.short_passwords and all(short not in where for where in report.short_passwords)
+
+    view = LogsView(
+        lambda: (install,),
+        CATALOG,
+        jobs=run_inline,
+        clipboard=lambda text: None,
+        pick_save_path=lambda parent, suggested: tmp_path / "out" / "tab.zip",
+        bundle_seams=seams,
+    )
+    view.refresh()
+    for action in (lambda: None, view.copy_last_lines, view.save_for_support):
+        action()
+        status = view.status.text()
+        assert "very short password" in status and "already taken out" not in status, status
+        assert short not in status

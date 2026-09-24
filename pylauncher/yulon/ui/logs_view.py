@@ -107,6 +107,8 @@ class _Read:
     items: tuple[support_sources.Viewable, ...]
     shown: Path | None
     text: str
+    short_passwords: tuple[str, ...] = ()
+    """Where a password too short to take out of free text is set (`Known.short`)."""
 
 
 class _ReadFailed(Exception):
@@ -153,6 +155,7 @@ def _read_logs(
         sources = support_sources.sources_for_app(installs, catalog, qt_version=qt_version)
         known = support_sources.gather_known(sources)
         redactor = Redactor.build(known.values, home=Path.home())
+        short = tuple(redactor.redact(where) for where in known.short)
         # A label is a file name and is shown too, so it is redacted like a line.
         items = tuple(
             support_sources.Viewable(redactor.redact(item.label), item.path)
@@ -165,12 +168,23 @@ def _read_logs(
     if shown is None and items:
         shown = items[0].path
     if shown is None:
-        return _Read(generation, items, None, "")
+        return _Read(generation, items, None, "", short)
     try:
         text = support_sources.read_tail(shown)
     except OSError as exc:
         text = f"This file could not be read: {exc.strerror or type(exc).__name__}"
-    return _Read(generation, items, shown, redactor.redact(text))
+    return _Read(generation, items, shown, redactor.redact(text), short)
+
+
+def _intro(*, short: bool) -> str:
+    """The tab's first line. It promises the passwords are gone only when they can be."""
+    text = (
+        "Something not working? Press <b>Save logs for support…</b> and send us the file "
+        "it makes. Passwords and your home folder are taken out first"
+    )
+    if short:
+        return text + ", except a very short password in ordinary log lines (see below)."
+    return text + "."
 
 
 def _size_text(size: int) -> str:
@@ -227,13 +241,12 @@ class LogsView(QWidget):
         """The newest read started; a result from any other is dropped."""
         self._reading = False
         self._saving_to: Path | None = None
+        self._short_passwords: tuple[str, ...] = ()
+        """The newest read's `Known.short`: while set, nothing here promises every
+        password is gone (Codex T93 review)."""
 
-        intro = QLabel(
-            "Something not working? Press <b>Save logs for support…</b> and send us the file "
-            "it makes. Passwords and your home folder are taken out first.",
-            self,
-        )
-        intro.setWordWrap(True)
+        self.intro = QLabel(_intro(short=False), self)
+        self.intro.setWordWrap(True)
         self.source_picker = QComboBox(self)
         # Never as wide as the longest run-log name: that width would become the
         # window's minimum (T32's lesson, `LogPanel`'s console picker).
@@ -248,7 +261,8 @@ class LogsView(QWidget):
         self.viewer.setPlaceholderText(NOTHING_LOGGED)
         self.save_button = QPushButton("Save logs for support…", self)
         self.save_button.setToolTip(
-            "One zip of every log and settings file, passwords taken out, to send to support"
+            "One zip of every log and settings file, passwords taken out, to send to support "
+            "(MANIFEST.txt inside says if one was too short to take out everywhere)"
         )
         self.save_button.clicked.connect(self.save_for_support)
         self.open_folder_button = QPushButton("Open log folder", self)
@@ -270,7 +284,7 @@ class LogsView(QWidget):
         ):
             bar.flow().addWidget(button)
         layout = QVBoxLayout(self)
-        layout.addWidget(intro)
+        layout.addWidget(self.intro)
         layout.addWidget(self.source_picker)
         layout.addWidget(self.viewer, 1)
         layout.addWidget(bar)
@@ -324,6 +338,10 @@ class LogsView(QWidget):
         finally:
             self.source_picker.blockSignals(False)
         self.viewer.setPlainText(result.text)
+        self._short_passwords = result.short_passwords
+        self.intro.setText(_intro(short=bool(result.short_passwords)))
+        if result.short_passwords:
+            self.status.setText(bundle.short_password_warning(result.short_passwords))
         scrollbar = self.viewer.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
@@ -358,6 +376,12 @@ class LogsView(QWidget):
             self.status.setText("Nothing to copy yet.")
             return
         self._clipboard("\n".join(lines))
+        if self._short_passwords:
+            self.status.setText(
+                f"Copied the last {len(lines)} lines. "
+                + bundle.short_password_warning(self._short_passwords)
+            )
+            return
         self.status.setText(f"Copied the last {len(lines)} lines, passwords already taken out.")
 
     @Slot()
@@ -406,10 +430,16 @@ class LogsView(QWidget):
         skipped = (
             f" {len(report.skipped)} skipped, MANIFEST.txt says why." if report.skipped else ""
         )
-        text = (
-            f"Saved {report.path} ({_size_text(report.size)}). Send this file; the passwords "
-            f"are already taken out.{skipped}"
-        )
+        if report.short_passwords:
+            text = (
+                f"Saved {report.path} ({_size_text(report.size)}).{skipped} "
+                + bundle.short_password_warning(report.short_passwords)
+            )
+        else:
+            text = (
+                f"Saved {report.path} ({_size_text(report.size)}). Send this file; the passwords "
+                f"are already taken out.{skipped}"
+            )
         if report.size > bundle.ZIP_CAP:
             text += (
                 f" It is larger than the {bundle.ZIP_CAP // 1_000_000} MB Yu'lon aims for, so it "

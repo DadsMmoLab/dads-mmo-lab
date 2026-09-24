@@ -21,7 +21,7 @@ from yulon.catalog import composegen
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.state import KnownInstall
 from yulon.support import runlog
-from yulon.support.redact import database_info_passwords
+from yulon.support.redact import TOKEN_FLOOR, database_info_passwords
 
 FILE_CAP = 2 * 1024 * 1024
 """Each file keeps its last 2 MiB, a worldserver snapshot's budget (`logsnap.MAX_BYTES`)."""
@@ -88,6 +88,13 @@ class Known:
 
     values: frozenset[str]
     missing: tuple[str, ...]
+    short: tuple[str, ...] = ()
+    """WHERE each password under `TOKEN_FLOOR` is set, never the value (Codex T93 review).
+
+    The redactor masks such a value only where a password is written, not in
+    free text, so the bundle and the Logs tab name these places and ask the
+    user to look before sharing.
+    """
 
 
 @dataclass(frozen=True)
@@ -284,10 +291,20 @@ def gather_known(sources: Sources) -> Known:
     generated install's `.db_password`, and the `DatabaseInfo` passwords in each
     install's confs, minus the catalog's public fixed values. Every value is
     stripped and a blank one dropped (see `_secret`). A store that cannot be
-    read is named in `missing`; the patterns still run without it.
+    read is named in `missing`; the patterns still run without it. Where a
+    password under `TOKEN_FLOOR` is set is named in `short`, never its value.
     """
     values: set[str] = set()
     missing: list[str] = []
+    short: list[str] = []
+
+    def add(value: str, where: str) -> None:
+        if value in sources.public_passwords:
+            return
+        values.add(value)
+        if len(value) < TOKEN_FLOOR and where not in short:
+            short.append(where)
+
     readers: tuple[tuple[str, Callable[[str, str, Path], str | None]], ...] = (
         (dbsecret.DIR_NAME, _kept_password),
         (CREDENTIALS_DIR, _channel_password),
@@ -306,7 +323,7 @@ def gather_known(sources: Sources) -> Known:
             game, _, install_id = path.stem.rpartition("-")
             password = _secret(read(game, install_id, sources.config_dir))
             if password is not None:
-                values.add(password)
+                add(password, f"{folder}/{path.name}")
             else:
                 missing.append(f"{folder}/{path.name} could not be read")
     for install in sources.installs:
@@ -314,7 +331,7 @@ def gather_known(sources: Sources) -> Known:
         if entry is not None and entry.install.password.mode == "generated":
             generated = _secret(entry.install.db_password(install.server_dir))
             if generated is not None:
-                values.add(generated)
+                add(generated, f"{install.label}: its database password")
             else:
                 missing.append(
                     f"{install.label}: its generated database password could not be read"
@@ -340,20 +357,20 @@ def gather_known(sources: Sources) -> Known:
             except OSError:
                 missing.append(f"{install.label}: {path.name} could not be read")
                 continue
-            values.update(
-                found
-                for value in database_info_passwords(text)
-                if (found := _secret(value)) is not None
-            )
-    return Known(values=frozenset(values - sources.public_passwords), missing=tuple(missing))
+            where = f"{install.label}: {path.relative_to(install.server_dir).as_posix()}"
+            for value in sorted(database_info_passwords(text)):
+                found = _secret(value)
+                if found is not None:
+                    add(found, where)
+    return Known(values=frozenset(values), missing=tuple(missing), short=tuple(short))
 
 
-def _room(limit: int) -> int:
+def _room(limit: int, notice: str = _TRUNCATION_NOTICE) -> int:
     """How many bytes of the file fit beside the notice. At least one."""
-    return max(limit - len(_TRUNCATION_NOTICE.encode("utf-8")), 1)
+    return max(limit - len(notice.encode("utf-8")), 1)
 
 
-def _cut(data: bytes) -> str:
+def _cut(data: bytes, notice: str = _TRUNCATION_NOTICE) -> str:
     """Bytes from the middle of a file, as text starting on a whole line, with a notice.
 
     `errors="ignore"` because a byte cut can land inside a multi-byte
@@ -362,7 +379,7 @@ def _cut(data: bytes) -> str:
     """
     tail = data.decode("utf-8", errors="ignore")
     _, newline, whole = tail.partition("\n")
-    return _TRUNCATION_NOTICE + (whole if newline else tail)
+    return notice + (whole if newline else tail)
 
 
 def read_tail(path: Path, limit: int = FILE_CAP) -> str:
@@ -380,10 +397,13 @@ def read_tail(path: Path, limit: int = FILE_CAP) -> str:
         return _cut(handle.read())
 
 
-def keep_tail(text: str, limit: int = FILE_CAP) -> str:
-    """`read_tail()` for text already in memory (a container's log)."""
+def keep_tail(text: str, limit: int = FILE_CAP, *, notice: str = _TRUNCATION_NOTICE) -> str:
+    """`read_tail()` for text already in memory: a container's log, or a file the
+    bundle cuts shorter to fit its size cap (which says so in its own `notice`)."""
     data = text.encode("utf-8")
-    return text if len(data) <= limit else _cut(data[len(data) - _room(limit) :])
+    if len(data) <= limit:
+        return text
+    return _cut(data[len(data) - _room(limit, notice) :], notice)
 
 
 def collect_live_logs(

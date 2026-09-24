@@ -105,6 +105,55 @@ def test_known_values_are_stripped_and_a_blank_one_is_not_a_password(tmp_path: P
     )
 
 
+def test_a_password_under_the_token_floor_is_named_by_where_it_is_set(tmp_path: Path) -> None:
+    """Codex T93 review: the redactor cannot take a 1-3 character password out of free
+    text, so the bundle must say one is set -- where, never what."""
+    config = platform.config_dir()
+    install = _tbc_install(tmp_path)
+    (install.server_dir / "etc").mkdir(parents=True)
+    (install.server_dir / ".db_password").write_text("Zq\n", encoding="utf-8")
+    (install.server_dir / "etc" / "mangosd.conf").write_text(
+        'LoginDatabaseInfo = "tbc-db;3306;mangos;x9!;tbcrealmd"\n'
+        'WorldDatabaseInfo = "tbc-db;3306;mangos;pwd;tbcmangos"\n',
+        encoding="utf-8",
+    )
+    (config / "credentials").mkdir(parents=True)
+    (config / "credentials" / "wow-tbc-0badc0de.json").write_text(
+        json.dumps({"account": "OWNER", "password": "q", "host": "localhost", "port": 7878}),
+        encoding="utf-8",
+    )
+    long_enough = "Long" + secrets.token_hex(6)
+    (config / "db-secrets").mkdir()
+    (config / "db-secrets" / "wow-vanilla-0badc0de.json").write_text(
+        json.dumps({"volume": "v", "password": long_enough}), encoding="utf-8"
+    )
+    known = gather_known(
+        Sources(
+            config_dir=config,
+            app_log=None,
+            installs=(install,),
+            public_passwords=frozenset({"pwd"}),
+        )
+    )
+    assert known.values == {"Zq", "x9!", "q", long_enough}
+    assert known.short == (
+        "credentials/wow-tbc-0badc0de.json",
+        f"{install.label}: its database password",
+        f"{install.label}: etc/mangosd.conf",
+    )
+    for value in ("Zq", "x9!", "q"):
+        assert all(value not in where for where in known.short)
+
+
+def test_no_short_password_means_no_warning(tmp_path: Path) -> None:
+    config = platform.config_dir()
+    (config / "db-secrets").mkdir(parents=True)
+    (config / "db-secrets" / "wow-vanilla-0badc0de.json").write_text(
+        json.dumps({"volume": "v", "password": "Long" + secrets.token_hex(6)}), encoding="utf-8"
+    )
+    assert gather_known(Sources(config_dir=config, app_log=None, installs=())).short == ()
+
+
 def test_an_unreadable_known_source_is_named_not_fatal(tmp_path: Path) -> None:
     config = platform.config_dir()
     (config / "credentials").mkdir(parents=True)

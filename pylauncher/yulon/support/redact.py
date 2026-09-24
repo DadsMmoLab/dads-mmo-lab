@@ -10,7 +10,10 @@ other cannot:
   that contains another is masked whole rather than leaving its tail behind.
   Eight characters or more are masked anywhere; four to seven only as a whole
   token, because `acore` is both a password and the start of `acore_auth`;
-  shorter ones are not worth the damage they would do.
+  shorter ones are not masked in free text -- `x9` would take every `x9` out
+  of every log -- but the patterns below mask them wherever a password is
+  WRITTEN, and the bundle and the Logs tab say plainly that one is set (Codex
+  T93 review).
 * **Patterns** -- what a password looks like when nobody told us its value: the
   `DatabaseInfo` field (`host;port;user;PASSWORD;schema`, in a conf and in the
   worldserver's own "cannot connect" line), a `*password* = value` setting, and
@@ -35,7 +38,9 @@ SUBSTRING_FLOOR = 8
 """A known value this long is masked wherever it occurs; a random collision is negligible."""
 
 TOKEN_FLOOR = 4
-"""Below this a known value is ignored: `abc` as a token would mask ordinary words."""
+"""Below this a known value is not masked in free text: `abc` as a token would mask
+ordinary words. The patterns still mask it in a password position, and
+`sources.Known.short` names where one is set so the user is told."""
 
 _WORD = "A-Za-z0-9_"
 
@@ -107,9 +112,13 @@ def _mask_field(match: re.Match[str]) -> str:
     return match.group("head") + MASK
 
 
-def _mask_setting(match: re.Match[str]) -> str:
+def _mask_setting(match: re.Match[str], short: frozenset[str] = frozenset()) -> str:
+    """Mask the value, unless it is empty or MySQL's `YES`/`NO` -- and that is not a
+    password this machine actually uses (`short`: the known values under `TOKEN_FLOOR`)."""
     value = match.group("value")
-    if value in ('""', "''") or value.upper() in _NOT_A_PASSWORD:
+    if value in ('""', "''"):
+        return match.group(0)
+    if value.upper() in _NOT_A_PASSWORD and value not in short:
         return match.group(0)
     return match.group("head") + MASK
 
@@ -138,11 +147,15 @@ class Redactor:
     anywhere: re.Pattern[str] | None
     tokens: re.Pattern[str] | None
     home: re.Pattern[str] | None
+    short: frozenset[str] = frozenset()
+    """Known values under `TOKEN_FLOOR`: never masked in free text, only in a password position."""
 
     @classmethod
     def build(cls, known: Iterable[str], *, home: Path | None = None) -> Redactor:
         """Compile the known values (longest first) and the home folder."""
-        values = {value for value in known if len(value) >= TOKEN_FLOOR}
+        given = set(known)
+        values = {value for value in given if len(value) >= TOKEN_FLOOR}
+        short = frozenset(value for value in given if 0 < len(value) < TOKEN_FLOOR)
         longest_first = sorted(values, key=lambda value: (-len(value), value))
         anywhere = [value for value in longest_first if len(value) >= SUBSTRING_FLOOR]
         tokens = [value for value in longest_first if len(value) < SUBSTRING_FLOOR]
@@ -154,6 +167,7 @@ class Redactor:
                 else None
             ),
             home=_home_pattern(home),
+            short=short,
         )
 
     def redact(self, text: str) -> str:
@@ -163,7 +177,8 @@ class Redactor:
         if self.tokens is not None:
             text = self.tokens.sub(MASK, text)
         text = _DATABASE_INFO.sub(_mask_field, text)
-        text = _PASSWORD_SETTING.sub(_mask_setting, text)
+        short = self.short
+        text = _PASSWORD_SETTING.sub(lambda match: _mask_setting(match, short), text)
         text = _GENERATED.sub(MASK, text)
         if self.home is not None:
             text = self.home.sub("~", text)

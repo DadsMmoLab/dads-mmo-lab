@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import secrets
 import zipfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -325,3 +326,156 @@ def test_two_names_that_differ_only_in_a_secret_stay_two_members(tmp_path: Path)
         "runs/install-***.log",
     ]
     assert len([n for n in _read(tmp_path / "s.zip") if n.startswith("runs/")]) == 2
+
+
+def test_a_short_password_is_named_in_the_manifest_and_the_promise_is_not_made(
+    tmp_path: Path,
+) -> None:
+    """Codex T93 review: a 1-3 character password stays in free text, so say so."""
+    config = platform.config_dir()
+    (config / "credentials").mkdir(parents=True)
+    (config / "credentials" / "wow-tbc-0badc0de.json").write_text(
+        '{"account": "OWNER", "password": "Zq", "host": "localhost", "port": 7878}',
+        encoding="utf-8",
+    )
+    report = bundle.save(
+        tmp_path / "s.zip", Sources(config, None, ()), seams=_seams(), home=tmp_path
+    )
+    manifest = _read(tmp_path / "s.zip")["MANIFEST.txt"]
+    assert report.short_passwords == ("credentials/wow-tbc-0badc0de.json",)
+    assert "WARNING" in manifest and "very short password" in manifest
+    assert "credentials/wow-tbc-0badc0de.json" in manifest
+    assert "longer password" in manifest
+    assert "Every password Yu'lon knows of" not in manifest
+    assert "Zq" not in manifest
+
+
+def test_without_a_short_password_the_manifest_makes_its_promise_and_warns_nothing(
+    tmp_path: Path,
+) -> None:
+    report = bundle.save(
+        tmp_path / "s.zip", Sources(platform.config_dir(), None, ()), seams=_seams(), home=tmp_path
+    )
+    manifest = _read(tmp_path / "s.zip")["MANIFEST.txt"]
+    assert report.short_passwords == ()
+    assert "Every password Yu'lon knows of" in manifest
+    assert "WARNING" not in manifest
+
+
+def _noise(size: int, tag: str) -> str:
+    """`size` bytes of base64 lines that deflate hardly at all, the last one tagged."""
+    lines = []
+    total = 0
+    while total < size:
+        line = secrets.token_urlsafe(57) + "\n"
+        lines.append(line)
+        total += len(line)
+    lines.append(f"LAST {tag}\n")
+    return "".join(lines)
+
+
+def _noisy_installs(tmp_path: Path, count: int, conf_bytes: int) -> tuple[InstallFacts, ...]:
+    installs = []
+    for n in range(count):
+        install = _install(tmp_path, f"0badc0d{n}")
+        for name in ("mangosd.conf", "realmd.conf"):
+            (install.server_dir / "etc" / name).write_text(
+                _noise(conf_bytes, f"{install.install_id}-{name}"), encoding="utf-8"
+            )
+        installs.append(install)
+    return tuple(installs)
+
+
+def _noisy_live(size: int) -> Callable[[InstallFacts, set[str | None]], list[LiveLog]]:
+    """A `live_logs` seam giving each of three containers `size` bytes of noise."""
+
+    def live_logs(install: InstallFacts, silent: set[str | None]) -> list[LiveLog]:
+        return [
+            LiveLog(name, _noise(size, f"{install.install_id}-{name}"))
+            for name in ("tbc-mangosd", "tbc-realmd", "tbc-db")
+        ]
+
+    return live_logs
+
+
+def test_live_logs_are_cut_shorter_until_the_zip_fits_the_cap(tmp_path: Path) -> None:
+    """Codex T93 review: dropping snapshots and runs alone left a zip far over the cap.
+
+    Three installs of hardly compressible container logs (9 x 1.25 MiB, ~9 MB
+    deflated) and confs (6 x 256 KiB): after the run log and snapshot go, the live logs are cut --
+    their END kept -- and the confs, which fit once the live logs are cut, are not.
+    """
+    config = platform.config_dir()
+    runs = src.runlog.runs_dir(config)
+    runs.mkdir(parents=True)
+    (runs / "install-wow-tbc-20260922T101010Z.log").write_text(
+        _noise(500_000, "run"), encoding="utf-8"
+    )
+    (config / "logs" / "wow-tbc-0badc0de-20260922T101010Z.log").write_text(
+        _noise(500_000, "snap"), encoding="utf-8"
+    )
+    installs = _noisy_installs(tmp_path, 3, 256 * 1024)
+    dest = tmp_path / "s.zip"
+    report = bundle.build(
+        dest,
+        Sources(config, None, installs),
+        Redactor.build([]),
+        seams=_seams(live_logs=_noisy_live(1280 * 1024)),
+    )
+    assert os.path.getsize(dest) <= bundle.ZIP_CAP
+    assert report.size == os.path.getsize(dest)
+    members = _read(dest)
+    manifest = members["MANIFEST.txt"]
+    assert "Still larger" not in manifest
+    assert report.dropped == (
+        "snapshots/wow-tbc-0badc0de-20260922T101010Z.log",
+        "runs/install-wow-tbc-20260922T101010Z.log",
+    )
+    live = [name for name in members if name.startswith("live/")]
+    assert len(live) == 9
+    assert report.cut and set(report.cut) <= set(live)
+    assert "Cut shorter" in manifest
+    for name in report.cut:
+        assert f"  {name}  " in manifest.split("Cut shorter", 1)[1], name
+        # The END is kept, from a whole line, with a notice that says it was cut.
+        assert members[name].startswith("[earlier lines dropped"), name
+        assert members[name].splitlines()[-1].startswith("LAST "), name
+    assert not any(name.startswith("conf/") for name in report.cut)
+
+
+def test_confs_are_cut_after_the_live_logs_are_at_their_floor(tmp_path: Path) -> None:
+    installs = _noisy_installs(tmp_path, 3, 256 * 1024)
+    dest = tmp_path / "s.zip"
+    cap = 500_000
+    report = bundle.build(
+        dest,
+        Sources(platform.config_dir(), None, installs),
+        Redactor.build([]),
+        seams=_seams(live_logs=_noisy_live(256 * 1024)),
+        cap_bytes=cap,
+    )
+    assert os.path.getsize(dest) <= cap
+    members = _read(dest)
+    for name in (n for n in members if n.startswith("live/")):
+        assert len(members[name].encode()) <= bundle.MIN_TAIL, name
+    assert any(name.startswith("conf/") for name in report.cut)
+    assert "Still larger" not in members["MANIFEST.txt"]
+
+
+def test_a_bundle_still_over_the_cap_at_every_floor_says_so(tmp_path: Path) -> None:
+    installs = _noisy_installs(tmp_path, 3, 96 * 1024)
+    dest = tmp_path / "s.zip"
+    cap = 100_000
+    report = bundle.build(
+        dest,
+        Sources(platform.config_dir(), None, installs),
+        Redactor.build([]),
+        seams=_seams(live_logs=_noisy_live(96 * 1024)),
+        cap_bytes=cap,
+    )
+    assert report.size > cap
+    members = _read(dest)
+    assert "Still larger than the cap" in members["MANIFEST.txt"]
+    for name in members:
+        if name.startswith(("live/", "conf/")):
+            assert len(members[name].encode()) <= bundle.MIN_TAIL, name
