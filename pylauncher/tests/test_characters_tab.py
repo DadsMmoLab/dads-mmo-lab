@@ -801,37 +801,117 @@ def test_choosing_a_character_reads_the_gear_off_the_gui_thread(tmp_path: Path) 
     assert drawn_on and set(drawn_on) == {threading.get_ident()}, "the answer was drawn off it"
 
 
+def _texts_set_on(view: ControllerView) -> list[str]:
+    """Every label the gear button is given, in order."""
+    texts: list[str] = []
+    set_text = view.send_gear_button.setText
+
+    def recording(text: str) -> None:
+        texts.append(text)
+        set_text(text)
+
+    view.send_gear_button.setText = recording  # type: ignore[method-assign]
+    return texts
+
+
+class _CountingPlay(_Play):
+    """Counts gear reads, the most ever running at once, and holds the first one on a gate."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.gate = threading.Event()
+        self.started: list[str] = []
+        self.running = 0
+        self.most_at_once = 0
+        self._lock = threading.Lock()
+
+    def gear_set_size(self, character: str) -> tuple[int, int]:
+        with self._lock:
+            self.started.append(character)
+            self.running += 1
+            self.most_at_once = max(self.most_at_once, self.running)
+            first = len(self.started) == 1
+        try:
+            if first:
+                self.gate.wait(HANG_BOUND_MS / 1000)
+            return super().gear_set_size(character)
+        finally:
+            with self._lock:
+                self.running -= 1
+
+
+def _roster(count: int) -> tuple[Character, ...]:
+    return tuple(Character(i, f"Bot{i:02d}", 10, True, "RNDBOT") for i in range(1, count + 1))
+
+
 def test_the_gear_button_waits_for_its_read_and_a_late_answer_for_another_row_is_dropped(
     tmp_path: Path,
 ) -> None:
     """While the read is out, the button promises nothing and cannot be pressed;
-    and an answer about a row that is no longer chosen must not relabel it."""
-    play = _Play(characters=_people(), pieces=19)
-    gate = threading.Event()
-    sized = play.gear_set_size
-
-    def slow_for_guglu(character: str) -> tuple[int, int]:
-        if character == "Guglu":
-            gate.wait(HANG_BOUND_MS / 1000)
-            return (7, 1)
-        return sized(character)
-
-    play.gear_set_size = slow_for_guglu  # type: ignore[method-assign]
+    an answer about a row that is no longer chosen never relabels it; and the row
+    chosen while that read was out gets its own read when it lands."""
+    play = _CountingPlay(characters=_people(), pieces=19)
     view = _view(tmp_path, play=play)
     view.refresh_characters()
     runner = _threaded_after_the_list_is_filled(view)
+    texts = _texts_set_on(view)
 
     view.character_list.setCurrentRow(0)  # Guglu, whose read is held
     assert view.send_gear_button.isEnabled() is False, "pressable before its count was known"
     assert "Guglu" in view.send_gear_button.text()
 
-    view.character_list.setCurrentRow(1)  # Ganaar
+    view.character_list.setCurrentRow(1)  # Ganaar, while Guglu's read is still out
+    assert "Ganaar" in view.send_gear_button.text()
+    play.gate.set()
     pump_until(lambda: "Ganaar's 19" in view.send_gear_button.text(), "Ganaar's count was drawn")
-    gate.set()
-    _every_answer_handled(runner)  # Guglu's late answer included
+    _every_answer_handled(runner)
 
-    assert "Ganaar's 19" in view.send_gear_button.text(), view.send_gear_button.text()
+    assert play.started == ["Guglu", "Ganaar"]
+    assert not [t for t in texts if "Guglu's" in t], texts
     assert view.send_gear_button.isEnabled() is True
+
+
+def test_a_burst_of_row_changes_runs_one_read_at_a_time_and_only_the_last_one_after(
+    tmp_path: Path,
+) -> None:
+    """Codex, T96 review: every row change started its own worker and its own two
+    `docker exec`s, so holding an arrow key down a 900-row roster queued hundreds
+    of them, all running, all to be thrown away -- and a shutdown then waited on
+    every one. One read at a time; the newest row waiting replaces any older one."""
+    roster = _roster(51)
+    play = _CountingPlay(characters=roster, pieces=19)
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    runner = _threaded_after_the_list_is_filled(view)
+
+    for row in range(51):  # the first starts a read; fifty more arrive while it is out
+        view.character_list.setCurrentRow(row)
+    play.gate.set()
+    last = roster[-1].name
+    pump_until(lambda: f"{last}'s 19" in view.send_gear_button.text(), "the last row was drawn")
+    _every_answer_handled(runner)
+
+    assert play.most_at_once == 1, play.most_at_once
+    assert play.started == [roster[0].name, last], play.started
+    assert f"{last}'s 19" in view.send_gear_button.text()
+
+
+def test_closing_the_tab_mid_read_starts_nothing_after_it(tmp_path: Path) -> None:
+    """A row waiting behind a read still out when the tab closes is never read."""
+    play = _CountingPlay(characters=_people(), pieces=19)
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    runner = _threaded_after_the_list_is_filled(view)
+
+    view.character_list.setCurrentRow(0)  # Guglu, held
+    view.character_list.setCurrentRow(1)  # Ganaar, waiting behind it
+    release = threading.Timer(0.2, play.gate.set)
+    release.start()
+    view.shutdown()  # joins the held read once the timer lets it go
+    release.join()
+    _every_answer_handled(runner)
+
+    assert play.started == ["Guglu"], play.started
 
 
 def test_a_gear_read_that_breaks_says_so_rather_than_reading_forever(
@@ -844,6 +924,7 @@ def test_a_gear_read_that_breaks_says_so_rather_than_reading_forever(
     view = _view(tmp_path, play=play)
     view.refresh_characters()
     runner = _threaded_after_the_list_is_filled(view)
+    texts = _texts_set_on(view)
     gate = threading.Event()
     sizing = view._gear_set_size
 
@@ -856,14 +937,13 @@ def test_a_gear_read_that_breaks_says_so_rather_than_reading_forever(
     monkeypatch.setattr(view, "_gear_set_size", breaks)
 
     view.character_list.setCurrentRow(0)  # Guglu, whose read will break late
-    view.character_list.setCurrentRow(1)  # Ganaar
-    pump_until(lambda: "Ganaar's 19" in view.send_gear_button.text(), "Ganaar's count was drawn")
+    view.character_list.setCurrentRow(1)  # Ganaar, waiting behind it
     gate.set()
+    pump_until(lambda: "Ganaar's 19" in view.send_gear_button.text(), "Ganaar's count was drawn")
     _every_answer_handled(runner)
-    assert "Ganaar's 19" in view.send_gear_button.text(), "a stale break relabelled the button"
+    assert not [t for t in texts if t.startswith("Could not read")], "a stale break relabelled it"
 
     view.character_list.setCurrentRow(0)  # Guglu again, and now it breaks for the row chosen
-    gate.set()
     _every_answer_handled(runner)
 
     said = view.send_gear_button.text()

@@ -5897,6 +5897,10 @@ class ControllerView(QWidget):
         self.character_report = QLabel("", tab)
         self._character_generation = 0
         self._gear_generation = 0
+        # One gear read at a time, and only the newest row waits behind it
+        # (T96 review): see `_ask_for_gear()`.
+        self._gear_in_flight = False
+        self._gear_waiting: tuple[int, str] | None = None
         self.character_report.setWordWrap(True)
         self.character_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         # A tree whose Play block nobody has measured gets a SENTENCE rather
@@ -5978,6 +5982,7 @@ class ControllerView(QWidget):
         self._gear_generation += 1
         item = self.character_list.item(row) if row >= 0 else None
         if item is None:
+            self._gear_waiting = None
             for button, label in self._character_actions():
                 button.setText(label)
                 button.setEnabled(False)
@@ -6036,9 +6041,26 @@ class ControllerView(QWidget):
         # half a second. Until the answer lands the button promises nothing.
         self.send_gear_button.setText(f"Reading what {name} is wearing…")
         self.send_gear_button.setEnabled(False)
+        self._ask_for_gear(self._gear_generation, name)
+
+    def _ask_for_gear(self, generation: int, name: str) -> None:
+        """Start this row's gear read, or let it wait behind the one already out.
+
+        ONE read at a time, and only the NEWEST row waits (Codex, T96 review):
+        a read per row change meant an arrow key held down a 900-row roster
+        started hundreds of workers and twice as many `docker exec`s, every one
+        of them to be thrown away, and a closing tab then waited on all of them.
+        A row that waits replaces whatever row waited before it; when the read
+        out lands, `_next_gear_read()` starts the one waiting.
+        """
+        if self._gear_in_flight:
+            self._gear_waiting = (generation, name)
+            return
+        self._gear_in_flight = True
+        self._gear_waiting = None
         # Everything the worker needs is taken HERE, on the GUI thread: the
         # worker must not reach back into a view it may outlive.
-        generation, play, size = self._gear_generation, self.services.play, self._gear_set_size
+        play, size = self.services.play, self._gear_set_size
 
         def read() -> tuple[int, str, tuple[int, int, tuple[str, str] | None]]:
             try:
@@ -6048,12 +6070,27 @@ class ControllerView(QWidget):
 
         self._run(read, self._gear_read, self._gear_read_failed)
 
+    def _next_gear_read(self) -> None:
+        """The read out has landed: start the row waiting behind it, if any.
+
+        The row waiting is always the one chosen now: every choice replaces it,
+        and choosing nothing clears it (`_character_chosen`). Nothing is
+        started once the tab is closing -- `shutdown()` has joined what was
+        running and nothing may be queued after it.
+        """
+        self._gear_in_flight = False
+        waiting, self._gear_waiting = self._gear_waiting, None
+        if waiting is None or getattr(self, "_closed", False):
+            return
+        self._ask_for_gear(*waiting)
+
     @Slot(object)
     def _gear_read(self, answer: object) -> None:
         """Draw the gear button from a read, if it is about the row still chosen."""
         generation, name, (pieces, mails, refusal) = cast(
             tuple[int, str, tuple[int, int, tuple[str, str] | None]], answer
         )
+        self._next_gear_read()
         if generation != self._gear_generation:
             return
         self.send_gear_button.setToolTip("" if refusal is None else refusal[1])
@@ -6086,6 +6123,7 @@ class ControllerView(QWidget):
         left says nothing about the one chosen now.
         """
         logger.warning(f"could not size the chosen character's gear: {exc}")
+        self._next_gear_read()
         if not isinstance(exc, _GearReadBroke) or exc.generation != self._gear_generation:
             return
         self.send_gear_button.setText(f"Could not read what {exc.name} is wearing")
