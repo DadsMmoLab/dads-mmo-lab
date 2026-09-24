@@ -30,13 +30,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFormLayout,
     QFrame,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QScrollArea,
@@ -68,8 +68,8 @@ _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 _ROWS_MIN_HEIGHT = 120
 """The shortest the question area may get: about four rows, so a squeezed dialog shows some."""
 
-_MIN_WIDTH = 480
-"""Wide enough that a question label wraps to two lines, not six."""
+_MIN_WIDTH = 560
+"""Wide enough that most question labels fit on one line and none wraps past three."""
 
 
 RERUN_SETS_NOTE = (
@@ -85,7 +85,7 @@ measured in the fix-wave live check on m910q, where both sentences appeared.
 
 
 NO_RECORD_NOTE = (
-    "Yu'lon has no record of your earlier answer to: {questions}. What is filled in there is "
+    "Yu'lon has no record of your earlier answers to {questions}. What is filled in there is "
     "the default (or nothing, where there is none), so change it if you set it differently."
 )
 """Shown when an installed module is asked again and some answer is not in its record.
@@ -186,7 +186,11 @@ class ManifestPromptDialog(QDialog):
         elif again:
             compounds = reapplies_on_top(manifest)
             if missing:
-                questions = "; ".join(p.question for p in missing)
+                questions = (
+                    "the questions below"
+                    if len(missing) == len(self._prompts) and len(missing) > 1
+                    else "these: " + "; ".join(p.question for p in missing)
+                )
                 lead = "" if compounds else RERUN_SETS_NOTE + " "
                 self._notes.append(lead + NO_RECORD_NOTE.format(questions=questions))
             if compounds:
@@ -201,15 +205,23 @@ class ManifestPromptDialog(QDialog):
         # ~470 px tall with no way to be shorter, which does not fit the app's
         # 960x640 minimum window once the notes and buttons are added.
         rows = QWidget()
-        form = QFormLayout(rows)
+        # A grid, not a `QFormLayout`: the form's label column does not ask a
+        # word-wrapped label its height at the width it is given, and at 560 px
+        # it drew "Share currency account-wide?" over the row above (m910q,
+        # accountwide). A grid does, so every question is as tall as its lines.
+        form = QGridLayout(rows)
         form.setContentsMargins(0, 0, 0, 0)
-        for prompt in self._prompts:
+        form.setColumnStretch(0, 3)
+        form.setColumnStretch(1, 2)
+        for row, prompt in enumerate(self._prompts):
             label = QLabel(prompt.question, rows)
             label.setWordWrap(True)
             self._questions.append(prompt.question)
             control = self._control_for(prompt, rows)
             self._controls[prompt.key] = control
-            form.addRow(label, control)
+            form.addWidget(label, row, 0)
+            form.addWidget(control, row, 1, Qt.AlignmentFlag.AlignVCenter)
+        form.setRowStretch(len(self._prompts), 1)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -236,14 +248,36 @@ class ManifestPromptDialog(QDialog):
         """Open as tall as the rows need, but never taller than the window it belongs to.
 
         `QScrollArea`'s own size hint stops well short of 13 rows, so without this
-        a dialog that has room would open with a scrollbar it does not need.
+        a dialog that has room would open with a scrollbar it does not need. And
+        a word-wrapped question is as tall as the width it gets: a scroll area
+        that sized its rows from `minimumSizeHint()` squeezed them until the
+        two-line labels overlapped (seen on m910q, accountwide at 480 px wide).
+        So the rows' height is asked of the form AT the viewport's width, now
+        and on every resize (`eventFilter`).
         """
-        scroll.setMinimumHeight(min(rows.sizeHint().height(), _ROWS_MIN_HEIGHT))
-        wanted = self.sizeHint().height() - scroll.sizeHint().height() + rows.sizeHint().height()
+        self._scroll, self._rows = scroll, rows
+        scroll.setMinimumHeight(_ROWS_MIN_HEIGHT)
+        scroll.viewport().installEventFilter(self)
+        width = max(self.sizeHint().width(), _MIN_WIDTH)
+        chrome = self.sizeHint().width() - scroll.sizeHint().width()
+        rows_h = self._rows_height(max(width - chrome, 1))
+        wanted = self.sizeHint().height() - scroll.sizeHint().height() + rows_h
         window = parent.window() if parent is not None else None
         screen = self.screen().availableGeometry().height() if self.screen() else wanted
         cap = min(window.height(), screen) if window is not None else screen
-        self.resize(max(self.sizeHint().width(), _MIN_WIDTH), min(wanted, cap))
+        self.resize(width, min(wanted, cap))
+
+    def _rows_height(self, width: int) -> int:
+        layout = self._rows.layout()
+        if layout is not None and layout.hasHeightForWidth():
+            return int(layout.totalHeightForWidth(width))
+        return int(self._rows.sizeHint().height())
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Keep the rows as tall as their wrapped questions need at the current width."""
+        if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._rows.setMinimumHeight(self._rows_height(self._scroll.viewport().width()))
+        return super().eventFilter(watched, event)
 
     # -- what the tests and the caller ask ---------------------------------
 

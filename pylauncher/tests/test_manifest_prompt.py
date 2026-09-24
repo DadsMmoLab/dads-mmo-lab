@@ -255,7 +255,18 @@ def test_accountwides_thirteen_questions_scroll_rather_than_clip_at_the_minimum_
 
     dialog.show()
     try:
+        qapp.processEvents()  # type: ignore[attr-defined]
         assert dialog.height() <= MINIMUM_WINDOW_SIZE[1], dialog.height()
+        # No question is squeezed below the lines it wraps to (a `QFormLayout`
+        # drew two-line labels over each other on m910q).
+        from PySide6.QtWidgets import QLabel
+
+        squeezed = [
+            label.text()
+            for label in inner.findChildren(QLabel)
+            if label.height() < label.heightForWidth(label.width())
+        ]
+        assert squeezed == []
         dialog.resize(dialog.width(), 360)
         qapp.processEvents()  # type: ignore[attr-defined]
         assert dialog.height() == 360, "the dialog can be shorter than its rows"
