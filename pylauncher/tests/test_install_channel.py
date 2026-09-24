@@ -682,3 +682,75 @@ def test_the_press_from_the_install_keeps_its_label(
     channel.enable(world_running=False)
 
     assert installed.read_text(encoding="utf-8") == _channel_on(channel.server_dir, bind_label=":z")
+
+
+@pytest.mark.parametrize("later", [False, None], ids=["permissive-now", "cannot-tell-now"])
+def test_a_labelled_press_is_rolled_back_after_the_host_stops_enforcing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, later: bool | None
+) -> None:
+    """The label on disk is what the press wrote THEN, not what the host says NOW.
+
+    Pressed while Enforcing, the override carries `:z`. A later `setenforce 0`,
+    or a probe that cannot answer, makes the host's label `""` -- and a rollback
+    that compared only against the host's current label read the press's own
+    file as edited and left the channel on (review of `70d0d642`).
+    """
+    from yulon import platform
+
+    _on_selinux(monkeypatch)
+    channel = _labelled_channel(tmp_path)
+    override = channel.server_dir / composegen.OVERRIDE_FILE
+    installed = override.read_text(encoding="utf-8")
+    channel.enable(world_running=False)
+    assert override.read_text(encoding="utf-8") == _channel_on(channel.server_dir, bind_label=":z")
+    monkeypatch.setattr(platform, "selinux_enforcing", lambda: later)
+
+    assert channel.roll_back() is True
+
+    _rolled_all_the_way_back(channel, installed)
+
+
+@pytest.mark.parametrize("label", [":z", ""], ids=["labelled", "unlabelled"])
+def test_a_channel_override_edited_in_another_way_is_still_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str
+) -> None:
+    """Accepting both labels must not widen into accepting any file.
+
+    The two texts the rollback recognises differ only in the `:z` token, so a
+    change anywhere else -- here a line a person added -- matches neither: the
+    override is kept, and only the port is released.
+    """
+    _on_selinux(monkeypatch)
+    channel = _labelled_channel(tmp_path)
+    override = channel.server_dir / composegen.OVERRIDE_FILE
+    channel.enable(world_running=False)
+    edited = _channel_on(channel.server_dir, bind_label=label) + "# a person was here\n"
+    override.write_text(edited, encoding="utf-8")
+
+    assert channel.roll_back() is True
+
+    assert override.read_text(encoding="utf-8") == edited
+    assert override.with_name(override.name + setup.BACKUP_SUFFIX).exists()
+    env = (channel.server_dir / ".env").read_text(encoding="utf-8")
+    assert f"{setup.HOST_PORT_VAR}={setup.RELEASED_HOST_PORT}" in env
+
+
+def test_the_two_recognised_texts_differ_only_in_the_label() -> None:
+    """The claim the two tests above rest on, checked on the rendered text itself.
+
+    Remove every `:z` that ends a host bind from the labelled channel-on
+    override and what is left must be the unlabelled one, byte for byte -- so no
+    other difference can ride in on the second candidate.
+    """
+    server_dir = Path("/srv/wotlk")
+    labelled = _channel_on(server_dir, bind_label=":z")
+    plain = _channel_on(server_dir, bind_label="")
+    binds = [line for line in labelled.splitlines() if line.strip().startswith("- ./")]
+    assert binds and all(line.endswith(":z") for line in binds)
+
+    stripped = "\n".join(
+        line[: -len(":z")] if line.strip().startswith("- ./") else line
+        for line in labelled.splitlines()
+    )
+
+    assert stripped + "\n" == plain

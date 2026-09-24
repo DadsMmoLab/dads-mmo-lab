@@ -1025,23 +1025,26 @@ class InstallChannel:
         has been changed since is left alone rather than overwritten from a
         backup that may be arbitrarily old.
 
-        Rendered with the install's bind label, as the press renders it (T102).
-        Compared without one, an enforcing host's channel-on override -- `:z`
-        on its bind, as the install's renderer writes it -- read as "edited
-        since", so only the port was released and the channel stuck on
-        (measured on `yulon-fedora`, 2026-09-24).
+        Compared against BOTH renderings, with the `:z` label and without it,
+        whatever the host says now (T102). Compared without one, an enforcing
+        host's channel-on override -- `:z` on its bind, as the press and the
+        install's renderer write it -- read as "edited since", so only the port
+        was released and the channel stuck on (measured on `yulon-fedora`,
+        2026-09-24). Compared only against the host's CURRENT label, the same
+        stick comes back the moment the host stops answering "enforcing"
+        (`setenforce 0`, or a probe that cannot tell): the file carries the
+        label the press wrote then, not the one the host would pick now. And
+        the unlabelled text is what the press wrote before T102, so it is what
+        an install upgraded from then has on disk, on any host.
 
-        And, on such a host, the unlabelled text as well: that is what the press
-        wrote before T102, so it is what an install upgraded from then has on
-        disk. Accepting only the labelled text would strand exactly those
-        installs in the same stuck state from the other side. The two differ
-        by the label alone, so a file a person has edited still matches
-        neither and is still left alone.
+        Each candidate is still an exact match. The two differ only in the
+        `:z` token at the end of each host bind
+        (`test_the_two_recognised_texts_differ_only_in_the_label`), so a file a
+        person has edited in any other way matches neither and is left alone.
         """
         operations = self.entry.operations
         expected: str | None = None
         if operations is not None:
-            label = install_bind_label(self.server_dir)
             try:
                 texts = [
                     composegen.render(
@@ -1052,7 +1055,7 @@ class InstallChannel:
                         db_password=self._db_password,
                         bind_label=each,
                     ).override
-                    for each in dict.fromkeys((label, ""))
+                    for each in (":z", "")
                 ]
             except Exception as exc:  # noqa: BLE001 - an unrenderable plan is not a reason to stop
                 logger.info(f"could not re-render {self.entry.id}'s override to compare: {exc}")
