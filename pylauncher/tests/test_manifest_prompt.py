@@ -15,7 +15,7 @@ import pytest
 
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import parse_manifest
-from yulon.ui.widgets.manifest_prompt import ManifestPromptDialog
+from yulon.ui.widgets.manifest_prompt import REMEMBERED_NOTE, ManifestPromptDialog
 
 
 def _ahbot() -> object:
@@ -98,29 +98,39 @@ def _hearthstone() -> object:
     return wotlk_modules.store().load("mod", "hearthstone-cd")
 
 
-def test_running_a_choice_again_says_the_answer_shown_is_the_one_applied(qapp: object) -> None:
-    """T100 review: an Update or a second Install re-asks with the DEFAULT selected.
-
-    Nothing remembers the earlier answer (that is T104's question for the
-    owner), so a player who picked 5 minutes, pressed Update and clicked OK got
-    30 minutes back without a word. Until answers are remembered, the dialog
-    says so: what is selected is what gets applied, now.
-
-    Mutation: drop the note and `notes()` carries no "applies the answer".
-    """
+def test_a_first_install_is_told_nothing_about_earlier_answers(qapp: object) -> None:
     manifest = _hearthstone()
     first = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
-    again = ManifestPromptDialog(
-        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+    assert REMEMBERED_NOTE not in first.notes()
+    assert "no record" not in first.notes()
+    assert first.answers() == {"cooldown": "30_Min"}
+
+
+def test_the_answer_remembered_for_this_install_is_filled_in_over_the_default(
+    qapp: object,
+) -> None:
+    """T104, the T100 cold-review repro: 5 minutes installed, Update pre-filled 30.
+
+    The dialog now opens on the answer this install remembers, so an Update
+    clicked straight through keeps what the player picked.
+
+    Mutation: ignore `remembered` in the dialog and the answer is `30_Min`.
+    """
+    manifest = _hearthstone()
+    dialog = ManifestPromptDialog(
+        None,
+        manifest,  # type: ignore[arg-type]
+        manifest.prompts,  # type: ignore[attr-defined]
+        again=True,
+        remembered={"cooldown": "5_Min"},
     )
-    assert "applies the answer" not in first.notes()
-    assert "applies the answer" in again.notes()
-    assert "does not remember" in again.notes()
-    assert again.answers() == {"cooldown": "30_Min"}, "still the default: the note is why"
+    assert dialog.answers() == {"cooldown": "5_Min"}
+    assert REMEMBERED_NOTE in dialog.notes()
+    assert "does not remember" not in dialog.notes(), "T100's warning is no longer true"
 
 
-def test_running_a_non_choice_again_gets_no_choice_note(qapp: object) -> None:
-    """The note is about picking between options, so a number prompt is not given it."""
+def test_a_remembered_number_is_filled_in_too(qapp: object) -> None:
+    """Every kind is remembered, not only a choice: a text box shows the saved number."""
     manifest = parse_manifest(
         {
             "id": "kindly",
@@ -130,5 +140,40 @@ def test_running_a_non_choice_again_gets_no_choice_note(qapp: object) -> None:
             "prompts": [{"key": "seconds", "question": "seconds", "kind": "int", "default": "20"}],
         }
     )
-    dialog = ManifestPromptDialog(None, manifest, manifest.prompts, again=True)
-    assert "applies the answer" not in dialog.notes()
+    dialog = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True, remembered={"seconds": "35"}
+    )
+    assert dialog.answers() == {"seconds": "35"}
+    assert dialog.problem() == ""
+
+
+def test_a_remembered_answer_the_question_no_longer_accepts_is_not_filled_in(
+    qapp: object,
+) -> None:
+    """A saved option the manifest has since dropped falls back to the default, and says so."""
+    manifest = _hearthstone()
+    dialog = ManifestPromptDialog(
+        None,
+        manifest,  # type: ignore[arg-type]
+        manifest.prompts,  # type: ignore[attr-defined]
+        again=True,
+        remembered={"cooldown": "2_Min"},
+    )
+    assert dialog.answers() == {"cooldown": "30_Min"}
+    assert "no record" in dialog.notes()
+
+
+def test_asked_again_with_nothing_remembered_says_the_defaults_are_shown(qapp: object) -> None:
+    """An install made before T104 has no record, so its Update shows the defaults -- and says so.
+
+    That much of T100's warning is still true for those installs, and only for
+    them; the question it names is the one whose default is showing.
+    """
+    manifest = _hearthstone()
+    dialog = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+    )
+    assert dialog.answers() == {"cooldown": "30_Min"}
+    assert "no record" in dialog.notes()
+    assert "Hearthstone" in dialog.notes() or "cooldown" in dialog.notes().lower()
+    assert REMEMBERED_NOTE not in dialog.notes()

@@ -3561,7 +3561,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
 
     The brief for the press called `mod-arac` *the only shipped manifest with a
     direct world-SQL step*. `SqlStep.applied_by` DEFAULTS to `"direct"`
-    (`manifest.py:136`), so every step that names no route is one: 44 steps
+    (`manifest.py:136`), so every step that names no route is one: 45 steps
     across 19 manifests in all four games. `mod-arac` and `mod-city-bots` are
     the only `module`-type ones, which is the narrower true statement.
 
@@ -3580,6 +3580,10 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     upstream's reset and then the chosen file as ONE `then` step (one
     transaction), and its remove became that reset file instead of an inline
     `spell_dbc` statement -- two steps before, two after, all into `world`.
+
+    45 after T104: `npc-teleporter` writes the Onyxia-level answer into the one
+    `conditions` row upstream builds from `@ONY_LEVEL`, as an inline `world`
+    step after the file, so the question it always asked finally does something.
 
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
@@ -3600,7 +3604,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
             games.add(path.parent.parent.name)
 
     assert (steps, len(files), sorted(games)) == (
-        44,
+        45,
         19,
         ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
     )

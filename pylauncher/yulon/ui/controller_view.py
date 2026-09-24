@@ -423,9 +423,10 @@ class PromptAsker(Protocol):
     the answer — install with it, or change nothing at all.
 
     `again` is True when the module is already installed -- an Update, or the
-    context menu's Install over it -- so the dialog can say that the answer it
-    shows (the default; nothing remembers the last one) is what gets applied
-    now (T100 review).
+    context menu's Install over it -- so the dialog can say that what it shows
+    is what gets applied now (T100 review). `remembered` is what this install
+    last answered (T104, `Applier.remembered_answers()`), filled in over the
+    manifest's defaults.
     """
 
     def __call__(
@@ -435,6 +436,7 @@ class PromptAsker(Protocol):
         prompts: Sequence[Prompt],
         *,
         again: bool = False,
+        remembered: Mapping[str, str] | None = None,
     ) -> Mapping[str, str] | None: ...
 
 
@@ -7641,17 +7643,22 @@ class ControllerView(QWidget):
         filled in every prompt that HAD a default and then raised on the one
         that did not, after the clone. See `widgets/manifest_prompt.py`.
 
-        The gate is deliberately narrow. A dialog opens only when this action
-        would really render a value the manifest has no default for, or a
-        `choice` (T100, `apply.must_ask()`); which shipped manifests that is
-        is pinned by `test_only_the_two_ah_bots_and_the_hearthstone_choice_are_
-        asked_about`, not written here. Every other manifest gets no window and
-        the applier gets `None` rather than `{}` — the call it has always been given.
+        The gate is `apply.must_ask()`: since T104 (the owner, "ask all,
+        remember answers") every question an install or update renders is put,
+        pre-filled with what this install answered last time, else the
+        manifest's default; a remove asks only what has no default, and the
+        applier fills the rest from the same record. Which shipped manifests
+        ask is pinned by `test_every_module_whose_install_renders_a_question_
+        asks_it`, not written here. A manifest that asks nothing gets no window
+        and the applier gets `None` rather than `{}` — the call it has always
+        been given.
         """
-        needed = required_prompts(manifest, action)
-        if not any(must_ask(prompt) for prompt in needed):
+        asked = tuple(p for p in required_prompts(manifest, action) if must_ask(p, action))
+        if not asked:
             return True, None
-        answers = self._prompt_asker(self, manifest, needed, again=again)
+        applier = self.services.applier
+        remembered = applier.remembered_answers(manifest) if applier is not None else {}
+        answers = self._prompt_asker(self, manifest, asked, again=again, remembered=remembered)
         return (False, None) if answers is None else (True, answers)
 
     def _custom_route(self) -> CustomModuleInstall | None:

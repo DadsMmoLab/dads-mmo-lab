@@ -36,7 +36,7 @@ from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import IO, Any, Literal, Protocol
 
-from yulon import docker, platform, rmtree, runner
+from yulon import docker, module_answers, platform, rmtree, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
@@ -1549,27 +1549,36 @@ def required_prompts(manifest: Manifest, action: When) -> tuple[Prompt, ...]:
     return tuple(prompt for prompt in manifest.prompts if prompt.key in wanted)
 
 
-def must_ask(prompt: Prompt) -> bool:
-    """Whether Install has to put this required prompt to a person before it runs.
+def must_ask(prompt: Prompt, action: When = "install") -> bool:
+    """Whether a press of `action` puts this required prompt to a person before it runs.
 
-    A prompt with no default cannot be filled in by the app at all. A `choice`
-    can -- and must not be, because choosing is the whole of what it is for
-    (T100): `hearthstone-cd`'s `cooldown` defaults to `30_Min`, which is
-    upstream's RESET file, and while only a missing default opened the dialog
-    every GUI install applied that and changed nothing. The dialog is handed
-    every required prompt with its default filled in, so clicking straight
-    through a FIRST install applies exactly what the old silent path did.
+    **Every question, on install** (the owner, 2026-09-24, T104: "ask all,
+    remember answers"). The dialog is handed each prompt pre-filled -- with the
+    answer this install remembers for it, else the manifest's default -- so
+    accepting is one click. Until T104 only a prompt with no default (and, from
+    T100, a `choice`) was asked, and every other answer was the default whether
+    the player wanted it or not: Stackables on Tortoise/Vanilla/TBC was always
+    200, the mob multipliers always theirs.
 
-    It is asked only of a prompt `required_prompts()` returned: a `choice` a
-    manifest declares but no template renders is never put to anyone. Which
-    shipped manifests end up asking is pinned by the view's sweep test, not
-    listed here.
+    **On remove, only a prompt with no default.** A remove that renders an
+    answer renders the one install USED: the mob multipliers divide by the same
+    `{hp}` install multiplied by. The right value is the remembered one, which
+    `Applier._values()` supplies, and a pre-filled box on Remove could only ever
+    be changed into a wrong one. A prompt with no default is still asked there,
+    because nothing else may be able to answer it.
+
+    It is asked only of a prompt `required_prompts()` returned: a question a
+    manifest declares but no template renders is never put to anyone
+    (`test_module_answers.py::test_no_shipped_manifest_declares_a_question_
+    nothing_uses` holds the shipped catalog to having none).
 
     One function because two places answer "will Install ask me something?" --
     the dialog gate in `ControllerView._module_values()` and the Modules row's
     "asks a question" chip -- and they must not disagree.
     """
-    return prompt.default is None or prompt.kind == "choice"
+    if action == "remove":
+        return prompt.default is None
+    return True
 
 
 def check_answer(prompt: Prompt, value: str) -> str:
@@ -1932,6 +1941,7 @@ class Applier:
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
         self._finish_claim(manifest, clone, url, claimed, log, log.client_copies or previous_copies)
+        self._remember(manifest, values, log)
         return self._report("install", manifest, log)
 
     def _finish_claim(
@@ -2255,6 +2265,7 @@ class Applier:
         self._patches(manifest, clone, vals, "configure", log)
         self._sql(manifest, clone, vals, "configure", log)
         self._conf(manifest, clone, vals, log)
+        self._remember(manifest, values, log)
         return self._report("configure", manifest, log)
 
     def remove(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
@@ -3641,11 +3652,52 @@ class Applier:
 
     # -- helpers -----------------------------------------------------------
 
-    @staticmethod
-    def _values(manifest: Manifest, values: Mapping[str, str] | None) -> dict[str, str]:
+    def _values(self, manifest: Manifest, values: Mapping[str, str] | None) -> dict[str, str]:
+        """Defaults, then what this install remembers, then what the caller handed in.
+
+        The middle layer is T104's. It is what makes a Remove of a mob
+        multiplier divide by the factor install multiplied by, and what any
+        caller that asks nothing (`values=None`) now gets instead of the
+        manifest's default. An install with no record -- every one made before
+        T104 -- gets exactly the defaults it always did.
+        """
         merged = {p.key: p.default for p in manifest.prompts if p.default is not None}
+        merged.update(self.remembered_answers(manifest))
         merged.update(values or {})
         return merged
+
+    def remembered_answers(self, manifest: Manifest) -> dict[str, str]:
+        """The answers last given for `manifest` on this install that are still usable.
+
+        Only declared questions, and only answers `check_answer()` accepts: a
+        saved `choice` the manifest no longer offers is dropped rather than
+        pre-filled, and the default takes its place. Never raises; a record it
+        cannot read is no record (`module_answers._read_all()`).
+        """
+        saved = module_answers.read_answers(self.server_dir, manifest)
+        return {
+            prompt.key: saved[prompt.key]
+            for prompt in manifest.prompts
+            if prompt.key in saved and check_answer(prompt, saved[prompt.key]) == ""
+        }
+
+    def _remember(self, manifest: Manifest, values: Mapping[str, str] | None, log: _Log) -> None:
+        """Keep the answers this press was handed, once every step they fed has run (T104).
+
+        Only what the caller HANDED IN, never the defaults filled in around it:
+        `values=None` is a caller that asked nothing, and it must not overwrite
+        what the player said last time. Only declared questions.
+        """
+        declared = {prompt.key for prompt in manifest.prompts}
+        answers = {k: str(v) for k, v in (values or {}).items() if k in declared}
+        if not answers:
+            return
+        problem = module_answers.record_answers(self.server_dir, manifest, answers)
+        if problem:
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: your answers could not be saved ({problem}), "
+                f"so the next Update of {manifest.id} will offer the defaults instead"
+            )
 
     def _report(self, action: When, manifest: Manifest, log: _Log) -> ApplyReport:
         report = ApplyReport(

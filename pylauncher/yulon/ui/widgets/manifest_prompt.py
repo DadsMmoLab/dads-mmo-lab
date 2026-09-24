@@ -57,20 +57,25 @@ the choice here is about what a worldserver reads, not about what passes.
 """
 
 
-RUN_AGAIN_CHOICE_NOTE = (
-    "This is already installed, and running it again applies the answer below as "
-    "the new setting. Yu'lon does not remember what you picked last time, so what "
-    "is selected now is the default: pick the one you want now."
+NO_RECORD_NOTE = (
+    "This is already installed, and running it again applies the answers below as the new "
+    "setting. Yu'lon has no record of your earlier answer to: {questions}. What is filled in "
+    "there is the default (or nothing, where there is none), so change it if you set it "
+    "differently."
 )
-"""Shown when an installed module's choice is asked again: an Update, or Install over it (T100).
+"""Shown when an installed module is asked again and some answer is not in its record.
 
-The dialog pre-selects the manifest's DEFAULT, and no earlier answer is kept
-anywhere, so clicking OK on an Update of Hearthstone Tweaks set back to
-30 minutes a player who had picked 5 -- without a word. Remembering the answer
-is a general feature and the owner's call (T104); until then the dialog says
-what OK will do. Only for a `choice`: that is the kind a player picks once and
-expects to stay picked.
+T100 said this of every re-run ("Yu'lon does not remember what you picked last
+time"). Since T104 it is true only of an install made before answers were kept,
+or of an answer the question no longer accepts, so it names just those.
 """
+
+
+REMEMBERED_NOTE = (
+    "Your answers from the last time this was installed or updated are filled in. "
+    "OK applies what is shown."
+)
+"""Shown when at least one answer came from this install's record (T104)."""
 
 
 class ManifestPromptDialog(QDialog):
@@ -89,6 +94,7 @@ class ManifestPromptDialog(QDialog):
         prompts: Sequence[Prompt],
         *,
         again: bool = False,
+        remembered: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(parent)
         self._manifest = manifest
@@ -102,8 +108,25 @@ class ManifestPromptDialog(QDialog):
         box = QVBoxLayout(self)
         when = "its steps run again" if again else "it can be installed"
         self._notes: list[str] = [f"{manifest.name} ({manifest.id}) asks for this before {when}."]
-        if again and any(prompt.kind == "choice" for prompt in self._prompts):
-            self._notes.append(RUN_AGAIN_CHOICE_NOTE)
+        # T104: what this install remembers, where the question still accepts it;
+        # else the manifest's default. A saved answer the question now refuses (a
+        # dropped `choice` option) is not shown, because OK would then be refused.
+        prefill: dict[str, str] = {}
+        from_record: list[Prompt] = []
+        for prompt in self._prompts:
+            saved = (remembered or {}).get(prompt.key)
+            if saved is not None and check_answer(prompt, saved) == "":
+                prefill[prompt.key] = saved
+                from_record.append(prompt)
+            elif prompt.default is not None:
+                prefill[prompt.key] = prompt.default
+        if from_record:
+            self._notes.append(REMEMBERED_NOTE)
+        missing = [p for p in self._prompts if p not in from_record]
+        if again and missing:
+            self._notes.append(
+                NO_RECORD_NOTE.format(questions="; ".join(p.question for p in missing))
+            )
         for text in self._notes:
             note = QLabel(text, self)
             note.setWordWrap(True)
@@ -128,9 +151,8 @@ class ManifestPromptDialog(QDialog):
         self._buttons.rejected.connect(self.reject)
         box.addWidget(self._buttons)
 
-        for prompt in self._prompts:
-            if prompt.default is not None:
-                self.set_answer(prompt.key, prompt.default)
+        for key, value in prefill.items():
+            self.set_answer(key, value)
         self._recheck()
 
     # -- what the tests and the caller ask ---------------------------------
@@ -225,6 +247,7 @@ def ask_manifest_prompts(
     prompts: Sequence[Prompt],
     *,
     again: bool = False,
+    remembered: Mapping[str, str] | None = None,
 ) -> Mapping[str, str] | None:
     """Put the manifest's questions to the user. `None` means they cancelled.
 
@@ -232,7 +255,7 @@ def ask_manifest_prompts(
     cancelling must change nothing on disk, whereas an empty mapping is what a
     manifest with nothing to ask produces.
     """
-    dialog = ManifestPromptDialog(parent, manifest, prompts, again=again)
+    dialog = ManifestPromptDialog(parent, manifest, prompts, again=again, remembered=remembered)
     if dialog.exec() != int(QDialog.DialogCode.Accepted):
         logger.info(f"{manifest.id}: the user cancelled the questions; nothing was applied")
         return None

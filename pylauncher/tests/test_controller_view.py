@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, NoReturn, cast
@@ -26,6 +26,7 @@ from yulon import (
     docker,
     logsnap,
     manifest_store,
+    module_answers,
     networking,
     party,
     purge,
@@ -77,7 +78,7 @@ from yulon.ui.controller_view import (
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
 from yulon.ui.widgets.job import run_inline
-from yulon.ui.widgets.manifest_prompt import ManifestPromptDialog
+from yulon.ui.widgets.manifest_prompt import REMEMBERED_NOTE, ManifestPromptDialog
 from yulon.ui.widgets.modules_panel import (
     BADGE_INSTALLED,
     BADGE_NOT_INSTALLED,
@@ -780,20 +781,24 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
     assert "cancelled" in view.module_report.toPlainText().lower()
 
 
-def test_only_the_two_ah_bots_and_the_hearthstone_choice_are_asked_about(
+def test_every_module_whose_install_renders_a_question_asks_it(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Every manifest but these three must behave exactly as it did — no new dialog.
+    """T104, the owner's "ask all": a default pre-fills the dialog, it no longer hides it.
 
-    The two ah-bots ask because their prompt has no default. `hearthstone-cd`
-    asks since T100 because its prompt is a `choice`: it has a default, and
-    the dialog used to skip it, so every GUI install applied the default —
-    upstream's reset file — and changed nothing (reported on Discord 2026-09-20).
+    Until T104 only the two ah-bots (a prompt with no default) and, from T100,
+    `hearthstone-cd` (a `choice`) opened the dialog; the mob multipliers,
+    xp-rates and the teleporter's Onyxia level were always their defaults. Every
+    module whose install renders a question now asks it, and every other one
+    still gets no window and `None` -- the call it has always been given.
 
     Rows whose Install is LOCKED are left out of the loop rather than counted
     as installs (T69): eleven shipped manifests declare a `requires`, nothing
     is on disk in this fixture, so `_module_action()` refuses them before the
     asker — which is the guard's whole job and is asserted by its own test.
+
+    Mutation: gate `must_ask()` on `default is None` again and only the two
+    ah-bots are asked.
     """
     asked: list[str] = []
 
@@ -819,7 +824,17 @@ def test_only_the_two_ah_bots_and_the_hearthstone_choice_are_asked_about(
         view.modules_panel.select(item_id)
         view._module_action("install")
 
-    assert sorted(asked) == ["hearthstone-cd", "mod-ah-bot", "mod-ah-bot-plus"], asked
+    assert sorted(asked) == [
+        "baby-mobs",
+        "buff-mobs",
+        "hearthstone-cd",
+        "mod-ah-bot",
+        "mod-ah-bot-plus",
+        "nerf-mobs",
+        "npc-teleporter",
+        "xbuff-mobs",
+        "xp-rates",
+    ], asked
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier)
     assert len(applier.installed) == len(catalogued)
@@ -957,44 +972,83 @@ def test_installing_hearthstone_tweaks_asks_which_cooldown(
     assert applier.values == [{"cooldown": "5_Min"}]
 
 
-def test_updating_hearthstone_tweaks_says_the_shown_answer_is_applied(
+def test_updating_hearthstone_tweaks_offers_the_answer_it_was_installed_with(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T100 review: the real dialog, through the view's seam, for Update vs Install.
+    """T104: the T100 cold-review repro, through the view's seam and the REAL dialog.
 
-    The dialog is built exactly as `ask_manifest_prompts` builds it, with the
-    `again` the view hands the seam, and its text is read rather than exec'd.
-    A first install is not told anything new; an Update of the installed
-    module is told that the selected answer replaces what was chosen before.
+    Hearthstone Tweaks installed with 5 minutes; Update + OK put back 30,
+    because nothing kept the answer and the dialog pre-selected the default.
+    The install's record now says 5 minutes, the view hands it to the dialog,
+    and OK on the Update -- or on the context menu's Install over it -- keeps it.
 
-    Mutation: pass `again=False` for an update in `_module_action()` and the
-    second note has no "applies the answer".
+    Mutation: stop passing `remembered` in `_module_values()` and every dialog
+    below opens on 30_Min.
     """
-    notes: list[tuple[str, str]] = []
-
-    def asker(parent: object, manifest: object, prompts: object, *, again: bool = False) -> None:
-        dialog = ManifestPromptDialog(None, manifest, prompts, again=again)  # type: ignore[arg-type]
-        notes.append((str(manifest.id), dialog.notes()))  # type: ignore[attr-defined]
-        return None  # cancel: this test is about what the player is TOLD
-
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
     services = _services(ps, tmp_path, [])
-    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
-    _select_module(view, "hearthstone-cd")
-    view._module_action("install")
+    services.applier = _FakeApplier(server_dir)
+    manifest = modules.store().load("mod", "hearthstone-cd")
+    assert module_answers.record_answers(server_dir, manifest, {"cooldown": "5_Min"}) == ""
+
+    shown: list[tuple[bool, dict[str, str], str]] = []
+
+    def asker(
+        parent: object,
+        manifest: object,
+        prompts: object,
+        *,
+        again: bool = False,
+        remembered: Mapping[str, str] | None = None,
+    ) -> Mapping[str, str] | None:
+        dialog = ManifestPromptDialog(
+            None, manifest, prompts, again=again, remembered=remembered  # type: ignore[arg-type]
+        )
+        shown.append((again, dialog.answers(), dialog.notes()))
+        return dialog.answers()  # OK, clicked straight through
 
     object.__setattr__(
         services, "installed_modules", lambda: {"mod": frozenset({"hearthstone-cd"})}
     )
-    view.reload_modules()
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
     assert view.modules_panel.row("hearthstone-cd").data.installed
     _select_module(view, "hearthstone-cd")
-    view._module_action("update")
     view._module_action("install")  # the context menu's Install over an installed row
+    view._module_action("update")  # refused by the real `update()`: no clone on disk
 
-    assert [item for item, _ in notes] == ["hearthstone-cd"] * 3
-    assert "applies the answer" not in notes[0][1]
-    assert "applies the answer" in notes[1][1]
-    assert "applies the answer" in notes[2][1]
+    assert [(again, answers) for again, answers, _ in shown] == [
+        (True, {"cooldown": "5_Min"}),
+        (True, {"cooldown": "5_Min"}),
+    ]
+    assert all(REMEMBERED_NOTE in notes for _, _, notes in shown)
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.values == [{"cooldown": "5_Min"}]
+
+
+def test_removing_a_mob_multiplier_asks_nothing_and_leaves_the_answer_to_the_record(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Remove renders `{hp}` for baby-mobs, and the only right answer is install's.
+
+    So it is not asked (`must_ask(prompt, "remove")`): the applier is handed
+    `None` and fills it from the install's record (`test_module_answers.py`).
+    """
+    asked: list[str] = []
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id) or {},
+    )
+    _select_module(view, "baby-mobs")
+    view._module_action("remove")
+
+    assert asked == []
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.removed == ["baby-mobs"] and applier.values == [None]
 
 
 def test_removing_hearthstone_tweaks_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
