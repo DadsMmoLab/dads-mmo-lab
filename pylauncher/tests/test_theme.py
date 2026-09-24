@@ -196,6 +196,29 @@ def test_the_generated_sheet_contains_no_negation_selector() -> None:
         assert "not(" not in qss
 
 
+LIVE_WIDGETS_A_RESTYLE_MAY_REPOLISH = 2000
+"""How many live widgets the app-wide restyles below may find. T109.
+
+`QApplication.setStyleSheet` and `setStyle` re-polish every live widget, so the
+two app-level tests here cost whatever earlier modules left alive. Measured on
+the full suite, 2026-09-24: 22,506 at this point before the fix (the parse test
+16 s on the laptop, 38 s on m910q), and 12,732 with only the per-test teardown
+(one module-scoped `main._Window` from `test_main.py` was never deleted). Run
+alone, this module starts at 0.
+"""
+
+
+def test_no_earlier_module_left_widgets_for_the_restyle_to_repolish(qapp: QApplication) -> None:
+    # Guards the two tests below from what OTHER modules do, and says so by
+    # name rather than as a slow run nobody reads: a leak shows up here first.
+    live = len(QApplication.allWidgets())
+    tops = {type(w).__name__ for w in QApplication.topLevelWidgets() if w.parentWidget() is None}
+    assert live <= LIVE_WIDGETS_A_RESTYLE_MAY_REPOLISH, (
+        f"{live} widgets are alive before an app-wide restyle; orphan windows: {sorted(tops)}. "
+        "Something outlived the test or module that made it (conftest.py tears these down)."
+    )
+
+
 def test_qt_actually_parses_the_generated_stylesheet(qapp: QApplication) -> None:
     # The only test that proves the sheet is VALID, not merely present. Qt emits
     # `Could not parse application stylesheet` (via qWarning) when the parser
