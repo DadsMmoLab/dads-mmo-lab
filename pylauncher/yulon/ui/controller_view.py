@@ -5886,6 +5886,7 @@ class ControllerView(QWidget):
 
         self.character_report = QLabel("", tab)
         self._character_generation = 0
+        self._gear_generation = 0
         self.character_report.setWordWrap(True)
         self.character_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         # A tree whose Play block nobody has measured gets a SENTENCE rather
@@ -5963,6 +5964,8 @@ class ControllerView(QWidget):
 
     def _character_chosen(self, row: int) -> None:
         """Name the chosen character in every button, or wait for one."""
+        # Any gear read still out is about a row that is no longer chosen (T96).
+        self._gear_generation += 1
         item = self.character_list.item(row) if row >= 0 else None
         if item is None:
             for button, label in self._character_actions():
@@ -6015,8 +6018,31 @@ class ControllerView(QWidget):
             # teleport's own help says so in as many words.
             self.revive_button.setEnabled(False)
             self.revive_button.setText(f"{name} has to be logged in to be revived")
-        pieces, mails, refusal = self._gear_set_size(name)
+        # The gear read is two `docker exec ... mysql` calls, so it runs through
+        # the job runner and the button waits for it (T96). It ran right here
+        # until then, on the GUI thread: ~240 ms per call on Docker Desktop
+        # (yulon-win11, 2026-09-23), so every arrow key through the list, and
+        # every refresh that kept a row selected, froze the window for about
+        # half a second. Until the answer lands the button promises nothing.
+        self.send_gear_button.setText(f"Reading what {name} is wearing…")
+        self.send_gear_button.setEnabled(False)
+        generation = self._gear_generation
+        self._run(
+            lambda: (generation, name, self._gear_set_size(name)),
+            self._gear_read,
+            self._gear_read_failed,
+        )
+
+    @Slot(object)
+    def _gear_read(self, answer: object) -> None:
+        """Draw the gear button from a read, if it is about the row still chosen."""
+        generation, name, (pieces, mails, refusal) = cast(
+            tuple[int, str, tuple[int, int, tuple[str, str] | None]], answer
+        )
+        if generation != self._gear_generation:
+            return
         self.send_gear_button.setToolTip("" if refusal is None else refusal[1])
+        self.send_gear_button.setEnabled(True)
         if refusal is not None:
             # The read did not answer, and WHY is the only useful thing to draw.
             # Measured on the live Vanilla server, 2026-09-07 (8.4c): two
@@ -6034,6 +6060,11 @@ class ControllerView(QWidget):
             # server would refuse an empty mail with a sentence about item ids.
             self.send_gear_button.setText(f"{name} is wearing nothing")
             self.send_gear_button.setEnabled(False)
+
+    @Slot(object)
+    def _gear_read_failed(self, exc: object) -> None:
+        """`_gear_set_size()` answers its own failures; this is the boundary if it ever does not."""
+        logger.warning(f"could not size the chosen character's gear: {exc}")
 
     def _revive_works_offline(self) -> bool:
         """Only where this tree's own box measured that it does.

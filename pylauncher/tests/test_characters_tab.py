@@ -7,16 +7,18 @@ and every press reports all three outcomes.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
 
+from tests.conftest import HANG_BOUND_MS, pump_until
 from yulon import play as play_module
 from yulon.catalog.catalog import load_catalog
 from yulon.play import Character
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerServices, ControllerView
-from yulon.ui.widgets.job import run_inline
+from yulon.ui.widgets.job import in_flight, run_inline, threaded_job_runner
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
@@ -713,3 +715,84 @@ def test_the_control_follows_the_measurement_rather_than_the_game_it_belongs_to(
     assert _in_the_layout(lost.set_level_button) is False, "the id is WotLK and the fact is not"
     assert _shown(lost.set_level_button) is False, "the id is WotLK and the fact is not"
     assert lost.set_level_absent.text() == "a sentence measured on some other server"
+
+
+# -- T96: choosing a character asks the database off the GUI thread ----------
+
+
+def _threaded_after_the_list_is_filled(view: ControllerView) -> None:
+    """Swap the app's real runner in once the list is on screen.
+
+    Filled inline first so this test is about the SELECTION's read and nothing
+    else: the list's own refresh has its own test (T97).
+    """
+    view._jobs = threaded_job_runner(view)
+
+
+def test_choosing_a_character_reads_the_gear_off_the_gui_thread(tmp_path: Path) -> None:
+    """T96. Measured on yulon-win11, 2026-09-23 (Docker Desktop, WotLK, 900 characters):
+    choosing a row ran `gear_set_size` ON THE GUI THREAD -- two `docker exec ...
+    mysql` calls, ~240 ms each on that box -- so every arrow key through the list
+    froze the window for about half a second, and so did every list refresh that
+    kept a row selected (three of them after each Characters action). py-spy
+    --idle put 81 GUI-thread samples inside it for ten key presses.
+    """
+    play = _Play(characters=_people(), pieces=19)
+    asked_on: list[int] = []
+    sized = play.gear_set_size
+
+    def recording(character: str) -> tuple[int, int]:
+        asked_on.append(threading.get_ident())
+        return sized(character)
+
+    play.gear_set_size = recording  # type: ignore[method-assign]
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    _threaded_after_the_list_is_filled(view)
+
+    view.character_list.setCurrentRow(0)
+    pump_until(lambda: "19" in view.send_gear_button.text(), "the gear count was drawn")
+
+    assert asked_on and threading.get_ident() not in asked_on, "the gear was read on the GUI thread"
+    assert view.send_gear_button.isEnabled() is True
+    assert view._jobs.wait(HANG_BOUND_MS) is True  # type: ignore[attr-defined]
+
+
+def test_the_gear_button_waits_for_its_read_and_a_late_answer_for_another_row_is_dropped(
+    tmp_path: Path,
+) -> None:
+    """While the read is out, the button promises nothing and cannot be pressed;
+    and an answer about a row that is no longer chosen must not relabel it."""
+    play = _Play(characters=_people(), pieces=19)
+    gate = threading.Event()
+    sized = play.gear_set_size
+
+    def slow_for_guglu(character: str) -> tuple[int, int]:
+        if character == "Guglu":
+            gate.wait(HANG_BOUND_MS / 1000)
+            return (7, 1)
+        return sized(character)
+
+    play.gear_set_size = slow_for_guglu  # type: ignore[method-assign]
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    _threaded_after_the_list_is_filled(view)
+
+    view.character_list.setCurrentRow(0)  # Guglu, whose read is held
+    assert view.send_gear_button.isEnabled() is False, "pressable before its count was known"
+    assert "Guglu" in view.send_gear_button.text()
+
+    view.character_list.setCurrentRow(1)  # Ganaar
+    pump_until(lambda: "Ganaar's 19" in view.send_gear_button.text(), "Ganaar's count was drawn")
+    reads = [thread for thread, _ in view._jobs._live]  # type: ignore[attr-defined]
+    gate.set()
+    # A read's answer is posted to this thread before its thread's `finished`, and
+    # `in_flight()` lets go of the pair on `finished`: once both reads are let go
+    # of, Guglu's late answer has been delivered too.
+    pump_until(
+        lambda: not any(held is thread for held, _ in in_flight()._pairs for thread in reads),
+        "both reads were delivered",
+    )
+
+    assert "Ganaar's 19" in view.send_gear_button.text(), view.send_gear_button.text()
+    assert view._jobs.wait(HANG_BOUND_MS) is True  # type: ignore[attr-defined]
