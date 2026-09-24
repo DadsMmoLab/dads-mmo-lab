@@ -847,11 +847,11 @@ def test_a_gear_read_that_breaks_says_so_rather_than_reading_forever(
     gate = threading.Event()
     sizing = view._gear_set_size
 
-    def breaks(name: str) -> tuple[int, int, tuple[str, str] | None]:
+    def breaks(seam: object, name: str) -> tuple[int, int, tuple[str, str] | None]:
         if name == "Guglu":
             gate.wait(HANG_BOUND_MS / 1000)
             raise RuntimeError("the worker fell over")
-        return sizing(name)
+        return sizing(seam, name)
 
     monkeypatch.setattr(view, "_gear_set_size", breaks)
 
@@ -870,3 +870,28 @@ def test_a_gear_read_that_breaks_says_so_rather_than_reading_forever(
     assert said == "Could not read what Guglu is wearing", said
     assert view.send_gear_button.isEnabled() is False
     assert "the worker fell over" in view.send_gear_button.toolTip()
+
+
+def test_the_gear_read_does_not_reach_back_into_the_view_from_its_worker(tmp_path: Path) -> None:
+    """The read runs on a worker, possibly after the view has started coming apart.
+
+    Seen in the suite's own log (T96 review round): pytest tearing a view down
+    changed the list's current row, `_character_chosen` dispatched a read, and
+    the worker then found `'ControllerView' object has no attribute 'services'`.
+    Harmless there -- the answer went nowhere -- but the worker has no business
+    reading the view at all: what it needs is taken on the GUI thread when the
+    row is chosen. A runner that holds the work lets the view lose its services
+    first, deterministically.
+    """
+    play = _Play(characters=_people(), pieces=19)
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    held: list[tuple[object, object, object]] = []
+    view._jobs = lambda work, on_done, on_error: held.append((work, on_done, on_error))
+
+    view.character_list.setCurrentRow(1)  # Ganaar
+    del view.services  # what a view being torn down looks like to a late worker
+
+    work = held[-1][0]
+    generation, name, (pieces, mails, refusal) = work()  # type: ignore[operator, misc]
+    assert (name, pieces, mails, refusal) == ("Ganaar", 19, 2, None)

@@ -6036,11 +6036,13 @@ class ControllerView(QWidget):
         # half a second. Until the answer lands the button promises nothing.
         self.send_gear_button.setText(f"Reading what {name} is wearing…")
         self.send_gear_button.setEnabled(False)
-        generation = self._gear_generation
+        # Everything the worker needs is taken HERE, on the GUI thread: the
+        # worker must not reach back into a view it may outlive.
+        generation, play, size = self._gear_generation, self.services.play, self._gear_set_size
 
         def read() -> tuple[int, str, tuple[int, int, tuple[str, str] | None]]:
             try:
-                return (generation, name, self._gear_set_size(name))
+                return (generation, name, size(play, name))
             except Exception as exc:  # noqa: BLE001 - carried to the GUI thread with its row
                 raise _GearReadBroke(generation, name, exc) from exc
 
@@ -6110,10 +6112,14 @@ class ControllerView(QWidget):
         play = self.entry.play
         return (play.rename_offline_refusal or "") if play is not None else ""
 
-    def _gear_set_size(self, name: str) -> tuple[int, int, tuple[str, str] | None]:
+    @staticmethod
+    def _gear_set_size(play: object, name: str) -> tuple[int, int, tuple[str, str] | None]:
         """The set's size, or why there is not one -- short enough for the
-        button, and in full for the tooltip behind it."""
-        play = self.services.play
+        button, and in full for the tooltip behind it.
+
+        Static, and handed the seam: it runs on a worker (T96), which must not
+        read the view -- a view being torn down has already lost `services`.
+        """
         if play is None:
             return (0, 0, None)
         try:
