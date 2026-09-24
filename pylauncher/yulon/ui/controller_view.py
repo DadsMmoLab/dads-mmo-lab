@@ -3622,17 +3622,21 @@ REPAIR_FILES_OWED = composegen.BASE_FILE
 """What a repair adds to the tab's owed-a-recreate set, and the banner looks for."""
 
 REPAIR_FILES_BANNER = (
-    "This server's docker-compose.yml is not the one this version of Yu'lon writes for it: it "
-    "was installed by another version and is missing the changes made to it since. Nothing "
-    "changes until you press Repair server files…"
+    "This server's docker-compose.yml differs from what this version of Yu'lon writes for it — "
+    "it was written by another version, or edited by hand. Repair server files… writes it the "
+    "way this version does and keeps the current file as a backup. Nothing changes until you "
+    "press it."
 )
 
 REPAIR_FILES_CONFIRM = (
-    "Repair this server's files now?\n\nYu'lon writes docker-compose.yml again the way this "
-    "version installs it, with this install's own project name, ports and password file. The "
-    "file as it is now is kept beside it as a backup ({backup}).\n\nNothing else changes: not "
-    "your characters, not your .conf settings, not docker-compose.override.yml or .env. The "
-    "running containers keep the old file until they are recreated, which Yu'lon offers next."
+    "Repair this server's files now?\n\ndocker-compose.yml differs from what this version of "
+    "Yu'lon writes for this server, either because another version wrote it or because it was "
+    "edited by hand. Yu'lon writes it again the way this version installs it, with this "
+    "install's own project name, ports and SELinux labels{counts}. Any hand edits in it are "
+    "replaced; the file as it is now is kept beside it as a backup ({backup}).\n\nNothing else "
+    "changes: not your characters, not your .conf settings, not docker-compose.override.yml or "
+    ".env. The running containers keep the old file until they are recreated, which Yu'lon "
+    "offers next."
 )
 
 REPAIR_FILES_DONE = (
@@ -4014,6 +4018,7 @@ class ControllerView(QWidget):
         # made, and whether a check is out. Before the tabs, because the Tuning
         # tab's owed-set refresh redraws the Server tab's compose banner too.
         self._compose_state: str | None = None
+        self._compose_check: native.ComposeCheck | None = None
         self._compose_backup: Path | None = None
         self._compose_pending = False
         self._build_server_tab()
@@ -9196,6 +9201,7 @@ class ControllerView(QWidget):
         if not isinstance(result, native.ComposeCheck):
             return
         self._compose_state = result.state
+        self._compose_check = result
         if result.state not in ("current", "stale"):
             # Not offered, and not a problem of anything the player pressed: said
             # in the log rather than over `problem_label`.
@@ -9246,7 +9252,14 @@ class ControllerView(QWidget):
         if route is None or self._busy:
             return
         backup = f"{composegen.BASE_FILE}.<date>{native.REPAIR_BACKUP_SUFFIX}"
-        if not self._confirm(REPAIR_FILES_LABEL, REPAIR_FILES_CONFIRM.format(backup=backup)):
+        last = self._compose_check
+        counts = (
+            f" (it adds {last.added} lines and removes {last.removed})"
+            if last is not None and last.state == "stale"
+            else ""
+        )
+        question = REPAIR_FILES_CONFIRM.format(backup=backup, counts=counts)
+        if not self._confirm(REPAIR_FILES_LABEL, question):
             return
         self.problem_label.setText("")
         self._set_busy(True)

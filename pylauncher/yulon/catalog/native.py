@@ -52,6 +52,7 @@ which are measured on yulon-ubuntu (Linux), and which are merely written.
 
 from __future__ import annotations
 
+import difflib
 import io
 import json
 import math
@@ -62,6 +63,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
@@ -548,7 +550,7 @@ class LatestRoute:
     """
 
 
-ComposeState = Literal["current", "stale", "foreign", "moved", "missing", "error"]
+ComposeState = Literal["current", "stale", "foreign", "moved", "mixed", "missing", "error"]
 
 
 @dataclass(frozen=True)
@@ -558,12 +560,18 @@ class ComposeCheck:
     `stale` is the one state the Server tab offers "Repair server files…" on.
     Every other state but `current` carries `why`, the sentence a refused
     repair says: a file that is not Yu'lon's (`foreign`), one that names
-    another folder's project (`moved`), no file at all (`missing`), or a render
-    or read that failed (`error`).
+    another folder's project (`moved`), one whose host binds disagree about
+    SELinux's `:z` (`mixed`), no file at all (`missing`), or a render or read
+    that failed (`error`).
+
+    `added`/`removed` count the lines a repair would add and take away, for the
+    confirmation; both are 0 on anything but `stale`.
     """
 
     state: ComposeState
     why: str = ""
+    added: int = 0
+    removed: int = 0
 
 
 @dataclass(frozen=True)
@@ -607,23 +615,57 @@ def _backup_beside(path: Path, when: datetime) -> Path:
     raise OSError(f"no free name for a backup of {path.name}")
 
 
-def _replace_keeping_mode(path: Path, text: str) -> None:
-    """Put `text` at `path` in one step, with the mode `path` already had.
+class ComposeChangedError(OSError):
+    """The file changed between the press's check and its write; it was left as it is."""
 
-    A temp file in the same folder, chmodded to the old mode BEFORE the rename, so
-    there is no moment the new file sits at the umask default. `newline="\\n"`,
-    as `composegen.write_plan()` writes every compose file.
+
+def _replace_if_unchanged(path: Path, text: str, expected: str) -> None:
+    """Put `text` at `path` in one step, with `path`'s mode -- only if it still says `expected`.
+
+    `expected` is the text the press checked and backed up. The target is read
+    again as the last thing before the rename, and anything else there (an editor
+    saving, a second press) aborts the write with the file left as it is: what
+    the press validated is not what it would be replacing. A small window stays
+    between that read and the rename; two Yu'lon processes on one install are out
+    of scope (no interprocess lock), and this closes the one a person can hit.
+
+    The temp file is `tempfile.mkstemp`'s own, in the same folder, so a leftover
+    of another attempt is never clobbered; it is fsynced, chmodded to the old mode
+    BEFORE the rename (no moment at the umask default), and removed on every
+    failure. `newline="\\n"`, as `composegen.write_plan()` writes every compose file.
+
+    Raises:
+        ComposeChangedError: the file no longer says `expected`.
+        OSError: the temp file could not be written or renamed.
     """
     mode = stat.S_IMODE(path.stat().st_mode)
-    tmp = path.with_name(path.name + ".yulon-new")
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".yulon-new", dir=path.parent)
+    tmp = Path(name)
     try:
-        with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.chmod(tmp, mode)
+        if path.read_text(encoding="utf-8") != expected:
+            raise ComposeChangedError(f"{path.name} changed after it was checked")
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _lines_changed(old: str, new: str) -> tuple[int, int]:
+    """How many lines going from `old` to `new` adds and removes, for the confirmation."""
+    added = removed = 0
+    for line in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0):
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
 
 
 def update_to_latest_confirmation(entry: CatalogEntry, server_dir: Path, repo: str) -> str:
@@ -6064,7 +6106,7 @@ class StagedInstaller:
             platform_id=self._seams.platform_id,
         )
 
-    def _base_compose_facts(self, server_dir: Path) -> tuple[ComposeCheck, str | None]:
+    def _base_compose_facts(self, server_dir: Path) -> tuple[ComposeCheck, str | None, str | None]:
         """What the base file is now, and what this version renders for it (T106).
 
         Only `docker-compose.yml`. The override and the build file are left to the
@@ -6075,13 +6117,52 @@ class StagedInstaller:
         the plan's `dotenv` -- never the base text, which spells
         `${DB_ROOT_PASSWORD:?…}` -- and this method never writes the dotenv. Even
         the value it mints when the password file is gone is therefore harmless here.
+
+        **The SELinux label comes from the file, not from the host** (review,
+        2026-09-24). The install decided `:z` once, from the host as it was then,
+        and wrote it on every host bind. Asking the host again at press time --
+        while `getenforce` fails, or with the host briefly permissive -- answers "no
+        label", which read an enforcing install as stale and let a repair strip the
+        label its containers need. So the label is `composegen.bind_label_of()` of
+        the file on disk, and the host is asked only when there is no Yu'lon file to
+        read one from. A file whose binds disagree is refused (`mixed`).
+
+        Returns the check, the fresh render (None when it could not be made) and
+        the text on disk (None when there is none): the snapshot a repair backs up
+        and must find unchanged before it writes.
         """
         path = server_dir / composegen.BASE_FILE
         name = composegen.BASE_FILE
         try:
-            fresh = self._render_compose(
-                server_dir, self.resolve_secrets(server_dir), self._bind_label(server_dir)
-            ).base
+            text: str | None = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = None
+        except (OSError, UnicodeDecodeError) as exc:
+            return (
+                ComposeCheck("error", f"{path} could not be read ({exc}). Nothing was written."),
+                None,
+                None,
+            )
+        ours = text is not None and composegen.is_marker_line(text)
+        label: str | None = None
+        if text is not None and ours:
+            try:
+                label = composegen.bind_label_of(text)
+            except composegen.MixedBindLabels as exc:
+                return (
+                    ComposeCheck(
+                        "mixed",
+                        f"{path}: {exc}, so Yu'lon cannot tell which way this install was made "
+                        "and does not rewrite it. Nothing was written. Give every `- ./` line "
+                        "the same ending (`:z` on all of them, or on none) and check again.",
+                    ),
+                    None,
+                    text,
+                )
+        if label is None:
+            label = self._bind_label(server_dir)
+        try:
+            fresh = self._render_compose(server_dir, self.resolve_secrets(server_dir), label).base
         except (composegen.ComposeGenError, InstallerError) as exc:
             return (
                 ComposeCheck(
@@ -6090,23 +6171,18 @@ class StagedInstaller:
                     "Nothing was written.",
                 ),
                 None,
+                text,
             )
-        try:
-            text = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
+        if text is None:
             return (
                 ComposeCheck(
                     "missing",
                     f"{path} is not there, so there is nothing to repair. Nothing was written.",
                 ),
                 fresh,
+                None,
             )
-        except (OSError, UnicodeDecodeError) as exc:
-            return (
-                ComposeCheck("error", f"{path} could not be read ({exc}). Nothing was written."),
-                fresh,
-            )
-        if not composegen.is_marker_line(text):
+        if not ours:
             return (
                 ComposeCheck(
                     "foreign",
@@ -6114,6 +6190,7 @@ class StagedInstaller:
                     "own file now and Yu'lon does not rewrite it. Nothing was written.",
                 ),
                 fresh,
+                text,
             )
         has, wants = composegen.project_of(text), composegen.project_of(fresh)
         if has != wants:
@@ -6126,17 +6203,21 @@ class StagedInstaller:
                     "from its characters' database volume, so nothing was written.",
                 ),
                 fresh,
+                text,
             )
         if composegen.same_compose(text, fresh):
-            return ComposeCheck("current"), fresh
-        return ComposeCheck("stale"), fresh
+            return ComposeCheck("current"), fresh, text
+        added, removed = _lines_changed(text, fresh)
+        return ComposeCheck("stale", added=added, removed=removed), fresh, text
 
     def base_compose_check(self, options: InstallOptions | None = None) -> ComposeCheck:
         """Is this install's `docker-compose.yml` what this version of Yu'lon writes? (T106)
 
         A reading: it never raises and never writes. See `ComposeCheck` for the states.
         """
-        check, _fresh = self._base_compose_facts(self.server_dir(options or InstallOptions()))
+        check, _fresh, _text = self._base_compose_facts(
+            self.server_dir(options or InstallOptions())
+        )
         return check
 
     def repair_base_compose(
@@ -6155,8 +6236,10 @@ class StagedInstaller:
         nothing and says so with `backup=None`; every other state refuses.
 
         The write: a stamped `.repair.bak` copy first (`copy2`, so it keeps the old
-        mode and mtime), then the fresh text to a temp file beside the target, given
-        the target's own mode, and `os.replace`d onto it -- atomic on POSIX and
+        mode and mtime), checked to hold exactly the text that was validated; then
+        `_replace_if_unchanged()` -- a unique fsynced temp file with the target's
+        mode, `os.replace`d onto the target only if the target still says what was
+        checked (Codex, 2026-09-24: the check-to-write race). Atomic on POSIX and
         Windows, so a full disk leaves the old file whole and the backup beside it.
 
         Raises:
@@ -6166,11 +6249,15 @@ class StagedInstaller:
         """
         server_dir = self.server_dir(options or InstallOptions())
         path = server_dir / composegen.BASE_FILE
-        check, fresh = self._base_compose_facts(server_dir)
+        check, fresh, text = self._base_compose_facts(server_dir)
         if check.state == "current":
             return ComposeRepaired(path, None)
-        if check.state != "stale" or fresh is None:
+        if check.state != "stale" or fresh is None or text is None:
             raise InstallerError(check.why)
+        changed = (
+            f"{path} changed while it was being repaired, so it was not replaced and is "
+            "left as it is now. Check again (Refresh) and press Repair once more."
+        )
         try:
             backup = _backup_beside(path, now or datetime.now())
         except OSError as exc:
@@ -6178,8 +6265,14 @@ class StagedInstaller:
                 f"{path} could not be backed up ({exc}), so it was not repaired. "
                 "Nothing was written."
             ) from exc
+        if backup.read_text(encoding="utf-8") != text:
+            # The copy is not of the file that was checked: it changed in between.
+            backup.unlink(missing_ok=True)
+            raise InstallerError(changed)
         try:
-            _replace_keeping_mode(path, fresh)
+            _replace_if_unchanged(path, fresh, text)
+        except ComposeChangedError as exc:
+            raise InstallerError(f"{changed} Its backup from before is {backup.name}.") from exc
         except OSError as exc:
             raise InstallerError(
                 f"{path} could not be written ({exc}). The old file is still in place, and its "

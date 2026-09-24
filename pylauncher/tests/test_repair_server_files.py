@@ -39,20 +39,30 @@ T98_FIRST = "    # THE DATABASE OUTLIVES THE WORLD ON EVERY STOP PATH (T98)."
 T98_LAST = '    command: ["mariadbd"]'
 
 
-def engine(entry: CatalogEntry = TBC, installers_root: Path | None = None) -> CmangosInstaller:
-    """A real CMaNGOS engine whose host questions answer like a plain Linux box."""
+def engine(
+    entry: CatalogEntry = TBC,
+    installers_root: Path | None = None,
+    *,
+    enforcing: bool | None = False,
+) -> CmangosInstaller:
+    """A real CMaNGOS engine whose host questions answer like a plain Linux box.
+
+    `enforcing=True` is a Fedora-like host (SELinux enforcing, on xfs), where the
+    install puts `:z` on every host bind; `None` is `getenforce` failing.
+    """
     return CmangosInstaller(
         entry,
         installers_root=installers_root or resources.installers_dir(),
         seams=native.Seams(
             platform_id=lambda: "linux",
-            selinux_enforcing=lambda: False,
-            fs_type=lambda path: "ext4",
+            selinux_enforcing=lambda: enforcing,
+            fs_type=lambda path: "xfs" if enforcing else "ext4",
+            relabel=lambda path: True,
         ),
     )
 
 
-def installed(tmp_path: Path, entry: CatalogEntry = TBC) -> Path:
+def installed(tmp_path: Path, entry: CatalogEntry = TBC, *, enforcing: bool = False) -> Path:
     """A server dir holding what the install's own `generate-compose` stage wrote."""
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
@@ -60,7 +70,7 @@ def installed(tmp_path: Path, entry: CatalogEntry = TBC) -> Path:
     assert plan.file is not None, f"{entry.id} no longer generates its password"
     # Built at runtime: a literal `<word>-<16 hex>` is what the secret scan looks for.
     (server_dir / plan.file).write_text(f"{plan.prefix}{'0' * 16}\n", encoding="utf-8")
-    eng = engine(entry)
+    eng = engine(entry, enforcing=enforcing)
     ctx = native.StageContext(
         server_dir=server_dir,
         client_dir=None,
@@ -242,6 +252,137 @@ def test_a_write_that_fails_leaves_the_old_file_and_no_temp(
     assert not list(server_dir.glob("*.yulon-new"))
 
 
+# -- the install's own SELinux label (review, Important 1) --------------------
+
+
+def host_binds(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip().startswith("- ./")]
+
+
+@pytest.mark.parametrize("now", [None, False], ids=["getenforce-failed", "permissive"])
+def test_a_z_install_stays_current_when_the_host_says_otherwise_today(
+    tmp_path: Path, now: bool | None
+) -> None:
+    """The label comes from the file the install wrote, not from a host asked again.
+
+    An install on an enforcing host carries `:z` on every host bind. Asked again
+    while `getenforce` fails or the host is briefly permissive, the old code
+    rendered no `:z`, called the file stale, and a repair stripped the label --
+    after which the containers cannot read `./etc` once enforcing is back.
+    """
+    server_dir = installed(tmp_path, enforcing=True)
+    path = server_dir / composegen.BASE_FILE
+    binds = host_binds(path.read_text(encoding="utf-8"))
+    assert binds and all(b.endswith(":z") for b in binds), binds
+    assert engine(enforcing=now).base_compose_check(
+        InstallOptions(server_dir=server_dir)
+    ).state == ("current")
+
+
+@pytest.mark.parametrize("now", [None, False], ids=["getenforce-failed", "permissive"])
+def test_a_repair_keeps_the_installs_z(tmp_path: Path, now: bool | None) -> None:
+    server_dir = installed(tmp_path, enforcing=True)
+    fresh, _old = make_old(server_dir)
+    done = engine(enforcing=now).repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert done.backup is not None
+    text = (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8")
+    assert text == fresh, "the repair did not write the install's own render, :z included"
+    assert all(b.endswith(":z") for b in host_binds(text))
+
+
+def test_a_file_whose_binds_disagree_is_not_offered(tmp_path: Path) -> None:
+    server_dir = installed(tmp_path, enforcing=True)
+    path = server_dir / composegen.BASE_FILE
+    _fresh, old = make_old(server_dir)
+    first = next(b for b in host_binds(old) if b.endswith(":z"))
+    mixed = old.replace(first, first[: -len(":z")], 1)
+    path.write_text(mixed, encoding="utf-8", newline="\n")
+    check = engine(enforcing=True).base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "mixed", check
+    assert ":z" in check.why
+    with pytest.raises(InstallerError):
+        engine(enforcing=True).repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert path.read_text(encoding="utf-8") == mixed
+    assert repair_backups(server_dir) == []
+
+
+def test_with_no_yulon_file_the_host_is_asked(tmp_path: Path) -> None:
+    """Nothing on disk to read the label from: the install's own question decides."""
+    server_dir = installed(tmp_path, enforcing=True)
+    (server_dir / composegen.BASE_FILE).unlink()
+    asked: list[int] = []
+    eng = engine(enforcing=True)
+    real = eng._seams.selinux_enforcing
+    assert real is not None
+
+    def ask() -> bool | None:
+        asked.append(1)
+        return real()
+
+    eng._seams.selinux_enforcing = ask
+    assert eng.base_compose_check(InstallOptions(server_dir=server_dir)).state == "missing"
+    assert asked, "the host was not asked although there was no file to read"
+
+
+# -- the check-to-write race (Codex, high) ------------------------------------
+
+
+def test_a_file_changed_after_the_check_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Somebody saves the file between the press's check and the write: the press aborts."""
+    server_dir = installed(tmp_path)
+    path = server_dir / composegen.BASE_FILE
+    make_old(server_dir)
+    theirs = path.read_text(encoding="utf-8") + "# their edit\n"
+    real = native.os.fsync
+
+    def edit_meanwhile(fd: int) -> None:
+        real(fd)
+        path.write_text(theirs, encoding="utf-8", newline="\n")
+
+    monkeypatch.setattr(native.os, "fsync", edit_meanwhile)
+    with pytest.raises(InstallerError, match="changed"):
+        engine().repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert path.read_text(encoding="utf-8") == theirs, "their edit was overwritten"
+    assert not [
+        p
+        for p in server_dir.iterdir()
+        if p.name.startswith(path.name + ".") and not p.name.endswith(native.REPAIR_BACKUP_SUFFIX)
+    ], "a temp file was left"
+
+
+def test_a_failed_write_removes_its_uniquely_named_temp_and_leaves_a_stale_one_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The temp file is `mkstemp`'s, so a leftover of another attempt is never clobbered."""
+    server_dir = installed(tmp_path)
+    path = server_dir / composegen.BASE_FILE
+    _fresh, old = make_old(server_dir)
+    leftover = server_dir / (composegen.BASE_FILE + ".yulon-new")
+    leftover.write_text("an older attempt's temp\n", encoding="utf-8")
+    before = set(server_dir.iterdir())
+
+    def refuse(fd: int) -> None:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(native.os, "fsync", refuse)
+    with pytest.raises(InstallerError, match="Input/output error"):
+        engine().repair_base_compose(InstallOptions(server_dir=server_dir))
+    assert path.read_text(encoding="utf-8") == old
+    left = set(server_dir.iterdir()) - before
+    assert all(p.name.endswith(native.REPAIR_BACKUP_SUFFIX) for p in left), left
+    assert leftover.read_text(encoding="utf-8") == "an older attempt's temp\n"
+
+
+def test_the_confirmation_counts_the_lines_that_change(tmp_path: Path) -> None:
+    server_dir = installed(tmp_path)
+    make_old(server_dir)
+    check = engine().base_compose_check(InstallOptions(server_dir=server_dir))
+    assert check.state == "stale"
+    assert (check.added, check.removed) == (62, 0), check
+
+
 # -- which installs get it ---------------------------------------------------
 
 
@@ -285,7 +426,8 @@ class _Route:
 
     def check(self) -> native.ComposeCheck:
         self.checks += 1
-        return native.ComposeCheck(self.state)  # type: ignore[arg-type]
+        counts = (62, 0) if self.state == "stale" else (0, 0)
+        return native.ComposeCheck(self.state, added=counts[0], removed=counts[1])  # type: ignore[arg-type]
 
     def repair(self) -> native.ComposeRepaired:
         self.repairs += 1
@@ -335,6 +477,8 @@ def test_a_stale_compose_shows_the_banner(qapp: object, ps: _Ps, tmp_path: Path)
     assert not view.compose_banner.isHidden()
     assert view.compose_banner_button.text() == controller_view_module.REPAIR_FILES_LABEL
     assert "docker-compose.yml" in view.compose_banner_label.text()
+    assert "edited by hand" in view.compose_banner_label.text()
+    assert "backup" in view.compose_banner_label.text()
 
 
 @pytest.mark.parametrize("state", ["current", "foreign", "moved", "missing", "error"])
@@ -360,6 +504,8 @@ def test_pressing_repair_asks_first_and_no_changes_nothing(
     asked = _answer(monkeypatch, yes=False)
     view.compose_banner_button.click()
     assert len(asked) == 1 and "backup" in asked[0].lower()
+    assert "adds 62 lines and removes 0" in asked[0], asked[0]
+    assert "edited by hand" in asked[0], "the dialog does not say hand edits are replaced"
     assert route.repairs == 0
     assert view.compose_banner_button.text() == controller_view_module.REPAIR_FILES_LABEL
 

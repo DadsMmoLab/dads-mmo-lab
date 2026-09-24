@@ -920,6 +920,41 @@ def project_of(text: str) -> str | None:
     return found.group(1) if found else None
 
 
+class MixedBindLabels(ComposeGenError):
+    """A compose file whose host binds disagree about `:z`: no install renders that (T106)."""
+
+
+def bind_label_of(text: str) -> str | None:
+    """The SELinux label a rendered compose file's host binds carry: `":z"`, `""` or None (T106).
+
+    `":z"` when every `- ./` bind ends with it, `""` when none does, None when the
+    text has no host bind at all. This is the install's own decision, read back
+    off what it wrote, and a re-render must use it rather than ask the host again:
+    asked while `getenforce` fails or the host is briefly permissive, the host
+    says "no label", and a file written from that answer strips `:z` from an
+    install whose containers then cannot read `./etc` once enforcing is back.
+
+    The same rule as T102's `channel_setup._label_on_disk()` (branch
+    `fix/t102-channel-selinux`, not merged when this was written), over text
+    rather than a path; the two are meant to be folded into one.
+
+    Raises:
+        MixedBindLabels: some binds carry `:z` and some do not.
+    """
+    binds = [line.strip() for line in text.splitlines() if line.strip().startswith("- ./")]
+    if not binds:
+        return None
+    labelled = [line.endswith(":z") for line in binds]
+    if all(labelled):
+        return ":z"
+    if not any(labelled):
+        return ""
+    raise MixedBindLabels(
+        "some of its host folders are labelled for SELinux (`:z`) and some are not, which is "
+        "not how Yu'lon writes it"
+    )
+
+
 def _meaningful_lines(text: str) -> list[str]:
     return [
         line.rstrip()
