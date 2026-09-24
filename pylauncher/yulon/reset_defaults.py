@@ -746,22 +746,41 @@ def _install_mode(server_dir: Path, file: str) -> int:
     return conf.CONF_MODE
 
 
-def press_facts(
-    entry: CatalogEntry, server_dir: Path, files: Sequence[str]
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """(left alone as another tool's, missing and made again) among `files`, for the question.
+@dataclass(frozen=True)
+class PressFacts:
+    """What the question must name BEFORE a press (Codex review), file by file.
 
-    Read when the press is made, before the Yes/No, so the dialog names both
-    BEFORE anything happens (Codex review): a stat per file and one read of the
-    base compose file.
+    `foreign`: another tool's override, left alone. `missing`: not on disk and
+    made again as the install makes it. `absent`: not on disk and never written
+    by the install (a WotLK conf), so it stays as it is.
+    """
+
+    foreign: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    absent: tuple[str, ...] = ()
+
+    def among(self, files: Sequence[str]) -> PressFacts:
+        """The same facts, for `files` only."""
+        return PressFacts(
+            tuple(f for f in self.foreign if f in files),
+            tuple(f for f in self.missing if f in files),
+            tuple(f for f in self.absent if f in files),
+        )
+
+
+def press_facts(entry: CatalogEntry, server_dir: Path, files: Sequence[str]) -> PressFacts:
+    """Sort `files` into `PressFacts`: a stat per file and one read of the base compose file.
+
+    Off the GUI thread: the Tuning tab reads it in its Undo lookup job (a
+    `\\wsl$` server answers over 9p), and `reset()` decides again for itself.
     """
     foreign = tuple(file for file in files if _foreign(server_dir, file))
-    missing = tuple(
-        file
-        for file in files
-        if file not in foreign and install_writes(entry, file) and not (server_dir / file).is_file()
+    gone = [f for f in files if f not in foreign and not (server_dir / f).is_file()]
+    return PressFacts(
+        foreign,
+        tuple(f for f in gone if install_writes(entry, f)),
+        tuple(f for f in gone if not install_writes(entry, f)),
     )
-    return foreign, missing
 
 
 def reset(
@@ -858,11 +877,15 @@ def reset(
             continue
         if current[file] == texts[file].encode("utf-8"):
             continue
+        made: Path | None = None
         try:
             made = seams.backup(path, press)
             seams.write(path, texts[file])
         except (OSError, InstallerError, tuning.TuningError) as exc:
-            return _rolled_back(files, skipped, done, file, exc, server_dir, seams)
+            # The failed file's own backup, if it was taken, goes to the
+            # rollback too: it is this press's newest, and left behind it would
+            # name this press as "the last reset" (re-review).
+            return _rolled_back(files, skipped, done, file, exc, server_dir, seams, made)
         logger.info(f"reset {path} to how {entry.id} installed it; backup {made.name}")
         done[file] = FileResult(file, "reset", made)
     return ResetReport(
@@ -894,8 +917,19 @@ def _rolled_back(
     exc: BaseException,
     server_dir: Path,
     seams: Seams,
+    failed_backup: Path | None = None,
 ) -> ResetReport:
-    """A write failed part-way: put every file this press wrote back, and remove any it made."""
+    """A write failed part-way: put every file this press wrote back, and remove any it made.
+
+    When every one of them was put back, the press left nothing standing, so its
+    own backups are removed too -- the failed file's included (`failed_backup`,
+    taken before the write that failed; `replace_file` is atomic, so that file
+    was never changed). Left behind, the newest of them would name this press as
+    "the last reset": it hid the press before it from the Undo after a restart
+    and, after a later edit, pointed the Undo at this press's backups (re-review).
+    When ANY could not be put back, every backup of the press is kept: a backup
+    whose restore failed is the only record of what its file said.
+    """
     logger.warning(f"reset of {failed} failed ({exc}); putting back {len(done)} file(s)")
     results: dict[str, FileResult] = {}
     for file, item in done.items():
@@ -923,6 +957,13 @@ def _rolled_back(
         else:
             results[file] = FileResult(file, "held")
     results[failed] = FileResult(failed, "refused", reason=WRITE_FAILED.format(exc=exc))
+    if not any(results[file].outcome == "refused" for file in done):
+        backups = [item.backup for item in done.values() if item.backup is not None]
+        for backup in (*backups, *([failed_backup] if failed_backup else [])):
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError as unlink_exc:
+                logger.warning(f"could not remove {backup}: {unlink_exc}")
     return ResetReport(
         tuple(results.get(file) or FileResult(file, skipped.get(file, "held")) for file in files)
     )
@@ -1075,16 +1116,16 @@ def question(
     files: Sequence[str],
     modules: Sequence[str],
     *,
-    foreign: Sequence[str] = (),
-    missing: Sequence[str] = (),
+    facts: PressFacts | None = None,
 ) -> str:
     """The Yes/No text: which files, what goes back, what is kept, the backup, the restart.
 
-    `foreign` and `missing` are `press_facts()`: named BEFORE the press, so a
-    file left alone or made again is never news only in the report.
+    `facts` is `press_facts()` for these files: named BEFORE the press, so a
+    file left alone, made again or left absent is never news only in the report.
     Conditional about the server being up: the tab keeps no status to ask
     (spec correction 14).
     """
+    facts = facts or PressFacts()
     them = "this file" if len(files) == 1 else "these files"
     names = "\n".join(f"    {label(file)}" for file in files)
     parts = [
@@ -1097,19 +1138,24 @@ def question(
             f"Settings that installed modules keep in {them} are kept as they are now: "
             f"{', '.join(modules)}."
         )
-    for file in foreign:
+    for file in facts.foreign:
         parts.append(f"Left alone: {label(file)} was not made by Yu'lon.")
-    for file in missing:
+    for file in facts.missing:
         parts.append(f"Not on disk, so it is made again as Yu'lon installs it: {label(file)}.")
-    if composegen.OVERRIDE_FILE in files and composegen.OVERRIDE_FILE not in foreign:
+    for file in facts.absent:
+        parts.append(
+            f"{label(file)} is not on disk and a fresh install does not write it, so it stays "
+            "as it is."
+        )
+    if composegen.OVERRIDE_FILE in files and composegen.OVERRIDE_FILE not in facts.foreign:
         parts.append(
             f"{composegen.OVERRIDE_FILE} holds the containers' own settings (the bot population, "
             "and the command channel if it is on). Anything added to it by hand is dropped, and "
             "the containers have to be RECREATED before it counts."
         )
     parts.append(
-        'A backup of each file is made first, and "Undo the last reset" in this menu puts '
-        "them back."
+        'A backup of each file that is on disk is made first, and "Undo the last reset" in this '
+        "menu puts them back."
     )
     # The job the banner will offer (`apply_rule`), never a flat "restart":
     # the override and CMaNGOS `etc/` owe a recreate (fix round 1).

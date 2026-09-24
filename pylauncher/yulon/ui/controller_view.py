@@ -3598,10 +3598,16 @@ TUNING_CORE_FILE = (
 
 @dataclass(frozen=True)
 class UndoLookup:
-    """One answer to "what would Undo the last reset put back", and which reload asked."""
+    """One answer to "what would Undo the last reset put back", and which reload asked.
+
+    `facts` rides along (re-review): the files the question must name before a
+    press -- left alone, made again, left absent -- read in the same job, so a
+    press never reads the disk on the GUI thread.
+    """
 
     generation: int
     items: tuple[reset_defaults.FileResult, ...]
+    facts: reset_defaults.PressFacts = reset_defaults.PressFacts()
 
 
 def _undo_still_undoable(
@@ -3622,7 +3628,11 @@ def _look_up_undo(
     generation: int,
 ) -> UndoLookup:
     """The Tuning tab's Undo lookup, as a job: it lists folders and reads files (T94)."""
-    return UndoLookup(generation, reset_defaults.undo_items(entry, server_dir, session))
+    return UndoLookup(
+        generation,
+        reset_defaults.undo_items(entry, server_dir, session),
+        reset_defaults.press_facts(entry, server_dir, reset_defaults.core_files(entry)),
+    )
 
 
 TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
@@ -3649,6 +3659,10 @@ TUNING_RESET_RUNNING = (
 )
 """The close guard's sentence while a reset or its undo runs (`busy_reason()`)."""
 
+TUNING_RESET_STILL_READING = (
+    "Yu'lon is still reading this server's settings files. Try Reset to default again in a "
+    "moment."
+)
 TUNING_RESET_NOTHING_TO_UNDO = (
     "Nothing to undo: every file is already as the last reset found it, or was put back since."
 )
@@ -8852,6 +8866,8 @@ class ControllerView(QWidget):
         # lookup is the newest: an older answer landing late is dropped.
         self._undo_items: tuple[reset_defaults.FileResult, ...] = ()
         self._undo_generation = 0
+        # The press's facts from the same lookup; `None` until it has landed.
+        self._press_facts: reset_defaults.PressFacts | None = None
         self.reload_tuning()
         self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
 
@@ -9085,14 +9101,16 @@ class ControllerView(QWidget):
                 and row.key.casefold() not in reset_defaults.install_keys(self.entry, row.file)
             }
         )
-        # Named BEFORE the press (Codex review): a stat per file and one read
-        # of the base compose file, once per press -- not per reload.
-        foreign, missing = reset_defaults.press_facts(
-            self.entry, self.services.controller.server_dir, chosen
-        )
+        # Named BEFORE the press (Codex review), from the lookup job's answer
+        # (re-review: never a stat or a read on the GUI thread). Before that
+        # answer lands the press is refused rather than asked without them;
+        # `reset()` decides every case again itself when it runs.
+        if self._press_facts is None:
+            self.tuning_report.setPlainText(TUNING_RESET_STILL_READING)
+            return
+        facts = self._press_facts.among(chosen)
         if not self._confirm(
-            TUNING_RESET_LABEL,
-            reset_defaults.question(chosen, modules, foreign=foreign, missing=missing),
+            TUNING_RESET_LABEL, reset_defaults.question(chosen, modules, facts=facts)
         ):
             return
         self._reset_running = True
@@ -9143,6 +9161,7 @@ class ControllerView(QWidget):
         """Ask, off the GUI thread, what the Undo would put back; greyed until the answer lands."""
         self._undo_generation += 1
         self._undo_items = ()
+        self._press_facts = None
         self.tuning_reset_undo_action.setEnabled(False)
         self._run(
             partial(
@@ -9162,6 +9181,7 @@ class ControllerView(QWidget):
         if not isinstance(result, UndoLookup) or result.generation != self._undo_generation:
             return
         self._undo_items = result.items
+        self._press_facts = result.facts
         self.tuning_reset_undo_action.setEnabled(bool(result.items))
 
     @Slot(object)

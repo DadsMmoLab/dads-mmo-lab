@@ -14125,6 +14125,7 @@ def test_the_reset_runs_on_the_job_runner_and_the_tab_is_busy_until_it_ends(
         ps, tmp_path, route, job_runner=lambda work, done, failed: held.append((work, done, failed))
     )
     _reset_yes(monkeypatch)
+    _land_undo_lookups(held)
     queued = len(held)
     _menu_action(view, TUNING_RESET_ALL).trigger()
 
@@ -14571,3 +14572,41 @@ def test_the_undo_press_checks_each_file_again_before_it_writes(
     assert not [n for n in siblings if n.startswith("worldserver.conf.") and ".undo-" in n]
     assert "worldserver.conf" not in view.tuning_report.toPlainText()
     assert (tmp_path / TUNING_CORE_FILES[1]).read_bytes() == b"Key = 2\n"
+
+
+def test_the_reset_question_reads_no_file_on_the_gui_thread(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review: `press_facts` stat'ed each file and read the base compose file on the GUI
+    thread, per press -- over 9p for a server inside WSL. It rides the Undo lookup's job now;
+    a press before that answer lands is refused politely, never read on the GUI thread."""
+    _wotlk_server(tmp_path)
+    (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    reads: list[Path] = []
+    real = composegen.is_ours
+
+    def spy(path: Path) -> bool:
+        reads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(composegen, "is_ours", spy)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    assert reads == [] and asked == [], "read or asked before the facts had landed"
+    assert "still reading" in view.tuning_report.toPlainText()
+
+    _land_undo_lookups(held)
+    read_by_the_job = len(reads)
+    assert read_by_the_job, "control: the lookup job read the base compose file"
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert len(reads) == read_by_the_job, "the press read the disk on the GUI thread"
+    assert f"Left alone: {composegen.OVERRIDE_FILE} was not made by Yu'lon." in asked[0]
+    assert "modules/playerbots.conf" in asked[0]

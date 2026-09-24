@@ -1537,20 +1537,18 @@ def test_the_question_names_a_file_left_alone_and_one_made_again_before_the_pres
     _dist_install(tmp_path)
     (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
     (tmp_path / OVERRIDE).write_text("services: {}\n", encoding="utf-8")
-    foreign, missing = reset_defaults.press_facts(WOTLK, tmp_path, reset_defaults.core_files(WOTLK))
-    assert (foreign, missing) == ((OVERRIDE,), ())
-    said = reset_defaults.question(reset_defaults.core_files(WOTLK), [], foreign=foreign)
+    facts = reset_defaults.press_facts(WOTLK, tmp_path, reset_defaults.core_files(WOTLK))
+    assert (facts.foreign, facts.missing, facts.absent) == ((OVERRIDE,), (), ())
+    said = reset_defaults.question(reset_defaults.core_files(WOTLK), [], facts=facts)
     assert f"Left alone: {OVERRIDE} was not made by Yu'lon." in said
     assert "RECREATED" not in said, "the override's own paragraph is for one that is reset"
 
     (tmp_path / "tbc").mkdir()
     server, _, _, _ = _tuned_tbc(tmp_path / "tbc")
     (server / "etc/ahbot.conf").unlink()
-    assert reset_defaults.press_facts(TBC, server, reset_defaults.core_files(TBC)) == (
-        (),
-        ("etc/ahbot.conf",),
-    )
-    said = reset_defaults.question(["etc/ahbot.conf"], [], missing=("etc/ahbot.conf",))
+    facts = reset_defaults.press_facts(TBC, server, reset_defaults.core_files(TBC))
+    assert (facts.foreign, facts.missing, facts.absent) == ((), ("etc/ahbot.conf",), ())
+    said = reset_defaults.question(["etc/ahbot.conf"], [], facts=facts.among(["etc/ahbot.conf"]))
     assert "made again as Yu'lon installs it: ahbot.conf" in said
 
 
@@ -1617,3 +1615,89 @@ def test_a_read_only_conf_is_written_and_left_owner_writable(
     monkeypatch.undo()
     assert [p.name for p in tmp_path.iterdir()] == ["mangosd.conf"], "a temp file was left"
     assert path.read_bytes() == b"A = 2\n"
+
+
+# -- re-review: a rolled-back press, and what the question says ------------------------
+
+
+def _third_write_fails() -> Any:
+    calls: list[Path] = []
+
+    def third_fails(path: Path, text: str, **kwargs: Any) -> None:
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        calls.append(path)
+        conf.replace_file(path, text, **kwargs)
+
+    return third_fails
+
+
+def test_a_rolled_back_press_leaves_no_backups_and_the_earlier_press_undoable(
+    tmp_path: Path,
+) -> None:
+    """The re-review's repro: a press that rolled back hid P1, then misdirected the Undo."""
+    files = reset_defaults.AZEROTHCORE_CORE_FILES
+    _dist_install(tmp_path)
+    p1 = reset_defaults.reset(WOTLK, tmp_path, files, seams=_seams())
+    for file in files:
+        (tmp_path / file).write_bytes(b"Key = 7\n")
+
+    p2 = reset_defaults.reset(
+        WOTLK,
+        tmp_path,
+        files,
+        seams=_seams(write=_third_write_fails(), restore=reset_defaults.restore),
+    )
+
+    assert p2.refused and p2.written == ()
+    assert all((tmp_path / file).read_bytes() == b"Key = 7\n" for file in files)
+    assert sorted(_baks(tmp_path)) == sorted(
+        r.backup for r in p1.written if r.backup
+    ), "the rolled-back press left its own backups, the failed file's included"
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == p1.written
+    (tmp_path / files[0]).write_bytes(b"Key = 9\n")
+    undone = reset_defaults.undo(tmp_path, reset_defaults.last_reset_on_disk(WOTLK, tmp_path))
+    assert [r.outcome for r in undone.results] == ["restored"] * 3
+    assert all(
+        (tmp_path / file).read_bytes() == b"Key = 2\n" for file in files
+    ), "the Undo did not put back what P1 replaced"
+
+
+def test_a_rollback_that_could_not_restore_keeps_every_backup_of_its_press(
+    tmp_path: Path,
+) -> None:
+    """A backup a rollback failed to copy back is the only record of the file: all are kept."""
+    files = reset_defaults.AZEROTHCORE_CORE_FILES
+    _dist_install(tmp_path)
+
+    def restore_fails(backup: Path, target: Path) -> None:
+        raise OSError(13, "Permission denied")
+
+    report = reset_defaults.reset(
+        WOTLK, tmp_path, files, seams=_seams(write=_third_write_fails(), restore=restore_fails)
+    )
+
+    assert report.refused
+    assert len(report.written) == 2, "the two written files stand changed, backups named"
+    assert len(_baks(tmp_path)) == 3, "a backup was deleted though a restore failed"
+
+
+def test_the_question_says_a_file_the_install_never_writes_stays_as_it_is() -> None:
+    """Re-review: WotLK's Reset all lists playerbots.conf, which stays absent."""
+    bots = reset_defaults.AZEROTHCORE_CORE_FILES[2]
+    facts = reset_defaults.PressFacts(absent=(bots,), missing=("etc/realmd.conf",))
+    said = reset_defaults.question([bots, "etc/realmd.conf"], [], facts=facts)
+    assert (
+        "modules/playerbots.conf is not on disk and a fresh install does not write it, "
+        "so it stays as it is." in said
+    )
+    assert "A backup of each file that is on disk is made first" in said
+    assert reset_defaults.PressFacts(absent=(bots,)).among(["x"]) == reset_defaults.PressFacts()
+
+
+def test_press_facts_sorts_every_core_file_into_its_case(tmp_path: Path) -> None:
+    _dist_install(tmp_path)
+    (tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[2]).unlink()
+    facts = reset_defaults.press_facts(WOTLK, tmp_path, reset_defaults.core_files(WOTLK))
+    assert facts.absent == (reset_defaults.AZEROTHCORE_CORE_FILES[2],)
+    assert facts.foreign == (OVERRIDE,) and facts.missing == ()
