@@ -92,3 +92,43 @@ def test_a_prompt_with_a_default_starts_filled_in(qapp: object) -> None:
     dialog = ManifestPromptDialog(None, manifest, manifest.prompts)
     assert dialog.answers() == {"seconds": "20"}
     assert dialog.problem() == ""
+
+
+def _hearthstone() -> object:
+    return wotlk_modules.store().load("mod", "hearthstone-cd")
+
+
+def test_running_a_choice_again_says_the_answer_shown_is_the_one_applied(qapp: object) -> None:
+    """T100 review: an Update or a second Install re-asks with the DEFAULT selected.
+
+    Nothing remembers the earlier answer (that is T104's question for the
+    owner), so a player who picked 5 minutes, pressed Update and clicked OK got
+    30 minutes back without a word. Until answers are remembered, the dialog
+    says so: what is selected is what gets applied, now.
+
+    Mutation: drop the note and `notes()` carries no "applies the answer".
+    """
+    manifest = _hearthstone()
+    first = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
+    again = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+    )
+    assert "applies the answer" not in first.notes()
+    assert "applies the answer" in again.notes()
+    assert "does not remember" in again.notes()
+    assert again.answers() == {"cooldown": "30_Min"}, "still the default: the note is why"
+
+
+def test_running_a_non_choice_again_gets_no_choice_note(qapp: object) -> None:
+    """The note is about picking between options, so a number prompt is not given it."""
+    manifest = parse_manifest(
+        {
+            "id": "kindly",
+            "name": "Kindly",
+            "type": "mod",
+            "game": "wow-wotlk",
+            "prompts": [{"key": "seconds", "question": "seconds", "kind": "int", "default": "20"}],
+        }
+    )
+    dialog = ManifestPromptDialog(None, manifest, manifest.prompts, again=True)
+    assert "applies the answer" not in dialog.notes()

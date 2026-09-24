@@ -1486,6 +1486,26 @@ def _destroys_message(found: _Reset, rel: str, item_id: str, url: str, doing: st
 _INT = re.compile(r"[+-]?\d+")
 
 _BOOL_WORDS = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+
+
+def _lua_spelling(manifest: Manifest, vals: Mapping[str, str]) -> dict[str, str]:
+    """`vals`, with every `bool` prompt's answer spelled `true`/`false` for a Lua file.
+
+    The dialog answers a `bool` as `"1"`/`"0"` because that is what a
+    worldserver conf holds (`manifest_prompt._BOOL_CHOICES`), and `check_answer`
+    takes either spelling. A `.lua` target reads `ENABLED = 0` as TRUE -- only
+    `nil` and `false` are false in Lua -- so a "no" written in conf spelling
+    turns a feature ON, and the manifest's `(true|false)` regex then never
+    matches that line again.
+    """
+    kinds = {prompt.key: prompt.kind for prompt in manifest.prompts}
+    out = dict(vals)
+    for key, value in vals.items():
+        if kinds.get(key) == "bool":
+            out[key] = "true" if value.strip().lower() in _TRUE_WORDS else "false"
+    return out
+
 
 _SAFE_IN_QUERY = re.compile(r"^[A-Za-z0-9_.-]+$")
 """What an answer may contain before it is pasted into an `ExistsCheck.query`.
@@ -1505,6 +1525,22 @@ def _fields(template: str) -> set[str]:
     }
 
 
+def _whens(action: When) -> tuple[When, ...]:
+    """Which `when` labels an action runs.
+
+    Install runs the configure-time steps too, as the item's FIRST configure
+    (T92). Every value-bearing step in the shipped catalog is `when:
+    configure` -- the six ALE scripts' Lua keys, `mod-ale`'s conf, `xp-rates`'
+    worldserver.conf lines, `battlepass`'s enable row -- and nothing in the
+    app calls `configure()`, so until this an install deployed the upstream
+    defaults, asked no question (`required_prompts` counted install-time
+    templates only, and there were none) and, for `xp-rates`, did nothing at
+    all. Measured on yulon-ubuntu 2026-09-22: `sitmeanrest` installed with
+    DELAY 10 / RATE 60 answered still read 30 / 5.0 on disk.
+    """
+    return ("install", "configure") if action == "install" else (action,)
+
+
 def _action_templates(manifest: Manifest, action: When) -> list[str]:
     """Every string this action would put through `_render()`, in the engine's own order.
 
@@ -1517,11 +1553,13 @@ def _action_templates(manifest: Manifest, action: When) -> list[str]:
     step, and `test_required_prompts_are_only_the_ones_the_action_actually_renders`
     is what says they are.
     """
-    out = [patch.replace for patch in manifest.patches if patch.when == action]
+    whens = _whens(action)
+    out = [patch.replace for patch in manifest.patches if patch.when in whens]
     for step in manifest.sql:
-        if step.when != action or step.applied_by != "direct":
+        if step.when not in whens or step.applied_by != "direct":
             continue
         out.append(step.statement if step.statement is not None else step.path or "")
+        out += list(step.then)
     if action in ("install", "configure"):
         for conf in manifest.conf:
             if _is_glob(conf.file) or not conf.file.endswith(_CONF_KEY_WRITE_SUFFIXES):
@@ -1546,6 +1584,31 @@ def required_prompts(manifest: Manifest, action: When) -> tuple[Prompt, ...]:
     for template in _action_templates(manifest, action):
         wanted |= _fields(template)
     return tuple(prompt for prompt in manifest.prompts if prompt.key in wanted)
+
+
+def must_ask(prompt: Prompt) -> bool:
+    """Whether Install has to put this required prompt to a person before it runs.
+
+    A prompt with no default cannot be filled in by the app at all. A `choice`
+    can -- and must not be, because choosing is the whole of what it is for
+    (T100): `hearthstone-cd`'s `cooldown` defaults to `30_Min`, which is
+    upstream's RESET file, and while only a missing default opened the dialog
+    every GUI install applied that and changed nothing. The dialog is handed
+    every required prompt with its default filled in, so clicking straight
+    through a FIRST install applies exactly what the old silent path did.
+
+    It is asked only of a prompt `required_prompts()` returned: a `choice` a
+    manifest declares but no template renders is never put to anyone. Which
+    shipped manifests end up asking is pinned by the view's sweep test, not
+    listed here.
+
+    It was written for two places that answer "will Install ask me something?"
+    -- the dialog gate in `ControllerView._module_values()` and the Modules
+    row's "asks a question" chip. Since T92 the dialog gate
+    opens for EVERY required prompt, a superset of this, so it no longer reads
+    `must_ask()`; the chip still does, and is the narrower of the two.
+    """
+    return prompt.default is None or prompt.kind == "choice"
 
 
 def check_answer(prompt: Prompt, value: str) -> str:
@@ -1739,8 +1802,15 @@ class Applier:
         folder: FolderSource | None = None,
         complete: Completer | None = None,
         replacing: bool = False,
+        first_configure_sql: bool = True,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
+
+        `first_configure_sql` is False from `update()` only: a fresh deploy
+        just replaced the script, so its configure-time PATCHES are re-run,
+        but the configure-time SQL writes rows the person may have changed by
+        hand since (`battlepass_config`), and an update is not a reason to
+        put those back to the prompt defaults.
 
         `folder` is the second way to fill `modules/<id>`: the bytes come from a
         directory on the user's own disk through `FolderSource.copier` instead
@@ -1827,7 +1897,9 @@ class Applier:
             # the case that needs the question asked most, not least. Gated on
             # such a patch actually existing, like `configure()`, so a refusal
             # is never about a folder this run would not have touched.
-            if clone.exists() and any(p.in_clone and p.when == "install" for p in manifest.patches):
+            if clone.exists() and any(
+                p.in_clone and p.when in _whens("install") for p in manifest.patches
+            ):
                 self._require_own_clone(manifest, clone, "install")
         else:
             self._require_own_clone(manifest, clone, "install")
@@ -1903,8 +1975,21 @@ class Applier:
             manifest = self._completed(manifest, clone, complete)
         self._deploy(manifest, clone, log)
         self._patches(manifest, clone, vals, "install", log)
+        # Both SQL passes are refused as one, BEFORE either runs: the guard's
+        # own sentence says no rows were written, and after the install-time
+        # pass that would be false of the configure-time one.
+        if first_configure_sql:
+            self._refuse_direct_sql_into_a_running_world(manifest, "configure")
         self._sql(manifest, clone, vals, "install", log)
         self._conf(manifest, clone, vals, log)
+        # Then the configure-time steps, as this item's first configure
+        # (`_whens`): a value the person answered is written now, not left for
+        # a `configure()` nothing calls. After `_conf()`, because a configure
+        # patch may target the conf that step activates (`mod-ale`'s does),
+        # which is the state a later `configure()` always finds.
+        self._patches(manifest, clone, vals, "configure", log)
+        if first_configure_sql:
+            self._sql(manifest, clone, vals, "configure", log)
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
         self._finish_claim(manifest, clone, url, claimed, log, log.client_copies or previous_copies)
@@ -2033,7 +2118,7 @@ class Applier:
         refusal = self._update_refusal(manifest)
         if refusal is not None:
             raise ApplyError(refusal)
-        return self.install(manifest, values)
+        return self.install(manifest, values, first_configure_sql=False)
 
     def _update_refusal(self, manifest: Manifest) -> str | None:
         """Why this clone must not be fast-forwarded, in the user's words, or `None`.
@@ -2938,7 +3023,8 @@ class Applier:
                 continue
             base = clone if patch.in_clone else self.server_dir
             files = sorted(base.glob(patch.file)) if _is_glob(patch.file) else [base / patch.file]
-            replacement = _render(patch.replace, vals, f"patch {patch.file}")
+            spelled = _lua_spelling(manifest, vals) if patch.file.endswith(".lua") else vals
+            replacement = _render(patch.replace, spelled, f"patch {patch.file}")
             for path in files:
                 if not path.is_file():
                     raise ApplyError(f"patch target missing: {path}")
@@ -2950,6 +3036,7 @@ class Applier:
     def _sql(
         self, manifest: Manifest, clone: Path, vals: Mapping[str, str], when: When, log: _Log
     ) -> None:
+        plan = self._plan_sql(manifest, clone, vals, when)
         self._refuse_direct_sql_into_a_running_world(manifest, when)
         # Second, and never first: a press against a live world is refused above
         # having started nothing. Starting containers under a world this guard
@@ -2976,7 +3063,7 @@ class Applier:
             # the trade: a container that is running when it need not be, rather
             # than rows written under a live world.
             self._refuse_direct_sql_into_a_running_world(manifest, when)
-        for step in manifest.sql:
+        for index, step in enumerate(manifest.sql):
             if step.when != when:
                 continue
             if step.applied_by == "db-import":
@@ -2991,7 +3078,7 @@ class Applier:
             # and keeps the skip in the same list the user already reads.
             if not self._precondition_met(step, log):
                 continue
-            self._run_sql(step, clone, vals, log)
+            self._run_sql(step, clone, vals, log, plan.get(index))
             self._verify_sql(manifest, step, log)
 
     def _refuse_direct_sql_into_a_running_world(self, manifest: Manifest, when: When) -> None:
@@ -3174,11 +3261,96 @@ class Applier:
         assert step.path is not None
         return PendingSql(db=step.db, path=step.path, files=_sql_files(clone, step.path))
 
-    def _run_sql(self, step: SqlStep, clone: Path, vals: Mapping[str, str], log: _Log) -> None:
+    def _plan_sql(
+        self, manifest: Manifest, clone: Path, vals: Mapping[str, str], when: When
+    ) -> dict[int, tuple[tuple[str, ...], str]]:
+        """Resolve, read and check every named SQL file this press will run, before any runs.
+
+        T100. Without it a press of several SQL steps ran them in order until one
+        was missing or unusable, and the ones before it stayed applied --
+        `hearthstone-cd`'s reset landed and then "sql file missing in clone" was
+        reported, with a custom cooldown already gone; and after round 2, a
+        good first step committed before a later `then` file was found to hold
+        DDL (Codex, round 3). So every named file of every direct step is looked
+        for here, and every `then` step's files are read, decoded and put through
+        `transaction_refusal()` -- the only place "nothing was run" is said.
+
+        Returns, per index into `manifest.sql`, the file names and the ONE text
+        `_run_transaction()` sends, so nothing is read twice or read differently
+        later. A glob is left alone: it names no file that can be missing.
+        """
+        if self.sql is None:
+            return {}
+        missing: list[str] = []
+        refusals: list[str] = []
+        plan: dict[int, tuple[tuple[str, ...], str]] = {}
+        for index, step in enumerate(manifest.sql):
+            if step.when != when or step.applied_by != "direct" or step.path is None:
+                continue
+            names = tuple(_render(t, vals, "sql path") for t in (step.path, *step.then))
+            absent = [n for n in names if not _is_glob(n) and not (clone / n).is_file()]
+            missing += absent
+            if not step.then or absent:
+                continue
+            texts: list[str] = []
+            for name in names:
+                try:
+                    text = (clone / name).read_bytes().decode("utf-8-sig")
+                except UnicodeDecodeError as exc:
+                    refusals.append(f"{name}: not UTF-8 text ({exc.reason} at byte {exc.start})")
+                    continue
+                refusal = transaction_refusal(name, text)
+                if refusal:
+                    refusals.append(refusal)
+                texts.append(text if text.endswith("\n") else text + "\n")
+            plan[index] = (names, "START TRANSACTION;\n" + "".join(texts) + "COMMIT;\n")
+        if missing:
+            refusals.insert(
+                0,
+                f"{', '.join(missing)} is not in the module's files; its upstream may have "
+                f"renamed or removed it",
+            )
+        if refusals:
+            raise ApplyError(f"{manifest.id}: nothing was run. " + " ".join(refusals))
+        return plan
+
+    def _run_transaction(
+        self, step: SqlStep, planned: tuple[tuple[str, ...], str], log: _Log
+    ) -> None:
+        """`path` and every `then` file as ONE text inside one transaction (T100 review).
+
+        Sent over `run_statement()` -- the runner every inline step already
+        uses, which pipes the text into `mysql` on stdin. `mysql` reading a
+        script stops at the first error, and the session it ends rolls back the
+        transaction still open, so a chosen file that fails takes the reset
+        before it with it. That holds only for statements that do not commit on
+        their own, which `_plan_sql()` has already made sure of for every file
+        (`transaction_refusal()`). `item_template` is InnoDB on AzerothCore --
+        read on the live world database, see the T100 gate -- which is what
+        makes the rollback real.
+        """
+        assert self.sql is not None
+        names, text = planned
+        self.sql.run_statement(step.db, text)
+        for name in names:
+            log.done.append(f"sql {name} → {step.db}")
+
+    def _run_sql(
+        self,
+        step: SqlStep,
+        clone: Path,
+        vals: Mapping[str, str],
+        log: _Log,
+        planned: tuple[tuple[str, ...], str] | None = None,
+    ) -> None:
         assert self.sql is not None
         if step.statement is not None:
             self.sql.run_statement(step.db, _render(step.statement, vals, "sql statement"))
             log.done.append(f"sql inline → {step.db}")
+            return
+        if step.then:
+            assert planned is not None, "a `then` step runs only from `_plan_sql()`'s text"
+            self._run_transaction(step, planned, log)
             return
         assert step.path is not None
         pattern = _render(step.path, vals, "sql path")
@@ -3635,6 +3807,108 @@ def _sql_files(clone: Path, path: str) -> tuple[str, ...] | None:
         return None
     matches = sorted(clone.glob(path)) if _is_glob(path) else [clone / path]
     return tuple(p.relative_to(clone).as_posix() for p in matches if p.is_file())
+
+
+_TRANSACTION_SAFE = frozenset({"UPDATE", "INSERT", "REPLACE", "DELETE", "SELECT", "SET"})
+"""The statements a `then` step may hold: row changes and reads, nothing else (T100 round 3).
+
+An ALLOWLIST, because the list of statements MySQL commits around by itself
+(8.4 manual, "Statements That Cause an Implicit Commit") is long, grows with
+each release, and a denylist that misses one entry calls a half-applied step
+atomic. `SET` is further narrowed in `transaction_refusal()` to user variables.
+"""
+
+_USER_VARIABLE_SET = re.compile(r"SET\s+@[A-Za-z0-9_$.]+\s*(:?=)", re.IGNORECASE)
+
+
+class _SqlSplitError(ValueError):
+    """The text cannot be split into statements this app can vouch for."""
+
+
+def split_sql(text: str) -> list[str]:
+    """Statements of a SQL script, comments removed, quoted text kept as written.
+
+    A small scanner, not a parser: it knows exactly what decides where a MySQL
+    statement ends -- `'...'`, `"..."` and `` `...` `` quoting (a backslash
+    escapes inside the first two, a doubled quote closes and reopens), `-- `,
+    `#` and `/* */` comments, and `;` -- so a `;` or a keyword inside a string
+    or a comment is not a statement. It refuses (`_SqlSplitError`) what it will
+    not guess at: an executable `/*! ... */` comment (MySQL runs its body), a
+    backslash outside a quote (a `mysql` client command such as `\\!` or
+    `\\g`), and a quote or comment left open at the end of the text.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if ch in "'\"`":
+            j = i + 1
+            while True:
+                if j >= n:
+                    raise _SqlSplitError(f"a {ch} quote is never closed")
+                if text[j] == "\\" and ch != "`":
+                    j += 2
+                    continue
+                if text[j] == ch:
+                    break
+                j += 1
+            current.append(text[i : j + 1])
+            i = j + 1
+        elif ch == "#" or (ch == "-" and nxt == "-" and (i + 2 >= n or text[i + 2] <= " ")):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            current.append(" ")
+        elif ch == "/" and nxt == "*":
+            if i + 2 < n and text[i + 2] == "!":
+                raise _SqlSplitError("an executable /*! ... */ comment, which MySQL runs")
+            j = text.find("*/", i + 2)
+            if j < 0:
+                raise _SqlSplitError("a /* comment is never closed")
+            current.append(" ")
+            i = j + 2
+        elif ch == "\\":
+            raise _SqlSplitError("a backslash outside a quote, which the mysql client runs")
+        elif ch == ";":
+            statements.append("".join(current).strip())
+            current = []
+            i += 1
+        else:
+            current.append(ch)
+            i += 1
+    statements.append("".join(current).strip())
+    return [statement for statement in statements if statement]
+
+
+def transaction_refusal(name: str, text: str) -> str:
+    """Why `text` cannot go inside one transaction, or `""` when every statement can.
+
+    Checked per statement, after `split_sql()`: a DDL statement second on a
+    line used to pass a check that only looked at the start of each line
+    (Codex, T100 round 3). Every statement's first word must be one of
+    `_TRANSACTION_SAFE`, and a `SET` must assign user variables only (`SET @x =
+    ...`) -- `SET autocommit`, `SET TRANSACTION`, `SET PASSWORD` and every other
+    system variable are refused, the first two because they end or reshape the
+    transaction this is for.
+    """
+    tail = "so this step cannot run inside one transaction"
+    try:
+        statements = split_sql(text)
+    except _SqlSplitError as exc:
+        return f"{name}: {exc}, {tail}"
+    for statement in statements:
+        word = statement.split(None, 1)[0].upper() if statement.split() else ""
+        shown = " ".join(statement.split())[:60]
+        if word not in _TRANSACTION_SAFE:
+            return f"{name}: `{shown}` is not a row change or a read, {tail}"
+        if word == "SET" and not all(
+            _USER_VARIABLE_SET.match("SET " + part.strip())
+            for part in statement[3:].split(",")
+            if part.strip()
+        ):
+            return f"{name}: `{shown}` sets more than a user variable, {tail}"
+    return ""
 
 
 def _render(template: str, values: Mapping[str, str], what: str) -> str:
