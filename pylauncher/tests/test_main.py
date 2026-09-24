@@ -1728,7 +1728,8 @@ def test_the_server_tab_button_on_a_tbc_tab_asks_stops_forgets_and_keeps_every_f
     tile = _catalog_view(window).button_for("wow-tbc")
     assert str(server_dir) not in tile.toolTip(), "the Catalog still names the removed server"
     survivors = window.saved_states[-1].installed_dirs()
-    assert tile.text() == ("Installed" if "wow-tbc" in survivors else "Install")
+    assert "wow-tbc" not in survivors, "the fixture remembers another TBC install"
+    assert tile.text() == "Install" and tile.isEnabled(), "the tile was not handed back"
 
 
 def test_answering_no_keeps_the_tab_the_record_and_the_server(

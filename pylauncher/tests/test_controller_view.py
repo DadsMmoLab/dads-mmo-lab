@@ -5591,6 +5591,68 @@ def test_a_poll_answered_while_an_action_runs_is_not_an_answer(
     assert view.last_seen_running() is None
 
 
+def test_a_poll_that_swallowed_an_actions_refresh_is_not_an_answer_and_is_asked_again(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Asked while idle, answered after a whole Start: that Start's own refresh was dropped.
+
+    `refresh_status()` returns early while a poll is in flight, so the Start's
+    end-of-action refresh never ran, and the one answer left is the "stopped"
+    read before the containers came up. Kept, it let a removal forget a running
+    server without stopping it (T95 review, round 1, the last hole).
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    ps.names = ""
+    view.refresh_status()  # the 5 s poll, asked while idle
+    stale = view.services.controller.status()
+    ((_work, on_done, on_error),) = gate.queued
+    gate.queued = [(lambda: stale, on_done, on_error)]  # "stopped", read now, answered later
+
+    gate.hold = False
+    view.start_server()  # runs to the end; its refresh finds the poll pending
+    assert any(c[:5] == ["docker", "compose", "up", "-d", "--no-deps"] for c in ps.calls)
+    assert not view._busy
+
+    gate.hold = True
+    queued, gate.queued = gate.queued, []
+    for work, done, error in queued:
+        run_inline(work, done, error)  # the late "stopped" answers
+
+    assert view.last_seen_running() is None, "the answer from before the Start was trusted"
+    assert len(gate.queued) == 1, "the refresh the Start lost was never asked again"
+    gate.release()
+    assert view.last_seen_running() is True
+
+
+def test_a_failed_poll_that_swallowed_a_refresh_asks_again_too(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    view.refresh_status()
+    view.refresh_status()  # dropped: the first is still out
+    ((_work, on_done, on_error),) = gate.queued
+
+    def no_docker() -> NoReturn:
+        raise RuntimeError("Cannot connect to the Docker daemon")
+
+    gate.queued = []
+    run_inline(no_docker, on_done, on_error)
+
+    assert view.last_seen_running() is None
+    assert len(gate.queued) == 1, "the dropped refresh was never asked again"
+    ps.names = "ac-worldserver\n"
+    gate.release()
+    assert view.last_seen_running() is True
+    gate.hold = True
+    view.refresh_status()
+    gate.release()
+    assert not gate.queued, "an answer nothing superseded asked again"
+
+
 def _refusal_while_held(view: ControllerView, gate: _Gate, press: Callable[[], None]) -> str | None:
     """Press with the job held, read the refusal, let the job finish, and prove it lifts."""
     gate.hold = True

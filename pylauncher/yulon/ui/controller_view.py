@@ -3861,6 +3861,10 @@ class ControllerView(QWidget):
         # Whether the poll in flight was asked while a Server action ran. Its
         # answer may predate what that action did (T95 review, round 1).
         self._status_asked_busy = False
+        # Whether a refresh was asked, and dropped, while that poll was in
+        # flight. The dropped one may be an action's own end-of-action refresh,
+        # so the answer still coming predates it (T95 review, round 2).
+        self._status_superseded = False
         # T95. Jobs that run through `_run()` without `_busy`, so neither
         # `busy_reason()` nor `_busy` sees them, and a removal must.
         self._backup_running = False
@@ -4273,8 +4277,12 @@ class ControllerView(QWidget):
         see `recheck()`.
         """
         if self._status_pending:
-            return  # a poll is already in flight; never queue them up
+            # A poll is already in flight; never queue them up. But remember
+            # the ask: its answer is older than this question (T95).
+            self._status_superseded = True
+            return
         self._status_pending = True
+        self._status_superseded = False
         self._status_asked_busy = self._busy
         self._run(self.services.controller.status, self._status_ready, self._status_failed)
 
@@ -4442,6 +4450,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _status_ready(self, result: object) -> None:
         self._status_pending = False
+        superseded = self._status_superseded
         status = result
         if not isinstance(status, InstallStatus):
             # Same hole, one branch narrower: a result that is not a status
@@ -4449,11 +4458,15 @@ class ControllerView(QWidget):
             # must not trust an older one (T95).
             self._last_status = None
             self._update_forget_visibility()
+            self._ask_again_if_superseded(superseded)
             return
         # T95: an answer is kept only if no Server action ran while it was
-        # read. A poll asked mid-Start can answer "stopped" for a server that
-        # came up a second later; unknown is what makes a removal stop first.
-        self._last_status = None if self._status_asked_busy or self._busy else status
+        # read, and no refresh was dropped while it was. A poll asked mid-Start
+        # can answer "stopped" for a server that came up a second later, and so
+        # can one asked just before it whose Start's own refresh it swallowed.
+        # Unknown is what makes a removal stop first.
+        stale = superseded or self._status_asked_busy or self._busy
+        self._last_status = None if stale else status
         if not self._busy:
             # Only while nothing of ours is running. The five-second poll used to
             # overwrite the label unconditionally, which was invisible at a
@@ -4475,6 +4488,16 @@ class ControllerView(QWidget):
         self._update_client_dir_row()
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
+        self._ask_again_if_superseded(superseded)
+
+    def _ask_again_if_superseded(self, superseded: bool) -> None:
+        """Ask once more for the refresh this poll's answer made `refresh_status()` drop (T95).
+
+        Without it, the answer on file stays unknown until the next five-second
+        tick, and an action's own end-of-action refresh is simply lost.
+        """
+        if superseded:
+            self.refresh_status()
 
     def _update_client_dir_row(self) -> None:
         """Re-read the row's text on the same poll as the status line (T36).
@@ -4722,6 +4745,10 @@ class ControllerView(QWidget):
     def _status_failed(self, exc: object) -> None:
         self._status_pending = False
         self._last_status = None
+        # T95: the refresh dropped while this poll was out is asked again. The
+        # app's job runner hands it to a worker thread, so its answer arrives
+        # after this method has returned.
+        self._ask_again_if_superseded(self._status_superseded)
         self.status_label.setText(f"status: Docker not reachable ({exc})")
         self.realm_badge.set_status("stopped")
         # T54. The reveal used to run only on the success path, and the control
