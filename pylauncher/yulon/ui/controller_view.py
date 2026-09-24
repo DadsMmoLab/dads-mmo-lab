@@ -8161,6 +8161,7 @@ class ControllerView(QWidget):
             lambda: source(cancel),
             title=f"Rebuilding {self.entry.name}",
             cancel=cancel,
+            record_as=self._run_record_kind(),
         )
 
     def _set_update_buttons(self) -> None:
@@ -8409,6 +8410,7 @@ class ControllerView(QWidget):
             lambda: route.press(cancel),
             title=f"Updating {self.entry.name} to the newest code",
             cancel=cancel,
+            record_as=self._run_record_kind(),
         )
 
     @Slot()
@@ -8448,6 +8450,7 @@ class ControllerView(QWidget):
             lambda: route.to_pin(cancel),
             title=f"Returning {self.entry.name} to the tested commit",
             cancel=cancel,
+            record_as=self._run_record_kind(),
         )
 
     def apply_database_updates(self) -> bool:
@@ -8519,6 +8522,7 @@ class ControllerView(QWidget):
             lambda: route.press(cancel),
             title=f"Applying database updates to {self.entry.name}",
             cancel=cancel,
+            record_as=self._run_record_kind(),
         )
 
     def adopt_as_imported(self) -> bool:
@@ -8586,7 +8590,18 @@ class ControllerView(QWidget):
             lambda: route.press(cancel),
             title=f"Adopting {self.entry.name}'s databases as a finished import",
             cancel=cancel,
+            record_as=self._run_record_kind(),
         )
+
+    def _run_record_kind(self) -> str:
+        """What this tab's rebuild-panel jobs are kept under on disk (T93).
+
+        `rebuild-<game>-<install id>`, the install id being the path hash every
+        per-install file of this app is keyed by (`composegen.install_id`), so
+        two installs of one game keep separate histories of ten.
+        """
+        server_dir = self.services.controller.server_dir
+        return f"rebuild-{self.entry.id}-{composegen.install_id(server_dir)}"
 
     @Slot()
     def _rebuild_started(self) -> None:
