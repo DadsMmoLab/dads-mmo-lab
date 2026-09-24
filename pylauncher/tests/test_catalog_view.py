@@ -36,6 +36,7 @@ from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import InstallEngine, InstallOptions
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.git import CloneSpec, RunnerGit
+from yulon.support import runlog
 from yulon.ui import catalog_view
 from yulon.ui.catalog_view import CatalogView, Identification
 from yulon.ui.widgets.log_panel import LogPanel
@@ -2489,3 +2490,23 @@ def test_the_modal_guard_covers_a_dialog_built_as_an_instance(qapp: object) -> N
     asked = catalog_view._qt_suggestion_asker(QWidget(), "WoW WotLK", Path("/tmp/whatever"))
 
     assert asked is False
+
+
+def test_an_install_keeps_its_output_in_a_run_log(
+    qapp: object, tmp_path: Path, the_compose_project_is_not_pinned: list[Path]
+) -> None:
+    """T93: a failed install is the commonest support case, and the panel forgets on close."""
+    panel = LogPanel()
+    view = CatalogView(
+        CATALOG,
+        lambda entry: _FakeInstaller(entry, ["cloning", "done"]),
+        panel,
+        platform_id=lambda: "linux",
+        pick_dir=lambda *_: tmp_path / "server",
+        home=tmp_path,
+    )
+    assert view.start_install(CATALOG.get("wow-wotlk")) is True
+    wait_for_panel(panel)
+    records = list(runlog.runs_dir().glob("install-wow-wotlk-*.log"))
+    assert len(records) == 1, records
+    assert "cloning" in records[0].read_text(encoding="utf-8")

@@ -1395,6 +1395,29 @@ def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(window: Any, tmp_p
     assert tabs.tabToolTip(index) == str(server_dir)
 
 
+def test_the_logs_tab_sits_under_the_catalog_and_stays_there(window: Any, tmp_path: Any) -> None:
+    """T93: the owner's placement. A server tab is APPENDED, so it can never push Logs down."""
+    from yulon.ui.logs_view import LogsView
+
+    tabs = window.property("tabs")
+    assert tabs.tabText(0) == "Catalog"
+    assert isinstance(tabs.widget(1), LogsView) and tabs.tabText(1) == "Logs"
+    assert tabs.widget(1) is window.yulon_logs_view
+    server_dir = tmp_path / "logs-tab-order"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    assert isinstance(tabs.widget(1), LogsView), "a new server tab pushed the Logs tab down"
+    assert tabs.indexOf(_tab_for(window, server_dir)) > 1
+
+
+def test_a_support_file_being_saved_refuses_the_close(window: Any, monkeypatch: Any) -> None:
+    """The join at exit waits 8 s and one docker read may take 50: a save must hold the close."""
+    assert main._busy_reasons(window) == []
+    monkeypatch.setattr(window.yulon_logs_view, "busy_reason", lambda: "saving the support file")
+    assert main._busy_reasons(window) == ["saving the support file"]
+    # The self-update asks `close_refusal()` as the guard does: it must hear the save too.
+    assert main.close_refusal(window) == "saving the support file"
+
+
 def test_a_tab_opened_after_startup_is_still_joined_when_the_window_closes(
     window: Any, tmp_path: Any
 ) -> None:

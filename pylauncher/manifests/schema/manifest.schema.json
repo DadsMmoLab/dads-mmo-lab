@@ -644,6 +644,15 @@
           "description": "Inline SQL (template).",
           "title": "Statement"
         },
+        "then": {
+          "default": [],
+          "description": "More files run after `path`, all of them as ONE transaction: a failure in any leaves none applied. Single files (templates ok), never globs; direct only.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Then",
+          "type": "array"
+        },
         "verify": {
           "default": [],
           "description": "Read after the step; an entry returning no row is a failure, by its own name.",
