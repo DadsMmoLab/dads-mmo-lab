@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import HANG_BOUND
+from tests.conftest import HANG_BOUND, spelled_bounds
 from tests.support_update import FEED
 from yulon import update
 from yulon.update import (
@@ -306,8 +306,48 @@ def test_urllib_turns_a_304_into_an_answer_not_an_exception(
     )
 
 
+TRICKLE_DEADLINE = 2.0
+"""The deadline the trickle test hands `_urllib_fetch`: short, so the file stays fast."""
+
+WATCHDOG_WAKE_ALLOWANCE = 6.0
+"""How long past its deadline a CORRECT fetch may still be running on a loaded box.
+
+Not a speed claim. For the `headers` shape exactly one thing ends the fetch:
+`_Deadline`'s `threading.Timer` waking and shutting the socket down, and when
+that thread gets a CPU is the operating system's decision, not this code's.
+Measured on the laptop (3 cores, WSL2) 2026-09-24 with `_Deadline._abort`
+wrapped to stamp the moment it ran: idle, it fired at 2.000-2.001 s and the
+fetch raised within 1 ms of it; beside 12 CPU spinners it fired at 3.212 s in
+one run of sixteen, and the fetch raised 4 ms after that. With both CI legs
+running at once the old `elapsed < 3.0` failed three times in one night at
+3.5 s (T105). Every late second was the timer waiting to be scheduled, and a
+player's launcher on a busy PC is late by the same amount: a watchdog thread
+is no more punctual than the scheduler that wakes it, and a fifteen-second
+bound that ends up at sixteen still ends.
+
+Sized against what the test must still catch, not against the worst load
+imaginable. Four times the worst lateness measured, so the bound is
+`TRICKLE_DEADLINE` + this = 8 s, which stays under both ways this test has
+seen the cut-off broken: running the server's whole trickle
+(`TRICKLE_SECONDS`), and the module's `TOTAL_FETCH_SECONDS` (15 s) reaching
+the timer in place of the deadline the caller gave. The lower half of the
+assertion needs no allowance, because load only ever makes a fetch later.
+"""
+
+TRICKLE_SECONDS = 30.0
+"""How long the test server keeps trickling if the client never hangs up.
+
+A correct fetch hangs up at the deadline and the server stops there, so this
+costs nothing on a green run. It is only as long as a BROKEN run takes, and it
+is long so that "cut off late" and "never cut off" cannot be confused: the
+defects measured against this server (see `_Deadline`) ran its full length.
+"""
+
+
 @contextlib.contextmanager
-def a_server_that(shape: str, *, seconds: float = 8.0, gap: float = 0.05) -> Iterator[str]:
+def a_server_that(
+    shape: str, *, seconds: float = TRICKLE_SECONDS, gap: float = 0.05
+) -> Iterator[str]:
     """A real socket on 127.0.0.1 that trickles, so the bound is proved not argued.
 
     A faked response object cannot show this: `http.client`'s `read(n)` blocks
@@ -393,7 +433,9 @@ def a_server_that(shape: str, *, seconds: float = 8.0, gap: float = 0.05) -> Ite
 
 
 @pytest.mark.parametrize("shape", ["body", "chunked", "headers"])
-def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(shape: str) -> None:
+def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(
+    shape: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Measured before the fix, against this very server with a 2 s deadline:
 
         body 12.0s   chunked 12.0s   headers 12.0s (and it RETURNED an answer)
@@ -401,14 +443,47 @@ def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(shape: str) -> N
     Two reasons a clock checked between reads could not see it: `read(n)`
     blocks until it has n bytes, and the header phase is inside `urlopen`,
     which had not returned yet — the deadline was computed after it did.
+
+    The upper bound carries `WATCHDOG_WAKE_ALLOWANCE` because the watchdog is
+    woken by the scheduler (T105), and the moment it ran is recorded so a
+    failure says which of the two was late: the timer getting a CPU, or the
+    fetch getting out once the socket was shut down.
     """
+    fired: list[float] = []
+    abort = update._Deadline._abort
+
+    def stamped(watcher: update._Deadline) -> None:
+        fired.append(time.monotonic())
+        abort(watcher)
+
+    monkeypatch.setattr(update._Deadline, "_abort", stamped)
+
     with a_server_that(shape) as url:
         started = time.monotonic()
         with pytest.raises(TimeoutError):
-            update._urllib_fetch(url, None, deadline=2.0)
+            update._urllib_fetch(url, None, deadline=TRICKLE_DEADLINE)
         elapsed = time.monotonic() - started
 
-    assert elapsed < 3.0, f"the {shape} shape ran {elapsed:.1f}s against a 2.0s deadline"
+    watchdog = f"the watchdog fired at {fired[0] - started:.3f}s" if fired else "it never fired"
+    assert elapsed >= TRICKLE_DEADLINE, f"the {shape} shape gave up early, at {elapsed:.3f}s"
+    assert elapsed < TRICKLE_DEADLINE + WATCHDOG_WAKE_ALLOWANCE, (
+        f"the {shape} shape ran {elapsed:.3f}s against a {TRICKLE_DEADLINE}s deadline"
+        f" ({watchdog})"
+    )
+
+
+def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
+    """The bounds audit `test_job.py` and `test_log_panel.py` run on themselves.
+
+    **What it cannot see, stated so the price is known.** The trickle test's
+    ASSERTION is an elapsed-time comparison, which `conftest.spelled_bounds`
+    does not read: that bound is `TRICKLE_DEADLINE + WATCHDOG_WAKE_ALLOWANCE`,
+    named and argued above, and a bare number typed into it would not change
+    this set. `time.monotonic()` is here because that test and the server
+    measure with it; `gap` is the server's pacing between trickled bytes, not a
+    wait on the subject.
+    """
+    assert spelled_bounds(__file__) == {"HANG_BOUND", "gap", "time.monotonic()"}
 
 
 def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
