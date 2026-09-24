@@ -60,6 +60,11 @@ the choice here is about what a worldserver reads, not about what passes.
 """
 
 
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+"""The yes/no spellings `apply.check_answer()` accepts, split by meaning."""
+
+
 _ROWS_MIN_HEIGHT = 120
 """The shortest the question area may get: about four rows, so a squeezed dialog shows some."""
 
@@ -146,6 +151,7 @@ class ManifestPromptDialog(QDialog):
         super().__init__(parent)
         self._manifest = manifest
         self._prompts = tuple(prompts)
+        self._kinds = {prompt.key: prompt.kind for prompt in self._prompts}
         self._answers: dict[str, str] = {}
         self._controls: dict[str, QWidget] = {}
         self._questions: list[str] = []
@@ -267,7 +273,21 @@ class ManifestPromptDialog(QDialog):
         return ""
 
     def set_answer(self, key: str, value: str) -> None:
-        """State one answer, and show it in its control if that control can show it."""
+        """State one answer, and show it in its control if that control can show it.
+
+        A yes/no answer spelled as a word (`"false"`, `"yes"`, ...) is stored as
+        the `"1"`/`"0"` its box offers. Accountwide's thirteen flags default to
+        `"false"`; stored as given, the box found no such item and stayed on
+        Yes while the answer held was "false" (found on the T92 merge, once
+        "ask all" put them in a dialog). A word that is not a yes/no at all is
+        kept as given, so `problem()` can still say so.
+        """
+        if self._kinds.get(key) == "bool":
+            word = value.strip().lower()
+            if word in _TRUE_WORDS:
+                value = "1"
+            elif word in _FALSE_WORDS:
+                value = "0"
         self._answers[key] = value
         control = self._controls.get(key)
         if isinstance(control, QLineEdit):

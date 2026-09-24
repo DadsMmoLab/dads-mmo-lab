@@ -266,3 +266,35 @@ def test_accountwides_thirteen_questions_scroll_rather_than_clip_at_the_minimum_
     finally:
         dialog.close()
         window.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("default", "shown", "answer"), [("false", "No", "0"), ("true", "Yes", "1")]
+)
+def test_a_yes_no_default_spelled_as_a_word_is_shown_as_that_answer(
+    qapp: object, default: str, shown: str, answer: str
+) -> None:
+    """Found on the T92 merge: accountwide's flags default to `"false"`, and the box said Yes.
+
+    The yes/no box offers `"1"`/`"0"`, and `set_answer("false")` found no such
+    item, so the box stayed on its first item -- Yes -- while the answer held
+    was "false". Never asked before T104, so never seen; with "ask all" all
+    thirteen accountwide flags opened reading Yes over a No.
+
+    Mutation: store the word as given and the box reads Yes for "false".
+    """
+    from PySide6.QtWidgets import QComboBox
+
+    manifest = parse_manifest(
+        {
+            "id": "flags",
+            "name": "Flags",
+            "type": "mod",
+            "game": "wow-wotlk",
+            "prompts": [{"key": "on", "question": "on?", "kind": "bool", "default": default}],
+        }
+    )
+    dialog = ManifestPromptDialog(None, manifest, manifest.prompts)
+    (combo,) = dialog.findChildren(QComboBox)
+    assert combo.currentText() == shown
+    assert dialog.answers() == {"on": answer}
