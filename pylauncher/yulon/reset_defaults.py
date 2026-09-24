@@ -150,10 +150,13 @@ UNDO_TAG = "undo"
 def undo_backup(path: Path, *, now: datetime | None = None) -> Path:
     """`tuning.backup()`, tagged as an undo's: the file as it was before the undo replaced it.
 
-    Two jobs. It makes the undo itself Revert-able -- anything tuned after the
-    reset is kept beside the file, not lost -- and it is the on-disk record that
-    this reset WAS undone, which `still_undoable()` reads so an undone reset is
-    never offered again after a later save changes the file.
+    Two jobs. Anything tuned into the file after the reset is kept beside it,
+    not lost: the report names this backup, and a person copies it back by hand
+    -- no control on the Tuning tab reaches it, because the raw editor's Revert
+    refuses the WotLK confs (read-only) and never lists the compose override or
+    a CMaNGOS conf no module names. And it is the on-disk record that this reset
+    WAS undone, which `still_undoable()` reads so an undone reset is never
+    offered again after a later save changes the file.
     """
     return tuning.backup(path, now=now, tag=UNDO_TAG)
 
@@ -168,14 +171,17 @@ def restore(from_backup: Path, target: Path) -> None:
     Not `tuning.restore()`: that is `shutil.copy2` straight onto the target,
     which truncates it first, so a copy that dies half-way (ENOSPC is the usual
     one) leaves half a conf -- neither the reset text nor the old one, with a
-    report saying otherwise. Here the copy goes to a sibling (`copy2`, so the
-    backup's mode and times come too -- the backup is itself a `copy2` of the
-    original) and is `os.replace`d on; a failure removes the sibling and leaves
+    report saying otherwise. Here the copy goes to a sibling
+    (`tuning.private_copy`: owner-only while the bytes land, then the backup's
+    mode and times -- the backup carries the original's, so the file keeps its
+    own mode) and is `os.replace`d on; a failure removes the sibling and leaves
     `target` exactly as it was.
     """
     tmp = target.with_name(f"{target.name}{RESTORE_TEMP_SUFFIX}")
     try:
-        shutil.copy2(from_backup, tmp)
+        # An interrupted run's leftover first: `private_copy` creates, never reuses.
+        tmp.unlink(missing_ok=True)
+        tuning.private_copy(from_backup, tmp)
         os.replace(tmp, target)
     except BaseException:
         try:
@@ -908,6 +914,23 @@ def _undoable(server_dir: Path, item: FileResult) -> bool:
 def still_undoable(server_dir: Path, items: Sequence[FileResult]) -> tuple[FileResult, ...]:
     """The items an Undo would still change: `_undoable()`'s rule, for session and disk alike."""
     return tuple(item for item in items if _undoable(server_dir, item))
+
+
+def undo_items(
+    entry: CatalogEntry, server_dir: Path, session: Sequence[FileResult]
+) -> tuple[FileResult, ...]:
+    """What "Undo the last reset…" would put back, or `()` when there is nothing.
+
+    This session's own record first (`session`, the last press's `written`):
+    it is exact. Without one -- the window was closed since, or crashed
+    half-way through a press -- the last press read off the backups on disk,
+    because the raw editor lists the WotLK confs read-only and its Revert cannot
+    reach their backups. Both go through the one `still_undoable()` rule. Reads
+    files and lists folders, so the Tuning tab runs it on its job runner.
+    """
+    if session:
+        return still_undoable(server_dir, session)
+    return last_reset_on_disk(entry, server_dir)
 
 
 def last_reset_on_disk(entry: CatalogEntry, server_dir: Path) -> tuple[FileResult, ...]:

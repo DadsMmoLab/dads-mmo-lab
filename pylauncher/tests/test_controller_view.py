@@ -470,11 +470,14 @@ def test_send_refuses_a_second_command_while_one_is_in_flight(
     view = ControllerView(
         WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=never_finishes
     )
+    # Counted from here: building the view queues its own jobs (T94's Undo
+    # lookup reads the disk off the GUI thread), none of them an attach.
+    queued = len(pending)
     view.command_edit.setText("server info")
     view.send_console_command()
     view.command_edit.setText("gm list")
     view.send_console_command()
-    assert len(pending) == 1, "a second attach was started while the first was still open"
+    assert len(pending) == queued + 1, "a second attach was started while the first was still open"
     assert not view.send_button.isEnabled()
     assert "gm list" not in view.console_log.text()
 
@@ -13992,6 +13995,16 @@ def _reset_view(
     return ControllerView(entry, services, status_poll_ms=0, **kw)
 
 
+def _land_undo_lookups(held: list[tuple[Any, Any, Any]]) -> None:
+    """Run and deliver every queued Undo lookup (final review Minor 2), oldest first."""
+    for job in [job for job in held if getattr(job[1], "__func__", None) is _LOOKED_UP]:
+        held.remove(job)
+        job[1](job[0]())
+
+
+_LOOKED_UP = ControllerView._undo_looked_up
+
+
 def test_the_wotlk_core_list_is_the_reset_modules_one_list() -> None:
     assert TUNING_CORE_FILES is reset_defaults.AZEROTHCORE_CORE_FILES
 
@@ -14125,6 +14138,7 @@ def test_the_reset_runs_on_the_job_runner_and_the_tab_is_busy_until_it_ends(
     assert calls == [(reset_defaults.core_files(WOTLK), {})], "no module installed: no keys"
     assert view.busy_reason() is None
     assert view.tuning_reset_button.isEnabled() is True
+    _land_undo_lookups(held)
 
     # The undo is the same shape: queued, busy, and handed back to bound slots.
     _menu_action(view, TUNING_RESET_UNDO).trigger()
@@ -14453,3 +14467,56 @@ def test_a_press_that_raised_hands_the_undo_to_the_disk_not_an_older_session_pre
     assert items == reset_defaults.last_reset_on_disk(WOTLK, tmp_path)
     assert TUNING_CORE_FILES[1] not in [item.file for item in items]
     assert TUNING_CORE_FILES[0] in [item.file for item in items]
+
+
+def test_the_undo_lookup_reads_no_file_on_the_gui_thread(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review Minor 2: every reload listed up to five folders and read each core file and
+    backup on the GUI thread -- over 9p for a server inside WSL. It is a job now, and the Undo
+    stays greyed until its answer lands; an answer older than the newest is dropped."""
+    _wotlk_server(tmp_path)
+    reset_defaults.reset(WOTLK, tmp_path, TUNING_CORE_FILES, seams=RESET_QUIET)
+    gui = threading.get_ident()
+    listed: list[int] = []
+    real = tuning.backups_of
+
+    def spy(path: Path) -> tuple[Path, ...]:
+        listed.append(threading.get_ident())
+        return real(path)
+
+    monkeypatch.setattr(tuning, "backups_of", spy)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    view.reload_tuning()
+
+    assert listed == [], "the Undo's lookup listed a folder on the GUI thread"
+    assert view.tuning_reset_undo_action.isEnabled() is False, "armed before its answer landed"
+    lookups = [job for job in held if getattr(job[1], "__func__", None) is _LOOKED_UP]
+    assert len(lookups) == 2, "one lookup per reload: the tab's opening, and this one"
+    for _work, done, failed in lookups:
+        assert done.__self__ is view and failed.__self__ is view
+        assert failed.__func__ is ControllerView._undo_lookup_failed
+    older, newest = lookups
+    newest[1](newest[0]())
+    assert view.tuning_reset_undo_action.isEnabled() is True
+    assert listed and gui in listed, "control: the spy saw the lookup's own reads"
+    stale = older[0]()
+    older[1](replace(stale, items=()))
+    assert view.tuning_reset_undo_action.isEnabled() is True, "a stale answer was applied"
+
+
+def test_an_undo_lookup_that_raised_leaves_the_undo_greyed(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    reset_defaults.reset(WOTLK, tmp_path, TUNING_CORE_FILES, seams=RESET_QUIET)
+
+    def boom(*args: object, **kwargs: object) -> tuple[reset_defaults.FileResult, ...]:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(reset_defaults, "undo_items", boom)
+    view = _reset_view(ps, tmp_path)
+    assert view.tuning_reset_undo_action.isEnabled() is False

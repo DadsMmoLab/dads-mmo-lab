@@ -3595,6 +3595,25 @@ TUNING_CORE_FILE = (
 )
 """Why `worldserver.conf` is listed but not editable here (T43's own follow-up)."""
 
+
+@dataclass(frozen=True)
+class UndoLookup:
+    """One answer to "what would Undo the last reset put back", and which reload asked."""
+
+    generation: int
+    items: tuple[reset_defaults.FileResult, ...]
+
+
+def _look_up_undo(
+    entry: CatalogEntry,
+    server_dir: Path,
+    session: tuple[reset_defaults.FileResult, ...],
+    generation: int,
+) -> UndoLookup:
+    """The Tuning tab's Undo lookup, as a job: it lists folders and reads files (T94)."""
+    return UndoLookup(generation, reset_defaults.undo_items(entry, server_dir, session))
+
+
 TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
 """The install's own conf files, listed read-only beside the module ones.
 
@@ -8815,6 +8834,10 @@ class ControllerView(QWidget):
         # its Undo. Empty, the Undo reads the last press off the disk instead.
         self._reset_running = False
         self._last_reset: tuple[reset_defaults.FileResult, ...] = ()
+        # What the Undo would put back, as its last lookup answered, and which
+        # lookup is the newest: an older answer landing late is dropped.
+        self._undo_items: tuple[reset_defaults.FileResult, ...] = ()
+        self._undo_generation = 0
         self.reload_tuning()
         self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
 
@@ -8838,9 +8861,11 @@ class ControllerView(QWidget):
         # drift (T44 item 13).
         self.tuning_panel.set_files(self._tuning_files(), read_only=TUNING_CORE_FILES)
         self._set_tuning_revert_all()
-        # T94: the files just re-read are what decides whether an undo has
-        # anything to put back.
-        self.tuning_reset_undo_action.setEnabled(bool(self._reset_undo_items()))
+        # T94: whether an undo has anything to put back, asked again of the
+        # files -- off the GUI thread (final review): it lists up to five
+        # folders and reads each core file and backup, over 9p for a server
+        # inside WSL.
+        self._look_up_reset_undo()
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -9084,21 +9109,42 @@ class ControllerView(QWidget):
         self.reload_tuning()
 
     def _reset_undo_items(self) -> tuple[reset_defaults.FileResult, ...]:
-        """What "Undo the last reset…" would put back, or `()` when there is nothing.
+        """What "Undo the last reset…" would put back, as the last lookup answered.
 
-        This session's own record first: it is exact. Without one -- the window
-        was closed since, or crashed half-way through a press -- the last press
-        read off the backups on disk (`reset_defaults.last_reset_on_disk`),
-        because the raw editor lists the WotLK confs read-only and its Revert
-        cannot reach their backups, so nothing else on this tab would. Both go
-        through the one "still undoable" rule, so a file put back by hand or an
-        undone reset later tuned again is never offered (fix round 1).
+        `reset_defaults.undo_items()` decides (this session's record, else the
+        disk's); `_look_up_reset_undo()` asks it on the job runner.
         """
-        if self._last_reset:
-            return reset_defaults.still_undoable(
-                self.services.controller.server_dir, self._last_reset
-            )
-        return reset_defaults.last_reset_on_disk(self.entry, self.services.controller.server_dir)
+        return self._undo_items
+
+    def _look_up_reset_undo(self) -> None:
+        """Ask, off the GUI thread, what the Undo would put back; greyed until the answer lands."""
+        self._undo_generation += 1
+        self._undo_items = ()
+        self.tuning_reset_undo_action.setEnabled(False)
+        self._run(
+            partial(
+                _look_up_undo,
+                self.entry,
+                self.services.controller.server_dir,
+                self._last_reset,
+                self._undo_generation,
+            ),
+            self._undo_looked_up,
+            self._undo_lookup_failed,
+        )
+
+    @Slot(object)
+    def _undo_looked_up(self, result: object) -> None:
+        """The lookup's answer, unless a newer reload has asked since (then it is stale)."""
+        if not isinstance(result, UndoLookup) or result.generation != self._undo_generation:
+            return
+        self._undo_items = result.items
+        self.tuning_reset_undo_action.setEnabled(bool(result.items))
+
+    @Slot(object)
+    def _undo_lookup_failed(self, exc: object) -> None:
+        """An unreadable folder leaves the Undo greyed; the next reload asks again."""
+        logger.warning(f"could not work out what a reset's undo would put back: {exc}")
 
     @Slot()
     def undo_last_reset(self) -> None:

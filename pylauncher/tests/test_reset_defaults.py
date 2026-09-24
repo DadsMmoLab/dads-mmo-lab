@@ -20,6 +20,7 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -123,11 +124,17 @@ def test_conf_table_is_the_entrys_own() -> None:
 def test_replace_file_keeps_the_text_exactly_and_leaves_nothing_beside_it(tmp_path: Path) -> None:
     path = tmp_path / "mangosd.conf"
     path.write_bytes(b"A = 1\r\n")
+    path.chmod(0o644)
     conf.replace_file(path, "A = 2\r\nB = 3\n")
     assert path.read_bytes() == b"A = 2\r\nB = 3\n"
     assert [p.name for p in tmp_path.iterdir()] == ["mangosd.conf"]
     if sys.platform != "win32":
-        assert path.stat().st_mode & 0o777 == conf.CONF_MODE
+        # The file's own mode, kept (final review, the gate's finding): 0600
+        # would lock a container user that is not the host user out.
+        assert path.stat().st_mode & 0o777 == 0o644
+        path.chmod(0o600)
+        conf.replace_file(path, "A = 3\n")
+        assert path.stat().st_mode & 0o777 == 0o600
 
 
 # -- the image, faked the way `docker cp` behaves ------------------------------
@@ -1000,12 +1007,17 @@ def test_an_undo_whose_copy_dies_half_way_leaves_the_file_whole(
     )
     before = {file: (server / file).stat().st_mode for file in installed}
 
-    def half_then_full(src: object, dst: object, **kwargs: object) -> object:
+    real_copy = tuning.private_copy
+
+    def half_then_full(src: Path, dst: Path) -> None:
+        # Only the restore's copy: the undo's own backup (fix round 1) must land.
+        if not dst.name.endswith(reset_defaults.RESTORE_TEMP_SUFFIX):
+            return real_copy(src, dst)
         data = Path(str(src)).read_bytes()
         Path(str(dst)).write_bytes(data[: len(data) // 2])
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(shutil, "copy2", half_then_full)
+    monkeypatch.setattr(tuning, "private_copy", half_then_full)
     undone = reset_defaults.undo(server, report.written)
     monkeypatch.undo()
 
@@ -1253,13 +1265,18 @@ def test_an_undo_whose_copy_failed_stays_offered(tmp_path: Path) -> None:
 
 
 def _half_copy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`shutil.copy2` as ENOSPC really fails: part of the file lands, then it raises."""
+    """The copy as ENOSPC really fails: part of the file lands, then it raises.
 
-    def copy2(src: object, dst: object, *args: object, **kwargs: object) -> None:
-        Path(str(dst)).write_bytes(Path(str(src)).read_bytes()[:5])
+    At `shutil.copyfileobj`, the byte copy every backup and restore goes through
+    since `tuning.private_copy()` (final review): patched there, a half copy is
+    what the REAL backup path meets.
+    """
+
+    def copyfileobj(fsrc: Any, fdst: Any, *args: object, **kwargs: object) -> None:
+        fdst.write(fsrc.read(5))
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(shutil, "copy2", copy2)
+    monkeypatch.setattr(shutil, "copyfileobj", copyfileobj)
 
 
 def _siblings(path: Path) -> list[str]:
@@ -1333,3 +1350,75 @@ def test_an_undo_whose_copy_failed_is_still_offered_after_a_later_save(tmp_path:
     tuning.write(world, {"Rate.XP.Kill": "3"})
 
     assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
+
+
+# -- final review: modes -------------------------------------------------------------
+
+
+def _mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX mode is a no-op on Windows")
+def test_a_reset_and_its_undo_keep_each_files_own_mode(tmp_path: Path) -> None:
+    """The gate: a reset wrote worldserver.conf and the override 0600 where they were 644/664.
+
+    It worked on m910q only because the container's user is uid 1000, the host
+    user; anywhere else the worldserver could not read its own conf.
+    """
+    _wotlk_stack(tmp_path)
+    _dist_install(tmp_path)
+    (tmp_path / OVERRIDE).write_bytes(b"services:\n  ac-worldserver: {}\n")
+    files = reset_defaults.core_files(WOTLK)
+    modes = dict(zip(files, (0o644, 0o640, 0o600, 0o664), strict=True))
+    for file, mode in modes.items():
+        (tmp_path / file).chmod(mode)
+
+    report = reset_defaults.reset(WOTLK, tmp_path, files, seams=_seams())
+
+    assert [r.outcome for r in report.results] == ["reset"] * 4
+    assert {file: _mode(tmp_path / file) for file in files} == modes
+    assert {r.file: _mode(r.backup) for r in report.written if r.backup} == modes
+    reset_defaults.undo(tmp_path, report.written)
+    assert {file: _mode(tmp_path / file) for file in files} == modes
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX mode is a no-op on Windows")
+def test_an_owner_only_cmangos_conf_stays_owner_only_through_reset_and_undo(
+    tmp_path: Path,
+) -> None:
+    server, _, _, _ = _tuned_tbc(tmp_path)
+    files = reset_defaults.core_files(TBC)
+    for file in files:
+        (server / file).chmod(0o600)
+    report = reset_defaults.reset(TBC, server, files, seams=_seams(FakeImage(TEMPLATES["wow-tbc"])))
+    assert {_mode(server / file) for file in files} == {0o600}
+    reset_defaults.undo(server, report.written)
+    assert {_mode(server / file) for file in files} == {0o600}
+    assert {_mode(p) for p in _baks(server)} == {0o600}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX mode is a no-op on Windows")
+def test_a_backup_and_a_restore_are_owner_only_while_the_bytes_are_copied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review Minor 4: `copy2` made the temp file at the umask default, password and all."""
+    path = tmp_path / "mangosd.conf"
+    path.write_text('LoginDatabaseInfo = "127.0.0.1;3306;mangos;secret"\n', encoding="utf-8")
+    path.chmod(0o644)
+    seen: list[int] = []
+    real = shutil.copyfileobj
+
+    def spy(fsrc: Any, fdst: Any, *args: Any, **kwargs: Any) -> None:
+        seen.append(os.fstat(fdst.fileno()).st_mode & 0o777)
+        real(fsrc, fdst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copyfileobj", spy)
+    made = tuning.backup(path)
+    path.write_text("changed\n", encoding="utf-8")
+    reset_defaults.restore(made, path)
+    monkeypatch.undo()
+
+    assert seen == [0o600, 0o600], "a copy was readable by others while it was written"
+    assert _mode(made) == 0o644 and _mode(path) == 0o644, "the file's own mode was not kept"
+    assert path.read_bytes() == made.read_bytes()

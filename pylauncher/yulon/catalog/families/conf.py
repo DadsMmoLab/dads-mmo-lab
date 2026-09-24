@@ -61,6 +61,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
@@ -305,17 +306,27 @@ def apply_table(
 
 
 def replace_file(path: Path, text: str) -> None:
-    """Replace the file at `path` with `text`, atomically and owner-only (T94's reset).
+    """Replace the file at `path` with `text`, atomically, keeping its mode (T94's reset).
 
     `_write()` under a public name, because a second caller now exists and it
     needs every rule `_write` keeps: the text a reset writes carries the
-    database password (`CONF_MODE`), and a reset interrupted half-way through a
-    file must leave the old file, not half of the new one. One writer, not two.
+    database password, so it is written owner-only (`CONF_MODE`), and a reset
+    interrupted half-way through a file must leave the old file, not half of
+    the new one. One writer, not two.
+
+    The file KEEPS its own mode once the text is whole (the T94 live gate): a
+    reset wrote WotLK's 644 `worldserver.conf` and 664 override as 0600, which a
+    container user that is not the host user cannot read. A file not on disk
+    takes `CONF_MODE`, the install's own.
 
     Raises:
         InstallerError: the file could not be written; it was left as it was.
     """
-    _write(path, text)
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        mode = CONF_MODE
+    _write(path, text, mode=mode)
 
 
 def _line(key: str, raw: str, tokens: Mapping[str, str]) -> str:
@@ -398,8 +409,11 @@ def _read(path: Path) -> str:
         ) from exc
 
 
-def _write(path: Path, text: str) -> None:
+def _write(path: Path, text: str, *, mode: int = CONF_MODE) -> None:
     """Write the text as given, owner-only, and never leave the conf half-written.
+
+    `mode` is the file's mode once it is whole: `CONF_MODE` for the install, the
+    file's own for `replace_file()`. The text is always written owner-only.
 
     The new text goes to a temporary file beside the conf and is renamed over it, so what
     is on disk is either entirely the old conf or entirely the new one. Straight into the
@@ -460,6 +474,10 @@ def _write(path: Path, text: str) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CONF_MODE)
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
+        if mode != CONF_MODE:
+            # `replace_file`'s kept mode, set only once the text is whole: the
+            # file had that mode before, so nothing is widened past it.
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     except (OSError, UnicodeEncodeError) as exc:
         raise InstallerError(

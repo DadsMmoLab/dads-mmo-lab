@@ -436,6 +436,30 @@ def _newline_of(raw: str) -> str:
     return "\r\n" if "\r\n" in raw else "\n"
 
 
+PRIVATE_MODE = 0o600
+"""What a copy is created with, before it takes its source's mode (`private_copy`)."""
+
+
+def private_copy(src: Path, dst: Path) -> None:
+    """Copy `src` to a NEW file `dst`, owner-only while the bytes land, then with `src`'s mode.
+
+    Not `shutil.copy2`: that creates `dst` at the umask default (0644, say) and
+    sets the source's mode only after the bytes are in, so a copy of a CMaNGOS
+    conf -- the database password is in it -- is readable by every local
+    account for that moment (T94 final review). Here the mode is asked for in
+    the creating syscall (`O_EXCL`: never someone else's file), the bytes are
+    copied, and `copystat` then gives `dst` exactly `src`'s mode and times, so a
+    backup or a restore keeps the file's own mode (the gate: a conf a container
+    user reads must not come back owner-only). A POSIX guarantee; the mode is a
+    no-op on Windows (`conf._write`'s docstring). Raises `OSError`; a caller
+    removes a half-written `dst`.
+    """
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_MODE)
+    with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+        shutil.copyfileobj(inp, out)
+    shutil.copystat(src, dst)
+
+
 def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
     """Copy `path` beside itself, stamped, and return where it went.
 
@@ -450,7 +474,8 @@ def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
     (`copy2`), so the backup's own mtime says when the ORIGINAL was last
     touched and the name says when it was taken.
 
-    The copy goes to a `.yulon-tmp` sibling and is renamed onto the `.bak` name
+    The copy (`private_copy`: owner-only while it is written, then the file's
+    own mode) goes to a `.yulon-tmp` sibling and is renamed onto the `.bak` name
     only once it is whole (T94 fix round 2): `copy2` straight onto the target
     leaves half a file when it dies (ENOSPC), and a half `.bak` is worse than
     none -- `backups_of()` lists it as the newest, so Revert would restore it,
@@ -471,7 +496,7 @@ def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
         if not target.exists():
             tmp = target.with_name(f"{target.name}{TEMP_SUFFIX}")
             try:
-                shutil.copy2(path, tmp)
+                private_copy(path, tmp)
                 os.replace(tmp, target)
             except BaseException:
                 try:
