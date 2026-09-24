@@ -13,10 +13,15 @@ Three rules make this work:
   only by a local variable is collected the moment the function returns and its
   `run` slot never fires — the job silently never happens (observed on the test
   VM: the Server tab sat on "status: unknown" forever).
-- **Callbacks must be bound methods of a GUI-thread `QObject`** (a view's own
-  `@Slot`). A plain function or lambda has no thread affinity, so PySide6
-  delivers it on the *worker* thread even with an explicit `QueuedConnection`
-  (verified on 6.11.2) — which is the other half of what this module avoids.
+- **The runner delivers every callback on the GUI thread, whatever it is**
+  (T97). A plain function or lambda connected straight to a worker's signal has
+  no thread affinity, so PySide6 delivers it on the *worker* thread even with an
+  explicit `QueuedConnection` (verified on 6.11.2). That was a rule callers had
+  to keep, and one did not: the Characters tab's list was cleared and refilled
+  from a worker and the app segfaulted (m910q, 2026-09-23). So the worker's
+  signals now go to `_Delivery`, a QObject living on the GUI thread, through a
+  queued connection to ITS slots, and that slot calls the callback -- a lambda,
+  a closure, a partial or a bound method all run where the widgets are.
 - **The worker is the only thread that touches the service**; the view is
   updated exclusively in the callbacks.
 
@@ -31,7 +36,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+import shiboken6
+from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
 
 from yulon.log import get_logger
 
@@ -99,16 +105,27 @@ class InFlight(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self._pairs: list[tuple[QThread, QObject]] = []
+        self._pairs: list[tuple[QThread, QObject, _Delivery | None]] = []
 
-    def hold(self, thread: QThread, worker: QObject) -> None:
-        self._pairs.append((thread, worker))
+    def hold(self, thread: QThread, worker: QObject, delivery: _Delivery | None = None) -> None:
+        """Own a started pair, and the delivery that carries its answer, if it has one.
+
+        The delivery is held until it has DELIVERED, not only until the thread
+        has finished: its slot is a queued call on the GUI thread, and a
+        delivery dropped with that call still in the queue is the same freed
+        receiver `InFlight` exists for, one hop later.
+        """
+        self._pairs.append((thread, worker, delivery))
         thread.finished.connect(self.sweep)
 
     @Slot()
     def sweep(self) -> None:
         """Drop every pair whose thread has finished. Runs on the GUI thread."""
-        self._pairs = [pair for pair in self._pairs if pair[0].isRunning()]
+        self._pairs = [
+            (thread, worker, delivery)
+            for thread, worker, delivery in self._pairs
+            if thread.isRunning() or (delivery is not None and not delivery.delivered)
+        ]
 
     def wait_all(self, timeout_ms: int = 10_000) -> bool:
         """Join everything still running (app shutdown). True if all finished in time.
@@ -121,7 +138,7 @@ class InFlight(QObject):
         can do is put a name in the log first, so the abort is not a mystery.
         """
         done = True
-        for thread, worker in list(self._pairs):
+        for thread, worker, _delivery in list(self._pairs):
             if thread.isRunning():
                 thread.quit()
                 if not thread.wait(timeout_ms):
@@ -145,8 +162,67 @@ def in_flight() -> InFlight:
     return _in_flight
 
 
+def _gone(owner: object) -> bool:
+    """True for a QObject whose C++ side has been deleted; False for anything else."""
+    return isinstance(owner, QObject) and not shiboken6.isValid(owner)
+
+
+class _Delivery(QObject):
+    """Carries one job's answer from its worker thread to its callback, ON the GUI thread.
+
+    Created on the GUI thread and connected to the worker's signals with a
+    queued connection to this object's own `@Slot`s, which is the one shape
+    PySide6 delivers where the receiver lives. The slot then calls the caller's
+    callable directly, so the callable's own nature -- lambda, closure, bound
+    method -- no longer decides the thread (T97).
+
+    **A deleted owner gets nothing, as before.** A bound slot connected straight
+    to the worker was disconnected by Qt when its view was destroyed, so a job
+    finishing after its tab closed called nothing. That is kept: the answer is
+    dropped when the runner's owner, or the object a bound-method callback
+    belongs to, has lost its C++ side. A lambda has no owner to ask, which is why
+    the runner's parent is asked too.
+
+    The callbacks are released once delivered, so a closure over a view does
+    not keep that view alive for as long as `in_flight()` holds this.
+    """
+
+    def __init__(self, owner: object, on_done: OnDone, on_error: OnError) -> None:
+        super().__init__()
+        self._owner = owner
+        self._on_done: OnDone | None = on_done
+        self._on_error: OnError | None = on_error
+        self.delivered = False
+
+    @Slot(object)
+    def done(self, result: object) -> None:
+        self._deliver(self._on_done, result)
+
+    @Slot(object)
+    def failed(self, exc: object) -> None:
+        self._deliver(self._on_error, exc)
+
+    def _deliver(self, callback: Callable[[object], None] | None, value: object) -> None:
+        if self.delivered or callback is None:
+            return
+        self.delivered = True
+        owner, self._owner = self._owner, None
+        self._on_done = self._on_error = None
+        # Swept on a LATER turn of the loop, never from inside this slot: the
+        # sweep drops the last reference to this object, and deleting a QObject
+        # while its own slot is on the stack is the freed-receiver crash again.
+        QTimer.singleShot(0, in_flight().sweep)
+        if _gone(owner) or _gone(getattr(callback, "__self__", None)):
+            logger.info("a background job finished after its owner was closed; answer dropped")
+            return
+        callback(value)
+
+
 class ThreadedJobRunner:
     """Runs each call on its own `QThread`; call it like a function.
+
+    Delivers `on_done`/`on_error` on the GUI thread through a `_Delivery`,
+    whatever kind of callable they are (T97).
 
     Holds every live (thread, worker) pair so neither is collected mid-flight,
     and `wait()` lets the app join them before Qt is torn down — a `QThread`
@@ -163,11 +239,18 @@ class ThreadedJobRunner:
         thread = QThread()
         worker = _JobWorker(work)
         worker.moveToThread(thread)
+        delivery = _Delivery(self._parent, on_done, on_error)
+        app = QCoreApplication.instance()
+        if app is not None and delivery.thread() is not app.thread():
+            # Only a caller off the GUI thread gets here, and its answer still
+            # belongs where the widgets are.
+            delivery.moveToThread(app.thread())
         self._live.append((thread, worker))
-        in_flight().hold(thread, worker)
+        in_flight().hold(thread, worker, delivery)
         thread.started.connect(worker.run)
-        worker.done.connect(on_done)
-        worker.failed.connect(on_error)
+        queued = Qt.ConnectionType.QueuedConnection
+        worker.done.connect(delivery.done, queued)
+        worker.failed.connect(delivery.failed, queued)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.start()

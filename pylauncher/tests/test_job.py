@@ -11,16 +11,18 @@ error anywhere.
 from __future__ import annotations
 
 import ast
+import gc
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QObject, Slot
 
 from tests.conftest import HANG_BOUND_MS, pump_until, spelled_bounds
-from yulon.ui.widgets.job import LineRelay, ThreadedJobRunner, run_inline
+from yulon.ui.widgets.job import LineRelay, ThreadedJobRunner, in_flight, run_inline
 
 STILL_RUNNING = 0.2
 """How long the job in `test_wait_joins_running_jobs` keeps running. Not a deadline.
@@ -92,6 +94,114 @@ def test_threaded_runner_reports_failures_instead_of_raising(qapp: object) -> No
     assert receiver.results == []
     assert isinstance(receiver.errors[0], RuntimeError) and "no docker" in str(receiver.errors[0])
     assert runner.wait(HANG_BOUND_MS) is True
+
+
+def _on_the_gui_thread() -> bool:
+    """Both ways of asking, because they are two different facts to a Qt program."""
+    from PySide6.QtCore import QCoreApplication, QThread
+
+    app = QCoreApplication.instance()
+    return (
+        threading.current_thread() is threading.main_thread()
+        and app is not None
+        and QThread.currentThread() is app.thread()
+    )
+
+
+@pytest.mark.parametrize("outcome", ["done", "failed"])
+def test_a_plain_lambda_callback_runs_on_the_gui_thread(qapp: object, outcome: str) -> None:
+    """T97, and the boundary this runner now IS rather than a rule callers keep.
+
+    A lambda connected straight to the worker's signal ran on the worker: the
+    Characters tab cleared and refilled its list from there and the app
+    segfaulted on m910q (2026-09-23, 4 of 5 Send gold runs). The runner now
+    hands every answer to a GUI-thread object first, so a lambda -- the shape
+    that had no thread of its own -- lands where the widgets are, on both arms.
+    """
+    owner = QObject()
+    runner = ThreadedJobRunner(owner)
+    landed: list[tuple[object, bool]] = []
+
+    def work() -> str:
+        if outcome == "failed":
+            raise RuntimeError("no docker")
+        return "hello"
+
+    runner(
+        work,
+        lambda result: landed.append((result, _on_the_gui_thread())),
+        lambda exc: landed.append((str(exc), _on_the_gui_thread())),
+    )
+    pump_until(lambda: bool(landed), f"the {outcome} callback ran")
+    assert runner.wait(HANG_BOUND_MS) is True
+
+    expected = "no docker" if outcome == "failed" else "hello"
+    assert landed == [(expected, True)], "a lambda callback ran off the GUI thread"
+
+
+def test_an_answer_for_a_deleted_owner_is_dropped_not_delivered(qapp: object) -> None:
+    """The behaviour a bound slot had for free, kept now that the runner calls it.
+
+    Qt disconnected a slot whose view had been destroyed, so a job finishing
+    after its tab closed called nothing. The runner calls the callable itself
+    now, so it asks first: the runner's owner deleted means nothing is called,
+    even for a lambda that would touch the dead view -- where calling it would
+    be "Internal C++ object already deleted" at best.
+    """
+    import shiboken6
+
+    owner = QObject()
+    runner = ThreadedJobRunner(owner)
+    gate = threading.Event()
+    called: list[object] = []
+
+    def work() -> str:
+        gate.wait()
+        return "late"
+
+    runner(work, called.append, called.append)
+    shiboken6.delete(owner)
+    gate.set()
+    assert runner.wait(HANG_BOUND_MS) is True
+    pump_until(
+        lambda: not any(d is not None and not d.delivered for *_, d in in_flight()._pairs),
+        "the answer was taken off the queue",
+    )
+    assert called == [], "a callback ran for an owner that no longer exists"
+
+
+def test_a_bound_callback_whose_object_was_deleted_is_not_called(qapp: object) -> None:
+    """The narrower case: the runner's owner lives, the callback's object does not."""
+    import shiboken6
+
+    runner = ThreadedJobRunner(QObject())
+    receiver = _Receiver()
+    seen, errors = receiver.results, receiver.errors
+    gate = threading.Event()
+    runner(lambda: gate.wait() and "late", receiver.done, receiver.failed)
+    shiboken6.delete(receiver)
+    gate.set()
+    assert runner.wait(HANG_BOUND_MS) is True
+    pump_until(
+        lambda: not any(d is not None and not d.delivered for *_, d in in_flight()._pairs),
+        "the answer was taken off the queue",
+    )
+    assert seen == [] and errors == [], "a slot ran on an object that no longer exists"
+
+
+def test_a_delivery_is_held_until_it_delivered_and_released_after(qapp: object) -> None:
+    """The lifetime half (see `InFlight`): the GUI-thread object carrying the answer
+    must outlive the thread it listens to until its queued slot has run, and must
+    not outlive that -- a closure over a view would keep the view with it."""
+    owner = QObject()
+    runner = ThreadedJobRunner(owner)
+    results: list[object] = []
+    runner(lambda: 7, lambda r: results.append(r), results.append)
+    delivery = weakref.ref(in_flight()._pairs[-1][2])  # type: ignore[arg-type]
+    assert runner.wait(HANG_BOUND_MS) is True
+    assert delivery() is not None, "dropped with its answer still queued"
+    pump_until(lambda: results == [7], "the answer arrived")
+    pump_until(lambda: (gc.collect(), delivery() is None)[1], "the delivery was released")
 
 
 def test_wait_joins_running_jobs(qapp: object) -> None:
@@ -182,6 +292,9 @@ wrappers that pass their callbacks straight on to it.
 def _job_callbacks_that_are_not_bound_slots() -> list[str]:
     """Every callback handed to the runner in `yulon/ui` that is not `self.<a @Slot>`.
 
+    Lint, not the thread-safety boundary: the runner delivers every callback on
+    the GUI thread itself (`_Delivery`), whether or not this passes.
+
     What it does NOT see, so a pass is read as no more than it is:
 
     * Slots are looked up per FILE, not per class. A name decorated `@Slot` in
@@ -240,16 +353,20 @@ def _job_callbacks_that_are_not_bound_slots() -> list[str]:
 
 
 def test_every_job_callback_in_the_ui_is_a_bound_slot() -> None:
-    """T97. The rule this module's docstring states, checked rather than trusted.
+    """T97. SUPPLEMENTARY lint now, not the safety boundary.
 
-    A lambda or a closure handed to the runner as `on_done` is delivered on the
-    WORKER thread, and whatever it does to a widget it does from there. Two
-    call sites broke the rule: the Characters tab's list refresh -- measured on
-    m910q 2026-09-23 segfaulting the app in 4 of 5 Send gold runs on a
-    900-character bot server, the worker's frame in `character_list.clear()` --
-    and the Tuning panel's restart/recreate completion, which set widget text
-    and started a thread from the worker. Both read as ordinary code at the call
-    site; this names each one.
+    The boundary is the runner: `ThreadedJobRunner` hands every answer to a
+    GUI-thread `_Delivery`, so a lambda or closure runs on the GUI thread
+    whatever it is (`test_a_plain_lambda_callback_runs_on_the_gui_thread`).
+    This check came first, when the rule was the caller's to keep: two call
+    sites broke it -- the Characters tab's list refresh, measured on m910q
+    2026-09-23 segfaulting the app in 4 of 5 Send gold runs on a 900-character
+    bot server, and the Tuning panel's restart/recreate completion.
+
+    It stays because a bound slot still carries one thing a lambda cannot: an
+    object the delivery can ask whether it is still alive, rather than only
+    the runner's owner. It is lint -- see the limits on the helper above -- and
+    a pass says nothing about thread safety that the runner's own tests do not.
     """
     assert _job_callbacks_that_are_not_bound_slots() == []
 
