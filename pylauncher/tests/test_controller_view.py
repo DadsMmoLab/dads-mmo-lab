@@ -1896,6 +1896,55 @@ def test_a_removal_that_found_nothing_says_so(qapp: object, ps: _Ps, tmp_path: P
     assert "no containers to remove" in view.problem_label.text()
 
 
+def test_a_removal_that_found_nothing_points_at_remove_from_yulon(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Andood's video (T95): every press ended "no containers to remove" and pointed nowhere.
+
+    The button is always there (decision 4). What this adds is the pointer: the
+    sentence names it, and the button is highlighted. Tortoise has no
+    Uninstall. It is the tree the dead end was reported on.
+    """
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=False)
+    assert view.forget_install_button is not None
+    assert not _highlighted(view.forget_install_button)
+
+    view.remove_containers()
+    view.remove_containers()
+
+    assert "no containers to remove" in view.problem_label.text()
+    assert controller_view_module.REMOVE_FROM_YULON in view.problem_label.text()
+    assert _highlighted(view.forget_install_button)
+
+
+def test_a_removal_that_removed_something_does_not_highlight_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=True)
+    view.remove_containers()
+    view.remove_containers()
+    assert view.forget_install_button is not None
+    assert not view.forget_install_button.isHidden(), "decision 4: always shown"
+    assert not _highlighted(view.forget_install_button)
+
+
+def test_a_start_takes_the_highlight_back(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The next Start recreates the containers, so "nothing to remove" is no longer true."""
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0)
+    _watch_remove(view, result=False)
+    view.remove_containers()
+    view.remove_containers()
+    assert view.forget_install_button is not None
+    assert _highlighted(view.forget_install_button)
+
+    view.start_server()
+
+    assert not _highlighted(view.forget_install_button)
+    assert not view.forget_install_button.isHidden()
+
+
 UNIMPORTED = docker.ImportState(
     "absent", "none of acore_auth, acore_characters, acore_world exists on this server yet"
 )

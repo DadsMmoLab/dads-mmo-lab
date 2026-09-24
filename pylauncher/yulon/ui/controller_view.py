@@ -3858,6 +3858,11 @@ class ControllerView(QWidget):
         # (never polled, or docker unreachable). The window reads it to decide
         # whether a removal stops the server first.
         self._last_status: InstallStatus | None = None
+        # T95. Set by a "Stop and remove containers…" press that found nothing to
+        # remove, and cleared by the next Start, which recreates them. While it
+        # holds, "Remove from Yu'lon…" is highlighted: it is the way out of the
+        # dead end in Andood's video.
+        self._nothing_to_remove = False
         # Whether the poll in flight was asked while a Server action ran. Its
         # answer may predate what that action did (T95 review, round 1).
         self._status_asked_busy = False
@@ -4547,14 +4552,15 @@ class ControllerView(QWidget):
 
         The button itself is always shown now. What this re-reads on every poll,
         including a poll that could not reach Docker (T54), is whether it is
-        THE answer: the folder is gone. Read fresh on every poll rather than
+        THE answer: the folder is gone, or a remove-containers press found
+        nothing (until the next Start). Read fresh on every poll rather than
         once at tab-build time, because the folder can be deleted out from
         under an open tab. `primary` is the theme's own emphasis, the property
         Start carries, so no new QSS is needed.
         """
         if self.forget_install_button is None:
             return
-        highlight = self._forget_is_eligible()
+        highlight = self._forget_is_eligible() or self._nothing_to_remove
         if bool(self.forget_install_button.property("primary")) == highlight:
             return
         self.forget_install_button.setProperty("primary", highlight)
@@ -4936,6 +4942,8 @@ class ControllerView(QWidget):
     def start_server(self) -> None:
         """Start the install; a README §12 conflict is shown, never a raw Docker error."""
         self._disarm_actions()
+        self._nothing_to_remove = False
+        self._update_forget_visibility()
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: starting…")
@@ -5607,11 +5615,19 @@ class ControllerView(QWidget):
     @Slot(object)
     def _remove_done(self, result: object) -> None:
         self._set_busy(False)
+        # T95: "nothing to remove" is where a player whose containers are gone
+        # looks for a way off the list. The button in the row is that way, and it
+        # lights up.
+        self._nothing_to_remove = not result
         self.problem_label.setText(
             "Containers removed; volumes kept. The next Start will recreate them."
             if result
-            else "There were no containers to remove."
+            else (
+                f'There were no containers to remove. "{REMOVE_FROM_YULON}" in the row above '
+                "takes this server off Yu'lon's list and deletes nothing."
+            )
         )
+        self._update_forget_visibility()
         self.refresh_status()
 
     @Slot(object)

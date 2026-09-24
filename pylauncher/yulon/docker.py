@@ -2619,6 +2619,15 @@ class ContainerState:
     status: str = ""
     started_at: str = ""
     restart_count: int = 0
+    missing: bool = False
+    """Docker ANSWERED, and said there is no container by this name (T95).
+
+    `status` stays `""` either way, because every other reader takes `""` to
+    mean "could not be read" and must keep doing so. Only the dashboard tells
+    the two apart. Asked of the wrong daemon (a WSL install asked of the
+    host), a live container also reads as missing (`native.py:2170-2175`),
+    so every caller that means it must pass `wsl_distro`.
+    """
 
     @property
     def settled(self) -> bool:
@@ -2632,6 +2641,11 @@ class ContainerState:
         added to remove, arriving by a different route (review, 2026-08-22).
         """
         return self.status == "running"
+
+
+_NO_SUCH_CONTAINER = re.compile(r"\bno such (?:object|container)\b", re.IGNORECASE)
+"""The two answers docker gives for a name it does not know (T95, wordings measured).
+No unreachable-daemon wording contains either; "no such file or directory" is not one."""
 
 
 def container_state(container: str, *, wsl_distro: str | None = None) -> ContainerState:
@@ -2653,7 +2667,8 @@ def container_state(container: str, *, wsl_distro: str | None = None) -> Contain
     proc = _docker(["inspect", container, "--format", fmt], wsl_distro=wsl_distro)
     if proc.returncode != 0:
         logger.warning(f"could not read the state of {container}: {proc.stderr.strip()}")
-        return ContainerState()
+        missing = not _cli_missing(proc) and bool(_NO_SUCH_CONTAINER.search(proc.stderr))
+        return ContainerState(missing=missing)
     fields = [part.strip() for part in proc.stdout.strip().split("\t")]
     status, started, count = (fields + ["", "", ""])[:3]
     return ContainerState(status, started, int(count) if count.isdigit() else 0)

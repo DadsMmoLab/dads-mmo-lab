@@ -572,6 +572,49 @@ def test_container_state_reads_the_restart_count_in_the_same_inspect(
     assert docker.container_state("x") == docker.ContainerState("running", "T", 0)
 
 
+def test_container_state_says_missing_only_when_docker_answered_no_such_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T95: a container that does not exist is an ANSWER, and a daemon that did not answer is not.
+
+    The wordings are real. Newer CLIs said `error: no such object: <name>` from
+    this very call on yulon-ubuntu (8.9a gate, 2026-09-08). Older CLIs say
+    `Error: No such object:` (native.py:2173), and `docker stop` says
+    `No such container`. The unreachable ones are from `volume_exists`'s
+    docstring, and none of them may read as missing, because "no such file
+    or directory" contains "no such".
+    """
+    cases = (
+        ("error: no such object: tbc-mangosd\n", True),
+        ("Error: No such object: tbc-mangosd\n", True),
+        ("Error response from daemon: No such container: tbc-mangosd\n", True),
+        (
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+            "Is the docker daemon running?\n",
+            False,
+        ),
+        (
+            "failed to connect to the docker API at unix:///var/run/docker.sock: "
+            "connect: no such file or directory\n",
+            False,
+        ),
+        (
+            "error during connect: this error may indicate that the docker daemon is not running\n",
+            False,
+        ),
+        ("", False),
+    )
+    for stderr, missing in cases:
+        monkeypatch.setattr(
+            docker.runner,
+            "run",
+            lambda cmd, cwd=None, timeout=None, e=stderr: _completed(returncode=1, stderr=e),
+        )
+        state = docker.container_state("tbc-mangosd")
+        assert state.status == "", "an unread state must still read as unread everywhere else"
+        assert state.missing is missing, stderr
+
+
 def test_wait_db_healthy_for_uses_spec_db_container(monkeypatch: pytest.MonkeyPatch) -> None:
     """`wait_db_healthy_for()` reads the container name from the spec."""
     seen: list[str] = []

@@ -34,7 +34,7 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-State = Literal["up", "stopped", "restart_loop", "unknown"]
+State = Literal["up", "stopped", "restart_loop", "unknown", "missing"]
 
 LOOP_RESTART_STRIKES = 3
 """How many restarts NEW SINCE THIS WATCHER FIRST LOOKED make a loop rather than a hiccup.
@@ -157,6 +157,11 @@ def line(verdict: Verdict) -> str:
         return "stopped"
     if verdict.state == "unknown":
         return "could not be asked — docker did not answer about this container"
+    if verdict.state == "missing":
+        return (
+            "no container — docker says this server's world container does not exist "
+            "(it was removed, or has not been created yet)"
+        )
     parts: list[str] = []
     if verdict.state == "restart_loop":
         head = f"restart loop — {verdict.restarts} restarts"
@@ -243,7 +248,10 @@ class Dashboard:
             # A read that failed said nothing about the count, and `0` is what
             # it leaves in the field. Kept out of the history, it stays a gap in
             # the record; stored, it makes the next honest read look like growth.
-            return Verdict("unknown", state.restart_count, state.started_at, uptime)
+            # T95: docker's own "no such container" is an answer, not a silence,
+            # and the player whose containers were deleted by hand must be told so.
+            kind: State = "missing" if state.missing else "unknown"
+            return Verdict(kind, state.restart_count, state.started_at, uptime)
         if self._restarted(state):
             self._loop_is_current = False
             self._strikes = 0
