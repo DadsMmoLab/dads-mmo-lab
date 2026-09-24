@@ -2589,6 +2589,36 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "most an unpruned folder; its own `except OSError` logs and returns, because "
         "retention failing must not fail the stop it runs in front of"
     ),
+    ("support/runlog.py", "_prune"): (
+        "T93. The same retention as `logsnap._prune`, for the run logs under `logs/runs/`: "
+        "lists that folder to keep the newest ten of one kind, matched by exact name so a "
+        "longer kind sharing the prefix is not pruned with it. It decides a DELETE of the "
+        "app's own run logs and never a write; the file just opened is excluded by identity, "
+        "and its own `except OSError` logs and returns, because retention failing must not "
+        "fail the install or rebuild whose output is being kept"
+    ),
+    ("support/sources.py", "_logs_in"): (
+        "T93. Lists `logs/` or `logs/runs/` to name the app's own log files for the Logs tab "
+        "and the support zip, newest first; decides no write and no delete anywhere. A "
+        "missing folder answers the empty list (nothing was recorded); an unreadable one "
+        "raises, which the tab shows as nothing to view and the zip names in its manifest "
+        "with the reason -- never a claim about a folder of the user's"
+    ),
+    ("support/sources.py", "_conf_listing"): (
+        "T93. Lists an install's conf folders to name the live `*.conf` files a support zip "
+        "copies and reads `DatabaseInfo` passwords from, and sets apart the ones reached "
+        "through a link so the zip cannot be made to carry a file from outside the install; "
+        "reads only, writes nothing. It lets `OSError` out on purpose: its callers name the "
+        "unlistable folder in the zip's manifest rather than letting 'could not look' pass "
+        "for 'nothing there'"
+    ),
+    ("support/sources.py", "gather_known"): (
+        "T93. Lists `db-secrets/` and `credentials/` to find every password this machine has "
+        "kept, so the support zip can remove them; reads only, writes nothing. A folder "
+        "that is not there has nothing kept; one that cannot be listed is named in "
+        "`Known.missing`, because a password it could not see is one it cannot promise to "
+        "have removed"
+    ),
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"

@@ -161,6 +161,10 @@ class ExistsCheck(_Strict):
         return value
 
 
+def _glob_chars(path: str) -> bool:
+    return any(ch in path for ch in "*?[")
+
+
 class SqlStep(_Strict):
     """One SQL application: a file/glob from the clone, or an inline statement.
 
@@ -208,11 +212,34 @@ class SqlStep(_Strict):
         default=(),
         description="Read after the step; an entry returning no row is a failure, by its own name.",
     )
+    then: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "More files run after `path`, all of them as ONE transaction: a failure in any "
+            "leaves none applied. Single files (templates ok), never globs; direct only."
+        ),
+    )
 
     @model_validator(mode="after")
     def _exactly_one_body(self) -> SqlStep:
         if (self.path is None) == (self.statement is None):
             raise ValueError("SqlStep needs exactly one of `path` or `statement`")
+        if self.then:
+            # T100 review. `hearthstone-cd` runs upstream's reset and then the
+            # chosen file; as two steps a chosen file that failed left the reset
+            # committed. `then` is the smallest shape that says "these together".
+            if self.path is None:
+                raise ValueError("SqlStep.then continues a `path`; an inline statement has none")
+            if any(_glob_chars(name) for name in (self.path, *self.then)):
+                raise ValueError(
+                    "SqlStep.then names single files: a transaction over a glob would be over "
+                    "whatever the clone happens to hold"
+                )
+            if self.applied_by != "direct":
+                raise ValueError(
+                    "SqlStep.then needs `applied_by='direct'`: only a file this app runs itself "
+                    "can be put inside its transaction"
+                )
         if self.applied_by != "direct" and (self.precondition is not None or self.verify):
             raise ValueError(
                 "SqlStep.precondition/verify need `applied_by='direct'`: a db-import step is run "
