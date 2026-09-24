@@ -65,6 +65,66 @@ services:
     volumes:
       - db-data:/var/lib/mysql
     restart: unless-stopped
+    # THE DATABASE OUTLIVES THE WORLDSERVER ON EVERY STOP PATH (T98). The
+    # app's Stop is `compose stop`, which stops the worldserver first and this
+    # service last. A Docker DAEMON shutdown -- a PC shutdown, a Docker Desktop
+    # quit, `systemctl stop docker` -- does not read depends_on: it signals
+    # every container at once, and the database was measured gone in under 2 s
+    # (yulon-ubuntu, 2026-09-23) while the worldserver was still draining the
+    # 7400-7700 character saves it queues at shutdown (docker.STOP_GRACE_SECONDS).
+    #
+    # So SIGTERM is held here while any server container is still connected
+    # (a TCP client from off loopback), then passed on to mysqld. The app's
+    # own `docker exec` queries name no host and ride the socket, so they do
+    # not count. The healthcheck below DOES: it connects over TCP to
+    # `ac-database`, this container's own network address, so for the few
+    # milliseconds it is connected it reads as a server and can add one
+    # more second to the hold. The hold is bounded at
+    # 240 s: the app's stops all pass `-t 300`, which overrides
+    # stop_grace_period, and 60 s is left for mysqld's own shutdown (measured
+    # 1.4 s). A count that fails is logged to stderr (the client's words; the
+    # password is in MYSQL_PWD, never in argv or the log) and tried again a
+    # second later: one fault must not end the hold under a connected world,
+    # but five in a row stop the database rather than hold it to the grace's
+    # SIGKILL. The grace is the worldserver's 5m so a daemon shutdown never
+    # SIGKILLs the database mid-wait. tests/test_db_outlives_world.py runs this script.
+    # `$$` is compose's escape for a literal `$`.
+    stop_grace_period: 5m
+    entrypoint:
+      - bash
+      - -c
+      - |
+        db=
+        held=
+        hold() {
+          [ -n "$$held" ] && return
+          held=1
+          i=0
+          failed=0
+          err=/tmp/yulon-hold-$$$$.err
+          while [ $$i -lt 240 ]; do
+            if left=$$(MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql -uroot -N -B -e "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID() AND HOST LIKE '%:%' AND HOST NOT LIKE '127.%' AND HOST NOT LIKE '::1%' AND HOST NOT LIKE '[::1]%'" 2>"$$err"); then
+              failed=0
+              [ "$${left:-0}" = 0 ] && break
+              echo "yulon: holding shutdown, $$left server connection(s) still open"
+            else
+              failed=$$((failed + 1))
+              echo "yulon: could not count server connections ($$failed of 5 in a row): $$(tr '\n' ' ' < "$$err")" >&2
+              [ $$failed -ge 5 ] && break
+            fi
+            sleep 1
+            i=$$((i + 1))
+          done
+          kill -TERM "$$db" 2>/dev/null
+        }
+        trap hold TERM INT
+        docker-entrypoint.sh "$$@" &
+        db=$$!
+        [ -n "$$held" ] && kill -TERM "$$db"
+        while kill -0 "$$db" 2>/dev/null; do wait "$$db"; done
+        wait "$$db"
+      - yulon-db
+    command: ["mysqld"]
     healthcheck:
       # Probes the way a CONSUMER does: over TCP, addressed by service name,
       # from the compose network. Upstream's copy has no `-h` at all, so it

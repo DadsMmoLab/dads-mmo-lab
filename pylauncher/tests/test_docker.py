@@ -763,6 +763,35 @@ def test_start_staged_names_the_services_so_compose_cannot_pick_the_import(
     assert ["docker", "compose", "up", "-d"] not in calls
 
 
+def test_the_rebuilds_recreate_stops_the_servers_before_it_replaces_the_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T98: world and login server stop, with the full grace, before `up --force-recreate`.
+
+    Compose recreates the database first, under a world still connected to it. Measured on
+    yulon-ubuntu's WotLK install (500 bots, 2026-09-24): without this stop the old world lost
+    its database mid-save (19.6 s, `Lost connection`) and, with T98's database holding SIGTERM
+    for connected servers, the recreate hung the whole 240 s hold (270.2 s) and lost it anyway.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            names = (SPEC.db, SPEC.auth, SPEC.world)
+            return _completed(stdout="".join(n + chr(10) for n in names))
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert docker.recreate_staged(SPEC, Path("/tmp/wow")) is True
+    stop = ["docker", "compose", "stop", "-t", _GRACE, SPEC.world, SPEC.auth]
+    up = ["docker", *docker.recreate_argv(SPEC)]
+    assert calls[:2] == [stop, up], calls
+    assert SPEC.db not in calls[0], "the database is stopped by the recreate, after the servers"
+
+
 def test_start_staged_never_starts_a_container_by_global_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

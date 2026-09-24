@@ -15,7 +15,7 @@ from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, process_events, pump_until
+from tests.conftest import HANG_BOUND, process_events, pump_until, wait_for_panel
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -36,7 +36,7 @@ from yulon import (
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql, required_prompts
-from yulon.catalog import native
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
@@ -62,6 +62,7 @@ from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.runner import run as _REAL_RUN
+from yulon.support import runlog
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
@@ -77,6 +78,7 @@ from yulon.ui.controller_view import (
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
 from yulon.ui.widgets.job import run_inline
+from yulon.ui.widgets.manifest_prompt import ManifestPromptDialog
 from yulon.ui.widgets.modules_panel import (
     BADGE_INSTALLED,
     BADGE_NOT_INSTALLED,
@@ -619,7 +621,7 @@ def test_modules_tab_lists_manifests_and_installs_selected(
         WOTLK,
         _services(ps, tmp_path, []),
         status_poll_ms=0,
-        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+        prompt_asker=lambda parent, manifest, prompts, **_: {p.key: "42" for p in prompts},
     )
     assert len(view.modules_panel.rows()) >= 40
     view.modules_panel.select("mod-ah-bot")
@@ -748,7 +750,7 @@ def test_installing_a_module_whose_prompt_has_no_default_asks_first(
     """
     asked: list[tuple[str, tuple[str, ...]]] = []
 
-    def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
+    def asker(parent: object, manifest: object, prompts: object, **_: object) -> dict[str, str]:
         asked.append(
             (str(manifest.id), tuple(p.key for p in prompts))  # type: ignore[attr-defined]
         )
@@ -770,7 +772,7 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
         WOTLK,
         _services(ps, tmp_path, []),
         status_poll_ms=0,
-        prompt_asker=lambda parent, manifest, prompts: None,
+        prompt_asker=lambda parent, manifest, prompts, **_: None,
     )
     _select_module(view, "mod-ah-bot-plus")
     view._module_action("install")
@@ -793,6 +795,10 @@ def test_exactly_the_manifests_with_a_question_are_asked(
     at all still get no window. A manifest gaining or losing a question shows
     up here by name.
 
+    `hearthstone-cd` is in the list since T100: its `cooldown` is a `choice`
+    whose default is upstream's reset file, so an install that did not ask
+    applied the reset and changed nothing (reported on Discord 2026-09-20).
+
     Rows whose Install is LOCKED are left out of the loop rather than counted
     as installs (T69): eleven shipped manifests declare a `requires`, nothing
     is on disk in this fixture, so `_module_action()` refuses them before the
@@ -800,7 +806,7 @@ def test_exactly_the_manifests_with_a_question_are_asked(
     """
     asked: list[str] = []
 
-    def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
+    def asker(parent: object, manifest: object, prompts: object, **_: object) -> dict[str, str]:
         asked.append(str(manifest.id))  # type: ignore[attr-defined]
         assert prompts, "a dialog with no question is a window for nothing"
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
@@ -832,6 +838,7 @@ def test_exactly_the_manifests_with_a_question_are_asked(
     )
     # `sitmeanrest` is absent: it requires mod-ale, locked in this fixture (T69).
     assert "mod-ah-bot" in expected and "xp-rates" in expected and "nerf-mobs" in expected
+    assert "hearthstone-cd" in expected, "T100: a `choice` with a default still asks"
     assert sorted(asked) == expected, asked
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier)
@@ -860,7 +867,7 @@ def test_the_menu_install_of_a_blocked_row_refuses_before_it_asks_anything(
         WOTLK,
         services,
         status_poll_ms=0,
-        prompt_asker=lambda parent, manifest, prompts: asked.append(manifest.id) or {},
+        prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id) or {},
     )
     _select_module(view, "mod-ah-bot-plus")
     row = view.modules_panel.row("mod-ah-bot-plus")
@@ -931,7 +938,7 @@ def test_installing_a_manifest_with_defaults_still_asks(
         WOTLK,
         services,
         status_poll_ms=0,
-        prompt_asker=lambda parent, manifest, prompts: asked.append(manifest.id)
+        prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id)
         or {p.key: "7" for p in prompts},
     )
     _select_module(view, "sitmeanrest")
@@ -960,7 +967,7 @@ def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path)
         WOTLK,
         _services(ps, tmp_path, []),
         status_poll_ms=0,
-        prompt_asker=lambda parent, manifest, prompts: asked.append(manifest.id) or {},
+        prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id) or {},
     )
     _select_module(view, "mod-ah-bot")
     view._module_action("remove")
@@ -968,6 +975,102 @@ def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path)
     assert asked == []
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier) and applier.removed == ["mod-ah-bot"]
+
+
+def test_installing_hearthstone_tweaks_asks_which_cooldown(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T100: a `choice` is put to the player even though it has a default.
+
+    `hearthstone-cd` ships five alternative SQL files and one `choice` prompt
+    whose default, `30_Min`, is upstream's reset. `_module_values()` opened the
+    dialog only for a prompt with NO default, so Install asked nothing and the
+    applier was called with `None` — every GUI install of Hearthstone Cooldown
+    Tweaks applied the reset and changed nothing.
+
+    The dialog is handed the question with its default, so clicking straight
+    through still installs what it always did.
+
+    Mutation: gate `_module_values()` on `default is None` again and `asked`
+    is empty and the applier is given `None`.
+    """
+    asked: list[tuple[str, tuple[tuple[str, str | None], ...]]] = []
+
+    def asker(parent: object, manifest: object, prompts: object, **_: object) -> dict[str, str]:
+        asked.append(
+            (
+                str(manifest.id),  # type: ignore[attr-defined]
+                tuple((p.key, p.default) for p in prompts),  # type: ignore[attr-defined]
+            )
+        )
+        return {"cooldown": "5_Min"}
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "hearthstone-cd")
+    view._module_action("install")
+
+    assert asked == [("hearthstone-cd", (("cooldown", "30_Min"),))]
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == ["hearthstone-cd"]
+    assert applier.values == [{"cooldown": "5_Min"}]
+
+
+def test_updating_hearthstone_tweaks_says_the_shown_answer_is_applied(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T100 review: the real dialog, through the view's seam, for Update vs Install.
+
+    The dialog is built exactly as `ask_manifest_prompts` builds it, with the
+    `again` the view hands the seam, and its text is read rather than exec'd.
+    A first install is not told anything new; an Update of the installed
+    module is told that the selected answer replaces what was chosen before.
+
+    Mutation: pass `again=False` for an update in `_module_action()` and the
+    second note has no "applies the answer".
+    """
+    notes: list[tuple[str, str]] = []
+
+    def asker(parent: object, manifest: object, prompts: object, *, again: bool = False) -> None:
+        dialog = ManifestPromptDialog(None, manifest, prompts, again=again)  # type: ignore[arg-type]
+        notes.append((str(manifest.id), dialog.notes()))  # type: ignore[attr-defined]
+        return None  # cancel: this test is about what the player is TOLD
+
+    services = _services(ps, tmp_path, [])
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "hearthstone-cd")
+    view._module_action("install")
+
+    object.__setattr__(
+        services, "installed_modules", lambda: {"mod": frozenset({"hearthstone-cd"})}
+    )
+    view.reload_modules()
+    assert view.modules_panel.row("hearthstone-cd").data.installed
+    _select_module(view, "hearthstone-cd")
+    view._module_action("update")
+    view._module_action("install")  # the context menu's Install over an installed row
+
+    assert [item for item, _ in notes] == ["hearthstone-cd"] * 3
+    assert "applies the answer" not in notes[0][1]
+    assert "applies the answer" in notes[1][1]
+    assert "applies the answer" in notes[2][1]
+
+
+def test_removing_hearthstone_tweaks_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Remove runs the reset file and renders no `{cooldown}`, so there is no question."""
+    asked: list[str] = []
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id) or {},
+    )
+    _select_module(view, "hearthstone-cd")
+    view._module_action("remove")
+
+    assert asked == []
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.removed == ["hearthstone-cd"]
 
 
 # ------------------------------- the module SQL that no other button reaches
@@ -5959,7 +6062,7 @@ def test_a_removal_is_refused_while_a_module_action_runs(
         _services(ps, tmp_path, []),
         status_poll_ms=0,
         job_runner=gate,
-        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+        prompt_asker=lambda parent, manifest, prompts, **_: {p.key: "42" for p in prompts},
     )
     view.modules_panel.select("mod-ah-bot")
     refusal = _refusal_while_held(view, gate, lambda: view._module_action("install"))
@@ -6100,6 +6203,25 @@ def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
     assert started[0] is not None, "the panel's Stop button has nothing to set"
     text = view.rebuild_log.text()
     assert "--- build" in text and "compiling" in text, text
+
+
+def test_a_rebuild_keeps_its_output_in_a_run_log_named_for_this_install(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T93: the rebuild panel's lines outlive the window, kept per install."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, _started = _rebuild_services(ps, tmp_path, lines=("--- build", "compiling"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_server() is True
+    wait_for_panel(view.rebuild_log)
+    install_id = composegen.install_id(services.controller.server_dir)
+    records = list(runlog.runs_dir().glob(f"rebuild-wow-wotlk-{install_id}-*.log"))
+    assert len(records) == 1, records
+    assert "compiling" in records[0].read_text(encoding="utf-8")
 
 
 def test_a_real_static_ints_yes_still_starts_the_rebuild(
@@ -6244,7 +6366,7 @@ def test_the_rebuild_sentence_names_a_button_that_is_really_on_the_tab(
         WOTLK,
         _services(ps, tmp_path, []),
         status_poll_ms=0,
-        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+        prompt_asker=lambda parent, manifest, prompts, **_: {p.key: "42" for p in prompts},
     )
     view.modules_panel.select("mod-ah-bot")
     view._module_action("install")
@@ -8182,7 +8304,7 @@ def _wotlk_modules_view(ps: _Ps, tmp_path: Path, **families: frozenset[str]) -> 
         WOTLK,
         services,
         status_poll_ms=0,
-        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+        prompt_asker=lambda parent, manifest, prompts, **_: {p.key: "42" for p in prompts},
     )
 
 
@@ -9397,7 +9519,7 @@ def _update_view(ps: _Ps, tmp_path: Path, **seams: object) -> ControllerView:
         WOTLK,
         services,
         status_poll_ms=0,
-        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+        prompt_asker=lambda parent, manifest, prompts, **_: {p.key: "42" for p in prompts},
     )
     view._behind = {("module", "mod-solocraft"): 3}
     view.reload_modules()
