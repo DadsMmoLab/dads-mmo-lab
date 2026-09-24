@@ -1749,21 +1749,76 @@ def test_answering_no_keeps_the_tab_the_record_and_the_server(
     # and the Yes test above fails: the fake returns a plain int (T33).
 
 
-def test_a_server_the_last_poll_saw_stopped_is_forgotten_without_a_stop(
+def test_a_server_the_last_poll_saw_stopped_is_still_stopped_before_it_is_forgotten(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex, final review (T95): a poll's "stopped" is trusted until the next poll begins.
+
+    A server started outside Yu'lon after that poll and before the press was
+    forgotten while it ran, with nothing left managing it. The stop now runs
+    for every server whose folder exists, whatever the last poll said; the
+    poll only chooses the dialog's words. `stop_staged()` is the ownership-
+    checking stop, and it answers False when nothing was running.
+    """
+    from yulon.controller import InstallStatus
+
+    asked = _answer(monkeypatch, True)
+    server_dir = tmp_path / "t95-started-behind-our-back"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+    view.services.controller.status = lambda: InstallStatus(db=False, auth=False, world=False)
+    view.refresh_status()
+    assert view.last_seen_running() is False
+    remembered_at_the_stop: list[bool] = []
+
+    def stop_what_was_started_outside() -> bool:
+        stops.append(1)
+        remembered_at_the_stop.append(_remembered(window, "wow-tbc", server_dir))
+        return True  # something was running, and is down now
+
+    view.services.controller.stop = stop_what_was_started_outside
+
+    view.forget_install_button.click()
+
+    assert "If it is running, it is stopped first" in asked[0][1]
+    assert stops == [1], "a server the last poll saw stopped was forgotten without a stop"
+    assert remembered_at_the_stop == [True], "it was forgotten before the stop"
+    assert window.property("tabs").indexOf(view) == -1
+    assert not _remembered(window, "wow-tbc", server_dir)
+
+
+def test_a_stop_that_finds_nothing_running_goes_on_to_forget(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _answer(monkeypatch, True)
+    server_dir = tmp_path / "t95-nothing-to-stop"
+    view, stops = _removable_tab(window, monkeypatch, server_dir)
+
+    def nothing_running() -> bool:
+        stops.append(1)
+        return False
+
+    view.services.controller.stop = nothing_running
+
+    view.forget_install_button.click()
+
+    assert stops == [1]
+    assert window.property("tabs").indexOf(view) == -1
+    assert not _remembered(window, "wow-tbc", server_dir)
+
+
+def test_a_server_the_last_poll_saw_running_is_told_it_is_running(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from yulon.controller import InstallStatus
 
-    asked = _answer(monkeypatch, True)
-    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t95-stopped")
-    view.services.controller.status = lambda: InstallStatus(db=False, auth=False, world=False)
+    asked = _answer(monkeypatch, False)
+    view, _ = _removable_tab(window, monkeypatch, tmp_path / "t95-running")
+    view.services.controller.status = lambda: InstallStatus(db=True, auth=True, world=True)
     view.refresh_status()
 
     view.forget_install_button.click()
 
-    assert "stopped first" not in asked[0][1]
-    assert stops == []
-    assert window.property("tabs").indexOf(view) == -1
+    assert "It is running, so it is stopped first" in asked[0][1]
 
 
 def test_a_busy_tab_refuses_with_its_own_reason_and_asks_nothing(

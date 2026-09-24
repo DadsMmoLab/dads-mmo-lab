@@ -13,7 +13,7 @@ def _facts(tmp_path: Path, **changes: object) -> forgetting.Facts:
         "server_dir": tmp_path,
         "wsl_distro": None,
         "folder_gone": False,
-        "stop_first": False,
+        "running": False,
     }
     base.update(changes)
     return forgetting.Facts(**base)  # type: ignore[arg-type]
@@ -22,16 +22,25 @@ def _facts(tmp_path: Path, **changes: object) -> forgetting.Facts:
 def test_every_question_says_what_goes_and_that_nothing_is_deleted(tmp_path: Path) -> None:
     said = forgetting.question(_facts(tmp_path))
     assert f"Yu'lon stops listing WoW TBC at {tmp_path}" in said
+    # Final review (T95): a second install of the same game keeps the tile
+    # "Installed", so the Catalog does not forget the game.
+    assert "Catalog forgets" not in said
     assert "Nothing is deleted" in said
     assert "database volume (your characters)" in said
     assert "Docker images" in said
 
 
-def test_a_server_that_may_be_running_is_said_to_be_stopped_first_and_only_then(
+def test_every_server_whose_folder_exists_is_said_to_be_stopped_first_if_it_runs(
     tmp_path: Path,
 ) -> None:
-    assert "stopped first" in forgetting.question(_facts(tmp_path, stop_first=True))
-    assert "stopped first" not in forgetting.question(_facts(tmp_path, stop_first=False))
+    """The stop always runs (T95, final review); the last poll only picks the words."""
+    assert "It is running, so it is stopped first" in forgetting.question(
+        _facts(tmp_path, running=True)
+    )
+    for unsure in (False, None):
+        said = forgetting.question(_facts(tmp_path, running=unsure))
+        assert "If it is running, it is stopped first" in said, unsure
+        assert "It is running" not in said, unsure
 
 
 def test_the_way_back_is_use_existing_and_never_a_reinstall(tmp_path: Path) -> None:
@@ -57,7 +66,7 @@ def test_a_wsl_install_is_pointed_at_find_in_wsl(tmp_path: Path) -> None:
 def test_a_gone_folder_keeps_t34s_promise_about_docker(tmp_path: Path) -> None:
     """No folder, no provable project: Docker is left alone and nothing is offered back."""
     gone = tmp_path / "gone"
-    said = forgetting.question(_facts(gone, folder_gone=True, stop_first=True))
+    said = forgetting.question(_facts(gone, folder_gone=True, running=True))
     assert f"{gone} no longer exists" in said
     assert "NOT touched" in said
     assert "Nothing is deleted" not in said

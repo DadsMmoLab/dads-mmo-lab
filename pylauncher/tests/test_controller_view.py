@@ -5612,6 +5612,31 @@ def test_the_stop_before_a_removal_goes_through_the_controller_and_reports_to_th
     assert view.refresh_button.isEnabled(), "the busy lock outlived the stop"
 
 
+def test_a_stop_before_a_removal_leaves_no_stopping_words_behind_when_it_succeeds(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The window may still keep the tab: a job started during the stop, or a save failed.
+
+    Final review (T95): the "can take a few minutes" paragraph and the
+    "stopping…" status line stayed up for good on a tab that was kept. Cleared,
+    and asked again, before the window is told, as the failed stop does.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    ps.names = ""
+    at_the_emit: list[tuple[str, str]] = []
+    view.stopped_for_removal.connect(
+        lambda *_: at_the_emit.append((view.status_label.text(), view.problem_label.text()))
+    )
+
+    view.stop_for_removal()
+
+    ((status, problem),) = at_the_emit
+    assert status != controller_view_module.STOPPING_FOR_REMOVAL
+    assert "world down" in status, "the status was not asked again"
+    assert problem != controller_view_module.STOPPING_FOR_REMOVAL_WAIT
+
+
 def test_a_failed_stop_before_a_removal_says_why_here_and_to_the_window(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

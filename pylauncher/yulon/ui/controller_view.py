@@ -5234,6 +5234,11 @@ class ControllerView(QWidget):
     @Slot(object)
     def _stopped_for_removal(self, _result: object) -> None:
         self._set_busy(False)
+        # The window may keep this tab (a job started during the stop, or the
+        # record could not be written), so the stop's words must not outlive
+        # it, as `_stop_for_removal_failed()` makes sure (final review, T95).
+        self.problem_label.setText("")
+        self.refresh_status()
         # Last: the window drops this tab on this signal. Nothing may touch
         # `self` after it (mirrors `_uninstall_done()`).
         self.stopped_for_removal.emit(self.entry.id, self.services.controller.server_dir, True, "")

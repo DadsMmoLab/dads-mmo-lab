@@ -90,7 +90,13 @@ class Facts:
     server_dir: Path
     wsl_distro: str | None
     folder_gone: bool
-    stop_first: bool
+    running: bool | None
+    """What the last status poll saw: True running, False stopped, None unknown.
+
+    Words only. A removal stops every server whose folder exists whatever this
+    says, because a poll's "stopped" is trusted until the next poll begins and
+    a server started outside Yu'lon in that gap would be forgotten while it ran
+    (Codex, final review, T95)."""
 
 
 def way_back(facts: Facts) -> str:
@@ -108,10 +114,7 @@ def way_back(facts: Facts) -> str:
 
 def question(facts: Facts) -> str:
     """The one Yes/No a removal asks: what goes, what stays, the stop, the way back."""
-    goes = (
-        f"Yu'lon stops listing {facts.name} at {facts.server_dir}: its tab closes and the "
-        "Catalog forgets it."
-    )
+    goes = f"Yu'lon stops listing {facts.name} at {facts.server_dir}, and its tab closes."
     if facts.folder_gone:
         return "\n\n".join((goes, _FOLDER_GONE.format(server_dir=facts.server_dir)))
     parts = [
@@ -119,11 +122,11 @@ def question(facts: Facts) -> str:
         "Nothing is deleted: the server folder, its database volume (your characters) and its "
         "Docker images all stay where they are.",
     ]
-    if facts.stop_first:
-        parts.append(
-            "It is running, or Yu'lon could not tell, so it is stopped first. Its containers are "
-            "kept."
-        )
+    parts.append(
+        "It is running, so it is stopped first. Its containers are kept."
+        if facts.running
+        else "If it is running, it is stopped first. Its containers are kept."
+    )
     parts.append(way_back(facts))
     return "\n\n".join(parts)
 

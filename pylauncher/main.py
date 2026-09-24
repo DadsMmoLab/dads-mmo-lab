@@ -594,8 +594,8 @@ def build_window() -> object:
         teardown during an import is the abort `busy_reason()` exists to
         prevent. Asked once, default No, read through `said_yes` (T33).
 
-        A server the last poll saw running, or one no poll has answered for,
-        is stopped first on the tab's own job runner, and the rest continues in
+        Every server whose folder exists is stopped first on the tab's own job
+        runner, whatever the last poll said, and the rest continues in
         `on_stopped_for_removal()`. A folder that is gone is never stopped:
         without the folder, no project name can be proved (T34's rule).
 
@@ -618,7 +618,7 @@ def build_window() -> object:
             server_dir=key[1],
             wsl_distro=view.services.controller.wsl_distro,
             folder_gone=folder_gone,
-            stop_first=not folder_gone and view.last_seen_running() is not False,
+            running=view.last_seen_running(),
         )
         answer = QMessageBox.question(
             window,
@@ -629,11 +629,15 @@ def build_window() -> object:
         )
         if not said_yes(answer):
             return
-        if facts.stop_first:
-            removal_pending.add(key)
-            view.stop_for_removal()
+        if folder_gone:
+            finish_removal(key)
             return
-        finish_removal(key)
+        # Always, whatever the last poll said (Codex, final review, T95): its
+        # "stopped" stays on file until the next poll begins, and a server
+        # started outside Yu'lon in that gap would be forgotten while it ran.
+        # `stop_staged()` checks ownership and answers False when nothing ran.
+        removal_pending.add(key)
+        view.stop_for_removal()
 
     def on_stopped_for_removal(game: str, server_dir: object, ok: bool, why: str) -> None:
         """The stop a removal asked for has ended. Forget, or ask once more if it failed (T95).

@@ -501,6 +501,26 @@ def test_polling_status_asks_docker_when_the_distro_is_up(
     assert ctl.status().any_running
 
 
+def test_stopping_does_not_start_a_stopped_distro(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T95: a removal always stops first, and `wsl -d` STARTS a distro.
+
+    Nothing runs in a distro that is down, so "nothing was stopped" is true
+    without asking; asking would boot the distro to learn it.
+    """
+    asked: list[str] = []
+    monkeypatch.setattr(
+        docker, "stop_staged", lambda *a, **kw: asked.append("stop") or True  # type: ignore[func-returns-value]
+    )
+    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: False)
+    ctl = Controller(SPEC, SERVER_DIR, wsl_distro="dml-arch")
+    assert ctl.stop() is False
+    assert asked == [], "the stop shelled into a stopped distro and started it"
+
+    monkeypatch.setattr(controller_module.wsl, "is_running", lambda distro: True)
+    assert ctl.stop() is True
+    assert asked == ["stop"]
+
+
 class _ForeignProjectRunner(_FakeRunner):
     """A neighbour install whose stack is bigger than the ports it publishes.
 
