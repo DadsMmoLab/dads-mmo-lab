@@ -2505,6 +2505,19 @@ module's import block (a parallel ticket edits it). `test_controller_view.py`
 asserts the two spellings are equal.
 """
 
+STOPPING_FOR_REMOVAL = "status: stopping the server first, then removing it from Yu'lon…"
+STOPPING_FOR_REMOVAL_WAIT = (
+    "Stopping the server before it is removed from Yu'lon. A server still loading its "
+    "world can take a few minutes to stop; the buttons unlock when it has."
+)
+"""T95, from the m910q gate: an × pressed on a world still loading took minutes.
+
+mangosd ignores SIGTERM while it loads, so the stop waits out its whole grace
+(`docker.STOP_GRACE_SECONDS`), and the locked buttons were all the player saw.
+The status line stays one short line (it does not wrap); the wait goes in the
+wrapped problem label.
+"""
+
 REPAIR_IDLE = "Repair: finish the database import…"
 REPAIR_ARMED = "Press again to overwrite the databases"
 """The same two-press gesture, for the action that really can destroy data.
@@ -5208,9 +5221,9 @@ class ControllerView(QWidget):
         what happens next (forget, or ask again) and may drop this tab.
         """
         self._disarm_actions()
-        self.problem_label.setText("")
         self._set_busy(True)
-        self.status_label.setText("status: stopping before it is removed from Yu'lon…")
+        self.status_label.setText(STOPPING_FOR_REMOVAL)
+        self.problem_label.setText(STOPPING_FOR_REMOVAL_WAIT)
         self.realm_badge.set_status("starting")
         self._run(
             self.services.controller.stop,

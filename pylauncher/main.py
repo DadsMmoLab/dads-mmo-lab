@@ -619,7 +619,6 @@ def build_window() -> object:
             wsl_distro=view.services.controller.wsl_distro,
             folder_gone=folder_gone,
             stop_first=not folder_gone and view.last_seen_running() is not False,
-            built_here=not folder_gone and forgetting.built_here(key[1]),
         )
         answer = QMessageBox.question(
             window,

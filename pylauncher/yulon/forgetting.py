@@ -12,12 +12,12 @@ chooses which one to show.
 How to bring a server back depends on the install type, and a sentence that is
 true of one type is false of another:
 
-* Yu'lon built it (`built_here`): "Use existing…" adopts the folder again at
-  once, and Install into the same folder resumes. `_claim_folder()`
-  (`catalog/native.py:5468`) returns the existing record, the run skips every
-  recorded stage, and it ends by starting the server.
-* Adopted, with no record (a DML install, say): only "Use existing…". Install
-  into that folder is refused as "not empty and was not created by this app".
+* On this host, built by Yu'lon or adopted: "Use existing…" on the Catalog
+  tile, pointed at the same folder. The m910q gate brought a removed TBC
+  server back that way (T95, 2026-09-24). Installing into the same folder
+  again is NOT offered: the gate found the install preflight's disk check
+  refusing it before the installer ever read its resume record (T112), and an
+  adopted folder, with no record, is refused outright.
 * In a WSL distro: "Find in WSL…".
 * Folder gone: nothing to bring back, and T34's promise about Docker, word
   for word.
@@ -91,22 +91,6 @@ class Facts:
     wsl_distro: str | None
     folder_gone: bool
     stop_first: bool
-    built_here: bool
-
-
-def built_here(server_dir: Path) -> bool:
-    """Whether Yu'lon's own install record proves this folder is a Yu'lon build.
-
-    The uninstall's ownership test (`apply.server_dir_claim`), and never the
-    file's presence. A copied folder carries a record that names the
-    original's path, and it must not be told that Install resumes there
-    (`native.read_claim()`'s rule). Imported inside the function for
-    `purge._default_claim()`'s reason: `apply` pulls in the whole engine.
-    """
-    from yulon.apply import server_dir_claim
-    from yulon.ownership import Ownership
-
-    return server_dir_claim(server_dir) is Ownership.OWNED
 
 
 def way_back(facts: Facts) -> str:
@@ -116,16 +100,10 @@ def way_back(facts: Facts) -> str:
             f'To bring it back: press "Find in WSL…" on the {facts.name} tile in the Catalog '
             f"and pick it in {facts.wsl_distro}."
         )
-    use_existing = (
-        f'press "Use existing…" on the {facts.name} tile in the Catalog and pick this folder'
+    return (
+        f'To bring it back: press "Use existing…" on the {facts.name} tile in the Catalog and '
+        "pick this folder."
     )
-    if facts.built_here:
-        return (
-            f"To bring it back: {use_existing}. Installing {facts.name} into this same folder "
-            "also works: the installer finds its own record there, skips every step already "
-            "done and starts the server."
-        )
-    return f"To bring it back: {use_existing}."
 
 
 def question(facts: Facts) -> str:

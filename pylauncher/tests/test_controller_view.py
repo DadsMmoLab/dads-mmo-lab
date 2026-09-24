@@ -5632,8 +5632,34 @@ def test_a_failed_stop_before_a_removal_says_why_here_and_to_the_window(
     assert "Docker would not say" in view.problem_label.text()
     assert view.refresh_button.isEnabled()
     assert (
-        "stopping before it is removed" not in view.status_label.text()
+        view.status_label.text() != controller_view_module.STOPPING_FOR_REMOVAL
     ), "the status line kept saying a stop was running after it had failed"
+
+
+def test_a_stop_before_a_removal_says_so_and_that_a_loading_server_is_slow(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The m910q gate (T95): an × on a world still loading took minutes, with locked buttons only.
+
+    mangosd ignores SIGTERM while it loads, so the stop waits out its whole
+    grace. The player is told, while it waits, what is happening and that it
+    can take that long.
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    view.services.controller.stop = lambda: True  # type: ignore[method-assign]
+    gate.hold = True
+
+    view.stop_for_removal()
+
+    status = view.status_label.text()
+    assert status == controller_view_module.STOPPING_FOR_REMOVAL
+    assert "stopping the server first" in status
+    said = view.problem_label.text()
+    assert "still loading" in said and "few minutes" in said
+    assert not view.refresh_button.isEnabled(), "the stop is running"
+    gate.release()
+    assert view.refresh_button.isEnabled()
 
 
 class _Gate:
