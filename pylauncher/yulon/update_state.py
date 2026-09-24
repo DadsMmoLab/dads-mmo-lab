@@ -65,6 +65,15 @@ class UpdateState(BaseModel):
     running NOW — a user who updates by hand must not be told about an update they have."""
     skipped_version: str | None = None
     """The one tag the player pressed "Skip this version" on. A newer one un-hides the bar."""
+    update_token: str | None = None
+    """A random secret this install's update working directories are marked with (T90 plan 3).
+
+    It is what makes a `.yulon-marker` unforgeable from outside: a marker is
+    believed only if it carries this value, which lives here in the config
+    directory rather than beside the install. An archive being unpacked and a
+    release body can both write files into the install folder; neither can read
+    this one.
+    """
     last_error: str | None = None
     """Why the last attempt gave nothing, when it gave nothing and there is no feed.
 

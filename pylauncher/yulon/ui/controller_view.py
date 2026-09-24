@@ -7718,13 +7718,19 @@ class ControllerView(QWidget):
         filled in every prompt that HAD a default and then raised on the one
         that did not, after the clone. See `widgets/manifest_prompt.py`.
 
-        The gate is deliberately narrow. A dialog opens only when this action
-        would really render a value the manifest has no default for, so 39 of
-        the 41 manifests get no new window and the applier gets `None` rather
-        than `{}` — the call it has always been given.
+        The gate: a dialog opens when this action would render ANY prompt,
+        pre-filled with the manifest's defaults, and a manifest that renders
+        none gets no window and hands the applier `None` — the call it has
+        always been given. Until T92 (2026-09-22) it opened only for a prompt
+        with NO default, which in the shipped catalog is `mod-ah-bot`'s two
+        GUIDs and nothing else — so `xp-rates` never asked its rates,
+        `sitmeanrest` never asked its seconds, and `unlimitedammo` would have
+        had the catalog's `true` written over the script's own `false` without
+        a word. A default shown in a box the person can change is an answer;
+        a default written unseen is not.
         """
         needed = required_prompts(manifest, action)
-        if not any(prompt.default is None for prompt in needed):
+        if not needed:
             return True, None
         answers = self._prompt_asker(self, manifest, needed)
         return (False, None) if answers is None else (True, answers)
