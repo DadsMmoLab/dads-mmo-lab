@@ -54,10 +54,15 @@ class _JobWorker(QObject):
 
     Exactly one of `done`, `failed` or `abandoned` is emitted per run.
     `abandoned` is the `BaseException` case -- a `KeyboardInterrupt` or a
-    `SystemExit` raised inside the work -- which is not a job failure to show a
-    person and not caught as one, but which must still end the thread and
-    release its delivery: before it existed, nothing was emitted, the thread
-    was never told to quit and the pair was held for the life of the app.
+    `SystemExit` raised inside the work. It is not a failure to show a person,
+    so no callback is called; the traceback goes to the log, the thread is told
+    to quit and the delivery is released, and the exception ENDS HERE. That is
+    what Python's own `threading` does with a `SystemExit` in a thread, and it
+    is not re-raised: PySide would print a second traceback for anything else,
+    and a re-raised `SystemExit` aborted or wedged the whole process (3.13:
+    abort 4 of 4, scoped re-review). Before `abandoned` existed, nothing was
+    emitted, the thread was never told to quit and the pair was held for the
+    life of the app.
     """
 
     done = Signal(object)
@@ -75,13 +80,13 @@ class _JobWorker(QObject):
         except Exception as exc:  # boundary: the view decides how to show it
             logger.warning(f"background job failed: {type(exc).__name__}: {exc}")
             self.failed.emit(exc)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - ends the job, not the process
             logger.error(
                 f"a background job was ended by {type(exc).__name__}, so it has no answer "
-                "to deliver"
+                "to deliver",
+                exc_info=True,
             )
             self.abandoned.emit()
-            raise
         else:
             self.done.emit(result)
 

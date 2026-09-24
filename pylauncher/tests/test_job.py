@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QObject, Slot
 
-from tests.conftest import HANG_BOUND_MS, process_events, pump_until, spelled_bounds
+from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until, spelled_bounds
 from yulon.ui.widgets.job import LineRelay, ThreadedJobRunner, in_flight, run_inline
 
 STILL_RUNNING = 0.2
@@ -293,6 +293,75 @@ def test_a_job_ended_by_a_base_exception_releases_its_thread_and_delivery(
         pump_until(lambda: (gc.collect(), delivery() is None)[1], "the delivery was released")
     assert called == [], "a job with no answer answered"
     assert "_NotAnException" in caplog.text
+    ended = [r for r in caplog.records if "_NotAnException" in r.getMessage()]
+    assert ended and ended[0].exc_info is not None, "logged without its traceback"
+
+
+_SYSTEM_EXIT_IN_A_JOB = """
+import gc
+import sys
+
+from PySide6.QtCore import QCoreApplication, QDeadlineTimer, QEventLoop, QObject
+
+app = QCoreApplication([])
+from yulon.ui.widgets.job import ThreadedJobRunner, in_flight  # noqa: E402
+
+owner = QObject()
+runner = ThreadedJobRunner(owner)
+called, later = [], []
+
+
+def pump(until):
+    deadline = QDeadlineTimer(60_000)
+    while not until() and not deadline.hasExpired():
+        QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 10)
+    return until()
+
+
+def work():
+    raise SystemExit(3)
+
+
+runner(work, called.append, called.append)
+thread, _worker, delivery = in_flight()._pairs[-1]
+thread_ended = pump(lambda: not thread.isRunning())
+released = pump(lambda: all(d is not delivery for *_, d in in_flight()._pairs))
+runner(lambda: 5, later.append, later.append)
+answered = pump(lambda: later == [5])
+print("STILL RUNNING", thread_ended, released, answered, called, later, flush=True)
+# Joined before exit, as `main()` joins every job: a QThread still running at
+# interpreter exit is Qt's own abort, and would read as this test's failure
+# (measured: the second job's thread, answered but not yet finished).
+in_flight().wait_all(60_000)
+"""
+"""A job whose work raises `SystemExit`, in a process of its own: before the
+fix, the re-raise after `abandoned` took the process down (3.13: abort 4 of 4),
+and a test that did that in-process would take the suite with it."""
+
+
+def test_a_system_exit_in_a_job_ends_the_job_and_not_the_process() -> None:
+    """Scoped re-review: `SystemExit` from the work was re-raised after
+    `abandoned`, and PySide does not swallow it -- the process aborted or
+    wedged. Python's own `threading` ignores `SystemExit` in a thread; so does
+    this runner now. The thread ends, the delivery is released, nothing is
+    called, the next job still answers, and the process is still there to say so.
+    """
+    import os
+    import subprocess
+
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    done = subprocess.run(
+        [sys.executable, "-c", _SYSTEM_EXIT_IN_A_JOB],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=HANG_BOUND,
+    )
+
+    assert done.returncode == 0, f"the process did not survive:\n{done.stdout}\n{done.stderr}"
+    assert "STILL RUNNING True True True [] [5]" in done.stdout, done.stdout + done.stderr
+    assert done.stderr.count("Traceback") <= 1, f"the traceback was printed twice:\n{done.stderr}"
 
 
 def test_wait_joins_running_jobs(qapp: object) -> None:
@@ -367,7 +436,7 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
     a `runner.wait(5000)` whose result was thrown away, and no audit at all --
     appending `gate.wait(5.0)` to it left 7 passed on m910q that day.
     """
-    assert spelled_bounds(__file__) == {"HANG_BOUND_MS", "STILL_RUNNING"}
+    assert spelled_bounds(__file__) == {"HANG_BOUND", "HANG_BOUND_MS", "STILL_RUNNING"}
 
 
 _UI = Path(__file__).resolve().parents[1] / "yulon" / "ui"
