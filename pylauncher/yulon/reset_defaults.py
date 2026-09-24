@@ -35,6 +35,7 @@ import os
 import shutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -127,6 +128,21 @@ def _host_bind_label(server_dir: Path) -> str:
     )
 
 
+RESET_TAG = "reset"
+"""What a reset's backups carry in their name: `<file>.<stamp>.reset.bak`."""
+
+
+def reset_backup(path: Path, *, now: datetime | None = None) -> Path:
+    """`tuning.backup()`, tagged as a reset's, so `last_reset_on_disk()` can find it again.
+
+    The same function the Tuning tab's saves use -- so its per-file Revert
+    still restores a reset -- with the tag between the stamp and `.bak`, which
+    is the one thing that tells this backup from a save's once the window that
+    made it has closed.
+    """
+    return tuning.backup(path, now=now, tag=RESET_TAG)
+
+
 RESTORE_TEMP_SUFFIX = ".yulon-restore-tmp"
 """What a file being put back from its backup is called until the rename lands."""
 
@@ -167,7 +183,7 @@ class Seams:
     platform_id: Callable[[], str] = platform.detect
     bind_label: Callable[[Path], str] = _host_bind_label
     write: Callable[[Path, str], None] = conf.replace_file
-    backup: Callable[[Path], Path] = tuning.backup
+    backup: Callable[[Path], Path] = reset_backup
     restore: Callable[[Path, Path], None] = restore
 
 
@@ -631,7 +647,7 @@ def reset(
 
     Phase one builds every default and reads every current file, and writes
     nothing; one failure there refuses the whole press. Phase two backs each
-    changing file up (`tuning.backup`, `<file>.<stamp>.bak` beside it) and
+    changing file up (`reset_backup`, `<file>.<stamp>.reset.bak` beside it) and
     replaces it atomically (`conf.replace_file`); a failure there puts back,
     from those backups, every file this press had already written. A file
     already equal to its default is not touched and gets no backup; a file not
@@ -780,6 +796,75 @@ def undo(
             logger.info(f"put {item.file} back from {item.backup.name}")
             results.append(FileResult(item.file, "restored", item.backup))
     return ResetReport(tuple(results), undo=True)
+
+
+ONE_PRESS = timedelta(seconds=10)
+"""How far apart two backups' stamps may be and still be one press's.
+
+A reset's backups are taken in one loop after every default is already built
+-- a copy and an atomic write per file, milliseconds apart even for the four
+CMaNGOS confs -- so ten seconds is room for a slow disk and still far short of
+a person pressing a second time.
+"""
+_STAMP = "%Y%m%d-%H%M%S-%f"
+"""`tuning.backup()`'s own stamp."""
+
+
+def _stamp_of(backup: Path, path: Path) -> datetime | None:
+    """When `reset_backup()` took `backup` of `path`, from its name; `None` if it did not.
+
+    A save's backup (untagged) and a person's own `.bak` both answer `None`.
+    """
+    head, tail = f"{path.name}.", f".{RESET_TAG}.bak"
+    name = backup.name
+    if not (name.startswith(head) and name.endswith(tail)):
+        return None
+    try:
+        return datetime.strptime(name[len(head) : -len(tail)], _STAMP)
+    except ValueError:
+        return None
+
+
+def last_reset_on_disk(entry: CatalogEntry, server_dir: Path) -> tuple[FileResult, ...]:
+    """The last press's files and backups, read off the disk, for an Undo after a restart.
+
+    The session's own record (`ResetReport.written`) dies with the window --
+    and with a crash half-way through a press, which is exactly when an undo is
+    wanted -- while the Tuning tab lists the WotLK confs read-only, so its
+    per-file Revert cannot reach their backups. The backups beside each file
+    are the record that survives. For each of this game's own files, its
+    newest backup a reset took (`reset_backup()`'s tag; a Tuning save's
+    backup is not one); the ones stamped within `ONE_PRESS` of the newest of
+    them are one press; of those, each whose file still differs from it is
+    what an Undo would put back. A file already equal to its backup has
+    nothing to undo, so an undone reset is not offered again.
+
+    Reads only; `()` when there is nothing to put back.
+    """
+    newest: dict[str, tuple[datetime, Path]] = {}
+    for file in core_files(entry):
+        path = server_dir / file
+        for backup in reversed(tuning.backups_of(path)):
+            stamp = _stamp_of(backup, path)
+            if stamp is not None:
+                newest[file] = (stamp, backup)
+                break
+    if not newest:
+        return ()
+    latest = max(stamp for stamp, _ in newest.values())
+    found: list[FileResult] = []
+    for file, (stamp, backup) in newest.items():
+        if latest - stamp > ONE_PRESS:
+            continue
+        try:
+            if backup.read_bytes() == (server_dir / file).read_bytes():
+                continue
+        except OSError:
+            # A file gone or unreadable: a reset never deletes one, so this is
+            # not a state an undo of it can put right.
+            continue
+        found.append(FileResult(file, "reset", backup))
+    return tuple(found)
 
 
 def question(files: Sequence[str], modules: Sequence[str]) -> str:

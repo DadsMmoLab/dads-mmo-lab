@@ -29,6 +29,7 @@ from yulon import (
     networking,
     party,
     purge,
+    reset_defaults,
     runner,
     state,
     steam,
@@ -36,7 +37,7 @@ from yulon import (
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql
-from yulon.catalog import native
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
@@ -66,7 +67,11 @@ from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
     RETURN_TO_PIN_BUTTON_LABEL,
+    TUNING_CORE_FILES,
     TUNING_RECREATE_LABEL,
+    TUNING_RESET_ALL,
+    TUNING_RESET_RUNNING,
+    TUNING_RESET_UNDO,
     TUNING_RESTART_LABEL,
     UPDATE_TO_LATEST_BUTTON_LABEL,
     ControllerServices,
@@ -13921,3 +13926,440 @@ def _index_of(tab: Any, widget: Any) -> int:
         if item is not None and item.widget() is widget:
             return index
     raise AssertionError(f"{widget} is not in {tab}'s layout")
+
+
+# --------------------------------------------- T94: Reset to default
+
+
+def _reset_menu_texts(view: ControllerView) -> list[str]:
+    return [a.text() for a in view.tuning_reset_menu.actions() if not a.isSeparator()]
+
+
+def _menu_action(view: ControllerView, text: str) -> Any:
+    return next(a for a in view.tuning_reset_menu.actions() if a.text() == text)
+
+
+def _reset_answer(monkeypatch: pytest.MonkeyPatch, answer: object, asked: list[str]) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: (asked.append(str(a[2])), answer)[1]
+    )
+
+
+def _reset_yes(monkeypatch: pytest.MonkeyPatch, asked: list[str] | None = None) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.Yes, [] if asked is None else asked)
+
+
+RESET_QUIET = reset_defaults.Seams(bind_label=lambda server_dir: "", platform_id=lambda: "linux")
+"""WotLK's reset asks no docker; this also keeps it from asking the host about SELinux."""
+
+
+def _wotlk_server(server: Path) -> dict[str, bytes]:
+    """A Yu'lon WotLK folder: three tuned confs with `.dist`s, a marked base, a broken override."""
+    defaults: dict[str, bytes] = {}
+    for file in TUNING_CORE_FILES:
+        path = server / file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        defaults[file] = f"# default {path.name}\nKey = 1\n".encode()
+        path.with_name(path.name + ".dist").write_bytes(defaults[file])
+        path.write_bytes(b"Key = 2\n")
+    (server / composegen.BASE_FILE).write_text(
+        composegen.GENERATED_MARKER + "\nservices: {}\n", encoding="utf-8"
+    )
+    (server / composegen.OVERRIDE_FILE).write_text(
+        "services:\n  ac-worldserver:\n    environment:\n      TZ: Europe/Oslo\n", encoding="utf-8"
+    )
+    return defaults
+
+
+def _reset_view(
+    ps: _Ps, tmp_path: Path, route: object = None, entry: CatalogEntry = WOTLK, **kw: Any
+) -> ControllerView:
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "reset_settings",
+        (
+            route
+            if route is not None
+            else reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
+        ),
+    )
+    return ControllerView(entry, services, status_poll_ms=0, **kw)
+
+
+def test_the_wotlk_core_list_is_the_reset_modules_one_list() -> None:
+    assert TUNING_CORE_FILES is reset_defaults.AZEROTHCORE_CORE_FILES
+
+
+@pytest.mark.parametrize(
+    ("game", "files"),
+    [
+        (
+            "wow-wotlk",
+            [
+                "worldserver.conf",
+                "authserver.conf",
+                "modules/playerbots.conf",
+                "docker-compose.override.yml",
+            ],
+        ),
+        ("wow-tbc", ["mangosd.conf", "realmd.conf", "aiplayerbot.conf", "ahbot.conf"]),
+        ("wow-vanilla", ["mangosd.conf", "realmd.conf", "aiplayerbot.conf", "ahbot.conf"]),
+        (
+            "wow-tortoise",
+            ["aiplayerbot.conf", "modules/tortoise_bots.conf", "mangosd.conf", "realmd.conf"],
+        ),
+    ],
+)
+def test_the_reset_menu_lists_exactly_this_games_files(
+    qapp: object, ps: _Ps, tmp_path: Path, game: str, files: list[str]
+) -> None:
+    view = _reset_view(ps, tmp_path, entry=load_catalog().get(game))
+    assert _reset_menu_texts(view) == [
+        TUNING_RESET_ALL,
+        *(f"{name}…" for name in files),
+        TUNING_RESET_UNDO,
+    ]
+    assert view.tuning_reset_button.isEnabled() is True
+    assert view.tuning_reset_undo_action.isEnabled() is False, "nothing to undo yet"
+
+
+def test_no_on_the_reset_question_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    watched = [tmp_path / composegen.OVERRIDE_FILE, *(tmp_path / "env").rglob("*")]
+    before = {p: p.read_bytes() for p in watched if p.is_file()}
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert len(asked) == 1 and "worldserver.conf" in asked[0] and "RECREATED" in asked[0]
+    assert {p: p.read_bytes() for p in before} == before
+    assert not list(tmp_path.rglob("*.bak"))
+    assert view.tuning_banner.isHidden() is True
+
+
+def test_yes_resets_everything_asks_for_a_recreate_and_undo_brings_it_back(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner decision 4: the override's env needs a recreate, the dearest job owed."""
+    defaults = _wotlk_server(tmp_path)
+    tuned_override = (tmp_path / composegen.OVERRIDE_FILE).read_bytes()
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert {f: (tmp_path / f).read_bytes() for f in defaults} == defaults
+    override = (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert "TZ" not in override and "AC_AI_PLAYERBOT_MAX_RANDOM_BOTS" in override
+    assert view.tuning_banner.isHidden() is False
+    assert composegen.OVERRIDE_FILE in view.tuning_banner_label.text()
+    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+    assert view.tuning_reset_undo_action.isEnabled() is True
+
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+
+    assert all((tmp_path / f).read_bytes() == b"Key = 2\n" for f in defaults)
+    assert (tmp_path / composegen.OVERRIDE_FILE).read_bytes() == tuned_override
+    assert view.tuning_reset_undo_action.isEnabled() is False, "an empty undo is offered"
+    assert "put back from" in view.tuning_report.toPlainText()
+
+
+def test_one_conf_can_be_reset_alone_and_owes_only_a_restart(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, "authserver.conf…").trigger()
+
+    assert (tmp_path / "env/dist/etc/authserver.conf").read_bytes() == defaults[
+        "env/dist/etc/authserver.conf"
+    ]
+    assert (tmp_path / "env/dist/etc/worldserver.conf").read_bytes() == b"Key = 2\n"
+    assert b"TZ" in (tmp_path / composegen.OVERRIDE_FILE).read_bytes()
+    assert view.tuning_banner_button.text() == TUNING_RESTART_LABEL
+
+
+def test_the_reset_runs_on_the_job_runner_and_the_tab_is_busy_until_it_ends(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No docker on the GUI thread: the press only QUEUES the work (spec Test 7).
+
+    And the two callbacks are the view's own bound slots: a lambda or a closure
+    has no thread affinity, so the job runner would call it on the WORKER
+    thread (`ui/widgets/job.py`; T97 crashed the Characters tab on exactly that).
+    """
+    _wotlk_server(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+    real = reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
+
+    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+        calls.append((tuple(files), dict(keys)))
+        return real(files, keys)
+
+    view = _reset_view(
+        ps, tmp_path, route, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    _reset_yes(monkeypatch)
+    queued = len(held)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert len(held) == queued + 1 and calls == [], "the press did the work itself"
+    assert view.busy_reason() == TUNING_RESET_RUNNING
+    assert view.tuning_reset_button.isEnabled() is False
+    work, done, failed = held[-1]
+    assert (done.__self__, done.__func__) == (view, ControllerView._reset_done)
+    assert (failed.__self__, failed.__func__) == (view, ControllerView._reset_failed)
+    done(work())
+    assert calls == [(reset_defaults.core_files(WOTLK), {})], "no module installed: no keys"
+    assert view.busy_reason() is None
+    assert view.tuning_reset_button.isEnabled() is True
+
+    # The undo is the same shape: queued, busy, and handed back to bound slots.
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+    assert view.busy_reason() == TUNING_RESET_RUNNING
+    assert (tmp_path / TUNING_CORE_FILES[0]).read_bytes() != b"Key = 2\n", "the undo ran inline"
+    work, done, failed = held[-1]
+    assert (done.__self__, done.__func__) == (view, ControllerView._undo_done)
+    assert (failed.__self__, failed.__func__) == (view, ControllerView._reset_failed)
+    done(work())
+    assert (tmp_path / TUNING_CORE_FILES[0]).read_bytes() == b"Key = 2\n"
+    assert view.busy_reason() is None
+
+
+def test_a_reset_that_raised_unlocks_the_tab_and_says_so(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+        raise RuntimeError("a bug in the reset")
+
+    view = _reset_view(ps, tmp_path, route)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert failures == ["a bug in the reset"]
+    assert "FAILED: a bug in the reset" in view.tuning_report.toPlainText()
+    assert view.busy_reason() is None and view.tuning_reset_button.isEnabled() is True
+
+
+def test_a_refused_reset_writes_nothing_says_why_and_offers_no_restart(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    (tmp_path / "env/dist/etc/authserver.conf.dist").unlink()
+    view = _reset_view(ps, tmp_path)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert (tmp_path / "env/dist/etc/worldserver.conf").read_bytes() == b"Key = 2\n"
+    assert b"TZ" in (tmp_path / composegen.OVERRIDE_FILE).read_bytes()
+    assert "authserver.conf.dist" in view.tuning_report.toPlainText()
+    assert failures, "a refusal must reach the window's failure line"
+    assert view.tuning_banner.isHidden() is True
+    assert view.tuning_reset_undo_action.isEnabled() is False
+
+
+def test_a_cmangos_reset_owes_what_file_rule_prices_its_etc_files_at(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec correction 10: `etc/` is priced as a recreate, so the banner offers Recreate."""
+    backup = tmp_path / "etc" / "mangosd.conf.20260923-120000-000000.bak"
+
+    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+        return reset_defaults.ResetReport(
+            (reset_defaults.FileResult("etc/mangosd.conf", "reset", backup),)
+        )
+
+    view = _reset_view(ps, tmp_path, route, entry=TBC)
+    _reset_yes(monkeypatch)
+    _menu_action(view, "mangosd.conf…").trigger()
+
+    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+    assert "etc/mangosd.conf" in view.tuning_banner_label.text()
+
+
+def _beastmaster_view(ps: _Ps, tmp_path: Path, route: object = None) -> ControllerView:
+    """WotLK with NPC Beastmaster installed: it keeps `Creatures.CustomIDs` in the core conf."""
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services, "installed_modules", lambda: {"module": frozenset({"mod-npc-beastmaster"})}
+    )
+    object.__setattr__(
+        services,
+        "reset_settings",
+        route or reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET),
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def test_the_question_says_the_installed_modules_settings_are_kept(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner decision 5, in the words the player reads."""
+    _wotlk_server(tmp_path)
+    view = _beastmaster_view(ps, tmp_path)
+    names = {
+        r.module_name
+        for r in view._tuning_rows
+        if r.installed and r.file == "env/dist/etc/worldserver.conf"
+    }
+    assert names, "control: the manifest no longer keys worldserver.conf"
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _menu_action(view, "worldserver.conf…").trigger()
+    assert all(name in asked[0] for name in names) and "are kept" in asked[0]
+    _menu_action(view, "authserver.conf…").trigger()
+    assert not any(name in asked[1] for name in names)
+
+
+def test_the_tab_hands_the_reset_its_own_rows_keys_spelled_as_wotlks_core_files(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Carried from Task 3: only TBC's `etc/` spelling was tested. WotLK's is `env/dist/etc/`."""
+    _wotlk_server(tmp_path)
+    got: list[dict[str, Any]] = []
+
+    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+        got.append(dict(keys))
+        return reset_defaults.ResetReport(())
+
+    view = _beastmaster_view(ps, tmp_path, route)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert list(got[0]) == ["env/dist/etc/worldserver.conf"]
+    assert set(got[0]) <= set(reset_defaults.core_files(WOTLK))
+    assert "Creatures.CustomIDs" in got[0]["env/dist/etc/worldserver.conf"]
+
+
+def test_a_cmangos_tab_hands_the_reset_its_rows_keys_spelled_as_its_core_files(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same through a TBC tab: XP Rates keys `etc/mangosd.conf`, `core_files()`'s spelling."""
+    from yulon.controller_wow_tbc import modules as tbc_modules
+
+    got: list[dict[str, Any]] = []
+
+    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+        got.append(dict(keys))
+        return reset_defaults.ResetReport(())
+
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "store", tbc_modules.store())
+    object.__setattr__(services, "installed_modules", lambda: {"mod": frozenset({"xp-rates"})})
+    object.__setattr__(services, "reset_settings", route)
+    view = ControllerView(TBC, services, status_poll_ms=0)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert list(got[0]) == ["etc/mangosd.conf"]
+    assert set(got[0]) <= set(reset_defaults.core_files(TBC))
+    assert got[0]["etc/mangosd.conf"], "XP Rates' keys never reached the reset"
+
+
+def test_an_installed_modules_key_survives_a_reset_pressed_on_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner decision 5 end to end: the tab hands its OWN rows' keys to the reset."""
+    defaults = _wotlk_server(tmp_path)
+    world = tmp_path / "env/dist/etc/worldserver.conf"
+    world.write_bytes(b"Key = 2\nCreatures.CustomIDs = 90001\n")
+    view = _beastmaster_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, "worldserver.conf…").trigger()
+
+    # The core key went back to the .dist; the module's key, absent there, was appended.
+    assert world.read_bytes() == defaults["env/dist/etc/worldserver.conf"] + (
+        b"Creatures.CustomIDs = 90001\n"
+    )
+
+
+def test_after_a_restart_undo_finds_the_last_reset_on_disk(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closed (or crashed) window loses the session's record; the backups on disk are enough.
+
+    The raw editor lists the WotLK confs read-only and its Revert refuses them,
+    so without this nothing on the tab reaches a core conf's backup.
+    """
+    defaults = _wotlk_server(tmp_path)
+    tuned_override = (tmp_path / composegen.OVERRIDE_FILE).read_bytes()
+    _reset_yes(monkeypatch)
+    first = _reset_view(ps, tmp_path)
+    _menu_action(first, TUNING_RESET_ALL).trigger()
+    assert {f: (tmp_path / f).read_bytes() for f in defaults} == defaults
+    first.deleteLater()
+
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    again = _reset_view(ps, tmp_path)
+    assert again.tuning_reset_undo_action.isEnabled() is True
+    _menu_action(again, TUNING_RESET_UNDO).trigger()
+
+    assert "worldserver.conf" in asked[0] and ".bak" in asked[0], "the dialog names its backups"
+    assert all((tmp_path / f).read_bytes() == b"Key = 2\n" for f in defaults)
+    assert (tmp_path / composegen.OVERRIDE_FILE).read_bytes() == tuned_override
+    assert again.tuning_reset_undo_action.isEnabled() is False
+    assert again.tuning_banner_button.text() == TUNING_RECREATE_LABEL, "the undo owes one too"
+
+
+def test_no_on_the_undo_question_puts_nothing_back(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defaults = _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, [])
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+
+    assert {f: (tmp_path / f).read_bytes() for f in defaults} == defaults
+    assert view.tuning_reset_undo_action.isEnabled() is True
+
+
+def test_the_reset_button_is_locked_while_another_action_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _reset_view(ps, tmp_path)
+    view._set_busy(True)
+    assert view.tuning_reset_button.isEnabled() is False
+    view._set_busy(False)
+    assert view.tuning_reset_button.isEnabled() is True
+
+
+def test_a_tab_with_no_reset_route_has_a_dead_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.tuning_reset_button.isEnabled() is False
+    view._set_busy(True)
+    view._set_busy(False)
+    assert view.tuning_reset_button.isEnabled() is False, "a job ending handed it a route"
+
+
+def test_a_saves_backup_is_not_offered_as_a_reset_to_undo(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Only a reset's own backups arm the Undo: a Tuning save of a core conf takes one too."""
+    _wotlk_server(tmp_path)
+    world = tmp_path / TUNING_CORE_FILES[0]
+    tuning.backup(world)
+    world.write_bytes(b"Key = 3\n")
+    view = _reset_view(ps, tmp_path)
+    assert view.tuning_reset_undo_action.isEnabled() is False

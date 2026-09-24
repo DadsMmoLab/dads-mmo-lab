@@ -27,6 +27,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -867,6 +868,14 @@ class ControllerServices:
     included, to say which of its three sentences applies.
     """
 
+    reset_settings: reset_defaults.ResetRoute | None = None
+    """The Tuning tab's Reset to default (T94), bound to this install.
+
+    Wired in `_assemble` for every game -- which files are a game's own and how
+    each default is made are catalog facts, not per-game decisions. `None` (a
+    hand-built services object) leaves the button dead.
+    """
+
     set_client_dir: Callable[[Path | None], None] | None = None
     """Write a new client folder (or clear it with `None`) for THIS install (T36).
 
@@ -1256,6 +1265,10 @@ def _assemble(
         update_to_latest=install_wiring.update_to_latest_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
+        # T94. HERE for the rebuild's reason: the file set and how each default
+        # is made are catalog facts every game's tab reads the same way. The
+        # WSL refusal lives in the route, where the distro is known.
+        reset_settings=reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
     )
 
 
@@ -3591,6 +3604,26 @@ the point of the list is that these three are the ones this tab deliberately
 will not write.
 """
 
+TUNING_RESET_LABEL = "Reset to default"
+TUNING_RESET_ALL = "All server settings…"
+TUNING_RESET_UNDO = "Undo the last reset…"
+"""T94's menu. The ellipses are this app's "a dialog opens first" convention."""
+
+TUNING_RESET_TIP = (
+    "Put this server's own settings files back to how Yu'lon installed it. Module files are "
+    "kept, and a backup of each file is made first."
+)
+TUNING_RESET_RUNNING = (
+    "Yu'lon is putting this server's settings files back. It takes a few seconds; this window "
+    "closes normally once it is done."
+)
+"""The close guard's sentence while a reset or its undo runs (`busy_reason()`)."""
+
+TUNING_RESET_UNDO_CONFIRM = (
+    "Put back the files the last reset replaced?\n\n{files}\n\nEach one is copied back from "
+    "the backup named beside it. Anything you changed in them since the reset is replaced."
+)
+
 MODULE_SQL_BUTTON_LABEL = "Apply module SQL"
 """The Modules tab's import button, named once.
 
@@ -4176,6 +4209,10 @@ class ControllerView(QWidget):
         outcome: the import cannot be stopped, so the only choice available was
         ever between waiting and a crash (review, 2026-08-23).
         """
+        # T94: a reset or its undo is writing the server's own confs, and a
+        # QThread destroyed mid-job aborts the process (see above).
+        if self._reset_running:
+            return TUNING_RESET_RUNNING
         if self._uninstall_running:
             return UNINSTALL_RUNNING
         if self._module_sql_running:
@@ -4724,6 +4761,8 @@ class ControllerView(QWidget):
             self.tuning_recreate_button.setEnabled(False)
             self.tuning_restart_button.setEnabled(False)
             self.tuning_banner_button.setEnabled(False)
+            # T94: a reset writes the same confs, and its undo puts them back.
+            self.tuning_reset_button.setEnabled(False)
         else:
             self.refresh_button.setEnabled(True)
             self.module_updates_button.setEnabled(self.services.module_updates is not None)
@@ -4748,6 +4787,8 @@ class ControllerView(QWidget):
             # that rule lives, so it is what unlocks them.
             self.tuning_reload_button.setEnabled(True)
             self.tuning_banner_button.setEnabled(True)
+            # Back to whether this tab HAS a route, never unconditionally.
+            self.tuning_reset_button.setEnabled(self.services.reset_settings is not None)
             self._set_tuning_revert_all()
             self._refresh_tuning_owed()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
@@ -8690,9 +8731,34 @@ class ControllerView(QWidget):
         self.tuning_restart_button.clicked.connect(self.restart_server)
         self.tuning_restart_button.setToolTip(TUNING_RESTART_TIP)
         self.tuning_restart_button.setEnabled(False)
+        # T94. A menu and not two buttons: "all" and "one file" are one action
+        # at two sizes, and the per-file entries are this game's own files from
+        # the catalog. Undo sits in the same menu because the raw editor lists
+        # the WotLK confs read-only, so its Revert cannot reach their backups.
+        self._reset_files = reset_defaults.core_files(self.entry)
+        self.tuning_reset_button = QPushButton(TUNING_RESET_LABEL, tab)
+        self.tuning_reset_button.setToolTip(TUNING_RESET_TIP)
+        self.tuning_reset_menu = QMenu(self.tuning_reset_button)
+        self.tuning_reset_menu.addAction(TUNING_RESET_ALL).triggered.connect(
+            self.reset_all_to_default
+        )
+        self.tuning_reset_menu.addSeparator()
+        for file in self._reset_files:
+            action = self.tuning_reset_menu.addAction(f"{reset_defaults.label(file)}…")
+            # A GUI-thread signal into a GUI-thread call, so a lambda is safe
+            # here; the JOB's callbacks below are bound slots (`_run()`).
+            action.triggered.connect(lambda _checked=False, one=file: self.reset_to_default((one,)))
+        self.tuning_reset_menu.addSeparator()
+        self.tuning_reset_undo_action = self.tuning_reset_menu.addAction(TUNING_RESET_UNDO)
+        self.tuning_reset_undo_action.triggered.connect(self.undo_last_reset)
+        self.tuning_reset_undo_action.setEnabled(False)
+        self.tuning_reset_button.setMenu(self.tuning_reset_menu)
+        self.tuning_reset_button.setVisible(bool(self._reset_files))
+        self.tuning_reset_button.setEnabled(self.services.reset_settings is not None)
         actions = QHBoxLayout()
         actions.addWidget(self.tuning_reload_button)
         actions.addWidget(self.tuning_revert_all_button)
+        actions.addWidget(self.tuning_reset_button)
         actions.addStretch(1)
         actions.addWidget(self.tuning_recreate_button)
         actions.addWidget(self.tuning_restart_button)
@@ -8743,6 +8809,11 @@ class ControllerView(QWidget):
         # and forgotten on restart for the same reason: a persisted marker is
         # a file with its own invalidation rules (T42's "Not in scope").
         self._tuning_owed: dict[str, set[str]] = {}
+        # T94: a reset or undo in flight (the close guard reads it through
+        # `busy_reason()`), and what the last reset of this session wrote, for
+        # its Undo. Empty, the Undo reads the last press off the disk instead.
+        self._reset_running = False
+        self._last_reset: tuple[reset_defaults.FileResult, ...] = ()
         self.reload_tuning()
         self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
 
@@ -8766,6 +8837,9 @@ class ControllerView(QWidget):
         # drift (T44 item 13).
         self.tuning_panel.set_files(self._tuning_files(), read_only=TUNING_CORE_FILES)
         self._set_tuning_revert_all()
+        # T94: the files just re-read are what decides whether an undo has
+        # anything to put back.
+        self.tuning_reset_undo_action.setEnabled(bool(self._reset_undo_items()))
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -8805,15 +8879,18 @@ class ControllerView(QWidget):
             )
         )
 
-    def _note_tuning_owed(self, file: str) -> None:
+    def _note_tuning_owed(self, file: str, rule: tuning.ApplyRule | None = None) -> None:
         """Record that `file` has been written and the server has not picked it up.
 
         The job is `tuning.file_rule()`'s, never a guess: a conf inside a
         directory the compose binds is read off the user's own disk at world
         start and a restart is enough; one outside every bind is a copy baked
-        into the image, and only a recreate picks the new one up.
+        into the image, and only a recreate picks the new one up. `rule` is for
+        a caller that knows better than `file_rule()`: T94's reset prices the
+        compose override as a recreate, which `file_rule()` calls read-only
+        (`reset_defaults.apply_rule`).
         """
-        rule = tuning.file_rule(file)
+        rule = rule or tuning.file_rule(file)
         if rule in TUNING_JOB_WORDS:
             self._tuning_owed.setdefault(rule, set()).add(file)
         self._refresh_tuning_owed()
@@ -8933,6 +9010,137 @@ class ControllerView(QWidget):
         self._refresh_tuning_owed()
         self.tuning_report.setPlainText(f"FAILED: {exc}")
         self.action_failed.emit(str(exc))
+
+    # -- T94: Reset to default
+
+    @Slot()
+    def reset_all_to_default(self) -> None:
+        self.reset_to_default(self._reset_files)
+
+    def reset_to_default(self, files: Sequence[str]) -> None:
+        """Ask once, then put `files` back to how Yu'lon installed this server, off the GUI thread.
+
+        Allowed while the server runs (owner, 2026-09-23): the files change on
+        disk and the banner offers the restart or recreate that makes them
+        count. Refused while another action of ours runs, which may be reading
+        these files.
+        """
+        route = self.services.reset_settings
+        if route is None or self._busy or not files:
+            return
+        chosen = tuple(files)
+        # Owner decision 5: the keys installed modules keep in these files,
+        # from this tab's OWN rows (`tuning.rows_for`), whose `file` is the
+        # manifest's spelling -- `env/dist/etc/...` on WotLK, `etc/...` on
+        # CMaNGOS -- which is `core_files()`'s. Read here, on the GUI thread,
+        # because they are already in memory; the worker gets a copy.
+        keys = reset_defaults.module_keys(self._tuning_rows, chosen)
+        modules = sorted(
+            {
+                row.module_name
+                for row in self._tuning_rows
+                if row.key in keys.get(row.file, ())
+                # A key the install table writes is not kept (`install_keys`),
+                # so a module holding only those is not named as kept either.
+                and row.key.casefold() not in reset_defaults.install_keys(self.entry, row.file)
+            }
+        )
+        if not self._confirm(TUNING_RESET_LABEL, reset_defaults.question(chosen, modules)):
+            return
+        self._reset_running = True
+        self._set_busy(True)
+        self.tuning_report.setPlainText("putting the settings back to how Yu'lon installed them…")
+        self._run(partial(route, chosen, keys), self._reset_done, self._reset_failed)
+
+    @Slot(object)
+    def _reset_done(self, result: object) -> None:
+        self._reset_running = False
+        self._set_busy(False)
+        if not isinstance(result, reset_defaults.ResetReport):
+            return
+        lines = result.lines()
+        self.tuning_report.setPlainText("\n".join(lines))
+        if result.written:
+            self._last_reset = result.written
+        for item in result.written:
+            self._note_tuning_owed(item.file, reset_defaults.apply_rule(item.file))
+        if result.refused:
+            self.action_failed.emit(" ".join(lines[:2]))
+        self._after_reset_files(result)
+
+    @Slot(object)
+    def _reset_failed(self, exc: object) -> None:
+        """Only a bug reaches here: `reset()` and `undo()` report every failure they expect."""
+        self._reset_running = False
+        self._set_busy(False)
+        self.tuning_report.setPlainText(f"FAILED: {exc}")
+        self.action_failed.emit(str(exc))
+
+    def _reset_undo_items(self) -> tuple[reset_defaults.FileResult, ...]:
+        """What "Undo the last reset…" would put back, or `()` when there is nothing.
+
+        This session's own record first: it is exact. Without one -- the window
+        was closed since, or crashed half-way through a press -- the last press
+        read off the backups on disk (`reset_defaults.last_reset_on_disk`),
+        because the raw editor lists the WotLK confs read-only and its Revert
+        cannot reach their backups, so nothing else on this tab would.
+        """
+        if self._last_reset:
+            return self._last_reset
+        return reset_defaults.last_reset_on_disk(self.entry, self.services.controller.server_dir)
+
+    @Slot()
+    def undo_last_reset(self) -> None:
+        """Copy back what the last reset replaced, after one Yes/No, off the GUI thread."""
+        if self._busy:
+            return
+        items = self._reset_undo_items()
+        if not items:
+            self.tuning_reset_undo_action.setEnabled(False)
+            return
+        names = "\n".join(
+            f"    {reset_defaults.label(item.file)}  <-  {item.backup.name}"
+            for item in items
+            if item.backup is not None
+        )
+        if not self._confirm(TUNING_RESET_UNDO, TUNING_RESET_UNDO_CONFIRM.format(files=names)):
+            return
+        self._reset_running = True
+        self._set_busy(True)
+        self.tuning_report.setPlainText("putting back what the last reset replaced…")
+        self._run(
+            partial(reset_defaults.undo, self.services.controller.server_dir, items),
+            self._undo_done,
+            self._reset_failed,
+        )
+
+    @Slot(object)
+    def _undo_done(self, result: object) -> None:
+        self._reset_running = False
+        self._set_busy(False)
+        if not isinstance(result, reset_defaults.ResetReport):
+            return
+        lines = result.lines()
+        self.tuning_report.setPlainText("\n".join(lines))
+        for item in result.results:
+            if item.outcome == "restored":
+                self._note_tuning_owed(item.file, reset_defaults.apply_rule(item.file))
+        # A file the undo could not put back keeps its backup, so a second
+        # press tries it again; the rest are done.
+        self._last_reset = tuple(item for item in result.results if item.outcome == "refused")
+        if result.refused:
+            self.action_failed.emit(" ".join(lines[:2]))
+        self._after_reset_files(result)
+
+    def _after_reset_files(self, result: reset_defaults.ResetReport) -> None:
+        """Re-read the tab (and the Undo's state) and the open file, if the press changed it."""
+        self.reload_tuning()
+        current = self.tuning_panel.current_file()
+        if current and any(
+            item.file == current and item.outcome in ("reset", "restored")
+            for item in result.results
+        ):
+            self.open_tuning_file(current)
 
     def _tuning_files(self) -> tuple[str, ...]:
         """What the raw editor offers: this install's module confs, then its own.

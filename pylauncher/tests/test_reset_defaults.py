@@ -18,6 +18,7 @@ import os
 import secrets
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -1063,3 +1064,98 @@ def test_a_rollback_puts_a_file_back_through_the_atomic_restore(
     assert not list((server / "etc").glob("*.yulon-restore-tmp"))
     if sys.platform != "win32":
         assert {file: (server / file).stat().st_mode for file in tuned} == modes
+
+
+# -- the undo after a restart: the last reset, read back off the disk -------------
+
+
+def test_after_a_restart_the_last_reset_is_found_from_its_backups_on_disk(tmp_path: Path) -> None:
+    """A crash or a restart loses the session's record; the backups beside each file are one."""
+    server, _, _, tuned = _tuned_tbc(tmp_path)
+    report = reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+
+    found = reset_defaults.last_reset_on_disk(TBC, server)
+
+    assert found == report.written
+    reset_defaults.undo(server, found)
+    assert _bytes(server, tuned) == tuned
+    assert reset_defaults.last_reset_on_disk(TBC, server) == (), "an undone reset is not undoable"
+
+
+def test_the_disk_record_is_one_press_not_every_backup_ever_taken(tmp_path: Path) -> None:
+    """An older backup of another file (another day's reset or save) is not the last press."""
+    defaults = _dist_install(tmp_path)
+    world, auth = (tmp_path / file for file in reset_defaults.AZEROTHCORE_CORE_FILES[:2])
+    reset_defaults.reset_backup(auth, now=datetime(2026, 9, 1, 12, 0, 0))
+    auth.write_bytes(b"Key = 3\n")
+    made = reset_defaults.reset_backup(world, now=datetime(2026, 9, 23, 12, 0, 0))
+    world.write_bytes(defaults[reset_defaults.AZEROTHCORE_CORE_FILES[0]])
+
+    found = reset_defaults.last_reset_on_disk(WOTLK, tmp_path)
+
+    assert found == (
+        reset_defaults.FileResult(reset_defaults.AZEROTHCORE_CORE_FILES[0], "reset", made),
+    )
+
+
+def test_a_press_cut_short_is_found_as_far_as_it_got(tmp_path: Path) -> None:
+    """A crash mid-reset: two files written, the third never reached, no rollback ran."""
+    _dist_install(tmp_path)
+    world, auth, bots = (tmp_path / file for file in reset_defaults.AZEROTHCORE_CORE_FILES)
+    first = reset_defaults.reset_backup(world, now=datetime(2026, 9, 23, 12, 0, 0, 1000))
+    world.write_bytes(b"Key = 1\n")
+    second = reset_defaults.reset_backup(auth, now=datetime(2026, 9, 23, 12, 0, 0, 9000))
+    auth.write_bytes(b"Key = 1\n")
+
+    found = reset_defaults.last_reset_on_disk(WOTLK, tmp_path)
+
+    assert [(r.file, r.backup) for r in found] == [
+        (reset_defaults.AZEROTHCORE_CORE_FILES[0], first),
+        (reset_defaults.AZEROTHCORE_CORE_FILES[1], second),
+    ]
+    assert bots.read_bytes() == b"Key = 2\n"
+
+
+def test_a_backup_a_reset_did_not_take_is_not_a_reset(tmp_path: Path) -> None:
+    """A Tuning save's backup, or someone's own `worldserver.conf.mine.bak`: never offered."""
+    _dist_install(tmp_path)
+    world = tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]
+    world.with_name(world.name + ".mine.bak").write_bytes(b"Key = 9\n")
+    world.with_name(world.name + ".20260923-120000-000000.reset.mine.bak").write_bytes(b"Key = 9\n")
+    tuning.backup(world, now=datetime(2026, 9, 23, 13, 0, 0))
+    world.write_bytes(b"Key = 5\n")
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == ()
+    made = reset_defaults.reset_backup(world, now=datetime(2026, 9, 23, 12, 0, 0))
+    world.write_bytes(b"Key = 1\n")
+    assert [r.backup for r in reset_defaults.last_reset_on_disk(WOTLK, tmp_path)] == [made]
+
+
+def test_no_backups_is_nothing_to_undo(tmp_path: Path) -> None:
+    _dist_install(tmp_path)
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == ()
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path / "gone") == ()
+
+
+def test_a_reset_tags_its_backups_and_revert_still_finds_them_newest(tmp_path: Path) -> None:
+    """The tag is what tells a reset's backup from a save's; the per-file Revert sees both."""
+    _dist_install(tmp_path)
+    world = tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]
+    saved = tuning.backup(world, now=datetime(2026, 9, 23, 12, 0, 0))
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES[:1])
+
+    made = report.written[0].backup
+    assert made is not None and made.name.endswith(".reset.bak")
+    assert not saved.name.endswith(".reset.bak")
+    assert tuning.backups_of(world) == (saved, made), "a name sort is still a time sort"
+
+
+def test_a_save_after_the_reset_does_not_hide_the_reset_from_its_undo(tmp_path: Path) -> None:
+    """Saving a module key into worldserver.conf after a reset backs it up too; Undo skips that."""
+    _dist_install(tmp_path)
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES)
+    world = tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]
+    tuning.write(world, {"Rate.XP.Kill": "3"})
+
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written

@@ -436,8 +436,13 @@ def _newline_of(raw: str) -> str:
     return "\r\n" if "\r\n" in raw else "\n"
 
 
-def backup(path: Path, *, now: datetime | None = None) -> Path:
+def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
     """Copy `path` beside itself, stamped, and return where it went.
+
+    `tag`, when given, goes between the stamp and `.bak` (T94: a Reset to
+    default's backups are `<name>.<stamp>.reset.bak`, so an Undo after a
+    restart can tell them from a save's). After the fixed-width stamp, so a
+    name sort is still a time sort and `backups_of()` still lists them.
 
     The stamp comes from the clock rather than from a counter: two saves a
     minute apart are two backups, and a name that had to be searched for a free
@@ -453,7 +458,9 @@ def backup(path: Path, *, now: datetime | None = None) -> Path:
         # result, Save again is well inside one second, and the second backup
         # landed on top of the first -- destroying the only record of the file
         # the user actually wanted back.
-        target = path.with_name(f"{path.name}.{when:%Y%m%d-%H%M%S-%f}.bak")
+        target = path.with_name(
+            f"{path.name}.{when:%Y%m%d-%H%M%S-%f}{'.' + tag if tag else ''}.bak"
+        )
         if not target.exists():
             shutil.copy2(path, target)
             return target
