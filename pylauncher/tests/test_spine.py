@@ -2324,6 +2324,61 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("selfupdate/layout.py", "is_empty_work_dir"): (
+        "T90 plan 3, cold review 2. Lists ONE of this app's own working directories -- a name "
+        "it spells itself, under the install -- to answer whether it holds anything. It decides "
+        "a DELETE, and that is the point: `prepare()` makes the directory and then writes the "
+        "marker, and a disk that filled up between the two left an empty `.yulon-new` that "
+        "every later update refused for ever. An empty directory under one of four reserved "
+        "names holds nothing of anybody's, so removing it costs nothing; a directory with a "
+        "single file of the player's in it answers False and is then never touched. An OSError "
+        "answers False, which is the safe side of that question"
+    ),
+    ("selfupdate/layout.py", "other_instances"): (
+        "T90 plan 3. Lists `/proc` to find every OTHER live process running this app's own "
+        "executable, before the update helper is started. It decides a REFUSAL and never a "
+        "write: two copies of Yu'lon open from one folder is how the swap moves the entries "
+        "under the second one, so a non-empty answer stops the update with the reason on the "
+        "bar. A `/proc` entry it cannot read is skipped -- that is another user's process, and "
+        "another user's Yu'lon is not running out of this folder -- and a platform with no "
+        "`/proc` answers the empty list, which the caller states rather than hides"
+    ),
+    ("selfupdate/cleanup.py", "_entries_in_backup"): (
+        "T90 plan 3, round 4. Lists `.yulon-old` -- one of this app's own marked working "
+        "directories, under the install -- to answer whether it holds anything that is not "
+        "this app's own bookkeeping. It decides a DELETE, and that is why the question "
+        "changed: it used to ask `are the entries the marker names in there`, so a "
+        "`player.sav` somebody had put in the backup counted as nothing and went with the "
+        "folder when the rollback arm removed it. Anything in there that is not one of the "
+        "five bookkeeping names is now a reason to REPORT and leave it, and an OSError "
+        "answers the empty list. That is the unsafe direction, and it is bounded: the "
+        "delete it can lead to is `discard_ours`, which removes a directory carrying "
+        "THIS install's marker -- a directory this app made -- so what an unreadable "
+        "backup can cost is the app's own backup, never a folder of the player's"
+    ),
+    ("selfupdate/stage.py", "staged_entries"): (
+        "T90 plan 3. Lists the STAGING directory this app filled moments earlier, to find the "
+        "top-level names the new build ships. It decides no write of its own; what it feeds is "
+        "`entries_to_swap()`, whose answer is checked against the running build's shipped "
+        "manifest before anything is moved -- a staged name that would land on a file the "
+        "running build did not ship REFUSES the whole update. An unreadable directory is the "
+        "same refusal"
+    ),
+    ("selfupdate/stage.py", "stage"): (
+        "T90 plan 3. Lists the unpack scratch directory -- inside the marked staging directory, "
+        "created by this same call -- to move each of the build's top-level entries up one "
+        "level. The write it decides is `os.replace` into the staging directory and nothing "
+        "else; the install's own entries are not touched here at all, and are not touched by "
+        "this process ever (the helper moves them after it has exited)"
+    ),
+    ("selfupdate/stage.py", "_the_one_yulon_directory"): (
+        "T90 plan 3. Lists the scratch folder this app just extracted an update archive INTO, "
+        "inside the staging directory it created itself moments earlier, to find the single "
+        "top-level `yulon/` directory a Yu'lon tarball carries. It decides a REFUSAL and never "
+        "a write: anything other than exactly one `yulon/` directory is `not a Yu'lon package` "
+        "and nothing is installed, and an OSError reading it is the same refusal rather than a "
+        "traceback. The running install is not touched by any of it"
+    ),
     ("steam.py", "find_profile"): (
         "8.8. Lists `userdata/` to count Steam profiles. It decides a REFUSAL and never a "
         "write: zero and two are both named refusals, so a listing that came back short "
@@ -2533,6 +2588,36 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "excluded by identity before the sort, so an empty or unreadable listing costs at "
         "most an unpruned folder; its own `except OSError` logs and returns, because "
         "retention failing must not fail the stop it runs in front of"
+    ),
+    ("support/runlog.py", "_prune"): (
+        "T93. The same retention as `logsnap._prune`, for the run logs under `logs/runs/`: "
+        "lists that folder to keep the newest ten of one kind, matched by exact name so a "
+        "longer kind sharing the prefix is not pruned with it. It decides a DELETE of the "
+        "app's own run logs and never a write; the file just opened is excluded by identity, "
+        "and its own `except OSError` logs and returns, because retention failing must not "
+        "fail the install or rebuild whose output is being kept"
+    ),
+    ("support/sources.py", "_logs_in"): (
+        "T93. Lists `logs/` or `logs/runs/` to name the app's own log files for the Logs tab "
+        "and the support zip, newest first; decides no write and no delete anywhere. A "
+        "missing folder answers the empty list (nothing was recorded); an unreadable one "
+        "raises, which the tab shows as nothing to view and the zip names in its manifest "
+        "with the reason -- never a claim about a folder of the user's"
+    ),
+    ("support/sources.py", "_conf_listing"): (
+        "T93. Lists an install's conf folders to name the live `*.conf` files a support zip "
+        "copies and reads `DatabaseInfo` passwords from, and sets apart the ones reached "
+        "through a link so the zip cannot be made to carry a file from outside the install; "
+        "reads only, writes nothing. It lets `OSError` out on purpose: its callers name the "
+        "unlistable folder in the zip's manifest rather than letting 'could not look' pass "
+        "for 'nothing there'"
+    ),
+    ("support/sources.py", "gather_known"): (
+        "T93. Lists `db-secrets/` and `credentials/` to find every password this machine has "
+        "kept, so the support zip can remove them; reads only, writes nothing. A folder "
+        "that is not there has nothing kept; one that cannot be listed is named in "
+        "`Known.missing`, because a password it could not see is one it cannot promise to "
+        "have removed"
     ),
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "

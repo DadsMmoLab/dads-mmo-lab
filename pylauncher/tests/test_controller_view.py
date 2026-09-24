@@ -15,7 +15,7 @@ from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, process_events, pump_until
+from tests.conftest import HANG_BOUND, process_events, pump_until, wait_for_panel
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -36,8 +36,8 @@ from yulon import (
     tuning,
     useraccounts,
 )
-from yulon.apply import Applier, ApplyReport, DockerSql
-from yulon.catalog import native
+from yulon.apply import Applier, ApplyReport, DockerSql, required_prompts
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
@@ -63,6 +63,7 @@ from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.runner import run as _REAL_RUN
+from yulon.support import runlog
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
@@ -175,7 +176,9 @@ class _FakeApplier(Applier):
         self.values: list[object] = []
         self.removed: list[str] = []
 
-    def install(self, manifest: object, values: object = None) -> ApplyReport:  # type: ignore[override]
+    def install(  # type: ignore[override]
+        self, manifest: object, values: object = None, **kw: object
+    ) -> ApplyReport:
         item_id = str(manifest.id)  # type: ignore[attr-defined]
         self.installed.append(item_id)
         self.values.append(values)
@@ -786,11 +789,13 @@ def test_every_module_whose_install_renders_a_question_asks_it(
 ) -> None:
     """T104, the owner's "ask all": a default pre-fills the dialog, it no longer hides it.
 
-    Until T104 only the two ah-bots (a prompt with no default) and, from T100,
-    `hearthstone-cd` (a `choice`) opened the dialog; the mob multipliers,
-    xp-rates and the teleporter's Onyxia level were always their defaults. Every
-    module whose install renders a question now asks it, and every other one
-    still gets no window and `None` -- the call it has always been given.
+    Until T92 (2026-09-22) and T104 only the two ah-bots (a prompt with no
+    default) and, from T100, `hearthstone-cd` (a `choice`) opened the dialog;
+    the mob multipliers, xp-rates and the teleporter's Onyxia level were always
+    their defaults. Every module whose install renders a question now asks it,
+    pre-filled, and every other one still gets no window and `None` -- the call
+    it has always been given. The list is computed from the catalog, so a
+    manifest gaining or losing a question shows up here by name.
 
     Rows whose Install is LOCKED are left out of the loop rather than counted
     as installs (T69): eleven shipped manifests declare a `requires`, nothing
@@ -804,6 +809,7 @@ def test_every_module_whose_install_renders_a_question_asks_it(
 
     def asker(parent: object, manifest: object, prompts: object, **_: object) -> dict[str, str]:
         asked.append(str(manifest.id))  # type: ignore[attr-defined]
+        assert prompts, "a dialog with no question is a window for nothing"
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
 
     services = _services(ps, tmp_path, [])
@@ -824,17 +830,19 @@ def test_every_module_whose_install_renders_a_question_asks_it(
         view.modules_panel.select(item_id)
         view._module_action("install")
 
-    assert sorted(asked) == [
-        "baby-mobs",
-        "buff-mobs",
-        "hearthstone-cd",
-        "mod-ah-bot",
-        "mod-ah-bot-plus",
-        "nerf-mobs",
-        "npc-teleporter",
-        "xbuff-mobs",
-        "xp-rates",
-    ], asked
+    store = modules.store()
+    expected = sorted(
+        m.id
+        for kind in ("module", "ale", "keg", "mod")
+        for m in store.load_all(kind)  # type: ignore[arg-type]
+        if m.id in catalogued and required_prompts(m, "install")
+    )
+    # `sitmeanrest` is absent: it requires mod-ale, locked in this fixture (T69).
+    assert "mod-ah-bot" in expected and "xp-rates" in expected and "nerf-mobs" in expected
+    assert "hearthstone-cd" in expected, "T100: a `choice` with a default still asks"
+    named = ["baby-mobs", "buff-mobs", "nerf-mobs", "npc-teleporter", "xbuff-mobs"]
+    assert all(item in expected for item in named), "T104: every question is asked"
+    assert sorted(asked) == expected, asked
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier)
     assert len(applier.installed) == len(catalogued)
@@ -914,6 +922,45 @@ def test_a_failed_press_redraws_the_conflict_lock_from_the_disk(
     view._module_failed(RuntimeError("a later step raised after the rmtree"))
     assert view.modules_panel.row("mod-ah-bot-plus").data.installable
     assert "remove mod-ah-bot FAILED" in view.module_report.toPlainText()
+
+
+def test_installing_a_manifest_with_defaults_still_asks(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A prompt WITH a default opens the dialog too, pre-filled, and the answers reach the applier.
+
+    Until T92 the gate opened only for a prompt with no default, which in the
+    shipped catalog is `mod-ah-bot`'s GUIDs and nothing else: `xp-rates` never
+    asked its rates and `sitmeanrest` never asked its seconds.
+    """
+    asked: list[str] = []
+    services = _services(ps, tmp_path, [])
+    # sitmeanrest requires mod-ale; say it is there so Install is not locked (T69).
+    object.__setattr__(services, "installed_modules", lambda: {"module": frozenset({"mod-ale"})})
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id)
+        or {p.key: "7" for p in prompts},
+    )
+    _select_module(view, "sitmeanrest")
+    view._module_action("install")
+
+    assert asked == ["sitmeanrest"]
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.installed == ["sitmeanrest"]
+    assert applier.values[-1] == {
+        key: "7"
+        for key in (
+            "duration",
+            "regen_aura",
+            "rest_xp_enabled",
+            "rest_xp_delay",
+            "rest_xp_rate",
+            "rest_xp_max_levels",
+        )
+    }
 
 
 def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -5815,6 +5862,25 @@ def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
     assert started[0] is not None, "the panel's Stop button has nothing to set"
     text = view.rebuild_log.text()
     assert "--- build" in text and "compiling" in text, text
+
+
+def test_a_rebuild_keeps_its_output_in_a_run_log_named_for_this_install(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T93: the rebuild panel's lines outlive the window, kept per install."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, _started = _rebuild_services(ps, tmp_path, lines=("--- build", "compiling"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_server() is True
+    wait_for_panel(view.rebuild_log)
+    install_id = composegen.install_id(services.controller.server_dir)
+    records = list(runlog.runs_dir().glob(f"rebuild-wow-wotlk-{install_id}-*.log"))
+    assert len(records) == 1, records
+    assert "compiling" in records[0].read_text(encoding="utf-8")
 
 
 def test_a_real_static_ints_yes_still_starts_the_rebuild(
