@@ -1701,3 +1701,58 @@ def test_press_facts_sorts_every_core_file_into_its_case(tmp_path: Path) -> None
     facts = reset_defaults.press_facts(WOTLK, tmp_path, reset_defaults.core_files(WOTLK))
     assert facts.absent == (reset_defaults.AZEROTHCORE_CORE_FILES[2],)
     assert facts.foreign == (OVERRIDE,) and facts.missing == ()
+
+
+# -- Codex final pass: the facts the player confirmed, checked again before writing --------
+
+
+def test_a_file_deleted_after_the_question_refuses_the_whole_press(tmp_path: Path) -> None:
+    server, _, _, tuned = _tuned_tbc(tmp_path)
+    files = reset_defaults.core_files(TBC)
+    confirmed = reset_defaults.press_facts(TBC, server, files)
+    assert confirmed == reset_defaults.PressFacts(), "control: every file was on disk"
+    (server / "etc/realmd.conf").unlink()
+
+    report = reset_defaults.reset(
+        TBC, server, files, confirmed=confirmed, seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+
+    assert report.refused and report.changed == ()
+    assert not (server / "etc/realmd.conf").exists()
+    assert _bytes(server, [f for f in tuned if f != "etc/realmd.conf"]) == {
+        f: b for f, b in tuned.items() if f != "etc/realmd.conf"
+    }
+    assert _baks(server) == []
+    text = "\n".join(report.lines())
+    assert "realmd.conf" in text and "changed since" in text and "Reset to default again" in text
+
+
+def test_a_file_back_or_a_compose_file_replaced_after_the_question_refuses_too(
+    tmp_path: Path,
+) -> None:
+    installed = _wotlk_stack(tmp_path)
+    _dist_install(tmp_path)
+    (tmp_path / OVERRIDE).unlink()
+    confirmed = reset_defaults.press_facts(WOTLK, tmp_path, [OVERRIDE])
+    assert confirmed.missing == (OVERRIDE,)
+    (tmp_path / OVERRIDE).write_bytes(b"services: {}\n")  # back, by another hand
+    report = reset_defaults.reset(WOTLK, tmp_path, [OVERRIDE], confirmed=confirmed, seams=_seams())
+    assert report.refused and (tmp_path / OVERRIDE).read_bytes() == b"services: {}\n"
+
+    confirmed = reset_defaults.press_facts(WOTLK, tmp_path, [OVERRIDE])
+    assert confirmed == reset_defaults.PressFacts()
+    (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    report = reset_defaults.reset(WOTLK, tmp_path, [OVERRIDE], confirmed=confirmed, seams=_seams())
+    assert report.refused and (tmp_path / OVERRIDE).read_bytes() == b"services: {}\n"
+    assert installed != b"services: {}\n"
+
+
+def test_unchanged_confirmed_facts_let_the_press_through(tmp_path: Path) -> None:
+    server, _, installed, _ = _tuned_tbc(tmp_path)
+    (server / "etc/realmd.conf").unlink()
+    files = reset_defaults.core_files(TBC)
+    confirmed = reset_defaults.press_facts(TBC, server, files)
+    report = reset_defaults.reset(
+        TBC, server, files, confirmed=confirmed, seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+    assert not report.refused and _bytes(server, installed) == installed

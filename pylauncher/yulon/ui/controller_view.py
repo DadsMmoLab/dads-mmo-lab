@@ -3598,16 +3598,41 @@ TUNING_CORE_FILE = (
 
 @dataclass(frozen=True)
 class UndoLookup:
-    """One answer to "what would Undo the last reset put back", and which reload asked.
-
-    `facts` rides along (re-review): the files the question must name before a
-    press -- left alone, made again, left absent -- read in the same job, so a
-    press never reads the disk on the GUI thread.
-    """
+    """One answer to "what would Undo the last reset put back", and which reload asked."""
 
     generation: int
     items: tuple[reset_defaults.FileResult, ...]
-    facts: reset_defaults.PressFacts = reset_defaults.PressFacts()
+
+
+@dataclass(frozen=True)
+class PressAnswer:
+    """One press's own facts, read fresh by a job, and which press and reload asked.
+
+    Codex (final pass): the question must describe the files as they are WHEN
+    the player is asked -- not as a reload hours earlier found them.
+    """
+
+    token: int
+    generation: int
+    facts: reset_defaults.PressFacts
+
+
+@dataclass(frozen=True)
+class _PressAsking:
+    """A press waiting for its own facts: which press, which reload, and what it asked for."""
+
+    token: int
+    generation: int
+    files: tuple[str, ...]
+    keys: dict[str, tuple[str, ...]]
+    modules: list[str]
+
+
+def _read_press_facts(
+    entry: CatalogEntry, server_dir: Path, files: tuple[str, ...], token: int, generation: int
+) -> PressAnswer:
+    """A press's facts, as a job: a stat per file and a read of the base compose file."""
+    return PressAnswer(token, generation, reset_defaults.press_facts(entry, server_dir, files))
 
 
 def _undo_still_undoable(
@@ -3628,11 +3653,7 @@ def _look_up_undo(
     generation: int,
 ) -> UndoLookup:
     """The Tuning tab's Undo lookup, as a job: it lists folders and reads files (T94)."""
-    return UndoLookup(
-        generation,
-        reset_defaults.undo_items(entry, server_dir, session),
-        reset_defaults.press_facts(entry, server_dir, reset_defaults.core_files(entry)),
-    )
+    return UndoLookup(generation, reset_defaults.undo_items(entry, server_dir, session))
 
 
 TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
@@ -3659,10 +3680,6 @@ TUNING_RESET_RUNNING = (
 )
 """The close guard's sentence while a reset or its undo runs (`busy_reason()`)."""
 
-TUNING_RESET_STILL_READING = (
-    "Yu'lon is still reading this server's settings files. Try Reset to default again in a "
-    "moment."
-)
 TUNING_RESET_NOTHING_TO_UNDO = (
     "Nothing to undo: every file is already as the last reset found it, or was put back since."
 )
@@ -4836,7 +4853,7 @@ class ControllerView(QWidget):
             self.tuning_reload_button.setEnabled(True)
             self.tuning_banner_button.setEnabled(True)
             # Back to whether this tab HAS a route, never unconditionally.
-            self.tuning_reset_button.setEnabled(self.services.reset_settings is not None)
+            self._set_reset_button()
             self._set_tuning_revert_all()
             self._refresh_tuning_owed()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
@@ -8866,8 +8883,10 @@ class ControllerView(QWidget):
         # lookup is the newest: an older answer landing late is dropped.
         self._undo_items: tuple[reset_defaults.FileResult, ...] = ()
         self._undo_generation = 0
-        # The press's facts from the same lookup; `None` until it has landed.
-        self._press_facts: reset_defaults.PressFacts | None = None
+        # The press waiting for its own facts job: its token, and what it asked
+        # for. A newer press or a reload makes an older answer stale.
+        self._press_token = 0
+        self._press_asking: _PressAsking | None = None
         self.reload_tuning()
         self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
 
@@ -9101,14 +9120,52 @@ class ControllerView(QWidget):
                 and row.key.casefold() not in reset_defaults.install_keys(self.entry, row.file)
             }
         )
-        # Named BEFORE the press (Codex review), from the lookup job's answer
-        # (re-review: never a stat or a read on the GUI thread). Before that
-        # answer lands the press is refused rather than asked without them;
-        # `reset()` decides every case again itself when it runs.
-        if self._press_facts is None:
-            self.tuning_report.setPlainText(TUNING_RESET_STILL_READING)
+        # The question names what the press will do to each file -- left
+        # alone, made again, left absent -- so it is built from THIS press's
+        # own facts, read fresh by a job (Codex final pass: a reload's answer
+        # can be hours old; re-review: never a stat or a read on the GUI
+        # thread). The button stays dead until they land.
+        self._press_token += 1
+        self._press_asking = _PressAsking(
+            self._press_token, self._undo_generation, chosen, keys, modules
+        )
+        self._set_reset_button()
+        self._run(
+            partial(
+                _read_press_facts,
+                self.entry,
+                self.services.controller.server_dir,
+                chosen,
+                self._press_token,
+                self._undo_generation,
+            ),
+            self._press_facts_ready,
+            self._press_facts_failed,
+        )
+
+    @Slot(object)
+    def _press_facts_ready(self, answer: object) -> None:
+        """This press's facts: ask the question from them, and hold the reset to them.
+
+        Dropped when it is not the waiting press's answer -- a newer press, or
+        a reload since (the tab moved on; the player presses again).
+        """
+        asking = self._press_asking
+        if (
+            not isinstance(answer, PressAnswer)
+            or asking is None
+            or answer.token != asking.token
+            or answer.generation != asking.generation
+            or answer.generation != self._undo_generation
+        ):
             return
-        facts = self._press_facts.among(chosen)
+        self._press_asking = None
+        self._set_reset_button()
+        chosen, keys, modules = asking.files, asking.keys, asking.modules
+        route = self.services.reset_settings
+        if route is None or self._busy:
+            return
+        facts = answer.facts
         if not self._confirm(
             TUNING_RESET_LABEL, reset_defaults.question(chosen, modules, facts=facts)
         ):
@@ -9116,7 +9173,24 @@ class ControllerView(QWidget):
         self._reset_running = True
         self._set_busy(True)
         self.tuning_report.setPlainText("putting the settings back to how Yu'lon installed them…")
-        self._run(partial(route, chosen, keys), self._reset_done, self._reset_failed)
+        # The facts the player said Yes to go with the press: `reset()`
+        # refuses, writing nothing, if any file's case changed since.
+        self._run(partial(route, chosen, keys, facts), self._reset_done, self._reset_failed)
+
+    @Slot(object)
+    def _press_facts_failed(self, exc: object) -> None:
+        self._press_asking = None
+        self._set_reset_button()
+        self.tuning_report.setPlainText(f"FAILED: the settings files could not be read ({exc})")
+        self.action_failed.emit(str(exc))
+
+    def _set_reset_button(self) -> None:
+        """Pressable when this tab has a route, nothing of ours runs, and no press is asking."""
+        self.tuning_reset_button.setEnabled(
+            self.services.reset_settings is not None
+            and not self._busy
+            and self._press_asking is None
+        )
 
     @Slot(object)
     def _reset_done(self, result: object) -> None:
@@ -9161,8 +9235,12 @@ class ControllerView(QWidget):
         """Ask, off the GUI thread, what the Undo would put back; greyed until the answer lands."""
         self._undo_generation += 1
         self._undo_items = ()
-        self._press_facts = None
         self.tuning_reset_undo_action.setEnabled(False)
+        # The tab moved on: a press still waiting for its facts is dropped (its
+        # answer is stale by generation), and the button is pressable again.
+        if self._press_asking is not None:
+            self._press_asking = None
+            self._set_reset_button()
         self._run(
             partial(
                 _look_up_undo,
@@ -9181,7 +9259,6 @@ class ControllerView(QWidget):
         if not isinstance(result, UndoLookup) or result.generation != self._undo_generation:
             return
         self._undo_items = result.items
-        self._press_facts = result.facts
         self.tuning_reset_undo_action.setEnabled(bool(result.items))
 
     @Slot(object)

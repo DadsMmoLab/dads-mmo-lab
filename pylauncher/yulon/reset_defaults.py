@@ -771,8 +771,10 @@ class PressFacts:
 def press_facts(entry: CatalogEntry, server_dir: Path, files: Sequence[str]) -> PressFacts:
     """Sort `files` into `PressFacts`: a stat per file and one read of the base compose file.
 
-    Off the GUI thread: the Tuning tab reads it in its Undo lookup job (a
-    `\\wsl$` server answers over 9p), and `reset()` decides again for itself.
+    Off the GUI thread and fresh: the Tuning tab reads it in a job of its own on
+    every press, and asks its question from that answer (a server inside WSL
+    answers over 9p). The answer goes into the reset as `confirmed`, which
+    refuses if any file's case has changed since.
     """
     foreign = tuple(file for file in files if _foreign(server_dir, file))
     gone = [f for f in files if f not in foreign and not (server_dir / f).is_file()]
@@ -783,12 +785,39 @@ def press_facts(entry: CatalogEntry, server_dir: Path, files: Sequence[str]) -> 
     )
 
 
+CHANGED_SINCE = (
+    "it changed since you were asked ({was}), so nothing was written. Press Reset to default "
+    "again to be asked about the files as they are now"
+)
+
+
+def _case(facts: PressFacts, file: str) -> str:
+    """How a question built from `facts` described `file`."""
+    if file in facts.foreign:
+        return "left alone: not made by Yu'lon"
+    if file in facts.missing:
+        return "not on disk, to be made again"
+    if file in facts.absent:
+        return "not on disk"
+    return "on disk"
+
+
+def _changed_since(asked: PressFacts, now: PressFacts, files: Sequence[str]) -> dict[str, str]:
+    """Each file whose case differs between the question and now, and what it is now."""
+    return {
+        f: f"asked as {_case(asked, f)}, now {_case(now, f)}"
+        for f in files
+        if _case(asked, f) != _case(now, f)
+    }
+
+
 def reset(
     entry: CatalogEntry,
     server_dir: Path,
     files: Sequence[str],
     *,
     module_keys: ModuleKeys | None = None,
+    confirmed: PressFacts | None = None,
     wsl_distro: str | None = None,
     seams: Seams | None = None,
 ) -> ResetReport:
@@ -833,6 +862,28 @@ def reset(
                 missing.add(file)
             else:
                 skipped[file] = "absent"
+    if confirmed is not None:
+        # Codex (final pass): the player said Yes to a question built from
+        # `confirmed`. A file whose case has changed since -- deleted, back on
+        # disk, its compose stack now another tool's or Yu'lon's again -- would
+        # be reset differently from what they were told, so nothing is written.
+        now = PressFacts(
+            tuple(f for f in files if skipped.get(f) == "foreign"),
+            tuple(f for f in files if f in missing),
+            tuple(f for f in files if skipped.get(f) == "absent"),
+        )
+        moved = _changed_since(confirmed.among(files), now, files)
+        if moved:
+            return ResetReport(
+                tuple(
+                    (
+                        FileResult(f, "refused", reason=CHANGED_SINCE.format(was=moved[f]))
+                        if f in moved
+                        else FileResult(f, "held")
+                    )
+                    for f in files
+                )
+            )
     present = [file for file in files if file not in skipped]
     texts, reasons = (
         default_texts(entry, server_dir, present, wsl_distro=wsl_distro, seams=seams)
@@ -1172,8 +1223,9 @@ def question(
     return "\n\n".join(parts)
 
 
-ResetRoute = Callable[[Sequence[str], ModuleKeys], ResetReport]
-"""The press: the files asked for, and the keys installed modules keep in them."""
+ResetRoute = Callable[[Sequence[str], ModuleKeys, "PressFacts | None"], ResetReport]
+"""The press: the files asked for, the keys installed modules keep in them, and the
+`PressFacts` the player said Yes to (`None`: nothing to hold the files to)."""
 
 
 def route_for_app(
@@ -1189,7 +1241,17 @@ def route_for_app(
     SELinux; the app passes none.
     """
 
-    def run(files: Sequence[str], keys: ModuleKeys) -> ResetReport:
-        return reset(entry, server_dir, files, module_keys=keys, wsl_distro=wsl_distro, seams=seams)
+    def run(
+        files: Sequence[str], keys: ModuleKeys, confirmed: PressFacts | None = None
+    ) -> ResetReport:
+        return reset(
+            entry,
+            server_dir,
+            files,
+            module_keys=keys,
+            confirmed=confirmed,
+            wsl_distro=wsl_distro,
+            seams=seams,
+        )
 
     return run

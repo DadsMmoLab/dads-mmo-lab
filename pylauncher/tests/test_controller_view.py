@@ -14117,7 +14117,7 @@ def test_the_reset_runs_on_the_job_runner_and_the_tab_is_busy_until_it_ends(
     calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
     real = reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
 
-    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
         calls.append((tuple(files), dict(keys)))
         return real(files, keys)
 
@@ -14128,6 +14128,14 @@ def test_the_reset_runs_on_the_job_runner_and_the_tab_is_busy_until_it_ends(
     _land_undo_lookups(held)
     queued = len(held)
     _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    # Codex (final pass): the press first reads its OWN facts, as a job.
+    assert len(held) == queued + 1 and calls == [], "the press did the work itself"
+    work, done, failed = held.pop()
+    assert (done.__self__, done.__func__) == (view, ControllerView._press_facts_ready)
+    assert (failed.__self__, failed.__func__) == (view, ControllerView._press_facts_failed)
+    assert view.tuning_reset_button.isEnabled() is False, "pressable while its facts are read"
+    done(work())
 
     assert len(held) == queued + 1 and calls == [], "the press did the work itself"
     assert view.busy_reason() == TUNING_RESET_RUNNING
@@ -14156,7 +14164,7 @@ def test_the_reset_runs_on_the_job_runner_and_the_tab_is_busy_until_it_ends(
 def test_a_reset_that_raised_unlocks_the_tab_and_says_so(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
         raise RuntimeError("a bug in the reset")
 
     view = _reset_view(ps, tmp_path, route)
@@ -14195,7 +14203,7 @@ def test_a_cmangos_reset_owes_what_file_rule_prices_its_etc_files_at(
     """Spec correction 10: `etc/` is priced as a recreate, so the banner offers Recreate."""
     backup = tmp_path / "etc" / "mangosd.conf.20260923-120000-000000.bak"
 
-    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
         return reset_defaults.ResetReport(
             (reset_defaults.FileResult("etc/mangosd.conf", "reset", backup),)
         )
@@ -14251,7 +14259,7 @@ def test_the_tab_hands_the_reset_its_own_rows_keys_spelled_as_wotlks_core_files(
     _wotlk_server(tmp_path)
     got: list[dict[str, Any]] = []
 
-    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
         got.append(dict(keys))
         return reset_defaults.ResetReport(())
 
@@ -14272,7 +14280,7 @@ def test_a_cmangos_tab_hands_the_reset_its_rows_keys_spelled_as_its_core_files(
 
     got: list[dict[str, Any]] = []
 
-    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
         got.append(dict(keys))
         return reset_defaults.ResetReport(())
 
@@ -14425,7 +14433,7 @@ def test_a_reset_that_raised_after_writing_rereads_the_tab(
     _wotlk_server(tmp_path)
     real = reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
 
-    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
         real(files, keys)
         raise RuntimeError("a bug after the writes")
 
@@ -14449,7 +14457,7 @@ def test_a_press_that_raised_hands_the_undo_to_the_disk_not_an_older_session_pre
     real = reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
     presses: list[str] = []
 
-    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+    def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
         presses.append("x")
         if len(presses) == 1:
             return reset_defaults.ResetReport(
@@ -14577,9 +14585,8 @@ def test_the_undo_press_checks_each_file_again_before_it_writes(
 def test_the_reset_question_reads_no_file_on_the_gui_thread(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Re-review: `press_facts` stat'ed each file and read the base compose file on the GUI
-    thread, per press -- over 9p for a server inside WSL. It rides the Undo lookup's job now;
-    a press before that answer lands is refused politely, never read on the GUI thread."""
+    """Re-review, then Codex's final pass: each press reads its OWN facts, fresh, as a job --
+    never a stat or a read on the GUI thread, and never an answer cached at the last reload."""
     _wotlk_server(tmp_path)
     (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
     reads: list[Path] = []
@@ -14594,19 +14601,93 @@ def test_the_reset_question_reads_no_file_on_the_gui_thread(
     view = _reset_view(
         ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
     )
+    _land_undo_lookups(held)
     asked: list[str] = []
     from PySide6.QtWidgets import QMessageBox
 
     _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    before = len(reads)
     _menu_action(view, TUNING_RESET_ALL).trigger()
-    assert reads == [] and asked == [], "read or asked before the facts had landed"
-    assert "still reading" in view.tuning_report.toPlainText()
+    assert len(reads) == before, "the press read the disk on the GUI thread"
+    assert asked == [], "asked before this press's own facts were read"
 
-    _land_undo_lookups(held)
-    read_by_the_job = len(reads)
-    assert read_by_the_job, "control: the lookup job read the base compose file"
-    _menu_action(view, TUNING_RESET_ALL).trigger()
+    work, done, _failed = held.pop()
+    assert done.__func__ is ControllerView._press_facts_ready
+    done(work())
 
-    assert len(reads) == read_by_the_job, "the press read the disk on the GUI thread"
+    assert len(reads) > before, "control: the press's job read the base compose file"
     assert f"Left alone: {composegen.OVERRIDE_FILE} was not made by Yu'lon." in asked[0]
     assert "modules/playerbots.conf" in asked[0]
+
+
+def test_a_file_deleted_after_the_tab_read_its_files_is_named_by_the_question(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex (final pass): the question used facts cached at the last reload, hours old."""
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    (tmp_path / composegen.OVERRIDE_FILE).unlink()
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _menu_action(view, f"{composegen.OVERRIDE_FILE}…").trigger()
+
+    assert "made again as Yu'lon installs it" in asked[0]
+
+
+def test_a_file_deleted_after_the_question_refuses_the_press_and_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The facts the player said Yes to go into the job; the job refuses if the files moved."""
+    defaults = _wotlk_server(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    _land_undo_lookups(held)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    work, done, _failed = held.pop()
+    done(work())  # the question, answered Yes: the reset job is queued, not run
+    reset_job = held.pop()
+    assert reset_job[1].__func__ is ControllerView._reset_done
+    (tmp_path / composegen.OVERRIDE_FILE).unlink()
+
+    reset_job[1](reset_job[0]())
+
+    assert not (tmp_path / composegen.OVERRIDE_FILE).exists()
+    assert all((tmp_path / f).read_bytes() == b"Key = 2\n" for f in defaults)
+    assert not list(tmp_path.rglob("*.bak")), "a backup was made by a refused press"
+    report = view.tuning_report.toPlainText()
+    assert "changed since" in report and "Reset to default again" in report
+
+
+def test_a_press_whose_tab_moved_on_is_dropped(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reload (or a newer press) between the press and its facts: that answer asks nothing."""
+    _wotlk_server(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    _land_undo_lookups(held)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    stale = held.pop()
+    view.reload_tuning()
+    _land_undo_lookups(held)
+    stale[1](stale[0]())
+    assert asked == [] and not held, "a press from before the reload asked or queued work"
+    assert view.tuning_reset_button.isEnabled() is True
+
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    work, done, _failed = held.pop()
+    answer = work()
+    done(replace(answer, token=answer.token - 1))
+    assert asked == [] and not held, "an answer for an older press was acted on"
+    done(answer)
+    assert len(asked) == 1, "control: the current press's own answer asks"
