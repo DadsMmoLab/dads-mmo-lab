@@ -5653,6 +5653,31 @@ def test_a_failed_poll_that_swallowed_a_refresh_asks_again_too(
     assert not gate.queued, "an answer nothing superseded asked again"
 
 
+def test_the_five_second_tick_never_supersedes_the_poll_it_finds_in_flight(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A `docker ps` slower than the tick is not a reason to ask again (T95 review, Task 2).
+
+    Were the tick to count, every answer on a slow Docker Desktop would be
+    thrown away and re-asked at once: back-to-back polls per tab, and a
+    `last_seen_running()` that is never anything but None. Only an action's
+    own end-of-action refresh and the Refresh button make an answer stale.
+    """
+    gate = _Gate()
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    gate.hold = True
+    ps.names = "ac-worldserver\n"
+    view._timer.timeout.emit()  # the tick asks
+    assert len(gate.queued) == 1
+    view._timer.timeout.emit()  # and ticks again while the poll is still out
+    assert len(gate.queued) == 1, "a tick queued a second poll"
+    queued, gate.queued = gate.queued, []
+    for work, done, error in queued:
+        run_inline(work, done, error)
+    assert not gate.queued, "a tick made the poll in flight ask again"
+    assert view.last_seen_running() is True, "a tick made a good answer unknown"
+
+
 def _refusal_while_held(view: ControllerView, gate: _Gate, press: Callable[[], None]) -> str | None:
     """Press with the job held, read the refusal, let the job finish, and prove it lifts."""
     gate.hold = True

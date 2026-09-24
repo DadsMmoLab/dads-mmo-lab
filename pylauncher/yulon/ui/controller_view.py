@@ -3950,7 +3950,8 @@ class ControllerView(QWidget):
         self.refresh_channel()
 
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self.refresh_status)
+        # T95: through `_tick`, so a tick never marks the poll in flight stale.
+        self._timer.timeout.connect(self._tick)
         self._timer.timeout.connect(self.refresh_verdict)
         if status_poll_ms > 0:
             self._timer.start(status_poll_ms)
@@ -4266,6 +4267,20 @@ class ControllerView(QWidget):
         """Run `work` off the GUI thread. `on_done`/`on_error` MUST be this view's own
         bound slots - a plain callable would be delivered on the worker thread."""
         self._jobs(work, on_done, on_error)
+
+    @Slot()
+    def _tick(self) -> None:
+        """The five-second poll: ask, unless a poll is already out (T95 review, Task 2).
+
+        Returns without going through `refresh_status()`'s dropped-ask branch,
+        so the tick never marks the answer in flight superseded. It asks
+        nothing new, and on a Docker slower than the interval it would make
+        every answer unknown and every poll back to back. Only an action's
+        own refresh and the Refresh button (`recheck()`) do.
+        """
+        if self._status_pending:
+            return
+        self.refresh_status()
 
     @Slot()
     def refresh_status(self) -> None:

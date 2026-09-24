@@ -2000,45 +2000,18 @@ def test_pressing_the_x_is_the_same_removal(
     assert window.property("tabs").indexOf(view) == -1
 
 
-def _right_click(bar: Any, index: int, choose: str | None = None) -> list[str]:
-    """Right-click tab `index` through the real menu, and return what it offered.
-
-    `QMenu.exec` cannot be replaced from Python: it is a Shiboken slot, and an
-    assignment to it is accepted and then ignored (`test_controller_view.py`'s
-    `_row_menu()`). A patched one left this test on a real popup until it was
-    killed (T95, measured). So the popup is really shown, and a zero-delay timer,
-    which runs inside the menu's own event loop (measured offscreen), reads its
-    entries, triggers `choose` and closes it.
-    """
-    from PySide6.QtCore import QTimer
-    from PySide6.QtWidgets import QApplication, QMenu
-
-    offered: list[str] = []
-
-    def drive() -> None:
-        popup = QApplication.activePopupWidget()
-        menus = [popup] if isinstance(popup, QMenu) else []
-        menus += [
-            w for w in QApplication.topLevelWidgets() if isinstance(w, QMenu) and w.isVisible()
-        ]
-        try:
-            for menu in dict.fromkeys(menus):
-                offered.extend(action.text() for action in menu.actions())
-                for action in menu.actions():
-                    if choose is not None and action.text() == choose:
-                        action.trigger()
-        finally:
-            for menu in menus:
-                menu.close()
-
-    QTimer.singleShot(0, drive)
-    bar.customContextMenuRequested.emit(bar.tabRect(index).center())
-    return offered
-
-
 def test_the_tab_menu_offers_the_same_removal_on_server_tabs_only(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Driven through the menu's builder, the way `test_controller_view.py`'s `_row_menu()` is.
+
+    `QMenu.exec` cannot be replaced from Python (a Shiboken slot: the patch is
+    accepted and ignored), and a popup driven from inside its own loop is
+    unbounded if anything runs that loop first. So the right-click's menu is
+    built by `window.yulon_tab_menu(pos)` and shown by a two-line caller, and
+    the entry is triggered here, with no popup open, as Qt triggers one after
+    the menu has closed.
+    """
     from yulon import forgetting
 
     asked = _answer(monkeypatch, False)
@@ -2046,15 +2019,42 @@ def test_the_tab_menu_offers_the_same_removal_on_server_tabs_only(
     tabs = window.property("tabs")
     bar = tabs.tabBar()
 
-    offered = _right_click(bar, tabs.indexOf(view), choose=forgetting.BUTTON_LABEL)
-    assert "Copy Server Path" in offered, "no menu was read at all"
-    assert forgetting.BUTTON_LABEL in offered
+    menu = window.yulon_tab_menu(bar.tabRect(tabs.indexOf(view)).center())
+    entries = {action.text(): action for action in menu.actions()}
+    assert "Copy Server Path" in entries, "not this tab's menu"
+    assert forgetting.BUTTON_LABEL in entries
+    entries[forgetting.BUTTON_LABEL].trigger()
     assert [title for title, _, _ in asked] == [forgetting.TITLE], "not the same dialog"
     assert tabs.indexOf(view) != -1, "answered No, yet the tab went"
 
-    offered = _right_click(bar, 0)
-    assert offered, "no menu was read at all"
-    assert forgetting.BUTTON_LABEL not in offered, "the Catalog's menu offers a removal"
+    catalog = window.yulon_tab_menu(bar.tabRect(0).center())
+    assert catalog.actions(), "not the Catalog's menu"
+    assert forgetting.BUTTON_LABEL not in [
+        a.text() for a in catalog.actions()
+    ], "the Catalog's menu offers a removal"
+
+
+def test_the_tab_menu_answered_yes_removes_the_server(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, True)
+    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t95-menu-yes")
+    tabs = window.property("tabs")
+    menu = window.yulon_tab_menu(tabs.tabBar().tabRect(tabs.indexOf(view)).center())
+
+    next(a for a in menu.actions() if a.text() == forgetting.BUTTON_LABEL).trigger()
+
+    assert [title for title, _, _ in asked] == [forgetting.TITLE]
+    assert stops == [1]
+    assert tabs.indexOf(view) == -1
+
+
+def test_a_right_click_off_every_tab_builds_no_menu(window: Any) -> None:
+    from PySide6.QtCore import QPoint
+
+    assert window.yulon_tab_menu(QPoint(-50, -50)) is None
 
 
 # ------------------------------------------------ T36: the client-folder seam

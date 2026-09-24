@@ -314,6 +314,9 @@ def build_window() -> object:
 
         yulon_gamepad: GamepadSource
         yulon_keyboard: KeyboardSource
+        # The sidebar's right-click menu, built and not shown (T95): a test
+        # drives the builder, because `QMenu.exec` cannot be replaced.
+        yulon_tab_menu: Callable[[QPoint], QMenu | None]
 
         def resizeEvent(self, event: object) -> None:
             """Re-scale the theme's font sizes with the window width.
@@ -398,11 +401,11 @@ def build_window() -> object:
     )
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
 
-    def _on_tab_bar_context_menu(pos: QPoint) -> None:
+    def _build_tab_menu(pos: QPoint) -> QMenu | None:
         tab_bar = tabs.tabBar()
         index = tab_bar.tabAt(pos)
         if index < 0:
-            return
+            return None
         menu = QMenu(tab_bar)
         if index == 0:
             act = menu.addAction("Catalog of Server Emulators")
@@ -433,7 +436,16 @@ def build_window() -> object:
                 remove_act = menu.addAction(forgetting.BUTTON_LABEL)
                 menu_key = (cv.entry.id, sd)
                 remove_act.triggered.connect(lambda _checked=False, k=menu_key: request_removal(*k))
-        menu.exec(tab_bar.mapToGlobal(pos))
+        return menu
+
+    def _on_tab_bar_context_menu(pos: QPoint) -> None:
+        # Built apart from being shown (T95): `QMenu.exec` cannot be replaced
+        # from Python, so the tests drive `_build_tab_menu` instead.
+        menu = _build_tab_menu(pos)
+        if menu is not None:
+            menu.exec(tabs.tabBar().mapToGlobal(pos))
+
+    window.yulon_tab_menu = _build_tab_menu
 
     tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     tabs.tabBar().customContextMenuRequested.connect(_on_tab_bar_context_menu)
@@ -681,10 +693,10 @@ def build_window() -> object:
         )
         on_uninstalled(game, folder)
 
+    # Where the × sits: the style's own close-button side (Fusion's
+    # `SH_TabBar_CloseButtonPosition`), which on this West rail is the TOP of the
+    # tab (measured offscreen 2026-09-23: the button's y equals the tab's).
     FORGET_SIDE = QTabBar.ButtonPosition.RightSide
-    """Where the × sits: the style's own close-button side (Fusion's
-    `SH_TabBar_CloseButtonPosition`), which on this West rail is the TOP of the
-    tab (measured offscreen 2026-09-23: the button's y equals the tab's)."""
 
     class _ForgetButtons(QObject):
         """Shows a server tab's × on the tab under the mouse and on the current one (T95).
