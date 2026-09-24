@@ -408,13 +408,27 @@ def _highest_level(entry: CatalogEntry) -> int:
     return level.max_level if level is not None else 3
 
 
-PromptAsker = Callable[[QWidget, Manifest, Sequence[Prompt]], "Mapping[str, str] | None"]
-"""Puts a manifest's own questions to the user, or returns `None` for "cancel".
+class PromptAsker(Protocol):
+    """Puts a manifest's own questions to the user, or returns `None` for "cancel".
 
-A constructor seam for the reason `catalog_view`'s pickers are seams: a modal
-dialog cannot run headless, and the part worth testing is what the tab does with
-the answer — install with it, or change nothing at all.
-"""
+    A constructor seam for the reason `catalog_view`'s pickers are seams: a modal
+    dialog cannot run headless, and the part worth testing is what the tab does with
+    the answer — install with it, or change nothing at all.
+
+    `again` is True when the module is already installed -- an Update, or the
+    context menu's Install over it -- so the dialog can say that the answer it
+    shows (the default; nothing remembers the last one) is what gets applied
+    now (T100 review).
+    """
+
+    def __call__(
+        self,
+        parent: QWidget,
+        manifest: Manifest,
+        prompts: Sequence[Prompt],
+        *,
+        again: bool = False,
+    ) -> Mapping[str, str] | None: ...
 
 
 LinkAsker = Callable[[QWidget, str], "str | None"]
@@ -7586,7 +7600,8 @@ class ControllerView(QWidget):
             return
         # An update re-runs the INSTALL-time steps -- it is the install over
         # content that has moved -- so it answers the install's prompts.
-        go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action])
+        again = action == "update" or (row is not None and row.data.installed)
+        go_ahead, values = self._module_values(manifest, MODULE_ACTION_STEPS[action], again=again)
         if not go_ahead:
             self._module_pending = None
             self.module_report.setPlainText(
@@ -7604,7 +7619,7 @@ class ControllerView(QWidget):
         self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
 
     def _module_values(
-        self, manifest: Manifest, action: When
+        self, manifest: Manifest, action: When, *, again: bool = False
     ) -> tuple[bool, Mapping[str, str] | None]:
         """Whether to go ahead, and the answers to hand the applier.
 
@@ -7628,12 +7643,14 @@ class ControllerView(QWidget):
         `sitmeanrest` never asked its seconds, and `unlimitedammo` would have
         had the catalog's `true` written over the script's own `false` without
         a word. A default shown in a box the person can change is an answer;
-        a default written unseen is not.
+        a default written unseen is not. `hearthstone-cd`'s `choice` (T100) is
+        the sharpest case: its default is upstream's RESET file, so an install
+        that did not ask applied the reset and changed nothing.
         """
         needed = required_prompts(manifest, action)
         if not needed:
             return True, None
-        answers = self._prompt_asker(self, manifest, needed)
+        answers = self._prompt_asker(self, manifest, needed, again=again)
         return (False, None) if answers is None else (True, answers)
 
     def _custom_route(self) -> CustomModuleInstall | None:
