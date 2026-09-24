@@ -296,11 +296,13 @@ class Controller:
             if there was nothing to stop. This used to be discarded, so the tab
             said the same thing either way (review, 2026-08-22).
         """
-        if self.wsl_distro is not None and not wsl.is_running(self.wsl_distro):
+        if self.wsl_distro is not None and wsl.known_stopped(self.wsl_distro):
             # `status()`'s reason: asking docker in a distro STARTS it, and
             # nothing runs in a distro that is down. A removal stops first
             # every time (T95), so without this it would boot the distro to
-            # learn there was nothing to stop.
+            # learn there was nothing to stop. Only when WSL SAID it is down:
+            # a listing that did not answer falls through to the real stop,
+            # because a skipped stop leaves a server running (T95 re-review).
             logger.debug(f"{self.wsl_distro} is not running; nothing to stop")
             return False
         self._save_evidence()
