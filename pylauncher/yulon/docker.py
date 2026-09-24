@@ -802,6 +802,25 @@ def recreate_argv(spec: ContainerSpec) -> list[str]:
     return staged_up_argv(spec, force_recreate=True)
 
 
+def recreate_stop_argv(spec: ContainerSpec) -> list[str]:
+    """What the rebuild stops before its recreate: the servers, not the database (T98).
+
+    `compose up --force-recreate` replaces the database FIRST (dependency
+    order) while the world is still running on it. Measured on yulon-ubuntu's
+    WotLK install with 500 bots, 2026-09-24: before T98 the database went in
+    under 4 s and the old worldserver logged `[2013] Lost connection` and
+    `Waiting for 0 queries` -- its saves gone -- in a 19.6 s replace; with
+    T98's database, which holds SIGTERM while a server is connected, the same
+    command sat out the whole 240 s hold and then took the database from
+    under the world anyway, 270.2 s. Stopping the servers first, with the
+    grace every other stop here uses, lets the world drain onto a live
+    database, and then the database has nobody to wait for.
+    """
+    database = spec.service_for(spec.db)
+    servers = [service for service in spec.compose_services() if service != database]
+    return ["compose", "stop", "-t", str(STOP_GRACE_SECONDS), *reversed(servers)]
+
+
 def recreate_staged(
     spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None
 ) -> bool:
@@ -816,7 +835,12 @@ def recreate_staged(
     The named volumes are untouched: this replaces containers, not data. That
     is the same guarantee `start_staged()` already relies on every time compose
     recreates a service whose configuration changed.
+
+    The servers are stopped first (`recreate_stop_argv()`), for the reason
+    given there. Compose's stop of services that are not running is a no-op,
+    so the rebuild of a stopped install pays nothing for it.
     """
+    _run(recreate_stop_argv(spec), cwd=server_dir, wsl_distro=wsl_distro)
     return start_staged(spec, server_dir, wsl_distro=wsl_distro, force_recreate=True)
 
 
@@ -1124,6 +1148,12 @@ never do.
 """
 
 
+COMPOSE_PS_TIMEOUT = 30.0
+"""`compose_container_id()`'s bound. Named so the support bundle (T93) can tell a
+`None` that took the whole bound -- a daemon that did not answer -- from one that
+came back at once."""
+
+
 def compose_container_id(
     service: str, server_dir: Path, *, wsl_distro: str | None = None
 ) -> str | None:
@@ -1143,7 +1173,10 @@ def compose_container_id(
     it was collected for.
     """
     proc = _docker(
-        ["compose", "ps", "-a", "-q", service], cwd=server_dir, wsl_distro=wsl_distro, timeout=30.0
+        ["compose", "ps", "-a", "-q", service],
+        cwd=server_dir,
+        wsl_distro=wsl_distro,
+        timeout=COMPOSE_PS_TIMEOUT,
     )
     if proc.returncode != 0:
         logger.warning(f"could not resolve {service} in {server_dir}: {proc.stderr.strip()}")
@@ -1156,7 +1189,11 @@ def compose_container_id(
 
 
 def log_tail(
-    container: str, lines: int = LOG_TAIL_LINES, *, wsl_distro: str | None = None
+    container: str,
+    lines: int = LOG_TAIL_LINES,
+    *,
+    wsl_distro: str | None = None,
+    timeout: float = _LOG_TAIL_TIMEOUT,
 ) -> str | None:
     """The last `lines` of a container's log, or `None` if it could not be read.
 
@@ -1171,16 +1208,33 @@ def log_tail(
     zero-byte file, presented as evidence, on every stop whose log driver was
     wedged (retrospective audit, 2026-09-08). A log that is genuinely empty is
     `""`; a log that could not be read is nothing at all.
+
+    `timeout` is the snapshot's 30 s unless a caller has a tighter budget: the
+    support bundle reads three containers per install and gives each 20 s (T93).
     """
     proc = _docker(
         ["logs", "--tail", str(lines), container],
         wsl_distro=wsl_distro,
-        timeout=_LOG_TAIL_TIMEOUT,
+        timeout=timeout,
     )
     if proc.returncode != 0:
         logger.warning(f"could not read the logs of {container}: {proc.stderr.strip()}")
         return None
     return proc.stdout
+
+
+def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> str | None:
+    """The Docker daemon's version, or `None` when it does not answer (T93's system-info.txt).
+
+    A read, bounded, never raising: `_docker` turns a missing CLI and a timeout
+    into a non-zero result, and both are "not reachable" to the one caller.
+    """
+    proc = _docker(
+        ["version", "--format", "{{.Server.Version}}"], wsl_distro=wsl_distro, timeout=timeout
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
 
 
 def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
