@@ -15,6 +15,7 @@ the clone and the database faked, and read the record it leaves beside
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -148,21 +149,23 @@ def test_the_mods_whose_install_compounds_are_exactly_the_four_mob_multipliers()
     assert compounding == ["baby-mobs", "buff-mobs", "nerf-mobs", "xbuff-mobs"]
 
 
-def test_the_largest_install_dialog_is_one_dialog_of_four_questions() -> None:
-    """Many questions stay one dialog per module; measured across every shipped manifest.
+def test_every_install_is_one_dialog_and_the_largest_is_accountwides_thirteen() -> None:
+    """Many questions stay ONE dialog per module; measured across every shipped manifest.
 
-    The dialog is one form, one row per prompt. The largest install is the mob
-    multipliers' four; accountwide's thirteen yes/no flags are `configure`-only
-    (the Tuning tab), so Install and Update never put them.
+    The dialog is one form, one row per prompt (and scrolls when that is taller
+    than the window -- `test_manifest_prompt.py`). Since T92 an install also runs
+    the module's configure-time steps, so "ask all" puts accountwide's thirteen
+    yes/no flags into its Install dialog, pre-filled, one click to accept (the
+    lead's ruling on the T92 merge, 2026-09-24). Next come the mob multipliers'
+    four.
     """
-    biggest = max(
-        len(apply_module.required_prompts(m, "install"))
+    sizes = sorted(
+        (len(apply_module.required_prompts(m, "install")), m.id)
         for m in _shipped()
-        if any(
-            apply_module.must_ask(p, "install") for p in apply_module.required_prompts(m, "install")
-        )
+        if apply_module.required_prompts(m, "install")
     )
-    assert biggest == 4
+    assert sizes[-1] == (13, "accountwide")
+    assert max(n for n, item in sizes if item != "accountwide") <= 6
 
 
 # ------------------------------------------------------------ remember answers
@@ -370,6 +373,86 @@ def test_the_dropped_questions_are_gone() -> None:
     assert "reputation_variant" not in {p.key for p in _wotlk("ale", "accountwide").prompts}
 
 
+ACCOUNTWIDE_UPSTREAM = (
+    "00_AccountWideUtils.lua",
+    "AccountAchievements.lua",
+    "AccountCurrency.lua",
+    "AccountMoney.lua",
+    "AccountMounts.lua",
+    "AccountPets.lua",
+    "AccountPlaytime.lua",
+    "AccountProfessions.lua",
+    "AccountPvPRank.lua",
+    "AccountReputation (default AC-Wotlk).lua",
+    "AccountReputation (modified for Ashen Order).lua",
+    "AccountTaxiPaths.lua",
+    "AccountTitles.lua",
+)
+"""`lua_scripts/AccountWide/` of Aldori15/azerothcore-eluna-accountwide @fddbd8c, listed 2026-09-24.
+
+There is NO `AccountReputation.lua` upstream: each reputation variant carries
+`local ENABLE_ACCOUNTWIDE_REPUTATION = false` at line 7 under its own long name.
+"""
+
+
+def _accountwide_clone() -> dict[str, str]:
+    """Upstream's own file NAMES, each holding the flag lines the manifest's patches edit.
+
+    Since T92 an install runs the configure-time patches too, so the fake clone
+    must carry the lines they rewrite (upstream ships each as
+    `local ENABLE_... = false`). The names are upstream's, NOT the patch
+    targets': a patch whose target exists only after a `deploy.rename` is traced
+    back to the file upstream actually ships, so a patch aimed at a name nobody
+    ships fails here as it would against the real clone (the T92 merge found
+    `AccountReputation.lua` doing exactly that).
+    """
+    manifest = _wotlk("ale", "accountwide")
+    shipped_as = {new: old for step in manifest.deploy for old, new in step.rename}
+    body = {name: "" for name in ACCOUNTWIDE_UPSTREAM}
+    for patch in manifest.patches:
+        key = re.search(r"local\\s\+(\w+)", patch.find)
+        assert key is not None, patch.find
+        name = Path(patch.file).name
+        name = shipped_as.get(name, name)
+        if name in body:
+            body[name] += f"local {key.group(1)} = false\n"
+    ashen = "AccountReputation (modified for Ashen Order).lua"
+    body[ashen] += "local ENABLE_ACCOUNTWIDE_REPUTATION = false\n"
+    files = {f"lua_scripts/AccountWide/{n}": text or "-- lua\n" for n, text in body.items()}
+    files["sql/create_accountwide_tables.sql"] = "-- tables\n"
+    return files
+
+
+def test_accountwide_installs_over_upstreams_own_file_names_with_every_flag_written(
+    tmp_path: Path,
+) -> None:
+    """Every configure patch finds its line in a file upstream ships (T92 merge finding).
+
+    `upstream/Yulon` @0726a0ab refused EVERY accountwide install with `patch target
+    missing: .../AccountReputation.lua`: T92 made install run the configure-time
+    patches, and the reputation patch names a file upstream does not ship.
+    Measured against the real upstream clone @fddbd8c through the real
+    `Applier`, not only against this fixture. The stock variant is now deployed
+    AS `AccountReputation.lua`.
+
+    Mutation: drop that rename and the install raises again.
+    """
+    manifest = _wotlk("ale", "accountwide")
+    (tmp_path / "modules" / "mod-ale").mkdir(parents=True)
+    every = {p.key: "true" for p in apply_module.required_prompts(manifest, "install")}
+    Applier(tmp_path, git=_Clone(_accountwide_clone()), sql=_Sql()).install(manifest, every)
+
+    deployed = tmp_path / "env/dist/etc/modules/lua_scripts/accountwide"
+    for patch in manifest.patches:
+        text = (tmp_path / patch.file).read_text(encoding="utf-8")
+        key = re.search(r"local\\s\+(\w+)", patch.find)
+        assert key is not None
+        assert f"local {key.group(1)} = true" in text, (patch.file, text)
+    assert "local ENABLE_ACCOUNTWIDE_REPUTATION = true" in (
+        deployed / "AccountReputation.lua"
+    ).read_text(encoding="utf-8")
+
+
 ALE_LOADS = (".lua", ".dll", ".so", ".ext", ".moon", ".out")
 """What mod-ale @bd74eae `ALE::AddScriptPath` loads: the text after the LAST dot, one of these."""
 
@@ -384,13 +467,7 @@ def test_accountwide_deploys_one_reputation_script_not_both(tmp_path: Path) -> N
     events. The Ashen file is renamed on deploy to a name ALE does not load.
     """
     manifest = _wotlk("ale", "accountwide")
-    names = (
-        "00_AccountWideUtils.lua",
-        "AccountReputation (default AC-Wotlk).lua",
-        "AccountReputation (modified for Ashen Order).lua",
-    )
-    files = {f"lua_scripts/AccountWide/{n}": "-- lua\n" for n in names}
-    files["sql/create_accountwide_tables.sql"] = "-- tables\n"
+    files = _accountwide_clone()
     (tmp_path / "modules" / "mod-ale").mkdir(parents=True)
     Applier(tmp_path, git=_Clone(files), sql=_Sql()).install(manifest, None)
 
@@ -400,19 +477,14 @@ def test_accountwide_deploys_one_reputation_script_not_both(tmp_path: Path) -> N
         for p in deployed.iterdir()
         if "." in p.name and p.name[p.name.rfind(".") :] in ALE_LOADS
     )
-    assert loaded == ["00_AccountWideUtils.lua", "AccountReputation (default AC-Wotlk).lua"]
+    assert [n for n in loaded if "Reputation" in n] == ["AccountReputation.lua"]
+    assert "00_AccountWideUtils.lua" in loaded
     assert (deployed / "AccountReputation (modified for Ashen Order).lua.unused").is_file()
 
 
 def _accountwide_installed(tmp_path: Path) -> tuple[Applier, Manifest, Path]:
     manifest = _wotlk("ale", "accountwide")
-    names = (
-        "00_AccountWideUtils.lua",
-        "AccountReputation (default AC-Wotlk).lua",
-        "AccountReputation (modified for Ashen Order).lua",
-    )
-    files = {f"lua_scripts/AccountWide/{n}": "-- lua\n" for n in names}
-    files["sql/create_accountwide_tables.sql"] = "-- tables\n"
+    files = _accountwide_clone()
     (tmp_path / "modules" / "mod-ale").mkdir(parents=True)
     source = manifest.source
     assert source is not None
