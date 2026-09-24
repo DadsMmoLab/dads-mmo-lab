@@ -1945,6 +1945,80 @@ def test_a_start_takes_the_highlight_back(qapp: object, ps: _Ps, tmp_path: Path)
     assert not view.forget_install_button.isHidden()
 
 
+def _nothing_to_remove_view(ps: _Ps, tmp_path: Path, **kwargs: Any) -> ControllerView:
+    """A Tortoise tab whose last "Stop and remove containers…" found nothing (T95)."""
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0, **kwargs)
+    _watch_remove(view, result=False)
+    ps.names = ""
+    view.remove_containers()
+    view.remove_containers()
+    assert view.forget_install_button is not None
+    assert _highlighted(view.forget_install_button)
+    return view
+
+
+def test_a_poll_that_sees_nothing_running_keeps_the_highlight(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The five-second poll must not take back the pointer it is there to hold up."""
+    view = _nothing_to_remove_view(ps, tmp_path)
+    view.refresh_status()
+    view.refresh_status()
+    assert _highlighted(view.forget_install_button)
+
+
+def test_a_poll_that_sees_the_server_running_takes_the_highlight_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A Rebuild, an Update, a Return-to-pin or an outside start brings it up without Start.
+
+    "Remove from Yu'lon…" lit with Start's own emphasis beside a live server
+    points the player at removing it (T95 Task 3 review, round 1).
+    """
+    view = _nothing_to_remove_view(ps, tmp_path)
+    ps.names = view.services.controller.spec.world + "\n"
+    view.refresh_status()
+    assert view.last_seen_running() is True
+    assert not _highlighted(view.forget_install_button)
+
+
+def test_a_stale_running_answer_does_not_take_the_highlight_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A poll asked BEFORE the removal, answered after it, says nothing about now."""
+    from yulon.controller import InstallStatus
+
+    gate = _Gate()
+    view = ControllerView(TORTOISE, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=gate)
+    _watch_remove(view, result=False)
+    gate.hold = True
+    view.refresh_status()  # the 5 s poll, asked while the server still ran
+    ((_work, on_done, on_error),) = gate.queued
+    gate.queued = []
+    gate.hold = False
+    ps.names = ""
+    view.remove_containers()
+    view.remove_containers()  # its own refresh is dropped: the poll is still out
+    assert view.forget_install_button is not None
+    assert _highlighted(view.forget_install_button)
+
+    run_inline(lambda: InstallStatus(db=True, auth=True, world=True), on_done, on_error)
+
+    assert _highlighted(view.forget_install_button), "an answer older than the removal cleared it"
+    assert view.last_seen_running() is False, "the dropped refresh was asked again, and answered"
+
+
+def test_a_removal_that_finds_containers_after_one_that_did_not_takes_it_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _nothing_to_remove_view(ps, tmp_path)
+    _watch_remove(view, result=True)
+    view.remove_containers()
+    view.remove_containers()
+    assert not _highlighted(view.forget_install_button)
+    assert "Containers removed" in view.problem_label.text()
+
+
 UNIMPORTED = docker.ImportState(
     "absent", "none of acore_auth, acore_characters, acore_world exists on this server yet"
 )

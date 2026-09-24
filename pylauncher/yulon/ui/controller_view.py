@@ -2283,7 +2283,11 @@ def _press_is_allowed(verdict: dashboard_module.Verdict) -> bool:
 
     Everything else stays shut: `restart_loop` and `unknown` are both servers
     that may be running, and the press would refuse or, worse, write a setting
-    under a world that is up.
+    under a world that is up. `missing` (T95) stays shut too, as it did while
+    it still read as `unknown`: it is not the stopped server the press is for
+    but a world container that is gone (removed by hand, or never created), and
+    `missing` is only as true as the daemon asked (`ContainerState.missing`).
+    The next Start recreates the container, and the verdict is one of the above.
     """
     return verdict.stable or verdict.state == "stopped"
 
@@ -3859,7 +3863,9 @@ class ControllerView(QWidget):
         # whether a removal stops the server first.
         self._last_status: InstallStatus | None = None
         # T95. Set by a "Stop and remove containers…" press that found nothing to
-        # remove, and cleared by the next Start, which recreates them. While it
+        # remove. Cleared by the next Start, by a removal that did find some, and
+        # by a fresh poll that sees the server running (a Rebuild, an Update, a
+        # Return-to-pin or an outside start brings it up without Start). While it
         # holds, "Remove from Yu'lon…" is highlighted: it is the way out of the
         # dead end in Andood's video.
         self._nothing_to_remove = False
@@ -4504,6 +4510,12 @@ class ControllerView(QWidget):
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
         self.realm_badge.set_status(_realm_badge_status(status))
+        if not stale and status.any_running:
+            # T95: something brought the server back without Start, so "nothing
+            # to remove" is no longer true, and a lit "Remove from Yu'lon…" beside
+            # a live server points at the wrong thing. Only a fresh answer: one
+            # asked before the removal says nothing about after it.
+            self._nothing_to_remove = False
         self._update_forget_visibility()
         self._update_client_dir_row()
         self._ask_about_the_import(status)

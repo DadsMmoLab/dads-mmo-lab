@@ -2212,6 +2212,17 @@ def apply_module_sql(
     return run
 
 
+_NO_SUCH_CONTAINER = re.compile(r"\bno such (?:object|container)\b", re.IGNORECASE)
+"""The two answers docker gives for a name it does not know (T95, wordings measured).
+No unreachable-daemon wording contains either; "no such file or directory" is not one.
+`container_state()` reads it as `missing`."""
+
+_STOP_SAYS_GONE = "No such container"
+"""What `docker stop` says for a container that is already gone; `_run_docker_stop()`
+takes it as done. The stricter, older reading of `_NO_SUCH_CONTAINER`'s answer, kept
+exactly as it was; a test pins that the regex matches it, so the two cannot drift (T95)."""
+
+
 def _run_docker_stop(container: str, *, wsl_distro: str | None = None) -> None:
     """`docker stop <container>`, blocking until that one container has exited.
 
@@ -2240,7 +2251,7 @@ def _run_docker_stop(container: str, *, wsl_distro: str | None = None) -> None:
     proc = _docker(["stop", "-t", str(STOP_GRACE_SECONDS), container], wsl_distro=wsl_distro)
     if proc.returncode == 0:
         return
-    if "No such container" in proc.stderr:
+    if _STOP_SAYS_GONE in proc.stderr:
         logger.debug(f"docker stop {container}: already gone")
         return
     raise DockerCommandError(f"docker stop {container} failed: {proc.stderr.strip()}")
@@ -2641,11 +2652,6 @@ class ContainerState:
         added to remove, arriving by a different route (review, 2026-08-22).
         """
         return self.status == "running"
-
-
-_NO_SUCH_CONTAINER = re.compile(r"\bno such (?:object|container)\b", re.IGNORECASE)
-"""The two answers docker gives for a name it does not know (T95, wordings measured).
-No unreachable-daemon wording contains either; "no such file or directory" is not one."""
 
 
 def container_state(container: str, *, wsl_distro: str | None = None) -> ContainerState:
