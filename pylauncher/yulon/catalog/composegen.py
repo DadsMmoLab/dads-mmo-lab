@@ -905,6 +905,43 @@ def is_ours(path: Path) -> bool:
         return False
 
 
+_NAME_LINE = re.compile(r"^name:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+
+
+def project_of(text: str) -> str | None:
+    """The compose project a base file names on its top-level `name:` line, or None (T106).
+
+    The project is where the install's character volume lives (`project_name()`), so
+    this is the one line a repair must never change: a folder moved after install
+    renders a different name, and writing it would start the server under a new
+    project with an empty database volume beside the old one.
+    """
+    found = _NAME_LINE.search(text)
+    return found.group(1) if found else None
+
+
+def _meaningful_lines(text: str) -> list[str]:
+    return [
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def same_compose(a: str, b: str) -> bool:
+    """Do two compose texts say the same thing, whole-line comments and blank lines aside? (T106)
+
+    The templates carry long comments that get reworded (T98's own review
+    corrected two), and a reworded comment is no reason to ask a player to
+    recreate a running server. Only whole-line comments are set aside: a trailing
+    `# …` after a value is compared as written, which errs towards offering.
+    A `#` line inside a block scalar is script text, not a YAML comment; the one
+    such block the templates carry (T98's shell wrapper) has none, and a comment
+    in a shell script would change nothing the script does either.
+    """
+    return _meaningful_lines(a) == _meaningful_lines(b)
+
+
 def write_plan(
     plan: ComposePlan, server_dir: Path, *, replaceable: Sequence[str] = ()
 ) -> tuple[Path, ...]:
