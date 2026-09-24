@@ -50,10 +50,19 @@ JobRunner = Callable[[Work, OnDone, OnError], None]
 
 
 class _JobWorker(QObject):
-    """Runs one callable on its thread and reports the outcome (never raises out)."""
+    """Runs one callable on its thread and reports the outcome.
+
+    Exactly one of `done`, `failed` or `abandoned` is emitted per run.
+    `abandoned` is the `BaseException` case -- a `KeyboardInterrupt` or a
+    `SystemExit` raised inside the work -- which is not a job failure to show a
+    person and not caught as one, but which must still end the thread and
+    release its delivery: before it existed, nothing was emitted, the thread
+    was never told to quit and the pair was held for the life of the app.
+    """
 
     done = Signal(object)
     failed = Signal(object)
+    abandoned = Signal()
 
     def __init__(self, work: Work) -> None:
         super().__init__()
@@ -66,6 +75,13 @@ class _JobWorker(QObject):
         except Exception as exc:  # boundary: the view decides how to show it
             logger.warning(f"background job failed: {type(exc).__name__}: {exc}")
             self.failed.emit(exc)
+        except BaseException as exc:
+            logger.error(
+                f"a background job was ended by {type(exc).__name__}, so it has no answer "
+                "to deliver"
+            )
+            self.abandoned.emit()
+            raise
         else:
             self.done.emit(result)
 
@@ -124,7 +140,7 @@ class InFlight(QObject):
         self._pairs = [
             (thread, worker, delivery)
             for thread, worker, delivery in self._pairs
-            if thread.isRunning() or (delivery is not None and not delivery.delivered)
+            if thread.isRunning() or (delivery is not None and not delivery.returned)
         ]
 
     def wait_all(self, timeout_ms: int = 10_000) -> bool:
@@ -185,6 +201,16 @@ class _Delivery(QObject):
 
     The callbacks are released once delivered, so a closure over a view does
     not keep that view alive for as long as `in_flight()` holds this.
+
+    **Held until the callback RETURNS, not until it starts** (cold review).
+    `delivered` says the answer was taken; `returned` says the callback is off
+    the stack, and only then may `in_flight()` let go. A callback that shows a
+    dialog runs a nested event loop, and in it the thread finishes and its
+    sweep runs; released on `delivered`, this object was deleted inside its own
+    slot (probe: 300 of 300).
+
+    A callback that raises is logged, not left to PySide's stderr print -- a
+    windowed Windows build has no stderr, so the error vanished.
     """
 
     def __init__(self, owner: object, on_done: OnDone, on_error: OnError) -> None:
@@ -193,6 +219,7 @@ class _Delivery(QObject):
         self._on_done: OnDone | None = on_done
         self._on_error: OnError | None = on_error
         self.delivered = False
+        self.returned = False
 
     @Slot(object)
     def done(self, result: object) -> None:
@@ -202,20 +229,44 @@ class _Delivery(QObject):
     def failed(self, exc: object) -> None:
         self._deliver(self._on_error, exc)
 
-    def _deliver(self, callback: Callable[[object], None] | None, value: object) -> None:
-        if self.delivered or callback is None:
+    @Slot()
+    def abandoned(self) -> None:
+        """The work ended with no answer; release everything and call nothing."""
+        self._deliver(None, None, reason="the job ended without an answer")
+
+    def _deliver(
+        self,
+        callback: Callable[[object], None] | None,
+        value: object,
+        *,
+        reason: str = "",
+    ) -> None:
+        if self.delivered:
             return
         self.delivered = True
         owner, self._owner = self._owner, None
         self._on_done = self._on_error = None
-        # Swept on a LATER turn of the loop, never from inside this slot: the
-        # sweep drops the last reference to this object, and deleting a QObject
-        # while its own slot is on the stack is the freed-receiver crash again.
-        QTimer.singleShot(0, in_flight().sweep)
-        if _gone(owner) or _gone(getattr(callback, "__self__", None)):
-            logger.info("a background job finished after its owner was closed; answer dropped")
-            return
-        callback(value)
+        try:
+            if reason:
+                logger.info(f"a background job's answer was not delivered: {reason}")
+                return
+            if callback is None:
+                logger.warning("a background job finished with no callback to hand its answer to")
+                return
+            if _gone(owner) or _gone(getattr(callback, "__self__", None)):
+                logger.info("a background job finished after its owner was closed; answer dropped")
+                return
+            try:
+                callback(value)
+            except Exception:  # boundary: one view's bug must not end the app's loop
+                logger.exception("a background job's callback raised")
+        finally:
+            self.returned = True
+            # Swept on a LATER turn of the loop, never from inside this slot:
+            # the sweep drops the last reference to this object, and deleting a
+            # QObject while its own slot is on the stack is the freed-receiver
+            # crash again.
+            QTimer.singleShot(0, in_flight().sweep)
 
 
 class ThreadedJobRunner:
@@ -251,8 +302,10 @@ class ThreadedJobRunner:
         queued = Qt.ConnectionType.QueuedConnection
         worker.done.connect(delivery.done, queued)
         worker.failed.connect(delivery.failed, queued)
+        worker.abandoned.connect(delivery.abandoned, queued)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        worker.abandoned.connect(thread.quit)
         thread.start()
 
     def _prune(self) -> None:

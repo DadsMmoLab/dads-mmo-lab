@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QObject, Slot
 
-from tests.conftest import HANG_BOUND_MS, pump_until, spelled_bounds
+from tests.conftest import HANG_BOUND_MS, process_events, pump_until, spelled_bounds
 from yulon.ui.widgets.job import LineRelay, ThreadedJobRunner, in_flight, run_inline
 
 STILL_RUNNING = 0.2
@@ -108,6 +108,14 @@ def _on_the_gui_thread() -> bool:
     )
 
 
+def _held(delivery: object) -> bool:
+    return any(d is delivery for *_, d in in_flight()._pairs)
+
+
+def _undelivered() -> bool:
+    return any(d is not None and not d.returned for *_, d in in_flight()._pairs)
+
+
 @pytest.mark.parametrize("outcome", ["done", "failed"])
 def test_a_plain_lambda_callback_runs_on_the_gui_thread(qapp: object, outcome: str) -> None:
     """T97, and the boundary this runner now IS rather than a rule callers keep.
@@ -163,10 +171,7 @@ def test_an_answer_for_a_deleted_owner_is_dropped_not_delivered(qapp: object) ->
     shiboken6.delete(owner)
     gate.set()
     assert runner.wait(HANG_BOUND_MS) is True
-    pump_until(
-        lambda: not any(d is not None and not d.delivered for *_, d in in_flight()._pairs),
-        "the answer was taken off the queue",
-    )
+    pump_until(lambda: not _undelivered(), "the answer was taken off the queue")
     assert called == [], "a callback ran for an owner that no longer exists"
 
 
@@ -182,10 +187,7 @@ def test_a_bound_callback_whose_object_was_deleted_is_not_called(qapp: object) -
     shiboken6.delete(receiver)
     gate.set()
     assert runner.wait(HANG_BOUND_MS) is True
-    pump_until(
-        lambda: not any(d is not None and not d.delivered for *_, d in in_flight()._pairs),
-        "the answer was taken off the queue",
-    )
+    pump_until(lambda: not _undelivered(), "the answer was taken off the queue")
     assert seen == [] and errors == [], "a slot ran on an object that no longer exists"
 
 
@@ -202,6 +204,95 @@ def test_a_delivery_is_held_until_it_delivered_and_released_after(qapp: object) 
     assert delivery() is not None, "dropped with its answer still queued"
     pump_until(lambda: results == [7], "the answer arrived")
     pump_until(lambda: (gc.collect(), delivery() is None)[1], "the delivery was released")
+
+
+def test_a_delivery_is_held_while_its_callback_runs_a_nested_event_loop(qapp: object) -> None:
+    """Cold review of the runner change: the delivery was marked done and its
+    sweep scheduled BEFORE the callback ran. A callback that runs a nested loop
+    -- every QMessageBox and `exec()` a view shows from an answer -- let the
+    thread finish and the sweep drop the delivery while its own slot was still
+    on the stack (probe: 300/300). It is held until the callback RETURNS.
+    """
+    runner = ThreadedJobRunner(QObject())
+    during: list[bool] = []
+
+    def modal(_result: object) -> None:
+        # A nested loop, as a dialog shown from an answer runs one: spun until
+        # the thread has finished and its `finished` -> sweep has been delivered.
+        pump_until(lambda: not thread.isRunning(), "the thread finished inside the callback")
+        process_events()
+        during.append(_held(delivery()))
+
+    runner(lambda: 3, modal, modal)
+    thread, _worker, held = in_flight()._pairs[-1]
+    delivery = weakref.ref(held)  # type: ignore[arg-type]
+    del held
+    pump_until(lambda: bool(during), "the callback's nested loop saw the thread finish")
+    assert during == [True], "the delivery was released while its own callback was running"
+    pump_until(lambda: (gc.collect(), delivery() is None)[1], "the delivery was released after")
+
+
+def test_a_callback_that_raises_is_logged_and_the_next_job_still_delivers(
+    qapp: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Cold review: a callback's exception went to stderr through PySide, which a
+    windowed Windows build does not have -- it vanished. It goes to the log."""
+    runner = ThreadedJobRunner(QObject())
+    later: list[object] = []
+
+    def boom(_result: object) -> None:
+        raise RuntimeError("the view fell over")
+
+    with caplog.at_level("ERROR", logger="yulon.ui.widgets.job"):
+        runner(lambda: 1, boom, boom)
+        pump_until(lambda: not _undelivered(), "the raising callback returned")
+        runner(lambda: 2, later.append, later.append)
+        pump_until(lambda: later == [2], "the next job's answer")
+    assert runner.wait(HANG_BOUND_MS) is True
+    assert any(
+        "the view fell over" in r.getMessage()
+        or (r.exc_info and "the view fell over" in str(r.exc_info[1]))
+        for r in caplog.records
+    ), caplog.text
+
+
+def test_a_job_with_no_callback_is_released_and_said(
+    qapp: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Cold review: a `None` callback never marked the delivery done, so the
+    pair was held for the life of the app."""
+    runner = ThreadedJobRunner(QObject())
+    with caplog.at_level("WARNING", logger="yulon.ui.widgets.job"):
+        runner(lambda: 1, None, None)  # type: ignore[arg-type]
+        delivery = weakref.ref(in_flight()._pairs[-1][2])  # type: ignore[arg-type]
+        assert runner.wait(HANG_BOUND_MS) is True
+        pump_until(lambda: (gc.collect(), delivery() is None)[1], "the delivery was released")
+    assert "no callback" in caplog.text
+
+
+class _NotAnException(BaseException):
+    """What `_JobWorker.run` does not catch: it catches `Exception` only."""
+
+
+def test_a_job_ended_by_a_base_exception_releases_its_thread_and_delivery(
+    qapp: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Cold review: a `BaseException` from the work emitted nothing, so the
+    thread was never told to quit and the delivery waited forever."""
+    runner = ThreadedJobRunner(QObject())
+    called: list[object] = []
+
+    def work() -> None:
+        raise _NotAnException("stop")
+
+    with caplog.at_level("ERROR", logger="yulon.ui.widgets.job"):
+        runner(work, called.append, called.append)
+        delivery = weakref.ref(in_flight()._pairs[-1][2])  # type: ignore[arg-type]
+        thread = in_flight()._pairs[-1][0]
+        pump_until(lambda: not thread.isRunning(), "the thread finished")
+        pump_until(lambda: (gc.collect(), delivery() is None)[1], "the delivery was released")
+    assert called == [], "a job with no answer answered"
+    assert "_NotAnException" in caplog.text
 
 
 def test_wait_joins_running_jobs(qapp: object) -> None:
