@@ -43,7 +43,7 @@ from collections.abc import Iterable
 from enum import Enum
 from typing import Protocol
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -572,32 +572,72 @@ class GamepadSource(QObject):
         self._running = True
 
     def _start_thread(self) -> None:
+        """Start one poller pair, owned the way `job.ThreadedJobRunner` owns its pairs (T111).
+
+        - **No parent on the QThread.** It was `QThread(self)`, so the thread
+          went with the source (and the source with the window); a QThread
+          destroyed while running aborts the process. Measured before T111:
+          SDL slower than `stop()`'s 500 ms to let go at exit, then the window
+          deleted -> `QThread: Destroyed while thread is still running`, exit 134.
+        - **Held by `in_flight()` until `finished`, no `deleteLater`.**
+          `thread.finished -> worker.deleteLater` ran the worker's destructor ON
+          the worker thread (measured), which needs the GIL there -- trap 3 of
+          the GUI segfault. `InFlight.sweep()` drops the pair on the GUI thread
+          instead, after the thread has exited, and `wait_all()` in
+          `main._stop_background_threads()` is its join at exit.
+        - **Input is queued to this object's thread** (the GUI thread), so the
+          navigator only ever moves focus from there.
+        """
+        from yulon.ui.widgets.job import in_flight
+
         worker = _GamepadWorker()
-        thread = QThread(self)
+        thread = QThread()
         worker.moveToThread(thread)
+        in_flight().hold(thread, worker)
         thread.started.connect(worker.run)
-        worker.direction.connect(self.direction)
-        worker.action.connect(self.action)
-        worker.finished.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
+        queued = Qt.ConnectionType.QueuedConnection
+        worker.direction.connect(self.direction, queued)
+        worker.action.connect(self.action, queued)
         thread.finished.connect(self._on_thread_finished)
+        # A source deleted without `stop()` (its window gone) must not leave the
+        # poll running with nobody to stop it: `in_flight().wait_all()` can quit
+        # an event loop, not this loop. Direct, because `stop()` only sets a flag
+        # and the source's own thread is the one being torn down.
+        self.destroyed.connect(worker.stop, Qt.ConnectionType.DirectConnection)
         self._thread = thread
         self._worker = worker
         thread.start()
 
+    @Slot()
     def _on_thread_finished(self) -> None:
+        """Forget the pair once its thread has ended -- unless a newer pair is running.
+
+        Queued to the GUI thread, so it can arrive after `stop(); start()` has
+        already made a new pair; clearing then dropped the NEW worker before its
+        `run` began (trap 1, measured: 0 polls, then a segfault at teardown).
+        """
+        if self._thread is not None and self._thread.isRunning():
+            return
         self._running = False
         self._thread = None
         self._worker = None
 
     def stop(self) -> None:
-        """Stop polling cleanly (the worker breaks its loop on the next tick)."""
+        """Tell the poller to stop; the join is `in_flight().wait_all()` at exit.
+
+        The worker breaks its loop on the next tick and quits its own thread.
+        Waiting here as well was the only join the thread had before T111, and
+        at 500 ms it lost to a slow SDL release (see `_start_thread`);
+        `main._stop_background_threads()` calls this and then `wait_all()`.
+        The references can go at once: `in_flight()` holds the pair until its
+        thread has finished.
+        """
         if self._worker is not None:
             self._worker.stop()
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait(500)
-            self._thread = None
+        self._thread = None
+        self._worker = None
         self._running = False
 
 
@@ -625,9 +665,9 @@ class _GamepadWorker(QObject):
         """Poll the SDL GameController layer until told to stop.
 
         The whole body is one `try/finally`: whatever happens — `pygame` missing,
-        no controller present, a poll raising — `finished` is emitted exactly once
-        so the owning `QThread` quits and the pair is torn down, never left
-        running into Qt's interpreter teardown (which aborts with 0xC0000409).
+        no controller present, a poll raising — `_finish()` runs exactly once,
+        so the owning `QThread` quits and `in_flight()` lets the pair go, never
+        left running into Qt's interpreter teardown (which aborts with 0xC0000409).
         """
         import pygame  # optional dep; availability is probed on the GUI thread first
         from pygame._sdl2 import controller as _sdl2ctl
@@ -641,7 +681,7 @@ class _GamepadWorker(QObject):
             _sdl2ctl.init()
         except pygame.error:
             # No controller subsystem (headless CI, a container): nothing to read.
-            self.finished.emit()
+            self._finish()
             return
 
         sticks: dict[int, GameController] = {}
@@ -738,8 +778,25 @@ class _GamepadWorker(QObject):
                     pass
             _sdl2ctl.quit()
             pygame.joystick.quit()
-            self.finished.emit()
+            self._finish()
 
+    def _finish(self) -> None:
+        """Say so, and end OUR thread's event loop from inside it.
+
+        Nothing else would: the QThread object lives on the GUI thread, so a
+        `finished -> thread.quit` connection is queued there, and at exit
+        `main._stop_background_threads()` blocks that thread in a join with
+        nothing pumping it (`LogPanel`'s worker does the same, for the same
+        reason). Guarded so a `run()` driven on the GUI thread cannot quit the
+        app's own loop.
+        """
+        self.finished.emit()
+        thread = self.thread()
+        app = QCoreApplication.instance()
+        if thread is not None and (app is None or thread is not app.thread()):
+            thread.quit()
+
+    @Slot()
     def stop(self) -> None:
         """Signal the poll loop to break (thread-safe enough for a bool flag)."""
         self._stop = True
