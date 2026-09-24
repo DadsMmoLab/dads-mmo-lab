@@ -510,7 +510,19 @@ def test_a_conf_the_containers_read_off_the_users_disk_needs_a_restart() -> None
 
 def test_a_conf_outside_every_bind_needs_the_containers_recreated() -> None:
     """The running container is using the image's copy; saving changes only the disk."""
-    assert tuning.apply_rule(_row("etc/somewhere-else.conf")) == "recreate"
+    assert tuning.apply_rule(_row("conf/somewhere-else.conf")) == "recreate"
+
+
+def test_a_cmangos_etc_conf_is_read_off_the_users_disk_and_needs_a_restart() -> None:
+    """T99: `./etc` is bound into mangosd and realmd, so a restart applies it (T94 follow-up).
+
+    Mutation: drop `etc/` from `BOUND_INTO_THE_CONTAINERS` and the Bots tab's
+    box, a Tuning save and a reset of a CMaNGOS conf all ask for the dearer
+    recreate again.
+    """
+    assert tuning.apply_rule(_row("etc/aiplayerbot.conf")) == "restart"
+    assert tuning.file_rule("etc/mangosd.conf") == "restart"
+    assert tuning.file_rule("etc/modules/tortoise_bots.conf") == "restart"
 
 
 def test_a_setting_in_the_modules_own_source_tree_needs_a_rebuild() -> None:
@@ -525,23 +537,26 @@ def test_the_bound_directory_is_the_one_this_apps_compose_actually_binds() -> No
     breaks this test instead of quietly turning every "restart" on the tab into
     a promise the app cannot keep.
     """
-    template = (
-        Path(__file__).resolve().parents[1]
-        / "catalog"
-        / "installers"
-        / "wow-wotlk"
-        / "native"
-        / "base.yml.tmpl"
-    ).read_text(encoding="utf-8")
-    for prefix in tuning.BOUND_INTO_THE_CONTAINERS:
-        assert f"- ./{prefix.rstrip('/')}:" in template
+    installers = Path(__file__).resolve().parents[1] / "catalog" / "installers"
+    templates = {
+        "env/dist/etc/": installers / "wow-wotlk" / "native" / "base.yml.tmpl",
+        # T99: every CMaNGOS game's compose, into mangosd AND realmd.
+        "etc/": installers / "shared" / "cmangos" / "base.yml.tmpl",
+    }
+    assert set(tuning.BOUND_INTO_THE_CONTAINERS) == set(templates)
+    for prefix, path in templates.items():
+        template = path.read_text(encoding="utf-8")
+        binds = template.count(f"- ./{prefix.rstrip('/')}:")
+        assert binds >= 1, prefix
+        if prefix == "etc/":
+            assert binds == 2, "both the world and the login server read ./etc"
 
 
 def test_every_rule_has_a_sentence_and_no_sentence_has_no_rule() -> None:
     """The chip and the banner read these; a rule with no words would draw blank."""
     for file, clone in (
         ("env/dist/etc/modules/a.conf", False),
-        ("etc/a.conf", False),
+        ("conf/a.conf", False),
         ("env/dist/etc/modules/a.conf", True),
         ("a.lua", False),
     ):

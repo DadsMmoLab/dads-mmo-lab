@@ -756,13 +756,19 @@ def lint_sentence(issues: Sequence[LintIssue]) -> str | None:
 
 ApplyRule = Literal["rebuild", "recreate", "restart", "read-only"]
 
-BOUND_INTO_THE_CONTAINERS: tuple[str, ...] = ("env/dist/etc/",)
+BOUND_INTO_THE_CONTAINERS: tuple[str, ...] = ("env/dist/etc/", "etc/")
 """The server-dir paths this app's compose binds into the running containers.
 
 Read off `catalog/installers/wow-wotlk/native/base.yml.tmpl:160-165, 243-245`:
 `./env/dist/etc` and `./env/dist/logs` go into `ac-worldserver`, `ac-db-import`
 and `ac-authserver`, and `./modules` into the worldserver alone. Only the conf
 directory matters here -- it is the one a tuning write lands in.
+
+`etc/` is every CMaNGOS game's (T99): `catalog/installers/shared/cmangos/
+base.yml.tmpl:81, 112` binds `./etc` into mangosd and realmd at the image's
+compiled-in sysconfdir, so they read it off the user's disk at start and a
+restart applies an edit. T94 priced it as a recreate and left this as its
+follow-up. No AzerothCore file lives under a top-level `etc/`.
 """
 
 APPLY_SENTENCES: dict[ApplyRule, str] = {

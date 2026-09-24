@@ -19,6 +19,7 @@ import pytest
 from tests.conftest import HANG_BOUND, process_events, pump_until
 from yulon import apply as apply_module
 from yulon import (
+    bot_population,
     botlist,
     channel,
     channel_setup,
@@ -67,6 +68,7 @@ from yulon.runner import run as _REAL_RUN
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
+    BOT_COUNT_RUNNING,
     RETURN_TO_PIN_BUTTON_LABEL,
     TUNING_CORE_FILES,
     TUNING_RECREATE_LABEL,
@@ -14200,7 +14202,7 @@ def test_a_refused_reset_writes_nothing_says_why_and_offers_no_restart(
 def test_a_cmangos_reset_owes_what_file_rule_prices_its_etc_files_at(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Spec correction 10: `etc/` is priced as a recreate, so the banner offers Recreate."""
+    """`etc/` is bound into the containers, so the banner offers Restart (T99; T94 had Recreate)."""
     backup = tmp_path / "etc" / "mangosd.conf.20260923-120000-000000.bak"
 
     def route(files: Sequence[str], keys: Any, confirmed: Any = None) -> reset_defaults.ResetReport:
@@ -14212,7 +14214,7 @@ def test_a_cmangos_reset_owes_what_file_rule_prices_its_etc_files_at(
     _reset_yes(monkeypatch)
     _menu_action(view, "mangosd.conf…").trigger()
 
-    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+    assert view.tuning_banner_button.text() == TUNING_RESTART_LABEL
     assert "etc/mangosd.conf" in view.tuning_banner_label.text()
 
 
@@ -14750,3 +14752,265 @@ def test_a_press_whose_files_cannot_be_read_says_so_and_frees_the_button(
     assert asked == [] and view._press_asking is None
     assert view.tuning_reset_button.isEnabled() is True
     assert "could not be read" in view.tuning_report.toPlainText() and failures
+
+
+# -- T99: the Bots tab's "Random bots" box, and the bot keys on the Tuning tab --------------
+
+BOT_CONF = "etc/aiplayerbot.conf"
+BOT_CONF_TEXT = (
+    "# Random bot count\n"
+    "AiPlayerbot.MinRandomBots = 500\n"
+    "AiPlayerbot.MaxRandomBots = 500\n"
+    "AiPlayerbot.RandomBotAccountCount = 100\n"
+)
+
+
+def _bot_conf(server: Path) -> bytes:
+    path = server / BOT_CONF
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(BOT_CONF_TEXT, encoding="utf-8")
+    return path.read_bytes()
+
+
+def _wotlk_override(server: Path) -> str:
+    """A Yu'lon WotLK folder's compose files, the override as the install renders it."""
+    (server / composegen.BASE_FILE).write_text(
+        composegen.GENERATED_MARKER + "\nservices: {}\n", encoding="utf-8"
+    )
+    text = reset_defaults.rendered_override(WOTLK, server, seams=RESET_QUIET)
+    (server / composegen.OVERRIDE_FILE).write_text(text, encoding="utf-8", newline="")
+    return text
+
+
+def _bots_view(ps: _Ps, tmp_path: Path, entry: CatalogEntry = TBC, **kw: Any) -> ControllerView:
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(
+        services,
+        "bot_population",
+        bot_population.bot_count_route(entry, tmp_path, seams=RESET_QUIET),
+    )
+    return ControllerView(entry, services, status_poll_ms=0, **kw)
+
+
+def _bot_jobs(held: list[tuple[Any, Any, Any]], slot: Any) -> list[tuple[Any, Any, Any]]:
+    return [job for job in held if getattr(job[1], "__func__", None) is slot]
+
+
+def test_the_bots_tab_shows_the_count_read_off_the_gui_thread(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No file read on the GUI thread: the tab only QUEUES the read, and the box waits for it."""
+    _bot_conf(tmp_path)
+    reads: list[int] = []
+    real = bot_population.read
+
+    def spy(*args: Any, **kwargs: Any) -> bot_population.Reading:
+        reads.append(threading.get_ident())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bot_population, "read", spy)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+
+    assert reads == [], "the bot count was read on the GUI thread"
+    assert view.bot_count_box.isEnabled() is False, "editable before its value landed"
+    assert view.bot_count_apply_button.isEnabled() is False
+    jobs = _bot_jobs(held, ControllerView._bot_count_read)
+    assert len(jobs) == 1
+    work, done, failed = jobs[0]
+    assert done.__self__ is view and failed.__self__ is view
+    assert failed.__func__ is ControllerView._bot_count_read_failed
+    done(work())
+
+    assert reads, "control: the spy saw the job's own read"
+    assert view.bot_count_box.value() == 500
+    assert view.bot_count_box.maximum() == 900, "100 bot accounts x 9 characters"
+    assert view.bot_count_box.isEnabled() is True and view.bot_count_apply_button.isEnabled()
+    assert "500" in view.bot_count_note.text()
+
+
+@pytest.mark.parametrize("entry", [TBC, TORTOISE], ids=lambda e: e.id)
+def test_apply_backs_the_conf_up_writes_both_numbers_and_offers_a_restart(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: CatalogEntry
+) -> None:
+    before = _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path, entry)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    view.bot_count_box.setValue(50)
+    view.bot_count_apply_button.click()
+
+    text = (tmp_path / BOT_CONF).read_text(encoding="utf-8")
+    assert "MinRandomBots = 50\n" in text and "MaxRandomBots = 50\n" in text
+    backups = sorted((tmp_path / "etc").glob("aiplayerbot.conf.*.bak"))
+    assert len(backups) == 1 and backups[0].read_bytes() == before
+    assert len(asked) == 1 and "50" in asked[0] and "restarted" in asked[0]
+    assert "RECREATED" not in asked[0]
+    assert view.tuning_banner.isHidden() is False
+    assert BOT_CONF in view.tuning_banner_label.text()
+    assert view.tuning_banner_button.text() == TUNING_RESTART_LABEL
+    assert view.bot_count_owed_button.isHidden() is False
+    assert view.bot_count_owed_button.text() == TUNING_RESTART_LABEL
+    assert view.bot_count_box.value() == 50, "the box was read again after the write"
+    assert backups[0].name in view.bot_count_report.text()
+    assert "Now 50" in view.bot_count_note.text()
+
+
+def test_no_on_the_bot_count_question_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    before = _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    asked: list[str] = []
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    view.bot_count_box.setValue(50)
+    view.bot_count_apply_button.click()
+
+    assert len(asked) == 1
+    assert (tmp_path / BOT_CONF).read_bytes() == before
+    assert not list(tmp_path.rglob("*.bak"))
+    assert view.tuning_banner.isHidden() is True and view.bot_count_owed_button.isHidden()
+
+
+def test_a_wotlk_bot_count_is_written_into_the_override_and_asks_for_a_recreate(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _wotlk_override(tmp_path)
+    view = _bots_view(ps, tmp_path, WOTLK)
+    assert view.bot_count_box.value() == 500
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    view.bot_count_box.setValue(60)
+    view.bot_count_apply_button.click()
+
+    now = (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert now == installed.replace('RANDOM_BOTS: "500"', 'RANDOM_BOTS: "60"')
+    assert len(asked) == 1 and "RECREATED" in asked[0]
+    assert "by hand" not in asked[0], "nothing was added by hand, so nothing is dropped"
+    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+    assert composegen.OVERRIDE_FILE in view.tuning_banner_label.text()
+    assert view.bot_count_owed_button.text() == TUNING_RECREATE_LABEL
+
+
+def test_a_hand_edited_wotlk_override_is_named_before_it_is_rewritten(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _wotlk_override(tmp_path)
+    (tmp_path / composegen.OVERRIDE_FILE).write_text(
+        installed.replace("    environment:\n", "    environment:\n      TZ: Europe/Oslo\n"),
+        encoding="utf-8",
+    )
+    view = _bots_view(ps, tmp_path, WOTLK)
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    view.bot_count_box.setValue(60)
+    view.bot_count_apply_button.click()
+
+    assert len(asked) == 1 and "by hand" in asked[0]
+    assert "TZ" in (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+
+
+def test_the_bot_count_write_runs_on_the_job_runner_and_holds_the_box(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write is a job, handed back to bound slots (T97), and the box is dead while it runs."""
+    before = _bot_conf(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    for work, done, _failed in _bot_jobs(held, ControllerView._bot_count_read):
+        done(work())
+    _reset_yes(monkeypatch)
+    view.bot_count_box.setValue(40)
+    view.bot_count_apply_button.click()
+
+    assert (tmp_path / BOT_CONF).read_bytes() == before, "the press wrote on the GUI thread"
+    jobs = _bot_jobs(held, ControllerView._bot_count_written)
+    assert len(jobs) == 1
+    work, done, failed = jobs[0]
+    assert (done.__self__, failed.__self__) == (view, view)
+    assert failed.__func__ is ControllerView._bot_count_failed
+    assert view.bot_count_box.isEnabled() is False
+    assert view.bot_count_apply_button.isEnabled() is False
+    assert view.busy_reason() == BOT_COUNT_RUNNING
+    done(work())
+    assert "MaxRandomBots = 40" in (tmp_path / BOT_CONF).read_text(encoding="utf-8")
+    assert view.busy_reason() is None
+
+
+def test_the_box_is_dead_while_any_job_of_ours_runs(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    assert view.bot_count_box.isEnabled() is True
+    view._set_busy(True)
+    assert view.bot_count_box.isEnabled() is False
+    assert view.bot_count_apply_button.isEnabled() is False
+    view._set_busy(False)
+    assert view.bot_count_box.isEnabled() is True
+    assert view.bot_count_apply_button.isEnabled() is True
+
+
+def test_a_refused_bot_count_writes_nothing_says_why_and_offers_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    (tmp_path / BOT_CONF).unlink()  # gone between the read and the press
+    _reset_yes(monkeypatch)
+    view.bot_count_box.setValue(50)
+    view.bot_count_apply_button.click()
+
+    assert not (tmp_path / BOT_CONF).exists()
+    assert "aiplayerbot.conf" in view.bot_count_report.text() and failures
+    assert "NOT changed" in view.bot_count_report.text()
+    assert view.tuning_banner.isHidden() is True
+
+
+def test_a_game_with_its_count_unreadable_says_so_and_keeps_the_box_dead(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _bots_view(ps, tmp_path)  # no aiplayerbot.conf on disk
+    assert view.bot_count_box.isEnabled() is False
+    assert view.bot_count_apply_button.isEnabled() is False
+    assert "aiplayerbot.conf" in view.bot_count_note.text()
+
+
+@pytest.mark.parametrize(
+    ("entry", "shown"),
+    [(TBC, True), (TORTOISE, True), (WOTLK, False)],
+    ids=["tbc", "tortoise", "wotlk"],
+)
+def test_the_tuning_tab_shows_the_bot_keys_for_cmangos_and_tortoise_only(
+    qapp: object, ps: _Ps, tmp_path: Path, entry: CatalogEntry, shown: bool
+) -> None:
+    _bot_conf(tmp_path)
+    _wotlk_override(tmp_path)
+    view = _bots_view(ps, tmp_path, entry)
+    cards = {card.card.module_id: card for card in view.tuning_panel._cards.values()}
+    assert (bot_population.CARD[1] in cards) is shown
+    if shown:
+        card = cards[bot_population.CARD[1]].card
+        keys = [row.key for row in card.rows]
+        assert bot_population.MAX_KEY in keys and bot_population.MIN_KEY in keys
+        assert card.rules == ("restart",)
+        spec = view._tuning_spec(*bot_population.CARD, BOT_CONF)
+        assert spec == bot_population.conf_keys(entry)
+
+
+def test_a_tuning_save_of_the_bot_card_moves_the_bots_tab_box(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    _bot_conf(tmp_path)
+    view = _bots_view(ps, tmp_path)
+    (tmp_path / BOT_CONF).write_text(BOT_CONF_TEXT.replace("= 500", "= 70"), encoding="utf-8")
+    view.reload_tuning()
+    assert view.bot_count_box.value() == 70
