@@ -613,3 +613,65 @@ def test_the_press_keeps_the_selinux_label_the_install_put_on_every_bind(
     written = (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8")
     assert 'AC_SOAP_ENABLED: "1"' in written
     assert _host_binds(written) == installed
+
+
+@pytest.mark.parametrize("probe", [False, None], ids=["permissive-now", "cannot-tell-now"])
+def test_the_press_takes_the_label_from_the_installed_override_not_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe: bool | None
+) -> None:
+    """A probe that answers wrongly at press time must not strip the install's `:z`.
+
+    `getenforce` failing (None) or a host briefly permissive (False) made the
+    press render with no label, which is T102 again (final review of
+    `424ac7a9`). The installed override already says which label this install
+    uses, so the press reads it there.
+    """
+    server_dir = _installed_with_label(tmp_path)
+    installed = _host_binds((server_dir / OVERRIDE_FILE).read_text(encoding="utf-8"))
+    monkeypatch.setattr(platform, "selinux_enforcing", lambda: probe)
+
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+
+    written = (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert 'AC_SOAP_ENABLED: "1"' in written
+    assert _host_binds(written) == installed
+
+
+def test_an_unlabelled_install_stays_unlabelled_on_an_enforcing_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file wins in this direction too: the press writes what the install wrote.
+
+    That is also the text the rollback recognises, so the press cannot move an
+    install onto a label its own undo would then have to guess at.
+    """
+    server_dir = _installed(tmp_path)
+    _on_selinux(monkeypatch)
+
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+
+    binds = _host_binds((server_dir / OVERRIDE_FILE).read_text(encoding="utf-8"))
+    assert binds and not any(line.endswith(":z") for line in binds)
+
+
+def test_an_override_with_mixed_labels_is_refused_and_nothing_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Some binds labelled and some not is no install's rendering; the press will not pick one."""
+    _on_selinux(monkeypatch)
+    server_dir = _installed_with_label(tmp_path)
+    override = server_dir / OVERRIDE_FILE
+    labelled = "      - ./modules:/azerothcore/modules:z\n"
+    text = override.read_text(encoding="utf-8")
+    assert labelled in text
+    mixed = text.replace(labelled, labelled + "      - ./extra:/azerothcore/extra\n")
+    override.write_text(mixed, encoding="utf-8")
+
+    with pytest.raises(setup.EnableRefused, match="label"):
+        setup.enable(
+            WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False
+        )
+
+    assert override.read_text(encoding="utf-8") == mixed
+    assert not override.with_name(override.name + setup.BACKUP_SUFFIX).exists()
+    assert not (server_dir / ".env").exists()

@@ -244,8 +244,8 @@ def install_bind_label(server_dir: Path) -> str:
 
     The install's own decision and its own inputs -- `platform.bind_label()` fed
     `selinux_enforcing()` and `filesystem_type()`, as `stage_generate_compose()`
-    feeds it -- so the press re-renders the override with the label the install
-    wrote rather than with none (T102). Both are looked up on the call, not
+    feeds it -- for a press whose installed override cannot say which label it
+    carries (`_label_on_disk()` comes first; T102). Both are looked up on the call, not
     bound at import, so a test that patches `platform` reaches the route every
     `InstallChannel` the app builds takes. The filesystem is asked only when
     SELinux enforces, as `git.ContainerGit` asks it: off SELinux the answer
@@ -255,6 +255,37 @@ def install_bind_label(server_dir: Path) -> str:
     return platform.bind_label(
         enforcing=enforcing,
         fs_type=platform.filesystem_type(server_dir) if enforcing is True else None,
+    )
+
+
+def _label_on_disk(override: Path) -> str | None:
+    """The label the installed override's host binds carry, or None if it cannot say.
+
+    `":z"` when every `- ./` bind ends with it, `""` when none does. None when
+    there is no file, the file is not this engine's (no generated marker), or
+    it has no host bind at all -- the CMaNGOS overrides have none -- and the
+    caller then asks the host. Binds that disagree are no install's rendering,
+    so that is a refusal rather than a guess.
+    """
+    if not override.is_file() or not composegen.is_ours(override):
+        return None
+    binds = [
+        line.strip()
+        for line in override.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("- ./")
+    ]
+    if not binds:
+        return None
+    labelled = [line.endswith(":z") for line in binds]
+    if all(labelled):
+        return ":z"
+    if not any(labelled):
+        return ""
+    raise EnableRefused(
+        f"{override.name} has some host folders labelled for SELinux (`:z`) and some not, "
+        "which is not how Yu'lon writes it, so the command channel was not turned on and "
+        "nothing was written. Give every `- ./` line the same ending, or none, and press "
+        "this again."
     )
 
 
@@ -284,8 +315,13 @@ def enable(
     rather than in the install's own so that Phase 7.1's byte-identical
     compose fixtures keep asserting what they assert.
 
-    It is rewritten WITH the install's bind label (`bind_label`, asked of the
-    host through `install_bind_label()` when not given). Until T102 it was
+    It is rewritten WITH the install's bind label: `bind_label` if given,
+    else the label the installed override's binds already carry
+    (`_label_on_disk()`), else the host's answer through
+    `install_bind_label()`. The file comes before the probe because the probe
+    can be wrong at press time -- `getenforce` failing, or a host briefly
+    permissive -- and the file is what the install actually wrote, which is
+    also what the rollback recognises. Until T102 it was
     rendered with none, and on an enforcing SELinux host the press turned the
     install's `./modules:/azerothcore/modules:z` into a bind with no label --
     measured on `yulon-fedora` (Fedora 44, 2026-09-24). The world still read
@@ -305,13 +341,19 @@ def enable(
             "starts, and writing it under a running world risks the world."
         )
 
+    target = server_dir / composegen.OVERRIDE_FILE
+    # Before anything is written, so a mixed file is refused with nothing touched.
+    if bind_label is None:
+        bind_label = _label_on_disk(target)
+    if bind_label is None:
+        bind_label = install_bind_label(server_dir)
+
     # The conf half first, and deliberately: a tree that reads no environment is
     # not switched on by the override at all, and the override's only job there
     # is publishing the port. Doing it first means a refusal -- a conf that is
     # not where the entry says -- happens before anything has been written.
     conf_changed = _write_the_conf(entry, server_dir)
 
-    target = server_dir / composegen.OVERRIDE_FILE
     before = target.read_text(encoding="utf-8") if target.exists() else ""
     backup = target.with_name(target.name + BACKUP_SUFFIX)
     # Written once, by the FIRST press. A second press would otherwise back up
@@ -331,7 +373,7 @@ def enable(
         templates_root=templates_root,
         world_env=_world_env(entry, operations.enable_env),
         db_password=db_password,
-        bind_label=install_bind_label(server_dir) if bind_label is None else bind_label,
+        bind_label=bind_label,
     )
     if plan.override == before:
         logger.info(f"{entry.id}'s command channel was already switched on in {target.name}")
