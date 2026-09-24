@@ -1549,7 +1549,9 @@ def required_prompts(manifest: Manifest, action: When) -> tuple[Prompt, ...]:
     return tuple(prompt for prompt in manifest.prompts if prompt.key in wanted)
 
 
-def must_ask(prompt: Prompt, action: When = "install") -> bool:
+def must_ask(
+    prompt: Prompt, action: When = "install", remembered: Mapping[str, str] | None = None
+) -> bool:
     """Whether a press of `action` puts this required prompt to a person before it runs.
 
     **Every question, on install** (the owner, 2026-09-24, T104: "ask all,
@@ -1560,12 +1562,15 @@ def must_ask(prompt: Prompt, action: When = "install") -> bool:
     the player wanted it or not: Stackables on Tortoise/Vanilla/TBC was always
     200, the mob multipliers always theirs.
 
-    **On remove, only a prompt with no default.** A remove that renders an
-    answer renders the one install USED: the mob multipliers divide by the same
-    `{hp}` install multiplied by. The right value is the remembered one, which
-    `Applier._values()` supplies, and a pre-filled box on Remove could only ever
-    be changed into a wrong one. A prompt with no default is still asked there,
-    because nothing else may be able to answer it.
+    **On remove, only what this install has no usable record of.** A remove
+    that renders an answer renders the one install USED: the mob multipliers
+    divide by the same `{hp}` install multiplied by. With a record
+    (`remembered`, from `Applier.remembered_answers()`) the applier fills it in
+    and nothing is asked. Without one -- an install made before T104, or a
+    damaged file -- the default would be a GUESS, and dividing by it in silence
+    leaves every creature multiplied whenever the player picked another value
+    (cold review + Codex, fix wave). So it is asked, pre-filled with the default
+    and with a note saying why. A prompt with no default is asked either way.
 
     It is asked only of a prompt `required_prompts()` returned: a question a
     manifest declares but no template renders is never put to anyone
@@ -1577,8 +1582,22 @@ def must_ask(prompt: Prompt, action: When = "install") -> bool:
     "asks a question" chip -- and they must not disagree.
     """
     if action == "remove":
-        return prompt.default is None
+        return prompt.default is None or prompt.key not in (remembered or {})
     return True
+
+
+def reapplies_on_top(manifest: Manifest) -> bool:
+    """Whether running this install again applies its answers on top of the last run.
+
+    Read off the manifest's own shape: a REMOVE that renders install's answers
+    undoes them relative to what is there (`HealthModifier/{hp}` after
+    `HealthModifier*{hp}`), so the install is relative too, and a second one --
+    an Update, or Install over it -- compounds. The four mob multipliers, pinned
+    by `test_module_answers.py`. Compounding is pre-existing (T115); this only
+    decides which dialogs warn about it.
+    """
+    install = {prompt.key for prompt in required_prompts(manifest, "install")}
+    return any(prompt.key in install for prompt in required_prompts(manifest, "remove"))
 
 
 def check_answer(prompt: Prompt, value: str) -> str:
@@ -2925,11 +2944,16 @@ class Applier:
         target = self._deploy_target(step.src, step.dest)
         src = clone / step.src
         if src.is_dir():
+            # BOTH names of a renamed file (T104 fix wave). A rename added to a
+            # manifest after installs exist -- accountwide's Ashen Order script,
+            # `.lua` -> `.lua.unused` -- leaves every earlier install holding the
+            # OLD name, and deleting only the new one left that live script
+            # behind in silence. `_rm()` names what it found and skips what is
+            # not there, so the report says which of the two this install had.
             deployed = {entry.name for entry in src.iterdir()}
             for old, new in step.rename:
                 old_parts, new_parts = Path(old).parts, Path(new).parts
                 if len(old_parts) == 1 and old_parts[0] in deployed:
-                    deployed.discard(old_parts[0])
                     deployed.add(new_parts[0])
             for name in sorted(deployed):
                 self._rm(target / name, log)

@@ -15,7 +15,12 @@ import pytest
 
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import parse_manifest
-from yulon.ui.widgets.manifest_prompt import REMEMBERED_NOTE, ManifestPromptDialog
+from yulon.ui.widgets.manifest_prompt import (
+    COMPOUNDS_NOTE,
+    REMEMBERED_NOTE,
+    REMOVE_NO_RECORD_NOTE,
+    ManifestPromptDialog,
+)
 
 
 def _ahbot() -> object:
@@ -177,3 +182,40 @@ def test_asked_again_with_nothing_remembered_says_the_defaults_are_shown(qapp: o
     assert "no record" in dialog.notes()
     assert "Hearthstone" in dialog.notes() or "cooldown" in dialog.notes().lower()
     assert REMEMBERED_NOTE not in dialog.notes()
+
+
+def _baby_mobs() -> object:
+    return wotlk_modules.store().load("mod", "baby-mobs")
+
+
+def test_a_remove_with_no_record_asks_the_multiplier_and_says_why(qapp: object) -> None:
+    """Fix wave: Remove never divides by a default in silence.
+
+    Mutation: drop the remove note and `notes()` lacks it.
+    """
+    manifest = _baby_mobs()
+    dialog = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True, removing=True  # type: ignore[attr-defined]
+    )
+    assert REMOVE_NO_RECORD_NOTE in dialog.notes()
+    assert dialog.answers()["hp"] == "0.25", "pre-filled with the default"
+    assert "running it again applies" not in dialog.notes(), "a Remove is not a re-run"
+
+
+def test_updating_a_compounding_mod_warns_that_it_multiplies_again(qapp: object) -> None:
+    """Update re-runs `HealthModifier*{hp}` on top of what is there (T115); the dialog says so."""
+    manifest = _baby_mobs()
+    again = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+    )
+    first = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
+    assert COMPOUNDS_NOTE in again.notes()
+    assert COMPOUNDS_NOTE not in first.notes()
+
+
+def test_updating_a_mod_that_does_not_compound_gets_no_such_warning(qapp: object) -> None:
+    manifest = _hearthstone()
+    dialog = ManifestPromptDialog(
+        None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
+    )
+    assert COMPOUNDS_NOTE not in dialog.notes()

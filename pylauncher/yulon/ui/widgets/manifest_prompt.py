@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon.apply import check_answer
+from yulon.apply import check_answer, reapplies_on_top
 from yulon.log import get_logger
 from yulon.manifest import Manifest, Prompt
 
@@ -78,6 +78,32 @@ REMEMBERED_NOTE = (
 """Shown when at least one answer came from this install's record (T104)."""
 
 
+REMOVE_NO_RECORD_NOTE = (
+    "Yu'lon has no record of the value used when this was installed. Enter the one you "
+    "chose: Remove undoes the install with it, so with any other value the change is not "
+    "undone exactly (a multiplier stays multiplied)."
+)
+"""Shown when Remove has to ask what install used (cold review + Codex, T104 fix wave).
+
+The mob multipliers undo `HealthModifier*{hp}` with `HealthModifier/{hp}`. With
+no usable record -- an install made before T104, or a damaged file -- the only
+other value to hand is the manifest's default, and dividing by it in silence
+would leave every creature multiplied whenever the player had picked another.
+So Remove asks, pre-filled with the default, and says why.
+"""
+
+
+COMPOUNDS_NOTE = (
+    "Running this again applies the values below again, on top of what the database holds "
+    "now, so they compound. To change them, Remove it and then Install it instead."
+)
+"""Shown when a module whose install is relative to the current values is run again.
+
+`apply.reapplies_on_top()`: the four mob multipliers. Compounding on Update is
+pre-existing and tracked as T115; until it is fixed, the dialog says what OK does.
+"""
+
+
 class ManifestPromptDialog(QDialog):
     """One row per prompt, the manifest's own question as the label.
 
@@ -95,6 +121,7 @@ class ManifestPromptDialog(QDialog):
         *,
         again: bool = False,
         remembered: Mapping[str, str] | None = None,
+        removing: bool = False,
     ) -> None:
         super().__init__(parent)
         self._manifest = manifest
@@ -106,7 +133,11 @@ class ManifestPromptDialog(QDialog):
         self.setModal(True)
 
         box = QVBoxLayout(self)
-        when = "its steps run again" if again else "it can be installed"
+        when = (
+            "it can be removed"
+            if removing
+            else "its steps run again" if again else "it can be installed"
+        )
         self._notes: list[str] = [f"{manifest.name} ({manifest.id}) asks for this before {when}."]
         # T104: what this install remembers, where the question still accepts it;
         # else the manifest's default. A saved answer the question now refuses (a
@@ -123,10 +154,16 @@ class ManifestPromptDialog(QDialog):
         if from_record:
             self._notes.append(REMEMBERED_NOTE)
         missing = [p for p in self._prompts if p not in from_record]
-        if again and missing:
-            self._notes.append(
-                NO_RECORD_NOTE.format(questions="; ".join(p.question for p in missing))
-            )
+        if removing:
+            if missing:
+                self._notes.append(REMOVE_NO_RECORD_NOTE)
+        elif again:
+            if missing:
+                self._notes.append(
+                    NO_RECORD_NOTE.format(questions="; ".join(p.question for p in missing))
+                )
+            if reapplies_on_top(manifest):
+                self._notes.append(COMPOUNDS_NOTE)
         for text in self._notes:
             note = QLabel(text, self)
             note.setWordWrap(True)
@@ -248,6 +285,7 @@ def ask_manifest_prompts(
     *,
     again: bool = False,
     remembered: Mapping[str, str] | None = None,
+    removing: bool = False,
 ) -> Mapping[str, str] | None:
     """Put the manifest's questions to the user. `None` means they cancelled.
 
@@ -255,7 +293,9 @@ def ask_manifest_prompts(
     cancelling must change nothing on disk, whereas an empty mapping is what a
     manifest with nothing to ask produces.
     """
-    dialog = ManifestPromptDialog(parent, manifest, prompts, again=again, remembered=remembered)
+    dialog = ManifestPromptDialog(
+        parent, manifest, prompts, again=again, remembered=remembered, removing=removing
+    )
     if dialog.exec() != int(QDialog.DialogCode.Accepted):
         logger.info(f"{manifest.id}: the user cancelled the questions; nothing was applied")
         return None

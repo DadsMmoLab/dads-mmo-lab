@@ -117,19 +117,35 @@ def test_every_question_an_install_renders_is_asked_even_with_a_default() -> Non
         assert apply_module.must_ask(prompt, "install"), kind
 
 
-def test_remove_asks_only_what_it_cannot_know() -> None:
-    """Remove's answer must be the one install used, so it is never put to a person.
+def test_remove_asks_only_what_this_install_has_no_record_of() -> None:
+    """Remove's answer must be the one install used, never a silent default (fix wave).
 
     The mob multipliers render their answers on REMOVE too (`HealthModifier/{hp}`
-    undoes `HealthModifier*{hp}`). A pre-filled "HP multiplier" on Remove is a
-    question whose only right answer is the remembered one, so it is not asked:
-    the applier fills it from the record. A question with no default at all is
-    still asked, because nothing else can answer it.
+    undoes `HealthModifier*{hp}`). With a usable record the right answer is known
+    and nothing is asked. With NO usable record -- an install made before T104,
+    or a file that is damaged -- dividing by the default would be a guess, so the
+    question is asked (pre-filled with the default and a note saying why).
+    A question with no default at all is asked either way.
+
+    Mutation: make `must_ask(..., "remove")` return `prompt.default is None` and
+    the no-record case is not asked.
     """
     defaulted = Prompt(key="hp", question="HP", kind="float", default="0.25")
     bare = Prompt(key="guid", question="GUID", kind="int")
-    assert not apply_module.must_ask(defaulted, "remove")
-    assert apply_module.must_ask(bare, "remove")
+    assert not apply_module.must_ask(defaulted, "remove", {"hp": "0.5"})
+    assert apply_module.must_ask(defaulted, "remove", {})
+    assert apply_module.must_ask(defaulted, "remove")
+    assert apply_module.must_ask(bare, "remove", {"hp": "0.5"})
+
+
+def test_the_mods_whose_install_compounds_are_exactly_the_four_mob_multipliers() -> None:
+    """A manifest whose remove renders install's answers applies them RELATIVE to what is there.
+
+    That is what makes a second install (an Update) compound: x0.5 twice is x0.25.
+    Pre-existing and tracked as T115; here it only decides who gets the warning.
+    """
+    compounding = sorted(m.id for m in _shipped() if apply_module.reapplies_on_top(m))
+    assert compounding == ["baby-mobs", "buff-mobs", "nerf-mobs", "xbuff-mobs"]
 
 
 def test_the_largest_install_dialog_is_one_dialog_of_four_questions() -> None:
@@ -386,6 +402,137 @@ def test_accountwide_deploys_one_reputation_script_not_both(tmp_path: Path) -> N
     )
     assert loaded == ["00_AccountWideUtils.lua", "AccountReputation (default AC-Wotlk).lua"]
     assert (deployed / "AccountReputation (modified for Ashen Order).lua.unused").is_file()
+
+
+def _accountwide_installed(tmp_path: Path) -> tuple[Applier, Manifest, Path]:
+    manifest = _wotlk("ale", "accountwide")
+    names = (
+        "00_AccountWideUtils.lua",
+        "AccountReputation (default AC-Wotlk).lua",
+        "AccountReputation (modified for Ashen Order).lua",
+    )
+    files = {f"lua_scripts/AccountWide/{n}": "-- lua\n" for n in names}
+    files["sql/create_accountwide_tables.sql"] = "-- tables\n"
+    (tmp_path / "modules" / "mod-ale").mkdir(parents=True)
+    source = manifest.source
+    assert source is not None
+    applier = Applier(tmp_path, git=_Clone(files), sql=_Sql(), remote_url=lambda _dest: source.url)
+    applier.install(manifest, None)
+    return applier, manifest, tmp_path / "env/dist/etc/modules/lua_scripts/accountwide"
+
+
+ASHEN = "AccountReputation (modified for Ashen Order).lua"
+
+
+def test_removing_a_pre_t104_accountwide_install_deletes_the_real_ashen_file(
+    tmp_path: Path,
+) -> None:
+    """An install made before T104 has the Ashen Order script under its REAL name.
+
+    The rename list maps it to `.lua.unused`, and `_undeploy()` re-derives what
+    it deployed from that list -- so Remove deleted a `.lua.unused` that was
+    never there and left the live `.lua` behind, loaded by ALE, in silence
+    (cold review, fix wave). Remove now deletes both names and says which it found.
+
+    Mutation: drop the old name from `_undeploy()`'s set and the `.lua` survives.
+    """
+    applier, manifest, deployed = _accountwide_installed(tmp_path)
+    (deployed / f"{ASHEN}.unused").replace(deployed / ASHEN)  # the pre-T104 shape
+
+    report = applier.remove(manifest, None)
+    assert not (deployed / ASHEN).exists()
+    assert not (deployed / f"{ASHEN}.unused").exists()
+    rel = "env/dist/etc/modules/lua_scripts/accountwide"
+    assert f"rm {rel}/{ASHEN}" in report.done, report.done
+
+
+def test_removing_a_t104_accountwide_install_deletes_the_renamed_file(tmp_path: Path) -> None:
+    applier, manifest, deployed = _accountwide_installed(tmp_path)
+    report = applier.remove(manifest, None)
+    assert not (deployed / f"{ASHEN}.unused").exists()
+    rel = "env/dist/etc/modules/lua_scripts/accountwide"
+    assert f"rm {rel}/{ASHEN}.unused" in report.done, report.done
+    assert f"rm {rel}/{ASHEN}" not in report.done
+
+
+# ------------------------------------------------------ the record's own write
+
+
+def test_a_record_that_cannot_be_parsed_is_left_alone_not_overwritten(tmp_path: Path) -> None:
+    """A damaged record might be a newer build's, or a hand edit: never clobbered (fix wave).
+
+    Mutation: treat an unparseable file as empty on write and it is replaced.
+    """
+    path = tmp_path / module_answers.ANSWERS_FILE
+    path.write_text("{ this is not json", encoding="utf-8")
+    manifest = _wotlk("mod", "hearthstone-cd")
+    report = _hearthstone_applier(tmp_path).install(manifest, {"cooldown": "5_Min"})
+    assert path.read_text(encoding="utf-8") == "{ this is not json"
+    assert any(module_answers.ANSWERS_FILE in line for line in report.skipped), report.skipped
+
+
+@pytest.mark.parametrize("payload", ["[]", '{"modules": []}', '"x"'])
+def test_a_record_of_a_shape_this_build_does_not_know_is_left_alone(
+    tmp_path: Path, payload: str
+) -> None:
+    path = tmp_path / module_answers.ANSWERS_FILE
+    path.write_text(payload, encoding="utf-8")
+    problem = module_answers.record_answers(
+        tmp_path, _wotlk("mod", "hearthstone-cd"), {"cooldown": "5_Min"}
+    )
+    assert problem != ""
+    assert path.read_text(encoding="utf-8") == payload
+
+
+def test_unknown_fields_and_a_newer_schema_version_survive_a_write(tmp_path: Path) -> None:
+    path = tmp_path / module_answers.ANSWERS_FILE
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 7,
+                "future": {"kept": True},
+                "modules": {"mod/other": {"a": "1", "extra": [1, 2]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        module_answers.record_answers(
+            tmp_path, _wotlk("mod", "hearthstone-cd"), {"cooldown": "5_Min"}
+        )
+        == ""
+    )
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["schema_version"] == 7
+    assert saved["future"] == {"kept": True}
+    assert saved["modules"]["mod/other"] == {"a": "1", "extra": [1, 2]}
+    assert saved["modules"]["mod/hearthstone-cd"] == {"cooldown": "5_Min"}
+
+
+def test_the_write_goes_through_a_unique_temp_file_in_the_same_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not a fixed `.new` name two writers could share; and a failed rename leaves no debris."""
+    made: list[tuple[object, object]] = []
+    real = module_answers.tempfile.mkstemp
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        made.append((kwargs.get("dir"), kwargs.get("prefix")))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module_answers.tempfile, "mkstemp", spy)
+    manifest = _wotlk("mod", "hearthstone-cd")
+    assert module_answers.record_answers(tmp_path, manifest, {"cooldown": "5_Min"}) == ""
+    assert made == [(tmp_path, module_answers.ANSWERS_FILE + ".")]
+
+    def refuse(*_a: object) -> None:
+        raise OSError("disk says no")
+
+    monkeypatch.setattr(module_answers.os, "replace", refuse)
+    assert module_answers.record_answers(tmp_path, manifest, {"cooldown": "1_Min"}) != ""
+    assert sorted(p.name for p in tmp_path.iterdir()) == [module_answers.ANSWERS_FILE]
+    saved = json.loads((tmp_path / module_answers.ANSWERS_FILE).read_text(encoding="utf-8"))
+    assert saved["modules"]["mod/hearthstone-cd"] == {"cooldown": "5_Min"}
 
 
 def test_the_accountwide_manifest_still_parses(tmp_path: Path) -> None:

@@ -1001,9 +1001,15 @@ def test_updating_hearthstone_tweaks_offers_the_answer_it_was_installed_with(
         *,
         again: bool = False,
         remembered: Mapping[str, str] | None = None,
+        removing: bool = False,
     ) -> Mapping[str, str] | None:
         dialog = ManifestPromptDialog(
-            None, manifest, prompts, again=again, remembered=remembered  # type: ignore[arg-type]
+            None,
+            manifest,  # type: ignore[arg-type]
+            prompts,  # type: ignore[arg-type]
+            again=again,
+            remembered=remembered,
+            removing=removing,
         )
         shown.append((again, dialog.answers(), dialog.notes()))
         return dialog.answers()  # OK, clicked straight through
@@ -1027,18 +1033,60 @@ def test_updating_hearthstone_tweaks_offers_the_answer_it_was_installed_with(
     assert applier.values == [{"cooldown": "5_Min"}]
 
 
-def test_removing_a_mob_multiplier_asks_nothing_and_leaves_the_answer_to_the_record(
+@pytest.mark.parametrize("record", ["missing", "corrupt", "invalid"])
+def test_removing_a_mob_multiplier_with_no_usable_record_asks_the_multiplier(
+    qapp: object, ps: _Ps, tmp_path: Path, record: str
+) -> None:
+    """Fix wave: with no usable record, Remove would divide by the default. So it asks.
+
+    Mutation: gate remove on `default is None` again and `asked` is empty while
+    the applier is handed `None` -- the silent default.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    path = server_dir / module_answers.ANSWERS_FILE
+    if record == "corrupt":
+        path.write_text("{ not json", encoding="utf-8")
+    elif record == "invalid":
+        path.write_text(
+            json.dumps({"modules": {"mod/baby-mobs": {"hp": "lots"}}}), encoding="utf-8"
+        )
+    asked: list[tuple[str, tuple[str, ...], dict[str, object]]] = []
+
+    def asker(parent: object, manifest: object, prompts: object, **kw: object) -> dict[str, str]:
+        keys = tuple(p.key for p in prompts)  # type: ignore[attr-defined]
+        asked.append((str(manifest.id), keys, kw))  # type: ignore[attr-defined]
+        return {"hp": "0.5", "dmg": "0.5", "arm": "0.5", "spd": "1.5"}
+
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "baby-mobs")
+    view._module_action("remove")
+
+    assert [(item, keys) for item, keys, _ in asked] == [("baby-mobs", ("hp", "dmg", "arm", "spd"))]
+    assert asked[0][2].get("removing") is True
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.removed == ["baby-mobs"]
+    assert applier.values == [{"hp": "0.5", "dmg": "0.5", "arm": "0.5", "spd": "1.5"}]
+
+
+def test_removing_a_mob_multiplier_with_a_record_asks_nothing_and_uses_it(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Remove renders `{hp}` for baby-mobs, and the only right answer is install's.
-
-    So it is not asked (`must_ask(prompt, "remove")`): the applier is handed
-    `None` and fills it from the install's record (`test_module_answers.py`).
-    """
+    """With a valid record the answer is known: no dialog, and the applier fills it in."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    manifest = modules.store().load("mod", "baby-mobs")
+    answers = {"hp": "0.5", "dmg": "0.25", "arm": "0.25", "spd": "1.5"}
+    assert module_answers.record_answers(server_dir, manifest, answers) == ""
     asked: list[str] = []
+    services = _services(ps, tmp_path, [])
+    services.applier = _FakeApplier(server_dir)
     view = ControllerView(
         WOTLK,
-        _services(ps, tmp_path, []),
+        services,
         status_poll_ms=0,
         prompt_asker=lambda parent, manifest, prompts, **_: asked.append(manifest.id) or {},
     )
@@ -1046,9 +1094,10 @@ def test_removing_a_mob_multiplier_asks_nothing_and_leaves_the_answer_to_the_rec
     view._module_action("remove")
 
     assert asked == []
-    applier = view.services.applier
+    applier = services.applier
     assert isinstance(applier, _FakeApplier)
     assert applier.removed == ["baby-mobs"] and applier.values == [None]
+    assert applier._values(manifest, None)["hp"] == "0.5"
 
 
 def test_removing_hearthstone_tweaks_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:

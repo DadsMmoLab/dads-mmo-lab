@@ -426,7 +426,8 @@ class PromptAsker(Protocol):
     context menu's Install over it -- so the dialog can say that what it shows
     is what gets applied now (T100 review). `remembered` is what this install
     last answered (T104, `Applier.remembered_answers()`), filled in over the
-    manifest's defaults.
+    manifest's defaults. `removing` is True for a Remove, which asks only what
+    the record cannot answer (`apply.must_ask()`).
     """
 
     def __call__(
@@ -437,6 +438,7 @@ class PromptAsker(Protocol):
         *,
         again: bool = False,
         remembered: Mapping[str, str] | None = None,
+        removing: bool = False,
     ) -> Mapping[str, str] | None: ...
 
 
@@ -7646,19 +7648,32 @@ class ControllerView(QWidget):
         The gate is `apply.must_ask()`: since T104 (the owner, "ask all,
         remember answers") every question an install or update renders is put,
         pre-filled with what this install answered last time, else the
-        manifest's default; a remove asks only what has no default, and the
-        applier fills the rest from the same record. Which shipped manifests
+        manifest's default; a remove asks only what the install's record cannot
+        answer, and the applier fills the rest from that record. Which shipped manifests
         ask is pinned by `test_every_module_whose_install_renders_a_question_
         asks_it`, not written here. A manifest that asks nothing gets no window
         and the applier gets `None` rather than `{}` — the call it has always
         been given.
         """
-        asked = tuple(p for p in required_prompts(manifest, action) if must_ask(p, action))
-        if not asked:
+        needed = required_prompts(manifest, action)
+        if not needed:
             return True, None
+        # Read here, on the GUI thread: one small JSON file in the server folder,
+        # the same class of read as the clone-folder listing `reload_modules()`
+        # already does here, and the dialog that needs it opens on this thread.
         applier = self.services.applier
         remembered = applier.remembered_answers(manifest) if applier is not None else {}
-        answers = self._prompt_asker(self, manifest, asked, again=again, remembered=remembered)
+        asked = tuple(p for p in needed if must_ask(p, action, remembered))
+        if not asked:
+            return True, None
+        answers = self._prompt_asker(
+            self,
+            manifest,
+            asked,
+            again=again,
+            remembered=remembered,
+            removing=action == "remove",
+        )
         return (False, None) if answers is None else (True, answers)
 
     def _custom_route(self) -> CustomModuleInstall | None:
