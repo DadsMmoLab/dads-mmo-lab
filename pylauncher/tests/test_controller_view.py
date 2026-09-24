@@ -15,7 +15,7 @@ from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, process_events, pump_until
+from tests.conftest import HANG_BOUND, process_events, pump_until, wait_for_panel
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -36,7 +36,7 @@ from yulon import (
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql, required_prompts
-from yulon.catalog import native
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
@@ -62,6 +62,7 @@ from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.runner import run as _REAL_RUN
+from yulon.support import runlog
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import (
@@ -5668,6 +5669,25 @@ def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
     assert started[0] is not None, "the panel's Stop button has nothing to set"
     text = view.rebuild_log.text()
     assert "--- build" in text and "compiling" in text, text
+
+
+def test_a_rebuild_keeps_its_output_in_a_run_log_named_for_this_install(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T93: the rebuild panel's lines outlive the window, kept per install."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, _started = _rebuild_services(ps, tmp_path, lines=("--- build", "compiling"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_server() is True
+    wait_for_panel(view.rebuild_log)
+    install_id = composegen.install_id(services.controller.server_dir)
+    records = list(runlog.runs_dir().glob(f"rebuild-wow-wotlk-{install_id}-*.log"))
+    assert len(records) == 1, records
+    assert "compiling" in records[0].read_text(encoding="utf-8")
 
 
 def test_a_real_static_ints_yes_still_starts_the_rebuild(
