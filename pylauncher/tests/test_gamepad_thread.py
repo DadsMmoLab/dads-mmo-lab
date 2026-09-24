@@ -61,6 +61,39 @@ class FakeSdl:
         self.gate = threading.Event()
         self.gate.set()
         self.held = threading.Event()
+        # SDL's controller subsystem is process-global: whoever inits it last
+        # and whoever quits it first decide it for every thread. `holder` is the
+        # thread that inited it and has not quit; anything another thread does
+        # while it holds, or an update by a thread that no longer holds, is a
+        # violation -- two pollers sharing, or one tearing it down under another.
+        self.holder: str | None = None
+        self.violations: list[str] = []
+        self.inits = 0
+        self._lock = threading.Lock()
+
+    def _who(self) -> str:
+        return threading.current_thread().name + f"#{threading.get_ident()}"
+
+    def _init(self) -> None:
+        with self._lock:
+            me = self._who()
+            if self.holder is not None and self.holder != me:
+                self.violations.append(f"init by {me} while {self.holder} holds SDL")
+            self.holder = me
+            self.inits += 1
+
+    def _quit(self) -> None:
+        with self._lock:
+            me = self._who()
+            if self.holder is not None and self.holder != me:
+                self.violations.append(f"quit by {me} tore SDL down under {self.holder}")
+            self.holder = None
+
+    def _update(self) -> None:
+        with self._lock:
+            me = self._who()
+            if self.holder != me:
+                self.violations.append(f"update by {me} while SDL is held by {self.holder}")
 
     def modules(self) -> dict[str, types.ModuleType]:
         fake = self
@@ -87,14 +120,16 @@ class FakeSdl:
                 fake.gate.wait()
             if fake.unplugged:
                 raise FakeError("the pad went away")
+            fake._update()
             fake.polls += 1
 
         def controller_quit() -> None:
             if fake.slow_release and threading.current_thread() is not threading.main_thread():
                 time.sleep(SDL_SLOW_RELEASE)
+            fake._quit()
 
         controller = types.ModuleType("pygame._sdl2.controller")
-        controller.init = lambda: None  # type: ignore[attr-defined]
+        controller.init = fake._init  # type: ignore[attr-defined]
         controller.quit = controller_quit  # type: ignore[attr-defined]
         controller.get_count = lambda: 1  # type: ignore[attr-defined]
         controller.update = update  # type: ignore[attr-defined]
@@ -287,9 +322,10 @@ def _child(scenario: str) -> None:
         pump_until(lambda: not first.isRunning(), "the orphaned poller stopped")
         assert in_flight().wait_all(HANG_BOUND_MS)
     elif scenario == "restart":
-        # The old thread's finish arrives AFTER a new pair started; it must not take the new one.
+        # The old thread's finish arrives around the new pair's start; it must not take it.
         source.stop()
         source.start()
+        pump_until(lambda: source._thread is not None, "the restarted poller started")
         second = source._thread
         assert second is not None and second is not first
         pump_until(lambda: not first.isRunning(), "the first poller finished")
@@ -299,6 +335,40 @@ def _child(scenario: str) -> None:
         source.stop()
         assert in_flight().wait_all(HANG_BOUND_MS)
         assert not second.isRunning(), "stop() could not reach the restarted poller"
+        assert not fake.violations, fake.violations
+        shiboken6.delete(window)
+    elif scenario in ("restart-overlap", "restart-cancelled"):
+        # SDL is global. Hold the old poll mid-update, `stop(); start()`, and
+        # only then let it go: the old worker still has an update and its SDL
+        # `quit()` to run. A new pair started meanwhile inits SDL under it and
+        # has it torn down by that quit (Codex review of e135f880). The start
+        # must wait for the old thread's `finished`; a second `stop()` before
+        # then cancels it.
+        fake.gate.clear()
+        assert fake.held.wait(HANG_BOUND), "the poll never reached the gate"
+        inits_before = fake.inits
+        source.stop()
+        source.start()
+        if scenario == "restart-cancelled":
+            source.stop()
+        fake.gate.set()
+        pump_until(lambda: not first.isRunning(), "the old poller finished")
+        assert not fake.violations, fake.violations
+        if scenario == "restart-overlap":
+            pump_until(lambda: source._thread is not None, "the waiting start ran")
+            before = fake.polls
+            pump_until(lambda: fake.polls > before, "the new poller polled")
+            second = source._thread
+            assert second is not None and second.isRunning()
+            assert fake.holder is not None, "no poller holds SDL"
+        else:
+            pump_until(lambda: source._stopping is None, "the old poller's finish arrived")
+            assert source._thread is None, "a cancelled start still started a poller"
+            assert fake.inits == inits_before, "a cancelled start still touched SDL"
+            assert fake.holder is None, "SDL is still held with no poller"
+        assert not fake.violations, fake.violations
+        source.stop()
+        assert in_flight().wait_all(HANG_BOUND_MS)
         shiboken6.delete(window)
     elif scenario == "churn":
         # Each restart is the `restart` race again: the previous thread's finish
@@ -307,6 +377,7 @@ def _child(scenario: str) -> None:
         for _ in range(CYCLES):
             source.stop()
             source.start()
+            pump_until(lambda: source._thread is not None, "the restarted poller started")
             current = source._thread
             assert current is not None
             previous = threads[-1]
@@ -318,6 +389,7 @@ def _child(scenario: str) -> None:
         source.stop()
         assert in_flight().wait_all(HANG_BOUND_MS)
         assert not any(t.isRunning() for t in threads), "a gamepad QThread leaked"
+        assert not fake.violations, fake.violations
         shiboken6.delete(window)
     else:
         raise SystemExit(f"no scenario {scenario!r}")
@@ -344,6 +416,8 @@ _child(sys.argv[1])
         "source-dropped",
         "window-deleted",
         "restart",
+        "restart-overlap",
+        "restart-cancelled",
         "churn",
     ],
 )
@@ -362,7 +436,11 @@ def test_the_gamepad_thread_never_aborts_the_process(scenario: str) -> None:
     * `window-deleted` -- the window goes while polling, with no `stop()`.
     * `restart` -- `stop(); start()`: the OLD thread's queued finish cleared
       the NEW pair, whose worker was collected before its `run` began.
-    * `churn` -- that, twenty-five times over; no QThread may be left running.
+    * `restart-overlap` -- `stop(); start()` while the old poll is still inside
+      SDL: the new pair inited SDL under it and the old one's `quit()` tore it
+      down under the new one. Added after the Codex review of the first fix.
+    * `restart-cancelled` -- `stop(); start(); stop()`: the waiting start is dropped.
+    * `churn` -- a restart twenty-five times over; no QThread may be left running.
     """
     pylauncher = Path(__file__).resolve().parent.parent
     done = subprocess.run(

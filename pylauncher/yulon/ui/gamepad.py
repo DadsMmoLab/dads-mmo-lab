@@ -536,6 +536,10 @@ class GamepadSource(QObject):
         self._thread: QThread | None = None
         self._worker: _GamepadWorker | None = None
         self._running = False
+        # A stopped pair whose thread has not finished yet, and whether a
+        # `start()` arrived meanwhile -- see `start()`.
+        self._stopping: QThread | None = None
+        self._start_pending = False
 
     def start(self) -> None:
         """Begin polling SDL for a connected pad. No-op if unavailable.
@@ -547,6 +551,14 @@ class GamepadSource(QObject):
         the exact same surface the worker uses, so the probe is authoritative.
         """
         if self._running:
+            return
+        if self._stopping is not None and self._stopping.isRunning():
+            # A stopped poller is still on its way out, and its last act is
+            # SDL's global `quit()`. Probing or starting now would init SDL
+            # under it and let that quit tear SDL down under the new poller,
+            # so the start waits for the old thread's `finished`
+            # (`_on_thread_finished`). A `stop()` before then cancels it.
+            self._start_pending = True
             return
         try:
             import pygame  # noqa: F401  # availability probe only
@@ -610,17 +622,23 @@ class GamepadSource(QObject):
 
     @Slot()
     def _on_thread_finished(self) -> None:
-        """Forget the pair once its thread has ended -- unless a newer pair is running.
+        """A poller thread has ended: forget it, and run a `start()` that waited for it.
 
-        Queued to the GUI thread, so it can arrive after `stop(); start()` has
-        already made a new pair; clearing then dropped the NEW worker before its
-        `run` began (trap 1, measured: 0 polls, then a segfault at teardown).
+        Queued to the GUI thread. The current pair is cleared only if IT has
+        ended (the pad went away): clearing a running pair dropped its worker
+        before its `run` began (trap 1, measured on `stop(); start()` before
+        T111). A finished thread has already run its worker's SDL `quit()`, so a
+        pending start is safe to make now.
         """
-        if self._thread is not None and self._thread.isRunning():
-            return
-        self._running = False
-        self._thread = None
-        self._worker = None
+        if self._thread is not None and not self._thread.isRunning():
+            self._running = False
+            self._thread = None
+            self._worker = None
+        if self._stopping is not None and not self._stopping.isRunning():
+            self._stopping = None
+            if self._start_pending:
+                self._start_pending = False
+                self.start()
 
     def stop(self) -> None:
         """Tell the poller to stop; the join is `in_flight().wait_all()` at exit.
@@ -630,12 +648,16 @@ class GamepadSource(QObject):
         at 500 ms it lost to a slow SDL release (see `_start_thread`);
         `main._stop_background_threads()` calls this and then `wait_all()`.
         The references can go at once: `in_flight()` holds the pair until its
-        thread has finished.
+        thread has finished. The thread is remembered as `_stopping` so a
+        `start()` before it finishes waits for it, and a pending start is
+        cancelled here.
         """
+        self._start_pending = False
         if self._worker is not None:
             self._worker.stop()
         if self._thread is not None:
             self._thread.quit()
+            self._stopping = self._thread
         self._thread = None
         self._worker = None
         self._running = False
