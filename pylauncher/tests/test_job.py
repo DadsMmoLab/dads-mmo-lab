@@ -180,7 +180,23 @@ wrappers that pass their callbacks straight on to it.
 
 
 def _job_callbacks_that_are_not_bound_slots() -> list[str]:
-    """Every callback handed to the runner in `yulon/ui` that is not `self.<a @Slot>`."""
+    """Every callback handed to the runner in `yulon/ui` that is not `self.<a @Slot>`.
+
+    What it does NOT see, so a pass is read as no more than it is:
+
+    * Slots are looked up per FILE, not per class. A name decorated `@Slot` in
+      one class of a file passes for a same-named plain method in another class
+      of that file -- `party_panel.py` defines `add_named` and `link_account`
+      twice, and `log_panel.py` defines `run` twice.
+    * Only calls on `self.` are examined; a runner reached as `panel._run(...)`
+      or held in a local variable is not.
+    * `*args` spread into the call is ignored, and so is anything reached only
+      through it.
+    * The first positional argument is taken to be the work and skipped, which
+      is the shape of every wrapper here; one that took its callbacks first
+      would have its work checked and a callback skipped.
+    * Only `yulon/ui` is walked. A runner used outside it is not checked.
+    """
     found = []
     for path in sorted(_UI.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
