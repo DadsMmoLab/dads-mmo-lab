@@ -79,14 +79,7 @@ from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon import play as play_module
 from yulon import steam as steam_module
-from yulon.apply import (
-    Applier,
-    ApplyReport,
-    DockerSql,
-    PendingSql,
-    must_ask,
-    required_prompts,
-)
+from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
 from yulon.catalog import composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import clientdir
@@ -7641,15 +7634,21 @@ class ControllerView(QWidget):
         filled in every prompt that HAD a default and then raised on the one
         that did not, after the clone. See `widgets/manifest_prompt.py`.
 
-        The gate is deliberately narrow. A dialog opens only when this action
-        would really render a value the manifest has no default for, or a
-        `choice` (T100, `apply.must_ask()`); which shipped manifests that is
-        is pinned by `test_only_the_two_ah_bots_and_the_hearthstone_choice_are_
-        asked_about`, not written here. Every other manifest gets no window and
-        the applier gets `None` rather than `{}` — the call it has always been given.
+        The gate: a dialog opens when this action would render ANY prompt,
+        pre-filled with the manifest's defaults, and a manifest that renders
+        none gets no window and hands the applier `None` — the call it has
+        always been given. Until T92 (2026-09-22) it opened only for a prompt
+        with NO default, which in the shipped catalog is `mod-ah-bot`'s two
+        GUIDs and nothing else — so `xp-rates` never asked its rates,
+        `sitmeanrest` never asked its seconds, and `unlimitedammo` would have
+        had the catalog's `true` written over the script's own `false` without
+        a word. A default shown in a box the person can change is an answer;
+        a default written unseen is not. `hearthstone-cd`'s `choice` (T100) is
+        the sharpest case: its default is upstream's RESET file, so an install
+        that did not ask applied the reset and changed nothing.
         """
         needed = required_prompts(manifest, action)
-        if not any(must_ask(prompt) for prompt in needed):
+        if not needed:
             return True, None
         answers = self._prompt_asker(self, manifest, needed, again=again)
         return (False, None) if answers is None else (True, answers)
