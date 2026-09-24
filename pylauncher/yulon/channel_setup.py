@@ -239,6 +239,25 @@ class Enabled:
     changed: bool
 
 
+def install_bind_label(server_dir: Path) -> str:
+    """The `:z` (or nothing) the install put on this folder's host binds, asked again now.
+
+    The install's own decision and its own inputs -- `platform.bind_label()` fed
+    `selinux_enforcing()` and `filesystem_type()`, as `stage_generate_compose()`
+    feeds it -- so the press re-renders the override with the label the install
+    wrote rather than with none (T102). Both are looked up on the call, not
+    bound at import, so a test that patches `platform` reaches the route every
+    `InstallChannel` the app builds takes. The filesystem is asked only when
+    SELinux enforces, as `git.ContainerGit` asks it: off SELinux the answer
+    cannot matter and `stat` is a subprocess.
+    """
+    enforcing = platform.selinux_enforcing()
+    return platform.bind_label(
+        enforcing=enforcing,
+        fs_type=platform.filesystem_type(server_dir) if enforcing is True else None,
+    )
+
+
 def enable(
     entry: CatalogEntry,
     server_dir: Path,
@@ -246,6 +265,7 @@ def enable(
     templates_root: Path,
     world_running: bool,
     db_password: str | None = None,
+    bind_label: str | None = None,
 ) -> Enabled:
     """Write this install's channel on, and only while the world is down.
 
@@ -263,6 +283,15 @@ def enable(
     Only the override is rewritten. The SOAP environment lives in that block
     rather than in the install's own so that Phase 7.1's byte-identical
     compose fixtures keep asserting what they assert.
+
+    It is rewritten WITH the install's bind label (`bind_label`, asked of the
+    host through `install_bind_label()` when not given). Until T102 it was
+    rendered with none, and on an enforcing SELinux host the press turned the
+    install's `./modules:/azerothcore/modules:z` into a bind with no label --
+    measured on `yulon-fedora` (Fedora 44, 2026-09-24). The world still read
+    the folder while the install's relabel was on it, and crash-looped on
+    `Permission denied` once the folder lost that label; with the `:z` kept,
+    the daemon relabelled the same folder at the next Start and it came up.
     """
     operations = entry.operations
     if operations is None:
@@ -302,6 +331,7 @@ def enable(
         templates_root=templates_root,
         world_env=_world_env(entry, operations.enable_env),
         db_password=db_password,
+        bind_label=install_bind_label(server_dir) if bind_label is None else bind_label,
     )
     if plan.override == before:
         logger.info(f"{entry.id}'s command channel was already switched on in {target.name}")
@@ -994,20 +1024,42 @@ class InstallChannel:
         Hands `roll_back()` the text the press would write NOW, so a file that
         has been changed since is left alone rather than overwritten from a
         backup that may be arbitrarily old.
+
+        Rendered with the install's bind label, as the press renders it (T102).
+        Compared without one, an enforcing host's channel-on override -- `:z`
+        on its bind, as the install's renderer writes it -- read as "edited
+        since", so only the port was released and the channel stuck on
+        (measured on `yulon-fedora`, 2026-09-24).
+
+        And, on such a host, the unlabelled text as well: that is what the press
+        wrote before T102, so it is what an install upgraded from then has on
+        disk. Accepting only the labelled text would strand exactly those
+        installs in the same stuck state from the other side. The two differ
+        by the label alone, so a file a person has edited still matches
+        neither and is still left alone.
         """
         operations = self.entry.operations
         expected: str | None = None
         if operations is not None:
+            label = install_bind_label(self.server_dir)
             try:
-                expected = composegen.render(
-                    self.entry,
-                    self.server_dir,
-                    templates_root=self.templates_root,
-                    world_env=_world_env(self.entry, operations.enable_env),
-                    db_password=self._db_password,
-                ).override
+                texts = [
+                    composegen.render(
+                        self.entry,
+                        self.server_dir,
+                        templates_root=self.templates_root,
+                        world_env=_world_env(self.entry, operations.enable_env),
+                        db_password=self._db_password,
+                        bind_label=each,
+                    ).override
+                    for each in dict.fromkeys((label, ""))
+                ]
             except Exception as exc:  # noqa: BLE001 - an unrenderable plan is not a reason to stop
                 logger.info(f"could not re-render {self.entry.id}'s override to compare: {exc}")
+            else:
+                target = self.server_dir / composegen.OVERRIDE_FILE
+                now = target.read_text(encoding="utf-8") if target.is_file() else None
+                expected = now if now in texts else texts[0]
         return roll_back(self.entry, self.server_dir, expected=expected)
 
     def enable(self, *, world_running: bool) -> Enabled:
