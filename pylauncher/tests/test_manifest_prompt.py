@@ -180,6 +180,7 @@ def test_asked_again_with_nothing_remembered_says_the_defaults_are_shown(qapp: o
     )
     assert dialog.answers() == {"cooldown": "30_Min"}
     assert "no record" in dialog.notes()
+    assert "as the new setting" in dialog.notes()
     assert "Hearthstone" in dialog.notes() or "cooldown" in dialog.notes().lower()
     assert REMEMBERED_NOTE not in dialog.notes()
 
@@ -211,6 +212,7 @@ def test_updating_a_compounding_mod_warns_that_it_multiplies_again(qapp: object)
     first = ManifestPromptDialog(None, manifest, manifest.prompts)  # type: ignore[attr-defined]
     assert COMPOUNDS_NOTE in again.notes()
     assert COMPOUNDS_NOTE not in first.notes()
+    assert "as the new setting" not in again.notes(), "false for a module that compounds"
 
 
 def test_updating_a_mod_that_does_not_compound_gets_no_such_warning(qapp: object) -> None:

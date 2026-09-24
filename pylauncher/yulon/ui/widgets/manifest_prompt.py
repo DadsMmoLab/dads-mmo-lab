@@ -57,11 +57,21 @@ the choice here is about what a worldserver reads, not about what passes.
 """
 
 
-NO_RECORD_NOTE = (
+RERUN_SETS_NOTE = (
     "This is already installed, and running it again applies the answers below as the new "
-    "setting. Yu'lon has no record of your earlier answer to: {questions}. What is filled in "
-    "there is the default (or nothing, where there is none), so change it if you set it "
-    "differently."
+    "setting."
+)
+"""The lead-in to `NO_RECORD_NOTE`, for a module whose re-run REPLACES the setting.
+
+Not said of a module whose re-run compounds (`COMPOUNDS_NOTE` says what happens
+there instead): "as the new setting" would be false for the mob multipliers,
+measured in the fix-wave live check on m910q, where both sentences appeared.
+"""
+
+
+NO_RECORD_NOTE = (
+    "Yu'lon has no record of your earlier answer to: {questions}. What is filled in there is "
+    "the default (or nothing, where there is none), so change it if you set it differently."
 )
 """Shown when an installed module is asked again and some answer is not in its record.
 
@@ -158,11 +168,12 @@ class ManifestPromptDialog(QDialog):
             if missing:
                 self._notes.append(REMOVE_NO_RECORD_NOTE)
         elif again:
+            compounds = reapplies_on_top(manifest)
             if missing:
-                self._notes.append(
-                    NO_RECORD_NOTE.format(questions="; ".join(p.question for p in missing))
-                )
-            if reapplies_on_top(manifest):
+                questions = "; ".join(p.question for p in missing)
+                lead = "" if compounds else RERUN_SETS_NOTE + " "
+                self._notes.append(lead + NO_RECORD_NOTE.format(questions=questions))
+            if compounds:
                 self._notes.append(COMPOUNDS_NOTE)
         for text in self._notes:
             note = QLabel(text, self)
