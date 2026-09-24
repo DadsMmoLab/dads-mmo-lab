@@ -184,7 +184,157 @@ MODULE: dict[str, Any] = {
 }
 
 
-def test_ale_install_deploys_patches_on_configure_and_removes(tmp_path: Path) -> None:
+def test_ale_install_writes_the_answer_it_was_given(tmp_path: Path) -> None:
+    """The person's answer, not the prompt's default, lands in the script at install (T92)."""
+    git = _FakeGit({"SitMeansRest.lua": "local DURATION = 5\n", "sql/tables.sql": "CREATE ..."})
+    applier = Applier(tmp_path, git=git, sql=_FakeSql())
+    m = parse_manifest(ALE)
+    _have_requirements(tmp_path, m)
+
+    applier.install(m, {"duration": "45"})
+    assert (tmp_path / LUA / "SitMeansRest.lua").read_text(
+        encoding="utf-8"
+    ) == "local DURATION = 45\n"
+
+
+def test_install_asks_for_a_configure_time_answer_it_has_no_default_for() -> None:
+    """`required_prompts(m, "install")` counts the configure-time templates (T92).
+
+    The Modules tab opens its dialog from this list; before T92 a `.lua`
+    manifest rendered nothing at install, so nothing was asked and nothing
+    written -- and the chip that says "installing this opens one dialog"
+    reads the same list, so the two cannot disagree.
+    """
+    m = parse_manifest(
+        {**ALE, "prompts": [{"key": "duration", "question": "seconds", "kind": "int"}]}
+    )
+    assert [p.key for p in apply_module.required_prompts(m, "install")] == ["duration"]
+    assert apply_module.required_prompts(m, "remove") == ()
+
+
+BATTLEPASS_LIKE: dict[str, Any] = {
+    **ALE,
+    "id": "bp",
+    "patches": [],
+    "sql": [
+        {"db": "characters", "path": "sql/tables.sql"},
+        {
+            "db": "characters",
+            "statement": "UPDATE bp_config SET value='{scale}' WHERE name='scale'",
+            "when": "configure",
+        },
+    ],
+    "prompts": [{"key": "scale", "question": "scale", "kind": "float", "default": "1.1"}],
+}
+
+
+def test_install_runs_configure_time_sql_once_and_update_leaves_those_rows_alone(
+    tmp_path: Path,
+) -> None:
+    """`battlepass`'s enable rows: written at install with the answer, not re-written by update.
+
+    Two halves, both from review 2026-09-22: the configure-time `_sql` line in
+    `install()` was unreached by any test (deleting it left 211 green), and
+    `update()` -- which is `install()` -- would have put `battlepass_config`
+    back to the prompt defaults on every update, over whatever the person had
+    changed in that table since.
+    """
+    git = _FakeGit({"SitMeansRest.lua": "x\n", "sql/tables.sql": "CREATE ..."})
+    sql = _FakeSql()
+    applier = Applier(
+        tmp_path,
+        git=git,
+        sql=sql,
+        remote_url=_Origins("https://github.com/Brytenwally/SitMeansRest.git"),
+        unmodified=lambda p, r: True,
+        no_local_commits=lambda p, r: True,
+    )
+    m = parse_manifest(BATTLEPASS_LIKE)
+    _have_requirements(tmp_path, m)
+
+    applier.install(m, {"scale": "2.5"})
+    assert sql.files == [("characters", "tables.sql")]
+    assert sql.statements == [("characters", "UPDATE bp_config SET value='2.5' WHERE name='scale'")]
+
+    applier.update(m)
+    assert len(sql.statements) == 1, "an update re-deploys but does not reset the rows"
+    assert len(sql.files) == 2, "the update did run, and ran its install-time file"
+
+
+def test_configure_time_sql_is_refused_before_the_install_time_sql_runs(tmp_path: Path) -> None:
+    """One refusal for both passes, and it comes before either wrote a row.
+
+    Without the early check the install-time file would run, and only then
+    would the configure-time pass raise a sentence saying no rows were written.
+    """
+    sql = _FakeSql()
+    applier = Applier(
+        tmp_path,
+        git=_FakeGit({"SitMeansRest.lua": "x\n", "sql/tables.sql": "C"}),
+        sql=sql,
+        world_running=lambda: True,
+    )
+    m = parse_manifest(BATTLEPASS_LIKE)
+    _have_requirements(tmp_path, m)
+
+    with pytest.raises(ApplyError, match="No SQL was run and no rows were written"):
+        applier.install(m)
+    assert sql.files == [] and sql.statements == []
+
+
+def test_a_bool_answer_is_spelled_true_or_false_in_a_lua_file(tmp_path: Path) -> None:
+    """The dialog answers a bool as "1"/"0" (conf spelling); Lua reads `= 0` as TRUE.
+
+    So the patch into a `.lua` target spells the answer `true`/`false`, and
+    the manifest's `(true|false)` regex keeps matching the line on the next
+    configure. A `.conf` target keeps the conf spelling.
+    """
+    git = _FakeGit({"SitMeansRest.lua": "ENABLED = true,\n", "sql/tables.sql": "C"})
+    applier = Applier(tmp_path, git=git, sql=_FakeSql())
+    m = parse_manifest(
+        {
+            **ALE,
+            "patches": [
+                {
+                    "file": f"{LUA}/SitMeansRest.lua",
+                    "find": r"(ENABLED\s*=\s*)(true|false)",
+                    "replace": r"\g<1>{on}",
+                    "regex": True,
+                    "when": "configure",
+                }
+            ],
+            "prompts": [{"key": "on", "question": "on?", "kind": "bool", "default": "true"}],
+        }
+    )
+    _have_requirements(tmp_path, m)
+    deployed = tmp_path / LUA / "SitMeansRest.lua"
+
+    applier.install(m, {"on": "0"})
+    assert deployed.read_text(encoding="utf-8") == "ENABLED = false,\n"
+    applier.configure(m, {"on": "1"})
+    assert deployed.read_text(encoding="utf-8") == "ENABLED = true,\n"
+    applier.configure(m, {"on": "no"})
+    assert deployed.read_text(encoding="utf-8") == "ENABLED = false,\n"
+
+
+def test_every_shipped_configure_patch_is_among_the_templates_install_asks_for() -> None:
+    """No shipped manifest may carry a value only `configure()` -- which nothing calls -- writes."""
+    for manifest in _shipped_all():
+        for patch in manifest.patches:
+            if patch.when == "configure":
+                assert patch.replace in apply_module._action_templates(
+                    manifest, "install"
+                ), f"{manifest.id}: {patch.find!r} is not run by install"
+
+
+def test_ale_install_deploys_runs_its_first_configure_and_removes(tmp_path: Path) -> None:
+    """Install writes the configure-time patch with the prompt's default (T92).
+
+    Until 2026-09-22 this test pinned the opposite -- `local DURATION = 5`
+    after install, "configure-time patch" -- and that was the bug, not the
+    spec: nothing in the app calls `configure()`, so every ALE script shipped
+    with the upstream value whatever the person answered.
+    """
     git = _FakeGit({"SitMeansRest.lua": "local DURATION = 5\n", "sql/tables.sql": "CREATE ..."})
     sql = _FakeSql()
     applier = Applier(tmp_path, git=git, sql=sql)
@@ -195,16 +345,17 @@ def test_ale_install_deploys_patches_on_configure_and_removes(tmp_path: Path) ->
     assert git.calls[0].url == "https://github.com/Brytenwally/SitMeansRest.git"
     assert git.calls[0].dest == tmp_path / "ale_scripts" / "sitmeanrest"
     deployed = tmp_path / LUA / "SitMeansRest.lua"
-    assert deployed.read_text(encoding="utf-8") == "local DURATION = 5\n"  # configure-time patch
+    assert deployed.read_text(encoding="utf-8") == "local DURATION = 20\n"  # prompt default
     assert sql.files == [("characters", "tables.sql")]
     assert report.rebuild_required is False and report.restart_recommended is True
     assert report.skipped == ()
+    assert any(step.startswith("patch ") for step in report.done)
 
-    # configure: prompt default applies when no value is given; explicit value wins.
-    applier.configure(m)
-    assert deployed.read_text(encoding="utf-8") == "local DURATION = 20\n"
+    # configure re-applies: default when no value is given; an explicit value wins.
     applier.configure(m, {"duration": "45"})
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 45\n"
+    applier.configure(m)
+    assert deployed.read_text(encoding="utf-8") == "local DURATION = 20\n"
 
     removed = applier.remove(m)
     assert not deployed.exists()
