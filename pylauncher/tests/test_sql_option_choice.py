@@ -176,8 +176,10 @@ class _TransactionalDb:
     A file (`run_file`) is autocommit: each line lands as it runs. A text that
     starts `START TRANSACTION;` is applied to a copy, and the copy is kept only
     if every line ran -- `mysql` in batch mode stops at the first error and the
-    closed session rolls the open transaction back. Lines are `SET <n>` or
-    `FAIL`; `FAIL` is a statement MySQL refuses.
+    closed session rolls the open transaction back. Lines are `SET @cd = <n>;`
+    or `SELECT * FROM missing;`, the second a statement MySQL refuses (1146).
+    Both are statements `transaction_refusal()` allows, so the preflight lets
+    them through and the failure happens where a real one would: in MySQL.
     """
 
     def __init__(self, cooldown: int) -> None:
@@ -186,9 +188,9 @@ class _TransactionalDb:
 
     def _apply(self, text: str, value: int) -> int:
         for line in text.splitlines():
-            if line.startswith("SET "):
-                value = int(line.split()[1])
-            elif line == "FAIL":
+            if line.startswith("SET @cd = "):
+                value = int(line.removeprefix("SET @cd = ").rstrip(";"))
+            elif line == "SELECT * FROM missing;":
                 raise apply_module.ApplyError("mysql exited 1: ERROR 1146 (42S02)")
         return value
 
@@ -228,8 +230,8 @@ def test_a_chosen_file_that_fails_leaves_the_earlier_cooldown_in_place(tmp_path:
     Mutation: split the step into two `path` steps and `cooldown` is -1.
     """
     texts = {name: f"-- {name}\n" for name in HEARTHSTONE_SHIPPED}
-    texts[HEARTHSTONE_RESET] = "SET -1\n"
-    texts["Hearthstone_1_Min.sql"] = "SET 60000\nFAIL\n"
+    texts[HEARTHSTONE_RESET] = "SET @cd = -1;\n"
+    texts["Hearthstone_1_Min.sql"] = "SET @cd = 60000;\nSELECT * FROM missing;\n"
     db = _TransactionalDb(cooldown=300000)
     with pytest.raises(apply_module.ApplyError, match="ERROR 1146"):
         Applier(tmp_path, git=_CloneWith(texts), sql=db).install(
@@ -294,8 +296,257 @@ def test_a_transaction_refuses_a_file_that_would_commit_on_its_own(tmp_path: Pat
     )
     texts = {"a.sql": "UPDATE t SET x = 1;\n", "b.sql": "  create table t2 (id int);\n"}
     sql = _Sql()
-    with pytest.raises(apply_module.ApplyError, match="commits on its own"):
+    with pytest.raises(apply_module.ApplyError, match="cannot run inside one transaction"):
         Applier(tmp_path, git=_CloneWith(texts), sql=sql).install(manifest)
+    assert sql.files == [] and sql.statements == []
+
+
+# The five upstream files verbatim, AsgavinYT/hearthstone-cooldowns @ 76ef309.
+HEARTHSTONE_TEXTS = {
+    "Hearthstone_1_Sec.sql": (
+        "UPDATE item_template SET spellcooldown_1=1000 WHERE spellcooldown_1=-1 AND entry=6948;\n"
+        "UPDATE item_template SET spellcategorycooldown_1=1000 "
+        "WHERE spellcategorycooldown_1=-1 AND entry=6948;"
+    ),
+    "Hearthstone_1_Min.sql": (
+        "UPDATE item_template SET spellcooldown_1=60000 WHERE spellcooldown_1=-1 AND entry=6948;\n"
+        "UPDATE item_template SET spellcategorycooldown_1=60000 "
+        "WHERE spellcategorycooldown_1=-1 AND entry=6948;"
+    ),
+    "Hearthstone_5_Min.sql": (
+        "UPDATE item_template SET spellcooldown_1=300000 WHERE spellcooldown_1=-1 AND entry=6948;\n"
+        "UPDATE item_template SET spellcategorycooldown_1=300000 "
+        "WHERE spellcategorycooldown_1=-1 AND entry=6948;"
+    ),
+    "Hearthstone_15_Min.sql": (
+        "UPDATE item_template SET spellcooldown_1=900000 WHERE spellcooldown_1=-1 AND entry=6948;\n"
+        "UPDATE item_template SET spellcategorycooldown_1=900000 "
+        "WHERE spellcategorycooldown_1=-1 AND entry=6948;"
+    ),
+    "Hearthstone_30_Min.sql": (
+        "UPDATE item_template SET spellcooldown_1=-1 "
+        "WHERE spellcooldown_1 BETWEEN 1 AND 900000 AND entry=6948;\n"
+        "UPDATE item_template SET spellcategorycooldown_1=-1 "
+        "WHERE spellcategorycooldown_1 BETWEEN 1 AND 900000 AND entry=6948;"
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(HEARTHSTONE_TEXTS))
+def test_the_real_hearthstone_files_pass_the_allowlist(name: str) -> None:
+    """Round 3: the check must not refuse the one module `then` exists for."""
+    assert apply_module.transaction_refusal(name, HEARTHSTONE_TEXTS[name]) == ""
+    assert len(apply_module.split_sql(HEARTHSTONE_TEXTS[name])) == 2
+
+
+def test_the_real_hearthstone_install_sends_the_real_files_as_one_transaction(
+    tmp_path: Path,
+) -> None:
+    sql = _Sql()
+    Applier(tmp_path, git=_CloneWith(dict(HEARTHSTONE_TEXTS)), sql=sql).install(
+        _hearthstone(), {"cooldown": "5_Min"}
+    )
+    ((db, text),) = sql.statements
+    assert db == "world"
+    assert text == (
+        "START TRANSACTION;\n"
+        + HEARTHSTONE_TEXTS[HEARTHSTONE_RESET]
+        + "\n"
+        + HEARTHSTONE_TEXTS["Hearthstone_5_Min.sql"]
+        + "\nCOMMIT;\n"
+    )
+
+
+def test_a_second_statement_on_the_same_line_is_checked_too() -> None:
+    """Codex, round 3: the old guard matched keywords at the START of a line only."""
+    refusal = apply_module.transaction_refusal(
+        "b.sql", "UPDATE t SET x = 1; CREATE TABLE y (id INT);\n"
+    )
+    assert "CREATE" in refusal and "cannot run inside one transaction" in refusal
+
+
+# Every statement kind on MySQL 8.4's "Statements That Cause an Implicit Commit"
+# page (sections: DDL, mysql-schema, transaction control, data loading,
+# administration, replication), plus the client-side and hidden ways in.
+IMPLICIT_COMMITS = [
+    # data definition
+    "ALTER DATABASE db UPGRADE DATA DIRECTORY NAME",
+    "ALTER EVENT e ENABLE",
+    "ALTER FUNCTION f COMMENT 'x'",
+    "ALTER PROCEDURE p COMMENT 'x'",
+    "ALTER SERVER s OPTIONS (USER 'u')",
+    "ALTER TABLE item_template ADD COLUMN x INT",
+    "ALTER TABLESPACE ts RENAME TO ts2",
+    "ALTER VIEW v AS SELECT 1",
+    "CREATE DATABASE d",
+    "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT 1",
+    "CREATE FUNCTION f() RETURNS INT RETURN 1",
+    "CREATE INDEX i ON t (c)",
+    "CREATE PROCEDURE p() SELECT 1",
+    "CREATE ROLE r",
+    "CREATE SERVER s FOREIGN DATA WRAPPER mysql OPTIONS (USER 'u')",
+    "CREATE SPATIAL REFERENCE SYSTEM 4120 NAME 'x' DEFINITION 'y'",
+    "CREATE TABLE t (id INT)",
+    "CREATE TABLESPACE ts ADD DATAFILE 'x.ibd'",
+    "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW SET @x = 1",
+    "CREATE VIEW v AS SELECT 1",
+    "DROP DATABASE d",
+    "DROP EVENT e",
+    "DROP FUNCTION f",
+    "DROP INDEX i ON t",
+    "DROP PROCEDURE p",
+    "DROP ROLE r",
+    "DROP SERVER s",
+    "DROP SPATIAL REFERENCE SYSTEM 4120",
+    "DROP TABLE t",
+    "DROP TABLESPACE ts",
+    "DROP TRIGGER tr",
+    "DROP VIEW v",
+    "INSTALL PLUGIN p SONAME 'p.so'",
+    "RENAME TABLE a TO b",
+    "TRUNCATE TABLE t",
+    "UNINSTALL PLUGIN p",
+    # the mysql system schema
+    "ALTER USER u IDENTIFIED BY 'x'",
+    "CREATE USER u",
+    "DROP USER u",
+    "GRANT SELECT ON *.* TO u",
+    "RENAME USER a TO b",
+    "REVOKE SELECT ON *.* FROM u",
+    "SET PASSWORD FOR u = 'x'",
+    # transaction control and locking
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "START TRANSACTION",
+    "LOCK TABLES t WRITE",
+    "UNLOCK TABLES",
+    "SET autocommit = 1",
+    "SET @@autocommit = 1",
+    "SET SESSION autocommit = 1",
+    "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+    "XA START 'x'",
+    # data loading
+    "LOAD DATA INFILE 'x' INTO TABLE t",
+    "LOAD XML INFILE 'x' INTO TABLE t",
+    # administration
+    "ANALYZE TABLE t",
+    "CACHE INDEX t IN c",
+    "CHECK TABLE t",
+    "FLUSH TABLES",
+    "LOAD INDEX INTO CACHE t",
+    "OPTIMIZE TABLE t",
+    "REPAIR TABLE t",
+    "RESET BINARY LOGS AND GTIDS",
+    # replication
+    "START REPLICA",
+    "STOP REPLICA",
+    "RESET REPLICA",
+    "CHANGE REPLICATION SOURCE TO SOURCE_HOST = 'h'",
+    "CHANGE MASTER TO MASTER_HOST = 'h'",
+    # client-side and hidden ways in
+    "DELIMITER //",
+    "USE acore_characters",
+    "CALL p()",
+    "/*!40101 CREATE TABLE t (id INT) */",
+    "UPDATE t SET x = 1 /*!40101 , y = (SELECT 1) */",
+    "\\! rm -rf /",
+    "UPDATE t SET x = 1 \\g",
+]
+
+
+@pytest.mark.parametrize("statement", IMPLICIT_COMMITS)
+def test_every_implicit_commit_kind_is_refused(statement: str) -> None:
+    text = f"UPDATE item_template SET x = 1 WHERE entry = 6948;\n{statement};\n"
+    refusal = apply_module.transaction_refusal("b.sql", text)
+    assert "cannot run inside one transaction" in refusal, (statement, refusal)
+
+
+def test_quotes_and_comments_do_not_confuse_the_splitter() -> None:
+    """A `;` or a keyword inside a string or a comment is not a statement."""
+    text = (
+        "UPDATE t SET s = 'a; CREATE TABLE x' WHERE id = 1; -- CREATE TABLE y;\n"
+        'SELECT "drop table z; commit"; # ALTER TABLE q;\n'
+        "/* ALTER TABLE z; COMMIT; */ SET @x = `create;`;\n"
+        "UPDATE t SET s = 'it''s; ok', u = 'back\\'slash; ok' WHERE id = 2;\n"
+        "INSERT INTO t VALUES (1); REPLACE INTO t VALUES (2); DELETE FROM t WHERE id = 3\n"
+    )
+    statements = apply_module.split_sql(text)
+    assert [s.split()[0].upper() for s in statements] == [
+        "UPDATE",
+        "SELECT",
+        "SET",
+        "UPDATE",
+        "INSERT",
+        "REPLACE",
+        "DELETE",
+    ]
+    assert apply_module.transaction_refusal("b.sql", text) == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["UPDATE t SET s = 'never closed;\n", "/* never closed\n", 'SELECT "x;\n'],
+)
+def test_an_unterminated_quote_or_comment_is_refused(text: str) -> None:
+    assert "cannot run inside one transaction" in apply_module.transaction_refusal("b.sql", text)
+
+
+def test_a_bad_later_step_stops_an_earlier_good_one_from_running(tmp_path: Path) -> None:
+    """Codex, round 3: the preflight looked for files but did not READ them.
+
+    A plain first step and a `then` step whose file holds DDL: the first step
+    ran and committed, then the second was refused with "nothing was run".
+    Every file of every step is now read and checked before any SQL runs.
+    """
+    manifest = parse_manifest(
+        {
+            "id": "two-steps",
+            "name": "Two steps",
+            "type": "mod",
+            "game": "wow-wotlk",
+            "source": {"repo": "someone/two-steps"},
+            "sql": [
+                {"db": "world", "path": "first.sql"},
+                {"db": "world", "path": "a.sql", "then": ["b.sql"]},
+            ],
+        }
+    )
+    texts = {
+        "first.sql": "UPDATE t SET x = 1;\n",
+        "a.sql": "UPDATE t SET y = 1;\n",
+        "b.sql": "UPDATE t SET z = 1; DROP TABLE t;\n",
+    }
+    sql = _Sql()
+    with pytest.raises(apply_module.ApplyError, match="nothing was run"):
+        Applier(tmp_path, git=_CloneWith(texts), sql=sql).install(manifest)
+    assert sql.files == [] and sql.statements == []
+
+
+def test_a_later_file_that_is_not_utf8_stops_an_earlier_step_too(tmp_path: Path) -> None:
+    manifest = parse_manifest(
+        {
+            "id": "two-steps",
+            "name": "Two steps",
+            "type": "mod",
+            "game": "wow-wotlk",
+            "source": {"repo": "someone/two-steps"},
+            "sql": [
+                {"db": "world", "path": "first.sql"},
+                {"db": "world", "path": "a.sql", "then": ["b.sql"]},
+            ],
+        }
+    )
+
+    class _Latin1(_CloneWith):
+        def clone(self, spec: CloneSpec) -> None:
+            super().clone(spec)
+            (spec.dest / "b.sql").write_bytes(b"UPDATE t SET s = '\xe9';\n")
+
+    texts = {"first.sql": "UPDATE t SET x = 1;\n", "a.sql": "UPDATE t SET y = 1;\n", "b.sql": ""}
+    sql = _Sql()
+    with pytest.raises(apply_module.ApplyError, match="nothing was run"):
+        Applier(tmp_path, git=_Latin1(texts), sql=sql).install(manifest)
     assert sql.files == [] and sql.statements == []
 
 
