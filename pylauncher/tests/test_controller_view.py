@@ -35,7 +35,7 @@ from yulon import (
     tuning,
     useraccounts,
 )
-from yulon.apply import Applier, ApplyReport, DockerSql
+from yulon.apply import Applier, ApplyReport, DockerSql, required_prompts
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
 from yulon.catalog.families import sqlplan
@@ -173,7 +173,9 @@ class _FakeApplier(Applier):
         self.values: list[object] = []
         self.removed: list[str] = []
 
-    def install(self, manifest: object, values: object = None) -> ApplyReport:  # type: ignore[override]
+    def install(  # type: ignore[override]
+        self, manifest: object, values: object = None, **kw: object
+    ) -> ApplyReport:
         item_id = str(manifest.id)  # type: ignore[attr-defined]
         self.installed.append(item_id)
         self.values.append(values)
@@ -779,8 +781,17 @@ def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_pa
     assert "cancelled" in view.module_report.toPlainText().lower()
 
 
-def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_path: Path) -> None:
-    """Every manifest but the two ah-bots must behave exactly as it did — no new dialog.
+def test_exactly_the_manifests_with_a_question_are_asked(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Which manifests open a dialog on Install, pinned by NAME (T92 widened it).
+
+    Until 2026-09-22 this pinned `["mod-ah-bot", "mod-ah-bot-plus"]` -- the two
+    with a prompt carrying no default -- and every other manifest's prompts
+    were never shown: the defaults were written unseen. Now every manifest
+    whose install renders a prompt asks, pre-filled; the ones with no prompt
+    at all still get no window. A manifest gaining or losing a question shows
+    up here by name.
 
     Rows whose Install is LOCKED are left out of the loop rather than counted
     as installs (T69): eleven shipped manifests declare a `requires`, nothing
@@ -791,6 +802,7 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
 
     def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
         asked.append(str(manifest.id))  # type: ignore[attr-defined]
+        assert prompts, "a dialog with no question is a window for nothing"
         return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
 
     services = _services(ps, tmp_path, [])
@@ -811,7 +823,16 @@ def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_
         view.modules_panel.select(item_id)
         view._module_action("install")
 
-    assert sorted(asked) == ["mod-ah-bot", "mod-ah-bot-plus"], asked
+    store = modules.store()
+    expected = sorted(
+        m.id
+        for kind in ("module", "ale", "keg", "mod")
+        for m in store.load_all(kind)  # type: ignore[arg-type]
+        if m.id in catalogued and required_prompts(m, "install")
+    )
+    # `sitmeanrest` is absent: it requires mod-ale, locked in this fixture (T69).
+    assert "mod-ah-bot" in expected and "xp-rates" in expected and "nerf-mobs" in expected
+    assert sorted(asked) == expected, asked
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier)
     assert len(applier.installed) == len(catalogued)
@@ -891,6 +912,45 @@ def test_a_failed_press_redraws_the_conflict_lock_from_the_disk(
     view._module_failed(RuntimeError("a later step raised after the rmtree"))
     assert view.modules_panel.row("mod-ah-bot-plus").data.installable
     assert "remove mod-ah-bot FAILED" in view.module_report.toPlainText()
+
+
+def test_installing_a_manifest_with_defaults_still_asks(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A prompt WITH a default opens the dialog too, pre-filled, and the answers reach the applier.
+
+    Until T92 the gate opened only for a prompt with no default, which in the
+    shipped catalog is `mod-ah-bot`'s GUIDs and nothing else: `xp-rates` never
+    asked its rates and `sitmeanrest` never asked its seconds.
+    """
+    asked: list[str] = []
+    services = _services(ps, tmp_path, [])
+    # sitmeanrest requires mod-ale; say it is there so Install is not locked (T69).
+    object.__setattr__(services, "installed_modules", lambda: {"module": frozenset({"mod-ale"})})
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: asked.append(manifest.id)
+        or {p.key: "7" for p in prompts},
+    )
+    _select_module(view, "sitmeanrest")
+    view._module_action("install")
+
+    assert asked == ["sitmeanrest"]
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.installed == ["sitmeanrest"]
+    assert applier.values[-1] == {
+        key: "7"
+        for key in (
+            "duration",
+            "regen_aura",
+            "rest_xp_enabled",
+            "rest_xp_delay",
+            "rest_xp_rate",
+            "rest_xp_max_levels",
+        )
+    }
 
 
 def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
