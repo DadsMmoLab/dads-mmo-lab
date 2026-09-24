@@ -169,6 +169,19 @@ def _insert_section(cursor: QTextCursor, section: QTextDocument) -> None:
     gap under the tag depended on what the body began with. Both are handled
     here, and which happened is read off the document rather than guessed from
     the markdown.
+
+    **There is no `setBlockCharFormat(first.charFormat())` beside the
+    `setBlockFormat` below any more, and that is a measurement** (T90 plan 3).
+    It was here from the same review and nothing pinned it. Measured on 6.11
+    by splicing six body shapes — heading, fence, block quote, paragraph, list,
+    table — with the line and without it, and comparing the landed block's
+    block-char format both ways: **identical in all six**. `QTextBlock.
+    charFormat()` is the block's DEFAULT character format, which md4c leaves
+    untouched for the first block of every real body, and the characters' own
+    formats travel on the fragment. Deleting it was also invisible to all 178
+    tests in `test_update_widgets.py`, which is the definition of the dead
+    defence this file made itself remove elsewhere (`_NotesView`'s
+    `loadResource`).
     """
     first = section.firstBlock()
     cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
@@ -180,7 +193,6 @@ def _insert_section(cursor: QTextCursor, section: QTextDocument) -> None:
     if landed.length() == first.length() and landed.text() == first.text():
         mender.setPosition(at)
         mender.setBlockFormat(first.blockFormat())
-        mender.setBlockCharFormat(first.charFormat())
     elif not landed.text():
         # Delete the separator BEFORE the empty block: that merges it into the
         # tag block above, which keeps the tag's format and loses the empty
