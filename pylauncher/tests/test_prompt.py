@@ -757,6 +757,86 @@ def test_the_last_words_survive_a_reader_that_delivers_them_after_the_child_is_g
     assert "LAST WORDS" in lines, lines
 
 
+def test_output_the_reader_still_holds_after_the_join_is_announced_not_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T108 review: the drain after the join is a snapshot, so a late reader must be SAID.
+
+    `reader.join()` is bounded, because an orphan holding the terminal keeps
+    the reader in `os.read` forever. So the join can return with the reader
+    still alive and still holding output, and nothing queued after the drain
+    is ever read. That loss cannot be closed without an unbounded wait. What
+    can be done is to say so: the log and the output both get one line saying
+    the rest may be cut off. Until the review, the output just stopped.
+
+    The reader is held on the last words until the caller has seen that line,
+    and the join bound is shrunk so the test does not wait 5 s.
+    """
+    monkeypatch.setattr(runner, "_SHUTDOWN_TIMEOUT_SECONDS", 0.3)
+    release = threading.Event()
+    real_read = runner.os.read
+
+    def read(fd: int, size: int) -> bytes:
+        data = real_read(fd, size)
+        if b"LAST WORDS" in data:
+            release.wait(HANG_BOUND)
+        return data
+
+    monkeypatch.setattr(runner.os, "read", read)
+    code = "import sys\nsys.stdout.write('LAST WORDS\\n')\nsys.stdout.flush()\n"
+    lines: list[str] = []
+    try:
+        for line in runner.interact(
+            [sys.executable, "-c", code],
+            respond=lambda _line: None,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
+        ):
+            lines.append(line)
+            if "cut off" in line:
+                release.set()
+    finally:
+        release.set()
+    assert runner._OUTPUT_MAY_BE_CUT_OFF in lines, lines
+
+
+def test_the_drain_after_the_join_is_bounded_even_if_the_queue_never_empties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T108 review: an orphan that keeps writing must not keep the drain going forever.
+
+    The drain reads only what was already queued when it began (`qsize()`,
+    taken once), or up to the end-of-stream sentinel if that comes first. The
+    endless writer is simulated by a queue whose `get_nowait` never runs dry.
+    Only the drain calls `get_nowait`, and the loop calls `get(timeout=...)`.
+    Without the bound, the guard below stops the run instead of letting it hang.
+    """
+    import queue as real_queue
+
+    calls: list[int] = []
+
+    class EndlessQueue(real_queue.Queue):  # type: ignore[type-arg]
+        def get_nowait(self) -> object:
+            calls.append(1)
+            if len(calls) > 1000:
+                raise RuntimeError("the drain kept reading a queue that never empties")
+            return b"more\n"
+
+    fake = type("QueueModule", (), {"Queue": EndlessQueue, "Empty": real_queue.Empty})
+    monkeypatch.setattr(runner, "queue", fake)
+    code = "import sys\nsys.stdout.write('done\\n')\n"
+    lines = list(
+        runner.interact(
+            [sys.executable, "-c", code],
+            respond=lambda _line: None,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
+        )
+    )
+    assert "done" in lines, lines
+    assert len(calls) <= 2, f"the drain read {len(calls)} times from a queue that never empties"
+
+
 def test_the_docker_group_question_reaches_a_real_dialog_unmasked(qapp: object) -> None:
     """Drive the consent question the way a person meets it: as an actual dialog.
 

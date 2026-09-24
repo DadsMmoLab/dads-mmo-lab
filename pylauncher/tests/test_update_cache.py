@@ -416,18 +416,16 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly(
 ) -> None:
     """The bound must not truncate or delay an ordinary answer.
 
-    "Delay" means the answer waited on the deadline. That has one visible
-    cause: the `_Deadline` watchdog, armed with the same `deadline`, fires. So
-    the test asserts the cause and uses no stopwatch. The watchdog was armed
-    with exactly the deadline, and it never fired. Any wait of a full deadline
-    while the watchdog is armed makes it fire, however loaded the box is. A
-    loaded box cannot make it fire unless the fetch really took the whole
-    deadline, and then the fetch raises anyway.
+    Two checks, because "delay" comes in two sizes. The watchdog must be armed
+    with exactly the deadline. And the whole call, from the call to the
+    return, must fit in `NORMAL_ANSWER_ALLOWANCE`. A delay long enough to reach
+    the deadline makes the watchdog fire, and the fetch then raises, so that
+    size fails on its own. A shorter delay does not: a `time.sleep(6)` before
+    the return passed a version of this test that only checked the watchdog
+    (T108 review), so the allowance is what catches it.
 
-    Until T108 this asserted `elapsed < 5.0`. That bound had no name, and it
-    measured the scheduler as well as the fetch. It is the same kind of bound
-    as the trickle test's (T105), and it had not flaked yet only because it
-    had 5 s of slack.
+    Until T108 this asserted `elapsed < 5.0`. That bound had no name and no
+    argument behind it; the allowance's docstring gives both.
     """
     deadline = 10.0
     armed: list[float | None] = []
@@ -485,7 +483,9 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly(
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
+        started = time.monotonic()
         answer = update._urllib_fetch(f"http://127.0.0.1:{port}/feed", None, deadline=deadline)
+        elapsed = time.monotonic() - started
     finally:
         stop.set()
         listener.close()
@@ -499,11 +499,34 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly(
     assert answer.etag == 'W/"one"'
     assert armed == [deadline], f"the watchdog was not armed with the deadline: {armed}"
     assert fired == [], "an ordinary answer waited on the deadline: the watchdog fired"
+    assert elapsed < NORMAL_ANSWER_ALLOWANCE, (
+        f"an ordinary answer took {elapsed:.2f}s from the call to the return; "
+        f"the allowance is {NORMAL_ANSWER_ALLOWANCE}s"
+    )
     # The watchdog is cancelled on the normal path: no Timer is left ticking,
     # and removing that `cancel()` used to fail nothing at all. Counted by
     # NAME rather than with `active_count()`, which is process-global and saw
     # an unrelated thread on the 3.11 leg.
     assert _live_watchdogs() == [], "a watchdog Timer outlived the fetch"
+
+
+NORMAL_ANSWER_ALLOWANCE = 2.0
+"""How long an ordinary loopback answer may take on a loaded box. Not a speed claim.
+
+The same idea and the same number as `PROMPT_ALLOWANCE` in the trickle test
+(T105, PR #207): a step that costs milliseconds gets 2 s, so load cannot fail
+it but a real stall still does. It is a separate name only because this branch
+was cut before #207 existed, and a second definition of one name would merge as
+a silent duplicate. Once both are in, the two can become one.
+
+What it times is all the code's own work: building the TLS context, one
+loopback connect, and reading a small body that is already sent. The test server
+is listening before the call. Measured on the laptop (3 cores, WSL2) beside the
+full suite and two CPU spinners, 2026-09-24: see the T108 report. It stays well
+short of the delays the test exists for. A 6 s stall before the return passed
+the watchdog-only version and fails this one. A wait of the full 10 s deadline
+fires the watchdog and fails both.
+"""
 
 
 def _live_watchdogs() -> list[threading.Thread]:

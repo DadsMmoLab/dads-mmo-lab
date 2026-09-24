@@ -742,6 +742,10 @@ _ANSI = re.compile(r"\[[0-9;?]*[ -/]*[@-~]")
 # How long a partial line must sit unchanged before it is looked at.
 _PROMPT_QUIET_SECONDS = 0.3
 
+# Yielded by `interact()` when its reader was still running after the bounded
+# join, so a cut-off log says it is cut off instead of just stopping.
+_OUTPUT_MAY_BE_CUT_OFF = "[Yu'lon] The rest of this output may be cut off: it was still arriving."
+
 
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences (the install scripts colour everything)."""
@@ -1076,7 +1080,12 @@ def interact(
             # Measured: 1 run in 100 at loadavg ~5 lost `GOT:hunter2` in
             # test_prompt's /dev/tty test. The reader is given the join's bound
             # to deliver, not one quiet tick.
-            while True:
+            #
+            # The drain takes only what is queued when it starts (`qsize()`,
+            # read once), or up to the end-of-stream sentinel if that comes
+            # first. An orphan that keeps writing keeps the reader queueing,
+            # and an unbounded drain would follow it forever.
+            for _ in range(chunks.qsize()):
                 try:
                     data = chunks.get_nowait()
                 except queue.Empty:
@@ -1088,6 +1097,17 @@ def interact(
             if buffer:
                 yield buffer
                 buffer = ""
+            if reader.is_alive():
+                # The join gave up with the reader still reading: an orphan
+                # holds the terminal, or the reader was starved for the whole
+                # bound. Anything it queues from now on is never read. That
+                # cannot be closed without an unbounded wait, so at least it
+                # is said, in the log and in the output (T108 review).
+                logger.warning(
+                    f"the reader of {command[0]} was still running after "
+                    f"{_SHUTDOWN_TIMEOUT_SECONDS}s; its last output may be missing"
+                )
+                yield _OUTPUT_MAY_BE_CUT_OFF
             proc.wait()
             if proc.returncode:
                 raise subprocess.CalledProcessError(proc.returncode, command)
