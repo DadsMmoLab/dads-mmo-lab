@@ -522,8 +522,9 @@ a silent duplicate. Once both are in, the two can become one.
 What it times is all the code's own work: building the TLS context, one
 loopback connect, and reading a small body that is already sent. The test server
 is listening before the call. Measured on the laptop (3 cores, WSL2) beside the
-full suite and two CPU spinners, 2026-09-24: see the T108 report. It stays well
-short of the delays the test exists for. A 6 s stall before the return passed
+full suite and two CPU spinners (loadavg 4-7), 2026-09-24: 230 fetches, worst
+25.7 ms, so the allowance is about 80 times the worst. It stays well short of
+the delays the test exists for. A 6 s stall before the return passed
 the watchdog-only version and fails this one. A wait of the full 10 s deadline
 fires the watchdog and fails both.
 """
