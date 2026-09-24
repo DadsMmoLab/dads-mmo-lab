@@ -1247,3 +1247,89 @@ def test_an_undo_whose_copy_failed_stays_offered(tmp_path: Path) -> None:
     assert undone.refused
     assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
     assert reset_defaults.still_undoable(tmp_path, undone.results) == undone.results
+
+
+# -- fix round 2: a failed copy leaves no backup behind -----------------------------
+
+
+def _half_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`shutil.copy2` as ENOSPC really fails: part of the file lands, then it raises."""
+
+    def copy2(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        Path(str(dst)).write_bytes(Path(str(src)).read_bytes()[:5])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(shutil, "copy2", copy2)
+
+
+def _siblings(path: Path) -> list[str]:
+    return sorted(p.name for p in path.parent.iterdir() if p.name.startswith(path.name + "."))
+
+
+def test_a_backup_whose_copy_fails_leaves_nothing_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one copy saves, resets and undos all back up through: a half `.bak` is never left."""
+    _dist_install(tmp_path)
+    world = tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]
+    before = _siblings(world)
+    _half_copy(monkeypatch)
+    for tag in ("", reset_defaults.RESET_TAG, reset_defaults.UNDO_TAG):
+        with pytest.raises(OSError):
+            tuning.backup(world, tag=tag)
+    with pytest.raises(OSError):
+        tuning.write(world, {"Rate.XP.Kill": "3"})
+    monkeypatch.undo()
+    assert _siblings(world) == before
+    assert world.read_bytes() == b"Key = 2\n"
+
+
+def test_an_undo_whose_real_backup_fails_leaves_the_reset_offered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 (Important): through the REAL backup, not a fake that makes no file."""
+    _dist_install(tmp_path)
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES[:1])
+    world = tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]
+    reset_text = world.read_bytes()
+    _half_copy(monkeypatch)
+    undone = reset_defaults.undo(tmp_path, report.written)
+    monkeypatch.undo()
+
+    assert [r.outcome for r in undone.results] == ["refused"]
+    assert world.read_bytes() == reset_text
+    assert not [n for n in _siblings(world) if n.endswith(".undo.bak")]
+    assert reset_defaults.still_undoable(tmp_path, report.written) == report.written
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
+
+
+def test_a_reset_whose_backup_fails_leaves_no_half_reset_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _dist_install(tmp_path)
+    world = tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]
+    before = _siblings(world)
+    _half_copy(monkeypatch)
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES[:1])
+    monkeypatch.undo()
+
+    assert report.refused and world.read_bytes() == b"Key = 2\n"
+    assert _siblings(world) == before
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == ()
+
+
+def test_an_undo_whose_copy_failed_is_still_offered_after_a_later_save(tmp_path: Path) -> None:
+    """Round 2: the undo backup taken before a failed copy is removed, so it marks nothing."""
+    _dist_install(tmp_path)
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES[:1])
+    world = tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]
+
+    def restore_fails(backup: Path, target: Path) -> None:
+        raise OSError(13, "Permission denied")
+
+    undone = reset_defaults.undo(tmp_path, report.written, restore=restore_fails)
+    assert undone.refused
+    assert not [n for n in _siblings(world) if n.endswith(".undo.bak")]
+    tuning.write(world, {"Rate.XP.Kill": "3"})
+
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written

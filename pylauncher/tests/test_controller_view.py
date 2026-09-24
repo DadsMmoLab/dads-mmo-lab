@@ -10,6 +10,7 @@ import subprocess
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -14418,3 +14419,37 @@ def test_a_reset_that_raised_after_writing_rereads_the_tab(
     _menu_action(view, TUNING_RESET_ALL).trigger()
 
     assert view.tuning_reset_undo_action.isEnabled() is True
+
+
+def test_a_press_that_raised_hands_the_undo_to_the_disk_not_an_older_session_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 2: after a crashed press the disk's newest press is the one to undo."""
+    _wotlk_server(tmp_path)
+    auth = tmp_path / TUNING_CORE_FILES[1]
+    old = reset_defaults.reset_backup(auth, now=datetime(2026, 9, 1, 12, 0, 0))
+    # At its default, so the crashing press leaves it alone: only the older
+    # session press names it.
+    auth.write_bytes(auth.with_name(auth.name + ".dist").read_bytes())
+    real = reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
+    presses: list[str] = []
+
+    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+        presses.append("x")
+        if len(presses) == 1:
+            return reset_defaults.ResetReport(
+                (reset_defaults.FileResult(TUNING_CORE_FILES[1], "reset", old),)
+            )
+        real(files, keys)
+        raise RuntimeError("a bug after the writes")
+
+    view = _reset_view(ps, tmp_path, route)
+    _reset_yes(monkeypatch)
+    _menu_action(view, "authserver.conf…").trigger()
+    assert [item.file for item in view._reset_undo_items()] == [TUNING_CORE_FILES[1]]
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    items = view._reset_undo_items()
+    assert items == reset_defaults.last_reset_on_disk(WOTLK, tmp_path)
+    assert TUNING_CORE_FILES[1] not in [item.file for item in items]
+    assert TUNING_CORE_FILES[0] in [item.file for item in items]

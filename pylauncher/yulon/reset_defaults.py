@@ -817,6 +817,13 @@ def undo(
         try:
             restore(item.backup, server_dir / item.file)
         except OSError as exc:
+            # The file was not changed, so the backup just taken equals it and
+            # records nothing; left behind, it would read as "this reset was
+            # undone" and hide a reset that never was (fix round 2).
+            try:
+                before.unlink(missing_ok=True)
+            except OSError as unlink_exc:
+                logger.warning(f"could not remove {before}: {unlink_exc}")
             results.append(
                 FileResult(
                     item.file,

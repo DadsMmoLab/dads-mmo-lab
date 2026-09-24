@@ -9076,8 +9076,11 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self.tuning_report.setPlainText(f"FAILED: {exc}")
         self.action_failed.emit(str(exc))
-        # A bug may have struck after some writes: the cards and the Undo's
-        # state are read again from what is on disk now.
+        # A bug may have struck after some writes, so this session's record of
+        # an EARLIER press is no longer the last one: dropped, so the Undo
+        # reads the newest press off the disk -- the one that just broke -- and
+        # the cards and the Undo's state are read again from the files.
+        self._last_reset = ()
         self.reload_tuning()
 
     def _reset_undo_items(self) -> tuple[reset_defaults.FileResult, ...]:

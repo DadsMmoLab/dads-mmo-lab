@@ -449,6 +449,13 @@ def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
     suffix would be a second thing to get wrong. Metadata is copied too
     (`copy2`), so the backup's own mtime says when the ORIGINAL was last
     touched and the name says when it was taken.
+
+    The copy goes to a `.yulon-tmp` sibling and is renamed onto the `.bak` name
+    only once it is whole (T94 fix round 2): `copy2` straight onto the target
+    leaves half a file when it dies (ENOSPC), and a half `.bak` is worse than
+    none -- `backups_of()` lists it as the newest, so Revert would restore it,
+    and a Reset to default's Undo reads a tagged one as a record. A failure
+    removes the sibling and raises; nothing named `.bak` is left.
     """
     when = now or datetime.now()
     for _ in range(_BACKUP_TRIES):
@@ -462,7 +469,16 @@ def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
             f"{path.name}.{when:%Y%m%d-%H%M%S-%f}{'.' + tag if tag else ''}.bak"
         )
         if not target.exists():
-            shutil.copy2(path, target)
+            tmp = target.with_name(f"{target.name}{TEMP_SUFFIX}")
+            try:
+                shutil.copy2(path, tmp)
+                os.replace(tmp, target)
+            except BaseException:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(f"could not remove {tmp}: {exc}")
+                raise
             return target
         # Not a counter suffix: `...-2.bak` sorts BEFORE `....bak`, which would
         # quietly make `backups_of()` report the wrong one as newest. The next
