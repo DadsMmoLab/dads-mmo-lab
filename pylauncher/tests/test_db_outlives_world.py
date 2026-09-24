@@ -130,11 +130,29 @@ while :; do sleep 0.05; done
 FAKE_CLIENT = """#!/usr/bin/env bash
 # Stands in for the SQL client: prints how many server connections are open, or fails like a
 # database that is not answering -- with something on stdout, so the script must go by the exit
-# status and not by what it read. Records the query so the test can see what was asked.
+# status and not by what it read, and the reason on stderr, where the real client puts it.
+# `fail_next` holds how many of the next calls fail (a transient fault); `unreachable` makes
+# every call fail. Records the query so the test can see what was asked.
 echo "$@" >> "$T98_DIR/queries.log"
-[ -f "$T98_DIR/unreachable" ] && { echo "ERROR 2002 (HY000)"; exit 1; }
+if [ -f "$T98_DIR/unreachable" ]; then
+  echo "ERROR 2002 (HY000)"; echo "ERROR 2002 (HY000): Can't connect to local server" >&2; exit 1
+fi
+n=$(cat "$T98_DIR/fail_next" 2>/dev/null || echo 0)
+if [ "$n" -gt 0 ]; then
+  echo $((n - 1)) > "$T98_DIR/fail_next"
+  echo "ERROR 1040 (HY000): Too many connections" >&2; exit 1
+fi
 cat "$T98_DIR/connections"
 """
+
+PASSWORD = "t98-sentinel-root-password"
+"""What the image's root-password variable holds in these runs; it must never reach a log."""
+
+
+def _failures(where: Path) -> list[str]:
+    path = where / "stderr.log"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    return [line for line in text.splitlines() if "could not count" in line]
 
 
 def _start(game: str, tmp_path: Path, *, widen: bool = False) -> tuple[subprocess.Popen[str], Path]:
@@ -151,7 +169,11 @@ def _start(game: str, tmp_path: Path, *, widen: bool = False) -> tuple[subproces
     script = _script(db)
     if widen:
         script = _widen_the_early_window(script)
-    proc = subprocess.Popen(["bash", "-c", script, "yulon-db", *db["command"]], env=env, text=True)
+    env.update({"MARIADB_ROOT_PASSWORD": PASSWORD, "MYSQL_ROOT_PASSWORD": PASSWORD})
+    with (tmp_path / "stderr.log").open("w", encoding="utf-8") as stderr:
+        proc = subprocess.Popen(
+            ["bash", "-c", script, "yulon-db", *db["command"]], env=env, text=True, stderr=stderr
+        )
     if not widen:
         _until(lambda: "started" in _log(tmp_path), "the server never started")
     return proc, tmp_path
@@ -217,16 +239,51 @@ def test_with_no_server_connected_the_database_stops_at_once(game: str, tmp_path
 
 @needs_bash
 @pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
-def test_a_database_that_cannot_be_asked_is_stopped_rather_than_held(
+def test_a_database_that_stays_unanswerable_is_stopped_after_five_tries(
     game: str, tmp_path: Path
 ) -> None:
-    """A failing count must never turn into a wait: that would be a SIGKILL at the grace."""
+    """A count that keeps failing ends the hold after five tries, not at the grace's SIGKILL.
+
+    Each failure is logged with the client's own words -- and never the password -- so a
+    container log shows why the database stopped holding.
+    """
     proc, where = _start(game, tmp_path)
     try:
         (where / "unreachable").write_text("", encoding="utf-8")
+        started = time.monotonic()
         proc.send_signal(signal.SIGTERM)
-        assert proc.wait(timeout=5) == 0
+        assert proc.wait(timeout=20) == 0
+        assert time.monotonic() - started >= 4.0, "gave up before five tries"
         assert "term" in _log(where)
+        failures = _failures(where)
+        assert len(failures) == 5, failures
+        assert all("Can't connect to local server" in line for line in failures), failures
+        assert PASSWORD not in (where / "stderr.log").read_text(encoding="utf-8")
+    finally:
+        proc.kill()
+
+
+@needs_bash
+@pytest.mark.parametrize("game", ("wow-wotlk", "wow-tortoise"))
+def test_a_count_that_fails_for_a_moment_keeps_the_hold(game: str, tmp_path: Path) -> None:
+    """Codex review: one failed query used to end the hold under a still-connected world.
+
+    Three failed counts in a row, then the database answers again with the world still
+    connected: the hold continues, and ends only when the world disconnects.
+    """
+    proc, where = _start(game, tmp_path)
+    try:
+        (where / "fail_next").write_text("3\n", encoding="utf-8")
+        proc.send_signal(signal.SIGTERM)
+        _until(lambda: len(_failures(where)) == 3, "the failures were not logged")
+        time.sleep(2.5)
+        assert "term" not in _log(where), "the hold ended on a transient failure"
+        assert proc.poll() is None
+        (where / "connections").write_text("0\n", encoding="utf-8")
+        _until(lambda: "term" in _log(where), "the database was never stopped")
+        assert proc.wait(timeout=10) == 0
+        assert len(_failures(where)) == 3
+        assert PASSWORD not in (where / "stderr.log").read_text(encoding="utf-8")
     finally:
         proc.kill()
 
@@ -254,9 +311,9 @@ def test_a_signal_before_the_server_started_still_stops_it(game: str, tmp_path: 
     """The early-signal line: TERM before `db=$!` exists must reach the server once it does.
 
     Without it `hold()` runs with no server to signal (the count fails -- nothing is up yet --
-    so it gives up at once), the server then starts, and nothing ever stops it: the container
-    is SIGKILLed at the end of its grace, which is the abrupt stop this whole change exists
-    to prevent.
+    so it gives up after its five tries), the server then starts, and nothing ever stops it:
+    the container is SIGKILLed at the end of its grace, which is the abrupt stop this whole
+    change exists to prevent.
     """
     (tmp_path / "unreachable").write_text("", encoding="utf-8")
     proc, where = _start(game, tmp_path, widen=True)
@@ -266,7 +323,7 @@ def test_a_signal_before_the_server_started_still_stops_it(game: str, tmp_path: 
         # Any exit status: the signal can reach the stub server before its own trap is set, and
         # then it dies of SIGTERM rather than exiting 0 -- a real entrypoint would too. What
         # matters is that the script is not left holding a running server.
-        proc.wait(timeout=10)
+        proc.wait(timeout=20)
         still = subprocess.run(
             ["pgrep", "-f", str(where / "bin" / "docker-entrypoint.sh")],
             capture_output=True,
