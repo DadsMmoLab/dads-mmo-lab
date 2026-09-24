@@ -3615,6 +3615,9 @@ class PressAnswer:
     token: int
     generation: int
     facts: reset_defaults.PressFacts
+    error: str = ""
+    """Why the files could not be read -- carried in the tagged answer, so a failure is
+    checked against the waiting press exactly as a success is (Codex, last pass)."""
 
 
 @dataclass(frozen=True)
@@ -3631,8 +3634,17 @@ class _PressAsking:
 def _read_press_facts(
     entry: CatalogEntry, server_dir: Path, files: tuple[str, ...], token: int, generation: int
 ) -> PressAnswer:
-    """A press's facts, as a job: a stat per file and a read of the base compose file."""
-    return PressAnswer(token, generation, reset_defaults.press_facts(entry, server_dir, files))
+    """A press's facts, as a job: a stat per file and a read of the base compose file.
+
+    A failure comes back INSIDE the answer, tagged with its press: the job
+    runner's failure callback is a bound slot with no way to say which press
+    failed, and an untagged failure let a stale press clear the waiting one.
+    """
+    try:
+        facts = reset_defaults.press_facts(entry, server_dir, files)
+    except Exception as exc:  # boundary: an unreadable server folder must not kill the UI
+        return PressAnswer(token, generation, reset_defaults.PressFacts(), error=str(exc))
+    return PressAnswer(token, generation, facts)
 
 
 def _undo_still_undoable(
@@ -3680,6 +3692,7 @@ TUNING_RESET_RUNNING = (
 )
 """The close guard's sentence while a reset or its undo runs (`busy_reason()`)."""
 
+TUNING_RESET_UNREADABLE = "FAILED: the settings files could not be read ({why})"
 TUNING_RESET_NOTHING_TO_UNDO = (
     "Nothing to undo: every file is already as the last reset found it, or was put back since."
 )
@@ -9161,6 +9174,10 @@ class ControllerView(QWidget):
             return
         self._press_asking = None
         self._set_reset_button()
+        if answer.error:
+            self.tuning_report.setPlainText(TUNING_RESET_UNREADABLE.format(why=answer.error))
+            self.action_failed.emit(answer.error)
+            return
         chosen, keys, modules = asking.files, asking.keys, asking.modules
         route = self.services.reset_settings
         if route is None or self._busy:
@@ -9179,9 +9196,14 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _press_facts_failed(self, exc: object) -> None:
-        self._press_asking = None
-        self._set_reset_button()
-        self.tuning_report.setPlainText(f"FAILED: the settings files could not be read ({exc})")
+        """Only a bug reaches here: `_read_press_facts` returns every failure in its answer.
+
+        It cannot say which press it belongs to, so it never touches the waiting
+        press (Codex, last pass: a stale press's failure cleared the current one
+        and re-armed the button mid-read); a reload frees the button.
+        """
+        logger.warning(f"a Reset to default press's facts job raised: {exc}")
+        self.tuning_report.setPlainText(TUNING_RESET_UNREADABLE.format(why=exc))
         self.action_failed.emit(str(exc))
 
     def _set_reset_button(self) -> None:

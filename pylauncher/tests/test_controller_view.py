@@ -14691,3 +14691,62 @@ def test_a_press_whose_tab_moved_on_is_dropped(
     assert asked == [] and not held, "an answer for an older press was acted on"
     done(answer)
     assert len(asked) == 1, "control: the current press's own answer asks"
+
+
+def test_an_older_press_failing_leaves_the_current_press_waiting(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex (last pass): A is made stale by a reload, B starts, then A's job fails. B must
+    still be the press waiting for its answer, with the button off -- and B's answer asks."""
+    _wotlk_server(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _reset_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    _land_undo_lookups(held)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    a_work, a_done, a_failed = held.pop()
+    view.reload_tuning()
+    _land_undo_lookups(held)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    b_work, b_done, _b_failed = held.pop()
+
+    a_failed(OSError(5, "Input/output error"))  # the job itself raised
+    assert view._press_asking is not None, "A's failure cleared B's press"
+    assert view.tuning_reset_button.isEnabled() is False, "pressable while B is still reading"
+
+    def unreadable(*args: object, **kwargs: object) -> reset_defaults.PressFacts:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(reset_defaults, "press_facts", unreadable)
+    a_done(a_work())  # the job caught it: a failure carried in A's own answer
+    monkeypatch.undo()
+    _reset_yes(monkeypatch, asked)
+    assert view._press_asking is not None and view.tuning_reset_button.isEnabled() is False
+
+    b_done(b_work())
+    assert len(asked) == 1, "B's own answer was dropped"
+
+
+def test_a_press_whose_files_cannot_be_read_says_so_and_frees_the_button(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    def unreadable(*args: object, **kwargs: object) -> reset_defaults.PressFacts:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(reset_defaults, "press_facts", unreadable)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert asked == [] and view._press_asking is None
+    assert view.tuning_reset_button.isEnabled() is True
+    assert "could not be read" in view.tuning_report.toPlainText() and failures
