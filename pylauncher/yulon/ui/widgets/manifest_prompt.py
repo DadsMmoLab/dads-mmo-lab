@@ -30,13 +30,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QLabel,
     QLineEdit,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -55,6 +58,13 @@ these values are written into already hold — `AuctionHouseBot.EnableSeller = 1
 in `mod_ahbot.conf` — and `check_answer()` accepts either spelling anyway, so
 the choice here is about what a worldserver reads, not about what passes.
 """
+
+
+_ROWS_MIN_HEIGHT = 120
+"""The shortest the question area may get: about four rows, so a squeezed dialog shows some."""
+
+_MIN_WIDTH = 480
+"""Wide enough that a question label wraps to two lines, not six."""
 
 
 RERUN_SETS_NOTE = (
@@ -179,15 +189,27 @@ class ManifestPromptDialog(QDialog):
             note = QLabel(text, self)
             note.setWordWrap(True)
             box.addWidget(note)
-        form = QFormLayout()
+        # The rows scroll (T104, ruling A of the T92 merge). Since T92 an install
+        # also runs configure-time steps, so accountwide's Install asks all 13 of
+        # its flags; laid straight into the dialog, 13 rows made it at least
+        # ~470 px tall with no way to be shorter, which does not fit the app's
+        # 960x640 minimum window once the notes and buttons are added.
+        rows = QWidget()
+        form = QFormLayout(rows)
+        form.setContentsMargins(0, 0, 0, 0)
         for prompt in self._prompts:
-            label = QLabel(prompt.question, self)
+            label = QLabel(prompt.question, rows)
             label.setWordWrap(True)
             self._questions.append(prompt.question)
-            control = self._control_for(prompt)
+            control = self._control_for(prompt, rows)
             self._controls[prompt.key] = control
             form.addRow(label, control)
-        box.addLayout(form)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(rows)
+        box.addWidget(scroll, 1)
 
         self._problem_label = QLabel("", self)
         self._problem_label.setWordWrap(True)
@@ -202,6 +224,20 @@ class ManifestPromptDialog(QDialog):
         for key, value in prefill.items():
             self.set_answer(key, value)
         self._recheck()
+        self._fit(scroll, rows, parent)
+
+    def _fit(self, scroll: QScrollArea, rows: QWidget, parent: QWidget | None) -> None:
+        """Open as tall as the rows need, but never taller than the window it belongs to.
+
+        `QScrollArea`'s own size hint stops well short of 13 rows, so without this
+        a dialog that has room would open with a scrollbar it does not need.
+        """
+        scroll.setMinimumHeight(min(rows.sizeHint().height(), _ROWS_MIN_HEIGHT))
+        wanted = self.sizeHint().height() - scroll.sizeHint().height() + rows.sizeHint().height()
+        window = parent.window() if parent is not None else None
+        screen = self.screen().availableGeometry().height() if self.screen() else wanted
+        cap = min(window.height(), screen) if window is not None else screen
+        self.resize(max(self.sizeHint().width(), _MIN_WIDTH), min(wanted, cap))
 
     # -- what the tests and the caller ask ---------------------------------
 
@@ -245,9 +281,9 @@ class ManifestPromptDialog(QDialog):
 
     # -- internals ---------------------------------------------------------
 
-    def _control_for(self, prompt: Prompt) -> QWidget:
+    def _control_for(self, prompt: Prompt, owner: QWidget) -> QWidget:
         if prompt.kind == "choice":
-            combo = QComboBox(self)
+            combo = QComboBox(owner)
             for choice in prompt.choices:
                 combo.addItem(choice, choice)
             combo.currentIndexChanged.connect(
@@ -256,7 +292,7 @@ class ManifestPromptDialog(QDialog):
             self._answers[prompt.key] = str(combo.currentData() or "")
             return combo
         if prompt.kind == "bool":
-            combo = QComboBox(self)
+            combo = QComboBox(owner)
             for text, value in _BOOL_CHOICES:
                 combo.addItem(text, value)
             combo.currentIndexChanged.connect(
@@ -264,7 +300,7 @@ class ManifestPromptDialog(QDialog):
             )
             self._answers[prompt.key] = str(combo.currentData() or "")
             return combo
-        edit = QLineEdit(self)
+        edit = QLineEdit(owner)
         # No `QIntValidator`: a validator that silently drops keystrokes leaves
         # a person typing into a box that does nothing and says nothing. The
         # refusal is shown as a sentence instead, under the form.

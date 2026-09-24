@@ -221,3 +221,48 @@ def test_updating_a_mod_that_does_not_compound_gets_no_such_warning(qapp: object
         None, manifest, manifest.prompts, again=True  # type: ignore[attr-defined]
     )
     assert COMPOUNDS_NOTE not in dialog.notes()
+
+
+def test_accountwides_thirteen_questions_scroll_rather_than_clip_at_the_minimum_window(
+    qapp: object,
+) -> None:
+    """Ruling A of the T92 merge: accountwide's Install asks all 13 flags, in ONE dialog.
+
+    At the app's minimum window (960x640) the dialog must stay usable: the rows
+    scroll inside it and OK stays on screen, rather than the dialog growing past
+    the window or clipping its last rows.
+
+    Mutation: put the form back straight into the dialog's layout and the
+    dialog can no longer be shorter than its thirteen rows.
+    """
+    from PySide6.QtWidgets import QDialogButtonBox, QScrollArea
+    from PySide6.QtWidgets import QWidget as _QWidget
+
+    from main import MINIMUM_WINDOW_SIZE
+    from yulon.apply import required_prompts
+
+    manifest = wotlk_modules.store().load("ale", "accountwide")
+    prompts = required_prompts(manifest, "install")
+    assert len(prompts) == 13
+    window = _QWidget()
+    window.resize(*MINIMUM_WINDOW_SIZE)
+    dialog = ManifestPromptDialog(window, manifest, prompts, again=True)
+
+    (scroll,) = dialog.findChildren(QScrollArea)
+    inner = scroll.widget()
+    assert inner is not None
+    assert len([c for c in dialog._controls.values() if inner.isAncestorOf(c)]) == 13
+
+    dialog.show()
+    try:
+        assert dialog.height() <= MINIMUM_WINDOW_SIZE[1], dialog.height()
+        dialog.resize(dialog.width(), 360)
+        qapp.processEvents()  # type: ignore[attr-defined]
+        assert dialog.height() == 360, "the dialog can be shorter than its rows"
+        assert scroll.verticalScrollBar().maximum() > 0, "the rows scroll"
+        buttons = dialog.findChild(QDialogButtonBox)
+        assert buttons is not None
+        assert buttons.geometry().bottom() <= dialog.height(), "OK is still inside the dialog"
+    finally:
+        dialog.close()
+        window.deleteLater()

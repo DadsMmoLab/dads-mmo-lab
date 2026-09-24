@@ -23,6 +23,7 @@ from typing import Any, NoReturn
 import pytest
 
 from yulon import apply as apply_module
+from yulon import module_answers
 from yulon.apply import Applier, ApplyError, DockerSql, _set_conf_key
 from yulon.catalog import composegen, native
 from yulon.git import CloneSpec, RunnerGit, git_available
@@ -351,9 +352,15 @@ def test_ale_install_deploys_runs_its_first_configure_and_removes(tmp_path: Path
     assert report.skipped == ()
     assert any(step.startswith("patch ") for step in report.done)
 
-    # configure re-applies: default when no value is given; an explicit value wins.
+    # configure re-applies: an explicit value wins, and is remembered (T104).
     applier.configure(m, {"duration": "45"})
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 45\n"
+    # No value given: the answer this install remembers beats the default --
+    # defaults < remembered < caller, the lead's ruling on the T92/T104 merge.
+    applier.configure(m)
+    assert deployed.read_text(encoding="utf-8") == "local DURATION = 45\n"
+    # An install with no remembered answer (one made before T104) gets the default.
+    (tmp_path / module_answers.ANSWERS_FILE).unlink()
     applier.configure(m)
     assert deployed.read_text(encoding="utf-8") == "local DURATION = 20\n"
 
