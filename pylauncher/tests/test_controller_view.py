@@ -14363,3 +14363,58 @@ def test_a_saves_backup_is_not_offered_as_a_reset_to_undo(
     world.write_bytes(b"Key = 3\n")
     view = _reset_view(ps, tmp_path)
     assert view.tuning_reset_undo_action.isEnabled() is False
+
+
+def test_an_undone_reset_stays_undone_after_a_save_into_the_same_conf(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1 (Important): the Undo must not re-arm and overwrite later tuning."""
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+    assert view.tuning_reset_undo_action.isEnabled() is False
+    tuning.write(tmp_path / TUNING_CORE_FILES[0], {"Creatures.CustomIDs": "90001"})
+
+    view.reload_tuning()
+
+    assert view.tuning_reset_undo_action.isEnabled() is False, "the undone reset re-armed"
+    again = _reset_view(ps, tmp_path)
+    assert again.tuning_reset_undo_action.isEnabled() is False, "re-armed after a restart"
+
+
+def test_a_file_put_back_by_hand_greys_the_sessions_undo(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1: the session's record gets the disk path's "already undone" test."""
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    assert view.tuning_reset_undo_action.isEnabled() is True
+    for item in view._last_reset:
+        assert item.backup is not None
+        tuning.restore(item.backup, tmp_path / item.file)
+
+    view.reload_tuning()
+
+    assert view.tuning_reset_undo_action.isEnabled() is False
+
+
+def test_a_reset_that_raised_after_writing_rereads_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix round 1: a failure after some writes must not leave stale cards or a stale Undo."""
+    _wotlk_server(tmp_path)
+    real = reset_defaults.route_for_app(WOTLK, tmp_path, seams=RESET_QUIET)
+
+    def route(files: Sequence[str], keys: Any) -> reset_defaults.ResetReport:
+        real(files, keys)
+        raise RuntimeError("a bug after the writes")
+
+    view = _reset_view(ps, tmp_path, route)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert view.tuning_reset_undo_action.isEnabled() is True

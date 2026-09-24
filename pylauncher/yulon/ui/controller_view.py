@@ -3621,7 +3621,8 @@ TUNING_RESET_RUNNING = (
 
 TUNING_RESET_UNDO_CONFIRM = (
     "Put back the files the last reset replaced?\n\n{files}\n\nEach one is copied back from "
-    "the backup named beside it. Anything you changed in them since the reset is replaced."
+    "the backup named beside it. Anything you changed in them since the reset is replaced, and "
+    "kept first: each file as it is now is backed up beside it (a .undo.bak)."
 )
 
 MODULE_SQL_BUTTON_LABEL = "Apply module SQL"
@@ -9075,6 +9076,9 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self.tuning_report.setPlainText(f"FAILED: {exc}")
         self.action_failed.emit(str(exc))
+        # A bug may have struck after some writes: the cards and the Undo's
+        # state are read again from what is on disk now.
+        self.reload_tuning()
 
     def _reset_undo_items(self) -> tuple[reset_defaults.FileResult, ...]:
         """What "Undo the last reset…" would put back, or `()` when there is nothing.
@@ -9083,10 +9087,14 @@ class ControllerView(QWidget):
         was closed since, or crashed half-way through a press -- the last press
         read off the backups on disk (`reset_defaults.last_reset_on_disk`),
         because the raw editor lists the WotLK confs read-only and its Revert
-        cannot reach their backups, so nothing else on this tab would.
+        cannot reach their backups, so nothing else on this tab would. Both go
+        through the one "still undoable" rule, so a file put back by hand or an
+        undone reset later tuned again is never offered (fix round 1).
         """
         if self._last_reset:
-            return self._last_reset
+            return reset_defaults.still_undoable(
+                self.services.controller.server_dir, self._last_reset
+            )
         return reset_defaults.last_reset_on_disk(self.entry, self.services.controller.server_dir)
 
     @Slot()

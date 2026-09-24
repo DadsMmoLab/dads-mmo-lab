@@ -726,8 +726,8 @@ def test_no_password_reaches_a_report_or_a_log_line(
 
 
 def test_the_question_names_the_files_the_backup_the_undo_and_the_restart() -> None:
-    one = reset_defaults.question(["etc/mangosd.conf"], [])
-    assert "mangosd.conf" in one and "backup" in one
+    one = reset_defaults.question(["env/dist/etc/worldserver.conf"], [])
+    assert "worldserver.conf" in one and "backup" in one
     assert "Undo the last reset" in one and "restarted" in one
     assert "installed modules" not in one and "RECREATED" not in one
     many = reset_defaults.question(["env/dist/etc/worldserver.conf", OVERRIDE], ["NPC Beastmaster"])
@@ -1159,3 +1159,91 @@ def test_a_save_after_the_reset_does_not_hide_the_reset_from_its_undo(tmp_path: 
     tuning.write(world, {"Rate.XP.Kill": "3"})
 
     assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
+
+
+# -- fix round 1: an undo backs up first, and an undone reset stays undone ---------
+
+
+def test_the_questions_last_word_is_the_job_the_banner_will_offer() -> None:
+    """A CMaNGOS `etc/` file and the override owe a recreate: the question must not say restart."""
+    for files in (["etc/mangosd.conf"], ["env/dist/etc/worldserver.conf", OVERRIDE]):
+        said = reset_defaults.question(files, [])
+        assert "until its containers are recreated" in said and "restarted" not in said, files
+    said = reset_defaults.question(["env/dist/etc/authserver.conf"], [])
+    assert "until it is restarted" in said and "recreated" not in said
+
+
+def test_an_undo_backs_each_file_up_first_so_revert_brings_back_what_it_replaced(
+    tmp_path: Path,
+) -> None:
+    server, _, installed, tuned = _tuned_tbc(tmp_path)
+    report = reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+    undone = reset_defaults.undo(server, report.written)
+
+    assert _bytes(server, tuned) == tuned
+    for item in undone.results:
+        newest = tuning.backups_of(server / item.file)[-1]
+        assert item.before == newest and newest.name.endswith(".undo.bak")
+        assert newest.read_bytes() == installed[item.file]
+        assert newest.name in item.line()
+        tuning.restore(newest, server / item.file)
+    assert _bytes(server, installed) == installed, "Revert did not bring back what Undo replaced"
+
+
+def test_an_undone_reset_edited_afterwards_is_not_offered_again(tmp_path: Path) -> None:
+    """The review's case: Undo, then a Tuning save into the conf; the old reset must stay undone."""
+    _dist_install(tmp_path)
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES)
+    reset_defaults.undo(tmp_path, report.written)
+    tuning.write(tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0], {"Rate.XP.Kill": "3"})
+
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == ()
+    assert reset_defaults.still_undoable(tmp_path, report.written) == ()
+
+
+def test_reverting_the_undo_offers_the_undo_again(tmp_path: Path) -> None:
+    """The file holds what the undo replaced again: the reset stands, so it is undoable again."""
+    _dist_install(tmp_path)
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES[:1])
+    undone = reset_defaults.undo(tmp_path, report.written)
+    before = undone.results[0].before
+    assert before is not None
+    tuning.restore(before, tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0])
+
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
+
+
+def test_an_undo_that_cannot_back_up_first_leaves_the_file_and_stays_offered(
+    tmp_path: Path,
+) -> None:
+    _dist_install(tmp_path)
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES[:1])
+    world = tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]
+    reset_text = world.read_bytes()
+
+    def backup_fails(path: Path) -> Path:
+        raise OSError(28, "No space left on device")
+
+    undone = reset_defaults.undo(tmp_path, report.written, backup=backup_fails)
+
+    assert [r.outcome for r in undone.results] == ["refused"]
+    assert "No space left on device" in "\n".join(undone.lines())
+    assert world.read_bytes() == reset_text
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
+
+
+def test_an_undo_whose_copy_failed_stays_offered(tmp_path: Path) -> None:
+    """Its backup was taken, then the copy failed: the file still holds the reset's text."""
+    _dist_install(tmp_path)
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES[:1])
+
+    def restore_fails(backup: Path, target: Path) -> None:
+        raise OSError(13, "Permission denied")
+
+    undone = reset_defaults.undo(tmp_path, report.written, restore=restore_fails)
+
+    assert undone.refused
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
+    assert reset_defaults.still_undoable(tmp_path, undone.results) == undone.results

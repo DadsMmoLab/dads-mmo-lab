@@ -143,6 +143,21 @@ def reset_backup(path: Path, *, now: datetime | None = None) -> Path:
     return tuning.backup(path, now=now, tag=RESET_TAG)
 
 
+UNDO_TAG = "undo"
+"""What an undo's own backups carry: `<file>.<stamp>.undo.bak`, the file as the undo found it."""
+
+
+def undo_backup(path: Path, *, now: datetime | None = None) -> Path:
+    """`tuning.backup()`, tagged as an undo's: the file as it was before the undo replaced it.
+
+    Two jobs. It makes the undo itself Revert-able -- anything tuned after the
+    reset is kept beside the file, not lost -- and it is the on-disk record that
+    this reset WAS undone, which `still_undoable()` reads so an undone reset is
+    never offered again after a later save changes the file.
+    """
+    return tuning.backup(path, now=now, tag=UNDO_TAG)
+
+
 RESTORE_TEMP_SUFFIX = ".yulon-restore-tmp"
 """What a file being put back from its backup is called until the rename lands."""
 
@@ -442,6 +457,7 @@ ROLLBACK_FAILED = (
     '({exc}). The file as it was is {backup}, beside it, and "Undo the last reset" tries again'
 )
 UNDO_FAILED = "copying {backup} back over it failed ({exc})"
+UNDO_UNSAFE = "it could not be backed up first ({exc}), so it was left as it is"
 
 
 @dataclass(frozen=True)
@@ -452,6 +468,8 @@ class FileResult:
     outcome: Outcome
     backup: Path | None = None
     reason: str = ""
+    before: Path | None = None
+    """An undo's own backup of the file as it found it (`undo_backup()`), for a "restored"."""
 
     def line(self) -> str:
         name = label(self.file)
@@ -469,7 +487,12 @@ class FileResult:
             "refused": f"{name}: NOT {'put back' if self.backup else 'reset'}: {self.reason}.",
             "held": f"{name}: not reset. A reset is all or nothing, and another file could not "
             "be made.",
-            "restored": f"{name}: put back from {kept}.",
+            "restored": f"{name}: put back from {kept}."
+            + (
+                f" The file as it was is kept beside it as {self.before.name}."
+                if self.before is not None
+                else ""
+            ),
         }[self.outcome]
 
 
@@ -771,15 +794,25 @@ def undo(
     written: Sequence[FileResult],
     *,
     restore: Callable[[Path, Path], None] = restore,
+    backup: Callable[[Path], Path] = undo_backup,
 ) -> ResetReport:
     """Copy back, from the backups a reset made, every file that reset wrote.
 
-    A copy (`restore()`, atomic), so the backup survives and a second undo
-    still has something to restore, and a copy that fails leaves the file whole.
+    Each file is backed up FIRST (`undo_backup()`), so whatever was tuned into
+    it after the reset is kept beside it and Revert brings it back; a file that
+    cannot be backed up is left as it is. Then a copy (`restore()`, atomic), so
+    the reset's backup survives and a copy that fails leaves the file whole.
     """
     results: list[FileResult] = []
     for item in written:
         if item.backup is None:
+            continue
+        try:
+            before = backup(server_dir / item.file)
+        except (OSError, tuning.TuningError) as exc:
+            results.append(
+                FileResult(item.file, "refused", item.backup, UNDO_UNSAFE.format(exc=exc))
+            )
             continue
         try:
             restore(item.backup, server_dir / item.file)
@@ -793,8 +826,8 @@ def undo(
                 )
             )
         else:
-            logger.info(f"put {item.file} back from {item.backup.name}")
-            results.append(FileResult(item.file, "restored", item.backup))
+            logger.info(f"put {item.file} back from {item.backup.name}; kept {before.name}")
+            results.append(FileResult(item.file, "restored", item.backup, before=before))
     return ResetReport(tuple(results), undo=True)
 
 
@@ -810,12 +843,12 @@ _STAMP = "%Y%m%d-%H%M%S-%f"
 """`tuning.backup()`'s own stamp."""
 
 
-def _stamp_of(backup: Path, path: Path) -> datetime | None:
-    """When `reset_backup()` took `backup` of `path`, from its name; `None` if it did not.
+def _stamp_of(backup: Path, path: Path, tag: str = RESET_TAG) -> datetime | None:
+    """When `backup` of `path` was taken with `tag`, from its name; `None` if it was not.
 
     A save's backup (untagged) and a person's own `.bak` both answer `None`.
     """
-    head, tail = f"{path.name}.", f".{RESET_TAG}.bak"
+    head, tail = f"{path.name}.", f".{tag}.bak"
     name = backup.name
     if not (name.startswith(head) and name.endswith(tail)):
         return None
@@ -823,6 +856,51 @@ def _stamp_of(backup: Path, path: Path) -> datetime | None:
         return datetime.strptime(name[len(head) : -len(tail)], _STAMP)
     except ValueError:
         return None
+
+
+def _newest(path: Path, tag: str) -> tuple[datetime, Path] | None:
+    """The newest backup of `path` taken with `tag`, and its stamp."""
+    for backup in reversed(tuning.backups_of(path)):
+        stamp = _stamp_of(backup, path, tag)
+        if stamp is not None:
+            return stamp, backup
+    return None
+
+
+def _undoable(server_dir: Path, item: FileResult) -> bool:
+    """Whether an Undo of `item` would still put back the reset it records.
+
+    Not when the file already equals the reset's backup (undone, or put back by
+    hand). Not when an undo backup newer than the reset's exists -- the reset
+    was undone, and a later save into the file must not re-arm it (fix round 1:
+    the undo would overwrite that tuning) -- UNLESS the file equals that undo
+    backup, which means the undo never landed (its copy failed) or was itself
+    reverted: either way the reset's text stands again.
+    """
+    if item.backup is None:
+        return False
+    path = server_dir / item.file
+    try:
+        current = path.read_bytes()
+        if current == item.backup.read_bytes():
+            return False
+    except OSError:
+        # A file gone or unreadable: a reset never deletes one, so this is
+        # not a state an undo of it can put right.
+        return False
+    reset_at = _stamp_of(item.backup, path)
+    undone = _newest(path, UNDO_TAG)
+    if reset_at is None or undone is None or undone[0] < reset_at:
+        return True
+    try:
+        return current == undone[1].read_bytes()
+    except OSError:
+        return False
+
+
+def still_undoable(server_dir: Path, items: Sequence[FileResult]) -> tuple[FileResult, ...]:
+    """The items an Undo would still change: `_undoable()`'s rule, for session and disk alike."""
+    return tuple(item for item in items if _undoable(server_dir, item))
 
 
 def last_reset_on_disk(entry: CatalogEntry, server_dir: Path) -> tuple[FileResult, ...]:
@@ -835,36 +913,26 @@ def last_reset_on_disk(entry: CatalogEntry, server_dir: Path) -> tuple[FileResul
     are the record that survives. For each of this game's own files, its
     newest backup a reset took (`reset_backup()`'s tag; a Tuning save's
     backup is not one); the ones stamped within `ONE_PRESS` of the newest of
-    them are one press; of those, each whose file still differs from it is
-    what an Undo would put back. A file already equal to its backup has
-    nothing to undo, so an undone reset is not offered again.
+    them are one press; of those, each `still_undoable()` is what an Undo
+    would put back -- so an undone reset is not offered again, even after a
+    later save changed the file.
 
     Reads only; `()` when there is nothing to put back.
     """
     newest: dict[str, tuple[datetime, Path]] = {}
     for file in core_files(entry):
-        path = server_dir / file
-        for backup in reversed(tuning.backups_of(path)):
-            stamp = _stamp_of(backup, path)
-            if stamp is not None:
-                newest[file] = (stamp, backup)
-                break
+        found = _newest(server_dir / file, RESET_TAG)
+        if found is not None:
+            newest[file] = found
     if not newest:
         return ()
     latest = max(stamp for stamp, _ in newest.values())
-    found: list[FileResult] = []
-    for file, (stamp, backup) in newest.items():
-        if latest - stamp > ONE_PRESS:
-            continue
-        try:
-            if backup.read_bytes() == (server_dir / file).read_bytes():
-                continue
-        except OSError:
-            # A file gone or unreadable: a reset never deletes one, so this is
-            # not a state an undo of it can put right.
-            continue
-        found.append(FileResult(file, "reset", backup))
-    return tuple(found)
+    press = [
+        FileResult(file, "reset", backup)
+        for file, (stamp, backup) in newest.items()
+        if latest - stamp <= ONE_PRESS
+    ]
+    return still_undoable(server_dir, press)
 
 
 def question(files: Sequence[str], modules: Sequence[str]) -> str:
@@ -895,10 +963,18 @@ def question(files: Sequence[str], modules: Sequence[str]) -> str:
         'A backup of each file is made first, and "Undo the last reset" in this menu puts '
         "them back."
     )
-    parts.append(
-        "If the server is running, it keeps its current settings until it is restarted; this "
-        "tab offers the restart when the reset is done."
-    )
+    # The job the banner will offer (`apply_rule`), never a flat "restart":
+    # the override and CMaNGOS `etc/` owe a recreate (fix round 1).
+    if any(apply_rule(file) == "recreate" for file in files):
+        parts.append(
+            "If the server is running, it keeps its current settings until its containers are "
+            "recreated; this tab offers the recreate when the reset is done."
+        )
+    else:
+        parts.append(
+            "If the server is running, it keeps its current settings until it is restarted; this "
+            "tab offers the restart when the reset is done."
+        )
     return "\n\n".join(parts)
 
 
