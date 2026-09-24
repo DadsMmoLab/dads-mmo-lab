@@ -742,8 +742,8 @@ _ANSI = re.compile(r"\[[0-9;?]*[ -/]*[@-~]")
 # How long a partial line must sit unchanged before it is looked at.
 _PROMPT_QUIET_SECONDS = 0.3
 
-# Yielded by `interact()` when its reader was still running after the bounded
-# join, so a cut-off log says it is cut off instead of just stopping.
+# Yielded by `interact()` when its reader's end-of-stream sentinel was never
+# consumed, so a cut-off log says it is cut off instead of just stopping.
 _OUTPUT_MAY_BE_CUT_OFF = "[Yu'lon] The rest of this output may be cut off: it was still arriving."
 
 
@@ -1091,21 +1091,29 @@ def interact(
                 except queue.Empty:
                     break
                 if data is None:
+                    eof = True
                     break
                 buffer += data.decode("utf-8", errors="replace")
             yield from _complete_lines()
             if buffer:
                 yield buffer
                 buffer = ""
-            if reader.is_alive():
-                # The join gave up with the reader still reading: an orphan
-                # holds the terminal, or the reader was starved for the whole
-                # bound. Anything it queues from now on is never read. That
-                # cannot be closed without an unbounded wait, so at least it
-                # is said, in the log and in the output (T108 review).
+            if not eof:
+                # The end-of-stream sentinel was never consumed, by the loop
+                # or by the drain. Only the sentinel proves the reader handed
+                # over everything. It may still be reading (an orphan holds the
+                # terminal, or it was starved for the whole join), or it may
+                # have queued its tail and the sentinel just after the drain's
+                # `qsize()` snapshot. Either way, that output is never read.
+                # Closing the gap would take an unbounded wait, so it is said
+                # instead, in the log and in the output. It is not keyed on
+                # `reader.is_alive()`: a reader that finished after the
+                # snapshot is not alive, and its tail was still lost (T108
+                # review, final Codex pass).
                 logger.warning(
-                    f"the reader of {command[0]} was still running after "
-                    f"{_SHUTDOWN_TIMEOUT_SECONDS}s; its last output may be missing"
+                    f"the reader of {command[0]} had not reached end of stream "
+                    f"{_SHUTDOWN_TIMEOUT_SECONDS}s after the child exited; "
+                    "its last output may be missing"
                 )
                 yield _OUTPUT_MAY_BE_CUT_OFF
             proc.wait()

@@ -309,6 +309,7 @@ def test_a_child_reading_dev_tty_is_answered_only_with_a_terminal() -> None:
     # output (T108; see the last-words test below).
     with_tty = run(terminal=True)
     assert any("GOT:hunter2" in line for line in with_tty), with_tty
+    assert runner._OUTPUT_MAY_BE_CUT_OFF not in with_tty, with_tty
     with_pipes = run(terminal=False)
     assert not any(
         "GOT:hunter2" in line for line in with_pipes
@@ -755,6 +756,33 @@ def test_the_last_words_survive_a_reader_that_delivers_them_after_the_child_is_g
         "so this run did not produce the ordering it tests"
     )
     assert "LAST WORDS" in lines, lines
+    # The reader finished inside the join, so its sentinel was drained and
+    # nothing was cut off: the marker must not appear on this path.
+    assert runner._OUTPUT_MAY_BE_CUT_OFF not in lines, lines
+
+
+@pytest.mark.parametrize(
+    "terminal", [False, pytest.param(True, marks=needs_tty)], ids=["pipes", "pty"]
+)
+def test_a_child_that_ends_normally_gets_no_cut_off_marker(terminal: bool) -> None:
+    """The cut-off line is for output that was really lost, never for an ordinary run.
+
+    It is keyed on the end-of-stream sentinel never being consumed. On an
+    ordinary run the loop or the drain always consumes it, over pipes and over
+    a pty (where the end of stream is EIO, not an empty read).
+    """
+    code = "import sys\nsys.stdout.write('one\\ntwo\\n')\nsys.stdout.flush()\n"
+    lines = list(
+        runner.interact(
+            [sys.executable, "-c", code],
+            respond=lambda _line: None,
+            terminal=terminal,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
+        )
+    )
+    assert "one" in lines and "two" in lines, lines
+    assert runner._OUTPUT_MAY_BE_CUT_OFF not in lines, lines
 
 
 def test_output_the_reader_still_holds_after_the_join_is_announced_not_lost(
@@ -798,6 +826,70 @@ def test_output_the_reader_still_holds_after_the_join_is_announced_not_lost(
     finally:
         release.set()
     assert runner._OUTPUT_MAY_BE_CUT_OFF in lines, lines
+
+
+def test_a_reader_that_finishes_between_the_drain_and_the_check_is_never_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T108, final Codex pass: only the end-of-stream sentinel proves the reader delivered all.
+
+    The interleaving: the join returns with the reader still alive, the drain
+    takes its `qsize()` snapshot, and only THEN does the reader queue its tail
+    and the sentinel and exit. The drain never sees the tail. A marker keyed on
+    `reader.is_alive()` then saw a finished reader and said nothing, so the
+    tail was lost without a word. The marker is now keyed on the fact that
+    matters: the sentinel was never consumed.
+
+    Forced every run: the reader is held on the tail, and the snapshot releases
+    it and waits until the reader has queued the sentinel and exited before
+    returning the count it took. Either outcome is acceptable, the tail or the
+    marker. Silence is the only failure.
+    """
+    import queue as real_queue
+
+    monkeypatch.setattr(runner, "_SHUTDOWN_TIMEOUT_SECONDS", 0.3)
+    release = threading.Event()
+    sentinel_put = threading.Event()
+    readers: list[threading.Thread] = []
+    real_read = runner.os.read
+
+    def read(fd: int, size: int) -> bytes:
+        data = real_read(fd, size)
+        if b"LAST WORDS" in data:
+            release.wait(HANG_BOUND)
+        return data
+
+    class GatedQueue(real_queue.Queue):  # type: ignore[type-arg]
+        def put(self, item: object, block: bool = True, timeout: float | None = None) -> None:
+            super().put(item, block, timeout)
+            if item is None:
+                readers.append(threading.current_thread())
+                sentinel_put.set()
+
+        def qsize(self) -> int:
+            taken = super().qsize()
+            release.set()
+            if sentinel_put.wait(HANG_BOUND):
+                readers[0].join(HANG_BOUND)
+            return taken
+
+    fake = type("QueueModule", (), {"Queue": GatedQueue, "Empty": real_queue.Empty})
+    monkeypatch.setattr(runner, "queue", fake)
+    monkeypatch.setattr(runner.os, "read", read)
+    code = "import sys\nsys.stdout.write('LAST WORDS\\n')\nsys.stdout.flush()\n"
+    try:
+        lines = list(
+            runner.interact(
+                [sys.executable, "-c", code],
+                respond=lambda _line: None,
+                quiet_seconds=0.15,
+                cancel=_expiring_cancel(),
+            )
+        )
+    finally:
+        release.set()
+    assert readers and not readers[0].is_alive(), "the interleaving was not produced"
+    assert "LAST WORDS" in lines or runner._OUTPUT_MAY_BE_CUT_OFF in lines, lines
 
 
 def test_the_drain_after_the_join_is_bounded_even_if_the_queue_never_empties(
