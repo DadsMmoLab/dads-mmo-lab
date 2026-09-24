@@ -304,7 +304,11 @@ def test_a_child_reading_dev_tty_is_answered_only_with_a_terminal() -> None:
             )
         )
 
-    assert any("GOT:hunter2" in line for line in run(terminal=True))
+    # The lines are in the message: under load this once failed as a bare
+    # `assert False`, and the lines are what shows it lost the child's last
+    # output (T108; see the last-words test below).
+    with_tty = run(terminal=True)
+    assert any("GOT:hunter2" in line for line in with_tty), with_tty
     with_pipes = run(terminal=False)
     assert not any(
         "GOT:hunter2" in line for line in with_pipes
@@ -686,6 +690,71 @@ def test_the_last_line_survives_a_child_that_exits_without_a_newline() -> None:
         )
     )
     assert any("FATAL: could not reach the database" in line for line in lines), lines
+
+
+@pytest.mark.parametrize(
+    "terminal", [False, pytest.param(True, marks=needs_tty)], ids=["pipes", "pty"]
+)
+def test_the_last_words_survive_a_reader_that_delivers_them_after_the_child_is_gone(
+    monkeypatch: pytest.MonkeyPatch, terminal: bool
+) -> None:
+    """T108: a child's last output must not depend on which thread the scheduler runs first.
+
+    `interact()` reads on a thread and consumes on the caller's. When the
+    consuming side times out and finds the child already gone, it stops
+    reading, which it must do because an orphan holding the terminal can keep
+    EOF away for a minute. But the reader can hold the child's last output
+    without having queued it yet: it is already out of the pipe, or still in
+    the kernel buffer waiting for the reader thread to be scheduled. Until T108
+    anything the reader queued after that point was never yielded. Under load
+    this is what failed
+    `test_a_child_reading_dev_tty_is_answered_only_with_a_terminal`: the child
+    answered `GOT:hunter2` and exited, the 0.2 s quiet tick came round before
+    the reader queued the line, and the line was lost. Measured on the laptop
+    at loadavg ~5: 1 run in 100, with the run ending through the "child
+    exited" branch and the cancel not set.
+
+    This test does not rely on getting that timing by chance. It makes the
+    timing happen every run: the reader is held on the chunk holding the last
+    words until `interact()` has seen, through `poll()`, that the child is
+    gone. That is the ordering load produced, made certain.
+    """
+    exit_seen = threading.Event()
+    real_poll = subprocess.Popen.poll
+
+    def poll(self: subprocess.Popen[bytes]) -> int | None:
+        code = real_poll(self)
+        if code is not None:
+            exit_seen.set()
+        return code
+
+    held: list[bool] = []
+    real_read = runner.os.read
+
+    def read(fd: int, size: int) -> bytes:
+        data = real_read(fd, size)
+        if b"LAST WORDS" in data:
+            # Returns True once `interact()` has seen the child gone.
+            held.append(exit_seen.wait(HANG_BOUND))
+        return data
+
+    monkeypatch.setattr(subprocess.Popen, "poll", poll)
+    monkeypatch.setattr(runner.os, "read", read)
+    code = "import sys\nsys.stdout.write('LAST WORDS\\n')\nsys.stdout.flush()\n"
+    lines = list(
+        runner.interact(
+            [sys.executable, "-c", code],
+            respond=lambda _line: None,
+            terminal=terminal,
+            quiet_seconds=0.15,
+            cancel=_expiring_cancel(),
+        )
+    )
+    assert held == [True], (
+        f"the reader was not held until the child was seen gone ({held}), "
+        "so this run did not produce the ordering it tests"
+    )
+    assert "LAST WORDS" in lines, lines
 
 
 def test_the_docker_group_question_reaches_a_real_dialog_unmasked(qapp: object) -> None:

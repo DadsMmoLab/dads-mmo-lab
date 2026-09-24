@@ -411,8 +411,43 @@ def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(shape: str) -> N
     assert elapsed < 3.0, f"the {shape} shape ran {elapsed:.1f}s against a 2.0s deadline"
 
 
-def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
-    """The bound must not truncate or delay an ordinary answer."""
+def test_a_server_that_answers_normally_is_read_whole_and_promptly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound must not truncate or delay an ordinary answer.
+
+    "Delay" means the answer waited on the deadline. That has one visible
+    cause: the `_Deadline` watchdog, armed with the same `deadline`, fires. So
+    the test asserts the cause and uses no stopwatch. The watchdog was armed
+    with exactly the deadline, and it never fired. Any wait of a full deadline
+    while the watchdog is armed makes it fire, however loaded the box is. A
+    loaded box cannot make it fire unless the fetch really took the whole
+    deadline, and then the fetch raises anyway.
+
+    Until T108 this asserted `elapsed < 5.0`. That bound had no name, and it
+    measured the scheduler as well as the fetch. It is the same kind of bound
+    as the trickle test's (T105), and it had not flaked yet only because it
+    had 5 s of slack.
+    """
+    deadline = 10.0
+    armed: list[float | None] = []
+    fired: list[bool] = []
+    real_enter = update._Deadline.__enter__
+    real_abort = update._Deadline._abort
+
+    def enter(self: update._Deadline) -> update._Deadline:
+        entered = real_enter(self)
+        # None when the Timer was not actually started: "never fired" would
+        # then prove nothing.
+        armed.append(self._timer.interval if self._timer.is_alive() else None)
+        return entered
+
+    def abort(self: update._Deadline) -> None:
+        fired.append(True)
+        real_abort(self)
+
+    monkeypatch.setattr(update._Deadline, "__enter__", enter)
+    monkeypatch.setattr(update._Deadline, "_abort", abort)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -450,9 +485,7 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
-        started = time.monotonic()
-        answer = update._urllib_fetch(f"http://127.0.0.1:{port}/feed", None, deadline=10.0)
-        elapsed = time.monotonic() - started
+        answer = update._urllib_fetch(f"http://127.0.0.1:{port}/feed", None, deadline=deadline)
     finally:
         stop.set()
         listener.close()
@@ -464,7 +497,8 @@ def test_a_server_that_answers_normally_is_read_whole_and_promptly() -> None:
     assert answer.status == 200
     assert answer.text == FEED
     assert answer.etag == 'W/"one"'
-    assert elapsed < 5.0, "an ordinary answer waited on the deadline"
+    assert armed == [deadline], f"the watchdog was not armed with the deadline: {armed}"
+    assert fired == [], "an ordinary answer waited on the deadline: the watchdog fired"
     # The watchdog is cancelled on the normal path: no Timer is left ticking,
     # and removing that `cancel()` used to fail nothing at all. Counted by
     # NAME rather than with `active_count()`, which is process-global and saw

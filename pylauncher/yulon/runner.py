@@ -1003,6 +1003,15 @@ def interact(
             return False
         return _write((reply + "\n").encode("utf-8"))
 
+    def _complete_lines() -> Iterator[str]:
+        """Yield every complete line in `buffer`, and let `respond()` see each one."""
+        nonlocal buffer
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.rstrip("\r")
+            yield line
+            _answer(line)
+
     try:
         eof = False
         cancelled = False
@@ -1026,11 +1035,9 @@ def interact(
                     # last line had no trailing newline never took it — and on
                     # cancel those bytes were dropped, which was exactly the
                     # text the bash engine's `run()` built its failure message
-                    # from. Yield them, then stop (review, 2026-08-23).
+                    # from. They are yielded below, after whatever the reader
+                    # still had (review, 2026-08-23; T108).
                     logger.debug("child exited; ending the read rather than waiting for EOF")
-                    if buffer:
-                        yield buffer
-                        buffer = ""
                     break
                 # A partial line that has gone quiet is the child waiting for
                 # input — or just a slow build. Ask about it once.
@@ -1054,15 +1061,33 @@ def interact(
                 break
             buffer += data.decode("utf-8", errors="replace")
             answered_partial = False
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.rstrip("\r")
-                yield line
-                _answer(line)
+            yield from _complete_lines()
         if not cancelled:
             # Bounded: an orphan holding the slave keeps the reader in os.read
             # long after the child is gone, and this join used to be unbounded.
             reader.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+            # The loop above can stop on "the child is gone" while the reader
+            # still holds the child's last output: already read but not yet
+            # queued, or still in the kernel buffer waiting for the reader
+            # thread to get a CPU. The join has now let the reader queue it,
+            # so read the queue once more. Until T108 nothing did, and on a
+            # busy machine the tail of the output was lost whenever a quiet
+            # tick fell between the child's exit and the reader's last put().
+            # Measured: 1 run in 100 at loadavg ~5 lost `GOT:hunter2` in
+            # test_prompt's /dev/tty test. The reader is given the join's bound
+            # to deliver, not one quiet tick.
+            while True:
+                try:
+                    data = chunks.get_nowait()
+                except queue.Empty:
+                    break
+                if data is None:
+                    break
+                buffer += data.decode("utf-8", errors="replace")
+            yield from _complete_lines()
+            if buffer:
+                yield buffer
+                buffer = ""
             proc.wait()
             if proc.returncode:
                 raise subprocess.CalledProcessError(proc.returncode, command)
