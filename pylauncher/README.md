@@ -191,9 +191,67 @@ progress for the reasons its entry gives: the running build has no command chann
   you. If there is one, a line under the header says so and `See what's new` opens what changed in
   every public release since yours. `Later` brings it back next launch; `Skip this version` hides
   that one version until a newer one is cut. There is also a `Check for updates` button in the
-  header, which asks straight away and tells you either way. It does not replace itself yet: the
-  button opens the download page. Yu'lon remembers all of this in `update.json` beside
-  `state.json`; deleting it only costs one more request.
+  header, which asks straight away and tells you either way. Yu'lon remembers all of this in
+  `update.json` beside `state.json`; deleting it only costs one more request.
+- **What "Update now" does, per platform.** Yu'lon only ever installs a release it can prove: one
+  that publishes a `SHA256SUMS` file listing the exact file for your computer. Anything else offers
+  the release page instead.
+
+  | You run | What the button does | State |
+  |---|---|---|
+  | Linux, the AppImage | downloads, checks, replaces itself and restarts | **built** |
+  | Linux, the tar.gz folder | downloads, checks, replaces itself and restarts | **built** |
+  | Windows, the zip folder | downloads, checks, replaces itself and restarts | **built** |
+  | macOS | downloads and checks the `.dmg`, then opens it for you to install | **built** |
+  | A folder you cannot write to | downloads and checks the file into your Downloads folder | **built** |
+  | A source checkout | opens the release page | **built** |
+
+  **Built** means written and unit-tested, not yet pressed on a real machine of that kind — the live
+  proof on Linux and Windows is the step still owed, and this table says **run live** only once it
+  has passed. Nothing is downloaded until you press the button, the download is checked against the
+  release's own `SHA256SUMS` before anything is unpacked, and the new build is started once with a
+  test flag and has to exit cleanly before your install is touched. If any of that fails, Yu'lon
+  says why and your install is exactly as it was.
+- **Your own files in the Yu'lon folder are never touched.** Yu'lon replaces the files it shipped —
+  the program and its `_internal` folder — one at a time, and nothing else. If you unpacked the
+  Windows zip straight into your Downloads folder, or keep notes or saves beside the program, they
+  stay exactly where they are. If the new version would have to replace something Yu'lon did not
+  put there, the update stops and tells you, and offers you the download instead. Yu'lon also never
+  renames or deletes the folder itself.
+- **Putting the previous version back.** While it updates, Yu'lon works in folders called
+  `.yulon-new`, `.yulon-download` and `.yulon-old` in your Yu'lon folder. All three are removed the
+  next time the new version starts. **Whether you can see them depends on your system**: on Linux
+  and macOS a name beginning with a dot is hidden by default (Ctrl+H in most file managers, or
+  `ls -a`); on **Windows they are ordinary visible folders** — Explorer does not hide dot-names and
+  Yu'lon does not set the hidden attribute — so you will see them in the folder while an update
+  runs.
+
+  If an update stops part-way, Yu'lon **does not touch anything** — it tells you what is missing
+  and leaves your folder exactly as it found it, backup included. (It could try to put things back
+  by itself, and deliberately does not: that would mean the running program renaming the very files
+  it is running from, with nothing to undo a half-done attempt.) Putting the previous version back
+  is two steps you take yourself, in this order — the same words Yu'lon puts on its own message
+  bar, so you do not have to come back here for them:
+
+  > 1. In the Yu'lon folder, delete (or move away) every file and folder that also exists inside
+  >    `.yulon-old`.
+  > 2. Move everything in `.yulon-old` except `.yulon-marker`, `helper-started`, `helper.lock`,
+  >    `helper.log`, `stand-down` into the Yu'lon folder, then delete `.yulon-old` and
+  >    `.yulon-new`.
+
+  Those five names are Yu'lon's own notes about the update, not part of any version; they go with
+  the folder. If the new version brought a file the old one never had, Yu'lon's message adds a
+  third step naming it — delete those too, because the new version brought them and the old one
+  does not use them.
+
+  **Step 1 is not optional**: if the new version's `_internal` folder is already in place, moving
+  the old one on top of it would put it *inside* rather than replace it, and Yu'lon would not
+  start. With the AppImage it is the same steps: the file inside `.yulon-old` is the version you
+  had.
+
+- **If two copies of Yu'lon are open**, the one you press Update in will say so and stop. Close the
+  other one first — otherwise the files would be replaced underneath it.
+
 
 ## Developers
 
