@@ -3604,6 +3604,17 @@ class UndoLookup:
     items: tuple[reset_defaults.FileResult, ...]
 
 
+def _undo_still_undoable(
+    server_dir: Path, items: tuple[reset_defaults.FileResult, ...]
+) -> reset_defaults.ResetReport:
+    """The Undo press's job: re-check each item NOW, then undo what still needs it.
+
+    The items come from the last lookup, which may be older than the files: a
+    file put back by hand since must not be backed up and copied over again.
+    """
+    return reset_defaults.undo(server_dir, reset_defaults.still_undoable(server_dir, items))
+
+
 def _look_up_undo(
     entry: CatalogEntry,
     server_dir: Path,
@@ -3638,10 +3649,13 @@ TUNING_RESET_RUNNING = (
 )
 """The close guard's sentence while a reset or its undo runs (`busy_reason()`)."""
 
+TUNING_RESET_NOTHING_TO_UNDO = (
+    "Nothing to undo: every file is already as the last reset found it, or was put back since."
+)
 TUNING_RESET_UNDO_CONFIRM = (
     "Put back the files the last reset replaced?\n\n{files}\n\nEach one is copied back from "
     "the backup named beside it. Anything you changed in them since the reset is replaced, and "
-    "kept first: each file as it is now is backed up beside it (a .undo.bak)."
+    "kept first: each file as it is now is backed up beside it (an .undo-….bak)."
 )
 
 MODULE_SQL_BUTTON_LABEL = "Apply module SQL"
@@ -9071,7 +9085,15 @@ class ControllerView(QWidget):
                 and row.key.casefold() not in reset_defaults.install_keys(self.entry, row.file)
             }
         )
-        if not self._confirm(TUNING_RESET_LABEL, reset_defaults.question(chosen, modules)):
+        # Named BEFORE the press (Codex review): a stat per file and one read
+        # of the base compose file, once per press -- not per reload.
+        foreign, missing = reset_defaults.press_facts(
+            self.entry, self.services.controller.server_dir, chosen
+        )
+        if not self._confirm(
+            TUNING_RESET_LABEL,
+            reset_defaults.question(chosen, modules, foreign=foreign, missing=missing),
+        ):
             return
         self._reset_running = True
         self._set_busy(True)
@@ -9088,7 +9110,8 @@ class ControllerView(QWidget):
         self.tuning_report.setPlainText("\n".join(lines))
         if result.written:
             self._last_reset = result.written
-        for item in result.written:
+        # A recreated file owes the restart too, though there is nothing to undo.
+        for item in result.changed:
             self._note_tuning_owed(item.file, reset_defaults.apply_rule(item.file))
         if result.refused:
             self.action_failed.emit(" ".join(lines[:2]))
@@ -9166,7 +9189,7 @@ class ControllerView(QWidget):
         self._set_busy(True)
         self.tuning_report.setPlainText("putting back what the last reset replaced…")
         self._run(
-            partial(reset_defaults.undo, self.services.controller.server_dir, items),
+            partial(_undo_still_undoable, self.services.controller.server_dir, items),
             self._undo_done,
             self._reset_failed,
         )
@@ -9177,7 +9200,7 @@ class ControllerView(QWidget):
         self._set_busy(False)
         if not isinstance(result, reset_defaults.ResetReport):
             return
-        lines = result.lines()
+        lines = result.lines() if result.results else (TUNING_RESET_NOTHING_TO_UNDO,)
         self.tuning_report.setPlainText("\n".join(lines))
         for item in result.results:
             if item.outcome == "restored":

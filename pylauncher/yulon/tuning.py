@@ -464,15 +464,16 @@ def backup(path: Path, *, now: datetime | None = None, tag: str = "") -> Path:
     """Copy `path` beside itself, stamped, and return where it went.
 
     `tag`, when given, goes between the stamp and `.bak` (T94: a Reset to
-    default's backups are `<name>.<stamp>.reset.bak`, so an Undo after a
-    restart can tell them from a save's). After the fixed-width stamp, so a
-    name sort is still a time sort and `backups_of()` still lists them.
+    default's backups are `<name>.<stamp>.reset-<press>.bak`, so an Undo after
+    a restart can tell them from a save's and find every file of one press).
+    After the fixed-width stamp, so a name sort is still a time sort and
+    `backups_of()` still lists them.
 
     The stamp comes from the clock rather than from a counter: two saves a
     minute apart are two backups, and a name that had to be searched for a free
     suffix would be a second thing to get wrong. Metadata is copied too
-    (`copy2`), so the backup's own mtime says when the ORIGINAL was last
-    touched and the name says when it was taken.
+    (`private_copy`'s `copystat`), so the backup's own mtime says when the
+    ORIGINAL was last touched and the name says when it was taken.
 
     The copy (`private_copy`: owner-only while it is written, then the file's
     own mode) goes to a `.yulon-tmp` sibling and is renamed onto the `.bak` name
@@ -681,9 +682,10 @@ def restore(from_backup: Path, target: Path) -> None:
 def backups_of(path: Path) -> tuple[Path, ...]:
     """Every backup this module has taken of `path`, newest last.
 
-    Sorted by NAME, which is the stamp, and not by mtime: `copy2` gives a backup
-    the mtime of the file it copied, so two backups of an untouched file share
-    an mtime and the newest of them is not the last one taken.
+    Sorted by NAME, which is the stamp, and not by mtime: `private_copy`'s
+    `copystat` gives a backup the mtime of the file it copied, so two backups
+    of an untouched file share an mtime and the newest of them is not the last
+    one taken.
     """
     try:
         found = [p for p in path.parent.iterdir() if p.name.startswith(f"{path.name}.")]

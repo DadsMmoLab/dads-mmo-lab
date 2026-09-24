@@ -14441,7 +14441,7 @@ def test_a_press_that_raised_hands_the_undo_to_the_disk_not_an_older_session_pre
     """Fix round 2: after a crashed press the disk's newest press is the one to undo."""
     _wotlk_server(tmp_path)
     auth = tmp_path / TUNING_CORE_FILES[1]
-    old = reset_defaults.reset_backup(auth, now=datetime(2026, 9, 1, 12, 0, 0))
+    old = reset_defaults.reset_backup(auth, "e5e5e5e5", now=datetime(2026, 9, 1, 12, 0, 0))
     # At its default, so the crashing press leaves it alone: only the older
     # session press names it.
     auth.write_bytes(auth.with_name(auth.name + ".dist").read_bytes())
@@ -14520,3 +14520,54 @@ def test_an_undo_lookup_that_raised_leaves_the_undo_greyed(
     monkeypatch.setattr(reset_defaults, "undo_items", boom)
     view = _reset_view(ps, tmp_path)
     assert view.tuning_reset_undo_action.isEnabled() is False
+
+
+def test_the_dialog_names_an_override_yulon_did_not_make_before_the_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review: "left alone" must be in the question, never only in the report after."""
+    _wotlk_server(tmp_path)
+    (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    view = _reset_view(ps, tmp_path)
+    asked: list[str] = []
+    from PySide6.QtWidgets import QMessageBox
+
+    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+
+    assert f"Left alone: {composegen.OVERRIDE_FILE} was not made by Yu'lon." in asked[0]
+
+
+def test_a_missing_override_is_made_again_and_owes_a_recreate(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wotlk_server(tmp_path)
+    (tmp_path / composegen.OVERRIDE_FILE).unlink()
+    view = _reset_view(ps, tmp_path)
+    asked: list[str] = []
+    _reset_yes(monkeypatch, asked)
+    _menu_action(view, f"{composegen.OVERRIDE_FILE}…").trigger()
+
+    assert "made again as Yu'lon installs it" in asked[0]
+    assert (tmp_path / composegen.OVERRIDE_FILE).is_file()
+    assert view.tuning_banner_button.text() == TUNING_RECREATE_LABEL
+
+
+def test_the_undo_press_checks_each_file_again_before_it_writes(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review: the cached lookup may be older than the files; a file put back since is left."""
+    _wotlk_server(tmp_path)
+    view = _reset_view(ps, tmp_path)
+    _reset_yes(monkeypatch)
+    _menu_action(view, TUNING_RESET_ALL).trigger()
+    world = next(item for item in view._last_reset if item.file == TUNING_CORE_FILES[0])
+    assert world.backup is not None
+    tuning.restore(world.backup, tmp_path / world.file)  # by hand, no reload
+
+    _menu_action(view, TUNING_RESET_UNDO).trigger()
+
+    siblings = [p.name for p in (tmp_path / world.file).parent.iterdir()]
+    assert not [n for n in siblings if n.startswith("worldserver.conf.") and ".undo-" in n]
+    assert "worldserver.conf" not in view.tuning_report.toPlainText()
+    assert (tmp_path / TUNING_CORE_FILES[1]).read_bytes() == b"Key = 2\n"

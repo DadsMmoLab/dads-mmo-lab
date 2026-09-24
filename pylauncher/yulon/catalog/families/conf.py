@@ -305,7 +305,7 @@ def apply_table(
     return tuple(changed)
 
 
-def replace_file(path: Path, text: str) -> None:
+def replace_file(path: Path, text: str, *, mode: int | None = None) -> None:
     """Replace the file at `path` with `text`, atomically, keeping its mode (T94's reset).
 
     `_write()` under a public name, because a second caller now exists and it
@@ -317,15 +317,17 @@ def replace_file(path: Path, text: str) -> None:
     The file KEEPS its own mode once the text is whole (the T94 live gate): a
     reset wrote WotLK's 644 `worldserver.conf` and 664 override as 0600, which a
     container user that is not the host user cannot read. A file not on disk
-    takes `CONF_MODE`, the install's own.
+    takes `mode` -- the mode the install gives it, which the caller knows
+    (T94 recreates a missing core file) -- or `CONF_MODE`.
 
     Raises:
         InstallerError: the file could not be written; it was left as it was.
     """
-    try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-    except OSError:
-        mode = CONF_MODE
+    if mode is None:
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            mode = CONF_MODE
     _write(path, text, mode=mode)
 
 
@@ -476,8 +478,11 @@ def _write(path: Path, text: str, *, mode: int = CONF_MODE) -> None:
             fh.write(text)
         if mode != CONF_MODE:
             # `replace_file`'s kept mode, set only once the text is whole: the
-            # file had that mode before, so nothing is widened past it.
-            os.chmod(tmp, mode)
+            # file had that mode before, so nothing is widened past it. Always
+            # owner-WRITABLE: a read-only temp (a 0444 conf's mode) could not be
+            # removed on Windows if the rename then failed, and Windows' own
+            # rename refuses a read-only target anyway.
+            os.chmod(tmp, mode | stat.S_IWUSR)
         os.replace(tmp, path)
     except (OSError, UnicodeEncodeError) as exc:
         raise InstallerError(

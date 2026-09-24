@@ -32,10 +32,13 @@ button and runs `reset()` on its job runner.
 from __future__ import annotations
 
 import os
+import re
+import secrets
 import shutil
+import stat
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -129,36 +132,68 @@ def _host_bind_label(server_dir: Path) -> str:
 
 
 RESET_TAG = "reset"
-"""What a reset's backups carry in their name: `<file>.<stamp>.reset.bak`."""
-
-
-def reset_backup(path: Path, *, now: datetime | None = None) -> Path:
-    """`tuning.backup()`, tagged as a reset's, so `last_reset_on_disk()` can find it again.
-
-    The same function the Tuning tab's saves use -- so its per-file Revert
-    still restores a reset -- with the tag between the stamp and `.bak`, which
-    is the one thing that tells this backup from a save's once the window that
-    made it has closed.
-    """
-    return tuning.backup(path, now=now, tag=RESET_TAG)
-
-
+"""A reset's backups: `<file>.<stamp>.reset-<press>.bak`."""
 UNDO_TAG = "undo"
-"""What an undo's own backups carry: `<file>.<stamp>.undo.bak`, the file as the undo found it."""
+"""An undo's own backups: `<file>.<stamp>.undo-<press>.bak`, `<press>` being the RESET's."""
 
 
-def undo_backup(path: Path, *, now: datetime | None = None) -> Path:
-    """`tuning.backup()`, tagged as an undo's: the file as it was before the undo replaced it.
+def new_press() -> str:
+    """A fresh press id: eight hex characters, carried by every backup one press takes.
+
+    What ties one reset's files together on disk (Codex review): stamps alone
+    needed a guess at how far apart one press's backups can be, and a slow,
+    network-mounted or scanned disk can stretch a press past any such guess.
+    """
+    return secrets.token_hex(4)
+
+
+def reset_backup(path: Path, press: str, *, now: datetime | None = None) -> Path:
+    """`tuning.backup()`, tagged as press `press`'s reset, so `last_reset_on_disk()` finds it.
+
+    The same function the Tuning tab's saves use, with the tag between the
+    stamp and `.bak`, which is what tells this backup from a save's -- and
+    this press's from any other's -- once the window that made it has closed.
+    """
+    return tuning.backup(path, now=now, tag=f"{RESET_TAG}-{press}")
+
+
+def undo_backup(path: Path, press: str, *, now: datetime | None = None) -> Path:
+    """`tuning.backup()`, tagged as the undo of reset `press`: the file as the undo found it.
 
     Two jobs. Anything tuned into the file after the reset is kept beside it,
-    not lost: the report names this backup, and a person copies it back by hand
-    -- no control on the Tuning tab reaches it, because the raw editor's Revert
-    refuses the WotLK confs (read-only) and never lists the compose override or
-    a CMaNGOS conf no module names. And it is the on-disk record that this reset
-    WAS undone, which `still_undoable()` reads so an undone reset is never
-    offered again after a later save changes the file.
+    not lost: the report names this backup. For a CMaNGOS conf an installed
+    module keys settings in, the raw editor lists the file and its Revert puts
+    back the newest backup -- this one; the WotLK confs are read-only there and
+    the override and a CMaNGOS conf no module names are not listed, so for
+    those a person copies it back by hand. And it is the on-disk record that
+    reset `press` WAS undone, which `still_undoable()` reads by the press id --
+    not by comparing clocks -- so an undone reset is never offered again after
+    a later save changes the file.
     """
-    return tuning.backup(path, now=now, tag=UNDO_TAG)
+    return tuning.backup(path, now=now, tag=f"{UNDO_TAG}-{press}")
+
+
+_TAGGED = re.compile(r"(\d{8}-\d{6}-\d{6})\.(reset|undo)-([0-9a-f]+)\.bak")
+
+
+@dataclass(frozen=True)
+class _Tagged:
+    stamp: str
+    kind: str
+    press: str
+
+
+def _tag_of(backup: Path, path: Path) -> _Tagged | None:
+    """The press a reset or undo backup of `path` belongs to, from its name; else `None`.
+
+    A save's backup (untagged), a person's own `.bak` and a name from any other
+    file all answer `None`.
+    """
+    head = f"{path.name}."
+    if not backup.name.startswith(head):
+        return None
+    found = _TAGGED.fullmatch(backup.name[len(head) :])
+    return _Tagged(*found.groups()) if found else None
 
 
 RESTORE_TEMP_SUFFIX = ".yulon-restore-tmp"
@@ -203,8 +238,9 @@ class Seams:
     image_present: Callable[[Sequence[str]], bool | None] = docker.images_built
     platform_id: Callable[[], str] = platform.detect
     bind_label: Callable[[Path], str] = _host_bind_label
-    write: Callable[[Path, str], None] = conf.replace_file
-    backup: Callable[[Path], Path] = reset_backup
+    write: Callable[..., None] = conf.replace_file
+    """`(path, text)`, keeping the file's mode; `(path, text, mode=...)` to recreate one."""
+    backup: Callable[[Path, str], Path] = reset_backup
     restore: Callable[[Path, Path], None] = restore
 
 
@@ -452,7 +488,9 @@ def _from_image(
     return texts, reasons
 
 
-Outcome = Literal["reset", "already", "absent", "foreign", "refused", "held", "restored"]
+Outcome = Literal[
+    "reset", "recreated", "already", "absent", "foreign", "refused", "held", "restored"
+]
 
 WRITE_FAILED = (
     "it could not be written ({exc}). Every file this press had already reset was put back, "
@@ -463,6 +501,10 @@ ROLLBACK_FAILED = (
     '({exc}). The file as it was is {backup}, beside it, and "Undo the last reset" tries again'
 )
 UNDO_FAILED = "copying {backup} back over it failed ({exc})"
+UNMADE_FAILED = (
+    "it was missing and was made again, then a later file failed, and removing it again "
+    "failed too ({exc}); it is on disk as Yu'lon installs it"
+)
 UNDO_UNSAFE = "it could not be backed up first ({exc}), so it was left as it is"
 
 
@@ -483,9 +525,12 @@ class FileResult:
         return {
             "reset": f"{name}: back to how Yu'lon installed it. The file as it was is kept "
             f"beside it as {kept}.",
+            "recreated": f"{name}: it was missing, so it was made again as Yu'lon installs it. "
+            "There was no older copy, so there is nothing to undo.",
             "already": f"{name}: already as Yu'lon installed it, so it was left alone "
             "(no backup made).",
-            "absent": f"{name}: not on disk, so there was nothing to reset.",
+            "absent": f"{name}: not on disk, and Yu'lon's install does not write it, so it was "
+            "left absent, as installed.",
             "foreign": f"{name}: this server's compose files were not made by Yu'lon, so it "
             "was left alone.",
             # A refused file WITH a backup was written and could not be put
@@ -528,6 +573,11 @@ class ResetReport:
         )
 
     @property
+    def changed(self) -> tuple[FileResult, ...]:
+        """Every file this press left different on disk: what the restart banner is owed for."""
+        return (*self.written, *(r for r in self.results if r.outcome == "recreated"))
+
+    @property
     def refused(self) -> bool:
         return any(r.outcome == "refused" for r in self.results)
 
@@ -543,7 +593,7 @@ class ResetReport:
             head = "The reset failed part-way, and not every file could be put back. File by file:"
         elif "refused" in outcomes:
             head = "The reset was not done. File by file:"
-        elif "reset" in outcomes:
+        elif outcomes & {"reset", "recreated"}:
             head = "Put back to how Yu'lon installed this server:"
         else:
             head = "Nothing needed resetting:"
@@ -663,6 +713,57 @@ def _foreign(server_dir: Path, file: str) -> bool:
     return not (base.is_file() and composegen.is_ours(base))
 
 
+def install_writes(entry: CatalogEntry, file: str) -> bool:
+    """Whether a fresh Yu'lon install writes `file` -- so a missing one is made again.
+
+    A CMaNGOS game's conf table is exactly what its install writes into
+    `etc/`, and WotLK's install writes the compose override. WotLK's confs are
+    NOT written by the install: a normal install has `playerbots.conf.dist` and
+    no `playerbots.conf`, and the worldserver does not load the `.dist`
+    (measured, `dbreads.py`, `party.py`), so making one from it would change the
+    server rather than put it back (plan correction 8). Such a file stays absent.
+    """
+    if file == composegen.OVERRIDE_FILE:
+        return True
+    native_block = entry.install.native
+    return (
+        native_block is not None and native_block.family == "cmangos" and file in core_files(entry)
+    )
+
+
+def _install_mode(server_dir: Path, file: str) -> int:
+    """The mode the install gives `file` when it makes it (for a recreated one).
+
+    A CMaNGOS conf: `conf.CONF_MODE`, as `conf.materialise` sets it. The
+    override: the mode of the base `docker-compose.yml` the same install call
+    (`composegen.write_plan`, a plain `write_text`) wrote beside it.
+    """
+    if file == composegen.OVERRIDE_FILE:
+        try:
+            return stat.S_IMODE((server_dir / composegen.BASE_FILE).stat().st_mode)
+        except OSError:
+            return conf.CONF_MODE
+    return conf.CONF_MODE
+
+
+def press_facts(
+    entry: CatalogEntry, server_dir: Path, files: Sequence[str]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(left alone as another tool's, missing and made again) among `files`, for the question.
+
+    Read when the press is made, before the Yes/No, so the dialog names both
+    BEFORE anything happens (Codex review): a stat per file and one read of the
+    base compose file.
+    """
+    foreign = tuple(file for file in files if _foreign(server_dir, file))
+    missing = tuple(
+        file
+        for file in files
+        if file not in foreign and install_writes(entry, file) and not (server_dir / file).is_file()
+    )
+    return foreign, missing
+
+
 def reset(
     entry: CatalogEntry,
     server_dir: Path,
@@ -676,11 +777,16 @@ def reset(
 
     Phase one builds every default and reads every current file, and writes
     nothing; one failure there refuses the whole press. Phase two backs each
-    changing file up (`reset_backup`, `<file>.<stamp>.reset.bak` beside it) and
-    replaces it atomically (`conf.replace_file`); a failure there puts back,
-    from those backups, every file this press had already written. A file
-    already equal to its default is not touched and gets no backup; a file not
-    on disk is reported and never created; another tool's override is left.
+    changing file up (`reset_backup`, `<file>.<stamp>.reset-<press>.bak` beside
+    it, one press id for all of them) and replaces it atomically, keeping its
+    mode (`conf.replace_file`); a failure there puts back, from those backups,
+    every file this press had already written, and removes any it recreated. A
+    file already equal to its default is not touched and gets no backup.
+    A file not on disk is MADE AGAIN when the install writes it
+    (`install_writes`; Codex review: a deleted core conf left a broken server)
+    with the install's mode (`_install_mode`), and its default must build like
+    any other or the whole press refuses; one the install does not write stays
+    absent. Another tool's override is left alone.
 
     `module_keys` (owner decision 5): for each file, the keys installed
     modules declare in it, from `module_keys()`. Their live lines are carried
@@ -699,11 +805,15 @@ def reset(
     if stray:
         raise ValueError(f"not {entry.id}'s own settings files: {', '.join(stray)}")
     skipped: dict[str, Outcome] = {}
+    missing: set[str] = set()
     for file in files:
         if _foreign(server_dir, file):
             skipped[file] = "foreign"
         elif not (server_dir / file).is_file():
-            skipped[file] = "absent"
+            if install_writes(entry, file):
+                missing.add(file)
+            else:
+                skipped[file] = "absent"
     present = [file for file in files if file not in skipped]
     texts, reasons = (
         default_texts(entry, server_dir, present, wsl_distro=wsl_distro, seams=seams)
@@ -712,7 +822,7 @@ def reset(
     )
     current: dict[str, bytes] = {}
     for file in present:
-        if file in reasons:
+        if file in reasons or file in missing:
             continue
         try:
             current[file] = (server_dir / file).read_bytes()
@@ -731,13 +841,25 @@ def reset(
     if reasons:
         return ResetReport(tuple(_before_writing(file, skipped, reasons) for file in files))
 
+    press = new_press()
     done: dict[str, FileResult] = {}
     for file in present:
         path = server_dir / file
+        if file in missing:
+            try:
+                # `modules/tortoise_bots.conf` may have lost its folder too;
+                # `materialise` makes the same one.
+                path.parent.mkdir(parents=True, exist_ok=True)
+                seams.write(path, texts[file], mode=_install_mode(server_dir, file))
+            except (OSError, InstallerError) as exc:
+                return _rolled_back(files, skipped, done, file, exc, server_dir, seams)
+            logger.info(f"recreated {path} as {entry.id} installs it")
+            done[file] = FileResult(file, "recreated")
+            continue
         if current[file] == texts[file].encode("utf-8"):
             continue
         try:
-            made = seams.backup(path)
+            made = seams.backup(path, press)
             seams.write(path, texts[file])
         except (OSError, InstallerError, tuning.TuningError) as exc:
             return _rolled_back(files, skipped, done, file, exc, server_dir, seams)
@@ -773,10 +895,21 @@ def _rolled_back(
     server_dir: Path,
     seams: Seams,
 ) -> ResetReport:
-    """A write failed part-way: put every file this press wrote back from its backup."""
+    """A write failed part-way: put every file this press wrote back, and remove any it made."""
     logger.warning(f"reset of {failed} failed ({exc}); putting back {len(done)} file(s)")
     results: dict[str, FileResult] = {}
     for file, item in done.items():
+        if item.outcome == "recreated":
+            # It was missing before this press: all or nothing means missing again.
+            try:
+                (server_dir / file).unlink(missing_ok=True)
+            except OSError as undo_exc:
+                results[file] = FileResult(
+                    file, "refused", reason=UNMADE_FAILED.format(exc=undo_exc)
+                )
+            else:
+                results[file] = FileResult(file, "held")
+            continue
         assert item.backup is not None
         try:
             seams.restore(item.backup, server_dir / file)
@@ -800,21 +933,23 @@ def undo(
     written: Sequence[FileResult],
     *,
     restore: Callable[[Path, Path], None] = restore,
-    backup: Callable[[Path], Path] = undo_backup,
+    backup: Callable[[Path, str], Path] = undo_backup,
 ) -> ResetReport:
     """Copy back, from the backups a reset made, every file that reset wrote.
 
-    Each file is backed up FIRST (`undo_backup()`), so whatever was tuned into
-    it after the reset is kept beside it and Revert brings it back; a file that
-    cannot be backed up is left as it is. Then a copy (`restore()`, atomic), so
-    the reset's backup survives and a copy that fails leaves the file whole.
+    Each file is backed up FIRST (`undo_backup()`, tagged with the reset's own
+    press id), so whatever was tuned into it after the reset is kept beside it,
+    named in the report; a file that cannot be backed up is left as it is. Then
+    a copy (`restore()`, atomic), so the reset's backup survives and a copy
+    that fails leaves the file whole.
     """
     results: list[FileResult] = []
     for item in written:
         if item.backup is None:
             continue
+        tagged = _tag_of(item.backup, server_dir / item.file)
         try:
-            before = backup(server_dir / item.file)
+            before = backup(server_dir / item.file, tagged.press if tagged else new_press())
         except (OSError, tuning.TuningError) as exc:
             results.append(
                 FileResult(item.file, "refused", item.backup, UNDO_UNSAFE.format(exc=exc))
@@ -844,51 +979,25 @@ def undo(
     return ResetReport(tuple(results), undo=True)
 
 
-ONE_PRESS = timedelta(seconds=10)
-"""How far apart two backups' stamps may be and still be one press's.
-
-A reset's backups are taken in one loop after every default is already built
--- a copy and an atomic write per file, milliseconds apart even for the four
-CMaNGOS confs -- so ten seconds is room for a slow disk and still far short of
-a person pressing a second time.
-"""
-_STAMP = "%Y%m%d-%H%M%S-%f"
-"""`tuning.backup()`'s own stamp."""
-
-
-def _stamp_of(backup: Path, path: Path, tag: str = RESET_TAG) -> datetime | None:
-    """When `backup` of `path` was taken with `tag`, from its name; `None` if it was not.
-
-    A save's backup (untagged) and a person's own `.bak` both answer `None`.
-    """
-    head, tail = f"{path.name}.", f".{tag}.bak"
-    name = backup.name
-    if not (name.startswith(head) and name.endswith(tail)):
-        return None
-    try:
-        return datetime.strptime(name[len(head) : -len(tail)], _STAMP)
-    except ValueError:
-        return None
-
-
-def _newest(path: Path, tag: str) -> tuple[datetime, Path] | None:
-    """The newest backup of `path` taken with `tag`, and its stamp."""
-    for backup in reversed(tuning.backups_of(path)):
-        stamp = _stamp_of(backup, path, tag)
-        if stamp is not None:
-            return stamp, backup
-    return None
+def _tagged(path: Path, kind: str) -> list[tuple[_Tagged, Path]]:
+    """Every `kind` backup of `path`, oldest first (a name sort is a time sort)."""
+    found = []
+    for backup in tuning.backups_of(path):
+        tag = _tag_of(backup, path)
+        if tag is not None and tag.kind == kind:
+            found.append((tag, backup))
+    return found
 
 
 def _undoable(server_dir: Path, item: FileResult) -> bool:
     """Whether an Undo of `item` would still put back the reset it records.
 
     Not when the file already equals the reset's backup (undone, or put back by
-    hand). Not when an undo backup newer than the reset's exists -- the reset
-    was undone, and a later save into the file must not re-arm it (fix round 1:
-    the undo would overwrite that tuning) -- UNLESS the file equals that undo
-    backup, which means the undo never landed (its copy failed) or was itself
-    reverted: either way the reset's text stands again.
+    hand). Not when an undo of THAT press (its id, not a clock) has a backup
+    beside the file -- the reset was undone, and a later save into the file must
+    not re-arm it (fix round 1: the undo would overwrite that tuning) -- UNLESS
+    the file equals the newest such undo backup, which means the undo was itself
+    reverted: the reset's text stands again.
     """
     if item.backup is None:
         return False
@@ -901,12 +1010,12 @@ def _undoable(server_dir: Path, item: FileResult) -> bool:
         # A file gone or unreadable: a reset never deletes one, so this is
         # not a state an undo of it can put right.
         return False
-    reset_at = _stamp_of(item.backup, path)
-    undone = _newest(path, UNDO_TAG)
-    if reset_at is None or undone is None or undone[0] < reset_at:
+    reset = _tag_of(item.backup, path)
+    undone = [b for tag, b in _tagged(path, UNDO_TAG) if reset and tag.press == reset.press]
+    if not undone:
         return True
     try:
-        return current == undone[1].read_bytes()
+        return current == undone[-1].read_bytes()
     except OSError:
         return False
 
@@ -940,34 +1049,39 @@ def last_reset_on_disk(entry: CatalogEntry, server_dir: Path) -> tuple[FileResul
     and with a crash half-way through a press, which is exactly when an undo is
     wanted -- while the Tuning tab lists the WotLK confs read-only, so its
     per-file Revert cannot reach their backups. The backups beside each file
-    are the record that survives. For each of this game's own files, its
-    newest backup a reset took (`reset_backup()`'s tag; a Tuning save's
-    backup is not one); the ones stamped within `ONE_PRESS` of the newest of
-    them are one press; of those, each `still_undoable()` is what an Undo
-    would put back -- so an undone reset is not offered again, even after a
-    later save changed the file.
+    are the record that survives. The newest reset backup of any of this
+    game's own files names the last press (its id); that press's backup of
+    each file is what it wrote -- however long the press took (Codex review:
+    a ten-second window split a slow press) -- and of those, each
+    `still_undoable()` is what an Undo would put back, so an undone reset is
+    not offered again, even after a later save changed the file.
 
     Reads only; `()` when there is nothing to put back.
     """
-    newest: dict[str, tuple[datetime, Path]] = {}
-    for file in core_files(entry):
-        found = _newest(server_dir / file, RESET_TAG)
-        if found is not None:
-            newest[file] = found
-    if not newest:
+    found = {file: _tagged(server_dir / file, RESET_TAG) for file in core_files(entry)}
+    stamps = [(tag.stamp, tag.press) for backups in found.values() for tag, _ in backups]
+    if not stamps:
         return ()
-    latest = max(stamp for stamp, _ in newest.values())
+    last = max(stamps)[1]
     press = [
-        FileResult(file, "reset", backup)
-        for file, (stamp, backup) in newest.items()
-        if latest - stamp <= ONE_PRESS
+        FileResult(file, "reset", [b for tag, b in backups if tag.press == last][-1])
+        for file, backups in found.items()
+        if any(tag.press == last for tag, _ in backups)
     ]
     return still_undoable(server_dir, press)
 
 
-def question(files: Sequence[str], modules: Sequence[str]) -> str:
+def question(
+    files: Sequence[str],
+    modules: Sequence[str],
+    *,
+    foreign: Sequence[str] = (),
+    missing: Sequence[str] = (),
+) -> str:
     """The Yes/No text: which files, what goes back, what is kept, the backup, the restart.
 
+    `foreign` and `missing` are `press_facts()`: named BEFORE the press, so a
+    file left alone or made again is never news only in the report.
     Conditional about the server being up: the tab keeps no status to ask
     (spec correction 14).
     """
@@ -983,7 +1097,11 @@ def question(files: Sequence[str], modules: Sequence[str]) -> str:
             f"Settings that installed modules keep in {them} are kept as they are now: "
             f"{', '.join(modules)}."
         )
-    if composegen.OVERRIDE_FILE in files:
+    for file in foreign:
+        parts.append(f"Left alone: {label(file)} was not made by Yu'lon.")
+    for file in missing:
+        parts.append(f"Not on disk, so it is made again as Yu'lon installs it: {label(file)}.")
+    if composegen.OVERRIDE_FILE in files and composegen.OVERRIDE_FILE not in foreign:
         parts.append(
             f"{composegen.OVERRIDE_FILE} holds the containers' own settings (the bot population, "
             "and the command channel if it is on). Anything added to it by hand is dropped, and "

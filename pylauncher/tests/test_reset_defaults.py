@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1100,9 +1101,9 @@ def test_the_disk_record_is_one_press_not_every_backup_ever_taken(tmp_path: Path
     """An older backup of another file (another day's reset or save) is not the last press."""
     defaults = _dist_install(tmp_path)
     world, auth = (tmp_path / file for file in reset_defaults.AZEROTHCORE_CORE_FILES[:2])
-    reset_defaults.reset_backup(auth, now=datetime(2026, 9, 1, 12, 0, 0))
+    reset_defaults.reset_backup(auth, "a1a1a1a1", now=datetime(2026, 9, 1, 12, 0, 0))
     auth.write_bytes(b"Key = 3\n")
-    made = reset_defaults.reset_backup(world, now=datetime(2026, 9, 23, 12, 0, 0))
+    made = reset_defaults.reset_backup(world, "b2b2b2b2", now=datetime(2026, 9, 23, 12, 0, 0))
     world.write_bytes(defaults[reset_defaults.AZEROTHCORE_CORE_FILES[0]])
 
     found = reset_defaults.last_reset_on_disk(WOTLK, tmp_path)
@@ -1116,9 +1117,13 @@ def test_a_press_cut_short_is_found_as_far_as_it_got(tmp_path: Path) -> None:
     """A crash mid-reset: two files written, the third never reached, no rollback ran."""
     _dist_install(tmp_path)
     world, auth, bots = (tmp_path / file for file in reset_defaults.AZEROTHCORE_CORE_FILES)
-    first = reset_defaults.reset_backup(world, now=datetime(2026, 9, 23, 12, 0, 0, 1000))
+    first = reset_defaults.reset_backup(
+        world, "c3c3c3c3", now=datetime(2026, 9, 23, 12, 0, 0, 1000)
+    )
     world.write_bytes(b"Key = 1\n")
-    second = reset_defaults.reset_backup(auth, now=datetime(2026, 9, 23, 12, 0, 0, 9000))
+    second = reset_defaults.reset_backup(
+        auth, "c3c3c3c3", now=datetime(2026, 9, 23, 12, 0, 0, 9000)
+    )
     auth.write_bytes(b"Key = 1\n")
 
     found = reset_defaults.last_reset_on_disk(WOTLK, tmp_path)
@@ -1139,7 +1144,7 @@ def test_a_backup_a_reset_did_not_take_is_not_a_reset(tmp_path: Path) -> None:
     tuning.backup(world, now=datetime(2026, 9, 23, 13, 0, 0))
     world.write_bytes(b"Key = 5\n")
     assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == ()
-    made = reset_defaults.reset_backup(world, now=datetime(2026, 9, 23, 12, 0, 0))
+    made = reset_defaults.reset_backup(world, "d4d4d4d4", now=datetime(2026, 9, 23, 12, 0, 0))
     world.write_bytes(b"Key = 1\n")
     assert [r.backup for r in reset_defaults.last_reset_on_disk(WOTLK, tmp_path)] == [made]
 
@@ -1158,8 +1163,8 @@ def test_a_reset_tags_its_backups_and_revert_still_finds_them_newest(tmp_path: P
     report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES[:1])
 
     made = report.written[0].backup
-    assert made is not None and made.name.endswith(".reset.bak")
-    assert not saved.name.endswith(".reset.bak")
+    assert made is not None and re.search(r"\.reset-[0-9a-f]{8}\.bak$", made.name)
+    assert ".reset-" not in saved.name
     assert tuning.backups_of(world) == (saved, made), "a name sort is still a time sort"
 
 
@@ -1197,7 +1202,7 @@ def test_an_undo_backs_each_file_up_first_so_revert_brings_back_what_it_replaced
     assert _bytes(server, tuned) == tuned
     for item in undone.results:
         newest = tuning.backups_of(server / item.file)[-1]
-        assert item.before == newest and newest.name.endswith(".undo.bak")
+        assert item.before == newest and ".undo-" in newest.name
         assert newest.read_bytes() == installed[item.file]
         assert newest.name in item.line()
         tuning.restore(newest, server / item.file)
@@ -1235,7 +1240,7 @@ def test_an_undo_that_cannot_back_up_first_leaves_the_file_and_stays_offered(
     world = tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]
     reset_text = world.read_bytes()
 
-    def backup_fails(path: Path) -> Path:
+    def backup_fails(path: Path, press: str) -> Path:
         raise OSError(28, "No space left on device")
 
     undone = reset_defaults.undo(tmp_path, report.written, backup=backup_fails)
@@ -1315,7 +1320,7 @@ def test_an_undo_whose_real_backup_fails_leaves_the_reset_offered(
 
     assert [r.outcome for r in undone.results] == ["refused"]
     assert world.read_bytes() == reset_text
-    assert not [n for n in _siblings(world) if n.endswith(".undo.bak")]
+    assert not [n for n in _siblings(world) if ".undo-" in n]
     assert reset_defaults.still_undoable(tmp_path, report.written) == report.written
     assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
 
@@ -1346,7 +1351,7 @@ def test_an_undo_whose_copy_failed_is_still_offered_after_a_later_save(tmp_path:
 
     undone = reset_defaults.undo(tmp_path, report.written, restore=restore_fails)
     assert undone.refused
-    assert not [n for n in _siblings(world) if n.endswith(".undo.bak")]
+    assert not [n for n in _siblings(world) if ".undo-" in n]
     tuning.write(world, {"Rate.XP.Kill": "3"})
 
     assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
@@ -1422,3 +1427,193 @@ def test_a_backup_and_a_restore_are_owner_only_while_the_bytes_are_copied(
     assert seen == [0o600, 0o600], "a copy was readable by others while it was written"
     assert _mode(made) == 0o644 and _mode(path) == 0o644, "the file's own mode was not kept"
     assert path.read_bytes() == made.read_bytes()
+
+
+# -- Codex review: a missing core file, and one id per press --------------------------
+
+
+def test_a_missing_cmangos_conf_is_made_again_owner_only_and_the_rest_reset(
+    tmp_path: Path,
+) -> None:
+    server, _, installed, _ = _tuned_tbc(tmp_path)
+    (server / "etc/realmd.conf").unlink()
+    report = reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(TEMPLATES["wow-tbc"]))
+    )
+
+    outcomes = {r.file: r.outcome for r in report.results}
+    assert outcomes == {
+        "etc/mangosd.conf": "reset",
+        "etc/realmd.conf": "recreated",
+        "etc/aiplayerbot.conf": "reset",
+        "etc/ahbot.conf": "reset",
+    }
+    assert _bytes(server, installed) == installed
+    assert "etc/realmd.conf" in [r.file for r in report.changed]
+    assert "etc/realmd.conf" not in [r.file for r in report.written], "nothing to undo to"
+    assert "made again" in "\n".join(report.lines())
+    if sys.platform != "win32":
+        assert _mode(server / "etc/realmd.conf") == conf.CONF_MODE
+
+
+def test_a_missing_file_whose_default_cannot_be_made_refuses_the_whole_press(
+    tmp_path: Path,
+) -> None:
+    server, _, _, tuned = _tuned_tbc(tmp_path)
+    (server / "etc/mangosd.conf").unlink()
+    without = {k: v for k, v in TEMPLATES["wow-tbc"].items() if k != "mangosd.conf.dist"}
+    report = reset_defaults.reset(
+        TBC, server, reset_defaults.core_files(TBC), seams=_seams(FakeImage(without))
+    )
+
+    assert report.refused and report.changed == ()
+    assert not (server / "etc/mangosd.conf").exists()
+    assert {
+        f: b for f, b in _bytes(server, [f for f in tuned if f != "etc/mangosd.conf"]).items()
+    } == {f: b for f, b in tuned.items() if f != "etc/mangosd.conf"}
+    assert _baks(server) == []
+
+
+def test_a_missing_override_is_made_again_with_the_mode_the_install_gives_it(
+    tmp_path: Path,
+) -> None:
+    installed = _wotlk_stack(tmp_path)
+    _dist_install(tmp_path)
+    (tmp_path / composegen.BASE_FILE).chmod(0o640)
+    (tmp_path / OVERRIDE).unlink()
+
+    report = reset_defaults.reset(WOTLK, tmp_path, [OVERRIDE], seams=_seams())
+
+    assert [r.outcome for r in report.results] == ["recreated"]
+    assert (tmp_path / OVERRIDE).read_bytes() == installed
+    if sys.platform != "win32":
+        assert _mode(tmp_path / OVERRIDE) == 0o640, "not the base compose file's mode"
+
+
+def test_a_missing_wotlk_conf_stays_absent_because_the_install_never_writes_one(
+    tmp_path: Path,
+) -> None:
+    """Plan correction 8: the worldserver does not load a `.dist`, so making one would change it."""
+    _dist_install(tmp_path)
+    (tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]).unlink()
+    report = reset_defaults.reset(
+        WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES, seams=_seams()
+    )
+    assert [r.outcome for r in report.results] == ["absent", "reset", "reset"]
+    assert not (tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0]).exists()
+
+
+def test_a_press_that_fails_after_making_a_file_removes_it_again(tmp_path: Path) -> None:
+    """All or nothing: the file was missing before the press, so it is missing after."""
+    server, _, _, tuned = _tuned_tbc(tmp_path)
+    (server / "etc/realmd.conf").unlink()
+    writes: list[Path] = []
+
+    def third_fails(path: Path, text: str, **kwargs: Any) -> None:
+        if len(writes) == 2:
+            raise OSError(28, "No space left on device")
+        writes.append(path)
+        conf.replace_file(path, text, **kwargs)
+
+    report = reset_defaults.reset(
+        TBC,
+        server,
+        reset_defaults.core_files(TBC),
+        seams=_seams(
+            FakeImage(TEMPLATES["wow-tbc"]), write=third_fails, restore=reset_defaults.restore
+        ),
+    )
+
+    assert report.refused and report.written == ()
+    assert not (server / "etc/realmd.conf").exists()
+    assert _bytes(server, [f for f in tuned if f != "etc/realmd.conf"]) == {
+        f: b for f, b in tuned.items() if f != "etc/realmd.conf"
+    }
+
+
+def test_the_question_names_a_file_left_alone_and_one_made_again_before_the_press(
+    tmp_path: Path,
+) -> None:
+    _dist_install(tmp_path)
+    (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / OVERRIDE).write_text("services: {}\n", encoding="utf-8")
+    foreign, missing = reset_defaults.press_facts(WOTLK, tmp_path, reset_defaults.core_files(WOTLK))
+    assert (foreign, missing) == ((OVERRIDE,), ())
+    said = reset_defaults.question(reset_defaults.core_files(WOTLK), [], foreign=foreign)
+    assert f"Left alone: {OVERRIDE} was not made by Yu'lon." in said
+    assert "RECREATED" not in said, "the override's own paragraph is for one that is reset"
+
+    (tmp_path / "tbc").mkdir()
+    server, _, _, _ = _tuned_tbc(tmp_path / "tbc")
+    (server / "etc/ahbot.conf").unlink()
+    assert reset_defaults.press_facts(TBC, server, reset_defaults.core_files(TBC)) == (
+        (),
+        ("etc/ahbot.conf",),
+    )
+    said = reset_defaults.question(["etc/ahbot.conf"], [], missing=("etc/ahbot.conf",))
+    assert "made again as Yu'lon installs it: ahbot.conf" in said
+
+
+def test_a_press_slower_than_any_window_is_undone_whole_after_a_restart(tmp_path: Path) -> None:
+    """Codex review: a ten-second window split a slow press; one id per press cannot."""
+    _dist_install(tmp_path)
+    at = iter(datetime(2026, 9, 23, 12, 0, 0) + i * timedelta(seconds=45) for i in range(10))
+
+    def slow(path: Path, press: str) -> Path:
+        return reset_defaults.reset_backup(path, press, now=next(at))
+
+    report = reset_defaults.reset(
+        WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES, seams=_seams(backup=slow)
+    )
+
+    assert len(report.written) == 3
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == report.written
+
+
+def test_two_presses_a_moment_apart_are_two_presses(tmp_path: Path) -> None:
+    _dist_install(tmp_path)
+    world, auth = reset_defaults.AZEROTHCORE_CORE_FILES[:2]
+    reset_defaults.reset(WOTLK, tmp_path, [auth], seams=_seams())
+    second = reset_defaults.reset(WOTLK, tmp_path, [world], seams=_seams())
+
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == second.written
+
+
+def test_an_undo_is_known_by_its_press_not_by_the_clock(tmp_path: Path) -> None:
+    """A clock stepped back between the reset and its undo must not re-arm the undone reset."""
+    _dist_install(tmp_path)
+    report = reset_defaults.reset(WOTLK, tmp_path, reset_defaults.AZEROTHCORE_CORE_FILES[:1])
+
+    def stepped_back(path: Path, press: str) -> Path:
+        return reset_defaults.undo_backup(path, press, now=datetime(2001, 1, 1))
+
+    reset_defaults.undo(tmp_path, report.written, backup=stepped_back)
+    tuning.write(tmp_path / reset_defaults.AZEROTHCORE_CORE_FILES[0], {"Rate.XP.Kill": "3"})
+
+    assert reset_defaults.last_reset_on_disk(WOTLK, tmp_path) == ()
+
+
+def test_a_read_only_conf_is_written_and_left_owner_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 0444 target: the temp must stay removable (Windows) and the rename must not be refused."""
+    path = tmp_path / "mangosd.conf"
+    path.write_bytes(b"A = 1\n")
+    path.chmod(0o444)
+    conf.replace_file(path, "A = 2\n")
+    assert path.read_bytes() == b"A = 2\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["mangosd.conf"]
+    if sys.platform != "win32":
+        assert _mode(path) == 0o644
+
+    path.chmod(0o444)
+
+    def refuse(src: object, dst: object) -> None:
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    with pytest.raises(InstallerError):
+        conf.replace_file(path, "A = 3\n")
+    monkeypatch.undo()
+    assert [p.name for p in tmp_path.iterdir()] == ["mangosd.conf"], "a temp file was left"
+    assert path.read_bytes() == b"A = 2\n"
