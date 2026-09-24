@@ -916,6 +916,7 @@ class CatalogView(QWidget):
             lambda: installer.run(options, cancel=cancel, ask=prompter.ask),
             title=f"Installing {entry.name}",
             cancel=cancel,
+            record_as=f"install-{entry.id}",
         )
         if started:
             self.install_started.emit(entry.id)
