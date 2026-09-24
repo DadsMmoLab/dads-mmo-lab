@@ -327,15 +327,16 @@ more punctual than the scheduler that wakes it; the 15 s bound still ends.
 What is asserted instead is causal and cannot be moved by load: the timer is
 armed with exactly the deadline it was given, it is armed within this
 allowance of the fetch starting, and the fetch is out within this allowance
-of giving up. Measured in 60 fetches beside the full suite and two CPU
-spinners (loadavg 5 on 3 cores, 2026-09-24): arming took at most 0.18 ms and
-getting out at most 47 ms, while in the same run one watchdog woke 1.406 s
-late and its fetch ended at 3.407 s -- a failure under the old bound, a pass
-under this one, because neither step the code owns was slow. Two seconds is
-forty times the worst step and still well short of every defect the test
-exists for: a watchdog armed five seconds late, a socket shut five seconds
-after the timer fired, and a read the shutdown does not wake, which runs the
-server's whole `TRICKLE_SECONDS`.
+of giving up. Measured in two runs of 60 fetches beside the full suite and
+two CPU spinners (loadavg 3-6 on 3 cores, 2026-09-24): arming, up to the
+return of `start()`, took at most 2.9 ms and getting out at most 47 ms, while
+in the first run one watchdog woke 1.406 s late and its fetch ended at
+3.407 s -- a failure under the old bound, a pass under this one, because
+neither step the code owns was slow. Two seconds is forty times the worst
+step and still well short of every defect the test exists for: a watchdog
+armed late (a `start()` that takes three seconds included), a socket shut
+five seconds after the timer fired, and a read the shutdown does not wake,
+which runs the server's whole `TRICKLE_SECONDS`.
 """
 
 TRICKLE_SECONDS = 30.0
@@ -351,14 +352,22 @@ was never cut off at all, and is reported as that rather than as slow.
 class WatchdogSpy:
     """What `_Deadline` did and when, stamped from inside it rather than guessed from outside.
 
-    `intervals` is what each timer was armed with, `armed` when its `start()`
-    was called, `fired` when `_abort` began, and `readings` every value the
-    fetch read from the clock it was handed (`clock`). The first reading is
-    the one `_urllib_fetch` builds its `stop_at` from.
+    `intervals` is what each timer was armed with, `starting` when its
+    `start()` was called and `armed` when that call RETURNED, `fired` when
+    `_abort` began, and `readings` every value the fetch read from the clock it
+    was handed (`clock`). The first reading is the one `_urllib_fetch` builds
+    its `stop_at` from.
+
+    `armed` is stamped after the real `start()` and not before it, because
+    `Timer.start()` does not return until the timer's thread is running, and
+    the countdown only begins in that thread: a `start()` that took three
+    seconds and then counted two passed every assertion when this was stamped
+    on the way in, with a fetch of five (second Codex review of T105).
     """
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.intervals: list[float] = []
+        self.starting: list[float] = []
         self.armed: list[float] = []
         self.fired: list[float] = []
         self.readings: list[float] = []
@@ -371,8 +380,9 @@ class WatchdogSpy:
             start = timer.start
 
             def stamped_start() -> None:
-                self.armed.append(time.monotonic())
+                self.starting.append(time.monotonic())
                 start()
+                self.armed.append(time.monotonic())
 
             monkeypatch.setattr(timer, "start", stamped_start)
 
@@ -516,7 +526,8 @@ def test_a_real_server_that_trickles_is_cut_off_at_the_deadline(
 
     gave_up = spy.gave_up(TRICKLE_DEADLINE)
     story = (
-        f"{shape}: armed {[round(t - started, 3) for t in spy.armed]}"
+        f"{shape}: start() called {[round(t - started, 3) for t in spy.starting]},"
+        f" armed {[round(t - started, 3) for t in spy.armed]}"
         f" with {spy.intervals}, fired {[round(t - started, 3) for t in spy.fired]},"
         f" exited {exited - started:.3f}s"
     )
