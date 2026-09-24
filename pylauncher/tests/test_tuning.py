@@ -7,6 +7,9 @@ a `QApplication`. The widgets are `tests/test_tuning_panel.py`'s.
 
 from __future__ import annotations
 
+import os
+import stat
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
@@ -832,3 +835,20 @@ def test_a_key_named_twice_is_listed_once() -> None:
     same key twice.
     """
     assert tuning.conf_keys("A = 1\nA = 2\n") == ("A",)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+@pytest.mark.parametrize("mode", [0o600, 0o644])
+def test_a_save_keeps_the_files_own_mode(tmp_path: Path, mode: int) -> None:
+    """T116: the temp was opened at the umask's 0644, so a 0600 CMaNGOS conf -- mangosd.conf
+    carries the database password -- came back readable by every local account."""
+    path = tmp_path / "mangosd.conf"
+    path.write_text("Key = 1\n", encoding="utf-8")
+    os.chmod(path, mode)
+    old = os.umask(0o022)
+    try:
+        tuning.write(path, {"Key": "2"})
+    finally:
+        os.umask(old)
+    assert path.read_text(encoding="utf-8") == "Key = 2\n"
+    assert stat.S_IMODE(path.stat().st_mode) == mode

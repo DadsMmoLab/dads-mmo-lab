@@ -3685,16 +3685,28 @@ class BotCountAnswer:
     """One read of the bot count, and which lookup asked (an older answer is dropped)."""
 
     generation: int
-    reading: botpop.Reading | None
-    error: str = ""
+    reading: botpop.Reading
+
+
+class BotCountReadFailed(Exception):
+    """A read that raised, tagged with the lookup that asked, so a stale one can be dropped."""
+
+    def __init__(self, generation: int, why: str) -> None:
+        super().__init__(why)
+        self.generation = generation
 
 
 def _read_bot_count(route: botpop.BotPopulationRoute, generation: int) -> BotCountAnswer:
-    """The Bots tab's read, as a job: it opens a conf or the compose override (T99)."""
+    """The Bots tab's read, as a job: it opens a conf or the compose override (T99).
+
+    A failure is re-raised TAGGED with its lookup (review Minor 3): the job
+    runner hands the failure slot only the exception, and an untagged one let an
+    old read's failure free the box while a newer read was still pending.
+    """
     try:
         return BotCountAnswer(generation, route.read())
     except Exception as exc:  # boundary: an unreadable server folder must not kill the UI
-        return BotCountAnswer(generation, None, error=str(exc))
+        raise BotCountReadFailed(generation, str(exc)) from exc
 
 
 TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
@@ -6707,18 +6719,19 @@ class ControllerView(QWidget):
         self._bot_count_pending = False
         reading = answer.reading
         self._bot_count_reading = reading
-        if reading is None:
-            self.bot_count_note.setText(f"Could not read this server's bot count: {answer.error}")
-        elif reading.problem is not None:
+        if reading.problem is not None:
             self.bot_count_note.setText(f"Cannot change the bot count here: {reading.problem}")
         else:
-            self.bot_count_box.setRange(0, reading.ceiling)
+            # Never past what a QSpinBox holds (a C int): `read()` clamps its
+            # ceiling, and the value is clamped again here (Codex medium).
+            top = min(reading.ceiling, botpop.NO_CEILING)
+            self.bot_count_box.setRange(0, top)
             if reading.max is not None:
-                self.bot_count_box.setValue(min(reading.max, reading.ceiling))
-            self.bot_count_box.setToolTip(f"0 to {reading.ceiling}: {reading.ceiling_why}")
+                self.bot_count_box.setValue(max(0, min(reading.max, top)))
+            self.bot_count_box.setToolTip(f"0 to {top}: {reading.ceiling_why}")
             self.bot_count_note.setText(self._bot_count_now(reading))
         self._set_bot_count_controls()
-        rows = reading.rows if reading is not None else ()
+        rows = reading.rows
         if rows != self._bot_rows:
             self._bot_rows = rows
             self.tuning_panel.set_cards(build_tuning_cards(self._all_tuning_rows()))
@@ -6740,7 +6753,15 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _bot_count_read_failed(self, exc: object) -> None:
-        """Only a bug reaches here: `_read_bot_count` returns every failure in its answer."""
+        """A read that raised: said, unless a newer read is pending (then it is stale and dropped).
+
+        An untagged failure cannot say which read it was, so it is logged and
+        never frees the box: the next reload asks again.
+        """
+        generation = getattr(exc, "generation", None)
+        if generation != self._bot_count_generation:
+            logger.warning(f"a stale or untagged bot-count read failed: {exc}")
+            return
         self._bot_count_pending = False
         self.bot_count_note.setText(f"Could not read this server's bot count: {exc}")
         self._set_bot_count_controls()

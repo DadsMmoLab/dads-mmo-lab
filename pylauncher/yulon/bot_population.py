@@ -10,7 +10,11 @@ keeps that number in its install's own place:
 * **WotLK** (AzerothCore): `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS` in the compose
   override's environment, from `azerothcore.world_env`. The environment WINS
   over `playerbots.conf` (`Config.cpp:540-552`), and a container keeps the
-  environment it was created with, so a recreate applies it.
+  environment it was created with, so a recreate applies it. Only those two
+  lines of the world service's `environment:` are changed, every other byte
+  kept (T99 fix wave: re-rendering the whole file dropped hand lines and, on a
+  flaky SELinux probe, the `:z` binds). Rebuilding the file is Reset to
+  default's job, not this box's.
 
 `where()` reads that off the catalog, never off a game id. The Bots tab's box
 sets Min = Max = N, as the install does; the Tuning tab shows the CMaNGOS file's
@@ -112,6 +116,19 @@ CEILING_ACCOUNTS = (
     "for more"
 )
 CEILING_NONE = "the server's own settings set no upper limit"
+CEILING_UNKNOWN = (
+    "{key} is {value!r}, which is not a number of bot accounts, so the server's own settings "
+    "give no upper limit Yu'lon can read"
+)
+ENV_MISSING = (
+    "{name} is not in the {service} environment of {file}, so Yu'lon does not know which line "
+    "the server reads. Reset to default on the Tuning tab writes the file again as installed."
+)
+ENV_TWICE = (
+    "{name} is in the {service} environment of {file} more than once, so Yu'lon does not know "
+    "which line the server reads. Remove the extra line, or use Reset to default on the Tuning "
+    "tab."
+)
 
 
 class BotCountError(RuntimeError):
@@ -130,8 +147,6 @@ class Reading:
     ceiling_why: str = CEILING_NONE
     problem: str | None = None
     """Why the count cannot be read or changed here; `None` when it can."""
-    hand_edited: bool = False
-    """WotLK: the override holds more than Yu'lon renders, which a rewrite drops."""
     rows: tuple[tuning.TuningRow, ...] = field(default_factory=tuple)
     """The Tuning tab's rows for the CMaNGOS file's own keys. Empty for WotLK."""
 
@@ -239,12 +254,106 @@ def _read_text(path: Path) -> str:
         return handle.read()
 
 
-def _env_value(text: str, name: str) -> str | None:
-    """The first `NAME: value` line's value in a compose file, quotes stripped."""
-    found = re.search(rf"^[ \t]*{re.escape(name)}[ \t]*:[ \t]*(.*?)[ \t]*$", text, re.MULTILINE)
-    if found is None:
-        return None
-    return found.group(1).strip("\"'")
+_ENV_LINE = re.compile(
+    r"^(?P<head>[ \t]*(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*)"
+    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s#]*)(?P<tail>.*)$"
+)
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _says_nothing(line: str) -> bool:
+    bare = line.strip()
+    return bare == "" or bare.startswith("#")
+
+
+def _env_lines(lines: list[str], service: str) -> dict[str, list[int]]:
+    """Where each key of `service`'s `environment:` mapping is, by line index. Comments skipped.
+
+    A line scanner and not a YAML round trip, on purpose: a YAML writer drops
+    comments and restyles what it emits (the override template's own header
+    says so), and this box must change two values and nothing else. The shape
+    it reads is the one the install writes -- `  <service>:` then
+    `    environment:` then `      KEY: "value"` lines; a block it cannot find
+    answers `{}`, which the caller refuses.
+    """
+    found: dict[str, list[int]] = {}
+    service_at: int | None = None
+    env_at: int | None = None
+    for index, raw in enumerate(lines):
+        line = raw.rstrip("\r")
+        if _says_nothing(line):
+            continue
+        depth = _indent(line)
+        if env_at is not None and depth <= env_at:
+            env_at = None
+        if service_at is not None and depth <= service_at:
+            service_at = None
+        if service_at is None:
+            if line.strip() == f"{service}:":
+                service_at = depth
+            continue
+        if env_at is None:
+            if line.strip() == "environment:":
+                env_at = depth
+            continue
+        match = _ENV_LINE.match(line)
+        if match is not None:
+            found.setdefault(match.group("key"), []).append(index)
+    return found
+
+
+def _world_service(entry: CatalogEntry) -> str:
+    """The compose service that runs the world: the templates name it as its container."""
+    return entry.container_spec().world
+
+
+def _env_line(lines: list[str], entry: CatalogEntry, name: str, file: str) -> int:
+    """The index of the ONE line of `name` in the world service's environment.
+
+    Raises:
+        BotCountError: the key is not there, or is there more than once.
+    """
+    service = _world_service(entry)
+    found = _env_lines(lines, service).get(name, [])
+    if not found:
+        raise BotCountError(ENV_MISSING.format(name=name, service=service, file=file))
+    if len(found) > 1:
+        raise BotCountError(ENV_TWICE.format(name=name, service=service, file=file))
+    return found[0]
+
+
+def _env_value(line: str) -> str:
+    match = _ENV_LINE.match(line.rstrip("\r"))
+    return "" if match is None else match.group("value").strip("\"'")
+
+
+def _set_env_value(line: str, value: str) -> str:
+    """The same line with its value replaced: indent, key, separator, quotes, tail, CR kept."""
+    ending = "\r" if line.endswith("\r") else ""
+    match = _ENV_LINE.match(line[: len(line) - len(ending)])
+    if match is None:  # `_env_lines` only hands over lines that match
+        raise BotCountError(f"not a `KEY: value` line: {line!r}")
+    old = match.group("value")
+    quote = old[0] if old[:1] in ('"', "'") else ""
+    return f"{match.group('head')}{quote}{value}{quote}{match.group('tail')}{ending}"
+
+
+def patch_env(text: str, entry: CatalogEntry, file: str, values: dict[str, str]) -> str:
+    """`text` with each named key's value replaced in the world's environment, nothing else.
+
+    Split on LF alone, so a CRLF file's CR stays on every line.
+
+    Raises:
+        BotCountError: a key is missing from that environment, or is in it twice.
+    """
+    lines = text.split("\n")
+    for name, value in values.items():
+        index = _env_line(lines, entry, name, file)
+        lines[index] = _set_env_value(lines[index], value)
+    return "\n".join(lines)
 
 
 def _foreign(server_dir: Path) -> bool:
@@ -252,9 +361,7 @@ def _foreign(server_dir: Path) -> bool:
     return not (base.is_file() and composegen.is_ours(base))
 
 
-def read(
-    entry: CatalogEntry, server_dir: Path, *, seams: reset_defaults.Seams | None = None
-) -> Reading:
+def read(entry: CatalogEntry, server_dir: Path) -> Reading:
     """This install's bot population as its files say it now. Never raises for a file."""
     spot = where(entry)
     if spot is None:
@@ -274,75 +381,51 @@ def read(
     if route == "conf":
         low = _number(tuning.conf_value(text, MIN_KEY))
         high = _number(tuning.conf_value(text, MAX_KEY))
-        accounts = _number(tuning.conf_value(text, ACCOUNT_KEY))
-        if accounts is not None and accounts >= 0:
-            ceiling = accounts * CHARACTERS_PER_ACCOUNT
-            why = CEILING_ACCOUNTS.format(
-                accounts=accounts, key=ACCOUNT_KEY, per=CHARACTERS_PER_ACCOUNT
-            )
-        else:
-            ceiling, why = NO_CEILING, CEILING_NONE
+        ceiling, why = _ceiling(tuning.conf_value(text, ACCOUNT_KEY))
         return Reading(file, route, low, high, ceiling, why, rows=_rows(entry, text))
-    low = _number(_env_value(text, MIN_ENV))
-    high = _number(_env_value(text, MAX_ENV))
-    return Reading(
-        file,
-        route,
-        low,
-        high,
-        hand_edited=_hand_edited(entry, server_dir, text, low, high, seams),
-    )
-
-
-def _hand_edited(
-    entry: CatalogEntry,
-    server_dir: Path,
-    text: str,
-    low: int | None,
-    high: int | None,
-    seams: reset_defaults.Seams | None,
-) -> bool:
-    """Whether the override holds anything Yu'lon would not render with these same numbers.
-
-    Asked so the question can say "anything added by hand is dropped" when, and
-    only when, there is something to drop. A render that fails answers `True`:
-    saying so when it is not needed costs a sentence, missing it costs a setting.
-    """
-    env = {}
-    if low is not None:
-        env[MIN_ENV] = str(low)
-    if high is not None:
-        env[MAX_ENV] = str(high)
+    lines = text.split("\n")
     try:
-        rendered = reset_defaults.rendered_override(entry, server_dir, env=env, seams=seams)
-    except (composegen.ComposeGenError, OSError) as exc:
-        logger.info(f"could not render {entry.id}'s override to compare: {exc}")
-        return True
-    return rendered != text
+        low, high = (
+            _number(_env_value(lines[_env_line(lines, entry, name, path.name)]))
+            for name in (MIN_ENV, MAX_ENV)
+        )
+    except BotCountError as exc:
+        return Reading(file, route, problem=str(exc))
+    return Reading(file, route, low, high)
 
 
-def write(
-    entry: CatalogEntry,
-    server_dir: Path,
-    n: int,
-    *,
-    seams: reset_defaults.Seams | None = None,
-) -> Written:
+def _ceiling(accounts_text: str | None) -> tuple[int, str]:
+    """The box's upper bound from `RandomBotAccountCount`, and the sentence that explains it.
+
+    Accounts x 9 when the key is a positive number, never above `NO_CEILING`
+    (Qt's spin box and the cores both stop at a 32-bit int). Absent: no limit.
+    0, negative or not a number: no limit Yu'lon can read -- NOT a 0..0 box
+    (Codex medium); the question's warning above the installed 500 stands.
+    """
+    if accounts_text is None:
+        return NO_CEILING, CEILING_NONE
+    accounts = _number(accounts_text)
+    if accounts is None or accounts <= 0:
+        return NO_CEILING, CEILING_UNKNOWN.format(key=ACCOUNT_KEY, value=accounts_text)
+    why = CEILING_ACCOUNTS.format(accounts=accounts, key=ACCOUNT_KEY, per=CHARACTERS_PER_ACCOUNT)
+    return min(accounts * CHARACTERS_PER_ACCOUNT, NO_CEILING), why
+
+
+def write(entry: CatalogEntry, server_dir: Path, n: int) -> Written:
     """Set Min = Max = `n`, backing the file up first; nothing written if it already says `n`.
 
     Read fresh here, not handed in: the range and the file's case are the disk's
     answer at the moment of writing. CMaNGOS: the two keys through `conf.patch`,
     the install's own writer, so every active copy of each key moves and nothing
-    else does. WotLK: the override rendered again the way the install renders it
-    (T94's `rendered_override`), with the channel's keys if its press is live and
-    these two values replaced.
+    else does. WotLK: the two env lines' values in the world's `environment:`,
+    every other byte of the override kept (`patch_env`).
 
     Raises:
         BotCountError: a refusal a player reads; nothing was written.
     """
     if isinstance(n, bool) or not isinstance(n, int):
         raise BotCountError(NOT_A_NUMBER.format(value=n))
-    reading = read(entry, server_dir, seams=seams)
+    reading = read(entry, server_dir)
     if reading.problem is not None:
         raise BotCountError(reading.problem)
     if n < 0 or n > reading.ceiling:
@@ -368,10 +451,8 @@ def write(
                 {},
             )
         else:
-            text = reset_defaults.rendered_override(
-                entry, server_dir, env={MIN_ENV: str(n), MAX_ENV: str(n)}, seams=seams
-            )
-    except (OSError, UnicodeDecodeError, InstallerError, composegen.ComposeGenError) as exc:
+            text = patch_env(_read_text(path), entry, path.name, {MIN_ENV: str(n), MAX_ENV: str(n)})
+    except (OSError, UnicodeDecodeError, InstallerError) as exc:
         raise BotCountError(WRITE_FAILED.format(file=path.name, exc=exc)) from exc
     try:
         made = tuning.backup(path)
@@ -402,8 +483,7 @@ def installed_count(entry: CatalogEntry) -> int | None:
 def question(entry: CatalogEntry, reading: Reading, n: int) -> str:
     """The Yes/No the Bots tab asks before `write()`, in the words a player reads.
 
-    It says where the number goes, that a backup is made, what a rewrite of the
-    override drops (only when it drops something), and exactly which job makes
+    It says where the number goes, that a backup is made, and exactly which job makes
     the server use it -- a restart for a conf, a recreate for container
     environment -- because the running server keeps what it started with.
     """
@@ -417,15 +497,10 @@ def question(entry: CatalogEntry, reading: Reading, n: int) -> str:
         )
     else:
         parts.append(
-            f"{name} is written again the way Yu'lon generates it, with {n} as both the lowest "
-            "and highest number of random bots, and the command channel's settings kept if it "
-            "is on. A backup of it is made beside it first."
+            f"{name} gets {n} for both {MIN_ENV} and {MAX_ENV}, the lowest and highest number "
+            "of random bots; only those two lines change. A backup of it is made beside it "
+            "first."
         )
-        if reading.hand_edited:
-            parts.append(
-                f"{name} holds something Yu'lon did not write there. Anything added to it by "
-                "hand is dropped (it stays in the backup)."
-            )
     installed = installed_count(entry)
     if installed is not None and n > installed:
         parts.append(
@@ -457,19 +532,16 @@ class BotPopulationRoute:
 
     entry: CatalogEntry
     server_dir: Path
-    seams: reset_defaults.Seams | None = None
 
     def read(self) -> Reading:
-        return read(self.entry, self.server_dir, seams=self.seams)
+        return read(self.entry, self.server_dir)
 
     def write(self, n: int) -> Written:
-        return write(self.entry, self.server_dir, n, seams=self.seams)
+        return write(self.entry, self.server_dir, n)
 
 
-def bot_count_route(
-    entry: CatalogEntry, server_dir: Path, *, seams: reset_defaults.Seams | None = None
-) -> BotPopulationRoute | None:
+def bot_count_route(entry: CatalogEntry, server_dir: Path) -> BotPopulationRoute | None:
     """This install's route, or `None` for a game whose install writes no bot count."""
     if where(entry) is None:
         return None
-    return BotPopulationRoute(entry, server_dir, seams)
+    return BotPopulationRoute(entry, server_dir)

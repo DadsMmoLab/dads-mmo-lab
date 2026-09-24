@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import bot_population, channel_setup, reset_defaults, resources, tuning
+from yulon import bot_population, channel_setup, resources, tuning
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
@@ -29,8 +29,6 @@ VANILLA = CATALOG.get("wow-vanilla")
 TORTOISE = CATALOG.get("wow-tortoise")
 OVERRIDE = composegen.OVERRIDE_FILE
 CONF = "etc/aiplayerbot.conf"
-QUIET = reset_defaults.Seams(bind_label=lambda server_dir: "", platform_id=lambda: "linux")
-"""WotLK's render asks the host about SELinux through this seam; the tests answer for it."""
 
 POSIX = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 
@@ -143,20 +141,19 @@ def test_a_crlf_conf_stays_crlf(tmp_path: Path) -> None:
     assert (tmp_path / CONF).read_bytes() == before.replace(b"Bots = 500", b"Bots = 120")
 
 
-def test_the_wotlk_count_round_trips_through_the_installs_own_render(tmp_path: Path) -> None:
+def test_the_wotlk_count_round_trips_in_the_installs_own_override(tmp_path: Path) -> None:
     installed = _wotlk_stack(tmp_path).decode("utf-8")
-    reading = bot_population.read(WOTLK, tmp_path, seams=QUIET)
+    reading = bot_population.read(WOTLK, tmp_path)
     assert (reading.min, reading.max, reading.problem) == (500, 500, None)
-    assert reading.hand_edited is False
 
-    written = bot_population.write(WOTLK, tmp_path, 50, seams=QUIET)
+    written = bot_population.write(WOTLK, tmp_path, 50)
 
     now = (tmp_path / OVERRIDE).read_text(encoding="utf-8")
     assert now == installed.replace(
         'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "500"', 'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "50"'
     ).replace('AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "500"', 'AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "50"')
-    again = bot_population.read(WOTLK, tmp_path, seams=QUIET)
-    assert (again.min, again.max, again.hand_edited) == (50, 50, False)
+    again = bot_population.read(WOTLK, tmp_path)
+    assert (again.min, again.max) == (50, 50)
     assert written.rule == "recreate", "container environment is read when it is created"
     assert written.backup is not None and written.backup.read_text(encoding="utf-8") == installed
 
@@ -165,23 +162,84 @@ def test_a_live_command_channel_keeps_its_env_when_the_count_changes(tmp_path: P
     pressed = _wotlk_stack(tmp_path, channel=True).decode("utf-8")
     assert "AC_SOAP_ENABLED" in pressed, "control: the press wrote the channel env"
 
-    bot_population.write(WOTLK, tmp_path, 75, seams=QUIET)
+    bot_population.write(WOTLK, tmp_path, 75)
 
     now = (tmp_path / OVERRIDE).read_text(encoding="utf-8")
     assert "AC_SOAP_ENABLED" in now
     assert now == pressed.replace('RANDOM_BOTS: "500"', 'RANDOM_BOTS: "75"')
 
 
-def test_a_hand_edited_override_is_flagged_before_the_rewrite_drops_it(tmp_path: Path) -> None:
-    installed = _wotlk_stack(tmp_path).decode("utf-8")
-    (tmp_path / OVERRIDE).write_text(
-        installed.replace("    environment:\n", "    environment:\n      TZ: Europe/Oslo\n"),
-        encoding="utf-8",
+def _hand_tuned(installed: str) -> str:
+    """The install's override as a player leaves it: `:z` binds, a hand-added key, a comment."""
+    tuned = installed.replace("/azerothcore/modules\n", "/azerothcore/modules:z\n")
+    assert tuned != installed, "control: the volume line is where this test expects it"
+    return tuned.replace(
+        "    environment:\n",
+        "    environment:\n      # my own note, kept\n      TZ: 'Europe/Oslo'   # hand-added\n",
     )
-    assert bot_population.read(WOTLK, tmp_path, seams=QUIET).hand_edited is True
-    bot_population.write(WOTLK, tmp_path, 60, seams=QUIET)
-    assert "TZ" not in (tmp_path / OVERRIDE).read_text(encoding="utf-8")
-    assert any("TZ: Europe/Oslo" in b.read_text(encoding="utf-8") for b in _baks(tmp_path))
+
+
+@POSIX
+def test_only_the_two_values_move_in_a_hand_tuned_override(tmp_path: Path) -> None:
+    """Codex high: the box re-rendered the whole override, dropping hand lines and `:z`.
+
+    Mutation: render the file again (f67483d0) and the TZ line, the note and
+    `:z` go, and the mode the render's writer picks replaces the file's own.
+    """
+    installed = _wotlk_stack(tmp_path).decode("utf-8")
+    before = _hand_tuned(installed)
+    path = tmp_path / OVERRIDE
+    path.write_text(before, encoding="utf-8", newline="")
+    os.chmod(path, 0o640)
+
+    written = bot_population.write(WOTLK, tmp_path, 60)
+
+    assert path.read_text(encoding="utf-8") == before.replace(
+        'RANDOM_BOTS: "500"', 'RANDOM_BOTS: "60"'
+    )
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert written.backup is not None and written.backup.read_text(encoding="utf-8") == before
+
+
+def test_a_crlf_override_stays_crlf_and_a_bare_value_stays_bare(tmp_path: Path) -> None:
+    installed = _wotlk_stack(tmp_path).decode("utf-8")
+    before = installed.replace('MAX_RANDOM_BOTS: "500"', "MAX_RANDOM_BOTS: 500").replace(
+        "\n", "\r\n"
+    )
+    (tmp_path / OVERRIDE).write_bytes(before.encode("utf-8"))
+    bot_population.write(WOTLK, tmp_path, 70)
+    assert (tmp_path / OVERRIDE).read_bytes() == before.replace(
+        'MIN_RANDOM_BOTS: "500"', 'MIN_RANDOM_BOTS: "70"'
+    ).replace("MAX_RANDOM_BOTS: 500", "MAX_RANDOM_BOTS: 70").encode("utf-8")
+
+
+@pytest.mark.parametrize("case", ["missing", "twice"])
+def test_a_key_missing_or_twice_in_the_world_env_is_refused(tmp_path: Path, case: str) -> None:
+    """Which line the world reads is not a guess this box makes; Reset to default rebuilds."""
+    installed = _wotlk_stack(tmp_path).decode("utf-8")
+    line = '      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "500"\n'
+    assert line in installed, "control"
+    before = installed.replace(line, "" if case == "missing" else line + line)
+    (tmp_path / OVERRIDE).write_text(before, encoding="utf-8", newline="")
+
+    reading = bot_population.read(WOTLK, tmp_path)
+    assert reading.problem is not None and "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS" in reading.problem
+    with pytest.raises(bot_population.BotCountError):
+        bot_population.write(WOTLK, tmp_path, 60)
+    assert (tmp_path / OVERRIDE).read_text(encoding="utf-8") == before
+    assert _baks(tmp_path) == []
+
+
+def test_a_commented_copy_of_a_key_is_not_a_second_one(tmp_path: Path) -> None:
+    installed = _wotlk_stack(tmp_path).decode("utf-8")
+    before = installed.replace(
+        "    environment:\n", '    environment:\n      # AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "9"\n'
+    )
+    (tmp_path / OVERRIDE).write_text(before, encoding="utf-8", newline="")
+    bot_population.write(WOTLK, tmp_path, 80)
+    now = (tmp_path / OVERRIDE).read_text(encoding="utf-8")
+    assert '# AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "9"' in now
+    assert 'AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "80"' in now
 
 
 # -- nothing written when there is nothing to write ------------------------------------
@@ -233,6 +291,24 @@ def test_zero_is_allowed_because_the_core_reads_it_as_no_random_bots(tmp_path: P
     assert bot_population.read(TBC, tmp_path).max == 0
 
 
+@pytest.mark.parametrize("accounts", ["0", "lots", "-3"])
+def test_an_account_count_of_zero_or_nonsense_means_no_ceiling_is_known(
+    tmp_path: Path, accounts: str
+) -> None:
+    """Codex medium: 0 gave the box a 0..0 range; nonsense is not a limit either."""
+    _cmangos_conf(tmp_path, accounts=accounts)
+    reading = bot_population.read(TBC, tmp_path)
+    assert reading.ceiling == bot_population.NO_CEILING
+    assert "RandomBotAccountCount" in reading.ceiling_why
+
+
+def test_a_huge_account_count_is_clamped_to_the_whole_number_the_core_reads(
+    tmp_path: Path,
+) -> None:
+    _cmangos_conf(tmp_path, accounts=str(10**12))
+    assert bot_population.read(TBC, tmp_path).ceiling == bot_population.NO_CEILING
+
+
 def test_a_conf_with_no_account_count_states_no_ceiling(tmp_path: Path) -> None:
     """Tortoise's module has no such key (T30 Half 1), and none is invented for it."""
     _cmangos_conf(tmp_path, accounts=None)
@@ -243,7 +319,7 @@ def test_a_conf_with_no_account_count_states_no_ceiling(tmp_path: Path) -> None:
 
 def test_wotlk_states_no_ceiling_either(tmp_path: Path) -> None:
     _wotlk_stack(tmp_path)
-    assert bot_population.read(WOTLK, tmp_path, seams=QUIET).ceiling == bot_population.NO_CEILING
+    assert bot_population.read(WOTLK, tmp_path).ceiling == bot_population.NO_CEILING
 
 
 # -- refusals ------------------------------------------------------------------------------
@@ -262,10 +338,10 @@ def test_another_tools_compose_stack_is_left_alone(tmp_path: Path) -> None:
     """A WotLK server adopted from the DML launcher: its compose files are not Yu'lon's."""
     installed = _wotlk_stack(tmp_path)
     (tmp_path / composegen.BASE_FILE).write_text("services: {}\n", encoding="utf-8")
-    reading = bot_population.read(WOTLK, tmp_path, seams=QUIET)
+    reading = bot_population.read(WOTLK, tmp_path)
     assert reading.problem is not None
     with pytest.raises(bot_population.BotCountError):
-        bot_population.write(WOTLK, tmp_path, 50, seams=QUIET)
+        bot_population.write(WOTLK, tmp_path, 50)
     assert (tmp_path / OVERRIDE).read_bytes() == installed
 
 
@@ -302,7 +378,7 @@ def test_the_tuning_rows_are_the_keys_the_install_writes_into_aiplayerbot_conf(
 def test_wotlk_has_no_tuning_rows(tmp_path: Path) -> None:
     """Its count is container environment, not a conf key; the tab's raw editor warns about it."""
     _wotlk_stack(tmp_path)
-    assert bot_population.read(WOTLK, tmp_path, seams=QUIET).rows == ()
+    assert bot_population.read(WOTLK, tmp_path).rows == ()
 
 
 def test_the_rows_spec_type_checks_a_count(tmp_path: Path) -> None:
@@ -329,15 +405,13 @@ def test_a_count_above_the_installs_says_what_it_costs(tmp_path: Path) -> None:
     assert "more than the 500 Yu'lon installs" in said
 
 
-def test_the_wotlk_question_asks_for_a_recreate_and_names_hand_edits_only_when_there_are_some(
+def test_the_wotlk_question_asks_for_a_recreate_and_changes_only_two_lines(
     tmp_path: Path,
 ) -> None:
-    installed = _wotlk_stack(tmp_path).decode("utf-8")
-    said = bot_population.question(WOTLK, bot_population.read(WOTLK, tmp_path, seams=QUIET), 50)
-    assert "RECREATED" in said and "by hand" not in said
-    (tmp_path / OVERRIDE).write_text(installed + "# my note\n", encoding="utf-8")
-    said = bot_population.question(WOTLK, bot_population.read(WOTLK, tmp_path, seams=QUIET), 50)
-    assert "by hand" in said
+    _wotlk_stack(tmp_path)
+    said = bot_population.question(WOTLK, bot_population.read(WOTLK, tmp_path), 50)
+    assert "RECREATED" in said and "only those two lines change" in said
+    assert "by hand" not in said and "written again" not in said
 
 
 def test_each_games_installed_count_is_read_off_the_catalog() -> None:

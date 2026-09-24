@@ -317,30 +317,15 @@ def channel_is_on(server_dir: Path) -> bool:
 
 
 def _override_default(entry: CatalogEntry, server_dir: Path, seams: Seams) -> str:
-    """What the install writes as `docker-compose.override.yml`, plus the channel's env if on."""
-    return rendered_override(entry, server_dir, seams=seams)
-
-
-def rendered_override(
-    entry: CatalogEntry,
-    server_dir: Path,
-    *,
-    env: Mapping[str, str] | None = None,
-    seams: Seams | None = None,
-) -> str:
-    """The override as the install renders it, plus the channel's env if on, plus `env`.
+    """What the install writes as `docker-compose.override.yml`, plus the channel's env if on.
 
     The same five inputs as the install's own call (`native.py:5925-5932`). The
     channel layer is the merge `channel_setup._world_env()` makes
     (`channel_setup.py:534-543`), spelled from public parts; the test compares
-    the result with the file `channel_setup.enable()` really writes. `env` is
-    the last layer (T99: the Bots tab's bot population), so a value set there
-    wins over the catalog's while the channel keeps its own keys.
+    the result with the file `channel_setup.enable()` really writes.
     """
-    seams = seams or Seams()
     operations = entry.operations
     extra = operations.enable_env if operations is not None and channel_is_on(server_dir) else {}
-    extra = {**extra, **(env or {})}
     plan = composegen.render(
         entry,
         server_dir,

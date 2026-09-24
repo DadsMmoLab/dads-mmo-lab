@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -599,11 +600,30 @@ def _atomic_write(path: Path, text: str) -> None:
     app runs on. The temp file is removed if anything goes wrong, so a failed
     save leaves neither a truncated conf nor a `.yulon-tmp` beside it for
     somebody to find later and wonder about.
+
+    The replaced file KEEPS its own mode (T116). The temp used to be opened at
+    the umask default, so a 0600 CMaNGOS conf came back 0644 -- `mangosd.conf`
+    carries the database password and is reachable through a module's card.
+    Now the temp is created owner-only in the creating call (`private_copy`'s
+    rule), the text lands, and it is given the file's own mode before the
+    rename, exactly as `conf.replace_file` does. A file not yet on disk keeps
+    the owner-only mode.
     """
     temp = path.with_name(f"{path.name}{TEMP_SUFFIX}")
     try:
-        with open(temp, "w", encoding="utf-8", newline="") as handle:
+        mode: int | None = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        mode = None
+    try:
+        # A temp left by a crash is someone's half-written text, never a file to append to.
+        temp.unlink(missing_ok=True)
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
+        if mode is not None:
+            # Owner-writable always, as `conf._write` keeps it: a read-only
+            # temp is one Windows cannot remove after a failed rename.
+            os.chmod(temp, mode | stat.S_IWUSR)
         os.replace(temp, path)
     except BaseException:
         temp.unlink(missing_ok=True)

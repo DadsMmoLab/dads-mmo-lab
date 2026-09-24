@@ -14777,7 +14777,11 @@ def _wotlk_override(server: Path) -> str:
     (server / composegen.BASE_FILE).write_text(
         composegen.GENERATED_MARKER + "\nservices: {}\n", encoding="utf-8"
     )
-    text = reset_defaults.rendered_override(WOTLK, server, seams=RESET_QUIET)
+    texts, reasons = reset_defaults.default_texts(
+        WOTLK, server, [composegen.OVERRIDE_FILE], seams=RESET_QUIET
+    )
+    assert reasons == {}
+    text = texts[composegen.OVERRIDE_FILE]
     (server / composegen.OVERRIDE_FILE).write_text(text, encoding="utf-8", newline="")
     return text
 
@@ -14787,7 +14791,7 @@ def _bots_view(ps: _Ps, tmp_path: Path, entry: CatalogEntry = TBC, **kw: Any) ->
     object.__setattr__(
         services,
         "bot_population",
-        bot_population.bot_count_route(entry, tmp_path, seams=RESET_QUIET),
+        bot_population.bot_count_route(entry, tmp_path),
     )
     return ControllerView(entry, services, status_poll_ms=0, **kw)
 
@@ -14896,24 +14900,86 @@ def test_a_wotlk_bot_count_is_written_into_the_override_and_asks_for_a_recreate(
     assert view.bot_count_owed_button.text() == TUNING_RECREATE_LABEL
 
 
-def test_a_hand_edited_wotlk_override_is_named_before_it_is_rewritten(
+def test_a_hand_added_wotlk_line_survives_apply(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Codex high: Apply re-rendered the whole override and dropped what a player added."""
     installed = _wotlk_override(tmp_path)
-    (tmp_path / composegen.OVERRIDE_FILE).write_text(
-        installed.replace("    environment:\n", "    environment:\n      TZ: Europe/Oslo\n"),
-        encoding="utf-8",
-    )
+    before = installed.replace("    environment:\n", "    environment:\n      TZ: Europe/Oslo\n")
+    (tmp_path / composegen.OVERRIDE_FILE).write_text(before, encoding="utf-8", newline="")
     view = _bots_view(ps, tmp_path, WOTLK)
     asked: list[str] = []
-    from PySide6.QtWidgets import QMessageBox
-
-    _reset_answer(monkeypatch, QMessageBox.StandardButton.No, asked)
+    _reset_yes(monkeypatch, asked)
     view.bot_count_box.setValue(60)
     view.bot_count_apply_button.click()
 
-    assert len(asked) == 1 and "by hand" in asked[0]
-    assert "TZ" in (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8")
+    assert len(asked) == 1 and "by hand" not in asked[0]
+    assert (tmp_path / composegen.OVERRIDE_FILE).read_text(encoding="utf-8") == before.replace(
+        'RANDOM_BOTS: "500"', 'RANDOM_BOTS: "60"'
+    )
+
+
+def test_a_huge_account_count_reaches_the_box_clamped_not_as_an_overflow(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Codex medium: accounts x 9 above Qt's int made `setRange` raise inside the slot."""
+    path = tmp_path / BOT_CONF
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        BOT_CONF_TEXT.replace(
+            "RandomBotAccountCount = 100", f"RandomBotAccountCount = {10**12}"
+        ).replace("MaxRandomBots = 500", f"MaxRandomBots = {10**11}"),
+        encoding="utf-8",
+    )
+    view = _bots_view(ps, tmp_path)
+    assert view.bot_count_box.maximum() == bot_population.NO_CEILING
+    assert view.bot_count_box.value() == bot_population.NO_CEILING
+    assert view.bot_count_box.isEnabled() is True
+
+
+def test_an_older_read_landing_late_is_dropped(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Review Minor 3: the generation check in `_bot_count_read`, pinned.
+
+    Mutation: drop the check and the late 500 overwrites the newer 70.
+    """
+    _bot_conf(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    ((old_work, old_done, _),) = _bot_jobs(held, ControllerView._bot_count_read)
+    stale = old_work()  # read while the file said 500
+    (tmp_path / BOT_CONF).write_text(BOT_CONF_TEXT.replace("= 500", "= 70"), encoding="utf-8")
+    view.reload_tuning()
+    new_work, new_done, _ = _bot_jobs(held, ControllerView._bot_count_read)[-1]
+    new_done(new_work())
+    assert view.bot_count_box.value() == 70
+    old_done(stale)
+    assert view.bot_count_box.value() == 70, "a stale read was applied"
+    assert "Now 70" in view.bot_count_note.text()
+
+
+def test_an_older_read_that_failed_does_not_free_a_newer_pending_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Review Minor 3: the failure slot keeps the same generation rule as the ready one."""
+    _bot_conf(tmp_path)
+    held: list[tuple[Any, Any, Any]] = []
+    view = _bots_view(
+        ps, tmp_path, job_runner=lambda work, done, failed: held.append((work, done, failed))
+    )
+    ((_w, _d, old_failed),) = _bot_jobs(held, ControllerView._bot_count_read)
+    view.reload_tuning()
+    new_work, new_done, new_failed = _bot_jobs(held, ControllerView._bot_count_read)[-1]
+    assert old_failed.__func__ is ControllerView._bot_count_read_failed
+    old_failed(controller_view_module.BotCountReadFailed(1, "an old read broke"))
+    assert view._bot_count_pending is True, "an old failure freed the newer read"
+    assert view.bot_count_box.isEnabled() is False
+    new_failed(
+        controller_view_module.BotCountReadFailed(view._bot_count_generation, "this one broke")
+    )
+    assert view._bot_count_pending is False
+    assert "this one broke" in view.bot_count_note.text()
 
 
 def test_the_bot_count_write_runs_on_the_job_runner_and_holds_the_box(
