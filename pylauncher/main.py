@@ -255,9 +255,17 @@ def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
 
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
-    from PySide6.QtCore import QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
-    from PySide6.QtGui import QDesktopServices, QGuiApplication
-    from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QPushButton, QWidget
+    from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
+    from PySide6.QtGui import QDesktopServices, QGuiApplication, QHoverEvent
+    from PySide6.QtWidgets import (
+        QMainWindow,
+        QMenu,
+        QMessageBox,
+        QPushButton,
+        QTabBar,
+        QToolButton,
+        QWidget,
+    )
 
     from yulon import __version__, forgetting
     from yulon.catalog.catalog import load_catalog
@@ -268,7 +276,7 @@ def build_window() -> object:
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.icons import get_app_icon, get_tab_icon
     from yulon.ui.tab_titles import retitle_controller_tabs
-    from yulon.ui.theme import apply_dadcraft_theme
+    from yulon.ui.theme import FORGET_TAB_BUTTON, apply_dadcraft_theme
     from yulon.ui.widgets.job import threaded_job_runner
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.ui.widgets.update_dialog import UpdateChoice, UpdateDialog, default_open_url
@@ -419,6 +427,12 @@ def build_window() -> object:
                 if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
                     stop_act = menu.addAction("Stop Server")
                     stop_act.triggered.connect(cv.stop_server)
+                # T95: the ×'s dialog, for anyone who reads the menu first.
+                # The same entry point and the same refusals.
+                menu.addSeparator()
+                remove_act = menu.addAction(forgetting.BUTTON_LABEL)
+                menu_key = (cv.entry.id, sd)
+                remove_act.triggered.connect(lambda _checked=False, k=menu_key: request_removal(*k))
         menu.exec(tab_bar.mapToGlobal(pos))
 
     tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -456,6 +470,7 @@ def build_window() -> object:
         index = tabs.indexOf(view)
         if index != -1:
             tabs.removeTab(index)
+            forget_buttons.tabs_changed()
         # The tab tree changed; the navigator's cached focus chain is stale.
         navigator.invalidate()
         # `removeTab()` only unparents the page, it does not delete it. Without
@@ -666,6 +681,79 @@ def build_window() -> object:
         )
         on_uninstalled(game, folder)
 
+    FORGET_SIDE = QTabBar.ButtonPosition.RightSide
+    """Where the × sits: the style's own close-button side (Fusion's
+    `SH_TabBar_CloseButtonPosition`), which on this West rail is the TOP of the
+    tab (measured offscreen 2026-09-23: the button's y equals the tab's)."""
+
+    class _ForgetButtons(QObject):
+        """Shows a server tab's × on the tab under the mouse and on the current one (T95).
+
+        An event filter on the sidebar's `QTabBar`, which has `WA_Hover` on by
+        default. Moving onto the × still sends the bar `HoverMove`, and leaving
+        the bar sends `Leave`/`HoverLeave` (both measured), so the × never
+        blinks out under the pointer. A hidden tab button still reserves its
+        length, so showing it moves nothing.
+        """
+
+        def __init__(self, bar: QTabBar) -> None:
+            super().__init__(bar)
+            self._bar = bar
+            self._hovered = -1
+
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+            if isinstance(event, QHoverEvent) and event.type() != QEvent.Type.HoverLeave:
+                self._hovered = self._bar.tabAt(event.position().toPoint())
+            elif event.type() in (QEvent.Type.HoverLeave, QEvent.Type.Leave):
+                self._hovered = -1
+            else:
+                return False
+            self.sync()
+            return False
+
+        def attach(self, index: int, button: QToolButton) -> None:
+            self._bar.setTabButton(index, FORGET_SIDE, button)
+            self.sync()
+
+        @Slot()
+        def sync(self) -> None:
+            current = self._bar.currentIndex()
+            for index in range(self._bar.count()):
+                button = self._bar.tabButton(index, FORGET_SIDE)
+                if button is not None:
+                    button.setVisible(index in (current, self._hovered))
+
+        @Slot(int)
+        def current_changed(self, _index: int) -> None:
+            self.sync()
+
+        def tabs_changed(self) -> None:
+            """A tab went: its index no longer names what the pointer was over."""
+            self._hovered = -1
+            self.sync()
+
+    forget_buttons = _ForgetButtons(tabs.tabBar())
+    tabs.tabBar().installEventFilter(forget_buttons)
+    tabs.currentChanged.connect(forget_buttons.current_changed)
+
+    def _forget_button(key: tuple[str, Path], name: str) -> QToolButton:
+        """The × for one server tab. Parented to the bar, which deletes it with its tab.
+
+        `QTabBar.removeTab()` deletes a tab's buttons (measured offscreen, 2026-09-24).
+        """
+        button = QToolButton(tabs.tabBar())
+        button.setObjectName(FORGET_TAB_BUTTON)
+        button.setText("×")
+        button.setAutoRaise(True)
+        # Not a gamepad stop: a control that comes and goes with the mouse would
+        # be a destructive target in the D-pad chain, and a stale entry in the
+        # navigator's cache. The Server tab's button is the gamepad's route.
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setToolTip(f"{forgetting.BUTTON_LABEL} {name}")
+        button.setAccessibleName(forgetting.BUTTON_LABEL)
+        button.clicked.connect(lambda _checked=False, k=key: request_removal(*k))
+        return button
+
     def on_client_dir_changed(game: str, server_dir: object, client_dir: object) -> None:
         """This install's client folder was set, changed or cleared (T36): rebuild its tab.
 
@@ -781,6 +869,9 @@ def build_window() -> object:
         panels.extend(view.log_panels())
         tabs.addTab(view, entry.name)
         tabs.setTabIcon(tabs.indexOf(view), get_tab_icon("server"))
+        # T95: the ×, on a server page only. Catalog (and T93's Logs) never get
+        # one, because only this function attaches it and only to a ControllerView.
+        forget_buttons.attach(tabs.indexOf(view), _forget_button(key, entry.name))
         # A new page entered the tree; the navigator's focus chain is stale.
         navigator.invalidate()
         # The leaf folder alone was the title, and it is the one part of the

@@ -1896,6 +1896,167 @@ def test_a_gone_folder_is_forgotten_without_a_stop_and_with_t34s_words(
     assert window.property("tabs").indexOf(view) == -1
 
 
+def _hover(bar: Any, index: int) -> None:
+    """A real `QHoverEvent`, sent the way Qt sends one.
+
+    Measured offscreen, an unshown window included.
+    """
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QHoverEvent
+    from PySide6.QtWidgets import QApplication
+
+    centre = QPointF(bar.tabRect(index).center())
+    QApplication.sendEvent(bar, QHoverEvent(QEvent.Type.HoverMove, centre, centre, QPointF(-1, -1)))
+
+
+def _leave(bar: Any) -> None:
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.sendEvent(bar, QEvent(QEvent.Type.Leave))
+
+
+def _x_of(window: Any, view: Any) -> Any:
+    from PySide6.QtWidgets import QTabBar
+
+    tabs = window.property("tabs")
+    return tabs.tabBar().tabButton(tabs.indexOf(view), QTabBar.ButtonPosition.RightSide)
+
+
+def test_only_server_tabs_carry_an_x(window: Any, tmp_path: Any) -> None:
+    """Decided by page type, not index: Catalog is 0 and T93 puts Logs at 1."""
+    from PySide6.QtWidgets import QTabBar
+
+    from yulon.ui.controller_view import ControllerView
+    from yulon.ui.theme import FORGET_TAB_BUTTON
+
+    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "t95-has-x", None)
+    tabs = window.property("tabs")
+    bar = tabs.tabBar()
+    for index in range(tabs.count()):
+        page = tabs.widget(index)
+        right = bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
+        left = bar.tabButton(index, QTabBar.ButtonPosition.LeftSide)
+        assert left is None
+        if isinstance(page, ControllerView):
+            assert right is not None and right.objectName() == FORGET_TAB_BUTTON
+        else:
+            assert right is None, f"{tabs.tabText(index)!r} has an ×"
+
+
+def test_the_x_shows_on_the_hovered_tab_and_the_current_one_and_nowhere_else(
+    window: Any, tmp_path: Any
+) -> None:
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", tmp_path / "t95-first", None)
+    catalog.installed.emit("wow-wotlk", tmp_path / "t95-second", None)
+    first, second = _tab_for(window, tmp_path / "t95-first"), _tab_for(
+        window, tmp_path / "t95-second"
+    )
+    tabs = window.property("tabs")
+    bar = tabs.tabBar()
+    x_first, x_second = _x_of(window, first), _x_of(window, second)
+    assert tabs.currentWidget() is second
+
+    assert x_first.isHidden() and not x_second.isHidden(), "only the current tab's × at rest"
+    _hover(bar, tabs.indexOf(first))
+    assert not x_first.isHidden() and not x_second.isHidden(), "hover shows it, current keeps it"
+    _leave(bar)
+    assert x_first.isHidden() and not x_second.isHidden()
+    tabs.setCurrentWidget(first)
+    assert not x_first.isHidden() and x_second.isHidden(), "the × follows the current tab"
+    shown = [
+        index
+        for index in range(tabs.count())
+        if (x := _x_of(window, tabs.widget(index))) is not None and not x.isHidden()
+    ]
+    assert shown == [tabs.indexOf(first)], "an × is showing on a tab nobody is on or over"
+
+
+def test_the_x_is_not_a_gamepad_stop_and_is_exempt_from_the_touch_floor(
+    window: Any, tmp_path: Any
+) -> None:
+    from PySide6.QtCore import Qt
+
+    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "t95-size", None)
+    x = _x_of(window, _tab_for(window, tmp_path / "t95-size"))
+    x.ensurePolished()
+    assert x.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert x.maximumWidth() <= 18 and x.maximumHeight() <= 18, x.maximumSize()
+
+
+def test_pressing_the_x_is_the_same_removal(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, True)
+    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t95-x-press")
+
+    _x_of(window, view).click()
+
+    assert [title for title, _, _ in asked] == [forgetting.TITLE]
+    assert stops == [1]
+    assert window.property("tabs").indexOf(view) == -1
+
+
+def _right_click(bar: Any, index: int, choose: str | None = None) -> list[str]:
+    """Right-click tab `index` through the real menu, and return what it offered.
+
+    `QMenu.exec` cannot be replaced from Python: it is a Shiboken slot, and an
+    assignment to it is accepted and then ignored (`test_controller_view.py`'s
+    `_row_menu()`). A patched one left this test on a real popup until it was
+    killed (T95, measured). So the popup is really shown, and a zero-delay timer,
+    which runs inside the menu's own event loop (measured offscreen), reads its
+    entries, triggers `choose` and closes it.
+    """
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QMenu
+
+    offered: list[str] = []
+
+    def drive() -> None:
+        popup = QApplication.activePopupWidget()
+        menus = [popup] if isinstance(popup, QMenu) else []
+        menus += [
+            w for w in QApplication.topLevelWidgets() if isinstance(w, QMenu) and w.isVisible()
+        ]
+        try:
+            for menu in dict.fromkeys(menus):
+                offered.extend(action.text() for action in menu.actions())
+                for action in menu.actions():
+                    if choose is not None and action.text() == choose:
+                        action.trigger()
+        finally:
+            for menu in menus:
+                menu.close()
+
+    QTimer.singleShot(0, drive)
+    bar.customContextMenuRequested.emit(bar.tabRect(index).center())
+    return offered
+
+
+def test_the_tab_menu_offers_the_same_removal_on_server_tabs_only(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yulon import forgetting
+
+    asked = _answer(monkeypatch, False)
+    view, _ = _removable_tab(window, monkeypatch, tmp_path / "t95-menu")
+    tabs = window.property("tabs")
+    bar = tabs.tabBar()
+
+    offered = _right_click(bar, tabs.indexOf(view), choose=forgetting.BUTTON_LABEL)
+    assert "Copy Server Path" in offered, "no menu was read at all"
+    assert forgetting.BUTTON_LABEL in offered
+    assert [title for title, _, _ in asked] == [forgetting.TITLE], "not the same dialog"
+    assert tabs.indexOf(view) != -1, "answered No, yet the tab went"
+
+    offered = _right_click(bar, 0)
+    assert offered, "no menu was read at all"
+    assert forgetting.BUTTON_LABEL not in offered, "the Catalog's menu offers a removal"
+
+
 # ------------------------------------------------ T36: the client-folder seam
 
 
