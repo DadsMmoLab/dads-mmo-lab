@@ -20,9 +20,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 import pytest
 
@@ -794,33 +796,53 @@ def _the_running_qapplication() -> object | None:
     return widgets.QApplication.instance()
 
 
-def top_level_widget_addresses() -> set[int]:
-    """The C++ address of every live top-level widget: a snapshot a teardown can compare with.
+def _address(widget: Any) -> int:
+    import shiboken6
 
-    Addresses and not the widgets themselves, because holding a Python reference
-    to a widget is what keeps a Python-owned one alive.
+    return int(shiboken6.getCppPointer(widget)[0])
+
+
+def top_level_widget_snapshot() -> dict[int, weakref.ref[Any]]:
+    """Every live top-level widget, by C++ address, with a WEAK reference to its wrapper.
+
+    Weak, because a strong reference to a Python-owned widget is what keeps it
+    alive: the snapshot would itself be the leak it is there to find.
+
+    The address alone is not an identity. Qt reuses a freed widget's address,
+    so a widget a test makes where a snapshotted one used to be would pass for
+    it and be spared. The weak reference tells them apart: the entry counts only
+    while it still returns that very wrapper. A widget Qt made for itself may
+    lose its wrapper as soon as this returns, so its entry can go dead while the
+    widget lives; the `createdByPython` filter below, not the snapshot, is what
+    spares those.
     """
     app = _the_running_qapplication()
     if app is None:
-        return set()
-    import shiboken6
+        return {}
     from PySide6.QtWidgets import QApplication
 
-    return {int(shiboken6.getCppPointer(w)[0]) for w in QApplication.topLevelWidgets()}
+    return {_address(w): weakref.ref(w) for w in QApplication.topLevelWidgets()}
 
 
-def destroy_the_widgets_left_behind(before: set[int]) -> int:
+def _was_in(before: Mapping[int, weakref.ref[Any]], widget: Any) -> bool:
+    then = before.get(_address(widget))
+    return then is not None and then() is widget
+
+
+def destroy_the_widgets_left_behind(before: Mapping[int, weakref.ref[Any]]) -> int:
     """Delete every orphan top-level widget Python made that was not alive in `before`.
 
     Returns how many it deleted. Three filters, each keeping something alive
     that is not a test's leftover:
 
-    - in `before`: alive when the test started, so a longer-scoped fixture's
-      (`test_main.py`'s module-scoped `_app_window` is built before any
-      function-scoped fixture, so it is always in the snapshot);
+    - in `before` (same address AND same wrapper): alive when the test started,
+      so a longer-scoped fixture's (`test_main.py`'s module-scoped `_app_window`
+      is built before any function-scoped fixture, so it is always in the
+      snapshot);
     - `parentWidget()` set: a dialog or menu is a top-level WINDOW with a parent,
       and its parent decides when it goes;
-    - not `createdByPython`: a widget Qt made for itself is Qt's to delete.
+    - not `createdByPython`: a widget Qt made for itself is Qt's to delete (a
+      `QCompleter`'s popup is parentless, and the completer deletes it).
 
     `deleteLater` plus a DeferredDelete-only `sendPostedEvents`, not
     `processEvents()`: the deletion happens here, and no other queued event gets
@@ -836,14 +858,23 @@ def destroy_the_widgets_left_behind(before: set[int]) -> int:
     left = [
         w
         for w in QApplication.topLevelWidgets()
-        if w.parentWidget() is None
-        and shiboken6.createdByPython(w)
-        and int(shiboken6.getCppPointer(w)[0]) not in before
+        if w.parentWidget() is None and shiboken6.createdByPython(w) and not _was_in(before, w)
     ]
     for widget in left:
         widget.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     return len(left)
+
+
+def destroying_what_is_left_behind() -> Iterator[None]:
+    """The body of both fixtures below: snapshot, yield to the test or module, delete the rest.
+
+    A plain generator so `test_leaked_widgets.py` can drive the very code the
+    fixtures run, inside one test, without depending on test order.
+    """
+    before = top_level_widget_snapshot()
+    yield
+    destroy_the_widgets_left_behind(before)
 
 
 @pytest.fixture(autouse=True)
@@ -864,9 +895,7 @@ def _widgets_a_test_leaves_behind_are_destroyed() -> Iterator[None]:
     in its teardown has done so before this one deletes the view.
     `test_leaked_widgets.py` holds this to what it deletes and what it spares.
     """
-    before = top_level_widget_addresses()
-    yield
-    destroy_the_widgets_left_behind(before)
+    yield from destroying_what_is_left_behind()
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -885,9 +914,7 @@ def _widgets_a_module_leaves_behind_are_destroyed() -> Iterator[None]:
     stopped the window's threads (`main._stop_background_threads`) before this
     deletes the window.
     """
-    before = top_level_widget_addresses()
-    yield
-    destroy_the_widgets_left_behind(before)
+    yield from destroying_what_is_left_behind()
 
 
 @pytest.fixture(autouse=True)
