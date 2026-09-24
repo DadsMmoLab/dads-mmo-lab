@@ -212,7 +212,7 @@ State = Idle | Pending | Verified | Refused | GaveUp
 # -- the enable press --------------------------------------------------------
 
 
-HOST_PORT_VAR = "DOCKER_SOAP_EXTERNAL_PORT"
+HOST_PORT_VAR = composegen.CHANNEL_PORT_VAR
 """The `.env` key the base compose reads for SOAP's whole host binding.
 
 Named in `docker-compose.yml` beside the mapping itself: the value carries the
@@ -220,11 +220,17 @@ address AND the port, because a literal `127.0.0.1:` prefix on the mapping would
 render `127.0.0.1:127.0.0.1:7878:7878` once this key is set.
 """
 
-RELEASED_HOST_PORT = "127.0.0.1:0"
-"""What a rolled-back channel claims: loopback, and whatever port is free."""
+RELEASED_HOST_PORT = composegen.CHANNEL_PORT_RELEASED
+"""What a rolled-back channel claims: loopback, and whatever port is free.
 
-BACKUP_SUFFIX = ".before-channel"
-"""The override as it was before the first press, kept beside it."""
+`composegen.channel_is_on()` reads it back: a released claim is a rollback (T101).
+"""
+
+BACKUP_SUFFIX = composegen.CHANNEL_BACKUP_SUFFIX
+"""The override as it was before the first press, kept beside it.
+
+Defined in `composegen`, which every writer of the override can import (T101).
+"""
 
 
 class EnableRefused(RuntimeError):
