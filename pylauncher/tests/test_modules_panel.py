@@ -304,6 +304,34 @@ def test_the_asks_a_question_chip_is_only_on_an_uninstalled_manifest_with_no_def
     assert mp.CHIP_ASKS_A_QUESTION not in _labels(_row(installed, "mod-ah-bot"))
 
 
+def test_the_asks_a_question_chip_is_on_a_choice_even_with_a_default() -> None:
+    """T100: a `choice` opens the Install dialog, so the row says it will.
+
+    The chip and the dialog answer one question -- "will Install ask me
+    something?" -- and both read `apply.must_ask()` so they cannot disagree.
+    `hearthstone-cd` is the shipped shape: five alternative files, a default.
+
+    Mutation: gate the chip on `default is None` again and the choice row
+    loses it.
+    """
+    choice = _m(
+        "hearthstone-cd",
+        prompts=(
+            Prompt(
+                key="cooldown",
+                question="Hearthstone cooldown",
+                kind="choice",
+                choices=("1_Min", "30_Min"),
+                default="30_Min",
+            ),
+        ),
+        patches=(Patch(file="x.conf", find="a", replace="{cooldown}"),),
+    )
+    rows = _rows([choice])
+    chip = next(c for c in _row(rows, "hearthstone-cd").chips if c.label == mp.CHIP_ASKS_A_QUESTION)
+    assert "Hearthstone cooldown" in chip.detail
+
+
 def test_the_client_folder_chip_appears_only_while_no_folder_is_set() -> None:
     """T36's folder: a manifest with `client` files cannot install without one.
 
