@@ -837,13 +837,16 @@ def test_a_reader_that_finishes_between_the_drain_and_the_check_is_never_silent(
     takes its `qsize()` snapshot, and only THEN does the reader queue its tail
     and the sentinel and exit. The drain never sees the tail. A marker keyed on
     `reader.is_alive()` then saw a finished reader and said nothing, so the
-    tail was lost without a word. The marker is now keyed on the fact that
-    matters: the sentinel was never consumed.
+    tail was lost without a word. Then the marker was keyed on the sentinel
+    never being consumed, which was honest but still lost a tail that was
+    sitting in the queue. Now a reader that has FINISHED is drained to its
+    sentinel: its queue is finite, so no bound is needed. The tail is delivered
+    and no marker appears. A reader still alive keeps the `qsize()` bound and
+    the marker (see the announced-not-lost test).
 
     Forced every run: the reader is held on the tail, and the snapshot releases
     it and waits until the reader has queued the sentinel and exited before
-    returning the count it took. Either outcome is acceptable, the tail or the
-    marker. Silence is the only failure.
+    returning the count it took.
     """
     import queue as real_queue
 
@@ -889,7 +892,8 @@ def test_a_reader_that_finishes_between_the_drain_and_the_check_is_never_silent(
     finally:
         release.set()
     assert readers and not readers[0].is_alive(), "the interleaving was not produced"
-    assert "LAST WORDS" in lines or runner._OUTPUT_MAY_BE_CUT_OFF in lines, lines
+    assert "LAST WORDS" in lines, lines
+    assert runner._OUTPUT_MAY_BE_CUT_OFF not in lines, lines
 
 
 def test_the_drain_after_the_join_is_bounded_even_if_the_queue_never_empties(
@@ -927,6 +931,54 @@ def test_the_drain_after_the_join_is_bounded_even_if_the_queue_never_empties(
     )
     assert "done" in lines, lines
     assert len(calls) <= 2, f"the drain read {len(calls)} times from a queue that never empties"
+
+
+def test_a_live_reader_never_gets_the_unbounded_drain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a FINISHED reader is drained to its sentinel. A live one keeps the `qsize()` bound.
+
+    A finished reader's queue is finite, so draining it to the sentinel is
+    safe. A live reader's queue is not: an orphan holding the terminal can
+    feed it forever. Here the reader is held alive past the (shrunken) join,
+    and the queue never runs dry. The run must still end, with the cut-off
+    line, instead of following the queue.
+    """
+    import queue as real_queue
+
+    monkeypatch.setattr(runner, "_SHUTDOWN_TIMEOUT_SECONDS", 0.3)
+    release = threading.Event()
+    calls: list[int] = []
+    real_read = runner.os.read
+
+    def read(fd: int, size: int) -> bytes:
+        data = real_read(fd, size)
+        if b"LAST WORDS" in data:
+            release.wait(HANG_BOUND)
+        return data
+
+    class EndlessQueue(real_queue.Queue):  # type: ignore[type-arg]
+        def get_nowait(self) -> object:
+            calls.append(1)
+            if len(calls) > 1000:
+                raise RuntimeError("a live reader's queue was drained without a bound")
+            return b"more\n"
+
+    fake = type("QueueModule", (), {"Queue": EndlessQueue, "Empty": real_queue.Empty})
+    monkeypatch.setattr(runner, "queue", fake)
+    monkeypatch.setattr(runner.os, "read", read)
+    code = "import sys\nsys.stdout.write('LAST WORDS\\n')\nsys.stdout.flush()\n"
+    try:
+        lines = list(
+            runner.interact(
+                [sys.executable, "-c", code],
+                respond=lambda _line: None,
+                quiet_seconds=0.15,
+                cancel=_expiring_cancel(),
+            )
+        )
+    finally:
+        release.set()
+    assert runner._OUTPUT_MAY_BE_CUT_OFF in lines, lines
+    assert len(calls) <= 2, f"the drain read {len(calls)} times from a live reader's queue"
 
 
 def test_the_docker_group_question_reaches_a_real_dialog_unmasked(qapp: object) -> None:

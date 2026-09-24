@@ -1094,22 +1094,33 @@ def interact(
                     eof = True
                     break
                 buffer += data.decode("utf-8", errors="replace")
+            if not eof and not reader.is_alive():
+                # The reader finished after the snapshot: its tail and its
+                # sentinel may be queued now. A finished reader's queue is
+                # finite, so it is drained to the sentinel without a bound.
+                # The `qsize()` bound above is only for a reader still alive,
+                # which an orphan can keep feeding forever.
+                while True:
+                    try:
+                        data = chunks.get_nowait()
+                    except queue.Empty:
+                        break
+                    if data is None:
+                        eof = True
+                        break
+                    buffer += data.decode("utf-8", errors="replace")
             yield from _complete_lines()
             if buffer:
                 yield buffer
                 buffer = ""
             if not eof:
                 # The end-of-stream sentinel was never consumed, by the loop
-                # or by the drain. Only the sentinel proves the reader handed
-                # over everything. It may still be reading (an orphan holds the
-                # terminal, or it was starved for the whole join), or it may
-                # have queued its tail and the sentinel just after the drain's
-                # `qsize()` snapshot. Either way, that output is never read.
-                # Closing the gap would take an unbounded wait, so it is said
-                # instead, in the log and in the output. It is not keyed on
-                # `reader.is_alive()`: a reader that finished after the
-                # snapshot is not alive, and its tail was still lost (T108
-                # review, final Codex pass).
+                # or by either drain. Only the sentinel proves the reader
+                # handed over everything. The reader was alive at the check
+                # above: an orphan holds the terminal, or it was starved for
+                # the whole join. Whatever it queues from here is never read.
+                # Closing that gap would take an unbounded wait, so it is said
+                # instead, in the log and in the output (T108 review).
                 logger.warning(
                     f"the reader of {command[0]} had not reached end of stream "
                     f"{_SHUTDOWN_TIMEOUT_SECONDS}s after the child exited; "
