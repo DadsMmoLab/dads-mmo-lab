@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QMetaObject, QObject, Qt, Slot
 
 from tests.conftest import HANG_BOUND_MS, pump_until
 from yulon import play as play_module
@@ -18,7 +19,7 @@ from yulon.catalog.catalog import load_catalog
 from yulon.play import Character
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerServices, ControllerView
-from yulon.ui.widgets.job import in_flight, run_inline, threaded_job_runner
+from yulon.ui.widgets.job import ThreadedJobRunner, run_inline, threaded_job_runner
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
@@ -720,13 +721,53 @@ def test_the_control_follows_the_measurement_rather_than_the_game_it_belongs_to(
 # -- T96: choosing a character asks the database off the GUI thread ----------
 
 
-def _threaded_after_the_list_is_filled(view: ControllerView) -> None:
-    """Swap the app's real runner in once the list is on screen.
+def _threaded_after_the_list_is_filled(view: ControllerView) -> ThreadedJobRunner:
+    """Swap the app's real runner in once the list is on screen, and hand it back.
 
     Filled inline first so this test is about the SELECTION's read and nothing
     else: the list's own refresh has its own test (T97).
     """
-    view._jobs = threaded_job_runner(view)
+    runner = threaded_job_runner(view)
+    view._jobs = runner
+    return runner
+
+
+class _Delivered(QObject):
+    """A queued call posted to this thread AFTER a job's answer, to know it has been handled.
+
+    `ThreadedJobRunner.wait()` returns once the worker has emitted its answer
+    (queued onto this thread) and exited. A call queued now lands behind that
+    answer, so when it runs, the answer has run too -- asked through Qt's own
+    ordering, not through the runner's bookkeeping.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reached = False
+
+    @Slot()
+    def mark(self) -> None:
+        self.reached = True
+
+
+def _every_answer_handled(runner: ThreadedJobRunner) -> None:
+    assert runner.wait(HANG_BOUND_MS) is True
+    flag = _Delivered()
+    QMetaObject.invokeMethod(flag, "mark", Qt.ConnectionType.QueuedConnection)
+    pump_until(lambda: flag.reached, "every answer the runner produced was handled")
+
+
+def _drawn_on(view: ControllerView) -> list[int]:
+    """The thread of every `setToolTip` on the gear button -- `_gear_read` draws through it."""
+    threads: list[int] = []
+    tooltip = view.send_gear_button.setToolTip
+
+    def recording(text: str) -> None:
+        threads.append(threading.get_ident())
+        tooltip(text)
+
+    view.send_gear_button.setToolTip = recording  # type: ignore[method-assign]
+    return threads
 
 
 def test_choosing_a_character_reads_the_gear_off_the_gui_thread(tmp_path: Path) -> None:
@@ -748,14 +789,16 @@ def test_choosing_a_character_reads_the_gear_off_the_gui_thread(tmp_path: Path) 
     play.gear_set_size = recording  # type: ignore[method-assign]
     view = _view(tmp_path, play=play)
     view.refresh_characters()
-    _threaded_after_the_list_is_filled(view)
+    runner = _threaded_after_the_list_is_filled(view)
+    drawn_on = _drawn_on(view)
 
     view.character_list.setCurrentRow(0)
-    pump_until(lambda: "19" in view.send_gear_button.text(), "the gear count was drawn")
+    _every_answer_handled(runner)
 
-    assert asked_on and threading.get_ident() not in asked_on, "the gear was read on the GUI thread"
+    assert "19" in view.send_gear_button.text(), view.send_gear_button.text()
     assert view.send_gear_button.isEnabled() is True
-    assert view._jobs.wait(HANG_BOUND_MS) is True  # type: ignore[attr-defined]
+    assert asked_on and threading.get_ident() not in asked_on, "the gear was read on the GUI thread"
+    assert drawn_on and set(drawn_on) == {threading.get_ident()}, "the answer was drawn off it"
 
 
 def test_the_gear_button_waits_for_its_read_and_a_late_answer_for_another_row_is_dropped(
@@ -776,7 +819,7 @@ def test_the_gear_button_waits_for_its_read_and_a_late_answer_for_another_row_is
     play.gear_set_size = slow_for_guglu  # type: ignore[method-assign]
     view = _view(tmp_path, play=play)
     view.refresh_characters()
-    _threaded_after_the_list_is_filled(view)
+    runner = _threaded_after_the_list_is_filled(view)
 
     view.character_list.setCurrentRow(0)  # Guglu, whose read is held
     assert view.send_gear_button.isEnabled() is False, "pressable before its count was known"
@@ -784,15 +827,46 @@ def test_the_gear_button_waits_for_its_read_and_a_late_answer_for_another_row_is
 
     view.character_list.setCurrentRow(1)  # Ganaar
     pump_until(lambda: "Ganaar's 19" in view.send_gear_button.text(), "Ganaar's count was drawn")
-    reads = [thread for thread, _ in view._jobs._live]  # type: ignore[attr-defined]
     gate.set()
-    # A read's answer is posted to this thread before its thread's `finished`, and
-    # `in_flight()` lets go of the pair on `finished`: once both reads are let go
-    # of, Guglu's late answer has been delivered too.
-    pump_until(
-        lambda: not any(held is thread for held, _ in in_flight()._pairs for thread in reads),
-        "both reads were delivered",
-    )
+    _every_answer_handled(runner)  # Guglu's late answer included
 
     assert "Ganaar's 19" in view.send_gear_button.text(), view.send_gear_button.text()
-    assert view._jobs.wait(HANG_BOUND_MS) is True  # type: ignore[attr-defined]
+    assert view.send_gear_button.isEnabled() is True
+
+
+def test_a_gear_read_that_breaks_says_so_rather_than_reading_forever(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_gear_set_size()` answers its own failures, so this is the boundary for one
+    it does not: the button must not stay on "Reading..." for the row still chosen,
+    and a break about a row already left must not relabel the one chosen now."""
+    play = _Play(characters=_people(), pieces=19)
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    runner = _threaded_after_the_list_is_filled(view)
+    gate = threading.Event()
+    sizing = view._gear_set_size
+
+    def breaks(name: str) -> tuple[int, int, tuple[str, str] | None]:
+        if name == "Guglu":
+            gate.wait(HANG_BOUND_MS / 1000)
+            raise RuntimeError("the worker fell over")
+        return sizing(name)
+
+    monkeypatch.setattr(view, "_gear_set_size", breaks)
+
+    view.character_list.setCurrentRow(0)  # Guglu, whose read will break late
+    view.character_list.setCurrentRow(1)  # Ganaar
+    pump_until(lambda: "Ganaar's 19" in view.send_gear_button.text(), "Ganaar's count was drawn")
+    gate.set()
+    _every_answer_handled(runner)
+    assert "Ganaar's 19" in view.send_gear_button.text(), "a stale break relabelled the button"
+
+    view.character_list.setCurrentRow(0)  # Guglu again, and now it breaks for the row chosen
+    gate.set()
+    _every_answer_handled(runner)
+
+    said = view.send_gear_button.text()
+    assert said == "Could not read what Guglu is wearing", said
+    assert view.send_gear_button.isEnabled() is False
+    assert "the worker fell over" in view.send_gear_button.toolTip()

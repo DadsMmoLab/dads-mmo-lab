@@ -152,6 +152,16 @@ def _realm_badge_status(status: InstallStatus) -> str:
     return "stopped"
 
 
+class _GearReadBroke(RuntimeError):
+    """A Characters gear read that raised, carrying which selection it was for (T96)."""
+
+    def __init__(self, generation: int, name: str, cause: Exception) -> None:
+        super().__init__(f"{name}: {cause}")
+        self.generation = generation
+        self.name = name
+        self.cause = cause
+
+
 class UnsupportedGameError(RuntimeError):
     """No `controller_<game>` package is wired to this catalog id.
 
@@ -6027,11 +6037,14 @@ class ControllerView(QWidget):
         self.send_gear_button.setText(f"Reading what {name} is wearing…")
         self.send_gear_button.setEnabled(False)
         generation = self._gear_generation
-        self._run(
-            lambda: (generation, name, self._gear_set_size(name)),
-            self._gear_read,
-            self._gear_read_failed,
-        )
+
+        def read() -> tuple[int, str, tuple[int, int, tuple[str, str] | None]]:
+            try:
+                return (generation, name, self._gear_set_size(name))
+            except Exception as exc:  # noqa: BLE001 - carried to the GUI thread with its row
+                raise _GearReadBroke(generation, name, exc) from exc
+
+        self._run(read, self._gear_read, self._gear_read_failed)
 
     @Slot(object)
     def _gear_read(self, answer: object) -> None:
@@ -6063,8 +6076,19 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _gear_read_failed(self, exc: object) -> None:
-        """`_gear_set_size()` answers its own failures; this is the boundary if it ever does not."""
+        """`_gear_set_size()` answers its own failures; this is the boundary if it ever does not.
+
+        For the row still chosen the button says the read broke -- disabled, as
+        the refusal branch above is, because nothing safe is known to press --
+        instead of staying on "Reading…" for good. A break about a row already
+        left says nothing about the one chosen now.
+        """
         logger.warning(f"could not size the chosen character's gear: {exc}")
+        if not isinstance(exc, _GearReadBroke) or exc.generation != self._gear_generation:
+            return
+        self.send_gear_button.setText(f"Could not read what {exc.name} is wearing")
+        self.send_gear_button.setToolTip(str(exc.cause))
+        self.send_gear_button.setEnabled(False)
 
     def _revive_works_offline(self) -> bool:
         """Only where this tree's own box measured that it does.
