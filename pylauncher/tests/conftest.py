@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path, PureWindowsPath
+from typing import NoReturn
 
 import pytest
 
@@ -738,6 +739,26 @@ def spelled_bounds(test_file: str) -> set[str]:
             bounds += node.args
         spelled.update(ast.unparse(value) for value in bounds)
     return spelled
+
+
+@pytest.fixture(autouse=True)
+def _no_forced_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`main._hard_exit` is `os._exit`; reached in-process it would end pytest itself (T113).
+
+    `main()` leaves through it when a background job outlives the exit join.
+    Replaced here so a test that reaches it by accident FAILS, naming the seam,
+    instead of the run vanishing mid-file with no report. A test that means to
+    reach it patches it again; the real one is proved in a child process.
+    """
+    import main
+
+    def _refuse(code: int) -> NoReturn:
+        raise AssertionError(
+            f"main._hard_exit({code}) was reached in-process: a background job outlived "
+            "the exit join. Patch main._hard_exit in the test if that is the point."
+        )
+
+    monkeypatch.setattr(main, "_hard_exit", _refuse)
 
 
 @pytest.fixture(autouse=True)

@@ -3162,3 +3162,186 @@ def test_the_windows_flags_are_the_ones_the_gate_settled() -> None:
     without = windows_creation_flags(fake, breakaway=False)
     assert without == 0x08000000 | 0x00000200
     assert not without & fake.CREATE_BREAKAWAY_FROM_JOB
+
+
+# ------------------------------------------- closing while a background job is stuck (T113)
+
+# A child process for `_ENTRY_POINT`'s reason, and a second one: the thing
+# under test is what happens AFTER `main()` - interpreter teardown, where Qt
+# aborts on a QThread destroyed while running - and no in-process test can
+# reach past its own interpreter's end. The window is the REAL one; only the
+# GitHub update check is stubbed (it would ask the network and write
+# `update.json`), and the docker-group re-exec, which would replace the child.
+_CLOSE_WITH_A_JOB = """\
+import os, sys, threading, time
+
+sys.argv = ["yulon"]
+from yulon import log, update
+
+update.check_with_cache = lambda *a, **k: None
+
+from PySide6.QtCore import QObject, QTimer, Slot
+
+import main
+from yulon.ui.widgets.job import threaded_job_runner
+
+main._regain_docker_group = lambda: None
+never = threading.Event()
+
+
+def a_job_that_never_returns() -> None:
+    never.wait()
+
+
+def a_job_that_returns() -> None:
+    return None
+
+
+class _Ignore(QObject):
+    @Slot(object)
+    def outcome(self, _outcome: object) -> None:
+        pass
+
+
+real_build_window = main.build_window
+
+
+def build_window():
+    window = real_build_window()
+    ignore = _Ignore(window)
+    runner = threaded_job_runner(window)
+    stuck = os.environ["YULON_TEST_JOB"] == "stuck"
+    work = a_job_that_never_returns if stuck else a_job_that_returns
+
+    def start_then_close() -> None:
+        runner(work, ignore.outcome, ignore.outcome)
+        print(f"T113 log {log.file_path()}", flush=True)
+        print(f"T113 closing at {time.time()}", flush=True)
+        window.close()
+
+    QTimer.singleShot(0, start_then_close)
+    return window
+
+
+main.build_window = build_window
+code = main.main()
+print(f"T113 main returned {code}", flush=True)
+raise SystemExit(code)
+"""
+
+EXIT_MARGIN_SECONDS = 10.0
+"""What the stuck close may take beyond `main.EXIT_JOIN_MS`, the join it has to sit out.
+
+The rest of the exit is ending abandoned `stream()` children (none here),
+flushing the log and `os._exit`. Measured on the laptop 2026-09-25 before the
+fix: 8.3 s from `window.close()` to the abort, i.e. the join plus 0.3 s. Ten
+seconds is headroom for a loaded box, not an expectation.
+"""
+
+
+def _close_the_real_window_with(job: str, tmp_path: Path) -> tuple[Any, float, float, str]:
+    """Run `_CLOSE_WITH_A_JOB`; answer (process, closed at, ended at, the log file's text)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    scratch_temp = tmp_path / "temp"
+    scratch_temp.mkdir()
+    env = dict(os.environ)
+    env.update(
+        {
+            "YULON_TEST_JOB": job,
+            "HOME": str(home),  # macOS: config_dir() is under HOME and nothing else
+            "APPDATA": str(home),
+            "XDG_DATA_HOME": str(home),
+            "QT_QPA_PLATFORM": "offscreen",
+            "TMPDIR": str(scratch_temp),
+            "TEMP": str(scratch_temp),
+            "TMP": str(scratch_temp),
+        }
+    )
+    for name in ("YULON_SMOKE_TEST", "YULON_PROVISION"):
+        env.pop(name, None)
+    pylauncher = Path(main.__file__).parent
+    env["PYTHONPATH"] = str(pylauncher)
+
+    done = subprocess.run(
+        [sys.executable, "-c", _CLOSE_WITH_A_JOB],
+        cwd=pylauncher,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    ended = time.time()
+    said = done.stdout.splitlines()
+    closing = [line for line in said if line.startswith("T113 closing at ")]
+    logged = [line for line in said if line.startswith("T113 log ")]
+    assert closing and logged, f"the window never closed:\n{done.stdout}\n{done.stderr}"
+    closed_at = float(closing[0].removeprefix("T113 closing at "))
+    log_file = Path(logged[0].removeprefix("T113 log "))
+    return done, closed_at, ended, log_file.read_text(encoding="utf-8")
+
+
+def test_closing_while_a_job_is_stuck_exits_cleanly_and_names_the_job(tmp_path: Path) -> None:
+    """T113: a job blocked forever must not turn a close into a crash report.
+
+    Before the fix, measured on the laptop 2026-09-25: `main()` returned 0,
+    and then interpreter teardown destroyed the QThread `InFlight` still held
+    and Qt aborted - "QThread: Destroyed while thread '' is still running",
+    exit 134, a core dump on Linux and a crash report on Windows and macOS.
+
+    The log is read from the FILE, not stderr, because the forced exit skips
+    `logging.shutdown()`'s atexit hook and a line still in a buffer is a line
+    support never sees. "main returned" must be absent: the process left
+    through `main._hard_exit`, not by returning into an interpreter teardown
+    that would abort on the running thread.
+    """
+    done, closed_at, ended, log_text = _close_the_real_window_with("stuck", tmp_path)
+
+    report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    assert "QThread: Destroyed" not in done.stderr, report
+    assert done.returncode == 0, report
+    assert "T113 main returned" not in done.stdout, report
+    assert ended - closed_at <= main.EXIT_JOIN_MS / 1000 + EXIT_MARGIN_SECONDS, report
+    assert "a_job_that_never_returns" in log_text, f"the log does not name the job:\n{log_text}"
+
+
+def test_closing_with_every_job_finished_returns_from_main_as_before(tmp_path: Path) -> None:
+    """The normal close is untouched: `main()` returns, and nothing is called stuck."""
+    done, closed_at, ended, log_text = _close_the_real_window_with("finishes", tmp_path)
+
+    report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    assert done.returncode == 0, report
+    assert "T113 main returned 0" in done.stdout, report
+    assert "QThread: Destroyed" not in done.stderr, report
+    assert "still running" not in log_text, log_text
+    assert ended - closed_at < main.EXIT_JOIN_MS / 1000, report
+
+
+def test_the_forced_exit_ends_streams_and_flushes_the_log_before_it_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The order `os._exit` makes the app responsible for, since no atexit hook runs.
+
+    `runner._close_abandoned_streams` first, so a `docker logs -f` child is not
+    left behind with PPID 1 (and so its own log lines are written); then the
+    log handlers are flushed and closed; then the exit, with the code `main()`
+    was going to return. PySide's `__moduleShutdown` and `pygame.quit` are the
+    two atexit hooks deliberately NOT run - see `_leave_with_jobs_still_running`.
+    """
+    import logging
+
+    from yulon import runner
+
+    calls: list[str] = []
+    monkeypatch.setattr(runner, "_close_abandoned_streams", lambda: calls.append("streams"))
+    monkeypatch.setattr(logging, "shutdown", lambda: calls.append("log"))
+    monkeypatch.setattr(main, "_hard_exit", lambda code: calls.append(f"exit {code}"))
+
+    main._leave_with_jobs_still_running(3)
+
+    assert calls == ["streams", "log", "exit 3"]
+
+
+def test_no_test_can_reach_the_real_os_exit_in_process() -> None:
+    """`conftest.py` swaps the seam out for every test; a forced exit would end pytest."""
+    assert main._hard_exit is not os._exit

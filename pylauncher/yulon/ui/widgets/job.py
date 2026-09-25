@@ -115,10 +115,10 @@ class InFlight(QObject):
 
         `quit()` ends an event loop; it cannot interrupt a `run()` still inside
         its work - a blocked `subprocess.run`, a `docker logs -f` with no new
-        line. A pair that does not finish is left held, and Qt's abort at
-        interpreter exit (a QThread destroyed while running) follows. That is
-        the pre-existing contract and this class does not change it; what it
-        can do is put a name in the log first, so the abort is not a mystery.
+        line. A pair that does not finish is left held, and this answers False.
+        Held into interpreter teardown, that thread is a Qt abort ("QThread:
+        Destroyed while thread is still running"), so `main()` does not go
+        there on a False: it leaves through `os._exit` instead (T113).
         """
         done = True
         for thread, worker in list(self._pairs):
@@ -128,10 +128,28 @@ class InFlight(QObject):
                     done = False
                     logger.warning(
                         f"a background job did not finish within {timeout_ms} ms at exit: "
-                        f"{type(worker).__name__}; Qt will abort when it is destroyed"
+                        f"{describe(worker)}"
                     )
         self.sweep()
         return done
+
+    def still_running(self) -> list[str]:
+        """What each held job whose thread has not finished is doing, for the exit log."""
+        return [describe(worker) for thread, worker in self._pairs if thread.isRunning()]
+
+
+def describe(worker: QObject) -> str:
+    """A held worker as a person reads it: its class, and for a view job, the work.
+
+    Every view job runs in a `_JobWorker`, so its class alone names them all
+    alike; the callable it was given is what tells the status poll from the
+    database import. A `functools.partial` is named by the function it wraps.
+    """
+    if not isinstance(worker, _JobWorker):
+        return type(worker).__name__
+    work = getattr(worker._work, "func", worker._work)
+    name = getattr(work, "__qualname__", None) or type(work).__name__
+    return f"{type(worker).__name__}({name})"
 
 
 _in_flight: InFlight | None = None

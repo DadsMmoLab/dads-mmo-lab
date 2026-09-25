@@ -17,7 +17,7 @@ import pytest
 from PySide6.QtCore import QObject, Slot
 
 from tests.conftest import HANG_BOUND_MS, pump_until, spelled_bounds
-from yulon.ui.widgets.job import LineRelay, ThreadedJobRunner, run_inline
+from yulon.ui.widgets.job import LineRelay, ThreadedJobRunner, in_flight, run_inline
 
 STILL_RUNNING = 0.2
 """How long the job in `test_wait_joins_running_jobs` keeps running. Not a deadline.
@@ -97,6 +97,37 @@ def test_wait_joins_running_jobs(qapp: object) -> None:
     runner = ThreadedJobRunner(receiver)
     runner(lambda: time.sleep(STILL_RUNNING), receiver.done, receiver.failed)
     assert runner.wait(HANG_BOUND_MS) is True
+
+
+def test_a_job_still_running_is_named_by_the_work_it_was_given(qapp: object) -> None:
+    """T113: the exit log has to say WHICH job kept Yu'lon from closing cleanly.
+
+    Every view job runs in the same `_JobWorker`, so the worker's class alone -
+    what the exit warning printed before T113 - named every stuck job the same.
+    The work's own name is what tells a support reader that it was, say, the
+    status poll and not the database import.
+    """
+    receiver = _Receiver()
+    runner = ThreadedJobRunner(receiver)
+    gate = threading.Event()
+    entered = threading.Event()
+
+    def a_job_that_waits_for_its_gate() -> None:
+        entered.set()
+        gate.wait()
+
+    runner(a_job_that_waits_for_its_gate, receiver.done, receiver.failed)
+    try:
+        pump_until(entered.is_set, "the job started")
+        names = in_flight().still_running()
+        assert any("a_job_that_waits_for_its_gate" in name for name in names), names
+    finally:
+        gate.set()
+    assert runner.wait(HANG_BOUND_MS) is True
+    pump_until(
+        lambda: not any("a_job_that_waits_for_its_gate" in n for n in in_flight().still_running()),
+        "the finished job left the still-running list",
+    )
 
 
 def test_a_line_relay_delivers_on_the_gui_thread_whoever_emits(qapp: object) -> None:
