@@ -36,6 +36,7 @@ from typing import Protocol
 from yulon import docker, platform, resources, runner
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource
+from yulon.catalog.upstream import UpstreamNews
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -845,6 +846,10 @@ class InstallEngine(Protocol):
     ) -> Iterator[str]: ...
 
     def sources_that_move(self) -> tuple[EmulatorSource, ...]: ...
+
+    def upstream_news(
+        self, options: InstallOptions | None = None, *, now: int | None = None
+    ) -> UpstreamNews: ...
 
     def update_to_latest(
         self,

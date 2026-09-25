@@ -70,7 +70,7 @@ from secrets import token_hex
 from typing import ClassVar, Protocol
 
 from yulon import dbsecret, docker, git, networking, platform, resources, runner
-from yulon.catalog import composegen, preflight
+from yulon.catalog import composegen, preflight, upstream
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -542,6 +542,15 @@ class LatestRoute:
     returned the line alone until 2026-09-16, and the button's rule was
     "non-empty" -- which is true after a return as well as after an update, so
     the control stayed offered on a server that was already on the pin.
+    """
+    upstream_news: Callable[[], upstream.UpstreamNews] | None = None
+    """How far upstream is past what this server was built from (T124), or None.
+
+    NOT affordable on the GUI thread, unlike `source_version`: a reading that is
+    not in the day's cache reads each source's HEAD through a container and asks
+    GitHub over the network. The tab runs it through its job runner and draws
+    `upstream.line()` of the answer. It never raises. `None` where the wiring
+    offers no count -- a spy that predates it, or a route T125 has not given one.
     """
 
 
@@ -2686,6 +2695,13 @@ class Seams:
     head_sha: Callable[[Path], str | None] = _git_head_sha
     head_version: Callable[[Path], str | None] = _git_head_version
     commits_since: Callable[[Path, str], int | None] = _git_commits_since
+    upstream_get: upstream.HttpGet = upstream.https_get
+    """The one network read T124's line makes: GitHub's compare API, per source.
+
+    A seam for the reason every network call here is one: a test that could
+    not count the GETs could not show the line is asked at most once a day, and
+    one that could not make them fail could not show "no network" says nothing.
+    """
     restore_rev: Callable[[Path, str], None] = _git_restore_rev
     """Put one source back on the commit it was on before this press moved it.
 
@@ -4169,6 +4185,59 @@ class StagedInstaller:
 
     # ------------------------------------------------------- update to latest (T64)
 
+    def upstream_news(
+        self, options: InstallOptions | None = None, *, now: int | None = None
+    ) -> upstream.UpstreamNews:
+        """How far upstream is past what each moving source was built from (T124). Never raises.
+
+        The cached reading while it is fresh (`upstream.read_cached()`), which
+        is what keeps a tab opened ten times a day -- or a Refresh pressed ten
+        times -- to one set of requests. Otherwise each source that an update
+        would move is read for its HEAD through the read-only container, and
+        GitHub is asked how far its branch is past that HEAD; the answer is
+        kept beside the install record.
+
+        Only the sources `sources_that_move()` names. A `*-db` repository stays
+        on its pin through "Update the server to latest…", so counting its new
+        commits would advertise code that button does not bring in.
+
+        HEAD, not the catalog pin, because the pin is what THIS build of the app
+        would install, and an install made before a pin moved (T120 moved
+        TortoiseBots') is still on the old one.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        moving = self.sources_that_move()
+        clock = upstream.now_unix() if now is None else now
+        repos = [source.repo for source in moving]
+        cached = upstream.read_cached(server_dir, repos, clock)
+        if cached is not None:
+            return cached
+        found: list[upstream.SourceNews] = []
+        for index, source in enumerate(moving):
+            label = "server" if index == 0 else source.repo.rsplit("/", 1)[-1]
+            found.append(
+                upstream.SourceNews(
+                    repo=source.repo, label=label, behind=self._behind(server_dir, source)
+                )
+            )
+        news = upstream.UpstreamNews(checked_unix=clock, sources=tuple(found))
+        if (server_dir / STATE_FILE).is_file():
+            upstream.write_cached(server_dir, news)
+        return news
+
+    def _behind(self, server_dir: Path, source: EmulatorSource) -> int | None:
+        """One source's count, or None when its HEAD or GitHub could not be asked."""
+        slug = upstream.github_slug(source.repo)
+        if slug is None:
+            return None
+        head = self._seams.head_sha(server_dir / source.dest)
+        if head is None:
+            return None
+        return upstream.commits_ahead(
+            slug, head, source.branch or "HEAD", get=self._seams.upstream_get
+        )
+
     def sources_that_move(self) -> tuple[EmulatorSource, ...]:
         """Which of this entry's sources an update to latest moves. The `*-db` ones do not.
 
@@ -4373,6 +4442,12 @@ class StagedInstaller:
                 "tested commit to return to. Nothing was started."
             )
         plan = self._refuse_unless_updatable(server_dir, moving)
+        # T124: the count on the Server tab was taken against the HEADs this
+        # press is about to move. Dropped before the first fetch AND again once
+        # the press is over, whichever way it ends: a tab that re-counted while
+        # the press was running would otherwise have cached the old HEAD's
+        # figure for a day, and a press that failed put the old HEADs back.
+        upstream.forget(server_dir)
         where = "the commit this app was tested against" if to_pin else "the newest upstream code"
         yield f"Moving {self.entry.name}'s sources in {server_dir} to {where}."
         yield RETURN_TO_PIN_OPENING_NOTE if to_pin else UPDATE_TO_LATEST_OPENING_NOTE
@@ -4419,6 +4494,7 @@ class StagedInstaller:
             # one failure most likely to happen twice in a row (cold review
             # round 2, 2026-09-16).
             yield from self._restore_the_folder(moved, server_dir, opts, state)
+            upstream.forget(server_dir)
             raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
         try:
             yield from self.rebuild(opts, cancel=cancel)
@@ -4427,8 +4503,10 @@ class StagedInstaller:
             # It puts the IMAGE back; this puts the SOURCE back; and it is the
             # pair that makes the folder and the running container agree again.
             yield from self._restore_the_folder(moved, server_dir, opts, state)
+            upstream.forget(server_dir)
             raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
         self._record_source_revs(server_dir, state, moved)
+        upstream.forget(server_dir)
         yield (
             f"{self.entry.name} is running on "
             f"{'the commit this app was tested against' if to_pin else 'the newest upstream code'}."

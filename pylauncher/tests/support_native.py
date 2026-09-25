@@ -20,8 +20,10 @@ rather than answering each question the way the code under test would like.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
+import urllib.error
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -347,6 +349,16 @@ class Recorder:
     already up to date" machine.
     """
 
+    github: dict[str, int] = field(default_factory=dict)
+    """T124: what GitHub's compare API answers as `ahead_by`, per repository slug.
+
+    A slug that is not here answers as a network that is not there -- the
+    default, so no test reaches past this double by accident.
+    """
+
+    gets: list[str] = field(default_factory=list)
+    """Every URL the engine asked GitHub for, in order: the rate-limit rule is a count."""
+
     edits: dict[Path, tuple[str, ...]] = field(default_factory=dict)
     """Tracked files the user has changed in each checkout — `local_edits()`'s answer.
 
@@ -377,6 +389,15 @@ class Recorder:
     running image disagreeing. A double that could only ever succeed could not
     produce the line that says so.
     """
+
+    def upstream_get(self, url: str, accept: str) -> bytes:
+        """GitHub, as far as T124 asks it: one compare per source."""
+        self.gets.append(url)
+        for slug, ahead in self.github.items():
+            if f"/repos/{slug}/compare/" in url:
+                status = "ahead" if ahead else "identical"
+                return json.dumps({"status": status, "ahead_by": ahead}).encode("utf-8")
+        raise urllib.error.URLError("no network in this test")
 
     def head_sha(self, dest: Path) -> str | None:
         self.calls.append(f"head-sha:{dest.name}")
@@ -662,6 +683,7 @@ class Recorder:
             head_version=self.head_version,
             commits_since=self.commits_since,
             restore_rev=self.restore_rev,
+            upstream_get=self.upstream_get,
             images_built=lambda refs: self.images,
             build=build,
             one_shot=one_shot,

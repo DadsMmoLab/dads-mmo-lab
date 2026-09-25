@@ -80,7 +80,7 @@ from yulon import dashboard as dashboard_module
 from yulon import play as play_module
 from yulon import steam as steam_module
 from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
-from yulon.catalog import composegen, native, preflight
+from yulon.catalog import composegen, native, preflight, upstream
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import clientdir
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
@@ -3858,6 +3858,8 @@ class ControllerView(QWidget):
         self._busy = False
         self._status_pending = False
         self._verdict_pending = False
+        # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
+        self._upstream_pending = False
         self._module_pending: str | None = None
         self._console_pending = False
         self._tabs = QTabWidget(self)
@@ -4017,6 +4019,12 @@ class ControllerView(QWidget):
         self.repair_channel_button.setVisible(False)
         self.repair_channel_button.clicked.connect(self.repair_channel)
         self.status_label = QLabel("status: unknown", tab)
+        # T124: what upstream has that this server was not built from. Hidden
+        # until a reading says there is something -- and for no network, no
+        # route, or nothing new, it stays hidden rather than saying so.
+        self.upstream_label = QLabel("", tab)
+        self.upstream_label.setWordWrap(True)
+        self.upstream_label.setVisible(False)
         # T36. Visible for every game, including WotLK -- AzerothCore reads no
         # client itself, but the folder is still a host path a manifest's
         # `client` step or the Steam entry can use, and hiding the row there
@@ -4173,6 +4181,7 @@ class ControllerView(QWidget):
         box.addLayout(name_row)
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
+        box.addWidget(self.upstream_label)
         box.addWidget(self.client_dir_label)
         if self.set_client_dir_button is not None:
             box.addWidget(self.set_client_dir_button)
@@ -4441,6 +4450,9 @@ class ControllerView(QWidget):
         # just fixed something to make the tab re-examine an unfinished import.
         self._import_asked = False
         self.refresh_status()
+        # T124: the day's cache answers this, so pressing Refresh repeatedly
+        # costs no network.
+        self._refresh_upstream_news()
 
     @Slot(object)
     def _status_ready(self, result: object) -> None:
@@ -4815,6 +4827,9 @@ class ControllerView(QWidget):
             # this runs.
             self._set_update_buttons()
             self._refresh_source_version()
+            # And the count, which the update route drops when it moves a
+            # source: re-asked here so the line does not outlive the press.
+            self._refresh_upstream_news()
             # Back to what this install can do, never unconditionally: three of
             # the four games have no such phase and must not be handed a live
             # button by any job of their own finishing.
@@ -7189,6 +7204,9 @@ class ControllerView(QWidget):
         # the app opens, which is what lets an install that was updated in an
         # earlier session say so without anybody pressing anything.
         self._refresh_source_version()
+        # T124's count, off the GUI thread: the cached reading on every open
+        # but the day's first, which asks GitHub.
+        self._refresh_upstream_news()
         # Keyed by (FAMILY, id) since round 2, for `modules_panel._rows`'s
         # reason: nothing makes an id unique across families, and an id-keyed
         # dict handed `selected_manifest()` the other family's manifest --
@@ -8244,6 +8262,39 @@ class ControllerView(QWidget):
         self.source_version_label.setText(said.line)
         self.source_version_label.setVisible(bool(said.line))
         self.return_to_pin_button.setVisible(said.past_the_pin)
+
+    def _refresh_upstream_news(self) -> None:
+        """Ask, off the GUI thread, how far upstream is past this server's build (T124).
+
+        Through `_run()` and never inline: a reading that is not in the day's
+        cache reads each source's HEAD through a container and asks GitHub, and
+        a tab that froze for that on opening would be the defect the job runner
+        exists to prevent. One in flight at a time -- a job finishing and a
+        Refresh landing together ask once.
+        """
+        route = self.services.update_to_latest
+        if route is None or route.upstream_news is None:
+            self.upstream_label.setVisible(False)
+            return
+        if self._upstream_pending:
+            return
+        self._upstream_pending = True
+        self._run(route.upstream_news, self._upstream_news_ready, self._upstream_news_failed)
+
+    @Slot(object)
+    def _upstream_news_ready(self, result: object) -> None:
+        self._upstream_pending = False
+        said = upstream.line(result) if isinstance(result, upstream.UpstreamNews) else ""
+        self.upstream_label.setText(said)
+        self.upstream_label.setVisible(bool(said))
+
+    @Slot(object)
+    def _upstream_news_failed(self, exc: object) -> None:
+        """Silent on the tab, logged: the line is news, and a failure to ask is not."""
+        self._upstream_pending = False
+        logger.debug(f"could not ask how far upstream is past {self.entry.id}: {exc}")
+        self.upstream_label.setText("")
+        self.upstream_label.setVisible(False)
 
     def _update_route_busy(self) -> bool:
         """The two gates both T64 presses share, put to the user and answered True when hit.
