@@ -360,6 +360,13 @@ class Recorder:
     """Every URL the engine asked GitHub for, in order: the rate-limit rule is a count."""
 
     releases: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    github_behind: dict[str, int] = field(default_factory=dict)
+    """T126: what the compare answers as `behind_by`, per slug; 0 when absent.
+
+    Non-zero together with a non-zero `github` count is a DIVERGED history --
+    upstream rewrote what the checkout was built from.
+    """
     """T126: each slug's newest published release as `(tag, commit)`. Absent = GitHub silent."""
 
     edits: dict[Path, tuple[str, ...]] = field(default_factory=dict)
@@ -404,8 +411,14 @@ class Recorder:
                 return sha.encode("utf-8")
         for slug, ahead in self.github.items():
             if f"/repos/{slug}/compare/" in url:
-                status = "ahead" if ahead else "identical"
-                return json.dumps({"status": status, "ahead_by": ahead}).encode("utf-8")
+                behind = self.github_behind.get(slug, 0)
+                status = (
+                    "diverged"
+                    if ahead and behind
+                    else "ahead" if ahead else "behind" if behind else "identical"
+                )
+                body = {"status": status, "ahead_by": ahead, "behind_by": behind}
+                return json.dumps(body).encode("utf-8")
         raise urllib.error.URLError("no network in this test")
 
     def head_sha(self, dest: Path) -> str | None:

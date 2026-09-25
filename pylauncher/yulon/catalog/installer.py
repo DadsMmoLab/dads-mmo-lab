@@ -28,7 +28,7 @@ other one.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -857,6 +857,7 @@ class InstallEngine(Protocol):
         *,
         to_pin: bool = False,
         cancel: threading.Event | None = None,
+        rewritten_ok: Collection[str] = (),
     ) -> Iterator[str]: ...
 
     """Move this install's sources to upstream's tip (or back to their pins) and rebuild (T64).

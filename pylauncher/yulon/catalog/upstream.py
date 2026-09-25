@@ -108,14 +108,35 @@ def github_slug(repo: str) -> str | None:
     return path if _SLUG.match(path) else None
 
 
-def commits_ahead(slug: str, base: str, ref: str, *, get: HttpGet) -> int | None:
-    """How many commits `ref` on GitHub carries that `base` does not. None = could not ask.
+@dataclass(frozen=True)
+class Comparison:
+    """How `ref` on GitHub stands to `base`: GitHub's `ahead_by`, `behind_by` and `status`.
 
-    `ahead_by` of `compare/{base}...{ref}`, which is `git rev-list --count
-    base..ref` -- the Modules tab's `HEAD..FETCH_HEAD`, asked of GitHub instead
-    of a fetched clone. A diverged pair (a pin that upstream rewrote away)
-    still answers `ahead_by`: those are commits upstream has and the checkout
-    does not, which is what the line reports.
+    Both counts, because one of them alone cannot tell a forward move from a
+    rewritten history (T126, Codex's final pass): a release on history that
+    has diverged from the checkout is AHEAD of it and BEHIND it at once, and
+    reading `ahead_by` only made that look like a plain update.
+    """
+
+    ahead: int
+    """Commits `ref` has that `base` does not."""
+    behind: int
+    """Commits `base` has that `ref` does not."""
+    status: str
+
+    @property
+    def diverged(self) -> bool:
+        """Both sides carry commits the other lacks: upstream rewrote its history."""
+        return self.ahead > 0 and self.behind > 0
+
+
+def compare(slug: str, base: str, ref: str, *, get: HttpGet) -> Comparison | None:
+    """`compare/{base}...{ref}` on GitHub, whole. None = could not ask, never a guess.
+
+    `ahead_by` is `git rev-list --count base..ref` -- the Modules tab's
+    `HEAD..FETCH_HEAD`, asked of GitHub instead of a fetched clone -- and
+    `behind_by` is the other direction. A body missing either count, or holding
+    a negative one, is "could not ask".
     """
     url = (
         f"https://api.github.com/repos/{slug}/compare/"
@@ -124,13 +145,28 @@ def commits_ahead(slug: str, base: str, ref: str, *, get: HttpGet) -> int | None
     try:
         payload = json.loads(get(url, "application/vnd.github+json").decode("utf-8"))
     except (OSError, ValueError) as exc:
-        logger.debug(f"could not ask GitHub how far {slug} {ref} is past {base}: {exc}")
+        logger.debug(f"could not ask GitHub how {slug} {ref} stands to {base}: {exc}")
         return None
-    ahead = payload.get("ahead_by") if isinstance(payload, dict) else None
-    if isinstance(ahead, bool) or not isinstance(ahead, int) or ahead < 0:
-        logger.debug(f"GitHub's compare of {slug} did not carry a count: {str(payload)[:200]}")
+    if not isinstance(payload, dict):
         return None
-    return ahead
+    ahead, behind = _count(payload.get("ahead_by")), _count(payload.get("behind_by"))
+    if ahead is None or behind is None:
+        logger.debug(f"GitHub's compare of {slug} did not carry counts: {str(payload)[:200]}")
+        return None
+    return Comparison(ahead=ahead, behind=behind, status=str(payload.get("status", "")))
+
+
+def _count(value: object) -> int | None:
+    """A non-negative int from JSON, or None. `True` is not a count."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def commits_ahead(slug: str, base: str, ref: str, *, get: HttpGet) -> int | None:
+    """`compare()`'s `ahead_by` alone, or None: for a caller that only counts."""
+    said = compare(slug, base, ref, get=get)
+    return None if said is None else said.ahead
 
 
 @dataclass(frozen=True)
@@ -203,6 +239,13 @@ class SourceNews:
     """The catalog's `Source.follow`, kept so a cache about the other mode is not served."""
     release: str = ""
     """The newest release's tag, for a source that follows releases and reached one."""
+    rewritten: int = 0
+    """Commits this checkout has that upstream no longer does, when the two DIVERGED.
+
+    Non-zero only when upstream is both ahead of and behind the checkout: it
+    rewrote its history (TortoiseBots did, T120). The line then says so rather
+    than offering a plain count, because "Update" onto that history drops these.
+    """
     installed: str = ""
     """The release tag the install record says this source was moved to, or `""`.
 
@@ -234,6 +277,19 @@ def release_word(newest: str, installed: str) -> str:
     return "updated release" if installed and installed == newest else "new release"
 
 
+def _said(source: SourceNews) -> str:
+    """One source's part of the line."""
+    if source.release:
+        what = f"{release_word(source.release, source.installed)} {source.release}"
+    else:
+        what = f"{source.behind} {'commit' if source.behind == 1 else 'commits'}"
+    if source.rewritten:
+        if not source.release:
+            what = f"{source.behind} new {'commit' if source.behind == 1 else 'commits'}"
+        return f"{source.label} upstream rewrote its history ({what})"
+    return f"{source.label} {what}"
+
+
 def line(news: UpstreamNews | None) -> str:
     """The Server tab's sentence, or `""` when there is nothing new or nothing known.
 
@@ -243,15 +299,7 @@ def line(news: UpstreamNews | None) -> str:
     """
     if news is None:
         return ""
-    said = [
-        (
-            f"{source.label} {release_word(source.release, source.installed)} {source.release}"
-            if source.release
-            else f"{source.label} {source.behind} {'commit' if source.behind == 1 else 'commits'}"
-        )
-        for source in news.sources
-        if source.behind
-    ]
+    said = [_said(source) for source in news.sources if source.behind]
     if not said:
         return ""
     return (
@@ -293,6 +341,7 @@ def read_cached(
                 follow=str(row.get("follow", "branch")),
                 release=str(row.get("release", "")),
                 installed=str(row.get("installed", "")),
+                rewritten=int(row.get("rewritten", 0)),
             )
             for row in payload["sources"]
         ]
@@ -345,6 +394,7 @@ def write_cached(server_dir: Path, news: UpstreamNews) -> None:
                 "follow": source.follow,
                 "release": source.release,
                 "installed": source.installed,
+                "rewritten": source.rewritten,
             }
             for source in news.sources
         ],

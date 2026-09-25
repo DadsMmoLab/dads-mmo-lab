@@ -685,3 +685,123 @@ def test_the_tortoise_tab_is_given_the_module_folder_seams(tmp_path: Path) -> No
     assert services.module_version is not None
     _clones(tmp_path, "tortoise-bots-manager")
     assert services.installed_modules()["mod"] == frozenset({"tortoise-bots-manager"})
+
+
+# -- Codex's final pass: a release on history upstream rewrote -------------------
+
+
+def _diverged(tmp_path: Path) -> tuple[Recorder, Path]:
+    """The release is ahead of the checkout AND behind it: upstream rewrote its history."""
+    rec, server_dir = _releasing_ready(tmp_path)
+    rec.github = {BOTS: 126, CORE: 3}
+    rec.github_behind = {BOTS: 65}
+    return rec, server_dir
+
+
+REWRITTEN = (
+    f"{BOTS}: Upstream rewrote its history: the release {TAG} does not contain 65 commits "
+    "this server was built from. Updating moves the server onto the release as upstream "
+    "publishes it."
+)
+"""The ruling's sentence, spelled here rather than read from the code under test."""
+
+
+def test_the_rewritten_line_is_the_rulings_sentence() -> None:
+    assert native.rewritten_line(BOTS, TAG, 65) == REWRITTEN
+
+
+def test_a_diverged_release_the_question_did_not_describe_moves_nothing(tmp_path: Path) -> None:
+    """Silently resetting onto a rewritten history is what 140f86a1 did; now it stops first."""
+    rec, server_dir = _diverged(tmp_path)
+    before = dict(rec.heads)
+    with pytest.raises(InstallerError, match="Upstream rewrote its history") as refused:
+        _press(rec, server_dir)
+    assert getattr(refused.value, "repo", None) == BOTS
+    assert getattr(refused.value, "line", None) == REWRITTEN
+    assert rec.clones == []
+    assert rec.heads == before
+
+
+def test_a_diverged_release_the_question_described_moves_and_says_so_in_the_log(
+    tmp_path: Path,
+) -> None:
+    """Warn, don't refuse: the install built on the old history is not locked out."""
+    rec, server_dir = _diverged(tmp_path)
+    lines = _press(rec, server_dir, rewritten_ok=frozenset({BOTS}))
+    assert rec.heads[_bots_dest(server_dir)] == REL, "HEAD moves, so T123's adoption runs"
+    assert REWRITTEN in "\n".join(lines)
+
+
+def test_a_checkout_only_ahead_of_the_release_stays_and_says_by_how_much(tmp_path: Path) -> None:
+    rec, server_dir = _releasing_ready(tmp_path)
+    rec.github = {BOTS: 0, CORE: 3}
+    rec.github_behind = {BOTS: 8}
+    lines = _press(rec, server_dir)
+    assert rec.heads[_bots_dest(server_dir)] == OLD
+    assert any("which is 8 commits past it, so it stays there" in line for line in lines), lines
+
+
+def test_the_notice_says_a_diverged_source_was_rewritten(tmp_path: Path) -> None:
+    rec, server_dir = _counted(tmp_path)
+    rec.github_behind = {BOTS: 65}
+    news = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    said = upstream.line(news)
+    assert f"mod-playerbots upstream rewrote its history (new release {TAG})" in said, said
+    assert "server 300 commits" in said
+
+
+def test_a_diverged_branch_source_is_said_as_rewritten_too(tmp_path: Path) -> None:
+    rec, server_dir = _counted(tmp_path)
+    rec.github_behind = {CORE: 4}
+    news = _engine(rec, ENTRY).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    assert "server upstream rewrote its history (300 new commits)" in upstream.line(news)
+
+
+def _route(rec: Recorder, server_dir: Path, monkeypatch: pytest.MonkeyPatch) -> native.LatestRoute:
+    from yulon import install_wiring
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda _entry: _engine(rec))
+    route = install_wiring.update_to_latest_for_app(_releasing(), server_dir)
+    assert route is not None
+    return route
+
+
+def test_the_question_carries_the_line_from_the_days_count_and_yes_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir = _diverged(tmp_path)
+    _engine(rec).upstream_news(InstallOptions(server_dir=server_dir))
+    route = _route(rec, server_dir, monkeypatch)
+    asked = route.confirmation()
+    assert asked.endswith("\n\n" + REWRITTEN), asked
+    list(route.press(None))
+    assert rec.heads[_bots_dest(server_dir)] == REL
+
+
+def test_a_divergence_the_question_missed_is_asked_about_on_the_next_press(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No count cached (a stale day, a new window): the press stops.
+
+    And the next question says it.
+    """
+    rec, server_dir = _diverged(tmp_path)
+    route = _route(rec, server_dir, monkeypatch)
+    assert REWRITTEN not in route.confirmation()
+    with pytest.raises(InstallerError, match="Upstream rewrote its history"):
+        list(route.press(None))
+    assert rec.clones == []
+    assert REWRITTEN in route.confirmation()
+    list(route.press(None))
+    assert rec.heads[_bots_dest(server_dir)] == REL
+
+
+def test_an_ordinary_release_asks_the_ordinary_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec, server_dir = _releasing_ready(tmp_path)
+    _engine(rec).upstream_news(InstallOptions(server_dir=server_dir))
+    route = _route(rec, server_dir, monkeypatch)
+    assert "rewrote" not in route.confirmation()
+    list(route.press(None))
+    assert rec.heads[_bots_dest(server_dir)] == REL
