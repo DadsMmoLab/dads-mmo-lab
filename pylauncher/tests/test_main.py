@@ -3178,7 +3178,17 @@ import os, sys, threading, time
 sys.argv = ["yulon"]
 from yulon import log, update
 
-update.check_with_cache = lambda *a, **k: None
+kind = os.environ["YULON_TEST_JOB"]
+never = threading.Event()
+
+
+def an_update_check_that_never_returns(*_a, **_k) -> None:
+    never.wait()
+
+
+update.check_with_cache = (
+    an_update_check_that_never_returns if kind == "stuck-update" else (lambda *a, **k: None)
+)
 
 from PySide6.QtCore import QObject, QTimer, Slot
 
@@ -3186,7 +3196,6 @@ import main
 from yulon.ui.widgets.job import threaded_job_runner
 
 main._regain_docker_group = lambda: None
-never = threading.Event()
 
 
 def a_job_that_never_returns() -> None:
@@ -3195,6 +3204,11 @@ def a_job_that_never_returns() -> None:
 
 def a_job_that_returns() -> None:
     return None
+
+
+def a_log_source_that_never_ends():
+    never.wait()
+    yield "never reached"
 
 
 class _Ignore(QObject):
@@ -3210,11 +3224,15 @@ def build_window():
     window = real_build_window()
     ignore = _Ignore(window)
     runner = threaded_job_runner(window)
-    stuck = os.environ["YULON_TEST_JOB"] == "stuck"
-    work = a_job_that_never_returns if stuck else a_job_that_returns
+    work = a_job_that_never_returns if kind == "stuck" else a_job_that_returns
 
     def start_then_close() -> None:
-        runner(work, ignore.outcome, ignore.outcome)
+        if kind == "stuck-panel":
+            # The first panel is the catalog's install log, and `LogPanel.run`
+            # is the real entry: the same call an install makes.
+            window.yulon_log_panels[0].run(a_log_source_that_never_ends, title="following")
+        elif kind != "stuck-update":
+            runner(work, ignore.outcome, ignore.outcome)
         print(f"T113 log {log.file_path()}", flush=True)
         print(f"T113 closing at {time.time()}", flush=True)
         window.close()
@@ -3305,6 +3323,40 @@ def test_closing_while_a_job_is_stuck_exits_cleanly_and_names_the_job(tmp_path: 
     assert "a_job_that_never_returns" in log_text, f"the log does not name the job:\n{log_text}"
 
 
+@pytest.mark.parametrize(
+    ("job", "named"),
+    [
+        ("stuck-panel", 'log panel "following"'),
+        ("stuck-update", "the launch update check"),
+    ],
+)
+def test_a_stuck_log_panel_or_update_check_reaches_the_forced_exit_by_name(
+    job: str, named: str, tmp_path: Path
+) -> None:
+    """The two threads `_stop_background_threads()` joins itself, stuck (T113, Codex pass).
+
+    A log panel following a source that never yields, and a launch update
+    check that never returns. Each must end at the forced exit with the code
+    `main()` would have returned (0), and the log must name it by what it IS -
+    the panel's job, the update check - not by a worker class every panel
+    shares. Measured on 3a6c9933, before the joins were collected: both
+    already exited 0, because `in_flight()` holds these threads too and its
+    `wait_all` caught them, but the log said `_StreamWorker` and
+    `_UpdateWorker`.
+    """
+    done, closed_at, ended, log_text = _close_the_real_window_with(job, tmp_path)
+
+    report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    assert "QThread: Destroyed" not in done.stderr, report
+    assert done.returncode == 0, report
+    assert "T113 main returned" not in done.stdout, report
+    closing = [line for line in log_text.splitlines() if "still running:" in line]
+    assert closing and named in closing[0], f"the log does not name {named}:\n{log_text}"
+    assert closing[0].count(named) == 1, f"named twice:\n{closing[0]}"
+    bound = (main.PANEL_JOIN_MS + main.UPDATE_JOIN_MS + main.EXIT_JOIN_MS) / 1000
+    assert ended - closed_at <= bound + EXIT_MARGIN_SECONDS, report
+
+
 def test_closing_with_every_job_finished_returns_from_main_as_before(tmp_path: Path) -> None:
     """The normal close is untouched: `main()` returns, and nothing is called stuck."""
     done, closed_at, ended, log_text = _close_the_real_window_with("finishes", tmp_path)
@@ -3337,7 +3389,7 @@ def test_the_forced_exit_ends_streams_and_flushes_the_log_before_it_leaves(
     monkeypatch.setattr(logging, "shutdown", lambda: calls.append("log"))
     monkeypatch.setattr(main, "_hard_exit", lambda code: calls.append(f"exit {code}"))
 
-    main._leave_with_jobs_still_running(3)
+    main._leave_with_jobs_still_running(3, ["the launch update check"])
 
     assert calls == ["streams", "log", "exit 3"]
 
@@ -3361,3 +3413,47 @@ def test_no_test_can_reach_the_real_os_exit_in_process() -> None:
     assert main._hard_exit is not _REAL_HARD_EXIT, "conftest's _no_forced_exit is not applied"
     with pytest.raises(AssertionError, match="was reached in-process"):
         main._hard_exit(0)
+
+
+def test_a_join_that_fails_counts_even_when_nothing_else_holds_the_thread(qapp: object) -> None:
+    """Every join `_stop_background_threads()` makes counts, not only `wait_all`'s (T113).
+
+    Today each panel's thread is also held by `in_flight()`, which is why the
+    child-process tests above would pass on `wait_all` alone. This is the case
+    that coincidence hides: a panel whose join failed and whose thread nobody
+    else holds must still be named, or `main()` returns into the Qt abort.
+    """
+    from types import SimpleNamespace
+
+    class _StuckPanel:
+        job_label = 'log panel "a thread nobody else holds"'
+        running = True
+
+        def stop(self) -> None:
+            pass
+
+        def wait(self, _timeout_ms: int) -> bool:
+            return False
+
+    window = SimpleNamespace(yulon_log_panels=[_StuckPanel()], property=lambda _name: None)
+
+    assert main._stop_background_threads(window) == [_StuckPanel.job_label]
+
+
+def test_a_panel_that_finished_during_the_last_join_is_not_called_stuck(qapp: object) -> None:
+    """A panel that missed its own join but is done by the end is no reason to force the exit."""
+    from types import SimpleNamespace
+
+    class _LatePanel:
+        job_label = 'log panel "late but done"'
+        running = False
+
+        def stop(self) -> None:
+            pass
+
+        def wait(self, _timeout_ms: int) -> bool:
+            return False
+
+    window = SimpleNamespace(yulon_log_panels=[_LatePanel()], property=lambda _name: None)
+
+    assert main._stop_background_threads(window) == []

@@ -99,10 +99,12 @@ class InFlight(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self._pairs: list[tuple[QThread, QObject]] = []
+        # (thread, worker, label): the label is what the exit log calls a job
+        # whose owner knows better than its worker's class (T113).
+        self._pairs: list[tuple[QThread, QObject, str | None]] = []
 
-    def hold(self, thread: QThread, worker: QObject) -> None:
-        self._pairs.append((thread, worker))
+    def hold(self, thread: QThread, worker: QObject, *, label: str | None = None) -> None:
+        self._pairs.append((thread, worker, label))
         thread.finished.connect(self.sweep)
 
     @Slot()
@@ -121,21 +123,23 @@ class InFlight(QObject):
         there on a False: it leaves through `os._exit` instead (T113).
         """
         done = True
-        for thread, worker in list(self._pairs):
+        for thread, worker, label in list(self._pairs):
             if thread.isRunning():
                 thread.quit()
                 if not thread.wait(timeout_ms):
                     done = False
                     logger.warning(
                         f"a background job did not finish within {timeout_ms} ms at exit: "
-                        f"{describe(worker)}"
+                        f"{label or describe(worker)}"
                     )
         self.sweep()
         return done
 
     def still_running(self) -> list[str]:
         """What each held job whose thread has not finished is doing, for the exit log."""
-        return [describe(worker) for thread, worker in self._pairs if thread.isRunning()]
+        return [
+            label or describe(worker) for thread, worker, label in self._pairs if thread.isRunning()
+        ]
 
 
 def describe(worker: QObject) -> str:

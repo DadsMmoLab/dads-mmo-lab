@@ -661,6 +661,7 @@ class LogPanel(QWidget):
         layout.addWidget(self._text, 1)
 
         self._cancel: threading.Event | None = None
+        self._job_label = "log panel (no job yet)"
         self._started_at: float | None = None
         # One second, because the field it drives has a seconds place; a faster
         # tick repaints a label that cannot have changed.
@@ -732,6 +733,16 @@ class LogPanel(QWidget):
     def text(self) -> str:
         """Everything currently shown."""
         return self._text.toPlainText()
+
+    @property
+    def job_label(self) -> str:
+        """What the exit log calls this panel's current or last job (T113).
+
+        One string for both places that name it - `job.in_flight()`'s hold and
+        `main._stop_background_threads()` - so the forced exit's list does not
+        name one stuck thread twice.
+        """
+        return self._job_label
 
     def status_text(self) -> str:
         """What the header says about the job (tests / accessibility)."""
@@ -924,6 +935,7 @@ class LogPanel(QWidget):
             self._record.write(f"--- {title}")
         self._cancel = cancel
         self._stop_requested = False
+        self._job_label = f'log panel "{title}"'
         # The zero the elapsed clock counts from. Set on the RUN, not on the
         # panel or the first line: the same panel is reused for the next
         # install and for the console, and an elapsed field that kept counting
@@ -944,7 +956,7 @@ class LogPanel(QWidget):
         # holds why that is the right question rather than a proxy for it.
         worker = _StreamWorker(source, drains=cancel is not None)
         worker.moveToThread(thread)
-        in_flight().hold(thread, worker)
+        in_flight().hold(thread, worker, label=self._job_label)
         thread.started.connect(worker.run)
         worker.line.connect(self.append)
         worker.finished.connect(self._on_finished)
