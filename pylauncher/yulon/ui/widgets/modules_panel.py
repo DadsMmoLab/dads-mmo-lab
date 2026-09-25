@@ -127,6 +127,23 @@ T43's probe produced on a real install, and it is the half-installed reading
 T41 was reported for -- a module that is "there" and does nothing.
 """
 
+BADGE_STATE_UNKNOWN = "State unknown"
+"""A sourceless mod whose last press stopped while its SQL was being sent (T121).
+
+The mob multipliers' record carries a `pending` mark from just before the
+statement until it has committed (T115). A mark left behind means the database
+may hold the old values or the new ones, so the row claims neither Installed
+nor Not installed. It offers Remove, which asks for the values -- the one press
+T115 lets through over a mark -- and it still locks the mod's alternatives.
+"""
+
+STATE_UNKNOWN_DETAIL = (
+    "An earlier press on this stopped while its SQL was being sent, so Yu'lon cannot tell "
+    "whether the database holds it. Press Remove: it asks which values are in the database "
+    "and divides them out, and then it can be installed again."
+)
+"""The unknown badge's tooltip, the sentence behind `BADGE_STATE_UNKNOWN`."""
+
 # There is deliberately NO `Not for this game` badge. T44's item 5 asked for one
 # (round 2) and T46 item 4 carried the ask forward; the owner DECLINED it on
 # 2026-09-15, and the reason is the store's shape rather than the store's
@@ -148,13 +165,16 @@ T41 was reported for -- a module that is "there" and does nothing.
 # cannot quietly stop being true.
 
 
-def _badge_for(installed: bool, sql_owed: bool) -> str:
+def _badge_for(installed: bool, sql_owed: bool, unknown: bool = False) -> str:
     """The one word the badge column says, decided here and never in a widget.
 
     An installed module whose SQL has not run is not simply `Installed`: the
     clone is on disk and the worldserver will compile it, and the rows it needs
-    are not in the database.
+    are not in the database. A recorded mod whose press stopped mid-statement
+    is `State unknown` (T121).
     """
+    if installed and unknown:
+        return BADGE_STATE_UNKNOWN
     if installed and sql_owed:
         return BADGE_SQL_NOT_APPLIED
     return BADGE_INSTALLED if installed else BADGE_NOT_INSTALLED
@@ -602,6 +622,7 @@ def build_module_rows(
     client_dir: Path | None,
     versions: Mapping[tuple[str, str], str] | None = None,
     unfinished: Mapping[str, frozenset[str]] | None = None,
+    unknown: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[ModuleRow, ...]:
     """Every row the Modules tab draws, in the order it draws them.
 
@@ -620,8 +641,14 @@ def build_module_rows(
     walk the clone directories -- and it is passed separately rather than folded
     in because the two facts are different questions with different remedies,
     and every reader of `installed` today means "the folder is there".
+
+    Since T121 `installed` is `apply.installed_modules()`: the folders, plus the
+    sourceless mob multipliers whose answers-file record says they are in the
+    database. `unknown` is `apply.unknown_modules()`, the ones a press stopped
+    on mid-statement; such a row reads `State unknown` and offers Remove.
     """
     catalog: list[Manifest] = list(manifests)
+    in_doubt = unknown or {}
     half_installed = unfinished or {}
     # What is ALREADY known, keyed the way the rows are. Handed in rather than
     # read here: this function is pure and stays pure, and the reading is the
@@ -743,7 +770,11 @@ def build_module_rows(
                 if here and needed_by
                 else None
             ),
-            badge=_badge_for(here, bool(session.sql_owed.get((manifest.type, manifest.id)))),
+            badge=_badge_for(
+                here,
+                bool(session.sql_owed.get((manifest.type, manifest.id))),
+                unknown=manifest.id in in_doubt.get(manifest.type, frozenset()),
+            ),
             # Installed rows only. A catalog row that is not on disk has no
             # clone to read, and looking one up for all 41 would be 20 reads
             # of folders that are not there.
@@ -1335,17 +1366,19 @@ class RowWidget(QFrame):
         middle = QHBoxLayout()
         middle.setSpacing(CHIP_SPACING)
         self.badge_label = QLabel(data.badge, self)
-        # Three tones for four badges, and the pairing is by what the badge
-        # ASKS OF THE READER rather than by its text: green for a module that
-        # is here and working, amber for one that is here and not finished,
-        # muted for the two that ask nothing.
-        if data.badge == BADGE_SQL_NOT_APPLIED:
+        # Three tones, and the pairing is by what the badge ASKS OF THE READER
+        # rather than by its text: green for a module that is here and working,
+        # amber for one that is here and not finished or whose state nobody can
+        # say (T121: its Remove is owed), muted for the ones that ask nothing.
+        if data.badge in (BADGE_SQL_NOT_APPLIED, BADGE_STATE_UNKNOWN):
             badge_colour = COLOR_TEXT_WARNING
         elif data.installed:
             badge_colour = COLOR_UNCOMMON
         else:
             badge_colour = COLOR_TEXT_MUTED
         self.badge_label.setStyleSheet(f"color: {badge_colour}; font-weight: bold;")
+        if data.badge == BADGE_STATE_UNKNOWN:
+            self.badge_label.setToolTip(STATE_UNKNOWN_DETAIL)
         middle.addWidget(self.badge_label)
         buttons: list[QPushButton] = []
         for chip in data.chips:

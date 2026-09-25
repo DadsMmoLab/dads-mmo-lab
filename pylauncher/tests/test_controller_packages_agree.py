@@ -451,6 +451,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # so its absence is the module surface too -- and offering it without
         # `installed_modules` would be a game reading completion marks out of
         # folders it has just said it cannot list.
+        # T121's `unknown_modules` rides with `installed_modules`, whose answer
+        # it qualifies: which of the recorded sourceless mods a press stopped on
+        # mid-statement. A game with no `installed_modules` has no row for it to
+        # mark.
         uncounted = (
             set()
             if counted
@@ -458,6 +462,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
                 "module_updates",
                 "installed_modules",
                 "unfinished_modules",
+                "unknown_modules",
                 "module_version",
             }
             | custom

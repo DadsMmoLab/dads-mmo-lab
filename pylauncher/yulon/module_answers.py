@@ -192,6 +192,38 @@ def record_applied(server_dir: Path, manifest: Manifest, values: Mapping[str, st
     return _write_record(server_dir, change, f"what was applied for {_key(manifest)}")
 
 
+def recorded_keys(server_dir: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """Every `<type>/<id>` with an `applied` entry, and every one with a `pending` mark (T121).
+
+    One read of the file for the whole install, because the Modules tab asks it
+    on every reload, on the GUI thread, beside the clone-folder listing. The
+    four mob multipliers leave no folder, so this record is the only thing that
+    can say one of them is in the database (`apply.installed_modules()`).
+
+    `(frozenset(), frozenset())` for no file and for any file this build cannot
+    read, as `read_applied()` answers `None` for one. An `applied` entry that is
+    there but unusable still counts as applied: it says a Remove is owed, which
+    is the reading the Remove dialog and T115's re-run refusal already give it.
+    """
+    path = server_dir / ANSWERS_FILE
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"no usable applied record in {server_dir}: {exc}")
+        return frozenset(), frozenset()
+    if not isinstance(parsed, dict):
+        return frozenset(), frozenset()
+
+    def keys(field: str) -> frozenset[str]:
+        entries = parsed.get(field)
+        if not isinstance(entries, dict):
+            return frozenset()
+        return frozenset(key for key in entries if isinstance(key, str))
+
+    return keys("applied"), keys("pending")
+
+
 def is_pending(server_dir: Path, manifest: Manifest) -> bool:
     """Whether a press marked `manifest`'s relative SQL as being sent and never finished (T115).
 

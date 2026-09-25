@@ -1246,6 +1246,104 @@ def test_installing_a_mob_multiplier_over_an_unusable_record_is_refused_before_t
     assert applier.installed == []
 
 
+def _mob_tab(ps: _Ps, tmp_path: Path) -> tuple[ControllerView, _RecordingSql, list[str]]:
+    """The real Modules tab over a real applier, reading installed state the way the app does.
+
+    Both seams are the ones `ControllerServices.for_entry()` wires
+    (`apply.installed_modules` and `apply.unknown_modules`), so a row reads
+    whatever the real install left in the answers file. The dialog answers x2
+    and records which mod asked.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    sql = _RecordingSql()
+    asked: list[str] = []
+
+    def asker(parent: object, manifest: object, prompts: object, **_: object) -> dict[str, str]:
+        asked.append(str(manifest.id))  # type: ignore[attr-defined]
+        return {"hp": "2", "dmg": "2", "arm": "2", "spd": "2"}
+
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "applier", Applier(server_dir, sql=sql))
+    object.__setattr__(
+        services, "installed_modules", lambda: apply_module.installed_modules(server_dir)
+    )
+    object.__setattr__(
+        services, "unknown_modules", lambda: apply_module.unknown_modules(server_dir)
+    )
+    return ControllerView(WOTLK, services, status_poll_ms=0, prompt_asker=asker), sql, asked
+
+
+def test_a_mob_mod_reads_installed_locks_its_siblings_and_frees_them_on_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T121, the ticket's sequence through the tab's own action code.
+
+    Baby Mobs installed: its row reads Installed. Buff Mobs: refused before its
+    dialog, naming Baby Mobs, nothing sent. Remove Baby Mobs: Not installed.
+    Buff Mobs then installs.
+    """
+    view, sql, asked = _mob_tab(ps, tmp_path)
+    assert view.modules_panel.row("baby-mobs").data.badge == "Not installed"
+
+    _select_module(view, "baby-mobs")
+    view._module_action("install")
+    baby = view.modules_panel.row("baby-mobs")
+    assert baby.data.installed and baby.data.badge == "Installed"
+    assert baby.remove_button is not None and baby.install_button is None
+    assert len(sql.statements) == 1 and asked == ["baby-mobs"]
+
+    _select_module(view, "buff-mobs")
+    view._module_action("install")
+    report = view.module_report.toPlainText()
+    assert "install buff-mobs: not started" in report, report
+    assert "Baby Mobs is installed here" in report, report
+    assert asked == ["baby-mobs"], "refused before the dialog"
+    assert len(sql.statements) == 1, "nothing sent for buff-mobs"
+
+    _select_module(view, "baby-mobs")
+    view._module_action("remove")
+    baby = view.modules_panel.row("baby-mobs")
+    assert not baby.data.installed and baby.data.badge == "Not installed"
+    assert len(sql.statements) == 2
+    assert view.modules_panel.row("buff-mobs").data.installable
+
+    _select_module(view, "buff-mobs")
+    view._module_action("install")
+    assert view.modules_panel.row("buff-mobs").data.badge == "Installed"
+    assert asked == ["baby-mobs", "buff-mobs"] and len(sql.statements) == 3
+
+
+def test_a_mob_mod_left_pending_reads_unknown_and_offers_remove(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T121: a press stopped mid-statement is neither Installed nor Not installed."""
+    view, _sql, _asked = _mob_tab(ps, tmp_path)
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.record_pending(tmp_path / "srv", manifest, {"hp": "2"}) == ""
+    view.reload_modules()
+
+    row = view.modules_panel.row("baby-mobs")
+    assert row.data.badge == "State unknown"
+    assert row.remove_button is not None and row.install_button is None
+    assert "Remove" in row.badge_label.toolTip()
+    assert not view.modules_panel.row("buff-mobs").data.installable
+
+
+def test_the_real_services_read_mob_mods_from_the_answers_file(ps: _Ps, tmp_path: Path) -> None:
+    """The wiring, not a fixture: `for_entry()` hands the tab the record-aware readers.
+
+    Mutation: wire `installed_modules` back to `installed_clones` and baby-mobs
+    is not in the answer.
+    """
+    manifest = modules.store().load("mod", "baby-mobs")
+    assert module_answers.record_applied(tmp_path, manifest, {"hp": "2"}) == ""
+    services = ControllerServices.for_entry(WOTLK, tmp_path)
+    assert services.installed_modules is not None and services.unknown_modules is not None
+    assert "baby-mobs" in services.installed_modules()["mod"]
+    assert services.unknown_modules() == {}
+
+
 def test_removing_hearthstone_tweaks_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """Remove runs the reset file and renders no `{cooldown}`, so there is no question."""
     asked: list[str] = []

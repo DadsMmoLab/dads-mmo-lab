@@ -779,6 +779,18 @@ class ControllerServices:
     is there" — the one thing this fact does not change. `None` for a game with
     no clone folders, which is the same gate `installed_modules` rides on.
     """
+    unknown_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None
+    """Which recorded sourceless mods a press stopped on mid-statement, per family (T121).
+
+    `apply.unknown_modules()`: a `pending` mark left in the answers file by a
+    mob multiplier's press that never recorded its result (T115). Those ids are
+    also in `installed_modules` -- the database may hold them -- and this says
+    which of them the row must call `State unknown` rather than `Installed`.
+    A separate seam for `unfinished_modules`' reason: the other readers of
+    `installed_modules` do not change on it. One small JSON read per reload,
+    on the GUI thread beside the folder listing: `reload_modules()` is not a
+    job, and the file is the same one `_module_values()` already reads there.
+    """
     module_from_link: Callable[[str], Manifest] | None = None
     """Derive a manifest from a link the user pasted, or raise with the refusal.
 
@@ -1173,6 +1185,7 @@ def _assemble(
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
     installed_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     unfinished_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
+    unknown_modules: Callable[[], Mapping[str, frozenset[str]]] | None = None,
     module_version: Callable[[Path], str | None] | None = None,
     module_from_link: Callable[[str], Manifest] | None = None,
     module_from_folder: Callable[[Path], Manifest] | None = None,
@@ -1240,6 +1253,9 @@ def _assemble(
         # T68's reading of the same folders, on the same flag once more: it
         # opens the claim inside each clone the line above listed.
         unfinished_modules=unfinished_modules,
+        # T121: the sourceless mods a press stopped on mid-statement, read from
+        # the same answers file `installed_modules` reads them from.
+        unknown_modules=unknown_modules,
         # T44's version line, on the same flag again: it reads a clone's own
         # `.git`, and a game with no clones has none to read.
         module_version=module_version,
@@ -1622,8 +1638,14 @@ def _for_wotlk(
         # T41: the cheap half of the same question, on every reload. Bound to
         # the same `has_manifests` flag, so the three CMaNGOS games — which have
         # no modules folder — keep a list of the catalog and nothing else.
+        # T121: the folders plus the answers file's record, because the four
+        # mob multipliers leave no folder and read Not installed for ever
+        # without it -- and `conflicts_with` never saw them.
         installed_modules=(
-            (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
+            (lambda: apply_module.installed_modules(server_dir)) if entry.has_manifests else None
+        ),
+        unknown_modules=(
+            (lambda: apply_module.unknown_modules(server_dir)) if entry.has_manifests else None
         ),
         # T68: which of those clones stopped part-way through their install,
         # read from the claim this app writes inside each one. Bound to the same
@@ -7302,6 +7324,21 @@ class ControllerView(QWidget):
             logger.warning(f"could not read which module installs were left unfinished: {exc}")
             return {}
 
+    def _unknown_modules(self) -> Mapping[str, frozenset[str]]:
+        """Which recorded mods a press stopped on mid-statement, per family (T121).
+
+        `{}` for no reader and for a reader that raised, as `_unfinished_clones()`
+        answers: it only changes the badge of a row that is already drawn.
+        """
+        reader = self.services.unknown_modules
+        if reader is None:
+            return {}
+        try:
+            return reader()
+        except Exception as exc:  # boundary: an unreadable record must not kill the UI
+            logger.warning(f"could not read which module presses were left unfinished: {exc}")
+            return {}
+
     def _load_manifests(self) -> tuple[list[Manifest], list[str]]:
         """This game's catalog in the store's own order, and what would not parse.
 
@@ -7367,6 +7404,8 @@ class ControllerView(QWidget):
                 # answers must come from the same moment, or a row is drawn
                 # from a folder list and a completion mark taken a press apart.
                 unfinished=self._unfinished_clones(),
+                # T121, the same moment again: which recorded mods are in doubt.
+                unknown=self._unknown_modules(),
             )
         )
         if broken:
@@ -7624,8 +7663,9 @@ class ControllerView(QWidget):
                 return
         # An update re-runs the INSTALL-time steps -- it is the install over
         # content that has moved -- so it answers the install's prompts. A mob
-        # multiplier leaves no folder, so its row never reads installed; its
-        # applied record is what says a second Install is a re-run (T115).
+        # multiplier leaves no folder; its applied record is what says a second
+        # Install is a re-run (T115), and since T121 it also marks the row
+        # installed -- read here directly too, for a game wired without that.
         again = (
             action == "update"
             or (row is not None and row.data.installed)

@@ -136,6 +136,57 @@ def installed_clones(server_dir: Path) -> dict[str, frozenset[str]]:
     }
 
 
+def _by_family(keys: frozenset[str]) -> dict[str, frozenset[str]]:
+    """`<type>/<id>` keys (the answers file's) as ids per family, known families only."""
+    found: dict[str, set[str]] = {}
+    for key in keys:
+        family, _, item_id = key.partition("/")
+        if family in CLONE_DIRS and item_id:
+            found.setdefault(family, set()).add(item_id)
+    return {family: frozenset(ids) for family, ids in found.items()}
+
+
+def recorded_modules(server_dir: Path) -> dict[str, frozenset[str]]:
+    """The sourceless mods whose record says they are, or may be, in the database (T121).
+
+    Baby, Nerf, Buff and Extreme Buff Mobs install one inline statement and
+    leave no folder, so `installed_clones()` never lists them: their rows read
+    Not installed for ever and `conflicts_with`, which the four declare against
+    each other, never saw one -- Baby Mobs at x0.25 then Buff Mobs at x2 left
+    creatures at x0.5 (measured through the real `Applier`, 2026-09-25). Since
+    T115 their install writes an `applied` record and marks a statement in
+    flight as `pending`; both mean "this may be in the database", so both are
+    listed. `unknown_modules()` says which are only marked.
+    """
+    applied, pending = module_answers.recorded_keys(server_dir)
+    return _by_family(applied | pending)
+
+
+def unknown_modules(server_dir: Path) -> dict[str, frozenset[str]]:
+    """The mods a press stopped on mid-statement: installed or not, nobody can say (T121).
+
+    A `pending` mark left behind (`module_answers.record_pending()`). The row
+    reads "State unknown" and offers Remove, which asks for the values -- T115's
+    remedy, and the only press T115 lets through over a mark.
+    """
+    _applied, pending = module_answers.recorded_keys(server_dir)
+    return _by_family(pending)
+
+
+def installed_modules(server_dir: Path) -> dict[str, frozenset[str]]:
+    """What is installed per family: the clone folders, plus the recorded sourceless mods (T121).
+
+    The Modules tab's reading and the applier's conflict and requirement
+    guards, so the tab and the refusal agree (T55's rule). `installed_clones()`
+    keeps meaning "the folder is there" for the readers that need a folder.
+    One directory listing per family and one small JSON read, on every reload.
+    """
+    found = {family: set(ids) for family, ids in installed_clones(server_dir).items()}
+    for family, ids in recorded_modules(server_dir).items():
+        found.setdefault(family, set()).update(ids)
+    return {family: frozenset(ids) for family, ids in found.items()}
+
+
 def conflicting_installed(
     manifest: Manifest, installed: Mapping[str, frozenset[str]]
 ) -> tuple[tuple[str, ManifestType], ...]:
@@ -2618,7 +2669,9 @@ class Applier:
         Asked of the DISK, never of the declaration. Four of the mods name each
         other (buff/xbuff/nerf/baby-mobs), so a check that refused on the
         presence of a conflict rather than of the conflicting CLONE would make
-        all four uninstallable.
+        all four uninstallable. Those four leave no clone, so for them the disk
+        is the answers file's record (`installed_modules()`, T121): until that,
+        this never saw one, and Baby Mobs then Buff Mobs stacked.
 
         Every family folder is searched rather than this manifest's own. Ids are
         unique across the catalog, the two known pairs are same-family, and a
@@ -2627,7 +2680,23 @@ class Applier:
         """
         if not manifest.conflicts_with:
             return None
-        for other, kind in conflicting_installed(manifest, installed_clones(self.server_dir)):
+        # T121: the four mob multipliers leave no folder, so the record is what
+        # says one of them is in the database. Asked first: it has no seat to open.
+        applied, pending = module_answers.recorded_keys(self.server_dir)
+        for other, kind in conflicting_installed(manifest, installed_modules(self.server_dir)):
+            if f"{kind}/{other}" in applied | pending:
+                where = (
+                    "may be in this server's database: a press on it stopped while its SQL "
+                    "was being sent"
+                    if f"{kind}/{other}" in pending
+                    else f"is applied to this server's database (Yu'lon's record of it is in "
+                    f"{module_answers.ANSWERS_FILE})"
+                )
+                return (
+                    f"{manifest.id} and {other} cannot both be installed: they are alternatives "
+                    f"to each other, and the catalog records the conflict. {other} {where}. "
+                    f"Remove it first, or keep it and leave {manifest.id} out. Nothing was changed."
+                )
             # An EMPTY directory is not an installed module. `clone_names()`
             # counts every non-hidden directory name -- no `.git`, no claim,
             # no content -- so a leftover from a failed install, or a folder
@@ -2667,10 +2736,12 @@ class Applier:
 
         Asked of the DISK and not of the catalog, so a module the SERVER install
         cloned counts as present; `missing_requirements()` says why that matters.
+        Through `installed_modules()` since T121, the tab's own reading, so a
+        recorded sourceless mod counts too (none is named in a `requires` today).
         """
         if not manifest.requires:
             return None
-        for needed in missing_requirements(manifest, installed_clones(self.server_dir)):
+        for needed in missing_requirements(manifest, installed_modules(self.server_dir)):
             return requirement_refusal(manifest.id, needed) + " Nothing was changed."
         return None
 
