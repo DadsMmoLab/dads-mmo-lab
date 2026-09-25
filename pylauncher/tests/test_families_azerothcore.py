@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -1271,6 +1272,84 @@ def test_a_fresh_database_import_forgets_what_was_applied_and_keeps_the_answers(
     kept = json.loads(path.read_text(encoding="utf-8"))
     assert "applied" not in kept and "pending" not in kept, kept
     assert kept["modules"] == {"mod/baby-mobs": {"hp": "2"}}, "the answers are kept"
+
+
+def test_a_clear_that_cannot_be_written_fails_the_stage_and_keeps_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex final pass: a failed clear was a warning, and the import went on.
+
+    That finished an install with a readable stale `applied` record. It is a
+    failure now, the stage is not recorded, and the next press tries again.
+    """
+    server_dir = tmp_path / "wow"
+    path = _answers_with_a_record(server_dir)
+    before = path.read_text(encoding="utf-8")
+
+    real_replace = os.replace
+
+    def no_replace(src: object, dst: object) -> None:
+        # Only the answers file's atomic replace fails; the engine's own state
+        # file (the same `os.replace`) must still be written.
+        if Path(str(dst)).name == module_answers.ANSWERS_FILE:
+            raise OSError("Permission denied")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", no_replace)
+    rec = Recorder(images=False)
+    with pytest.raises(InstallerError) as failed:
+        install(rec, server_dir)
+    message = str(failed.value)
+    assert module_answers.ANSWERS_FILE in message and "press Install again" in message, message
+    assert "one-shot:ac-db-import" not in rec.calls, "no import over a record that says otherwise"
+    assert path.read_text(encoding="utf-8") == before, "the record is still there, untouched"
+    state = native.read_state(server_dir, valid=STAGE_NAMES)
+    assert state is not None and "import" not in state.completed, "the next press retries"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        pytest.param({"reset_error": RuntimeError("there is player data")}, id="reset-raises"),
+        pytest.param({"reset_answer": ()}, id="reset-drops-nothing"),
+    ],
+)
+def test_a_partial_database_that_was_not_dropped_keeps_the_record(
+    tmp_path: Path, fault: dict[str, object]
+) -> None:
+    """Codex final pass: the clear ran BEFORE `reset()`. If the old schemas survive,
+    so does what is applied to them, and so must the record."""
+    server_dir = tmp_path / "wow"
+    path = _answers_with_a_record(server_dir)
+    before = path.read_text(encoding="utf-8")
+    rec = Recorder(images=False, probe_answers=[PARTIAL], **fault)
+    with pytest.raises(InstallerError):
+        install(rec, server_dir)
+    assert "reset" in rec.calls
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_partial_database_that_was_dropped_clears_the_record_and_keeps_the_answers(
+    tmp_path: Path,
+) -> None:
+    """The clear comes AFTER the drop: at `reset()` the record still describes the old schemas."""
+    server_dir = tmp_path / "wow"
+    path = _answers_with_a_record(server_dir)
+    rec = Recorder(images=False, probe_answers=[PARTIAL, IMPORTED])
+    at_reset: list[dict[str, object]] = []
+    real_reset = rec.reset
+
+    def reset() -> tuple[str, ...]:
+        at_reset.append(json.loads(path.read_text(encoding="utf-8")))
+        return real_reset()
+
+    rec.reset = reset  # type: ignore[method-assign]
+    install(rec, server_dir)
+    assert rec.calls.index("reset") < rec.calls.index("one-shot:ac-db-import")
+    assert at_reset and "applied" in at_reset[0], "cleared before the old schemas were dropped"
+    kept = json.loads(path.read_text(encoding="utf-8"))
+    assert "applied" not in kept and "pending" not in kept, kept
+    assert kept["modules"] == {"mod/baby-mobs": {"hp": "2"}}
 
 
 def test_a_resume_over_a_finished_import_keeps_the_record(tmp_path: Path) -> None:
