@@ -153,6 +153,16 @@ def _realm_badge_status(status: InstallStatus) -> str:
     return "stopped"
 
 
+class _GearReadBroke(RuntimeError):
+    """A Characters gear read that raised, carrying which selection it was for (T96)."""
+
+    def __init__(self, generation: int, name: str, cause: Exception) -> None:
+        super().__init__(f"{name}: {cause}")
+        self.generation = generation
+        self.name = name
+        self.cause = cause
+
+
 class UnsupportedGameError(RuntimeError):
     """No `controller_<game>` package is wired to this catalog id.
 
@@ -5927,6 +5937,11 @@ class ControllerView(QWidget):
 
         self.character_report = QLabel("", tab)
         self._character_generation = 0
+        self._gear_generation = 0
+        # One gear read at a time, and only the newest row waits behind it
+        # (T96 review): see `_ask_for_gear()`.
+        self._gear_in_flight = False
+        self._gear_waiting: tuple[int, str] | None = None
         self.character_report.setWordWrap(True)
         self.character_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         # A tree whose Play block nobody has measured gets a SENTENCE rather
@@ -6004,8 +6019,11 @@ class ControllerView(QWidget):
 
     def _character_chosen(self, row: int) -> None:
         """Name the chosen character in every button, or wait for one."""
+        # Any gear read still out is about a row that is no longer chosen (T96).
+        self._gear_generation += 1
         item = self.character_list.item(row) if row >= 0 else None
         if item is None:
+            self._gear_waiting = None
             for button, label in self._character_actions():
                 button.setText(label)
                 button.setEnabled(False)
@@ -6056,8 +6074,68 @@ class ControllerView(QWidget):
             # teleport's own help says so in as many words.
             self.revive_button.setEnabled(False)
             self.revive_button.setText(f"{name} has to be logged in to be revived")
-        pieces, mails, refusal = self._gear_set_size(name)
+        # The gear read is two `docker exec ... mysql` calls, so it runs through
+        # the job runner and the button waits for it (T96). It ran right here
+        # until then, on the GUI thread: ~240 ms per call on Docker Desktop
+        # (yulon-win11, 2026-09-23), so every arrow key through the list, and
+        # every refresh that kept a row selected, froze the window for about
+        # half a second. Until the answer lands the button promises nothing.
+        self.send_gear_button.setText(f"Reading what {name} is wearing…")
+        self.send_gear_button.setEnabled(False)
+        self._ask_for_gear(self._gear_generation, name)
+
+    def _ask_for_gear(self, generation: int, name: str) -> None:
+        """Start this row's gear read, or let it wait behind the one already out.
+
+        ONE read at a time, and only the NEWEST row waits (Codex, T96 review):
+        a read per row change meant an arrow key held down a 900-row roster
+        started hundreds of workers and twice as many `docker exec`s, every one
+        of them to be thrown away, and a closing tab then waited on all of them.
+        A row that waits replaces whatever row waited before it; when the read
+        out lands, `_next_gear_read()` starts the one waiting.
+        """
+        if self._gear_in_flight:
+            self._gear_waiting = (generation, name)
+            return
+        self._gear_in_flight = True
+        self._gear_waiting = None
+        # Everything the worker needs is taken HERE, on the GUI thread: the
+        # worker must not reach back into a view it may outlive.
+        play, size = self.services.play, self._gear_set_size
+
+        def read() -> tuple[int, str, tuple[int, int, tuple[str, str] | None]]:
+            try:
+                return (generation, name, size(play, name))
+            except Exception as exc:  # noqa: BLE001 - carried to the GUI thread with its row
+                raise _GearReadBroke(generation, name, exc) from exc
+
+        self._run(read, self._gear_read, self._gear_read_failed)
+
+    def _next_gear_read(self) -> None:
+        """The read out has landed: start the row waiting behind it, if any.
+
+        The row waiting is always the one chosen now: every choice replaces it,
+        and choosing nothing clears it (`_character_chosen`). Nothing is
+        started once the tab is closing -- `shutdown()` has joined what was
+        running and nothing may be queued after it.
+        """
+        self._gear_in_flight = False
+        waiting, self._gear_waiting = self._gear_waiting, None
+        if waiting is None or getattr(self, "_closed", False):
+            return
+        self._ask_for_gear(*waiting)
+
+    @Slot(object)
+    def _gear_read(self, answer: object) -> None:
+        """Draw the gear button from a read, if it is about the row still chosen."""
+        generation, name, (pieces, mails, refusal) = cast(
+            tuple[int, str, tuple[int, int, tuple[str, str] | None]], answer
+        )
+        self._next_gear_read()
+        if generation != self._gear_generation:
+            return
         self.send_gear_button.setToolTip("" if refusal is None else refusal[1])
+        self.send_gear_button.setEnabled(True)
         if refusal is not None:
             # The read did not answer, and WHY is the only useful thing to draw.
             # Measured on the live Vanilla server, 2026-09-07 (8.4c): two
@@ -6075,6 +6153,23 @@ class ControllerView(QWidget):
             # server would refuse an empty mail with a sentence about item ids.
             self.send_gear_button.setText(f"{name} is wearing nothing")
             self.send_gear_button.setEnabled(False)
+
+    @Slot(object)
+    def _gear_read_failed(self, exc: object) -> None:
+        """`_gear_set_size()` answers its own failures; this is the boundary if it ever does not.
+
+        For the row still chosen the button says the read broke -- disabled, as
+        the refusal branch above is, because nothing safe is known to press --
+        instead of staying on "Reading…" for good. A break about a row already
+        left says nothing about the one chosen now.
+        """
+        logger.warning(f"could not size the chosen character's gear: {exc}")
+        self._next_gear_read()
+        if not isinstance(exc, _GearReadBroke) or exc.generation != self._gear_generation:
+            return
+        self.send_gear_button.setText(f"Could not read what {exc.name} is wearing")
+        self.send_gear_button.setToolTip(str(exc.cause))
+        self.send_gear_button.setEnabled(False)
 
     def _revive_works_offline(self) -> bool:
         """Only where this tree's own box measured that it does.
@@ -6096,10 +6191,14 @@ class ControllerView(QWidget):
         play = self.entry.play
         return (play.rename_offline_refusal or "") if play is not None else ""
 
-    def _gear_set_size(self, name: str) -> tuple[int, int, tuple[str, str] | None]:
+    @staticmethod
+    def _gear_set_size(play: object, name: str) -> tuple[int, int, tuple[str, str] | None]:
         """The set's size, or why there is not one -- short enough for the
-        button, and in full for the tooltip behind it."""
-        play = self.services.play
+        button, and in full for the tooltip behind it.
+
+        Static, and handed the seam: it runs on a worker (T96), which must not
+        read the view -- a view being torn down has already lost `services`.
+        """
         if play is None:
             return (0, 0, None)
         try:
