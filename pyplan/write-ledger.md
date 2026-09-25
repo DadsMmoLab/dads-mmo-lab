@@ -166,6 +166,35 @@ ordinary one and the adopt press — go through that one function; a second call
 site would be a second spelling of a row the probe reads in one shape only. The
 rest of `exec_stdin` stays open and stays named.
 
+**T123's bot enrolment is a write this walk cannot see either, and it is sent
+while the world runs** (2026-09-25). After "Update the server to latest…" (or
+"Return to the tested pin") moves Tortoise's bots module, the route sends
+`bot pool adopt preview` and then `bot pool adopt confirm <challenge>`
+(`controller_wow_tortoise/botpool.py::adopt`), and the confirm makes the running
+mangosd enrol every `RNDBOT` account into TortoiseBots' own account registry,
+`tortoise_bots_pool_account` in the characters database. It goes over the
+install's SOAP channel first and the attach console second. The console half is
+the `controller_wow_wotlk/console.py::send_command::os.write` row below. The SOAP
+half is an `http.client` request out of `soap.py`, which names no file and no
+database, so the walk has no callee to find and there is no row to add. This
+paragraph is the record.
+
+What is true of that write: the server makes it, through its own command, under
+its own locks. The app writes no SQL beside it. The confirm is sent only with the
+challenge the preview printed a moment before, and the module refuses it if the
+set of bot accounts changed in between; that refusal wrote nothing, so only then
+is the pair asked again. A confirm whose answer never came is never sent a second
+time, on any channel. Adoption brings nothing online by itself, so an adoption
+that enrolled anything is followed by a restart of the world. **World may be
+running: yes, and necessarily**, for the reason the console row gives: a command
+needs a running server to answer it. **Owner question:** this is the same class
+of write as T26's account link above, a bots module's own account table that the
+running server writes through its own command. Here the command is the server's
+and not SQL beside it, which is the route owner answer 7 prefers, but the table
+is in `characters`, which answer 7 names. The question left running there covers
+this one too: does answer 7 extend to a bots table the server writes live
+through its own command? The owner still has to answer it.
+
 Generated rows are checked against the tree by the test, not by hand. The
 descriptions are written by hand.
 

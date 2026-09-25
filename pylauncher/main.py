@@ -15,7 +15,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from yulon import platform
 from yulon.log import configure, file_log_problem, get_logger, use_utf8_streams
@@ -95,6 +95,33 @@ player actually uses (T90, third review).
 
 ABSURD_URL_CHARS = 2000
 """Past this, a link is refused outright rather than shown or copied."""
+
+
+PANEL_JOIN_MS = 5000
+"""How long the exit waits for each log panel's job after asking it to stop."""
+
+UPDATE_JOIN_MS = 8000
+"""How long the exit waits for the launch update check's thread."""
+
+UPDATE_CHECK_LABEL = "the launch update check"
+"""What the exit log calls the update check's thread: its hold and its join use this one string."""
+
+EXIT_JOIN_MS = 8000
+"""How long the exit waits for background jobs nobody else joined (`in_flight().wait_all`).
+
+A job still running after it is left running, and the process leaves through
+`_leave_with_jobs_still_running()` rather than Qt's teardown (T113).
+"""
+
+
+def _hard_exit(code: int) -> NoReturn:
+    """`os._exit`, behind a name a test can replace (T113).
+
+    `conftest.py` replaces it for every in-process test: reached for real, it
+    would end pytest itself. The one test that needs the real thing runs the
+    app in a child process, where no conftest applies.
+    """
+    os._exit(code)
 
 
 def _short(url: str) -> str:
@@ -1793,7 +1820,7 @@ def build_window() -> object:
     # lazy-import comments (review, 2026-08-28).
     from yulon.ui.widgets.job import in_flight
 
-    in_flight().hold(update_thread, update_worker)
+    in_flight().hold(update_thread, update_worker, label=UPDATE_CHECK_LABEL)
     window.setProperty("update_thread", update_thread)
     window.setProperty("update_worker", update_worker)
     update_thread.start()
@@ -1985,6 +2012,9 @@ def main() -> int:
     platform.declare_gui_thread()
     window = build_window()
     assert isinstance(window, QMainWindow)
+    # What `main()` returns, kept outside the `try` for the forced exit below,
+    # which has to leave with the same answer the return would have given.
+    code = 0
     try:
         if os.environ.get("YULON_SMOKE_TEST"):
             # CI / packaging check: prove the frozen app can build its window, then leave.
@@ -2037,13 +2067,25 @@ def main() -> int:
         # After show(), so the app is visibly UP before it admits to anything:
         # the log file failing is not a reason to hold the window back.
         _warn_about_the_log_file(window)
-        return int(app.exec())
+        code = int(app.exec())
+        return code
     finally:
-        _stop_background_threads(window)
+        stuck = _stop_background_threads(window)
+        if stuck:
+            # A job is still running and nothing can stop it (T113). Returning
+            # from here hands its QThread to interpreter teardown, and Qt aborts
+            # there: exit 134, a crash report on Windows and macOS. The window is
+            # already closed and nothing is saved at close (state.json is written
+            # at each action), so leaving now loses nothing a return would keep.
+            failure = sys.exc_info()[1]
+            if failure is not None:
+                logger.error("the launcher ended on an exception", exc_info=failure)
+                code = 1
+            _leave_with_jobs_still_running(code, stuck)
 
 
-def _stop_background_threads(window: object) -> None:
-    """Stop every live worker before the interpreter tears Qt down.
+def _stop_background_threads(window: object) -> list[str]:
+    """Stop every live worker before the interpreter tears Qt down; name any still running.
 
     A `QThread` destroyed while running does not warn — it ABORTS the process
     (0xC0000409, verified): closing the window mid-install or while following
@@ -2066,6 +2108,21 @@ def _stop_background_threads(window: object) -> None:
     install: `_on_finished` is queued into this same blocked thread, so
     `run_finished` never fires, `CatalogView._on_run_finished()` never runs and
     nothing is written to `state.json` on this path.
+
+    The answer is every thread still running after its join, named; empty
+    when everything finished. A non-empty answer means a job's work is blocked
+    where `quit()` cannot reach it, and `main()` must not return into a
+    teardown with it still running (T113). EVERY join's result counts, not only
+    `wait_all`'s: today each panel's and the update check's thread is also held
+    by `in_flight()`, so its survivor would be named there too, but a thread
+    this function joins and nobody else holds must not be able to slip through
+    on that coincidence. A survivor both lists name is named once, by the
+    label its owner gave it (`LogPanel.job_label`, `UPDATE_CHECK_LABEL`).
+
+    The controllers' `shutdown()` joins are not collected here: their jobs run
+    in `ThreadedJobRunner`, whose every pair `in_flight()` holds, and their
+    panels are in `yulon_log_panels`. The gamepad's thread is not held by
+    `in_flight()` on this branch (T111 moves it there).
     """
     from PySide6.QtCore import QThread
 
@@ -2073,18 +2130,23 @@ def _stop_background_threads(window: object) -> None:
     # Read off the window as attributes: `build_window()`'s `_Window` records
     # why - a list put through `setProperty()` comes back as a copy frozen at
     # that call, and the tabs that matter here are the ones opened after it.
+    unjoined: list[str] = []
     for view in getattr(window, "yulon_controllers", []):
         view.shutdown()
     for panel in getattr(window, "yulon_log_panels", []):
         panel.stop()
-        panel.wait(5000)
+        if not panel.wait(PANEL_JOIN_MS):
+            unjoined.append(panel.job_label)
     thread = prop("update_thread")
     if isinstance(thread, QThread) and thread.isRunning():
         thread.quit()
-        thread.wait(8000)
+        if not thread.wait(UPDATE_JOIN_MS):
+            unjoined.append(UPDATE_CHECK_LABEL)
     # The gamepad poller and keyboard filter. The gamepad's 120 Hz QThread must
     # be stopped and joined BEFORE the window is torn down — a QThread destroyed
     # while running aborts the process, exactly like every other worker here.
+    # `stop()` only tells it to; the join is `wait_all()` below, which holds the
+    # pair since T111 (its own 500 ms wait lost to a slow SDL release).
     # Read as attributes (not `setProperty`) for the reason `_Window` documents.
     gamepad = getattr(window, "yulon_gamepad", None)
     if gamepad is not None:
@@ -2097,7 +2159,71 @@ def _stop_background_threads(window: object) -> None:
     # the join for a worker whose panel is already gone.
     from yulon.ui.widgets.job import in_flight
 
-    in_flight().wait_all(8000)
+    in_flight().wait_all(EXIT_JOIN_MS)
+    # Read AFTER the join rather than from its answer: a panel that missed its
+    # own join may have finished during `wait_all`'s, and is not stuck now.
+    held = in_flight().still_running()
+    return held + [name for name in unjoined if name not in held and _still_joined(window, name)]
+
+
+def _still_joined(window: object, name: str) -> bool:
+    """Whether the thread `_stop_background_threads()` named `name` is running now."""
+    from PySide6.QtCore import QThread
+
+    if name == UPDATE_CHECK_LABEL:
+        thread = getattr(window, "property", lambda _name: None)("update_thread")
+        return isinstance(thread, QThread) and thread.isRunning()
+    return any(
+        panel.running and panel.job_label == name
+        for panel in getattr(window, "yulon_log_panels", [])
+    )
+
+
+def _leave_with_jobs_still_running(code: int, stuck: list[str]) -> NoReturn:
+    """Name what is stuck, do what the skipped atexit hooks would have done, and leave (T113).
+
+    `os._exit` rather than a return, because a return reaches interpreter
+    teardown, which destroys the still-running QThread `job.InFlight` holds,
+    and Qt aborts on that ("QThread: Destroyed while thread is still running",
+    exit 134, measured 2026-09-25).
+
+    `os._exit` skips every atexit hook. Listed in the real app on 2026-09-25
+    by recording `atexit.register` before any import, there are four:
+
+    - `yulon.runner._close_abandoned_streams` - RUN here: it ends a `stream()`
+      child nobody closed, which would otherwise outlive the app with PPID 1.
+      It may also be what unblocks the stuck job, if that job was reading one.
+    - `logging.shutdown` - RUN here, after the above so its lines land: the
+      file handler's buffer is support's only record of this exit.
+    - `PySide6.QtCore.__moduleShutdown` - NOT run: it is the Qt teardown this
+      function exists to avoid.
+    - `pygame.base.quit` - NOT run: `SDL_Quit` from this thread while the
+      stuck thread may be inside an SDL poll is a second way to hang or crash,
+      and the OS releases the joystick handles when the process ends.
+
+    Nothing is connected to `aboutToQuit`, and it has fired inside `app.exec()`
+    before this runs anyway. Nothing is written at close: `state.json` is saved
+    at each action, and there is no settings or geometry save.
+    """
+    import logging
+
+    from yulon import runner
+
+    logger.error(
+        f"closing with {len(stuck)} background job(s) still running: "
+        f"{', '.join(stuck) or 'none named'}; leaving without Qt's teardown, "
+        "which would abort on them"
+    )
+    runner._close_abandoned_streams()
+    logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        # `None` in the windowed build (`console=False`), where there is nothing to flush.
+        if stream is not None:
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+    _hard_exit(code)
 
 
 if __name__ == "__main__":
