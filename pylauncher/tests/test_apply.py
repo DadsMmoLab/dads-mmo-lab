@@ -3727,6 +3727,11 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
     module-type write this guard stands in front of, and the count moving is
     what says the new step joined the guarded set rather than slipping past it.
 
+    Still 44 after T100, by a route worth saying: `hearthstone-cd` runs
+    upstream's reset and then the chosen file as ONE `then` step (one
+    transaction), and its remove became that reset file instead of an inline
+    `spell_dbc` statement -- two steps before, two after, all into `world`.
+
     Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
     `db-import`: either would empty this guard's blast radius without a word,
     and both would leave every other test above green.

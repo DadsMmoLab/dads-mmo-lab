@@ -1395,6 +1395,29 @@ def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(window: Any, tmp_p
     assert tabs.tabToolTip(index) == str(server_dir)
 
 
+def test_the_logs_tab_sits_under_the_catalog_and_stays_there(window: Any, tmp_path: Any) -> None:
+    """T93: the owner's placement. A server tab is APPENDED, so it can never push Logs down."""
+    from yulon.ui.logs_view import LogsView
+
+    tabs = window.property("tabs")
+    assert tabs.tabText(0) == "Catalog"
+    assert isinstance(tabs.widget(1), LogsView) and tabs.tabText(1) == "Logs"
+    assert tabs.widget(1) is window.yulon_logs_view
+    server_dir = tmp_path / "logs-tab-order"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    assert isinstance(tabs.widget(1), LogsView), "a new server tab pushed the Logs tab down"
+    assert tabs.indexOf(_tab_for(window, server_dir)) > 1
+
+
+def test_a_support_file_being_saved_refuses_the_close(window: Any, monkeypatch: Any) -> None:
+    """The join at exit waits 8 s and one docker read may take 50: a save must hold the close."""
+    assert main._busy_reasons(window) == []
+    monkeypatch.setattr(window.yulon_logs_view, "busy_reason", lambda: "saving the support file")
+    assert main._busy_reasons(window) == ["saving the support file"]
+    # The self-update asks `close_refusal()` as the guard does: it must hear the save too.
+    assert main.close_refusal(window) == "saving the support file"
+
+
 def test_a_tab_opened_after_startup_is_still_joined_when_the_window_closes(
     window: Any, tmp_path: Any
 ) -> None:
@@ -3139,3 +3162,298 @@ def test_the_windows_flags_are_the_ones_the_gate_settled() -> None:
     without = windows_creation_flags(fake, breakaway=False)
     assert without == 0x08000000 | 0x00000200
     assert not without & fake.CREATE_BREAKAWAY_FROM_JOB
+
+
+# ------------------------------------------- closing while a background job is stuck (T113)
+
+# A child process for `_ENTRY_POINT`'s reason, and a second one: the thing
+# under test is what happens AFTER `main()` - interpreter teardown, where Qt
+# aborts on a QThread destroyed while running - and no in-process test can
+# reach past its own interpreter's end. The window is the REAL one; only the
+# GitHub update check is stubbed (it would ask the network and write
+# `update.json`), and the docker-group re-exec, which would replace the child.
+_CLOSE_WITH_A_JOB = """\
+import os, sys, threading, time
+
+sys.argv = ["yulon"]
+from yulon import log, update
+
+kind = os.environ["YULON_TEST_JOB"]
+never = threading.Event()
+
+
+def an_update_check_that_never_returns(*_a, **_k) -> None:
+    never.wait()
+
+
+update.check_with_cache = (
+    an_update_check_that_never_returns if kind == "stuck-update" else (lambda *a, **k: None)
+)
+
+from PySide6.QtCore import QObject, QTimer, Slot
+
+import main
+from yulon.ui.widgets.job import threaded_job_runner
+
+main._regain_docker_group = lambda: None
+
+
+def a_job_that_never_returns() -> None:
+    never.wait()
+
+
+def a_job_that_returns() -> None:
+    return None
+
+
+def a_log_source_that_never_ends():
+    never.wait()
+    yield "never reached"
+
+
+class _Ignore(QObject):
+    @Slot(object)
+    def outcome(self, _outcome: object) -> None:
+        pass
+
+
+real_build_window = main.build_window
+
+
+def build_window():
+    window = real_build_window()
+    ignore = _Ignore(window)
+    runner = threaded_job_runner(window)
+    work = a_job_that_never_returns if kind == "stuck" else a_job_that_returns
+
+    def start_then_close() -> None:
+        if kind == "stuck-panel":
+            # The first panel is the catalog's install log, and `LogPanel.run`
+            # is the real entry: the same call an install makes.
+            window.yulon_log_panels[0].run(a_log_source_that_never_ends, title="following")
+        elif kind != "stuck-update":
+            runner(work, ignore.outcome, ignore.outcome)
+        print(f"T113 log {log.file_path()}", flush=True)
+        print(f"T113 closing at {time.time()}", flush=True)
+        window.close()
+
+    QTimer.singleShot(0, start_then_close)
+    return window
+
+
+main.build_window = build_window
+code = main.main()
+print(f"T113 main returned {code}", flush=True)
+raise SystemExit(code)
+"""
+
+EXIT_MARGIN_SECONDS = 10.0
+"""What the stuck close may take beyond `main.EXIT_JOIN_MS`, the join it has to sit out.
+
+The rest of the exit is ending abandoned `stream()` children (none here),
+flushing the log and `os._exit`. Measured on the laptop 2026-09-25 before the
+fix: 8.3 s from `window.close()` to the abort, i.e. the join plus 0.3 s. Ten
+seconds is headroom for a loaded box, not an expectation.
+"""
+
+
+def _close_the_real_window_with(job: str, tmp_path: Path) -> tuple[Any, float, float, str]:
+    """Run `_CLOSE_WITH_A_JOB`; answer (process, closed at, ended at, the log file's text)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    scratch_temp = tmp_path / "temp"
+    scratch_temp.mkdir()
+    env = dict(os.environ)
+    env.update(
+        {
+            "YULON_TEST_JOB": job,
+            "HOME": str(home),  # macOS: config_dir() is under HOME and nothing else
+            "APPDATA": str(home),
+            "XDG_DATA_HOME": str(home),
+            "QT_QPA_PLATFORM": "offscreen",
+            "TMPDIR": str(scratch_temp),
+            "TEMP": str(scratch_temp),
+            "TMP": str(scratch_temp),
+        }
+    )
+    for name in ("YULON_SMOKE_TEST", "YULON_PROVISION"):
+        env.pop(name, None)
+    pylauncher = Path(main.__file__).parent
+    env["PYTHONPATH"] = str(pylauncher)
+
+    done = subprocess.run(
+        [sys.executable, "-c", _CLOSE_WITH_A_JOB],
+        cwd=pylauncher,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    ended = time.time()
+    said = done.stdout.splitlines()
+    closing = [line for line in said if line.startswith("T113 closing at ")]
+    logged = [line for line in said if line.startswith("T113 log ")]
+    assert closing and logged, f"the window never closed:\n{done.stdout}\n{done.stderr}"
+    closed_at = float(closing[0].removeprefix("T113 closing at "))
+    log_file = Path(logged[0].removeprefix("T113 log "))
+    return done, closed_at, ended, log_file.read_text(encoding="utf-8")
+
+
+def test_closing_while_a_job_is_stuck_exits_cleanly_and_names_the_job(tmp_path: Path) -> None:
+    """T113: a job blocked forever must not turn a close into a crash report.
+
+    Before the fix, measured on the laptop 2026-09-25: `main()` returned 0,
+    and then interpreter teardown destroyed the QThread `InFlight` still held
+    and Qt aborted - "QThread: Destroyed while thread '' is still running",
+    exit 134, a core dump on Linux and a crash report on Windows and macOS.
+
+    The log is read from the FILE, not stderr, because the forced exit skips
+    `logging.shutdown()`'s atexit hook and a line still in a buffer is a line
+    support never sees. "main returned" must be absent: the process left
+    through `main._hard_exit`, not by returning into an interpreter teardown
+    that would abort on the running thread.
+    """
+    done, closed_at, ended, log_text = _close_the_real_window_with("stuck", tmp_path)
+
+    report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    assert "QThread: Destroyed" not in done.stderr, report
+    assert done.returncode == 0, report
+    assert "T113 main returned" not in done.stdout, report
+    assert ended - closed_at <= main.EXIT_JOIN_MS / 1000 + EXIT_MARGIN_SECONDS, report
+    assert "a_job_that_never_returns" in log_text, f"the log does not name the job:\n{log_text}"
+
+
+@pytest.mark.parametrize(
+    ("job", "named"),
+    [
+        ("stuck-panel", 'log panel "following"'),
+        ("stuck-update", "the launch update check"),
+    ],
+)
+def test_a_stuck_log_panel_or_update_check_reaches_the_forced_exit_by_name(
+    job: str, named: str, tmp_path: Path
+) -> None:
+    """The two threads `_stop_background_threads()` joins itself, stuck (T113, Codex pass).
+
+    A log panel following a source that never yields, and a launch update
+    check that never returns. Each must end at the forced exit with the code
+    `main()` would have returned (0), and the log must name it by what it IS -
+    the panel's job, the update check - not by a worker class every panel
+    shares. Measured on 3a6c9933, before the joins were collected: both
+    already exited 0, because `in_flight()` holds these threads too and its
+    `wait_all` caught them, but the log said `_StreamWorker` and
+    `_UpdateWorker`.
+    """
+    done, closed_at, ended, log_text = _close_the_real_window_with(job, tmp_path)
+
+    report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    assert "QThread: Destroyed" not in done.stderr, report
+    assert done.returncode == 0, report
+    assert "T113 main returned" not in done.stdout, report
+    closing = [line for line in log_text.splitlines() if "still running:" in line]
+    assert closing and named in closing[0], f"the log does not name {named}:\n{log_text}"
+    assert closing[0].count(named) == 1, f"named twice:\n{closing[0]}"
+    bound = (main.PANEL_JOIN_MS + main.UPDATE_JOIN_MS + main.EXIT_JOIN_MS) / 1000
+    assert ended - closed_at <= bound + EXIT_MARGIN_SECONDS, report
+
+
+def test_closing_with_every_job_finished_returns_from_main_as_before(tmp_path: Path) -> None:
+    """The normal close is untouched: `main()` returns, and nothing is called stuck."""
+    done, closed_at, ended, log_text = _close_the_real_window_with("finishes", tmp_path)
+
+    report = f"exit {done.returncode}\n{done.stdout}\n{done.stderr}"
+    assert done.returncode == 0, report
+    assert "T113 main returned 0" in done.stdout, report
+    assert "QThread: Destroyed" not in done.stderr, report
+    assert "still running" not in log_text, log_text
+    assert ended - closed_at < main.EXIT_JOIN_MS / 1000, report
+
+
+def test_the_forced_exit_ends_streams_and_flushes_the_log_before_it_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The order `os._exit` makes the app responsible for, since no atexit hook runs.
+
+    `runner._close_abandoned_streams` first, so a `docker logs -f` child is not
+    left behind with PPID 1 (and so its own log lines are written); then the
+    log handlers are flushed and closed; then the exit, with the code `main()`
+    was going to return. PySide's `__moduleShutdown` and `pygame.quit` are the
+    two atexit hooks deliberately NOT run - see `_leave_with_jobs_still_running`.
+    """
+    import logging
+
+    from yulon import runner
+
+    calls: list[str] = []
+    monkeypatch.setattr(runner, "_close_abandoned_streams", lambda: calls.append("streams"))
+    monkeypatch.setattr(logging, "shutdown", lambda: calls.append("log"))
+    monkeypatch.setattr(main, "_hard_exit", lambda code: calls.append(f"exit {code}"))
+
+    main._leave_with_jobs_still_running(3, ["the launch update check"])
+
+    assert calls == ["streams", "log", "exit 3"]
+
+
+_REAL_HARD_EXIT = main._hard_exit
+"""`main._hard_exit` as this module found it at import, before any fixture ran.
+
+Collection imports test modules before the first test's fixtures, so this is
+the real seam - the function that calls `os._exit` - and never conftest's stub.
+"""
+
+
+def test_no_test_can_reach_the_real_os_exit_in_process() -> None:
+    """`conftest.py` swaps the seam out for every test; a forced exit would end pytest.
+
+    Compared with the function captured at import, not with `os._exit`: the
+    seam is a function that CALLS `os._exit`, so `is not os._exit` held with
+    or without the guard. The identity check comes first so that, with the
+    fixture removed, this fails on the assert instead of calling the real one.
+    """
+    assert main._hard_exit is not _REAL_HARD_EXIT, "conftest's _no_forced_exit is not applied"
+    with pytest.raises(AssertionError, match="was reached in-process"):
+        main._hard_exit(0)
+
+
+def test_a_join_that_fails_counts_even_when_nothing_else_holds_the_thread(qapp: object) -> None:
+    """Every join `_stop_background_threads()` makes counts, not only `wait_all`'s (T113).
+
+    Today each panel's thread is also held by `in_flight()`, which is why the
+    child-process tests above would pass on `wait_all` alone. This is the case
+    that coincidence hides: a panel whose join failed and whose thread nobody
+    else holds must still be named, or `main()` returns into the Qt abort.
+    """
+    from types import SimpleNamespace
+
+    class _StuckPanel:
+        job_label = 'log panel "a thread nobody else holds"'
+        running = True
+
+        def stop(self) -> None:
+            pass
+
+        def wait(self, _timeout_ms: int) -> bool:
+            return False
+
+    window = SimpleNamespace(yulon_log_panels=[_StuckPanel()], property=lambda _name: None)
+
+    assert main._stop_background_threads(window) == [_StuckPanel.job_label]
+
+
+def test_a_panel_that_finished_during_the_last_join_is_not_called_stuck(qapp: object) -> None:
+    """A panel that missed its own join but is done by the end is no reason to force the exit."""
+    from types import SimpleNamespace
+
+    class _LatePanel:
+        job_label = 'log panel "late but done"'
+        running = False
+
+        def stop(self) -> None:
+            pass
+
+        def wait(self, _timeout_ms: int) -> bool:
+            return False
+
+    window = SimpleNamespace(yulon_log_panels=[_LatePanel()], property=lambda _name: None)
+
+    assert main._stop_background_threads(window) == []

@@ -166,6 +166,35 @@ ordinary one and the adopt press — go through that one function; a second call
 site would be a second spelling of a row the probe reads in one shape only. The
 rest of `exec_stdin` stays open and stays named.
 
+**T123's bot enrolment is a write this walk cannot see either, and it is sent
+while the world runs** (2026-09-25). After "Update the server to latest…" (or
+"Return to the tested pin") moves Tortoise's bots module, the route sends
+`bot pool adopt preview` and then `bot pool adopt confirm <challenge>`
+(`controller_wow_tortoise/botpool.py::adopt`), and the confirm makes the running
+mangosd enrol every `RNDBOT` account into TortoiseBots' own account registry,
+`tortoise_bots_pool_account` in the characters database. It goes over the
+install's SOAP channel first and the attach console second. The console half is
+the `controller_wow_wotlk/console.py::send_command::os.write` row below. The SOAP
+half is an `http.client` request out of `soap.py`, which names no file and no
+database, so the walk has no callee to find and there is no row to add. This
+paragraph is the record.
+
+What is true of that write: the server makes it, through its own command, under
+its own locks. The app writes no SQL beside it. The confirm is sent only with the
+challenge the preview printed a moment before, and the module refuses it if the
+set of bot accounts changed in between; that refusal wrote nothing, so only then
+is the pair asked again. A confirm whose answer never came is never sent a second
+time, on any channel. Adoption brings nothing online by itself, so an adoption
+that enrolled anything is followed by a restart of the world. **World may be
+running: yes, and necessarily**, for the reason the console row gives: a command
+needs a running server to answer it. **Owner question:** this is the same class
+of write as T26's account link above, a bots module's own account table that the
+running server writes through its own command. Here the command is the server's
+and not SQL beside it, which is the route owner answer 7 prefers, but the table
+is in `characters`, which answer 7 names. The question left running there covers
+this one too: does answer 7 extend to a bots table the server writes live
+through its own command? The owner still has to answer it.
+
 Generated rows are checked against the tree by the test, not by hand. The
 descriptions are written by hand.
 
@@ -182,6 +211,7 @@ descriptions are written by hand.
 | `apply.py::_rm::unlink` | a file a manifest's `rm` step names | yes |
 | `apply.py::_run_sql::run_file` | a module manifest's `.sql` file, into the database its step names | **guardable since 8.7a, and unguarded for every caller shipped today** — `_refuse_direct_sql_into_a_running_world()` refuses the action when a `world_running` seam says the world is up (or cannot say) and any of the action's direct steps names `characters`, `world` or `playerbots`; no caller passes that seam yet, so in the app as it ships this is still **yes**. `auth` and `acore_ale` are outside the guard. A crash still leaves a multi-file step half applied — the refusal prevents starting, not tearing |
 | `apply.py::_run_sql::run_statement` | a module manifest's inline SQL, into the database its step names | **as the row above** — the refusal is a pre-pass over the action's steps, so an inline statement that is FIRST never reaches the runner either; this is the site 8.7a's clause is written about, and `all-stackables` sends three of these to `world` on one install |
+| `apply.py::_run_transaction::run_statement` | a `then` step's files (`path` first, then each `then` file), concatenated as ONE text inside `START TRANSACTION; ... COMMIT;`, into the database its step names — T100, `hearthstone-cd`'s reset + chosen cooldown | **as the two rows above** — behind the same running-world refusal; unlike a multi-file `path` step it cannot be left half applied by a failing file: `mysql` stops at the first error and the closed session rolls the open transaction back (InnoDB `item_template`, measured on m910q 2026-09-24), and every file of every step of the press is read and put through an allowlist (row changes, reads and user-variable `SET` only, per statement) by `_plan_sql()` before anything is sent |
 | `apply.py::_set_conf_key::write_text` | one key in a server conf file, byte-preserving elsewhere | yes — the file changes now, the value arrives at the next world start |
 | `apply.py::_take_back::unlink` | T67. One `Patch-*.MPQ` DELETED out of the user's game client `Data/` on remove — and only a file whose sha256 still equals the one the install recorded in the clone's claim, so a file the user changed, or one no record covers, is left and named in `left_behind` | yes for the server — but the GAME CLIENT must be closed: an open WoW holds its archives open on Windows, the `unlink` raises, and the failure is reported as a left-behind file with the OS's own words rather than swallowed |
 | `apply.py::install::touch` | the marker that records a module as installed | yes |
@@ -303,6 +333,11 @@ descriptions are written by hand.
 | `state.py::load_state::replace` | an unreadable `state.json` moved aside to a backup | n/a |
 | `state.py::save_state::replace` | `state.json` renamed into place | n/a |
 | `state.py::save_state::write_text` | `state.json`, to a temp name | n/a — the app's own record |
+| `support/bundle.py::_discard::unlink` | **new (T93)** the support zip's `.partial` after a failed write, through a helper that cannot itself raise | n/a — a file the user chose, outside every server folder |
+| `support/bundle.py::_write_atomically::os.replace` | **new (T93)** the finished support zip renamed onto the path the user picked in Save As | n/a — as above |
+| `support/bundle.py::_write_atomically::write_bytes` | **new (T93)** the support zip (redacted app log, run logs, snapshots, container logs, confs, system info, manifest), to `<chosen>.zip.partial`. Built in memory first, because `zipfile.ZipFile(path, "w")` is invisible to this walk | n/a — as above |
+| `support/runlog.py::_default_opener::open(x)` | **new (T93)** one install or rebuild run's output lines, raw, as `<config>/logs/runs/<kind>-<UTC stamp>.log`, created exclusively (`x`) and flushed per line. Never a server file | n/a — the app's own record of a job |
+| `support/runlog.py::_prune::unlink` | **new (T93)** run logs of the same kind beyond the newest ten, never the one just opened | n/a — as above |
 | `steam.py::_backup::shutil.copy2` | **new (8.8)** a copy of `shortcuts.vdf` — and of Steam's own `config/config.vdf` — beside the original as `<name>.yulon-bak-<stamp>`, before either is touched. Two files through one function is one row. Both belong to the Steam account signed in on the machine and neither was written by this app; the `shortcuts.vdf` one may hold shortcuts a person added by hand years ago, and Steam offers no undo | n/a — the Steam profile, not the server. The process this write refuses under is **Steam**, asked of `pgrep -x steam` before anything is copied |
 | `steam.py::_write_artwork::write_bytes` | **new (8.8)** six PNGs into `userdata/<id>/config/grid/`: three of Steam's four slots (`<appid>.png`, `<appid>p.png`, `<appid>_hero.png`) for each of the two entries. `_logo` is deliberately not written — Steam draws it instead of the entry's NAME, measured on `yulon-arch` — and the two entries get differently coloured marks, because the library grid draws no name at all. The bytes are drawn by `icon_png()` rather than read from a file, since this app ships no images anywhere; the file names are the appids, which is why an upsert must not recompute one it is replacing. Two calls in one function is one row | n/a — as above |
 | `steam.py::_write_compat::write_text` | **new (8.8)** Steam's global `config/config.vdf`, with one `CompatToolMapping/<appid>` block inserted or its `name` changed and **every other byte preserved** (`compat_mapping()` returns the block it inserted so the test can take it back out and compare). 17,977 bytes of Steam's own state on the box this was read from — websocket tables, shader-cache buckets, the depot list — none of which this app understands well enough to reformat. Written to a `.yulon-tmp` sibling, and with `errors="surrogateescape"` and `newline=""` because that is how it was READ: one byte that is not UTF-8 raised on a strict write, and universal newlines would have rewritten a CRLF file LF-only, which is every line of it and would make this row's own promise false | n/a — as above |
@@ -320,3 +355,4 @@ descriptions are written by hand.
 | `update_state.py::_sweep_stale_temporaries::unlink` | **new (T90, second review)** any `update.json.*.tmp` beside `update.json` that is more than a day old, removed when the state is loaded. That is the leftover of a save killed between the write and the rename, which nothing else would ever come back for. A day, because a younger one may belong to a write still in flight in ANOTHER copy of Yu'lon, which this process's lock knows nothing about; it matches only this app's own temp-name shape, in this app's own directory, and a failure to read the directory is logged and ignored | n/a — as above |
 | `update_state.py::save_update_state::replace` | **new (T90)** that temp file renamed onto `update.json`. `state.py:126-131` is the same pattern for the same reason: a truncate-then-write interrupted leaves a half file, and a half `update.json` would be read as an empty state and re-fetched — harmless here, but the rename costs nothing and keeps one pattern for every file this app owns | n/a — as above |
 | `ui/controller_view.py::save_tuning_file::open(w)` | **new (T43)** the raw editor's whole text onto one module conf, after `tuning.backup()` and after one confirm if `tuning.lint()` says it stopped looking like a `.conf`. A file that would not DECODE never reaches here: it opens empty and read-only, with the Save button dead. The file's line ending is remembered at load and re-applied here, because `QPlainTextEdit` hands back `"\n"` whatever it was given. The server's own three conf files (`worldserver.conf`, `authserver.conf`, `playerbots.conf`) are listed read-only and refused here by name — core configuration is T43's own follow-up | **no** — as `tuning.py::write` above, and for the same reason |
+| `ui/widgets/log_panel.py::run::open(?)` | **new (T93)** not a file open of its own: `runlog.RunLog.open(runlog.runs_dir(), record_as)`, a classmethod the walk reads by its name. It is the call that starts a run log when an install or rebuild asked for one, and every byte it and the panel's per-line `write` put down goes through `support/runlog.py::_default_opener::open(x)` above | n/a — as above: the app's own record of a job |
