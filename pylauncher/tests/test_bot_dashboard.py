@@ -870,9 +870,9 @@ def _on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, _Docker,
     return server_dir, fake, switch
 
 
-def _assert_still_on(server_dir: Path, fake: _Docker) -> None:
+def _assert_still_on(server_dir: Path, fake: _Docker, *, calls: list[str]) -> None:
     assert files.state(server_dir) == files.State(on=True, lan=False), "the block is the record"
-    assert fake.calls == [], "no container or image was touched"
+    assert fake.calls == calls, "the container goes first, idempotently; the image never yet"
     conf = _conf(server_dir)
     assert conf.with_name(conf.name + files.CONF_BACKUP_SUFFIX).is_file(), "the retry needs it"
 
@@ -893,7 +893,7 @@ def test_off_with_an_unreadable_conf_leaves_the_switch_on_and_can_be_retried(
     monkeypatch.setattr(files, "read_exact", unreadable)
     with pytest.raises(botdash.SwitchError, match="left ON"):
         list(switch.switch_off())
-    _assert_still_on(server_dir, fake)
+    _assert_still_on(server_dir, fake, calls=["rm tortoise-observability"])
 
     monkeypatch.setattr(files, "read_exact", real)
     list(switch.switch_off())
@@ -901,9 +901,11 @@ def test_off_with_an_unreadable_conf_leaves_the_switch_on_and_can_be_retried(
     assert conf.read_text(encoding="utf-8") == CONF_TEXT
 
 
-def test_off_with_an_unwritable_conf_leaves_the_switch_on_and_can_be_retried(
+def test_off_whose_conf_write_fails_after_the_container_is_gone_reads_on_and_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Codex final pass: the container goes FIRST and is idempotent, so a conf that cannot be
+    written leaves the block (On) and needs no compensating write; a second press finishes."""
     server_dir, fake, switch = _on(tmp_path, monkeypatch)
     real = files.write_keeping_mode
     conf = _conf(server_dir)
@@ -917,29 +919,44 @@ def test_off_with_an_unwritable_conf_leaves_the_switch_on_and_can_be_retried(
     monkeypatch.setattr(files, "write_keeping_mode", read_only)
     with pytest.raises(botdash.SwitchError, match="left ON"):
         list(switch.switch_off())
-    _assert_still_on(server_dir, fake)
-    assert conf.read_text(encoding="utf-8") == on_text, "the world's keys still say send"
+    _assert_still_on(server_dir, fake, calls=["rm tortoise-observability"])
+    assert conf.read_text(encoding="utf-8") == on_text, "nothing half-written"
 
     monkeypatch.setattr(files, "write_keeping_mode", real)
+    fake.calls.clear()
     list(switch.switch_off())
+    image = files.image_ref(TORTOISE, server_dir)
+    assert fake.calls == ["rm tortoise-observability", f"rmi {image}"], "rm again: idempotent"
     assert files.state(server_dir) == files.State()
     assert conf.read_text(encoding="utf-8") == CONF_TEXT
 
 
-def test_off_whose_container_will_not_go_puts_the_keys_on_again(
+def test_off_whose_container_will_not_go_changes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    server_dir, fake, switch = _on(tmp_path, monkeypatch)
-    on_text = _conf(server_dir).read_text(encoding="utf-8")
+    """Codex final pass: no write happens before the container is gone, so a refusal there
+    leaves both files exactly as they were -- no compensating write that could itself fail."""
+    server_dir, _fake, switch = _on(tmp_path, monkeypatch)
+    conf = _conf(server_dir)
+    before = (_base(server_dir), conf.read_text(encoding="utf-8"))
+    written: list[Path] = []
+    real = files.write_keeping_mode
+
+    def spy(path: Path, text: str) -> None:
+        written.append(path)
+        real(path, text)
 
     def refuse(*_a: object, **_kw: object) -> None:
         raise docker.DockerCommandError("daemon busy")
 
+    monkeypatch.setattr(files, "write_keeping_mode", spy)
     monkeypatch.setattr(docker, "compose_remove_service", refuse)
     with pytest.raises(botdash.SwitchError, match="left ON"):
         list(switch.switch_off())
+    assert written == [], "nothing was written before the container was gone"
+    assert (_base(server_dir), conf.read_text(encoding="utf-8")) == before
     assert files.state(server_dir).on
-    assert _conf(server_dir).read_text(encoding="utf-8") == on_text
+    assert conf.with_name(conf.name + files.CONF_BACKUP_SUFFIX).is_file()
 
 
 def test_the_start_hook_bounds_the_dashboard_start(

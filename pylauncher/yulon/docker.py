@@ -3969,7 +3969,13 @@ def compose_up_service(
 def compose_remove_service(
     server_dir: Path, service: str, *, wsl_distro: str | None = None
 ) -> None:
-    """Stop and remove ONE service's container (`compose rm --stop --force`). No volumes (T127)."""
+    """Stop and remove ONE service's container (`compose rm --stop --force`). No volumes (T127).
+
+    Meant to be idempotent: compose v2 treats a service that has no container as
+    nothing to remove and exits 0, which the bot dashboard's switch-off relies on
+    when a second press repeats this step. Expected from compose, not measured in
+    this repository; a non-zero exit still raises, and then the switch stays On.
+    """
     _run(["compose", "rm", "--stop", "--force", service], cwd=server_dir, wsl_distro=wsl_distro)
 
 

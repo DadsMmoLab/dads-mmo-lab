@@ -181,19 +181,21 @@ class Dashboard:
     # -- off --------------------------------------------------------------
 
     def switch_off(self, cancel: threading.Event | None = None) -> Iterator[str]:
-        """Conf first, then the container, then the block. The restart is the tab's question.
+        """Container, then conf, then the block. The restart is the tab's question.
 
-        **The block is the only record that the switch is on, so it goes LAST.**
-        The first version removed the container and the block and then put the
-        conf back; a conf that could not be written then left a tab reading Off
-        over a world still sending telemetry, and no press that would retry
-        (Codex review, 2026-09-25). Now each step either finishes or leaves the
-        switch On with the block in place, so pressing Off again picks up where
-        this one stopped:
+        **The block is the only record that the switch is on, so it goes LAST, and
+        nothing is ever written to undo a step.** Two orders came before this one:
+        the first removed the block before the conf (a failed conf write read Off
+        with telemetry still on), and the second put the conf back first and, when
+        the container then would not go, wrote the keys on again -- a compensating
+        write that swallowed its own failure and could leave the file saying Off
+        under a switch saying On (Codex, 2026-09-25). Now:
 
-        1. the three keys go back (a failure changes nothing else);
-        2. the container is removed (a failure writes the keys on again, so the
-           files still agree with a running dashboard);
+        1. the container is removed. `compose rm --stop --force` on a service with
+           no container does nothing and succeeds, so a second press repeats this
+           harmlessly. A failure here has changed nothing;
+        2. the three keys go back. A failure leaves the block, so the switch reads
+           On and a second press retries from step 1;
         3. the block comes out of `docker-compose.yml`;
         4. only then the conf's backup and the image go.
         """
@@ -203,23 +205,23 @@ class Dashboard:
         text = self._read_ours(base)
         service = files.service(self.entry)
         on = files.block_in(text) is not None
-        try:
-            yield from self._put_the_conf_back(conf)
-        except OSError as exc:
-            raise SwitchError(
-                f"{conf.name} could not be put back ({exc}), so the dashboard was left ON and "
-                "nothing else was changed. Fix that, then press the switch again."
-            ) from exc
         if on:
             try:
                 docker.compose_remove_service(self.server_dir, service, wsl_distro=self.wsl_distro)
             except docker.DockerCommandError as exc:
-                self._keys_on_again(conf)
                 raise SwitchError(
-                    f"The dashboard's container could not be removed ({exc}), so it was left ON. "
-                    "Press the switch again to retry."
+                    f"The dashboard's container could not be removed ({exc}), so nothing was "
+                    "changed and the dashboard was left ON. Press the switch again to retry."
                 ) from exc
             yield "Stopped and removed the dashboard."
+        try:
+            yield from self._put_the_conf_back(conf)
+        except OSError as exc:
+            raise SwitchError(
+                f"{conf.name} could not be put back ({exc}), so the dashboard was left ON (its "
+                "container is already stopped). Fix that, then press the switch again."
+            ) from exc
+        if on:
             try:
                 files.write_keeping_mode(base, files.remove(text))
             except OSError as exc:
@@ -236,15 +238,6 @@ class Dashboard:
         if said:
             yield f"The dashboard's image was left on this PC ({said})."
         yield "The bot dashboard is off."
-
-    def _keys_on_again(self, conf: Path) -> None:
-        try:
-            now = files.read_exact(conf)
-            after = files.patch_text(now, files.conf_keys(self.entry))
-            if after != now:
-                files.write_keeping_mode(conf, after)
-        except OSError as exc:  # the Start hook re-asserts them; this is the best effort
-            logger.warning(f"could not write the dashboard's keys back into {conf}: {exc}")
 
     def _put_the_conf_back(self, conf: Path) -> Iterator[str]:
         """Each key back to what the backup says; one the backup lacked is removed.
