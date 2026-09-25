@@ -1916,6 +1916,8 @@ def _stop_background_threads(window: object) -> list[str]:
     # The gamepad poller and keyboard filter. The gamepad's 120 Hz QThread must
     # be stopped and joined BEFORE the window is torn down — a QThread destroyed
     # while running aborts the process, exactly like every other worker here.
+    # `stop()` only tells it to; the join is `wait_all()` below, which holds the
+    # pair since T111 (its own 500 ms wait lost to a slow SDL release).
     # Read as attributes (not `setProperty`) for the reason `_Window` documents.
     gamepad = getattr(window, "yulon_gamepad", None)
     if gamepad is not None:
