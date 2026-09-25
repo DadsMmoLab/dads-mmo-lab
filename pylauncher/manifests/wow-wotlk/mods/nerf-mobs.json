@@ -27,24 +27,28 @@
       "key": "hp",
       "question": "HP multiplier",
       "kind": "float",
+      "min_exclusive": 0,
       "default": "0.5"
     },
     {
       "key": "dmg",
       "question": "Damage multiplier",
       "kind": "float",
+      "min_exclusive": 0,
       "default": "0.75"
     },
     {
       "key": "arm",
       "question": "Armor multiplier",
       "kind": "float",
+      "min_exclusive": 0,
       "default": "0.75"
     },
     {
       "key": "spd",
       "question": "Attack-time multiplier (>1 = slower)",
       "kind": "float",
+      "min_exclusive": 0,
       "default": "1.2"
     }
   ],

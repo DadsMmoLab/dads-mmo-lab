@@ -472,6 +472,19 @@
           "title": "Kind",
           "type": "string"
         },
+        "min_exclusive": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "int/float only: the answer must be MORE than this (T122). The mob multipliers declare 0, because `X=X*{m}` at 0 cannot be divided back by their Remove.",
+          "title": "Min Exclusive"
+        },
         "question": {
           "minLength": 1,
           "title": "Question",

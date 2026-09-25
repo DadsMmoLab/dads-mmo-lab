@@ -19,6 +19,7 @@ language-neutral copy kept at `manifests/schema/manifest.schema.json`.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from typing import Annotated, Literal
@@ -416,6 +417,13 @@ class Prompt(_Strict):
         default=None,
         description="A row that must be found before this answer is used; see `ExistsCheck`.",
     )
+    min_exclusive: float | None = Field(
+        default=None,
+        description=(
+            "int/float only: the answer must be MORE than this (T122). The mob multipliers "
+            "declare 0, because `X=X*{m}` at 0 cannot be divided back by their Remove."
+        ),
+    )
 
     @model_validator(mode="after")
     def _choice_needs_choices(self) -> Prompt:
@@ -424,6 +432,32 @@ class Prompt(_Strict):
         if self.kind != "choice" and self.choices:
             raise ValueError("`choices` only valid with kind='choice'")
         return self
+
+    @model_validator(mode="after")
+    def _bound_needs_a_number(self) -> Prompt:
+        if self.min_exclusive is None:
+            return self
+        if self.kind not in ("int", "float"):
+            raise ValueError("`min_exclusive` only valid with kind='int' or 'float'")
+        if self.default is not None and not self.above_bound(self.default):
+            raise ValueError(
+                f"default {self.default!r} is not more than min_exclusive {self.min_exclusive:g}"
+            )
+        return self
+
+    def above_bound(self, text: str) -> bool:
+        """Whether `text` is a finite number above `min_exclusive` (True when there is none).
+
+        Finite on purpose: `float()` reads `inf` and `nan`, `inf > 0` is true, and
+        a Remove dividing by `inf` gives NaN, not the value it started from.
+        """
+        if self.min_exclusive is None:
+            return True
+        try:
+            number = float(text.strip())
+        except ValueError:
+            return False
+        return math.isfinite(number) and number > self.min_exclusive
 
 
 class Origin(_Strict):

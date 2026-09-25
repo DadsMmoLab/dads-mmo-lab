@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1688,18 +1689,35 @@ def check_answer(prompt: Prompt, value: str) -> str:
     if not text:
         return "this cannot be left empty"
     if prompt.kind == "int":
-        return "" if _INT.fullmatch(text) else "this must be a whole number"
+        return (
+            _bound_problem(prompt, text) if _INT.fullmatch(text) else "this must be a whole number"
+        )
     if prompt.kind == "float":
         try:
-            float(text)
+            number = float(text)
         except ValueError:
             return "this must be a number"
-        return ""
+        if prompt.min_exclusive is not None and not math.isfinite(number):
+            return "this must be a number"
+        return _bound_problem(prompt, text)
     if prompt.kind == "bool":
         return "" if text.lower() in _BOOL_WORDS else "this must be yes or no"
     if prompt.kind == "choice":
         return "" if text in prompt.choices else "choose one of: " + ", ".join(prompt.choices)
     return ""
+
+
+def _bound_problem(prompt: Prompt, text: str) -> str:
+    """The sentence for a number at or under the question's `min_exclusive`, or `""` (T122).
+
+    The mob multipliers declare 0: `HealthModifier*0` destroys the value and
+    their Remove cannot divide it back, and a negative one flips the sign.
+    Checked here, so the dialog's OK and the applier's pre-flight refuse it
+    alike, before anything is written or sent.
+    """
+    if prompt.above_bound(text):
+        return ""
+    return f"this must be more than {prompt.min_exclusive:g}"
 
 
 # ------------------------------------------------------------------- engine
