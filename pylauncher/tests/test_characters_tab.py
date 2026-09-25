@@ -386,6 +386,52 @@ def test_the_list_refresh_after_an_action_is_bounded_rather_than_a_single_guess(
     assert view.character_list.count() == 2, "a late older refresh emptied the list"
 
 
+def test_the_character_list_is_written_on_the_gui_thread_by_a_real_threaded_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T97: "crashes if you try to add gold to owned bots" (Rixter, Tortoise on Windows).
+
+    The read ran on a worker thread, as it should; its ANSWER was handed to a
+    lambda, and `job.py` says what that means -- a plain callable is delivered
+    on the worker thread. So `clear()` and one `addItem()` per character ran
+    off the GUI thread while the GUI thread painted the same list. Every
+    successful action schedules up to four such re-reads, and a bot server has
+    hundreds of rows. Measured on m910q, 2026-09-23: pressing Send gold on the
+    real tab segfaulted the app in 4 of 5 runs, with the worker's frame in
+    `self.character_list.clear()`, while the worldserver stayed up.
+
+    Every other test here runs jobs inline, where the question cannot arise, so
+    this one uses the real runner and records the thread each write lands on.
+    """
+    play = _Play(characters=_people())
+    runner: list[ThreadedJobRunner] = []
+
+    def real_runner(parent: object) -> ThreadedJobRunner:
+        runner.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
+        return runner[0]
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
+    view = _view(tmp_path, play=play)
+    writes: list[tuple[str, bool]] = []
+    listing = view.character_list
+    for name in ("clear", "addItem"):
+        real = getattr(listing, name)
+
+        def recorded(*args: object, _name: str = name, _real: object = real) -> object:
+            writes.append((_name, threading.current_thread() is threading.main_thread()))
+            return _real(*args)  # type: ignore[operator]
+
+        setattr(listing, name, recorded)
+
+    view.refresh_characters()
+    pump_until(lambda: listing.count() == len(_people()), "the refreshed list")
+    assert runner[0].wait(HANG_BOUND_MS) is True
+
+    assert writes, "the refresh never wrote the list"
+    off_thread = [name for name, on_gui in writes if not on_gui]
+    assert off_thread == [], f"the character list was written from a worker thread: {off_thread}"
+
+
 def test_revive_is_offered_offline_where_the_tree_measured_that_it_works(
     tmp_path: Path,
 ) -> None:
