@@ -197,11 +197,19 @@ def test_an_unreadable_answers_file_refuses_a_mob_mod_before_any_sql(
 ) -> None:
     _corrupt(tmp_path, how)
     db = _Recorder()
+    started: list[str] = []
+    applier = Applier(
+        tmp_path,
+        sql=db,
+        world_running=lambda: False,
+        start_database=lambda: started.append("db") is None,
+    )
     with pytest.raises(ApplyError) as refused:
-        Applier(tmp_path, sql=db).install(_mob(item_id), _all("2"))
+        applier.install(_mob(item_id), _all("2"))
     message = str(refused.value)
     assert module_answers.ANSWERS_FILE in message and "Nothing was changed" in message, message
-    assert db.texts == []
+    assert "cannot tell whether this one or one of its alternatives" in message, message
+    assert db.texts == [] and started == [], "refused before the database start and any SQL"
 
 
 # ------------------------------------------------------------ the exclusive rule

@@ -2722,13 +2722,10 @@ class Applier:
         conflict that reaches across families -- an ale script against the
         module it shadows -- is exactly the one a same-family check would miss.
         """
-        # T121 fix wave (Codex high): a mod whose installed state IS the record
-        # cannot be checked against its alternatives when the record cannot be
-        # read. Refused here, before the database is started or any SQL is sent,
-        # rather than at the pending-mark write after both.
+        # An answers file that cannot be read is refused before this, for a mod
+        # whose state IS that file: `install()` asks `_undo_values()` first, and
+        # `reapply_refusal()` says so (T121 fix wave, Codex high).
         read = module_answers.recorded_keys(self.server_dir)
-        if read.unreadable and reapplies_on_top(manifest):
-            return f"{manifest.id}: {unreadable_record(read.unreadable)} Nothing was changed."
         if not manifest.conflicts_with:
             return None
         # T121: the four mob multipliers leave no folder, so the record is what
@@ -4033,9 +4030,11 @@ class Applier:
         """
         if not reapplies_on_top(manifest):
             return None
-        # T121 fix wave: an answers file that cannot be read says nothing about
-        # this mod or its alternatives, so nothing may run over it. The same
-        # sentence `_conflict_refusal()` raises, said before any dialog.
+        # T121 fix wave (Codex high): an answers file that cannot be read says
+        # nothing about this mod or its alternatives, so nothing may run over
+        # it. Asked by the tab before any dialog, and by `install()` (through
+        # `_undo_values()`) before the conflict guard, the database start or
+        # any SQL -- not at the pending-mark write after all three.
         unreadable = module_answers.recorded_keys(self.server_dir).unreadable
         if unreadable:
             return f"{manifest.id}: {unreadable_record(unreadable)} Nothing was changed."
