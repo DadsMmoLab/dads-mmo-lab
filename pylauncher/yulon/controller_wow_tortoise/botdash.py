@@ -56,6 +56,12 @@ DOCKERFILE_DIR = "tools/observability"
 
 Press = Callable[[threading.Event | None], Iterator[str]]
 
+START_HOOK_TIMEOUT_S = 120.0
+"""How long the server's Start waits for the dashboard's `compose up` before going on without it.
+
+The image is already built, so a healthy start takes a second or two; the bound
+is there so a daemon that hangs can never hold the server's own Start."""
+
 
 class SwitchError(RuntimeError):
     """A refusal or a failure, in the words the log panel shows."""
@@ -175,30 +181,70 @@ class Dashboard:
     # -- off --------------------------------------------------------------
 
     def switch_off(self, cancel: threading.Event | None = None) -> Iterator[str]:
-        """Remove the container, the block and the conf keys. The restart is the tab's question."""
+        """Conf first, then the container, then the block. The restart is the tab's question.
+
+        **The block is the only record that the switch is on, so it goes LAST.**
+        The first version removed the container and the block and then put the
+        conf back; a conf that could not be written then left a tab reading Off
+        over a world still sending telemetry, and no press that would retry
+        (Codex review, 2026-09-25). Now each step either finishes or leaves the
+        switch On with the block in place, so pressing Off again picks up where
+        this one stopped:
+
+        1. the three keys go back (a failure changes nothing else);
+        2. the container is removed (a failure writes the keys on again, so the
+           files still agree with a running dashboard);
+        3. the block comes out of `docker-compose.yml`;
+        4. only then the conf's backup and the image go.
+        """
         del cancel  # each step is short and every one of them should finish
         conf = self._conf_path()
         base = files.base_path(self.server_dir)
         text = self._read_ours(base)
         service = files.service(self.entry)
-        if files.block_in(text) is not None:
+        on = files.block_in(text) is not None
+        try:
+            yield from self._put_the_conf_back(conf)
+        except OSError as exc:
+            raise SwitchError(
+                f"{conf.name} could not be put back ({exc}), so the dashboard was left ON and "
+                "nothing else was changed. Fix that, then press the switch again."
+            ) from exc
+        if on:
             try:
                 docker.compose_remove_service(self.server_dir, service, wsl_distro=self.wsl_distro)
             except docker.DockerCommandError as exc:
+                self._keys_on_again(conf)
                 raise SwitchError(
-                    f"The dashboard's container could not be removed ({exc}), so nothing else "
-                    "was changed. It is still on."
+                    f"The dashboard's container could not be removed ({exc}), so it was left ON. "
+                    "Press the switch again to retry."
                 ) from exc
             yield "Stopped and removed the dashboard."
-            files.write_keeping_mode(base, files.remove(text))
+            try:
+                files.write_keeping_mode(base, files.remove(text))
+            except OSError as exc:
+                raise SwitchError(
+                    f"{base.name} could not be written ({exc}), so the dashboard still reads ON "
+                    "there. Its container is gone and the bots module no longer sends to it. "
+                    "Press the switch again to finish."
+                ) from exc
             yield f"Took the dashboard out of {base.name}."
-        yield from self._put_the_conf_back(conf)
+        conf.with_name(conf.name + files.CONF_BACKUP_SUFFIX).unlink(missing_ok=True)
         said = docker.remove_image(
             files.image_ref(self.entry, self.server_dir), wsl_distro=self.wsl_distro
         )
         if said:
             yield f"The dashboard's image was left on this PC ({said})."
         yield "The bot dashboard is off."
+
+    def _keys_on_again(self, conf: Path) -> None:
+        try:
+            now = files.read_exact(conf)
+            after = files.patch_text(now, files.conf_keys(self.entry))
+            if after != now:
+                files.write_keeping_mode(conf, after)
+        except OSError as exc:  # the Start hook re-asserts them; this is the best effort
+            logger.warning(f"could not write the dashboard's keys back into {conf}: {exc}")
 
     def _put_the_conf_back(self, conf: Path) -> Iterator[str]:
         """Each key back to what the backup says; one the backup lacked is removed.
@@ -207,6 +253,8 @@ class Dashboard:
         reason: the backup can be old, and restoring a whole user-editable file
         to undo three keys would throw away every other edit made since. With no
         backup the switch is still turned off, and the host and port are left.
+        The backup is NOT removed here: until the block is gone it is what a
+        second press restores from. Raises `OSError` having written nothing.
         """
         backup = conf.with_name(conf.name + files.CONF_BACKUP_SUFFIX)
         now = files.read_exact(conf)
@@ -222,7 +270,6 @@ class Dashboard:
             after = files.patch_text(now, {files.SWITCH_KEY: "0"})
         if after != now:
             files.write_keeping_mode(conf, after)
-        backup.unlink(missing_ok=True)
         yield f"Put the bots module's telemetry settings back ({conf.name})."
 
     # -- the restart ------------------------------------------------------
@@ -363,7 +410,9 @@ def start_if_on(entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
             if after != now:
                 files.write_keeping_mode(conf, after)
                 logger.info(f"put the bot dashboard's keys back into {conf}")
-        docker.compose_up_service(server_dir, files.service(entry), wsl_distro=wsl_distro)
+        docker.compose_up_service(
+            server_dir, files.service(entry), timeout=START_HOOK_TIMEOUT_S, wsl_distro=wsl_distro
+        )
     except Exception as exc:  # noqa: BLE001 - the dashboard must never stop a server starting
         logger.warning(f"the bot dashboard could not be started with the server: {exc}")
 

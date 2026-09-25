@@ -2632,13 +2632,17 @@ DASHBOARD_ABOUT = (
 DASHBOARD_LAN_LABEL = "Allow other devices on my network"
 DASHBOARD_LAN_WARNING = (
     "Leave this off unless you want to open the dashboard from another device. With it on, "
-    "anyone on your network can reach the dashboard's sign-in page. Change it while the "
-    "dashboard is off."
+    "anyone on your network can reach the dashboard's sign-in page, and can read its "
+    "/metrics page (bot counts, bot problems) without signing in at all. Signing in sends "
+    "your GM account's password over plain, unencrypted HTTP. Change it while the dashboard "
+    "is off."
 )
 DASHBOARD_OFF_QUESTION = (
-    "The dashboard is stopped and removed, it is taken out of this server's "
-    "docker-compose.yml, and the bots module's telemetry settings in tortoise_bots.conf are "
-    "put back as they were. Nothing else changes.\n\nSwitch it off?"
+    "The dashboard is stopped and removed, and it is taken out of this server's "
+    "docker-compose.yml. In tortoise_bots.conf the three telemetry settings "
+    "(AiPlayerbot.Observability, ObservabilityHost and ObservabilityPort) are set back to the "
+    "values they had before you switched it on; if you changed those three by hand since, "
+    "your changes to them are replaced. Nothing else in the file changes.\n\nSwitch it off?"
 )
 DASHBOARD_RESTART_QUESTION = (
     "The bot dashboard is off. The world keeps trying to send to it until it restarts, which "
@@ -2649,7 +2653,10 @@ DASHBOARD_RESTART_QUESTION = (
 def dashboard_on_question(*, lan: bool) -> str:
     """The switch-on question: every change it makes, the restart, and who can reach it."""
     where = (
-        f"Every device on your network will be able to reach it on port {bot_dashboard.HTTP_PORT}."
+        f"Every device on your network will be able to reach it on port "
+        f"{bot_dashboard.HTTP_PORT}: its sign-in page, and its /metrics page (bot counts and "
+        "bot problems), which needs no sign-in. Signing in from another device sends your GM "
+        "account's password over plain, unencrypted HTTP."
         if lan
         else f"Only this PC will be able to reach it, at {bot_dashboard.URL}."
     )

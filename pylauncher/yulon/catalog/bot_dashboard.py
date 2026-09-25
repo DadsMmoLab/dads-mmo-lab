@@ -162,34 +162,29 @@ def base_path(server_dir: Path) -> Path:
 # -- the compose block ----------------------------------------------------------
 
 
-_HOST_BIND = re.compile(r"""^\s*-\s*["']?\./[^"'\s]*["']?\s*$""")
-
-
 def bind_label(text: str) -> str:
     """The SELinux label the file's own host binds carry: `":z"`, `""`, or a refusal.
 
     Read off the installed file and never probed (lane rule, 2026-09-25): three
     lanes re-asked `getenforce` when they rewrote a compose file, and a
     permissive moment or a failing probe stripped `:z` from an enforcing
-    install. All binds labelled means label ours; none means none; a mix is a
-    file somebody changed by hand, and this module will not guess which half is
-    right.
+    install. The rule is `composegen.bind_label_of()`'s -- one reader, shared
+    with T106's Repair, so the two cannot disagree about a file this module
+    wrote (they did: T106 counted `:ro,z` as unlabelled). All binds labelled
+    means label ours; none means none; a mix is a file somebody changed by
+    hand, and this module will not guess which half is right.
     """
-    binds = [
-        line.strip().lstrip("-").strip().strip("\"'")
-        for line in remove(text).splitlines()
-        if _HOST_BIND.match(line)
-    ]
-    labelled = [b for b in binds if b.endswith(":z") or b.endswith(",z")]
-    if not binds or not labelled:
-        return ""
-    if len(labelled) == len(binds):
-        return ":z"
-    raise DashboardError(
-        "Some of the folders docker-compose.yml shares with the server carry an SELinux label "
-        "and some do not, so Yu'lon cannot tell which way this one should go. Nothing was "
-        "changed."
-    )
+    from yulon.catalog import composegen  # noqa: PLC0415 - composegen imports this module
+
+    try:
+        label = composegen.bind_label_of(remove(text))
+    except composegen.MixedBindLabels:
+        raise DashboardError(
+            "Some of the folders docker-compose.yml shares with the server carry an SELinux "
+            "label and some do not, so Yu'lon cannot tell which way this one should go. "
+            "Nothing was changed."
+        ) from None
+    return label or ""
 
 
 def block(entry: CatalogEntry, server_dir: Path, *, lan: bool, label: str, dbc: bool) -> str:

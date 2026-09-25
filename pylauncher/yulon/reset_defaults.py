@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Literal
 
 from yulon import channel_setup, dbsecret, docker, platform, resources, tuning
-from yulon.catalog import composegen
+from yulon.catalog import bot_dashboard, composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import conf
 from yulon.catalog.families.cmangos import ETC_DIR, CmangosInstaller
@@ -416,7 +416,10 @@ def _from_image(
     engine = installer_for(entry, platform_id=seams.platform_id)
     if not isinstance(engine, CmangosInstaller):  # the catalog says cmangos; keeps mypy honest
         return {}, dict.fromkeys(files, NO_DEFAULT.format(game=entry.name))
-    table = engine.conf_table()
+    # T127: while the bot dashboard is switched on, its three keys are the
+    # install's own setting, not a drift from the default -- and this reset's
+    # banner offers a recreate, not a Start, so nothing else would put them back.
+    table = bot_dashboard.overlay(engine.conf_table(), entry, server_dir)
     names: dict[str, str] = {}
     reasons: dict[str, str] = {}
     for file in files:

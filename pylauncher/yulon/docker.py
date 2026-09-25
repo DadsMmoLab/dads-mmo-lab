@@ -420,12 +420,10 @@ def pin_project_name(server_dir: Path, *, wsl_distro: str | None = None) -> str 
         "# Pinned by Yu'lon so this install keeps working if the folder is moved.\n"
         f"{PROJECT_NAME_VAR}={name}\n"
     ).encode()
-    tmp = env_path.with_name(env_path.name + ".yulon-new")
     try:
-        tmp.write_bytes(existing + addition)
-        os.replace(tmp, env_path)  # atomic on POSIX and on Windows
+        # T127: never wider than 0600 -- `.env` holds the root password.
+        platform.write_private_atomically(env_path, existing + addition)
     except OSError as exc:
-        tmp.unlink(missing_ok=True)
         logger.warning(f"could not write {env_path}; not pinning: {exc}")
         return None
     logger.info(f"pinned {PROJECT_NAME_VAR}={name} in {env_path}")
@@ -3952,18 +3950,20 @@ def compose_up_service(
     service: str,
     *,
     force_recreate: bool = False,
+    timeout: float | None = None,
     wsl_distro: str | None = None,
 ) -> None:
     """Start ONE service of this install's project, and nothing it depends on (T127).
 
     `--no-deps` for `staged_up_argv()`'s reason: the caller decides what else
     runs. Raises `DockerCommandError` with compose's own words, which for a
-    taken port name the port.
+    taken port name the port. `timeout` bounds the wait (a timed-out run is a
+    non-zero result from `runner.run()`, so it raises here like any failure).
     """
     argv = ["compose", "up", "-d", "--no-deps"]
     if force_recreate:
         argv.append("--force-recreate")
-    _run([*argv, service], cwd=server_dir, wsl_distro=wsl_distro)
+    _run([*argv, service], cwd=server_dir, timeout=timeout, wsl_distro=wsl_distro)
 
 
 def compose_remove_service(

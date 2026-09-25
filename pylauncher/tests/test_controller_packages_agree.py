@@ -538,7 +538,9 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | undashboarded
         )
         if game == "wow-wotlk":
-            reference = unprobed | unupdatable | unadoptable | unwindowed | undashboarded | unrepaired
+            reference = (
+                unprobed | unupdatable | unadoptable | unwindowed | undashboarded | unrepaired
+            )
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

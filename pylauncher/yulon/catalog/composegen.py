@@ -942,8 +942,11 @@ class MixedBindLabels(ComposeGenError):
 def bind_label_of(text: str) -> str | None:
     """The SELinux label a rendered compose file's host binds carry: `":z"`, `""` or None (T106).
 
-    `":z"` when every `- ./` bind ends with it, `""` when none does, None when the
-    text has no host bind at all. This is the install's own decision, read back
+    `":z"` when every `- ./` bind carries `z` in its options (`:z`, or a list such
+    as `:ro,z`), `""` when none does, None when the text has no host bind at all.
+    The one reader of this rule: `bot_dashboard.bind_label()` asks it too.
+
+    This is the install's own decision, read back
     off what it wrote, and a re-render must use it rather than ask the host again:
     asked while `getenforce` fails or the host is briefly permissive, the host
     says "no label", and a file written from that answer strips `:z` from an
@@ -956,10 +959,14 @@ def bind_label_of(text: str) -> str | None:
     Raises:
         MixedBindLabels: some binds carry `:z` and some do not.
     """
-    binds = [line.strip() for line in text.splitlines() if line.strip().startswith("- ./")]
+    binds = [
+        line.strip()[1:].strip().strip("\"'")
+        for line in text.splitlines()
+        if line.strip().startswith("- ./")
+    ]
     if not binds:
         return None
-    labelled = [line.endswith(":z") for line in binds]
+    labelled = [_carries_z(bind) for bind in binds]
     if all(labelled):
         return ":z"
     if not any(labelled):
@@ -968,6 +975,18 @@ def bind_label_of(text: str) -> str | None:
         "some of its host folders are labelled for SELinux (`:z`) and some are not, which is "
         "not how Yu'lon writes it"
     )
+
+
+def _carries_z(bind: str) -> bool:
+    """Does `./host:/target[:options]` carry the shared SELinux label `z`? (T127)
+
+    The options are a comma list, so `./etc:/etc:z` and `./data/dbc:/dbc:ro,z`
+    are both labelled. Counting only a trailing `:z` read the bot dashboard's
+    read-only bind as unlabelled, so an enforcing install with the dashboard on
+    read as MIXED and T106's Repair refused it.
+    """
+    parts = bind.split(":")
+    return len(parts) >= 3 and "z" in (option.strip() for option in parts[-1].split(","))
 
 
 def _meaningful_lines(text: str) -> list[str]:
@@ -1083,11 +1102,6 @@ def write_dotenv(server_dir: Path, additions: Mapping[str, str]) -> Path:
     path = server_dir / DOTENV_FILE
     existing = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
     merged = merge_dotenv(existing, additions)
-    tmp = path.with_name(path.name + ".yulon-new")
-    try:
-        tmp.write_text(merged, encoding="utf-8", newline="\n")
-        os.replace(tmp, path)  # atomic on POSIX and on Windows
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        raise
+    # T127: never wider than 0600 -- this file holds the root password.
+    platform.write_private_atomically(path, merged.encode("utf-8"))
     return path

@@ -795,6 +795,7 @@ def test_no_press_reads_a_file_or_asks_docker_on_the_gui_thread(
     seam = _Seam()
     accounts = _Accounts(useraccounts.Listing())
     view = _view(qapp, tmp_path, seam, accounts, jobs=hold)
+    held.clear()  # what the other tabs ask for at build time (T94's undo look-up) is theirs
     view.refresh_bot_dashboard()
     view.open_bot_dashboard()
     assert seam.calls == [] and accounts.threads == []
@@ -812,3 +813,244 @@ def test_no_press_reads_a_file_or_asks_docker_on_the_gui_thread(
 def test_the_dashboard_panel_is_joined_on_exit(qapp: object, tmp_path: Path) -> None:
     view = _view(qapp, tmp_path, _Seam())
     assert view.dashboard_log in view.log_panels()
+
+
+# -- fix wave 1 (cold review + Codex, 2026-09-25) ---------------------------------------------
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the POSIX mode is a no-op on Windows")
+@pytest.mark.parametrize("before", [0o664, 0o644, 0o600])
+def test_switch_on_leaves_env_owner_only_under_umask_022(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before: int
+) -> None:
+    """Codex high 1. `.env` holds the root password and now the session secret.
+
+    `write_dotenv()` wrote its temp file at the umask and renamed it over the file,
+    so the switch WIDENED a 0600 `.env` to 0644 -- and left the 0664 the install
+    made (measured on yulon-ubuntu) as it was.
+    """
+    server_dir = _install(tmp_path)
+    env = server_dir / composegen.DOTENV_FILE
+    env.chmod(before)
+    _Docker(monkeypatch)
+    old = os.umask(0o022)
+    try:
+        list(_switch(server_dir).switch_on(lan=False))
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+    assert files.SECRET_VAR in env.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the POSIX mode is a no-op on Windows")
+def test_the_private_writer_never_widens_and_keeps_a_stricter_mode(tmp_path: Path) -> None:
+    from yulon import platform as yplatform
+
+    new = tmp_path / "new.env"
+    old = os.umask(0o000)
+    try:
+        yplatform.write_private_atomically(new, b"A=1\n")
+        strict = tmp_path / "strict.env"
+        strict.write_bytes(b"x")
+        strict.chmod(0o400)
+        yplatform.write_private_atomically(strict, b"A=2\n")
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(new.stat().st_mode) == 0o600
+    assert stat.S_IMODE(strict.stat().st_mode) == 0o400 and strict.read_bytes() == b"A=2\n"
+    assert not list(tmp_path.glob("*.yulon-new"))
+
+
+def _on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, _Docker, botdash.Dashboard]:
+    server_dir = _install(tmp_path)
+    fake = _Docker(monkeypatch)
+    switch = _switch(server_dir)
+    list(switch.switch_on(lan=False))
+    fake.calls.clear()
+    return server_dir, fake, switch
+
+
+def _assert_still_on(server_dir: Path, fake: _Docker) -> None:
+    assert files.state(server_dir) == files.State(on=True, lan=False), "the block is the record"
+    assert fake.calls == [], "no container or image was touched"
+    conf = _conf(server_dir)
+    assert conf.with_name(conf.name + files.CONF_BACKUP_SUFFIX).is_file(), "the retry needs it"
+
+
+def test_off_with_an_unreadable_conf_leaves_the_switch_on_and_can_be_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex high 2: the conf goes back FIRST, and the block (the record of On) goes last."""
+    server_dir, fake, switch = _on(tmp_path, monkeypatch)
+    real = files.read_exact
+    conf = _conf(server_dir)
+
+    def unreadable(path: Path) -> str:
+        if path == conf:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(files, "read_exact", unreadable)
+    with pytest.raises(botdash.SwitchError, match="left ON"):
+        list(switch.switch_off())
+    _assert_still_on(server_dir, fake)
+
+    monkeypatch.setattr(files, "read_exact", real)
+    list(switch.switch_off())
+    assert files.state(server_dir) == files.State()
+    assert conf.read_text(encoding="utf-8") == CONF_TEXT
+
+
+def test_off_with_an_unwritable_conf_leaves_the_switch_on_and_can_be_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, switch = _on(tmp_path, monkeypatch)
+    real = files.write_keeping_mode
+    conf = _conf(server_dir)
+    on_text = conf.read_text(encoding="utf-8")
+
+    def read_only(path: Path, text: str) -> None:
+        if path == conf:
+            raise OSError(30, "Read-only file system", str(path))
+        real(path, text)
+
+    monkeypatch.setattr(files, "write_keeping_mode", read_only)
+    with pytest.raises(botdash.SwitchError, match="left ON"):
+        list(switch.switch_off())
+    _assert_still_on(server_dir, fake)
+    assert conf.read_text(encoding="utf-8") == on_text, "the world's keys still say send"
+
+    monkeypatch.setattr(files, "write_keeping_mode", real)
+    list(switch.switch_off())
+    assert files.state(server_dir) == files.State()
+    assert conf.read_text(encoding="utf-8") == CONF_TEXT
+
+
+def test_off_whose_container_will_not_go_puts_the_keys_on_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_dir, fake, switch = _on(tmp_path, monkeypatch)
+    on_text = _conf(server_dir).read_text(encoding="utf-8")
+
+    def refuse(*_a: object, **_kw: object) -> None:
+        raise docker.DockerCommandError("daemon busy")
+
+    monkeypatch.setattr(docker, "compose_remove_service", refuse)
+    with pytest.raises(botdash.SwitchError, match="left ON"):
+        list(switch.switch_off())
+    assert files.state(server_dir).on
+    assert _conf(server_dir).read_text(encoding="utf-8") == on_text
+
+
+def test_the_start_hook_bounds_the_dashboard_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review minor 7: a hung `compose up` must never hold the server's own Start."""
+    from yulon import runner
+
+    server_dir, _fake, _switch_ = _on(tmp_path, monkeypatch)
+    monkeypatch.setattr(docker, "compose_up_service", _REAL_UP)
+    seen: list[tuple[list[str], float | None]] = []
+
+    def hung(cmd: list[str], cwd: Path | None = None, timeout: float | None = None) -> object:
+        import subprocess
+
+        seen.append((cmd, timeout))
+        return subprocess.CompletedProcess(cmd, 124, "", "timed out")
+
+    monkeypatch.setattr(runner, "run", hung)
+    botdash.start_if_on(TORTOISE, server_dir)  # never raises
+
+    ups = [t for cmd, t in seen if cmd[-5:-1] == ["compose", "up", "-d", "--no-deps"]]
+    assert ups == [botdash.START_HOOK_TIMEOUT_S]
+    assert 0 < botdash.START_HOOK_TIMEOUT_S <= 300
+
+
+_REAL_UP = docker.compose_up_service
+
+
+def test_the_daemons_session_secret_is_the_installs_own_never_the_public_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review minor 9, the unit half: the daemon's env names the `.env` secret, and that is
+    random -- never the default compiled into the daemon. The live half (a cookie forged with
+    the default is refused) is in the gate's curl log."""
+    import re as _re
+
+    server_dir, _fake, _switch_ = _on(tmp_path, monkeypatch)
+    block = files.block_in(_base(server_dir))
+    assert block is not None
+    assert f"SESSION_SECRET: ${{{files.SECRET_VAR}:?" in block
+    env = (server_dir / composegen.DOTENV_FILE).read_text(encoding="utf-8")
+    value = next(
+        line.split("=", 1)[1] for line in env.splitlines() if line.startswith(files.SECRET_VAR)
+    )
+    assert _re.fullmatch(r"[0-9a-f]{64}", value)
+    assert value not in ("tortoise-observability-salt-secret", "tortoise-observability-secret-salt")
+    # A second install gets a different one; a second switch-on keeps this one.
+    assert files.new_secret() != value
+    list(_switch(server_dir).switch_off())
+    list(_switch(server_dir).switch_on(lan=False))
+    assert value in (server_dir / composegen.DOTENV_FILE).read_text(encoding="utf-8")
+
+
+# -- merge-time: T106's Repair and T94's Reset --------------------------------------------------
+
+
+def test_an_enforcing_install_with_the_dashboard_reads_labelled_and_repair_keeps_the_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review B4: T106 counted only a trailing `:z`, so `:ro,z` read as MIXED and Repair refused."""
+    from tests.test_repair_server_files import engine as repair_engine
+    from yulon.catalog.installer import InstallOptions
+
+    server_dir = _install(tmp_path, label=":z")
+    (server_dir / ".db_password").write_text(PASSWORD + "\n", encoding="utf-8")
+    _Docker(monkeypatch)
+    list(_switch(server_dir).switch_on(lan=False))
+    text = _base(server_dir)
+    assert "- ./data/dbc:/dbc:ro,z" in text
+    assert composegen.bind_label_of(text) == ":z"
+    assert files.bind_label(text) == ":z"
+
+    eng = repair_engine(TORTOISE, enforcing=True)
+    options = InstallOptions(server_dir=server_dir)
+    check = eng.base_compose_check(options)
+    assert check.state == "current", check
+    # And a real repair of a stale file (a comment-free change) keeps the block.
+    base = server_dir / composegen.BASE_FILE
+    base.write_text(text.replace("restart: unless-stopped\n", "", 1), encoding="utf-8")
+    assert eng.base_compose_check(options).state == "stale"
+    eng.repair_base_compose(options)
+    after = _base(server_dir)
+    assert files.block_in(after) == files.block_in(text)
+    assert composegen.bind_label_of(after) == ":z"
+
+
+def test_a_reset_with_the_switch_on_keeps_the_three_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review B5: T94's Reset writes the table back and its banner offers a recreate, not a
+    Start, so the Start hook never runs after it. The reset lays the keys over the table."""
+    from tests.test_reset_defaults import TEMPLATES, FakeImage, _seams
+    from yulon import reset_defaults
+
+    server_dir = _install(tmp_path)
+    (server_dir / ".db_password").write_text(PASSWORD + "\n", encoding="utf-8")
+    _Docker(monkeypatch)
+    list(_switch(server_dir).switch_on(lan=False))
+    file = "etc/modules/tortoise_bots.conf"
+
+    reset_defaults.reset(
+        TORTOISE, server_dir, [file], seams=_seams(FakeImage(TEMPLATES["wow-tortoise"]))
+    )
+
+    text = (server_dir / file).read_text(encoding="utf-8")
+    assert files.conf_values(text, tuple(files.conf_keys(TORTOISE))) == files.conf_keys(TORTOISE)
+    assert "TortoiseBots.LogLevel = 1" in text, "the rest of the file was reset"
+
+    list(_switch(server_dir).switch_off())
+    reset_defaults.reset(
+        TORTOISE, server_dir, [file], seams=_seams(FakeImage(TEMPLATES["wow-tortoise"]))
+    )
+    assert "AiPlayerbot.Observability = 0" in (server_dir / file).read_text(encoding="utf-8")
