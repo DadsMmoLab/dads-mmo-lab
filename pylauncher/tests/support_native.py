@@ -112,6 +112,8 @@ class Recorder:
     """False when git cannot be asked at all, which is `is_unmodified()`'s `None`."""
 
     images: bool | None = True
+    images_asked: list[tuple[str, ...]] = field(default_factory=list)
+    """Every ref tuple `images_built()` was asked about, in order (T112: what preflight checks)."""
     build_result: docker.AttachedRun = docker.AttachedRun(0, ("built",))
     one_shot_result: docker.AttachedRun = docker.AttachedRun(0, ("ran",))
     probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
@@ -662,7 +664,7 @@ class Recorder:
             head_version=self.head_version,
             commits_since=self.commits_since,
             restore_rev=self.restore_rev,
-            images_built=lambda refs: self.images,
+            images_built=self.images_built,
             build=build,
             one_shot=one_shot,
             verify_import=verify,
@@ -707,6 +709,11 @@ class Recorder:
         """Answer `self.ready`, and KEEP the pattern that was asked about."""
         self.ready_specs.append(ready)
         return self.ready
+
+    def images_built(self, refs: Sequence[str]) -> bool | None:
+        """`docker.images_built()`: answers `self.images`, and keeps what it was asked about."""
+        self.images_asked.append(tuple(refs))
+        return self.images
 
     def gather(self, entry: object, server_dir: Path, **_kwargs: object) -> preflight.Facts:
         self.calls.append("gather")
