@@ -127,8 +127,19 @@ class InFlight(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._pairs: list[tuple[QThread, QObject, _Delivery | None]] = []
+        # id(thread) -> label: what the exit log calls a job whose owner knows
+        # better than its worker's class (T113). Kept beside `_pairs`, and
+        # dropped with its pair in `sweep()`.
+        self._labels: dict[int, str] = {}
 
-    def hold(self, thread: QThread, worker: QObject, delivery: _Delivery | None = None) -> None:
+    def hold(
+        self,
+        thread: QThread,
+        worker: QObject,
+        delivery: _Delivery | None = None,
+        *,
+        label: str | None = None,
+    ) -> None:
         """Own a started pair, and the delivery that carries its answer, if it has one.
 
         The delivery is held until it has DELIVERED, not only until the thread
@@ -137,6 +148,8 @@ class InFlight(QObject):
         receiver `InFlight` exists for, one hop later.
         """
         self._pairs.append((thread, worker, delivery))
+        if label is not None:
+            self._labels[id(thread)] = label
         thread.finished.connect(self.sweep)
 
     @Slot()
@@ -147,29 +160,54 @@ class InFlight(QObject):
             for thread, worker, delivery in self._pairs
             if thread.isRunning() or (delivery is not None and not delivery.returned)
         ]
+        held = {id(thread) for thread, _worker, _delivery in self._pairs}
+        self._labels = {key: label for key, label in self._labels.items() if key in held}
 
     def wait_all(self, timeout_ms: int = 10_000) -> bool:
         """Join everything still running (app shutdown). True if all finished in time.
 
         `quit()` ends an event loop; it cannot interrupt a `run()` still inside
         its work - a blocked `subprocess.run`, a `docker logs -f` with no new
-        line. A pair that does not finish is left held, and Qt's abort at
-        interpreter exit (a QThread destroyed while running) follows. That is
-        the pre-existing contract and this class does not change it; what it
-        can do is put a name in the log first, so the abort is not a mystery.
+        line. A pair that does not finish is left held, and this answers False.
+        Held into interpreter teardown, that thread is a Qt abort ("QThread:
+        Destroyed while thread is still running"), so `main()` does not go
+        there on a False: it leaves through `os._exit` instead (T113).
         """
         done = True
         for thread, worker, _delivery in list(self._pairs):
+            label = self._labels.get(id(thread))
             if thread.isRunning():
                 thread.quit()
                 if not thread.wait(timeout_ms):
                     done = False
                     logger.warning(
                         f"a background job did not finish within {timeout_ms} ms at exit: "
-                        f"{type(worker).__name__}; Qt will abort when it is destroyed"
+                        f"{label or describe(worker)}"
                     )
         self.sweep()
         return done
+
+    def still_running(self) -> list[str]:
+        """What each held job whose thread has not finished is doing, for the exit log."""
+        return [
+            self._labels.get(id(thread)) or describe(worker)
+            for thread, worker, _delivery in self._pairs
+            if thread.isRunning()
+        ]
+
+
+def describe(worker: QObject) -> str:
+    """A held worker as a person reads it: its class, and for a view job, the work.
+
+    Every view job runs in a `_JobWorker`, so its class alone names them all
+    alike; the callable it was given is what tells the status poll from the
+    database import. A `functools.partial` is named by the function it wraps.
+    """
+    if not isinstance(worker, _JobWorker):
+        return type(worker).__name__
+    work = getattr(worker._work, "func", worker._work)
+    name = getattr(work, "__qualname__", None) or type(work).__name__
+    return f"{type(worker).__name__}({name})"
 
 
 _in_flight: InFlight | None = None
