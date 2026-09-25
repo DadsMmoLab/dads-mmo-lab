@@ -417,11 +417,19 @@ class Prompt(_Strict):
         default=None,
         description="A row that must be found before this answer is used; see `ExistsCheck`.",
     )
-    min_exclusive: float | None = Field(
+    min: float | None = Field(
         default=None,
         description=(
-            "int/float only: the answer must be MORE than this (T122). The mob multipliers "
-            "declare 0, because `X=X*{m}` at 0 cannot be divided back by their Remove."
+            "int/float only: the smallest answer accepted, inclusive (T122). The mob "
+            "multipliers declare 0.01: `X=X*{m}` at 0 -- or at 1e-50, which a FLOAT column "
+            "rounds to 0 -- cannot be divided back by their Remove."
+        ),
+    )
+    max: float | None = Field(
+        default=None,
+        description=(
+            "int/float only: the largest answer accepted, inclusive (T122). The mob "
+            "multipliers declare 100: at 1e39 the FLOAT column overflows."
         ),
     )
 
@@ -434,30 +442,48 @@ class Prompt(_Strict):
         return self
 
     @model_validator(mode="after")
-    def _bound_needs_a_number(self) -> Prompt:
-        if self.min_exclusive is None:
-            return self
-        if self.kind not in ("int", "float"):
-            raise ValueError("`min_exclusive` only valid with kind='int' or 'float'")
-        if self.default is not None and not self.above_bound(self.default):
+    def _range_needs_a_number(self) -> Prompt:
+        for field, bound in (("min", self.min), ("max", self.max)):
+            if bound is None:
+                continue
+            if self.kind not in ("int", "float"):
+                raise ValueError(f"`{field}` only valid with kind='int' or 'float'")
+            if not math.isfinite(bound):
+                raise ValueError(f"`{field}` must be a finite number")
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise ValueError(f"`min` {self.min:g} is more than `max` {self.max:g}")
+        if self.default is not None and self.range_problem(self.default):
             raise ValueError(
-                f"default {self.default!r} is not more than min_exclusive {self.min_exclusive:g}"
+                f"default {self.default!r} is outside its own question's range "
+                f"({self.range_problem(self.default)})"
             )
         return self
 
-    def above_bound(self, text: str) -> bool:
-        """Whether `text` is a finite number above `min_exclusive` (True when there is none).
+    def range_problem(self, text: str) -> str:
+        """Why `text` is outside this question's `min`..`max`, or `""` (also when it has none).
 
-        Finite on purpose: `float()` reads `inf` and `nan`, `inf > 0` is true, and
-        a Remove dividing by `inf` gives NaN, not the value it started from.
+        Finite on purpose: `float()` reads `inf` and `nan`, `nan` compares false
+        both ways, and a Remove dividing by `inf` gives NaN, not the value it
+        started from. Text that is not a number at all answers `""` here: saying
+        so is `apply.check_answer()`'s job, in its own words.
         """
-        if self.min_exclusive is None:
-            return True
+        if self.min is None and self.max is None:
+            return ""
         try:
             number = float(text.strip())
         except ValueError:
-            return False
-        return math.isfinite(number) and number > self.min_exclusive
+            return ""
+        if not math.isfinite(number):
+            return "this must be a number"
+        low = self.min is None or number >= self.min
+        high = self.max is None or number <= self.max
+        if low and high:
+            return ""
+        if self.min is not None and self.max is not None:
+            return f"this must be between {self.min:g} and {self.max:g}"
+        if self.min is not None:
+            return f"this must be at least {self.min:g}"
+        return f"this must be at most {self.max:g}"
 
 
 class Origin(_Strict):
