@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -36,23 +37,45 @@ class _Db:
 
     `START TRANSACTION` is MySQL's spelling; sqlite's is `BEGIN`. A text that
     fails part-way is rolled back, as `mysql` ending its session does (T100).
+
+    `BaseAttackTime` and `RangeAttackTime` are INTEGER columns on AzerothCore, and
+    MySQL rounds a fractional result into them on every UPDATE (cold review, T115
+    fix wave). sqlite would keep `666.5` in an INTEGER column, so a trigger does
+    MySQL's rounding (half away from zero, as for the DECIMAL literal `0.5`).
+
+    `on_statement` is called with the text before anything runs: what the disk
+    says at that moment is what a kill right then would leave behind.
     """
 
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(
+        self,
+        fail: bool = False,
+        base: tuple[float, ...] = BASE,
+        on_statement: Callable[[str], None] | None = None,
+    ) -> None:
         self.db = sqlite3.connect(":memory:")
         self.db.execute(
             "CREATE TABLE creature_template (entry INT, HealthModifier REAL, DamageModifier REAL, "
-            "ArmorModifier REAL, BaseAttackTime REAL, RangeAttackTime REAL)"
+            "ArmorModifier REAL, BaseAttackTime INTEGER, RangeAttackTime INTEGER)"
         )
-        self.db.execute("INSERT INTO creature_template VALUES (1, ?, ?, ?, ?, ?)", BASE)
+        self.db.execute(
+            "CREATE TRIGGER mysql_int_rounding AFTER UPDATE ON creature_template BEGIN "
+            "UPDATE creature_template SET BaseAttackTime = CAST(ROUND(NEW.BaseAttackTime) AS "
+            "INTEGER), RangeAttackTime = CAST(ROUND(NEW.RangeAttackTime) AS INTEGER) "
+            "WHERE rowid = NEW.rowid; END"
+        )
+        self.db.execute("INSERT INTO creature_template VALUES (1, ?, ?, ?, ?, ?)", base)
         self.db.commit()
         self.texts: list[str] = []
         self.fail = fail
+        self.on_statement = on_statement
 
     def run_file(self, db: str, path: Path) -> None:
         raise AssertionError(f"a mob mod runs no file, got {path}")
 
     def run_statement(self, db: str, statement: str) -> None:
+        if self.on_statement is not None:
+            self.on_statement(statement)
         if self.fail:
             raise ApplyError("mysql exited 1: ERROR 2013 (HY000): Lost connection")
         self.texts.append(statement)
@@ -263,7 +286,7 @@ def test_an_unwritable_record_refuses_the_install_before_any_sql(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Fail closed: SQL applied with no record of it is the defect this ticket is about."""
-    monkeypatch.setattr(module_answers, "record_applied", lambda *_a, **_k: "disk full")
+    monkeypatch.setattr(module_answers, "record_pending", lambda *_a, **_k: "disk full")
     db = _Db()
     with pytest.raises(ApplyError, match="disk full"):
         Applier(tmp_path, sql=db).install(_mob(), _all("2"))
@@ -275,7 +298,7 @@ def test_an_unclearable_record_refuses_the_remove_before_any_sql(
 ) -> None:
     db = _Db()
     Applier(tmp_path, sql=db).install(_mob(), _all("2"))
-    monkeypatch.setattr(module_answers, "record_applied", lambda *_a, **_k: "read-only")
+    monkeypatch.setattr(module_answers, "record_pending", lambda *_a, **_k: "read-only")
     with pytest.raises(ApplyError, match="read-only"):
         Applier(tmp_path, sql=db).remove(_mob(), None)
     assert db.row() == _times(2) and len(db.texts) == 1
@@ -306,3 +329,156 @@ def test_every_relative_manifest_can_be_undone_in_one_transaction() -> None:
     assert sorted(m.id for m in relative) == list(MOB_MODS)
     for manifest in relative:
         assert apply_module.reapply_steps_problem(manifest) == "", manifest.id
+
+
+# ------------------------------------------------ whole-number columns
+
+
+def test_whole_number_columns_can_drift_by_one_and_that_is_pinned(tmp_path: Path) -> None:
+    """Honest about the integer columns (cold review, T115 fix wave): no rounding logic.
+
+    Attack times are INTEGER on AzerothCore. At x0.5 an odd 1333 ms becomes
+    666.5, stored as 667; dividing back gives 1334. So a round trip through a
+    fractional multiplier can leave an attack time 1 ms off, and a re-install
+    undoes through the same rounding. The float modifiers are unaffected.
+    """
+    base = (1.0, 1.0, 1.0, 1333, 1333)
+    db = _Db(base=base)
+    applier = Applier(tmp_path, sql=db)
+    applier.install(_mob(), _all("0.5"))
+    assert db.row()[3:] == (667, 667)
+    applier.install(_mob(), _all("1"))
+    assert db.row() == (1.0, 1.0, 1.0, 1334, 1334), "base x new, the attack times 1 ms off"
+    applier.remove(_mob(), None)
+    assert db.row() == (1.0, 1.0, 1.0, 1334, 1334)
+
+
+# ------------------------------------------------ a kill part-way (fix wave)
+
+
+def _snapshot(server_dir: Path, into: list[Path]) -> Callable[..., None]:
+    """Copy the record as it is on disk now into a fresh server folder: a kill right here."""
+
+    def take(*_args: object) -> None:
+        folder = server_dir.parent / f"killed-{len(into)}"
+        folder.mkdir()
+        record = server_dir / module_answers.ANSWERS_FILE
+        if record.is_file():
+            (folder / module_answers.ANSWERS_FILE).write_bytes(record.read_bytes())
+        into.append(folder)
+
+    return take
+
+
+def _no_database_start(snap: Callable[..., None]) -> Callable[..., bool]:
+    def start(self: Applier, manifest: Manifest, when: str, log: object) -> bool:
+        snap()
+        return False
+
+    return start
+
+
+def test_a_kill_while_the_database_starts_leaves_the_old_record_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold review, Important: the record was written before a wait of up to 180 s.
+
+    `_start_the_database_for_direct_sql()` waits for the database to be healthy.
+    Killed there, nothing has been sent, so the record must still say x2.
+
+    Fails on cd72db01: the record already said x3 while the database held x2.
+    """
+    server = tmp_path / "srv"
+    server.mkdir()
+    Applier(server, sql=_Db()).install(_mob(), _all("2"))
+    kills: list[Path] = []
+    monkeypatch.setattr(
+        Applier, "_start_the_database_for_direct_sql", _no_database_start(_snapshot(server, kills))
+    )
+    Applier(server, sql=_Db()).install(_mob(), _all("3"))
+    assert Applier(kills[0]).applied_record(_mob()) == (_all("2"), "")
+
+
+def test_a_kill_while_the_database_starts_for_a_remove_keeps_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fails on cd72db01: Remove cleared the record before the wait."""
+    server = tmp_path / "srv"
+    server.mkdir()
+    Applier(server, sql=_Db()).install(_mob(), _all("2"))
+    kills: list[Path] = []
+    monkeypatch.setattr(
+        Applier, "_start_the_database_for_direct_sql", _no_database_start(_snapshot(server, kills))
+    )
+    Applier(server, sql=_Db()).remove(_mob(), None)
+    assert Applier(kills[0]).applied_record(_mob()) == (_all("2"), "")
+
+
+@pytest.mark.parametrize("press", ["install", "remove"])
+def test_a_kill_at_the_statement_leaves_the_record_unusable_not_wrong(
+    tmp_path: Path, press: str
+) -> None:
+    """Killed while the statement is in flight, Yu'lon cannot know if it committed.
+
+    So the record is PENDING there, which reads as unusable: a re-run is refused
+    and Remove asks -- the existing refusal and dialog, no new UI. After the
+    commit the pending entry becomes the applied one.
+
+    Fails on cd72db01: at the statement the record already said the new values
+    (install) or nothing (remove), each a usable answer that may be wrong.
+    """
+    server = tmp_path / "srv"
+    server.mkdir()
+    Applier(server, sql=_Db()).install(_mob(), _all("2"))
+    kills: list[Path] = []
+    applier = Applier(server, sql=_Db(base=_times(2), on_statement=_snapshot(server, kills)))
+    if press == "install":
+        applier.install(_mob(), _all("3"))
+    else:
+        applier.remove(_mob(), None)
+
+    killed = Applier(kills[0])
+    applied, why = killed.applied_record(_mob())
+    assert applied is None and why, why
+    assert killed.reapply_refusal(_mob()) is not None
+    after = _record(server)
+    assert _mob().type + "/" + _mob().id not in after.get("pending", {})  # type: ignore[operator]
+    expected = (_all("3"), "") if press == "install" else (None, "")
+    assert Applier(server).applied_record(_mob()) == expected
+
+
+def test_a_failed_statement_restores_the_previous_record(tmp_path: Path) -> None:
+    """Pending while the statement runs; the old record back, and no pending, when it fails.
+
+    Fails on cd72db01: during the statement the record read x3, usable.
+    """
+    server = tmp_path / "srv"
+    server.mkdir()
+    Applier(server, sql=_Db()).install(_mob(), _all("2"))
+    kills: list[Path] = []
+    with pytest.raises(ApplyError):
+        Applier(server, sql=_Db(fail=True, on_statement=_snapshot(server, kills))).install(
+            _mob(), _all("3")
+        )
+    assert Applier(kills[0]).applied_record(_mob())[0] is None
+    assert Applier(server).applied_record(_mob()) == (_all("2"), "")
+    assert "mod/baby-mobs" not in _record(server).get("pending", {})  # type: ignore[operator]
+
+
+@pytest.mark.parametrize("press", ["install", "remove"])
+def test_with_no_sql_runner_nothing_runs_and_the_record_is_left_alone(
+    tmp_path: Path, press: str
+) -> None:
+    """Cold review, Minor 3: a press whose SQL is skipped must not change the record.
+
+    Fails on cd72db01: Remove cleared it, and Install wrote the new values,
+    with nothing sent to the database.
+    """
+    Applier(tmp_path, sql=_Db()).install(_mob(), _all("2"))
+    skipped = Applier(tmp_path, sql=None)
+    if press == "install":
+        report = skipped.install(_mob(), _all("3"))
+    else:
+        report = skipped.remove(_mob(), None)
+    assert any("no SQL runner" in line for line in report.skipped), report.skipped
+    assert Applier(tmp_path).applied_record(_mob()) == (_all("2"), "")

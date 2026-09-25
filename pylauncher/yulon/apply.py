@@ -1635,7 +1635,7 @@ def reapplies_on_top(manifest: Manifest) -> bool:
     Since T115 such a re-run does not compound: the applier keeps a record of
     the values it applied (`module_answers.record_applied()`) and runs the
     manifest's own remove statements with them, then the install statements
-    with the new ones, in one transaction (`Applier._reapply_text()`). Measured
+    with the new ones, in one transaction (`Applier._run_relative()`). Measured
     before that: Install at x2 then again at x3 left creatures at x6.
     """
     install = {prompt.key for prompt in required_prompts(manifest, "install")}
@@ -2037,10 +2037,7 @@ class Applier:
         # pass that would be false of the configure-time one.
         if first_configure_sql:
             self._refuse_direct_sql_into_a_running_world(manifest, "configure")
-        if reapplies_on_top(manifest):
-            self._relative_install_sql(manifest, clone, vals, undo, log)
-        else:
-            self._sql(manifest, clone, vals, "install", log)
+        self._sql(manifest, clone, vals, "install", log, undo=undo)
         self._conf(manifest, clone, vals, log)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
@@ -2405,10 +2402,7 @@ class Applier:
             # destroy a directory whose only crime is matching a catalog id.
             self._require_own_clone(manifest, clone, "remove")
         self._patches(manifest, clone, vals, "remove", log)
-        if relative:
-            self._relative_remove_sql(manifest, clone, vals, log)
-        else:
-            self._sql(manifest, clone, vals, "remove", log)
+        self._sql(manifest, clone, vals, "remove", log)
         for step in manifest.deploy:
             self._undeploy(step, clone, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
@@ -3123,11 +3117,13 @@ class Applier:
         log: _Log,
         undo: Mapping[str, str] | None = None,
     ) -> None:
-        """Run this action's SQL steps; with `undo`, a relative re-install as one text (T115).
+        """Run this action's SQL steps; a relative manifest's as one recorded text (T115).
 
-        `undo` is the applied record of a `reapplies_on_top()` manifest, and it
-        changes only what is sent once the guards below have passed: the same
+        A `reapplies_on_top()` manifest's install or remove goes through
+        `_run_relative()` once the guards below have passed -- the same
         running-world refusal and the same database start as any other press.
+        `undo` is its applied record on a re-install: the values to divide out
+        first.
         """
         plan = self._plan_sql(manifest, clone, vals, when)
         self._refuse_direct_sql_into_a_running_world(manifest, when)
@@ -3156,16 +3152,12 @@ class Applier:
             # the trade: a container that is running when it need not be, rather
             # than rows written under a live world.
             self._refuse_direct_sql_into_a_running_world(manifest, when)
-        if undo is not None and when == "install":
-            if self.sql is None:
-                log.skipped.append(f"sql → {manifest.id}: no SQL runner configured")
-                return
-            db, text = self._reapply_text(manifest, vals, undo)
-            self.sql.run_statement(db, text)
-            log.done.append(
-                f"sql inline → {db}: undid the values applied last time and applied these, "
-                f"in one transaction"
-            )
+        if (
+            when in ("install", "remove")
+            and reapplies_on_top(manifest)
+            and not reapply_steps_problem(manifest)
+        ):
+            self._run_relative(manifest, vals, when, undo, log)
             return
         for index, step in enumerate(manifest.sql):
             if step.when != when:
@@ -3843,8 +3835,15 @@ class Applier:
         render, each one `check_answer()` accepts and, for a number, not zero --
         nothing divides by zero, and MySQL would write NULL. `(None, "")` for no
         record at all. `(None, why)` for a record that is there and cannot be
-        used, which is a known re-run with unknown values.
+        used, which is a known re-run with unknown values -- including one still
+        marked in flight (`module_answers.is_pending()`), where a press stopped
+        between marking its statement and recording the result.
         """
+        if module_answers.is_pending(self.server_dir, manifest):
+            return None, (
+                "an earlier press stopped while its SQL was being sent, so Yu'lon cannot tell "
+                "whether the database holds the values from before it or after it"
+            )
         raw = module_answers.read_applied(self.server_dir, manifest)
         if raw is None:
             return None, ""
@@ -3900,91 +3899,109 @@ class Applier:
             return None
         return self.applied_record(manifest)[0]
 
-    def _reapply_text(
-        self, manifest: Manifest, vals: Mapping[str, str], undo: Mapping[str, str]
+    def _relative_text(
+        self,
+        manifest: Manifest,
+        when: When,
+        vals: Mapping[str, str],
+        undo: Mapping[str, str] | None,
     ) -> tuple[Db, str]:
-        """The remove statements with the applied values, then install's with the new ones.
+        """One transaction: on a re-install, remove's statements with `undo` first, then `when`'s.
 
-        One text in one transaction, sent over `run_statement()` as T100's
-        `_run_transaction()` sends its files: `mysql` stops at the first error
-        and the session it ends rolls the transaction back, so the divide never
-        lands without the multiply. `creature_template` is InnoDB on AzerothCore
-        (read on the m910q world database, T115 gate), which is what makes that
-        rollback real.
+        Sent over `run_statement()` as T100's `_run_transaction()` sends its
+        files: `mysql` stops at the first error and the session it ends rolls
+        the transaction back, so the divide never lands without the multiply.
+        `creature_template` is InnoDB on AzerothCore (read on the m910q world
+        database, T115 gate), which is what makes that rollback real.
         """
-        undo_vals = {**vals, **undo}
+        passes: list[tuple[When, Mapping[str, str]]] = []
+        if when == "install" and undo is not None:
+            passes.append(("remove", {**vals, **undo}))
+        passes.append((when, vals))
         parts: list[str] = []
         db: Db | None = None
-        for when, values in (("remove", undo_vals), ("install", vals)):
+        for step_when, values in passes:
             for step in manifest.sql:
-                if step.when != when:
+                if step.when != step_when:
                     continue
                 assert step.statement is not None, "`reapply_steps_problem()` refused this"
                 db = step.db
                 text = _render(step.statement, values, "sql statement").strip()
                 parts.append(text if text.endswith(";") else text + ";")
-        assert db is not None, "a relative manifest has install SQL"
+        assert db is not None, "a relative manifest has install and remove SQL"
         return db, "START TRANSACTION;\n" + "\n".join(parts) + "\nCOMMIT;\n"
 
-    def _relative_install_sql(
+    def _run_relative(
         self,
         manifest: Manifest,
-        clone: Path,
         vals: Mapping[str, str],
+        when: When,
         undo: Mapping[str, str] | None,
         log: _Log,
     ) -> None:
-        """Record what is about to be applied, run it, and put the record back if it fails.
+        """Mark the record pending, send the one text, then record what the database holds.
 
-        The record is written FIRST and fail-closed: relative SQL in the database
-        with no record of it is exactly what made a second install compound. It
-        holds the values the statements render -- the defaults too, for a caller
-        that handed none in.
+        **The order is the fix-wave's (cold review, Important).** The first
+        version wrote the new record before `_sql()`'s guards and database start,
+        which can wait up to 180 s: killed there, the record said x-new over a
+        database still at x-old, and Remove divided by the wrong number. Now:
+
+        1. Nothing is written until the statement is the very next thing.
+        2. `record_pending()` marks it in flight, fail-closed: if that cannot be
+           written, nothing is sent. A kill from here on leaves a mark that
+           `applied_record()` reads as unusable -- a re-run is refused and Remove
+           asks -- instead of an answer that may be wrong.
+        3. The statement. If it fails, the transaction rolled back, so the mark
+           is dropped and the applied record, never touched, is still true.
+        4. After the commit, `record_applied()` writes the new values (or clears
+           them for a Remove) and drops the mark in one write.
+
+        With no SQL runner nothing is sent, so the record is left alone (Minor 3).
         """
-        before = module_answers.read_applied(self.server_dir, manifest)
-        applying = {p.key: vals[p.key] for p in required_prompts(manifest, "remove")}
-        problem = module_answers.record_applied(self.server_dir, manifest, applying)
+        if self.sql is None:
+            log.skipped.append(f"sql → {manifest.id}: no SQL runner configured")
+            return
+        db, text = self._relative_text(manifest, when, vals, undo)
+        after = (
+            {p.key: vals[p.key] for p in required_prompts(manifest, "remove")}
+            if when == "install"
+            else None
+        )
+        was_pending = module_answers.is_pending(self.server_dir, manifest)
+        problem = module_answers.record_pending(self.server_dir, manifest, after)
         if problem:
             raise ApplyError(
-                f"{manifest.id}: nothing was run. Yu'lon could not record the values it was "
-                f"about to apply ({problem}), and without that record the next Install or "
-                f"Remove could not undo them."
+                f"{manifest.id}: nothing was run. Yu'lon could not note in its record that "
+                f"this SQL was about to run ({problem}), and without that note an "
+                f"interrupted run could leave the record saying the wrong values."
             )
         try:
-            self._sql(manifest, clone, vals, "install", log, undo=undo)
+            self.sql.run_statement(db, text)
         except BaseException:
-            self._restore_applied(manifest, before)
+            # Rolled back, so the database is as the applied record says -- unless
+            # an EARLIER press was interrupted, whose mark must stay.
+            if not was_pending:
+                dropped = module_answers.clear_pending(self.server_dir, manifest)
+                if dropped:
+                    logger.warning(
+                        f"{manifest.id}: the SQL failed and its in-flight mark could not be "
+                        f"dropped ({dropped}); the next Install will be refused and Remove "
+                        f"will ask for the values"
+                    )
             raise
-
-    def _relative_remove_sql(
-        self, manifest: Manifest, clone: Path, vals: Mapping[str, str], log: _Log
-    ) -> None:
-        """Clear the applied record, run the remove SQL, and put the record back if it fails.
-
-        Cleared FIRST and fail-closed, for the mirror reason: a record left
-        behind after the divide would make the next Install divide again.
-        """
-        before = module_answers.read_applied(self.server_dir, manifest)
-        problem = module_answers.record_applied(self.server_dir, manifest, None)
-        if problem:
-            raise ApplyError(
-                f"{manifest.id}: nothing was run. Yu'lon could not clear its record of the "
-                f"values applied ({problem}), and with that record left behind the next "
-                f"Install would undo values that are no longer there."
+        if when == "install" and undo is not None:
+            log.done.append(
+                f"sql inline → {db}: undid the values applied last time and applied these, "
+                f"in one transaction"
             )
-        try:
-            self._sql(manifest, clone, vals, "remove", log)
-        except BaseException:
-            self._restore_applied(manifest, before)
-            raise
-
-    def _restore_applied(self, manifest: Manifest, before: Mapping[str, str] | None) -> None:
-        """Put the applied record back as it was after a failed press; logged if it cannot be."""
-        problem = module_answers.record_applied(self.server_dir, manifest, before)
+        else:
+            log.done.append(f"sql inline → {db}")
+        problem = module_answers.record_applied(self.server_dir, manifest, after)
         if problem:
-            logger.warning(
-                f"{manifest.id}: the SQL failed and the record of the values applied could "
-                f"not be put back ({problem}); it may no longer match the database"
+            log.skipped.append(
+                f"{module_answers.ANSWERS_FILE}: the SQL ran, but the record of what it "
+                f"applied could not be updated ({problem}); it stays marked as interrupted, "
+                f"so the next Install of {manifest.id} is refused and Remove asks for the values"
             )
 
     def _remember(self, manifest: Manifest, values: Mapping[str, str] | None, log: _Log) -> None:

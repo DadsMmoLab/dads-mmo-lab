@@ -101,6 +101,7 @@ def _load_for_write(path: Path) -> tuple[dict[str, Any] | None, str]:
         not isinstance(parsed, dict)
         or not isinstance(parsed.get("modules", {}), dict)
         or not isinstance(parsed.get("applied", {}), dict)
+        or not isinstance(parsed.get("pending", {}), dict)
     ):
         return None, f"{path.name} is not in a shape this version knows; it was left as it is"
     return parsed, ""
@@ -169,13 +170,14 @@ def read_applied(server_dir: Path, manifest: Manifest) -> dict[str, str] | None:
 def record_applied(server_dir: Path, manifest: Manifest, values: Mapping[str, str] | None) -> str:
     """Record `values` as what the database now holds for `manifest`; `None` deletes it (T115).
 
-    `""` if written (or if there was nothing to delete), else why not -- the
-    caller refuses on that, because relative SQL run with no record of it is
-    what made a second install multiply again. The same careful write as
-    `record_answers()`: every other entry and field is kept.
+    Called once the SQL has COMMITTED, so it also drops this module's `pending`
+    mark (`record_pending()`). `""` if written (or if there was nothing to
+    change), else why not. The same careful write as `record_answers()`: every
+    other entry and field is kept.
     """
     if values is None and read_applied(server_dir, manifest) is None:
-        return ""
+        if not is_pending(server_dir, manifest):
+            return ""
 
     def change(everything: dict[str, Any]) -> None:
         applied = everything.get("applied", {})
@@ -185,8 +187,68 @@ def record_applied(server_dir: Path, manifest: Manifest, values: Mapping[str, st
         else:
             applied[_key(manifest)] = {str(k): str(v) for k, v in values.items()}
         everything["applied"] = applied
+        _drop_pending(everything, manifest)
 
     return _write_record(server_dir, change, f"what was applied for {_key(manifest)}")
+
+
+def is_pending(server_dir: Path, manifest: Manifest) -> bool:
+    """Whether a press marked `manifest`'s relative SQL as being sent and never finished (T115).
+
+    A mark left behind means the app stopped while the statement was in flight:
+    it may have committed or not, so the applied record cannot be trusted.
+    `Applier.applied_record()` reads that as unusable -- a re-run is refused and
+    Remove asks -- rather than as either answer. Unreadable file: `False`, as
+    `read_applied()` answers `None` for it.
+    """
+    path = server_dir / ANSWERS_FILE
+    try:
+        with path.open(encoding="utf-8-sig") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    pending = parsed.get("pending") if isinstance(parsed, dict) else None
+    return isinstance(pending, dict) and _key(manifest) in pending
+
+
+def record_pending(server_dir: Path, manifest: Manifest, values: Mapping[str, str] | None) -> str:
+    """Mark `manifest`'s relative SQL as about to be sent, towards `values` (`None`: a Remove).
+
+    Written immediately before the statement -- after the running-world guards
+    and the database start, which can wait up to 180 s (cold review, T115 fix
+    wave) -- and replaced by `record_applied()` once it has committed. The
+    applied record itself is not touched here, so a failure before or during
+    the statement needs only `clear_pending()`. `""` if written, else why not;
+    the caller refuses the press on that, having sent nothing.
+    """
+
+    def change(everything: dict[str, Any]) -> None:
+        pending = everything.get("pending", {})
+        pending = dict(pending) if isinstance(pending, dict) else {}
+        target = None if values is None else {str(k): str(v) for k, v in values.items()}
+        pending[_key(manifest)] = {"to": target}
+        everything["pending"] = pending
+
+    return _write_record(server_dir, change, f"the SQL about to run for {_key(manifest)}")
+
+
+def clear_pending(server_dir: Path, manifest: Manifest) -> str:
+    """Drop the `pending` mark after a statement that FAILED: the database was not changed."""
+    if not is_pending(server_dir, manifest):
+        return ""
+    return _write_record(
+        server_dir,
+        lambda everything: _drop_pending(everything, manifest),
+        f"the SQL mark for {_key(manifest)}",
+    )
+
+
+def _drop_pending(everything: dict[str, Any], manifest: Manifest) -> None:
+    pending = everything.get("pending")
+    if isinstance(pending, dict) and _key(manifest) in pending:
+        pending = dict(pending)
+        pending.pop(_key(manifest))
+        everything["pending"] = pending
 
 
 def _write_record(server_dir: Path, change: Callable[[dict[str, Any]], None], what: str) -> str:
