@@ -36,13 +36,12 @@ them on its job runner.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from yulon import reset_defaults, tuning
-from yulon.catalog import composegen
+from yulon.catalog import bot_count, composegen
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
 from yulon.catalog.families.cmangos import ETC_DIR
@@ -52,18 +51,18 @@ from yulon.manifest import ConfKey
 
 logger = get_logger(__name__)
 
-MIN_KEY = "AiPlayerbot.MinRandomBots"
-MAX_KEY = "AiPlayerbot.MaxRandomBots"
+MIN_KEY = bot_count.MIN_KEY
+MAX_KEY = bot_count.MAX_KEY
 ACCOUNT_KEY = "AiPlayerbot.RandomBotAccountCount"
-MIN_ENV = composegen.env_name_for(MIN_KEY)
-MAX_ENV = composegen.env_name_for(MAX_KEY)
-CONF_NAME = "aiplayerbot.conf"
+MIN_ENV = bot_count.MIN_ENV
+MAX_ENV = bot_count.MAX_ENV
+CONF_NAME = bot_count.CONF_NAME
 CONF_FILE = f"{ETC_DIR}/{CONF_NAME}"
 
 CHARACTERS_PER_ACCOUNT = 9
 """cmangos playerbots' own cap outside `MANGOSBOT_TWO` (`RandomPlayerbotFactory.cpp:755-760`)."""
 
-NO_CEILING = 2**31 - 1
+NO_CEILING = bot_count.LARGEST
 """The largest whole number the cores read these keys as (`GetIntDefault`, `GetOption<int32>`).
 
 Not a recommendation: where the conf states no limit, this is the honest one.
@@ -254,57 +253,6 @@ def _read_text(path: Path) -> str:
         return handle.read()
 
 
-_ENV_LINE = re.compile(
-    r"^(?P<head>[ \t]*(?P<key>[A-Za-z_][A-Za-z0-9_]*)[ \t]*:[ \t]*)"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s#]*)(?P<tail>.*)$"
-)
-
-
-def _indent(line: str) -> int:
-    return len(line) - len(line.lstrip(" \t"))
-
-
-def _says_nothing(line: str) -> bool:
-    bare = line.strip()
-    return bare == "" or bare.startswith("#")
-
-
-def _env_lines(lines: list[str], service: str) -> dict[str, list[int]]:
-    """Where each key of `service`'s `environment:` mapping is, by line index. Comments skipped.
-
-    A line scanner and not a YAML round trip, on purpose: a YAML writer drops
-    comments and restyles what it emits (the override template's own header
-    says so), and this box must change two values and nothing else. The shape
-    it reads is the one the install writes -- `  <service>:` then
-    `    environment:` then `      KEY: "value"` lines; a block it cannot find
-    answers `{}`, which the caller refuses.
-    """
-    found: dict[str, list[int]] = {}
-    service_at: int | None = None
-    env_at: int | None = None
-    for index, raw in enumerate(lines):
-        line = raw.rstrip("\r")
-        if _says_nothing(line):
-            continue
-        depth = _indent(line)
-        if env_at is not None and depth <= env_at:
-            env_at = None
-        if service_at is not None and depth <= service_at:
-            service_at = None
-        if service_at is None:
-            if line.strip() == f"{service}:":
-                service_at = depth
-            continue
-        if env_at is None:
-            if line.strip() == "environment:":
-                env_at = depth
-            continue
-        match = _ENV_LINE.match(line)
-        if match is not None:
-            found.setdefault(match.group("key"), []).append(index)
-    return found
-
-
 def _world_service(entry: CatalogEntry) -> str:
     """The compose service that runs the world: the templates name it as its container."""
     return entry.container_spec().world
@@ -317,7 +265,7 @@ def _env_line(lines: list[str], entry: CatalogEntry, name: str, file: str) -> in
         BotCountError: the key is not there, or is there more than once.
     """
     service = _world_service(entry)
-    found = _env_lines(lines, service).get(name, [])
+    found = bot_count.env_lines(lines, service).get(name, [])
     if not found:
         raise BotCountError(ENV_MISSING.format(name=name, service=service, file=file))
     if len(found) > 1:
@@ -325,16 +273,11 @@ def _env_line(lines: list[str], entry: CatalogEntry, name: str, file: str) -> in
     return found[0]
 
 
-def _env_value(line: str) -> str:
-    match = _ENV_LINE.match(line.rstrip("\r"))
-    return "" if match is None else match.group("value").strip("\"'")
-
-
 def _set_env_value(line: str, value: str) -> str:
     """The same line with its value replaced: indent, key, separator, quotes, tail, CR kept."""
     ending = "\r" if line.endswith("\r") else ""
-    match = _ENV_LINE.match(line[: len(line) - len(ending)])
-    if match is None:  # `_env_lines` only hands over lines that match
+    match = bot_count.ENV_LINE.match(line[: len(line) - len(ending)])
+    if match is None:  # `bot_count.env_lines` only hands over lines that match
         raise BotCountError(f"not a `KEY: value` line: {line!r}")
     old = match.group("value")
     quote = old[0] if old[:1] in ('"', "'") else ""
@@ -386,7 +329,7 @@ def read(entry: CatalogEntry, server_dir: Path) -> Reading:
     lines = text.split("\n")
     try:
         low, high = (
-            _number(_env_value(lines[_env_line(lines, entry, name, path.name)]))
+            _number(bot_count.env_value(lines[_env_line(lines, entry, name, path.name)]))
             for name in (MIN_ENV, MAX_ENV)
         )
     except BotCountError as exc:

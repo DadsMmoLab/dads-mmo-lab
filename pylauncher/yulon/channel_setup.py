@@ -52,8 +52,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from yulon import commands, platform, soap
-from yulon.catalog import composegen
+from yulon import bot_population, commands, platform, soap
+from yulon.catalog import bot_count, composegen
 from yulon.catalog.catalog import CatalogEntry, ConfPatch
 from yulon.catalog.families import conf
 from yulon.log import get_logger
@@ -306,7 +306,9 @@ def enable(
         entry,
         server_dir,
         templates_root=templates_root,
-        world_env=_world_env(entry, operations.enable_env),
+        # The player's bot count, off the file this replaces (T117): the press
+        # rendered the catalog's 500 until then.
+        world_env=bot_count.world_env(entry, server_dir, _world_env(entry, operations.enable_env)),
         db_password=db_password,
     )
     if plan.override == before:
@@ -469,7 +471,11 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
         )
         composegen.write_dotenv(server_dir, {HOST_PORT_VAR: RELEASED_HOST_PORT})
         return True
-    target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    target.write_text(
+        _keep_the_bot_count(entry, now, backup.read_text(encoding="utf-8")),
+        encoding="utf-8",
+        newline="\n",
+    )
     # The `.env` before the unlink, and the unlink last. An interruption then
     # leaves the backup on disk with the override already restored, and running
     # this again is a no-op that finishes the job -- whereas deleting the only
@@ -484,6 +490,23 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
     _forget_the_conf_backup(entry, server_dir)
     logger.info(f"rolled {entry.id}'s command channel back and released its host port")
     return True
+
+
+def _keep_the_bot_count(entry: CatalogEntry, now: str, restored: str) -> str:
+    """The pre-press file to put back, carrying the bot count `now` holds (T117).
+
+    The backup is the override before the FIRST press, so it holds the count
+    from then: one changed on the Bots tab while the channel was on would go
+    back with the channel. Only the two values move; a backup without the two
+    lines, or a `now` without a usable pair, is put back as it was.
+    """
+    kept = bot_count.in_override_text(now, entry)
+    if not kept:
+        return restored
+    try:
+        return bot_population.patch_env(restored, entry, composegen.OVERRIDE_FILE, kept)
+    except bot_population.BotCountError:
+        return restored
 
 
 def _forget_the_conf_backup(entry: CatalogEntry, server_dir: Path) -> None:
@@ -1009,7 +1032,9 @@ class InstallChannel:
                     self.entry,
                     self.server_dir,
                     templates_root=self.templates_root,
-                    world_env=_world_env(self.entry, operations.enable_env),
+                    world_env=bot_count.world_env(
+                        self.entry, self.server_dir, _world_env(self.entry, operations.enable_env)
+                    ),
                     db_password=self._db_password,
                 ).override
             except Exception as exc:  # noqa: BLE001 - an unrenderable plan is not a reason to stop

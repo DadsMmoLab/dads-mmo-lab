@@ -70,7 +70,7 @@ from secrets import token_hex
 from typing import ClassVar, Protocol
 
 from yulon import dbsecret, docker, git, networking, platform, resources, runner
-from yulon.catalog import composegen, preflight
+from yulon.catalog import bot_count, composegen, preflight
 from yulon.catalog.catalog import (
     CatalogEntry,
     EmulatorSource,
@@ -5929,12 +5929,21 @@ class StagedInstaller:
         # brought the world up with `AC_SOAP_ENABLED` gone and nothing on the
         # channel's port. `None` on a first install (no press yet), which is
         # `render()`'s own default.
+        #
+        # And the player's bot count rides over it (T117): the Bots box writes
+        # Min/Max into this same file, and rendering the catalog's 500 again put
+        # it back on every Repair and Update. Read off the file being replaced,
+        # never probed; no usable pair in it leaves the catalog's number.
         try:
             plan = composegen.render(
                 self.entry,
                 ctx.server_dir,
                 templates_root=self.installers_root,
-                world_env=composegen.channel_world_env(self.entry, ctx.server_dir),
+                world_env=bot_count.world_env(
+                    self.entry,
+                    ctx.server_dir,
+                    composegen.channel_world_env(self.entry, ctx.server_dir),
+                ),
                 db_password=ctx.secrets.db_password,
                 bind_label=label,
                 platform_id=self._seams.platform_id,
