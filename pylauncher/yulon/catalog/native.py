@@ -1848,6 +1848,17 @@ def _git_commits_since(dest: Path, rev: str) -> int | None:
     return git.ContainerGit().commits_since(dest, rev)
 
 
+def _upstream_get(url: str, accept: str) -> bytes:
+    """`upstream.https_get`, looked up at CALL time.
+
+    Not `= upstream.https_get` bound into `Seams` at import, for the reason
+    `Seams.selinux_enforcing` records: a default bound at class definition is a
+    function object no later patch of the module can reach, so the suite's
+    guard against real GitHub calls (`conftest`) could not see it (T124 review).
+    """
+    return upstream.https_get(url, accept)
+
+
 def _git_restore_rev(dest: Path, rev: str) -> None:
     """Put this checkout back on `rev`, containerised. Raises `git.GitError`."""
     git.ContainerGit().restore_rev(dest, rev)
@@ -2695,7 +2706,7 @@ class Seams:
     head_sha: Callable[[Path], str | None] = _git_head_sha
     head_version: Callable[[Path], str | None] = _git_head_version
     commits_since: Callable[[Path, str], int | None] = _git_commits_since
-    upstream_get: upstream.HttpGet = upstream.https_get
+    upstream_get: upstream.HttpGet = _upstream_get
     """The one network read T124's line makes: GitHub's compare API, per source.
 
     A seam for the reason every network call here is one: a test that could
@@ -4190,12 +4201,12 @@ class StagedInstaller:
     ) -> upstream.UpstreamNews:
         """How far upstream is past what each moving source was built from (T124). Never raises.
 
-        The cached reading while it is fresh (`upstream.read_cached()`), which
-        is what keeps a tab opened ten times a day -- or a Refresh pressed ten
-        times -- to one set of requests. Otherwise each source that an update
-        would move is read for its HEAD through the read-only container, and
-        GitHub is asked how far its branch is past that HEAD; the answer is
-        kept beside the install record.
+        Each source's cached row while it is fresh (`upstream.read_cached()`),
+        which is what keeps a tab opened ten times a day -- or a Refresh pressed
+        ten times -- to one set of requests. A source with no fresh row is read
+        for its HEAD through the read-only container, and GitHub is asked how
+        far its branch is past that HEAD; the answers are kept beside the
+        install record.
 
         Only the sources `sources_that_move()` names. A `*-db` repository stays
         on its pin through "Update the server to latest…", so counting its new
@@ -4210,19 +4221,27 @@ class StagedInstaller:
         moving = self.sources_that_move()
         clock = upstream.now_unix() if now is None else now
         repos = [source.repo for source in moving]
-        cached = upstream.read_cached(server_dir, repos, clock)
-        if cached is not None:
-            return cached
+        fresh = upstream.read_cached(server_dir, repos, clock)
         found: list[upstream.SourceNews] = []
+        asked = False
         for index, source in enumerate(moving):
+            kept = fresh.get(source.repo)
+            if kept is not None:
+                found.append(kept)
+                continue
+            asked = True
             label = "server" if index == 0 else source.repo.rsplit("/", 1)[-1]
             found.append(
                 upstream.SourceNews(
-                    repo=source.repo, label=label, behind=self._behind(server_dir, source)
+                    repo=source.repo,
+                    label=label,
+                    behind=self._behind(server_dir, source),
+                    checked_unix=clock,
                 )
             )
-        news = upstream.UpstreamNews(checked_unix=clock, sources=tuple(found))
-        if (server_dir / STATE_FILE).is_file():
+        taken = clock if asked or not found else min(row.checked_unix for row in found)
+        news = upstream.UpstreamNews(checked_unix=taken, sources=tuple(found))
+        if asked and (server_dir / STATE_FILE).is_file():
             upstream.write_cached(server_dir, news)
         return news
 
@@ -4443,74 +4462,79 @@ class StagedInstaller:
             )
         plan = self._refuse_unless_updatable(server_dir, moving)
         # T124: the count on the Server tab was taken against the HEADs this
-        # press is about to move. Dropped before the first fetch AND again once
-        # the press is over, whichever way it ends: a tab that re-counted while
-        # the press was running would otherwise have cached the old HEAD's
-        # figure for a day, and a press that failed put the old HEADs back.
+        # press is about to move. Dropped here, before the first fetch, so a
+        # count asked while the press runs is asked again rather than served
+        # the pre-press figure; and dropped again in the `finally` below, for
+        # a count cached while the press ran.
         upstream.forget(server_dir)
         where = "the commit this app was tested against" if to_pin else "the newest upstream code"
         yield f"Moving {self.entry.name}'s sources in {server_dir} to {where}."
         yield RETURN_TO_PIN_OPENING_NOTE if to_pin else UPDATE_TO_LATEST_OPENING_NOTE
         self._check_cancel(cancel)
-        moved: list[tuple[EmulatorSource, Path, str]] = []
         try:
-            for source, dest, old in plan:
+            moved: list[tuple[EmulatorSource, Path, str]] = []
+            try:
+                for source, dest, old in plan:
+                    self._check_cancel(cancel)
+                    yield f"Fetching {source.repo} into {source.dest}."
+                    # `rev=None` is what makes this an update rather than a re-pin:
+                    # `git.RunnerGit.clone()` sees an existing `.git`, runs
+                    # `_update()` -- fetch, then `reset --hard FETCH_HEAD` -- and
+                    # `_pin()` then returns immediately. With `rev=source.rev` the
+                    # same two calls run and the pin is re-applied on top, which is
+                    # the way back. One seam, two directions, no second fetch path.
+                    #
+                    # APPENDED BEFORE the call and not after: `clone_lines()` can
+                    # fail half way through, after the reset has already landed, and
+                    # a source that is not in `moved` is a source nothing puts back.
+                    moved.append((source, dest, old))
+                    yield from self._clone_lines(
+                        git.CloneSpec(
+                            url=source.url,
+                            dest=dest,
+                            branch=source.branch,
+                            sparse_path=source.sparse_path,
+                            depth=source.depth,
+                            rev=source.rev if to_pin else None,
+                        ),
+                        UPDATE_SOURCES_STAGE,
+                    )
+                    yield self._moved_line(source, dest, old)
                 self._check_cancel(cancel)
-                yield f"Fetching {source.repo} into {source.dest}."
-                # `rev=None` is what makes this an update rather than a re-pin:
-                # `git.RunnerGit.clone()` sees an existing `.git`, runs
-                # `_update()` -- fetch, then `reset --hard FETCH_HEAD` -- and
-                # `_pin()` then returns immediately. With `rev=source.rev` the
-                # same two calls run and the pin is re-applied on top, which is
-                # the way back. One seam, two directions, no second fetch path.
-                #
-                # APPENDED BEFORE the call and not after: `clone_lines()` can
-                # fail half way through, after the reset has already landed, and
-                # a source that is not in `moved` is a source nothing puts back.
-                moved.append((source, dest, old))
-                yield from self._clone_lines(
-                    git.CloneSpec(
-                        url=source.url,
-                        dest=dest,
-                        branch=source.branch,
-                        sparse_path=source.sparse_path,
-                        depth=source.depth,
-                        rev=source.rev if to_pin else None,
-                    ),
-                    UPDATE_SOURCES_STAGE,
-                )
-                yield self._moved_line(source, dest, old)
-            self._check_cancel(cancel)
-            yield from self.check_carried_patches(server_dir)
-            yield from self._rewrite_what_we_own(server_dir, opts, state)
-            yield from self.apply_carried_patches(server_dir)
-        except (InstallerError, OSError) as exc:
-            # `OSError` as well, and not for symmetry: everything between the
-            # first fetch and the compile WRITES -- `_rewrite_what_we_own()`
-            # renders three compose files, `apply_carried_patches()` writes into
-            # the checkout -- and a full disk or a read-only mount surfaces as a
-            # bare `OSError` that no `InstallerError` wraps. Skipping the
-            # restore on it would leave the folder ahead of the image for the
-            # one failure most likely to happen twice in a row (cold review
-            # round 2, 2026-09-16).
-            yield from self._restore_the_folder(moved, server_dir, opts, state)
+                yield from self.check_carried_patches(server_dir)
+                yield from self._rewrite_what_we_own(server_dir, opts, state)
+                yield from self.apply_carried_patches(server_dir)
+            except (InstallerError, OSError) as exc:
+                # `OSError` as well, and not for symmetry: everything between the
+                # first fetch and the compile WRITES -- `_rewrite_what_we_own()`
+                # renders three compose files, `apply_carried_patches()` writes into
+                # the checkout -- and a full disk or a read-only mount surfaces as a
+                # bare `OSError` that no `InstallerError` wraps. Skipping the
+                # restore on it would leave the folder ahead of the image for the
+                # one failure most likely to happen twice in a row (cold review
+                # round 2, 2026-09-16).
+                yield from self._restore_the_folder(moved, server_dir, opts, state)
+                raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+            try:
+                yield from self.rebuild(opts, cancel=cancel)
+            except InstallerError as exc:
+                # AFTER `rebuild()` has done its own rollback, never instead of it.
+                # It puts the IMAGE back; this puts the SOURCE back; and it is the
+                # pair that makes the folder and the running container agree again.
+                yield from self._restore_the_folder(moved, server_dir, opts, state)
+                raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
+            self._record_source_revs(server_dir, state, moved)
+            landed = (
+                "the commit this app was tested against" if to_pin else "the newest upstream code"
+            )
+            yield f"{self.entry.name} is running on {landed}."
+        finally:
+            # T124's second drop, and the one that covers EVERY way out: a
+            # success, a failure after the sources went back, a Cancel, and a
+            # generator closed half way (GeneratorExit is none of the handled
+            # exceptions). It exists for a count asked WHILE the press ran,
+            # which cached the moved -- or about-to-be-restored -- HEADs.
             upstream.forget(server_dir)
-            raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
-        try:
-            yield from self.rebuild(opts, cancel=cancel)
-        except InstallerError as exc:
-            # AFTER `rebuild()` has done its own rollback, never instead of it.
-            # It puts the IMAGE back; this puts the SOURCE back; and it is the
-            # pair that makes the folder and the running container agree again.
-            yield from self._restore_the_folder(moved, server_dir, opts, state)
-            upstream.forget(server_dir)
-            raise InstallerError(f"{exc} {SOURCES_PUT_BACK_NOTE}") from exc
-        self._record_source_revs(server_dir, state, moved)
-        upstream.forget(server_dir)
-        yield (
-            f"{self.entry.name} is running on "
-            f"{'the commit this app was tested against' if to_pin else 'the newest upstream code'}."
-        )
 
     def _refuse_unless_updatable(
         self, server_dir: Path, moving: Sequence[EmulatorSource]

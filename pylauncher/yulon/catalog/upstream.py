@@ -141,6 +141,9 @@ class SourceNews:
     """What the line calls it: "server" for the core, the repository's name otherwise."""
     behind: int | None
     """Commits upstream has past this checkout's HEAD. `None` = could not ask."""
+    checked_unix: int = 0
+    """When THIS source was asked. Per source, so one that failed (a 403, a timeout)
+    is asked again after `RETRY_SECONDS` while the ones that answered keep their day."""
 
 
 @dataclass(frozen=True)
@@ -177,45 +180,48 @@ def line(news: UpstreamNews | None) -> str:
     )
 
 
-def read_cached(server_dir: Path, repos: Sequence[str], now: float) -> UpstreamNews | None:
-    """The cached reading if it is still fresh for these sources, else None.
+def read_cached(server_dir: Path, repos: Sequence[str], now: float) -> dict[str, SourceNews]:
+    """The cached rows that are still fresh, by repository. Empty when there are none.
 
-    Stale when older than `MAX_AGE_SECONDS` (or `RETRY_SECONDS` if nothing
-    answered), when it is from the future (a clock set back), or when it is
-    about a different set of sources -- a newer app that moves a different
-    source must not be told a count about the old one.
+    Freshness is PER SOURCE: a row that answered is kept `MAX_AGE_SECONDS`, a
+    row that could not be asked `RETRY_SECONDS`, each from its own
+    `checked_unix`. So a 403 on one source is asked about again within the
+    hour without re-asking the sources that answered.
+
+    Nothing is served from a file that is damaged, from the future (a clock set
+    back), or about a different set of sources -- a newer app that moves a
+    different source must not be told a count about the old one.
     """
     path = server_dir / UPSTREAM_FILE
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return {}
     try:
         if payload["version"] != CACHE_VERSION:
-            return None
+            return {}
         checked = int(payload["checked_unix"])
-        rows = payload["sources"]
-        news = UpstreamNews(
-            checked_unix=checked,
-            sources=tuple(
-                SourceNews(
-                    repo=str(row["repo"]),
-                    label=str(row["label"]),
-                    behind=None if row["behind"] is None else int(row["behind"]),
-                )
-                for row in rows
-            ),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
+        rows = [
+            SourceNews(
+                repo=str(row["repo"]),
+                label=str(row["label"]),
+                behind=None if row["behind"] is None else int(row["behind"]),
+                checked_unix=int(row.get("checked_unix", checked)),
+            )
+            for row in payload["sources"]
+        ]
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
         logger.debug(f"{path} is not a reading this build can use: {exc}")
-        return None
-    if [source.repo for source in news.sources] != list(repos):
-        return None
-    age = now - checked
-    limit = MAX_AGE_SECONDS if news.answered() else RETRY_SECONDS
-    if age < 0 or age >= limit:
-        return None
-    return news
+        return {}
+    if [row.repo for row in rows] != list(repos):
+        return {}
+    fresh: dict[str, SourceNews] = {}
+    for row in rows:
+        age = now - row.checked_unix
+        limit = MAX_AGE_SECONDS if row.behind is not None else RETRY_SECONDS
+        if 0 <= age < limit:
+            fresh[row.repo] = row
+    return fresh
 
 
 def write_cached(server_dir: Path, news: UpstreamNews) -> None:
@@ -225,7 +231,12 @@ def write_cached(server_dir: Path, news: UpstreamNews) -> None:
         "version": CACHE_VERSION,
         "checked_unix": news.checked_unix,
         "sources": [
-            {"repo": source.repo, "label": source.label, "behind": source.behind}
+            {
+                "repo": source.repo,
+                "label": source.label,
+                "behind": source.behind,
+                "checked_unix": source.checked_unix or news.checked_unix,
+            }
             for source in news.sources
         ],
     }
