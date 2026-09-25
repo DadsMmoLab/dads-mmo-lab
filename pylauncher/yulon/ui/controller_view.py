@@ -26,7 +26,7 @@ import re
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -92,6 +92,7 @@ from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tbc import modules as tbc_modules
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
 from yulon.controller_wow_tortoise import autoupdate as tortoise_autoupdate
+from yulon.controller_wow_tortoise import botpool as tortoise_botpool
 from yulon.controller_wow_tortoise import console as tortoise_console
 from yulon.controller_wow_tortoise import controller as tortoise_controller
 from yulon.controller_wow_tortoise import maintenance as tortoise_maintenance
@@ -2150,7 +2151,10 @@ def _for_tortoise(
         sql=sql,
         channel_for_saved=channel.live_channel,
     )
-    return _assemble(
+    lifecycle = tortoise_controller.controller_for(
+        server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+    )
+    services = _assemble(
         entry,
         server_dir,
         client_dir=client_dir,
@@ -2161,9 +2165,7 @@ def _for_tortoise(
         accounts=accounts_admin,
         play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),
-        controller=tortoise_controller.controller_for(
-            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
-        ),
+        controller=lifecycle,
         sql=sql,
         # This package's `send()` takes no container: it addresses its own
         # entry's worldserver, which is the same catalog fact `spec.world` is.
@@ -2236,6 +2238,31 @@ def _for_tortoise(
         ),
         restore=lambda plan: tortoise_maintenance.restore(
             plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
+        ),
+    )
+    # T123. Moving the bots module onto its registry (TortoiseBots #265) leaves
+    # the bots an older module made on accounts it ignores, and only the update
+    # route moves that checkout. So both of its presses end by enrolling them --
+    # over SOAP first, which this core runs at console level, then the attach
+    # console -- and restarting the world, which is when the module loads them.
+    # `botpool.py` holds the measurement.
+    console_channel = channel_module.AttachChannel(
+        send=lambda cmd, **kw: tortoise_console.send(cmd, wsl_distro=wsl_distro, **kw)
+    )
+
+    def adoption_channels() -> list[channel_module.Channel]:
+        soap = channel.live_channel()
+        found = [soap] if isinstance(soap, channel_module.SoapChannel) else []
+        return [*found, console_channel]
+
+    return replace(
+        services,
+        update_to_latest=tortoise_botpool.wrap_route(
+            services.update_to_latest,
+            entry,
+            server_dir,
+            channels=adoption_channels,
+            restart=lambda: tortoise_botpool.restart_world(lifecycle),
         ),
     )
 
