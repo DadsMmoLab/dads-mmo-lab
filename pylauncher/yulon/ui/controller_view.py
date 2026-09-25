@@ -27,6 +27,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -71,6 +72,7 @@ from yulon import (
     party,
     platform,
     purge,
+    reset_defaults,
     resources,
     tuning,
     useraccounts,
@@ -915,6 +917,14 @@ class ControllerServices:
     included, to say which of its three sentences applies.
     """
 
+    reset_settings: reset_defaults.ResetRoute | None = None
+    """The Tuning tab's Reset to default (T94), bound to this install.
+
+    Wired in `_assemble` for every game -- which files are a game's own and how
+    each default is made are catalog facts, not per-game decisions. `None` (a
+    hand-built services object) leaves the button dead.
+    """
+
     set_client_dir: Callable[[Path | None], None] | None = None
     """Write a new client folder (or clear it with `None`) for THIS install (T36).
 
@@ -1310,6 +1320,10 @@ def _assemble(
         repair_compose=install_wiring.repair_compose_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
+        # T94. HERE for the rebuild's reason: the file set and how each default
+        # is made are catalog facts every game's tab reads the same way. The
+        # WSL refusal lives in the route, where the distro is known.
+        reset_settings=reset_defaults.route_for_app(entry, server_dir, wsl_distro=wsl_distro),
     )
 
 
@@ -3766,17 +3780,112 @@ TUNING_CORE_FILE = (
 )
 """Why `worldserver.conf` is listed but not editable here (T43's own follow-up)."""
 
-TUNING_CORE_FILES: tuple[str, ...] = (
-    "env/dist/etc/worldserver.conf",
-    "env/dist/etc/authserver.conf",
-    "env/dist/etc/modules/playerbots.conf",
-)
+
+@dataclass(frozen=True)
+class UndoLookup:
+    """One answer to "what would Undo the last reset put back", and which reload asked."""
+
+    generation: int
+    items: tuple[reset_defaults.FileResult, ...]
+
+
+@dataclass(frozen=True)
+class PressAnswer:
+    """One press's own facts, read fresh by a job, and which press and reload asked.
+
+    Codex (final pass): the question must describe the files as they are WHEN
+    the player is asked -- not as a reload hours earlier found them.
+    """
+
+    token: int
+    generation: int
+    facts: reset_defaults.PressFacts
+    error: str = ""
+    """Why the files could not be read -- carried in the tagged answer, so a failure is
+    checked against the waiting press exactly as a success is (Codex, last pass)."""
+
+
+@dataclass(frozen=True)
+class _PressAsking:
+    """A press waiting for its own facts: which press, which reload, and what it asked for."""
+
+    token: int
+    generation: int
+    files: tuple[str, ...]
+    keys: dict[str, tuple[str, ...]]
+    modules: list[str]
+
+
+def _read_press_facts(
+    entry: CatalogEntry, server_dir: Path, files: tuple[str, ...], token: int, generation: int
+) -> PressAnswer:
+    """A press's facts, as a job: a stat per file and a read of the base compose file.
+
+    A failure comes back INSIDE the answer, tagged with its press: the job
+    runner's failure callback is a bound slot with no way to say which press
+    failed, and an untagged failure let a stale press clear the waiting one.
+    """
+    try:
+        facts = reset_defaults.press_facts(entry, server_dir, files)
+    except Exception as exc:  # boundary: an unreadable server folder must not kill the UI
+        return PressAnswer(token, generation, reset_defaults.PressFacts(), error=str(exc))
+    return PressAnswer(token, generation, facts)
+
+
+def _undo_still_undoable(
+    server_dir: Path, items: tuple[reset_defaults.FileResult, ...]
+) -> reset_defaults.ResetReport:
+    """The Undo press's job: re-check each item NOW, then undo what still needs it.
+
+    The items come from the last lookup, which may be older than the files: a
+    file put back by hand since must not be backed up and copied over again.
+    """
+    return reset_defaults.undo(server_dir, reset_defaults.still_undoable(server_dir, items))
+
+
+def _look_up_undo(
+    entry: CatalogEntry,
+    server_dir: Path,
+    session: tuple[reset_defaults.FileResult, ...],
+    generation: int,
+) -> UndoLookup:
+    """The Tuning tab's Undo lookup, as a job: it lists folders and reads files (T94)."""
+    return UndoLookup(generation, reset_defaults.undo_items(entry, server_dir, session))
+
+
+TUNING_CORE_FILES: tuple[str, ...] = reset_defaults.AZEROTHCORE_CORE_FILES
 """The install's own conf files, listed read-only beside the module ones.
 
-Named here and not discovered by a glob of `env/dist/etc`: a glob would also
-list every module conf a second time, and the point of the list is that these
-three are the ones this tab deliberately will not write.
+Named (in `reset_defaults`, since T94) and not discovered by a glob of
+`env/dist/etc`: a glob would also list every module conf a second time, and
+the point of the list is that these three are the ones this tab deliberately
+will not write.
 """
+
+TUNING_RESET_LABEL = "Reset to default"
+TUNING_RESET_ALL = "All server settings…"
+TUNING_RESET_UNDO = "Undo the last reset…"
+"""T94's menu. The ellipses are this app's "a dialog opens first" convention."""
+
+TUNING_RESET_TIP = (
+    "Put this server's own settings files back to how Yu'lon installed it. Module files are "
+    "kept, and a backup of each file is made first."
+)
+TUNING_RESET_RUNNING = (
+    "Yu'lon is putting this server's settings files back. It takes a few seconds; this window "
+    "closes normally once it is done."
+)
+"""The close guard's sentence while a reset or its undo runs (`busy_reason()`)."""
+
+TUNING_RESET_UNREADABLE = "FAILED: the settings files could not be read ({why})"
+TUNING_RESET_NOTHING_TO_UNDO = (
+    "Nothing to undo: every file is already as the last reset found it, or was put back since."
+)
+TUNING_RESET_UNDO_CONFIRM = (
+    "Put back the files the last reset replaced?\n\n{files}\n\nEach one is copied back from "
+    "the backup named beside it. Anything you changed in them since the reset is replaced, and "
+    "kept first: each file as it is now is backed up beside it (an .undo-….bak)."
+)
 
 MODULE_SQL_BUTTON_LABEL = "Apply module SQL"
 """The Modules tab's import button, named once.
@@ -4443,6 +4552,10 @@ class ControllerView(QWidget):
         outcome: the import cannot be stopped, so the only choice available was
         ever between waiting and a crash (review, 2026-08-23).
         """
+        # T94: a reset or its undo is writing the server's own confs, and a
+        # QThread destroyed mid-job aborts the process (see above).
+        if self._reset_running:
+            return TUNING_RESET_RUNNING
         if self._uninstall_running:
             return UNINSTALL_RUNNING
         if self._module_sql_running:
@@ -5106,6 +5219,8 @@ class ControllerView(QWidget):
             self.tuning_restart_button.setEnabled(False)
             self.tuning_banner_button.setEnabled(False)
             self.compose_banner_button.setEnabled(False)
+            # T94: a reset writes the same confs, and its undo puts them back.
+            self.tuning_reset_button.setEnabled(False)
         else:
             self.compose_banner_button.setEnabled(True)
             self.refresh_button.setEnabled(True)
@@ -5131,6 +5246,8 @@ class ControllerView(QWidget):
             # that rule lives, so it is what unlocks them.
             self.tuning_reload_button.setEnabled(True)
             self.tuning_banner_button.setEnabled(True)
+            # Back to whether this tab HAS a route, never unconditionally.
+            self._set_reset_button()
             self._set_tuning_revert_all()
             self._refresh_tuning_owed()
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
@@ -9331,9 +9448,34 @@ class ControllerView(QWidget):
         self.tuning_restart_button.clicked.connect(self.restart_server)
         self.tuning_restart_button.setToolTip(TUNING_RESTART_TIP)
         self.tuning_restart_button.setEnabled(False)
+        # T94. A menu and not two buttons: "all" and "one file" are one action
+        # at two sizes, and the per-file entries are this game's own files from
+        # the catalog. Undo sits in the same menu because the raw editor lists
+        # the WotLK confs read-only, so its Revert cannot reach their backups.
+        self._reset_files = reset_defaults.core_files(self.entry)
+        self.tuning_reset_button = QPushButton(TUNING_RESET_LABEL, tab)
+        self.tuning_reset_button.setToolTip(TUNING_RESET_TIP)
+        self.tuning_reset_menu = QMenu(self.tuning_reset_button)
+        self.tuning_reset_menu.addAction(TUNING_RESET_ALL).triggered.connect(
+            self.reset_all_to_default
+        )
+        self.tuning_reset_menu.addSeparator()
+        for file in self._reset_files:
+            action = self.tuning_reset_menu.addAction(f"{reset_defaults.label(file)}…")
+            # A GUI-thread signal into a GUI-thread call, so a lambda is safe
+            # here; the JOB's callbacks below are bound slots (`_run()`).
+            action.triggered.connect(lambda _checked=False, one=file: self.reset_to_default((one,)))
+        self.tuning_reset_menu.addSeparator()
+        self.tuning_reset_undo_action = self.tuning_reset_menu.addAction(TUNING_RESET_UNDO)
+        self.tuning_reset_undo_action.triggered.connect(self.undo_last_reset)
+        self.tuning_reset_undo_action.setEnabled(False)
+        self.tuning_reset_button.setMenu(self.tuning_reset_menu)
+        self.tuning_reset_button.setVisible(bool(self._reset_files))
+        self.tuning_reset_button.setEnabled(self.services.reset_settings is not None)
         actions = QHBoxLayout()
         actions.addWidget(self.tuning_reload_button)
         actions.addWidget(self.tuning_revert_all_button)
+        actions.addWidget(self.tuning_reset_button)
         actions.addStretch(1)
         actions.addWidget(self.tuning_recreate_button)
         actions.addWidget(self.tuning_restart_button)
@@ -9384,6 +9526,19 @@ class ControllerView(QWidget):
         # and forgotten on restart for the same reason: a persisted marker is
         # a file with its own invalidation rules (T42's "Not in scope").
         self._tuning_owed: dict[str, set[str]] = {}
+        # T94: a reset or undo in flight (the close guard reads it through
+        # `busy_reason()`), and what the last reset of this session wrote, for
+        # its Undo. Empty, the Undo reads the last press off the disk instead.
+        self._reset_running = False
+        self._last_reset: tuple[reset_defaults.FileResult, ...] = ()
+        # What the Undo would put back, as its last lookup answered, and which
+        # lookup is the newest: an older answer landing late is dropped.
+        self._undo_items: tuple[reset_defaults.FileResult, ...] = ()
+        self._undo_generation = 0
+        # The press waiting for its own facts job: its token, and what it asked
+        # for. A newer press or a reload makes an older answer stale.
+        self._press_token = 0
+        self._press_asking: _PressAsking | None = None
         self.reload_tuning()
         self.tuning_panel.set_enabled_actions(self._module_actions_allowed())
 
@@ -9407,6 +9562,11 @@ class ControllerView(QWidget):
         # drift (T44 item 13).
         self.tuning_panel.set_files(self._tuning_files(), read_only=TUNING_CORE_FILES)
         self._set_tuning_revert_all()
+        # T94: whether an undo has anything to put back, asked again of the
+        # files -- off the GUI thread (final review): it lists up to five
+        # folders and reads each core file and backup, over 9p for a server
+        # inside WSL.
+        self._look_up_reset_undo()
 
     @Slot()
     def _set_tuning_revert_all(self) -> None:
@@ -9446,15 +9606,18 @@ class ControllerView(QWidget):
             )
         )
 
-    def _note_tuning_owed(self, file: str) -> None:
+    def _note_tuning_owed(self, file: str, rule: tuning.ApplyRule | None = None) -> None:
         """Record that `file` has been written and the server has not picked it up.
 
         The job is `tuning.file_rule()`'s, never a guess: a conf inside a
         directory the compose binds is read off the user's own disk at world
         start and a restart is enough; one outside every bind is a copy baked
-        into the image, and only a recreate picks the new one up.
+        into the image, and only a recreate picks the new one up. `rule` is for
+        a caller that knows better than `file_rule()`: T94's reset prices the
+        compose override as a recreate, which `file_rule()` calls read-only
+        (`reset_defaults.apply_rule`).
         """
-        rule = tuning.file_rule(file)
+        rule = rule or tuning.file_rule(file)
         if rule in TUNING_JOB_WORDS:
             self._tuning_owed.setdefault(rule, set()).add(file)
         self._refresh_tuning_owed()
@@ -9685,6 +9848,248 @@ class ControllerView(QWidget):
         self._refresh_tuning_owed()
         self.tuning_report.setPlainText(f"FAILED: {exc}")
         self.action_failed.emit(str(exc))
+
+    # -- T94: Reset to default
+
+    @Slot()
+    def reset_all_to_default(self) -> None:
+        self.reset_to_default(self._reset_files)
+
+    def reset_to_default(self, files: Sequence[str]) -> None:
+        """Ask once, then put `files` back to how Yu'lon installed this server, off the GUI thread.
+
+        Allowed while the server runs (owner, 2026-09-23): the files change on
+        disk and the banner offers the restart or recreate that makes them
+        count. Refused while another action of ours runs, which may be reading
+        these files.
+        """
+        route = self.services.reset_settings
+        if route is None or self._busy or not files:
+            return
+        chosen = tuple(files)
+        # Owner decision 5: the keys installed modules keep in these files,
+        # from this tab's OWN rows (`tuning.rows_for`), whose `file` is the
+        # manifest's spelling -- `env/dist/etc/...` on WotLK, `etc/...` on
+        # CMaNGOS -- which is `core_files()`'s. Read here, on the GUI thread,
+        # because they are already in memory; the worker gets a copy.
+        keys = reset_defaults.module_keys(self._tuning_rows, chosen)
+        modules = sorted(
+            {
+                row.module_name
+                for row in self._tuning_rows
+                if row.key in keys.get(row.file, ())
+                # A key the install table writes is not kept (`install_keys`),
+                # so a module holding only those is not named as kept either.
+                and row.key.casefold() not in reset_defaults.install_keys(self.entry, row.file)
+            }
+        )
+        # The question names what the press will do to each file -- left
+        # alone, made again, left absent -- so it is built from THIS press's
+        # own facts, read fresh by a job (Codex final pass: a reload's answer
+        # can be hours old; re-review: never a stat or a read on the GUI
+        # thread). The button stays dead until they land.
+        self._press_token += 1
+        self._press_asking = _PressAsking(
+            self._press_token, self._undo_generation, chosen, keys, modules
+        )
+        self._set_reset_button()
+        self._run(
+            partial(
+                _read_press_facts,
+                self.entry,
+                self.services.controller.server_dir,
+                chosen,
+                self._press_token,
+                self._undo_generation,
+            ),
+            self._press_facts_ready,
+            self._press_facts_failed,
+        )
+
+    @Slot(object)
+    def _press_facts_ready(self, answer: object) -> None:
+        """This press's facts: ask the question from them, and hold the reset to them.
+
+        Dropped when it is not the waiting press's answer -- a newer press, or
+        a reload since (the tab moved on; the player presses again).
+        """
+        asking = self._press_asking
+        if (
+            not isinstance(answer, PressAnswer)
+            or asking is None
+            or answer.token != asking.token
+            or answer.generation != asking.generation
+            or answer.generation != self._undo_generation
+        ):
+            return
+        self._press_asking = None
+        self._set_reset_button()
+        if answer.error:
+            self.tuning_report.setPlainText(TUNING_RESET_UNREADABLE.format(why=answer.error))
+            self.action_failed.emit(answer.error)
+            return
+        chosen, keys, modules = asking.files, asking.keys, asking.modules
+        route = self.services.reset_settings
+        if route is None or self._busy:
+            return
+        facts = answer.facts
+        if not self._confirm(
+            TUNING_RESET_LABEL, reset_defaults.question(chosen, modules, facts=facts)
+        ):
+            return
+        self._reset_running = True
+        self._set_busy(True)
+        self.tuning_report.setPlainText("putting the settings back to how Yu'lon installed them…")
+        # The facts the player said Yes to go with the press: `reset()`
+        # refuses, writing nothing, if any file's case changed since.
+        self._run(partial(route, chosen, keys, facts), self._reset_done, self._reset_failed)
+
+    @Slot(object)
+    def _press_facts_failed(self, exc: object) -> None:
+        """Only a bug reaches here: `_read_press_facts` returns every failure in its answer.
+
+        It cannot say which press it belongs to, so it never touches the waiting
+        press (Codex, last pass: a stale press's failure cleared the current one
+        and re-armed the button mid-read); a reload frees the button.
+        """
+        logger.warning(f"a Reset to default press's facts job raised: {exc}")
+        self.tuning_report.setPlainText(TUNING_RESET_UNREADABLE.format(why=exc))
+        self.action_failed.emit(str(exc))
+
+    def _set_reset_button(self) -> None:
+        """Pressable when this tab has a route, nothing of ours runs, and no press is asking."""
+        self.tuning_reset_button.setEnabled(
+            self.services.reset_settings is not None
+            and not self._busy
+            and self._press_asking is None
+        )
+
+    @Slot(object)
+    def _reset_done(self, result: object) -> None:
+        self._reset_running = False
+        self._set_busy(False)
+        if not isinstance(result, reset_defaults.ResetReport):
+            return
+        lines = result.lines()
+        self.tuning_report.setPlainText("\n".join(lines))
+        if result.written:
+            self._last_reset = result.written
+        # A recreated file owes the restart too, though there is nothing to undo.
+        for item in result.changed:
+            self._note_tuning_owed(item.file, reset_defaults.apply_rule(item.file))
+        if result.refused:
+            self.action_failed.emit(" ".join(lines[:2]))
+        self._after_reset_files(result)
+
+    @Slot(object)
+    def _reset_failed(self, exc: object) -> None:
+        """Only a bug reaches here: `reset()` and `undo()` report every failure they expect."""
+        self._reset_running = False
+        self._set_busy(False)
+        self.tuning_report.setPlainText(f"FAILED: {exc}")
+        self.action_failed.emit(str(exc))
+        # A bug may have struck after some writes, so this session's record of
+        # an EARLIER press is no longer the last one: dropped, so the Undo
+        # reads the newest press off the disk -- the one that just broke -- and
+        # the cards and the Undo's state are read again from the files.
+        self._last_reset = ()
+        self.reload_tuning()
+
+    def _reset_undo_items(self) -> tuple[reset_defaults.FileResult, ...]:
+        """What "Undo the last reset…" would put back, as the last lookup answered.
+
+        `reset_defaults.undo_items()` decides (this session's record, else the
+        disk's); `_look_up_reset_undo()` asks it on the job runner.
+        """
+        return self._undo_items
+
+    def _look_up_reset_undo(self) -> None:
+        """Ask, off the GUI thread, what the Undo would put back; greyed until the answer lands."""
+        self._undo_generation += 1
+        self._undo_items = ()
+        self.tuning_reset_undo_action.setEnabled(False)
+        # The tab moved on: a press still waiting for its facts is dropped (its
+        # answer is stale by generation), and the button is pressable again.
+        if self._press_asking is not None:
+            self._press_asking = None
+            self._set_reset_button()
+        self._run(
+            partial(
+                _look_up_undo,
+                self.entry,
+                self.services.controller.server_dir,
+                self._last_reset,
+                self._undo_generation,
+            ),
+            self._undo_looked_up,
+            self._undo_lookup_failed,
+        )
+
+    @Slot(object)
+    def _undo_looked_up(self, result: object) -> None:
+        """The lookup's answer, unless a newer reload has asked since (then it is stale)."""
+        if not isinstance(result, UndoLookup) or result.generation != self._undo_generation:
+            return
+        self._undo_items = result.items
+        self.tuning_reset_undo_action.setEnabled(bool(result.items))
+
+    @Slot(object)
+    def _undo_lookup_failed(self, exc: object) -> None:
+        """An unreadable folder leaves the Undo greyed; the next reload asks again."""
+        logger.warning(f"could not work out what a reset's undo would put back: {exc}")
+
+    @Slot()
+    def undo_last_reset(self) -> None:
+        """Copy back what the last reset replaced, after one Yes/No, off the GUI thread."""
+        if self._busy:
+            return
+        items = self._reset_undo_items()
+        if not items:
+            self.tuning_reset_undo_action.setEnabled(False)
+            return
+        names = "\n".join(
+            f"    {reset_defaults.label(item.file)}  <-  {item.backup.name}"
+            for item in items
+            if item.backup is not None
+        )
+        if not self._confirm(TUNING_RESET_UNDO, TUNING_RESET_UNDO_CONFIRM.format(files=names)):
+            return
+        self._reset_running = True
+        self._set_busy(True)
+        self.tuning_report.setPlainText("putting back what the last reset replaced…")
+        self._run(
+            partial(_undo_still_undoable, self.services.controller.server_dir, items),
+            self._undo_done,
+            self._reset_failed,
+        )
+
+    @Slot(object)
+    def _undo_done(self, result: object) -> None:
+        self._reset_running = False
+        self._set_busy(False)
+        if not isinstance(result, reset_defaults.ResetReport):
+            return
+        lines = result.lines() if result.results else (TUNING_RESET_NOTHING_TO_UNDO,)
+        self.tuning_report.setPlainText("\n".join(lines))
+        for item in result.results:
+            if item.outcome == "restored":
+                self._note_tuning_owed(item.file, reset_defaults.apply_rule(item.file))
+        # A file the undo could not put back keeps its backup, so a second
+        # press tries it again; the rest are done.
+        self._last_reset = tuple(item for item in result.results if item.outcome == "refused")
+        if result.refused:
+            self.action_failed.emit(" ".join(lines[:2]))
+        self._after_reset_files(result)
+
+    def _after_reset_files(self, result: reset_defaults.ResetReport) -> None:
+        """Re-read the tab (and the Undo's state) and the open file, if the press changed it."""
+        self.reload_tuning()
+        current = self.tuning_panel.current_file()
+        if current and any(
+            item.file == current and item.outcome in ("reset", "restored")
+            for item in result.results
+        ):
+            self.open_tuning_file(current)
 
     def _tuning_files(self) -> tuple[str, ...]:
         """What the raw editor offers: this install's module confs, then its own.
