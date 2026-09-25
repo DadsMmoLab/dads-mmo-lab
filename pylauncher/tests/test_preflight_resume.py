@@ -80,7 +80,7 @@ def _lay_record(
     native.write_state(
         server_dir,
         native.InstallState(
-            game_id=TBC.id,
+            game_id=installer.entry.id,
             install_id=installer._install_id(server_dir),
             family=installer.family,
             completed=completed,
