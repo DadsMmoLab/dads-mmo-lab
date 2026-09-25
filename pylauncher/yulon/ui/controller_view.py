@@ -851,6 +851,13 @@ class ControllerServices:
     `native.UpdateRoute` for why the halves must not be able to arrive apart.
     """
 
+    repair_compose: native.ComposeRepairRoute | None = None
+    """T106's "Repair server files…" for this install; None where it is not offered.
+
+    `install_wiring.repair_compose_for_app()` answers: the CMaNGOS family only,
+    and never a server inside a WSL distro. `None` means no banner and no check.
+    """
+
     update_to_latest: native.LatestRoute | None = None
     """Move this install's sources to upstream's newest code and rebuild; None when it cannot.
 
@@ -1278,6 +1285,12 @@ def _assemble(
         # and the WSL distro whose daemon `native.Seams` cannot address) and
         # that module is where the rebuild's identical refusal already lives.
         update_to_latest=install_wiring.update_to_latest_for_app(
+            entry, server_dir, wsl_distro=wsl_distro
+        ),
+        # T106. Here for the rebuild's reason: which installs are offered it is a
+        # fact of `catalog.json` (the family) and of the install (its distro),
+        # both answered in `install_wiring`.
+        repair_compose=install_wiring.repair_compose_for_app(
             entry, server_dir, wsl_distro=wsl_distro
         ),
     )
@@ -3639,6 +3652,36 @@ TUNING_BANNER = "Waiting on a {job}: {files}"
 
 TUNING_JOB_WORDS: dict[str, str] = {"recreate": "recreate", "restart": "restart"}
 
+REPAIR_FILES_LABEL = "Repair server files…"
+"""T106's press: re-render this install's docker-compose.yml from the current template."""
+
+REPAIR_FILES_OWED = composegen.BASE_FILE
+"""What a repair adds to the tab's owed-a-recreate set, and the banner looks for."""
+
+REPAIR_FILES_BANNER = (
+    "This server's docker-compose.yml differs from what this version of Yu'lon writes for it — "
+    "it was written by another version, or edited by hand. Repair server files… writes it the "
+    "way this version does and keeps the current file as a backup. Nothing changes until you "
+    "press it."
+)
+
+REPAIR_FILES_CONFIRM = (
+    "Repair this server's files now?\n\ndocker-compose.yml differs from what this version of "
+    "Yu'lon writes for this server, either because another version wrote it or because it was "
+    "edited by hand. Yu'lon writes it again the way this version installs it, with this "
+    "install's own project name, ports and SELinux labels{counts}. Any hand edits in it are "
+    "replaced; the file as it is now is kept beside it as a backup ({backup}).\n\nNothing else "
+    "changes: not your characters, not your .conf settings, not docker-compose.override.yml or "
+    ".env. The running containers keep the old file until they are recreated, which Yu'lon "
+    "offers next."
+)
+
+REPAIR_FILES_DONE = (
+    "docker-compose.yml was repaired; the old one is kept as {backup}. The containers still run "
+    "the old file until they are recreated: press Recreate containers… (the server goes down "
+    "and comes back up; your characters are kept)."
+)
+
 TUNING_REVERTED_FILE = "Put {file} back from {backup}.\n{rule}"
 
 TUNING_ALL_REVERTED = (
@@ -4008,6 +4051,13 @@ class ControllerView(QWidget):
         self._import_relay = LineRelay(self)
         self._import_relay.line.connect(self._import_line)
         self._import_tail: deque[str] = deque(maxlen=_IMPORT_TAIL_LINES)
+        # T106: what the last compose check said, the backup the last repair
+        # made, and whether a check is out. Before the tabs, because the Tuning
+        # tab's owed-set refresh redraws the Server tab's compose banner too.
+        self._compose_state: str | None = None
+        self._compose_check: native.ComposeCheck | None = None
+        self._compose_backup: Path | None = None
+        self._compose_pending = False
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -4017,6 +4067,10 @@ class ControllerView(QWidget):
         self._build_modules_tab()
         self._build_tuning_tab()
         self._build_networking_tab()
+
+        # T106: asked once now, whether or not this tab polls -- it reads files
+        # and asks no daemon.
+        self.check_server_files()
 
         # What the channel says needs no daemon, no database and no network:
         # it is read from the credential file, so it is shown whether or not
@@ -4249,6 +4303,29 @@ class ControllerView(QWidget):
         self.realm_badge = DadcraftRealmBadge("stopped", tab)
         name_row.addWidget(self.realm_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         box.addLayout(name_row)
+        # T106's banner, hidden until the check says this install's
+        # docker-compose.yml is not what this version writes -- and, after a
+        # repair, until the recreate that applies it has run. Amber and above the
+        # status line for `rebuild_banner`'s reason: it is the one thing on this
+        # tab the player has to decide.
+        self.compose_banner = QWidget(tab)
+        compose_banner_box = QHBoxLayout(self.compose_banner)
+        compose_banner_box.setContentsMargins(8, 6, 8, 6)
+        self.compose_banner_label = QLabel("", self.compose_banner)
+        self.compose_banner_label.setWordWrap(True)
+        self.compose_banner_label.setStyleSheet(f"color: {COLOR_TEXT_WARNING};")
+        self.compose_banner_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse  # so the backup's name can be copied
+        )
+        self.compose_banner_button = QPushButton(REPAIR_FILES_LABEL, self.compose_banner)
+        self.compose_banner_button.clicked.connect(self._compose_banner_pressed)
+        compose_banner_box.addWidget(self.compose_banner_label, 1)
+        compose_banner_box.addWidget(self.compose_banner_button)
+        self.compose_banner.setStyleSheet(
+            f"background-color: {COLOR_BG_PARCHMENT}; border: 1px solid {COLOR_TEXT_WARNING};"
+        )
+        self.compose_banner.setVisible(False)
+        box.addWidget(self.compose_banner)
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
         box.addWidget(self.client_dir_label)
@@ -4536,6 +4613,7 @@ class ControllerView(QWidget):
         # just fixed something to make the tab re-examine an unfinished import.
         self._import_asked = False
         self.refresh_status()
+        self.check_server_files()
 
     @Slot(object)
     def _status_ready(self, result: object) -> None:
@@ -4956,7 +5034,9 @@ class ControllerView(QWidget):
             self.tuning_recreate_button.setEnabled(False)
             self.tuning_restart_button.setEnabled(False)
             self.tuning_banner_button.setEnabled(False)
+            self.compose_banner_button.setEnabled(False)
         else:
+            self.compose_banner_button.setEnabled(True)
             self.refresh_button.setEnabled(True)
             self.module_updates_button.setEnabled(self.services.module_updates is not None)
             # Back to what this install can do, never unconditionally: a game
@@ -9211,6 +9291,7 @@ class ControllerView(QWidget):
         needing the containers replaced must not be offered the cheaper of the
         two and told that is enough.
         """
+        self._refresh_compose_banner()
         recreate = sorted(self._tuning_owed.get("recreate", ()))
         restart = sorted(self._tuning_owed.get("restart", ()))
         self.tuning_recreate_button.setEnabled(bool(recreate) and not self._busy)
@@ -9235,6 +9316,116 @@ class ControllerView(QWidget):
             self.recreate_containers()
         else:
             self.restart_server()
+
+    # ------------------------------------------------- T106: repair server files
+
+    @Slot()
+    def check_server_files(self) -> None:
+        """Ask, off the GUI thread, whether docker-compose.yml is what this version writes.
+
+        Only where the route is wired (the CMaNGOS family). Never queued behind
+        itself: a check already out answers for this one too.
+        """
+        route = self.services.repair_compose
+        if route is None or self._compose_pending:
+            return
+        self._compose_pending = True
+        self._run(route.check, self._server_files_checked, self._server_files_check_failed)
+
+    @Slot(object)
+    def _server_files_checked(self, result: object) -> None:
+        self._compose_pending = False
+        if not isinstance(result, native.ComposeCheck):
+            return
+        self._compose_state = result.state
+        self._compose_check = result
+        if result.state not in ("current", "stale"):
+            # Not offered, and not a problem of anything the player pressed: said
+            # in the log rather than over `problem_label`.
+            logger.info(f"{self.entry.id}: no compose repair offered: {result.why}")
+        self._refresh_compose_banner()
+
+    @Slot(object)
+    def _server_files_check_failed(self, exc: object) -> None:
+        """`check` never raises by contract; if it does, the banner stays as it was."""
+        self._compose_pending = False
+        logger.warning(f"{self.entry.id}: the compose check failed: {exc}")
+
+    def _refresh_compose_banner(self) -> None:
+        """Draw T106's banner from the two facts it answers: a recreate owed, or a stale file.
+
+        A recreate owed for the repaired file comes first: the file on disk is then
+        current, and what is left to do is apply it.
+        """
+        if REPAIR_FILES_OWED in self._tuning_owed.get("recreate", set()):
+            backup = self._compose_backup.name if self._compose_backup else "a .repair.bak"
+            self.compose_banner_label.setText(REPAIR_FILES_DONE.format(backup=backup))
+            self.compose_banner_button.setText(TUNING_RECREATE_LABEL)
+            self.compose_banner.setVisible(True)
+        elif self._compose_state == "stale":
+            self.compose_banner_label.setText(REPAIR_FILES_BANNER)
+            self.compose_banner_button.setText(REPAIR_FILES_LABEL)
+            self.compose_banner.setVisible(True)
+        else:
+            self.compose_banner.setVisible(False)
+
+    @Slot()
+    def _compose_banner_pressed(self) -> None:
+        """The banner's press: Repair, or -- once repaired -- the Tuning tab's own Recreate."""
+        if self.compose_banner_button.text() == TUNING_RECREATE_LABEL:
+            self.recreate_containers()
+        else:
+            self.repair_server_files()
+
+    @Slot()
+    def repair_server_files(self) -> None:
+        """Ask, then re-render docker-compose.yml in a job (T106). Nothing happens on a No.
+
+        The owner's decision: the player chooses when, and nothing changes behind
+        their back. The dialog says what is written, what is kept and that the
+        recreate comes next.
+        """
+        route = self.services.repair_compose
+        if route is None or self._busy:
+            return
+        backup = f"{composegen.BASE_FILE}.<date>{native.REPAIR_BACKUP_SUFFIX}"
+        last = self._compose_check
+        counts = (
+            f" (it adds {last.added} lines and removes {last.removed})"
+            if last is not None and last.state == "stale"
+            else ""
+        )
+        question = REPAIR_FILES_CONFIRM.format(backup=backup, counts=counts)
+        if not self._confirm(REPAIR_FILES_LABEL, question):
+            return
+        self.problem_label.setText("")
+        self._set_busy(True)
+        self._run(route.repair, self._server_files_repaired, self._server_files_repair_failed)
+
+    @Slot(object)
+    def _server_files_repaired(self, result: object) -> None:
+        if isinstance(result, native.ComposeRepaired):
+            self._compose_state = "current"
+            if result.backup is not None:
+                self._compose_backup = result.backup
+                self._note_tuning_owed_recreate(REPAIR_FILES_OWED)
+            else:
+                self.problem_label.setText(
+                    "docker-compose.yml is already what this version of Yu'lon writes; nothing "
+                    "was written."
+                )
+        self._set_busy(False)
+        self.check_server_files()
+
+    @Slot(object)
+    def _server_files_repair_failed(self, exc: object) -> None:
+        self.problem_label.setText(f"The server files were not repaired: {exc}")
+        self._set_busy(False)
+
+    def _note_tuning_owed_recreate(self, name: str) -> None:
+        """Record `name` as owed a recreate, in the Tuning tab's own set, so both banners agree."""
+        self._tuning_owed.setdefault("recreate", set()).add(name)
+        self._refresh_tuning_owed()
 
     @Slot()
     def restart_server(self) -> None:
