@@ -166,6 +166,35 @@ ordinary one and the adopt press — go through that one function; a second call
 site would be a second spelling of a row the probe reads in one shape only. The
 rest of `exec_stdin` stays open and stays named.
 
+**T123's bot enrolment is a write this walk cannot see either, and it is sent
+while the world runs** (2026-09-25). After "Update the server to latest…" (or
+"Return to the tested pin") moves Tortoise's bots module, the route sends
+`bot pool adopt preview` and then `bot pool adopt confirm <challenge>`
+(`controller_wow_tortoise/botpool.py::adopt`), and the confirm makes the running
+mangosd enrol every `RNDBOT` account into TortoiseBots' own account registry,
+`tortoise_bots_pool_account` in the characters database. It goes over the
+install's SOAP channel first and the attach console second. The console half is
+the `controller_wow_wotlk/console.py::send_command::os.write` row below. The SOAP
+half is an `http.client` request out of `soap.py`, which names no file and no
+database, so the walk has no callee to find and there is no row to add. This
+paragraph is the record.
+
+What is true of that write: the server makes it, through its own command, under
+its own locks. The app writes no SQL beside it. The confirm is sent only with the
+challenge the preview printed a moment before, and the module refuses it if the
+set of bot accounts changed in between; that refusal wrote nothing, so only then
+is the pair asked again. A confirm whose answer never came is never sent a second
+time, on any channel. Adoption brings nothing online by itself, so an adoption
+that enrolled anything is followed by a restart of the world. **World may be
+running: yes, and necessarily**, for the reason the console row gives: a command
+needs a running server to answer it. **Owner question:** this is the same class
+of write as T26's account link above, a bots module's own account table that the
+running server writes through its own command. Here the command is the server's
+and not SQL beside it, which is the route owner answer 7 prefers, but the table
+is in `characters`, which answer 7 names. The question left running there covers
+this one too: does answer 7 extend to a bots table the server writes live
+through its own command? The owner still has to answer it.
+
 Generated rows are checked against the tree by the test, not by hand. The
 descriptions are written by hand.
 
@@ -225,6 +254,11 @@ descriptions are written by hand.
 | `catalog/families/extract.py::write_evidence::unlink` | the temp evidence file after a failure | install time |
 | `catalog/families/extract.py::write_evidence::write_text` | the extraction evidence file, to a temp name | install time |
 | `catalog/families/patch.py::apply::write_bytes` | a patched file in the clone | install time |
+| `catalog/native.py::_backup_beside::shutil.copy2` | **new (T106)** `docker-compose.yml.<stamp>.repair.bak`: a copy of an install's base compose file taken by "Repair server files…" before it is replaced, in a name that did not exist | **yes** — a copy; the running containers never read the base file after they were created |
+| `catalog/native.py::_replace_if_unchanged::os.chmod` | **new (T106)** the fresh render of an install's `docker-compose.yml`, in a `tempfile.mkstemp` file beside it (`docker-compose.yml.<random>.yulon-new`), written through `os.fdopen` and fsynced — this walk does not see an `mkstemp` descriptor, so this row carries that write — then given the old file's mode before the rename below | **yes** — the containers keep the file they were created from; the Server tab then offers the recreate that applies it |
+| `catalog/native.py::_replace_if_unchanged::os.replace` | **new (T106)** the repaired `docker-compose.yml` renamed into place, atomically; only after the backup above exists and holds the text that was checked, only when the check at press time said `stale` (Yu'lon's marker, this folder's own project name, the install's own `:z` read off the file, content that differs beyond comments), and only if the target, read again just before the rename, still says what was checked | **yes** — as above; a `compose up` reading at that instant reads the old file or the new one, never half of either |
+| `catalog/native.py::_replace_if_unchanged::unlink` | **new (T106)** that temp file, on every failure (a failed write, fsync or chmod, or the target having changed) | **yes** — as above |
+| `catalog/native.py::repair_base_compose::unlink` | **new (T106)** a `.repair.bak` the press has just taken, removed when it does not hold the text that was checked (the file changed between the check and the copy), so no backup claims to be of a file the press never validated | **yes** — as above |
 | `catalog/native.py::_put_recipe_back::write_bytes` | **new (T8)** the `Dockerfile` and `.dockerignore` PUT BACK exactly as this press found them, when a rebuild is stopped or fails before the containers are replaced. It writes no new content: the only bytes it can write are the bytes it read out of those two files before the first stage ran, so its whole effect is undoing `dockerfile.write()`'s row above | **yes** — the world is running throughout this window, and that is the point of the row: nothing reads these two files except `docker build`, so putting them back changes nothing the server is using |
 | `catalog/native.py::_put_recipe_back::unlink` | **new (T8)** one of those two files removed, in the one case where the ground had no such file and the re-render created it. Same undo, same window | **yes** — as above |
 | `catalog/native.py::write_state::os.replace` | that record renamed into place | install time |
