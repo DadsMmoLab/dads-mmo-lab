@@ -49,11 +49,23 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from yulon import resources
-from yulon.apply import CLONE_DIRS, ApplyReport, SqlRunner, clone_release
+from yulon.apply import (
+    CLONE_DIRS,
+    ApplyReport,
+    CountingGit,
+    ModuleUpdate,
+    SqlRunner,
+    cached_module_update,
+    cached_module_updates,
+    clone_release,
+)
 from yulon.catalog.native import read_state
+from yulon.catalog.upstream import Release, github_slug
+from yulon.catalog.upstream import cached_row as upstream_cached_row
 from yulon.controller_wow_tortoise import autoupdate
 from yulon.controller_wow_tortoise.autoupdate import Arming, GuardedApplier
 from yulon.git import Git
+from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import (
     HttpGet,
@@ -63,6 +75,8 @@ from yulon.manifest_store import (
     load_manifest,
     urllib_get,
 )
+
+logger = get_logger(__name__)
 
 GAME = "wow-tortoise"
 
@@ -183,8 +197,56 @@ server (`TBM:CAPS`), so a skew is a note and never a refusal.
 """
 
 
-def release_note(addon: str, server: str) -> str:
-    """The TortoiseBots Manager row's extra line: its release, and the server's if known."""
+def module_updates(
+    server_dir: Path,
+    *,
+    git: CountingGit | None = None,
+    newest_release: Callable[[str], Release | None] | None = None,
+    now: int | None = None,
+) -> tuple[ModuleUpdate, ...]:
+    """ "Check for updates" for this install's cloned mods -- the two client addons (T126).
+
+    Tortoise's clones are `mod`s in `sql_scripts/clones/`; its SQL and conf mods
+    clone nothing and are not listed. Each clone is counted against what its
+    manifest follows -- the newest release for TortoiseBots Manager, the branch
+    tip for TortoiseGMManager -- through `apply.cached_module_updates()`, so a
+    row is kept for a day (an hour when nothing answered) and the press costs
+    GitHub nothing while the addon has not moved.
+    """
+    branches: dict[str, str | None] = {}
+    releases: dict[str, str] = {}
+    try:
+        for manifest in store().load_all("mod"):
+            if manifest.source is None:
+                continue
+            branches[manifest.id] = manifest.source.branch
+            if manifest.source.follow == "releases":
+                slug = github_slug(manifest.source.repo)
+                if slug is not None:
+                    releases[manifest.id] = slug
+    except Exception as exc:  # boundary: a broken manifest tree must not stop the count
+        logger.warning(f"could not read the wow-tortoise mods for what they follow: {exc}")
+    return cached_module_updates(
+        server_dir,
+        kind="mod",
+        git=git,
+        branches=branches,
+        releases=releases,
+        newest_release=newest_release,
+        now=now,
+    )
+
+
+def release_note(
+    addon: str, server: str, *, addon_moved: bool = False, server_moved: bool = False
+) -> str:
+    """The TortoiseBots Manager row's extra line: its release, and the server's if known.
+
+    `addon_moved`/`server_moved` say the last count found that side BEHIND a
+    newest release of the SAME name: the tag was re-published on newer commits
+    since that side was installed. Equal names are then not "in step" -- the
+    comparison is of commits, and the names only label them.
+    """
     said = f"Installed: release {addon}."
     if not server:
         return said
@@ -194,17 +256,30 @@ def release_note(addon: str, server: str) -> str:
             f"\nThe addon ({addon}) and the server's bot module ({server}) are from different "
             "releases. They work together, but updating both keeps them in step."
         )
+    elif addon_moved or server_moved:
+        which = (
+            "both"
+            if addon_moved and server_moved
+            else "the addon" if addon_moved else "the server's bot module"
+        )
+        said += (
+            f"\nBoth are named {addon}, but an updated release {addon} has come out since "
+            f"{which} {'were' if which == 'both' else 'was'} installed. They work together, "
+            "but updating both keeps them in step."
+        )
     return said
 
 
 def release_notes(server_dir: Path) -> dict[tuple[str, str], str]:
     """Per-row notes for this install's Modules tab: the addon's release against the server's.
 
-    Two small file reads and nothing else -- the addon's clone claim, where the
-    install recorded the release it checked out, and the install record, where
-    "Update the server to latest…" recorded the release the bot module moved
-    to. An addon installed before T126 recorded none and gets no line; a server
-    still on its tested pin is on no release, so only the addon's is said.
+    Small file reads and nothing else: the addon's clone claim (the release its
+    install checked out), the install record (the release "Update the server to
+    latest…" moved the bot module to), and the two cached counts -- the
+    addon's "Check for updates" row and the Server tab's upstream reading --
+    which say whether either side is behind a newer build of a release with the
+    same name. An addon installed before T126 recorded none and gets no line; a
+    server still on its tested pin is on no release, so only the addon's is said.
     """
     clone = server_dir / CLONE_DIRS["mod"] / ADDON_ID
     addon = clone_release(clone, item_id=ADDON_ID)
@@ -212,4 +287,13 @@ def release_notes(server_dir: Path) -> dict[tuple[str, str], str]:
         return {}
     state = read_state(server_dir, valid=())
     rev = state.rev_for(BOTS_REPO) if state is not None else None
-    return {("mod", ADDON_ID): release_note(addon, rev.release if rev is not None else "")}
+    server = rev.release if rev is not None else ""
+    counted = cached_module_update(server_dir, "mod", ADDON_ID)
+    addon_moved = counted is not None and counted.release == addon and (counted.behind or 0) > 0
+    news = upstream_cached_row(server_dir, BOTS_REPO)
+    server_moved = news is not None and news.release == server and (news.behind or 0) > 0
+    return {
+        ("mod", ADDON_ID): release_note(
+            addon, server, addon_moved=addon_moved, server_moved=server_moved
+        )
+    }

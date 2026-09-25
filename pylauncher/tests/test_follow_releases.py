@@ -501,3 +501,187 @@ def test_the_note_is_drawn_on_its_row_in_full(qapp: object) -> None:
     widget = modules_panel.RowWidget(rows[0])
     assert widget.note_label is not None
     assert widget.note_label.text().endswith("keeps them in step.")
+
+
+# -- review fixes: a compare GitHub will not answer refuses (Codex high) --------
+
+
+def test_a_release_whose_comparison_github_will_not_answer_refuses_before_anything_moves(
+    tmp_path: Path,
+) -> None:
+    """The release resolves, the compare does not (a 403, a timeout): no source moves.
+
+    Without the comparison nobody knows whether the release is ahead of the
+    checkout or behind it, and the old code moved onto it anyway.
+    """
+    rec, server_dir = _releasing_ready(tmp_path)
+    rec.github = {CORE: 3}  # the bots' compare has no answer
+    before = dict(rec.heads)
+    with pytest.raises(InstallerError, match="GitHub did not answer"):
+        _press(rec, server_dir)
+    assert rec.clones == []
+    assert rec.heads == before
+
+
+# -- review fixes: a tag moved within its own day -------------------------------
+
+
+def _record_release(server_dir: Path, repo: str, tag: str) -> None:
+    state = native.read_state(server_dir, valid=())
+    assert state is not None
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id=state.game_id,
+            install_id=state.install_id,
+            family=state.family,
+            completed=state.completed,
+            source_revs=(native.SourceRev(repo, f"{OLD[:7]} · 2026-09-25", release=tag),),
+        ),
+    )
+
+
+def test_a_newer_build_of_the_release_installed_is_an_updated_release(tmp_path: Path) -> None:
+    """Same tag name, commits ahead: "updated release", never "in step" or "new"."""
+    rec, server_dir = _counted(tmp_path)
+    _record_release(server_dir, BOTS, TAG)
+    news = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    assert f"mod-playerbots updated release {TAG}" in upstream.line(news)
+    _record_release(server_dir, BOTS, "v2026-09-24")
+    (server_dir / upstream.UPSTREAM_FILE).unlink()
+    news = _engine(rec).upstream_news(InstallOptions(server_dir=server_dir), now=T0)
+    assert f"mod-playerbots new release {TAG}" in upstream.line(news)
+
+
+def test_a_module_row_on_an_older_build_of_its_release_says_updated() -> None:
+    row = apply_module.ModuleUpdate(
+        "tbm", Path("/x"), True, 3, family="mod", release=TAG, installed_release=TAG
+    )
+    assert row.line == f"tbm: updated release {TAG}"
+    assert modules_panel.chip_update_label(3, TAG, updated=True) == (
+        f"Update available — updated release {TAG}"
+    )
+
+
+def test_equal_release_names_are_not_in_step_when_one_side_is_an_older_build(
+    tmp_path: Path,
+) -> None:
+    """The note compares what the counts found, not only the two names."""
+    _addon_installed(tmp_path, TAG)
+    _server_on(tmp_path, TAG)
+    note = tortoise_modules.release_notes(tmp_path)[("mod", "tortoise-bots-manager")]
+    assert "\n" not in note, "no count says either side moved: in step"
+    # The addon's last "Check for updates" found a newer build of the same tag.
+    clone = tmp_path / apply_module.CLONE_DIRS["mod"] / tortoise_modules.ADDON_ID
+    (clone / ".git").mkdir()
+
+    class _G:
+        def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+            return 2
+
+        def head_sha(self, dest: Path) -> str | None:
+            return OLD
+
+    tortoise_modules.module_updates(
+        tmp_path, git=_G(), newest_release=lambda slug: upstream.Release(TAG, REL), now=T0
+    )
+    note = tortoise_modules.release_notes(tmp_path)[("mod", "tortoise-bots-manager")]
+    assert note.endswith(
+        f"Both are named {TAG}, but an updated release {TAG} has come out since the addon was "
+        "installed. They work together, but updating both keeps them in step."
+    ), note
+
+
+# -- review fixes: Tortoise can see and take a new addon release -----------------
+
+
+class _CountGit:
+    def __init__(self, behind: dict[str, int | None], heads: dict[str, str]) -> None:
+        self.behind = behind
+        self.heads = heads
+        self.asked: list[tuple[str, str | None]] = []
+
+    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+        self.asked.append((dest.name, branch))
+        return self.behind.get(dest.name)
+
+    def head_sha(self, dest: Path) -> str | None:
+        return self.heads.get(dest.name)
+
+
+def _clones(server_dir: Path, *names: str) -> None:
+    for name in names:
+        (server_dir / apply_module.CLONE_DIRS["mod"] / name / ".git").mkdir(parents=True)
+
+
+def test_tortoise_counts_its_addons_each_against_what_it_follows(tmp_path: Path) -> None:
+    _clones(tmp_path, "tortoise-bots-manager", "tortoise-gm-manager")
+    git = _CountGit(
+        {"tortoise-bots-manager": 4, "tortoise-gm-manager": 2},
+        {"tortoise-bots-manager": OLD, "tortoise-gm-manager": OLD},
+    )
+    rows = tortoise_modules.module_updates(
+        tmp_path, git=git, newest_release=lambda slug: upstream.Release(TAG, REL), now=T0
+    )
+    assert [(r.family, r.key, r.line) for r in rows] == [
+        ("mod", "tortoise-bots-manager", f"tortoise-bots-manager: new release {TAG}"),
+        ("mod", "tortoise-gm-manager", "tortoise-gm-manager: 2 commits behind"),
+    ]
+    assert git.asked == [("tortoise-bots-manager", REL), ("tortoise-gm-manager", None)]
+
+
+def test_the_tortoise_count_is_kept_for_a_day_and_recounted_when_the_clone_moves(
+    tmp_path: Path,
+) -> None:
+    """T124's rule for modules: a Check pressed again costs GitHub and git nothing."""
+    _clones(tmp_path, "tortoise-bots-manager")
+    git = _CountGit({"tortoise-bots-manager": 4}, {"tortoise-bots-manager": OLD})
+    resolved: list[str] = []
+
+    def newest(slug: str) -> upstream.Release:
+        resolved.append(slug)
+        return upstream.Release(TAG, REL)
+
+    def count(now: int) -> tuple[apply_module.ModuleUpdate, ...]:
+        return tortoise_modules.module_updates(tmp_path, git=git, newest_release=newest, now=now)
+
+    count(T0)
+    count(T0 + upstream.MAX_AGE_SECONDS - 1)
+    assert len(resolved) == 1 and len(git.asked) == 1, "a second press within the day asked"
+    git.heads["tortoise-bots-manager"] = REL  # an Update moved the clone
+    git.behind["tortoise-bots-manager"] = 0
+    rows = count(T0 + 60)
+    assert len(resolved) == 2, "a row about a HEAD that is gone was served"
+    assert rows[0].line == f"tortoise-bots-manager: on the newest release, {TAG}"
+    count(T0 + upstream.MAX_AGE_SECONDS + 61)
+    assert len(resolved) == 3
+
+
+def test_a_tortoise_count_that_could_not_ask_is_retried_within_the_hour(tmp_path: Path) -> None:
+    _clones(tmp_path, "tortoise-bots-manager")
+    git = _CountGit({"tortoise-bots-manager": 4}, {"tortoise-bots-manager": OLD})
+    answers: list[upstream.Release | None] = [None, upstream.Release(TAG, REL)]
+    rows = tortoise_modules.module_updates(
+        tmp_path, git=git, newest_release=lambda slug: answers.pop(0), now=T0
+    )
+    assert rows[0].behind is None
+    rows = tortoise_modules.module_updates(
+        tmp_path,
+        git=git,
+        newest_release=lambda slug: answers.pop(0),
+        now=T0 + upstream.RETRY_SECONDS,
+    )
+    assert rows[0].behind == 4
+
+
+def test_the_tortoise_tab_is_given_the_module_folder_seams(tmp_path: Path) -> None:
+    """What makes the addon rows installed, countable and updatable on Tortoise."""
+    from yulon.ui.controller_view import ControllerServices
+
+    services = ControllerServices.for_entry(load_catalog().get("wow-tortoise"), tmp_path)
+    assert services.module_updates is not None
+    assert services.installed_modules is not None
+    assert services.unfinished_modules is not None
+    assert services.module_version is not None
+    _clones(tmp_path, "tortoise-bots-manager")
+    assert services.installed_modules()["mod"] == frozenset({"tortoise-bots-manager"})

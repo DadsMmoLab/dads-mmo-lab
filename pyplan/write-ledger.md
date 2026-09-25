@@ -190,6 +190,9 @@ descriptions are written by hand.
 | `apply.py::write_clone_claim::os.replace` | the claim file renamed into place | yes |
 | `apply.py::write_clone_claim::unlink` | the temp claim file after a failure | yes |
 | `apply.py::write_clone_claim::write_text` | the clone-claim file, to a temp name | yes |
+| `apply.py::_write_module_updates::os.replace` | **new (T126)** `.yulon-module-updates.json`, the day's cached "Check for updates" rows (Tortoise's addons), renamed into place beside `.yulon-install.json`. A cache: losing it costs one more count | **yes** — nothing the server reads |
+| `apply.py::_write_module_updates::unlink` | the temp cache after a failure | **yes** — as above |
+| `apply.py::_write_module_updates::write_text` | **new (T126)** that cache, to a temp name | **yes** — as above |
 | `catalog/composegen.py::write_dotenv::os.replace` | `.env` renamed into place | install time |
 | `catalog/composegen.py::write_dotenv::unlink` | the temp `.env` after a failure | install time |
 | `catalog/composegen.py::write_dotenv::write_text` | the merged `.env`, to a temp name | install time |

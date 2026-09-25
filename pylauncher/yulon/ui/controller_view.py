@@ -2201,6 +2201,23 @@ def _for_tortoise(
         module_notes=(
             (lambda: tortoise_modules.release_notes(server_dir)) if entry.has_manifests else None
         ),
+        # T126 review: the four module-folder seams, so a Tortoise player can
+        # SEE and TAKE a new addon release. This game's clones are the two
+        # client addons under `sql_scripts/clones/`; its SQL and conf mods
+        # clone nothing. "Check for updates" counts them off the GUI thread
+        # (`_run`), cached a day per clone; an installed row that is behind
+        # gets the Update chip, whose press is `Applier.update()` -- the path
+        # with the repository, dirty-tree and local-commit checks.
+        module_updates=(
+            (lambda: tortoise_modules.module_updates(server_dir)) if entry.has_manifests else None
+        ),
+        installed_modules=(
+            (lambda: apply_module.installed_clones(server_dir)) if entry.has_manifests else None
+        ),
+        unfinished_modules=(
+            (lambda: apply_module.unfinished_clones(server_dir)) if entry.has_manifests else None
+        ),
+        module_version=(RunnerGit().head_version if entry.has_manifests else None),
         applier=(
             tortoise_modules.applier(
                 server_dir,
@@ -3933,6 +3950,7 @@ class ControllerView(QWidget):
         # T126: the newest release's tag for a counted row that follows its
         # releases. Read only for a key `_behind` still has.
         self._behind_release: dict[tuple[str, str], str] = {}
+        self._behind_updated: set[tuple[str, str]] = set()
         self._repair_armed = False
         # The last answer the database gave about its own import, and whether it
         # has been asked since the database came up. Remembered because the
@@ -7305,6 +7323,7 @@ class ControllerView(QWidget):
             sql_owed=dict(self._sql_owed),
             behind=dict(self._behind),
             releases={k: v for k, v in self._behind_release.items() if k in self._behind},
+            updated=frozenset(k for k in self._behind_updated if k in self._behind),
         )
 
     def _module_actions_allowed(self) -> bool:
@@ -8056,12 +8075,20 @@ class ControllerView(QWidget):
         # chip, and `None` ("could not ask") is deliberately not a zero: a
         # checkout git could not answer for gets no chip rather than a
         # confident "up to date".
-        # Keyed `("module", key)`: `apply.module_updates()` enumerates ONE clone
-        # directory -- `CLONE_DIRS["module"]`, which is `modules/` -- so every
-        # key it returns is in that family by construction, and inventing a
-        # family here would be a guess where this is the answer.
-        self._behind = {("module", row.key): row.behind for row in result if (row.behind or 0) > 0}
-        self._behind_release = {("module", row.key): row.release for row in result if row.release}
+        # Keyed `(row.family, key)`: `apply.module_updates()` enumerates ONE
+        # clone directory and says which family it read, so the family is the
+        # seam's answer rather than a guess. It was the literal `"module"`
+        # until T126, when Tortoise began counting its `mod` clones (the two
+        # client addons in `sql_scripts/clones/`).
+        self._behind = {
+            (row.family, row.key): row.behind for row in result if (row.behind or 0) > 0
+        }
+        self._behind_release = {(row.family, row.key): row.release for row in result if row.release}
+        self._behind_updated = {
+            (row.family, row.key)
+            for row in result
+            if row.release and row.release == row.installed_release
+        }
         self.reload_modules()
 
     @Slot(object)

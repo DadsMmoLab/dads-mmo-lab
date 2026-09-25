@@ -1881,6 +1881,12 @@ def _git_commits_since(dest: Path, rev: str) -> int | None:
     return git.ContainerGit().commits_since(dest, rev)
 
 
+def _installed_release(state: InstallState | None, repo: str) -> str:
+    """The release tag the install record says `repo` was moved to, or `""` (T126)."""
+    rev = state.rev_for(repo) if state is not None else None
+    return rev.release if rev is not None else ""
+
+
 def _upstream_get(url: str, accept: str) -> bytes:
     """`upstream.https_get`, looked up at CALL time.
 
@@ -4257,6 +4263,7 @@ class StagedInstaller:
         fresh = upstream.read_cached(server_dir, keys, clock)
         found: list[upstream.SourceNews] = []
         asked = False
+        record = read_state(server_dir, valid=())
         for index, source in enumerate(moving):
             kept = fresh.get(source.repo)
             if kept is not None:
@@ -4273,6 +4280,7 @@ class StagedInstaller:
                     checked_unix=clock,
                     follow=source.follow,
                     release=release,
+                    installed=_installed_release(record, source.repo),
                 )
             )
         taken = clock if asked or not found else min(row.checked_unix for row in found)
@@ -4611,7 +4619,7 @@ class StagedInstaller:
         marked to avoid.
         """
         found: dict[str, ReleaseTarget] = {}
-        for source, _dest, old in plan:
+        for source, dest, old in plan:
             if source.follow != "releases":
                 continue
             slug = upstream.github_slug(source.repo)
@@ -4627,6 +4635,15 @@ class StagedInstaller:
                     f"try again when GitHub can be reached."
                 )
             ahead = upstream.commits_ahead(slug, old, release.sha, get=self._seams.upstream_get)
+            if ahead is None:
+                # Refused, not guessed (T126 review, Codex high): without the
+                # comparison nobody knows whether the release is ahead of this
+                # checkout or behind it, and moving onto it could be a step back.
+                raise InstallerError(
+                    f"{source.repo} follows its published releases, and GitHub did not answer "
+                    f"whether {release.tag} is ahead of what {dest} is on. Nothing in that "
+                    f"folder was changed; try again later."
+                )
             if ahead == 0 and old != release.sha:
                 # No tag recorded: the checkout is PAST the release, and a
                 # version line naming the release would name a commit it is not on.

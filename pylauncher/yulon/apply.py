@@ -29,7 +29,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -4075,6 +4075,23 @@ class ModuleUpdate:
     ask": no `.git`, an offline machine, a repository that has gone private.
     Never collapsed into `0` — see `git.BehindReader`."""
 
+    family: str = "module"
+    """Which manifest family's clone folder this row was read from (T126).
+
+    `modules/` was the only folder counted until T126, so every row was a
+    `module`. Tortoise counts `sql_scripts/clones/` -- its two client addons are
+    `mod`s -- and the tab keys its chips by `(family, id)`.
+    """
+
+    installed_release: str = ""
+    """The release tag this app's install recorded in the clone's claim, or `""`."""
+
+    head: str = ""
+    """The commit the checkout was on when counted: what a cached row is valid for."""
+
+    checked_unix: int = 0
+    """When this row was counted, for `cached_module_updates()`."""
+
     release: str = ""
     """For a module that follows its releases (T126): the newest release's tag.
 
@@ -4098,7 +4115,8 @@ class ModuleUpdate:
             return f"{self.key}: could not ask (no answer from git)"
         if self.release:
             if self.behind:
-                return f"{self.key}: new release {self.release}"
+                word = upstream.release_word(self.release, self.installed_release)
+                return f"{self.key}: {word} {self.release}"
             return f"{self.key}: on the newest release, {self.release}"
         plural = "" if self.behind == 1 else "s"
         return f"{self.key}: {self.behind} commit{plural} behind"
@@ -4149,26 +4167,186 @@ def module_updates(
         # different problem than one with nothing installed. Logged, either way.
         logger.debug(f"no {CLONE_DIRS[kind]} folder to list under {server_dir}: {exc}")
         return ()
+    return tuple(
+        _module_update(
+            path, kind, git, branch_of.get(path.name), release_of.get(path.name), resolve
+        )
+        for path in entries
+    )
+
+
+def _module_update(
+    path: Path,
+    kind: ManifestType,
+    git: BehindReader,
+    branch: str | None,
+    slug: str | None,
+    resolve: Callable[[str], upstream.Release | None],
+) -> ModuleUpdate:
+    """One clone's row: counted against its branch, or against its newest release (T126)."""
+    checkout = (path / ".git").is_dir()
+    if not checkout:
+        return ModuleUpdate(key=path.name, path=path, is_checkout=False, behind=None, family=kind)
+    if slug is None:
+        return ModuleUpdate(
+            key=path.name,
+            path=path,
+            is_checkout=True,
+            behind=git.commits_behind(path, branch),
+            family=kind,
+        )
+    release = resolve(slug)
+    return ModuleUpdate(
+        key=path.name,
+        path=path,
+        is_checkout=True,
+        behind=git.commits_behind(path, release.sha) if release is not None else None,
+        family=kind,
+        release=release.tag if release is not None else "",
+        installed_release=clone_release(path, item_id=path.name),
+    )
+
+
+MODULE_UPDATES_FILE = ".yulon-module-updates.json"
+"""The day's cached "Check for updates" rows, beside `.yulon-install.json` (T126)."""
+
+
+class CountingGit(BehindReader, Protocol):
+    """What `cached_module_updates()` asks git: the count, and what a row is valid for."""
+
+    def head_sha(self, dest: Path) -> str | None: ...
+
+
+def cached_module_updates(
+    server_dir: Path,
+    *,
+    kind: ManifestType,
+    git: CountingGit | None = None,
+    branches: Mapping[str, str | None] | None = None,
+    releases: Mapping[str, str] | None = None,
+    newest_release: Callable[[str], upstream.Release | None] | None = None,
+    now: int | None = None,
+) -> tuple[ModuleUpdate, ...]:
+    """`module_updates()`, with each row kept for a day -- T124's rule, for modules (T126).
+
+    A row is reused while the clone is still on the commit it was counted at
+    (`head`) and it is younger than `upstream.MAX_AGE_SECONDS` -- or
+    `upstream.RETRY_SECONDS` for a row that could not be asked. An Update moves
+    the clone's HEAD, so the row it made stale is recounted on the next press
+    without anybody having to drop it. A release-following module costs two
+    GitHub requests per count, so without this a Check pressed repeatedly would
+    spend the unauthenticated limit.
+
+    A clone whose HEAD cannot be read is counted every time and never cached:
+    there is nothing to say what a cached row would be valid for.
+    """
+    reader: CountingGit = git if git is not None else _default_git(server_dir)  # type: ignore[assignment]
+    clock = upstream.now_unix() if now is None else now
+    resolve = newest_release if newest_release is not None else _github_newest_release
+    kept = _read_module_updates(server_dir, clock)
+    root = server_dir / CLONE_DIRS[kind]
+    try:
+        entries = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
+    except OSError as exc:
+        logger.debug(f"no {CLONE_DIRS[kind]} folder to list under {server_dir}: {exc}")
+        return ()
     rows: list[ModuleUpdate] = []
+    asked = False
     for path in entries:
-        checkout = (path / ".git").is_dir()
-        slug = release_of.get(path.name)
-        if checkout and slug is not None:
-            release = resolve(slug)
-            behind = git.commits_behind(path, release.sha) if release is not None else None
-            rows.append(
-                ModuleUpdate(
-                    key=path.name,
-                    path=path,
-                    is_checkout=True,
-                    behind=behind,
-                    release=release.tag if release is not None else "",
-                )
-            )
+        head = reader.head_sha(path) if (path / ".git").is_dir() else None
+        old = kept.get((kind, path.name))
+        if head is not None and old is not None and old.head == head:
+            rows.append(replace(old, path=path))
             continue
-        behind = git.commits_behind(path, branch_of.get(path.name)) if checkout else None
-        rows.append(ModuleUpdate(key=path.name, path=path, is_checkout=checkout, behind=behind))
+        asked = True
+        row = _module_update(
+            path,
+            kind,
+            reader,
+            (branches or {}).get(path.name),
+            (releases or {}).get(path.name),
+            resolve,
+        )
+        rows.append(replace(row, head=head or "", checked_unix=clock))
+    if asked:
+        _write_module_updates(server_dir, [row for row in rows if row.head], keep=kept, family=kind)
     return tuple(rows)
+
+
+def _read_module_updates(server_dir: Path, now: int) -> dict[tuple[str, str], ModuleUpdate]:
+    """The cached rows still fresh at `now`, by `(family, key)`. Empty on any damage."""
+    fresh: dict[tuple[str, str], ModuleUpdate] = {}
+    for key, row in _read_module_updates_any_age(server_dir).items():
+        limit = upstream.MAX_AGE_SECONDS if row.behind is not None else upstream.RETRY_SECONDS
+        if 0 <= now - row.checked_unix < limit:
+            fresh[key] = row
+    return fresh
+
+
+def _write_module_updates(
+    server_dir: Path,
+    rows: Sequence[ModuleUpdate],
+    *,
+    keep: Mapping[tuple[str, str], ModuleUpdate],
+    family: str,
+) -> None:
+    """Write the rows, keeping other families' fresh rows. Best-effort, logged."""
+    others = [row for (fam, _key), row in keep.items() if fam != family]
+    payload = {
+        "version": 1,
+        "rows": [
+            {
+                "family": row.family,
+                "key": row.key,
+                "head": row.head,
+                "behind": row.behind,
+                "release": row.release,
+                "installed_release": row.installed_release,
+                "checked_unix": row.checked_unix,
+            }
+            for row in [*others, *rows]
+        ],
+    }
+    path = server_dir / MODULE_UPDATES_FILE
+    tmp = path.with_name(path.name + ".new")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        logger.warning(f"could not keep the module-update reading in {path}: {exc}")
+
+
+def cached_module_update(server_dir: Path, family: str, key: str) -> ModuleUpdate | None:
+    """The last cached row for one clone, however old, or None (T126).
+
+    What the Tortoise addon's note reads to tell a release name that matches the
+    server's from one that has since been re-published: a file read, no git.
+    """
+    return _read_module_updates_any_age(server_dir).get((family, key))
+
+
+def _read_module_updates_any_age(server_dir: Path) -> dict[tuple[str, str], ModuleUpdate]:
+    """Every cached row regardless of age, by `(family, key)`. Empty on any damage."""
+    path = server_dir / MODULE_UPDATES_FILE
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            (str(row["family"]), str(row["key"])): ModuleUpdate(
+                key=str(row["key"]),
+                path=server_dir,
+                is_checkout=True,
+                behind=None if row["behind"] is None else int(row["behind"]),
+                family=str(row["family"]),
+                release=str(row.get("release", "")),
+                installed_release=str(row.get("installed_release", "")),
+                head=str(row["head"]),
+                checked_unix=int(row["checked_unix"]),
+            )
+            for row in payload["rows"]
+        }
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
 
 
 # ---------------------------------------------------------------------------

@@ -57,7 +57,7 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
-from yulon.git import RunnerGit
+from yulon.git import RunnerGit, git_available
 from yulon.manifest import Build, ConfKey, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
@@ -14232,3 +14232,75 @@ def _index_of(tab: Any, widget: Any) -> int:
         if item is not None and item.widget() is widget:
             return index
     raise AssertionError(f"{widget} is not in {tab}'s layout")
+
+
+@pytest.mark.skipif(not git_available(), reason="needs a host git to make a real checkout")
+def test_a_tortoise_addon_row_offers_the_new_release_and_update_takes_it(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T126 review: a Tortoise player can SEE a new addon release and TAKE it.
+
+    Real git throughout (a local origin standing in for GitHub's repository),
+    the real `Applier.update()` behind the row's Update chip, and Tortoise's own
+    count. Only GitHub's answer to "which release is newest" is a stand-in.
+    """
+    from tests.test_apply import (
+        _git,
+        _LocalOrigin,
+        _origin,
+        _origin_answers_as_the_manifest,
+        _publish,
+    )
+    from yulon.catalog import upstream
+    from yulon.controller_wow_tortoise import modules as tortoise_modules
+
+    def run(cmd: list[str], *args: object, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        # git is real here; docker stays the `ps` fake every other test uses.
+        if cmd and cmd[0] == "git":
+            return _REAL_RUN(cmd, *args, **kwargs)
+        return ps(cmd, kwargs.get("cwd"), kwargs.get("timeout"))
+
+    monkeypatch.setattr(runner, "run", run)
+    files = {"TortoiseBotsManager.toc": "## Interface: 11200\nCore.lua\n", "Core.lua": "-- {v}\n"}
+    origin = _origin(tmp_path)
+    released = {"now": upstream.Release("v2026-09-24", _publish(origin, files, "v1"))}
+    manifest = tortoise_modules.store().load("mod", "tortoise-bots-manager")
+    client = tmp_path / "client"
+    (client / "Interface" / "AddOns").mkdir(parents=True)
+    server = tmp_path / "server"
+    applier = Applier(
+        server,
+        git=_LocalOrigin(origin),  # type: ignore[arg-type]
+        client_dir=client,
+        newest_release=lambda slug: released["now"],
+    )
+    _origin_answers_as_the_manifest(applier, manifest)
+    applier.install(manifest)
+    clone = applier.clone_dir(manifest)
+    assert apply_module.clone_release(clone, item_id=manifest.id) == "v2026-09-24"
+
+    released["now"] = upstream.Release("v2026-09-25", _publish(origin, files, "v2"))
+    services = _services(ps, tmp_path, [])
+    object.__setattr__(services, "store", tortoise_modules.store())
+    object.__setattr__(services, "applier", applier)
+    object.__setattr__(services, "installed_modules", lambda: apply_module.installed_clones(server))
+    object.__setattr__(
+        services,
+        "module_updates",
+        lambda: tortoise_modules.module_updates(
+            server, git=RunnerGit(), newest_release=lambda slug: released["now"]
+        ),
+    )
+    view = ControllerView(TORTOISE, services, status_poll_ms=0)
+    view.check_module_updates()
+    assert "tortoise-bots-manager: new release v2026-09-25" in view.module_report.toPlainText()
+    labels = [b.text() for b in view.modules_panel.row(manifest.id).chip_buttons]
+    assert "Update available — new release v2026-09-25" in labels, labels
+
+    view.modules_panel.chip_action_pressed.emit(manifest.id, "update")
+
+    assert _git(clone, "show", "-s", "--format=%s") == "v2"
+    assert apply_module.clone_release(clone, item_id=manifest.id) == "v2026-09-25"
+    addon = client / "Interface" / "AddOns" / "TortoiseBotsManager" / "Core.lua"
+    assert addon.read_text(encoding="utf-8").strip().endswith("v2")
+    assert view.modules_panel.row(manifest.id).chip_buttons == (), "the chip outlived the update"

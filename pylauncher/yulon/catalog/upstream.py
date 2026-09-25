@@ -203,6 +203,14 @@ class SourceNews:
     """The catalog's `Source.follow`, kept so a cache about the other mode is not served."""
     release: str = ""
     """The newest release's tag, for a source that follows releases and reached one."""
+    installed: str = ""
+    """The release tag the install record says this source was moved to, or `""`.
+
+    Read so that a tag moved within its own day -- v2026-09-25 was re-published
+    as "builds v1-v31" -- is said as an UPDATED release rather than as being in
+    step: `behind` compares commits, and a positive count against a release of
+    the same name is a newer build of it.
+    """
 
 
 @dataclass(frozen=True)
@@ -217,6 +225,15 @@ class UpstreamNews:
         return any(source.behind is not None for source in self.sources)
 
 
+def release_word(newest: str, installed: str) -> str:
+    """ "new release" or "updated release": the second when the NAME is the one installed.
+
+    Only ever asked about a release whose commit is ahead of what is installed,
+    so a matching name means the tag was moved to newer commits since.
+    """
+    return "updated release" if installed and installed == newest else "new release"
+
+
 def line(news: UpstreamNews | None) -> str:
     """The Server tab's sentence, or `""` when there is nothing new or nothing known.
 
@@ -228,7 +245,7 @@ def line(news: UpstreamNews | None) -> str:
         return ""
     said = [
         (
-            f"{source.label} new release {source.release}"
+            f"{source.label} {release_word(source.release, source.installed)} {source.release}"
             if source.release
             else f"{source.label} {source.behind} {'commit' if source.behind == 1 else 'commits'}"
         )
@@ -275,6 +292,7 @@ def read_cached(
                 checked_unix=int(row.get("checked_unix", checked)),
                 follow=str(row.get("follow", "branch")),
                 release=str(row.get("release", "")),
+                installed=str(row.get("installed", "")),
             )
             for row in payload["sources"]
         ]
@@ -292,6 +310,26 @@ def read_cached(
     return fresh
 
 
+def cached_row(server_dir: Path, repo: str) -> SourceNews | None:
+    """The last cached reading of one source, however old, or None (T126).
+
+    What the Tortoise addon's note reads to learn whether the server's bot
+    module is behind a newer build of the release it is named after.
+    """
+    try:
+        payload = json.loads((server_dir / UPSTREAM_FILE).read_text(encoding="utf-8"))
+        row = next(r for r in payload["sources"] if r["repo"] == repo)
+        return SourceNews(
+            repo=repo,
+            label=str(row["label"]),
+            behind=None if row["behind"] is None else int(row["behind"]),
+            release=str(row.get("release", "")),
+            installed=str(row.get("installed", "")),
+        )
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration):
+        return None
+
+
 def write_cached(server_dir: Path, news: UpstreamNews) -> None:
     """Write the reading atomically. Best-effort: a failure costs one more ask, logged."""
     path = server_dir / UPSTREAM_FILE
@@ -306,6 +344,7 @@ def write_cached(server_dir: Path, news: UpstreamNews) -> None:
                 "checked_unix": source.checked_unix or news.checked_unix,
                 "follow": source.follow,
                 "release": source.release,
+                "installed": source.installed,
             }
             for source in news.sources
         ],

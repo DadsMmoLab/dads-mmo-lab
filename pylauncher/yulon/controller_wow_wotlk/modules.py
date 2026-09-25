@@ -318,6 +318,11 @@ def module_updates(
 
     Costs one `git fetch` per installed checkout, so it belongs behind a control
     the user pressed rather than on the status poll.
+
+    WotLK's count, over `modules/`, uncached. Tortoise has its own since T126
+    (`controller_wow_tortoise.modules.module_updates()`): it counts the two
+    client addons in `sql_scripts/clones/` behind the same "Check for updates"
+    press, each against what its manifest follows, and keeps each row a day.
     """
     reader: BehindReader = git if git is not None else RunnerGit()
     branches: dict[str, str | None] = {}

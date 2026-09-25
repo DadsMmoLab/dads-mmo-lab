@@ -198,14 +198,14 @@ the app's own convention: that press opens a dialog first.
 """
 
 
-def chip_update_label(behind: int, release: str = "") -> str:
+def chip_update_label(behind: int, release: str = "", updated: bool = False) -> str:
     """The update chip's own label, so the view and the tests cannot spell it apart.
 
     A module that follows its releases (T126) is offered the RELEASE, not a
     count of the commits between it and the branch tip.
     """
     if release:
-        return f"Update available — new release {release}"
+        return f"Update available — {'updated' if updated else 'new'} release {release}"
     plural = "" if behind == 1 else "s"
     return f"Update available — {behind} commit{plural} behind"
 
@@ -374,6 +374,9 @@ class SessionState:
     Keyed like `behind` and read only for a key `behind` has, so a count that
     goes (an update, a removal) takes its release with it.
     """
+    updated: frozenset[tuple[str, str]] = frozenset()
+    """The `releases` rows whose installed release has the SAME name as the newest:
+    the tag was moved to newer commits since, which the chip says as "updated"."""
 
 
 def _clone_dir_of(kind: str) -> str:
@@ -538,7 +541,7 @@ def _chips_for(
         chips.append(
             Chip(
                 "owed",
-                chip_update_label(behind, release),
+                chip_update_label(behind, release, key in session.updated),
                 said + "then re-deploys "
                 "and re-applies everything the manifest declares — and it may ask this "
                 "module's install questions again. It REFUSES rather than reset if the "
