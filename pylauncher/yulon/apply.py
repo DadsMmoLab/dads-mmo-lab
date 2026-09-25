@@ -272,6 +272,18 @@ class ApplyError(RuntimeError):
     """A step failed in a way that must stop the run (missing template value, git failure, ...)."""
 
 
+class SqlNotSent(ApplyError):
+    """A SQL runner failed before anything could reach the server: no process ever ran (T115).
+
+    The ONE failure a caller may read as "the database was not changed".
+    Anything else out of `run_statement()` -- a non-zero `mysql` exit, ERROR 2013,
+    a transport error -- can come after the server ran COMMIT (Codex, T115), so
+    it proves nothing either way. `DockerSql` raises this where there is no
+    docker CLI to start; it is an `ApplyError`, so every existing handler still
+    catches it.
+    """
+
+
 CLAIM_FILE = CLONE_MARKER
 """What this app writes INSIDE a clone it made, so it can recognise it later.
 
@@ -1039,7 +1051,7 @@ class DockerSql:
             # reported to the user as "install Docker Desktop" with nothing in the log
             # to contradict it (review finding, 2026-08-23).
             logger.warning(f"{argv[0]} could not be started: {exc}")
-            raise ApplyError(platform.DOCKER_CLI_MISSING_HELP) from exc
+            raise SqlNotSent(platform.DOCKER_CLI_MISSING_HELP) from exc
 
     def _env(self) -> dict[str, str]:
         # The distro goes with the password. Without it `mysql_env()` builds an
@@ -1064,7 +1076,7 @@ class DockerSql:
         """
         prefix = platform.docker_prefix(self.wsl_distro)
         if prefix is None:
-            raise ApplyError(platform.DOCKER_CLI_MISSING_HELP)
+            raise SqlNotSent(platform.DOCKER_CLI_MISSING_HELP)
         return [
             *prefix,
             "exec",
@@ -3951,8 +3963,11 @@ class Applier:
            written, nothing is sent. A kill from here on leaves a mark that
            `applied_record()` reads as unusable -- a re-run is refused and Remove
            asks -- instead of an answer that may be wrong.
-        3. The statement. If it fails, the transaction rolled back, so the mark
-           is dropped and the applied record, never touched, is still true.
+        3. The statement. A failure is NOT proof of a rollback (Codex, T115):
+           ERROR 2013 or a broken `docker exec` can come after the server ran
+           COMMIT. So the mark stays and the failure says Yu'lon cannot tell
+           whether the change landed. Only `SqlNotSent` -- no process ever ran --
+           drops the mark, leaving the untouched applied record true.
         4. After the commit, `record_applied()` writes the new values (or clears
            them for a Remove) and drops the mark in one write.
 
@@ -3977,18 +3992,28 @@ class Applier:
             )
         try:
             self.sql.run_statement(db, text)
-        except BaseException:
-            # Rolled back, so the database is as the applied record says -- unless
-            # an EARLIER press was interrupted, whose mark must stay.
+        except SqlNotSent:
+            # Proven: no process ran, so the database is as the applied record
+            # says -- unless an EARLIER press was interrupted, whose mark stays.
             if not was_pending:
                 dropped = module_answers.clear_pending(self.server_dir, manifest)
                 if dropped:
                     logger.warning(
-                        f"{manifest.id}: the SQL failed and its in-flight mark could not be "
-                        f"dropped ({dropped}); the next Install will be refused and Remove "
-                        f"will ask for the values"
+                        f"{manifest.id}: nothing reached the database, but the in-flight mark "
+                        f"could not be dropped ({dropped}); the next Install will be refused "
+                        f"and Remove will ask for the values"
                     )
             raise
+        except Exception as exc:
+            # NOT proof of a rollback (Codex, T115): ERROR 2013 or a broken
+            # `docker exec` can come after the server ran COMMIT. The mark stays,
+            # so the record reads as unknown: a re-run is refused and Remove asks.
+            raise ApplyError(
+                f"{manifest.id}: the SQL failed ({exc}), and Yu'lon cannot tell whether the "
+                f"change reached the database before it did. Its record of the values is now "
+                f"marked as unknown: Install is refused until you Remove {manifest.id}, and "
+                f"Remove will ask which values are in the database."
+            ) from exc
         if when == "install" and undo is not None:
             log.done.append(
                 f"sql inline → {db}: undid the values applied last time and applied these, "

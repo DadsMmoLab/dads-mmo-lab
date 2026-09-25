@@ -217,9 +217,10 @@ def record_pending(server_dir: Path, manifest: Manifest, values: Mapping[str, st
     Written immediately before the statement -- after the running-world guards
     and the database start, which can wait up to 180 s (cold review, T115 fix
     wave) -- and replaced by `record_applied()` once it has committed. The
-    applied record itself is not touched here, so a failure before or during
-    the statement needs only `clear_pending()`. `""` if written, else why not;
-    the caller refuses the press on that, having sent nothing.
+    applied record itself is not touched here. A failure PROVEN to be before
+    the server (`apply.SqlNotSent`) needs only `clear_pending()`; any other
+    failure leaves the mark, since the COMMIT may have landed. `""` if written,
+    else why not; the caller refuses the press on that, having sent nothing.
     """
 
     def change(everything: dict[str, Any]) -> None:
@@ -233,7 +234,7 @@ def record_pending(server_dir: Path, manifest: Manifest, values: Mapping[str, st
 
 
 def clear_pending(server_dir: Path, manifest: Manifest) -> str:
-    """Drop the `pending` mark after a statement that FAILED: the database was not changed."""
+    """Drop the `pending` mark when nothing reached the server (`apply.SqlNotSent`)."""
     if not is_pending(server_dir, manifest):
         return ""
     return _write_record(

@@ -52,6 +52,8 @@ class _Db:
         fail: bool = False,
         base: tuple[float, ...] = BASE,
         on_statement: Callable[[str], None] | None = None,
+        not_sent: bool = False,
+        lost_after_commit: bool = False,
     ) -> None:
         self.db = sqlite3.connect(":memory:")
         self.db.execute(
@@ -69,6 +71,8 @@ class _Db:
         self.texts: list[str] = []
         self.fail = fail
         self.on_statement = on_statement
+        self.not_sent = not_sent
+        self.lost_after_commit = lost_after_commit
 
     def run_file(self, db: str, path: Path) -> None:
         raise AssertionError(f"a mob mod runs no file, got {path}")
@@ -76,6 +80,9 @@ class _Db:
     def run_statement(self, db: str, statement: str) -> None:
         if self.on_statement is not None:
             self.on_statement(statement)
+        if self.not_sent:
+            # What `DockerSql` raises when no process could be started at all.
+            raise apply_module.SqlNotSent("docker could not be started")
         if self.fail:
             raise ApplyError("mysql exited 1: ERROR 2013 (HY000): Lost connection")
         self.texts.append(statement)
@@ -84,6 +91,9 @@ class _Db:
         except sqlite3.Error as exc:
             self.db.rollback()
             raise ApplyError(f"mysql exited 1: {exc}") from exc
+        if self.lost_after_commit:
+            # The server committed; the client side died before it could say so.
+            raise ApplyError("mysql exited 1: ERROR 2013 (HY000): Lost connection")
 
     def row(self) -> tuple[float, ...]:
         return tuple(
@@ -262,24 +272,27 @@ def test_a_first_install_has_nothing_to_refuse(tmp_path: Path) -> None:
     assert Applier(tmp_path, sql=_Db()).reapply_refusal(_mob()) is None
 
 
-def test_a_failed_reinstall_leaves_the_applied_record_as_it_was(tmp_path: Path) -> None:
+def test_a_reinstall_that_never_reached_the_server_leaves_the_applied_record(
+    tmp_path: Path,
+) -> None:
+    """Only a failure PROVEN to be before the server (`SqlNotSent`) keeps the old record usable."""
     Applier(tmp_path, sql=_Db()).install(_mob(), _all("2"))
     with pytest.raises(ApplyError):
-        Applier(tmp_path, sql=_Db(fail=True)).install(_mob(), _all("3"))
-    assert Applier(tmp_path).applied_record(_mob())[0] == _all("2")
+        Applier(tmp_path, sql=_Db(not_sent=True)).install(_mob(), _all("3"))
+    assert Applier(tmp_path).applied_record(_mob()) == (_all("2"), "")
 
 
-def test_a_failed_first_install_leaves_no_applied_record(tmp_path: Path) -> None:
+def test_a_first_install_that_never_reached_the_server_leaves_no_record(tmp_path: Path) -> None:
     with pytest.raises(ApplyError):
-        Applier(tmp_path, sql=_Db(fail=True)).install(_mob(), _all("3"))
+        Applier(tmp_path, sql=_Db(not_sent=True)).install(_mob(), _all("3"))
     assert Applier(tmp_path).applied_record(_mob()) == (None, "")
 
 
-def test_a_failed_remove_keeps_the_applied_record(tmp_path: Path) -> None:
+def test_a_remove_that_never_reached_the_server_keeps_the_applied_record(tmp_path: Path) -> None:
     Applier(tmp_path, sql=_Db()).install(_mob(), _all("2"))
     with pytest.raises(ApplyError):
-        Applier(tmp_path, sql=_Db(fail=True)).remove(_mob(), None)
-    assert Applier(tmp_path).applied_record(_mob())[0] == _all("2")
+        Applier(tmp_path, sql=_Db(not_sent=True)).remove(_mob(), None)
+    assert Applier(tmp_path).applied_record(_mob()) == (_all("2"), "")
 
 
 def test_an_unwritable_record_refuses_the_install_before_any_sql(
@@ -447,22 +460,77 @@ def test_a_kill_at_the_statement_leaves_the_record_unusable_not_wrong(
     assert Applier(server).applied_record(_mob()) == expected
 
 
-def test_a_failed_statement_restores_the_previous_record(tmp_path: Path) -> None:
-    """Pending while the statement runs; the old record back, and no pending, when it fails.
+@pytest.mark.parametrize("press", ["install", "remove"])
+def test_a_lost_connection_leaves_the_record_unknown_and_the_rerun_refused(
+    tmp_path: Path, press: str
+) -> None:
+    """Codex, high: ERROR 2013 is not proof of a rollback -- the COMMIT may have landed.
 
-    Fails on cd72db01: during the statement the record read x3, usable.
+    So the pending mark stays: the record is unusable, a re-run is refused, and
+    the failure says Yu'lon cannot tell whether the change landed and that
+    Remove will ask.
+
+    Fails on 8a9f45e1: the mark was dropped and the old x2 read as usable.
     """
     server = tmp_path / "srv"
     server.mkdir()
     Applier(server, sql=_Db()).install(_mob(), _all("2"))
-    kills: list[Path] = []
-    with pytest.raises(ApplyError):
-        Applier(server, sql=_Db(fail=True, on_statement=_snapshot(server, kills))).install(
-            _mob(), _all("3")
-        )
-    assert Applier(kills[0]).applied_record(_mob())[0] is None
-    assert Applier(server).applied_record(_mob()) == (_all("2"), "")
-    assert "mod/baby-mobs" not in _record(server).get("pending", {})  # type: ignore[operator]
+    failing = Applier(server, sql=_Db(fail=True))
+    with pytest.raises(ApplyError) as caught:
+        if press == "install":
+            failing.install(_mob(), _all("3"))
+        else:
+            failing.remove(_mob(), None)
+    assert "cannot tell whether" in str(caught.value)
+    assert "Remove" in str(caught.value) and "ask" in str(caught.value)
+    applied, why = Applier(server).applied_record(_mob())
+    assert applied is None and why
+    db = _Db()
+    with pytest.raises(ApplyError, match="Remove it first"):
+        Applier(server, sql=db).install(_mob(), _all("4"))
+    assert db.texts == []
+
+
+def test_a_commit_then_a_client_side_failure_is_not_read_as_the_old_values(
+    tmp_path: Path,
+) -> None:
+    """The server ran COMMIT (x3 is in the table), then the client died reporting an error.
+
+    Fails on 8a9f45e1: the record went back to x2, so the next re-run would
+    have divided x3 by 2 and landed on x1.5 times the new value.
+    """
+    server = tmp_path / "srv"
+    server.mkdir()
+    Applier(server, sql=_Db()).install(_mob(), _all("2"))
+    db = _Db(base=_times(2), lost_after_commit=True)
+    with pytest.raises(ApplyError, match="cannot tell whether"):
+        Applier(server, sql=db).install(_mob(), _all("3"))
+    assert db.row() == _times(3), "the change did land"
+    assert Applier(server).applied_record(_mob())[0] is None
+    assert Applier(server).reapply_refusal(_mob()) is not None
+
+
+def test_docker_that_cannot_be_started_is_a_failure_before_the_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`DockerSql` raises `SqlNotSent` only where no process ever ran.
+
+    Every seam that could reach a real docker is replaced: the CLI lookup, the
+    client probe, and `subprocess.run` itself.
+    """
+
+    def no_docker(*_a: object, **_k: object) -> object:
+        raise FileNotFoundError(2, "No such file or directory", "docker")
+
+    monkeypatch.setattr(apply_module.platform, "docker_prefix", lambda _distro=None: ["docker"])
+    monkeypatch.setattr(apply_module, "mysql_client", lambda *_a, **_k: "mysql")
+    monkeypatch.setattr(apply_module.subprocess, "run", no_docker)
+    runner = apply_module.DockerSql(db_container="ac-database", root_password="unused")
+    with pytest.raises(apply_module.SqlNotSent):
+        runner.run_statement("world", "SELECT 1;")
+    monkeypatch.setattr(apply_module.platform, "docker_prefix", lambda _distro=None: None)
+    with pytest.raises(apply_module.SqlNotSent):
+        runner.run_statement("world", "SELECT 1;")
 
 
 @pytest.mark.parametrize("press", ["install", "remove"])
