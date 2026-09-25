@@ -4037,7 +4037,12 @@ class Applier:
         # any SQL -- not at the pending-mark write after all three.
         unreadable = module_answers.recorded_keys(self.server_dir).unreadable
         if unreadable:
-            return f"{manifest.id}: {unreadable_record(unreadable)} Nothing was changed."
+            # Named the way the re-run refusal below names it, not `id:`-prefixed:
+            # the tab puts `install <id>:` in front of whatever this says.
+            return (
+                f"{manifest.name} ({manifest.id}) was not run. {unreadable_record(unreadable)} "
+                "Nothing was changed."
+            )
         applied, why = self.applied_record(manifest)
         if applied is not None:
             problem = reapply_steps_problem(manifest)

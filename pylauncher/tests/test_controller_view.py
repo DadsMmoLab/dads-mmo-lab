@@ -1370,6 +1370,7 @@ def test_an_unreadable_answers_file_refuses_a_mob_mod_on_the_tab_naming_the_file
     view._module_action("install")
     report = view.module_report.toPlainText()
     assert module_answers.ANSWERS_FILE in report and "Nothing was changed" in report, report
+    assert report.startswith("install buff-mobs: Buff Mobs (buff-mobs) was not run."), report
     assert asked == [] and sql.statements == []
 
 
