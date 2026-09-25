@@ -47,10 +47,13 @@ from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QAbstractSpinBox,
     QApplication,
     QComboBox,
     QLineEdit,
+    QPlainTextEdit,
     QTabWidget,
+    QTextEdit,
     QWidget,
 )
 
@@ -168,6 +171,18 @@ _KEY_TO_ACTION: dict[int, Action] = {
     int(Qt.Key.Key_L): Action.CYCLE_PREV,
     int(Qt.Key.Key_R): Action.CYCLE_NEXT,
 }
+# The mapped keys that also type or delete text. While a field that accepts typing
+# has focus they go to the field: a player could not type an r into the console or
+# an account name (T131). Arrows, Return and Escape keep their pad meaning there,
+# so Up/Down still leave the field and A still opens the on-screen keyboard.
+_TYPING_KEYS = frozenset(
+    {
+        int(Qt.Key.Key_L),
+        int(Qt.Key.Key_R),
+        int(Qt.Key.Key_Space),
+        int(Qt.Key.Key_Backspace),
+    }
+)
 # Discrete actions must not auto-repeat (holding A must not spam clicks); held
 # *direction* keys DO repeat so a user can fast-scroll a list.
 _NON_REPEATING_ACTIONS = frozenset(_KEY_TO_ACTION.values())
@@ -439,6 +454,15 @@ class Navigator(QObject):
         return None
 
 
+def _accepts_typing(widget: QWidget | None) -> bool:
+    """Whether `widget` is a field the user can type into right now."""
+    if isinstance(widget, QLineEdit | QPlainTextEdit | QTextEdit | QAbstractSpinBox):
+        return not widget.isReadOnly()
+    if isinstance(widget, QComboBox):
+        return widget.isEditable()
+    return False
+
+
 class KeyboardSource(QObject):
     """The shipped input source: a global event filter over the QApplication.
 
@@ -483,6 +507,8 @@ class KeyboardSource(QObject):
                 return True
 
             if key in _KEY_TO_ACTION:
+                if key in _TYPING_KEYS and _accepts_typing(QApplication.focusWidget()):
+                    return False
                 action = _KEY_TO_ACTION[key]
                 if action in _NON_REPEATING_ACTIONS and event.isAutoRepeat():
                     # Swallow the repeat of a held discrete action.
