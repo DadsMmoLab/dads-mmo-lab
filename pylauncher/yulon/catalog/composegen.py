@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from yulon import platform, tuning
+from yulon.catalog import bot_dashboard
 from yulon.catalog.catalog import CatalogEntry, NativeInstall
 from yulon.log import get_logger
 
@@ -485,6 +486,12 @@ def render(
             **entry_tokens(entry),
         },
     )
+    # T127: the bot dashboard's block is the player's switch, not the template's,
+    # so a render that replaces the base file carries it over from the file it
+    # replaces -- T117's rule for the bot count. Nothing is carried when there is
+    # no file or no block in it, which is every render but one made over an
+    # install whose dashboard is on.
+    base = bot_dashboard.carry(base, _read_if_there(server_dir / BASE_FILE))
     override = fill(
         texts["override.yml.tmpl"],
         {
@@ -512,6 +519,14 @@ def render(
         },
     )
     return ComposePlan(base, override, build, {"DB_ROOT_PASSWORD": password} if generated else {})
+
+
+def _read_if_there(path: Path) -> str | None:
+    """The file's text, or None if it is absent or unreadable (then nothing is carried)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _read_template(path: Path) -> str:

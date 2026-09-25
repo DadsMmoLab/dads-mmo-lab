@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from yulon import party
-from yulon.catalog import native
+from yulon.catalog import bot_dashboard, native
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -502,6 +502,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # window to bind the write seam into nor a folder to report, so both
         # read `None` here regardless of which game's entry this loop is on.
         unwindowed = {"client_dir", "set_client_dir"}
+        # T127's bot dashboard, decided by the CATALOG: only an entry whose conf
+        # table carries the bots module's telemetry switch has a dashboard to turn
+        # on -- the TortoiseBots module ships it and no other tree's bots do.
+        # Read through the function the wiring reads, so a tree that gains the
+        # key fails this until its tab offers the switch. Absent on the
+        # reference too.
+        undashboarded = set() if bot_dashboard.conf_file(entry) else {"bot_dashboard"}
         allowed = (
             unstocked
             | unmeasured
@@ -516,9 +523,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unupdatable
             | unadoptable
             | unwindowed
+            | undashboarded
         )
         if game == "wow-wotlk":
-            reference = unprobed | unupdatable | unadoptable | unwindowed
+            reference = unprobed | unupdatable | unadoptable | unwindowed | undashboarded
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

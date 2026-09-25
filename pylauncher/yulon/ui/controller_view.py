@@ -30,8 +30,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -80,7 +80,7 @@ from yulon import dashboard as dashboard_module
 from yulon import play as play_module
 from yulon import steam as steam_module
 from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
-from yulon.catalog import composegen, native, preflight
+from yulon.catalog import bot_dashboard, composegen, native, preflight
 from yulon.catalog.catalog import CatalogEntry
 from yulon.catalog.families import clientdir
 from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
@@ -92,6 +92,7 @@ from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tbc import modules as tbc_modules
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
 from yulon.controller_wow_tortoise import autoupdate as tortoise_autoupdate
+from yulon.controller_wow_tortoise import botdash as tortoise_botdash
 from yulon.controller_wow_tortoise import botpool as tortoise_botpool
 from yulon.controller_wow_tortoise import console as tortoise_console
 from yulon.controller_wow_tortoise import controller as tortoise_controller
@@ -269,6 +270,26 @@ class AccountAdmin(Protocol):
     def set_password(self, account: str, password: str) -> object: ...
 
     def set_gm_level(self, account: str, level: int) -> object: ...
+
+
+class BotDashboardSeam(Protocol):
+    """The Bots tab's "Bot dashboard" switch (T127). Every method does IO: never on the GUI thread.
+
+    `switch_on`/`switch_off`/`restart_world` are line sources for the tab's log
+    panel; `state` and `world_running` are readings for `_run()`.
+    """
+
+    url: str
+
+    def state(self) -> object: ...
+
+    def world_running(self) -> bool | None: ...
+
+    def switch_on(self, *, lan: bool, cancel: threading.Event | None = None) -> Iterator[str]: ...
+
+    def switch_off(self, cancel: threading.Event | None = None) -> Iterator[str]: ...
+
+    def restart_world(self, cancel: threading.Event | None = None) -> Iterator[str]: ...
 
 
 class ChannelSetup(Protocol):
@@ -669,6 +690,12 @@ class ControllerServices:
     """
     play: object | None = None
     """8.4a's Characters tab, where this tree has measured what it needs."""
+    bot_dashboard: BotDashboardSeam | None = None
+    """T127's switch for the bots module's own web dashboard, on Tortoise only.
+
+    `None` for a game whose catalog conf table carries no telemetry key, which
+    hides the whole group rather than showing a switch that cannot work.
+    """
     steam: steam_module.SteamShortcuts | None = None
     """8.8's two Steam library entries, on Linux and the Steam Deck only.
 
@@ -2255,10 +2282,17 @@ def _for_tortoise(
         found = [soap] if isinstance(soap, channel_module.SoapChannel) else []
         return [*found, console_channel]
 
+    # T127. The dashboard switch, and the update route rebuilding its image from
+    # the module the update moved. Inside T123's wrap, so a restart T123 makes
+    # for the adoption comes after the dashboard is back.
+    dashboard_switch = tortoise_botdash.for_entry(
+        entry, server_dir, lifecycle, wsl_distro=wsl_distro
+    )
     return replace(
         services,
+        bot_dashboard=dashboard_switch,
         update_to_latest=tortoise_botpool.wrap_route(
-            services.update_to_latest,
+            tortoise_botdash.wrap_route(services.update_to_latest, dashboard_switch),
             entry,
             server_dir,
             channels=adoption_channels,
@@ -2535,6 +2569,48 @@ modal would arrive from a worker thread.
 """
 
 REPAIR_IDLE = "Repair: finish the database import…"
+
+DASHBOARD_SWITCH_OFF = "Bot dashboard: Off"
+DASHBOARD_SWITCH_ON = "Bot dashboard: On"
+DASHBOARD_ABOUT = (
+    "The bots module's own web dashboard: a live map of every bot, their health and what "
+    "they are doing, stuck bots, and an Armory that shows any bot's gear. You sign in with "
+    "one of your game accounts that has GM rank 2 or higher."
+)
+DASHBOARD_LAN_LABEL = "Allow other devices on my network"
+DASHBOARD_LAN_WARNING = (
+    "Leave this off unless you want to open the dashboard from another device. With it on, "
+    "anyone on your network can reach the dashboard's sign-in page. Change it while the "
+    "dashboard is off."
+)
+DASHBOARD_OFF_QUESTION = (
+    "The dashboard is stopped and removed, it is taken out of this server's "
+    "docker-compose.yml, and the bots module's telemetry settings in tortoise_bots.conf are "
+    "put back as they were. Nothing else changes.\n\nSwitch it off?"
+)
+DASHBOARD_RESTART_QUESTION = (
+    "The bot dashboard is off. The world keeps trying to send to it until it restarts, which "
+    "does no harm.\n\nRestart the server now? Anyone playing is disconnected for a few minutes."
+)
+
+
+def dashboard_on_question(*, lan: bool) -> str:
+    """The switch-on question: every change it makes, the restart, and who can reach it."""
+    where = (
+        f"Every device on your network will be able to reach it on port {bot_dashboard.HTTP_PORT}."
+        if lan
+        else f"Only this PC will be able to reach it, at {bot_dashboard.URL}."
+    )
+    return (
+        "Yu'lon builds the bots module's own dashboard (a few minutes the first time), turns "
+        "the bots module's telemetry on in tortoise_bots.conf (a copy of the file is kept), adds "
+        "the dashboard to this server's docker-compose.yml and starts it.\n\n"
+        "If the server is running, it is then restarted so the bots module starts sending. "
+        "Anyone playing is disconnected for a few minutes.\n\n"
+        f"{where}\n\nSwitch it on?"
+    )
+
+
 REPAIR_ARMED = "Press again to overwrite the databases"
 """The same two-press gesture, for the action that really can destroy data.
 
@@ -3935,6 +4011,8 @@ class ControllerView(QWidget):
         self._import_relay = LineRelay(self)
         self._import_relay.line.connect(self._import_line)
         self._import_tail: deque[str] = deque(maxlen=_IMPORT_TAIL_LINES)
+        # T127's log panel, built with the Bots tab only where the game has a dashboard.
+        self.dashboard_log: LogPanel | None = None
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
@@ -3963,6 +4041,9 @@ class ControllerView(QWidget):
             # polled at all, here included.
             self.refresh_status()
             self.refresh_verdict()
+            # T127: what the files say about the bot dashboard, once. It changes
+            # only through the switch, whose job re-reads it when it ends.
+            self.refresh_bot_dashboard()
             # And ask the channel once, for the same reason: a credential the
             # server has stopped accepting reads as verified straight off the
             # disk, and until something asks, the repair is never offered.
@@ -6488,7 +6569,9 @@ class ControllerView(QWidget):
         columns.setSpacing(12)
         columns.addWidget(browse, 1)
         columns.addWidget(self._build_my_party_group(tab), 1)
-        box.addLayout(columns)
+        box.addLayout(columns, 1)
+        if self.services.bot_dashboard is not None:
+            box.addWidget(self._build_bot_dashboard_group(tab))
         self._add_panel_tab(tab, "bots", "Bots")
 
     def _build_my_party_group(self, tab: QWidget) -> QGroupBox:
@@ -6616,6 +6699,208 @@ class ControllerView(QWidget):
     @Slot(object)
     def _bots_failed(self, exc: object) -> None:
         self.bot_summary.setText(f"Could not read this server's bots: {exc}")
+
+    # ------------------------------------------------------- the bot dashboard
+
+    def _build_bot_dashboard_group(self, tab: QWidget) -> QGroupBox:
+        """T127: the switch, the network opt-in, the Open button, and a log for the slow part.
+
+        Nothing here reads a file or asks Docker on the GUI thread. The switch
+        shows what the files say only once `refresh_bot_dashboard()` has read
+        them through `_run()`, and every press runs in the group's own log panel,
+        which locks the Server tab's buttons for as long as it runs -- a switch
+        restarts the world, and so do a rebuild and an update.
+        """
+        group = QGroupBox("Bot dashboard", tab)
+        inside = QVBoxLayout(group)
+        about = QLabel(DASHBOARD_ABOUT, group)
+        about.setWordWrap(True)
+        row = QHBoxLayout()
+        self.dashboard_switch = QCheckBox(DASHBOARD_SWITCH_OFF, group)
+        self.dashboard_switch.clicked.connect(self.switch_bot_dashboard)
+        self.open_dashboard_button = QPushButton("Open bot dashboard", group)
+        self.open_dashboard_button.clicked.connect(self.open_bot_dashboard)
+        self.open_dashboard_button.setEnabled(False)
+        row.addWidget(self.dashboard_switch)
+        row.addStretch(1)
+        row.addWidget(self.open_dashboard_button)
+        self.dashboard_lan = QCheckBox(DASHBOARD_LAN_LABEL, group)
+        self.dashboard_lan_warning = QLabel(DASHBOARD_LAN_WARNING, group)
+        self.dashboard_lan_warning.setWordWrap(True)
+        self.dashboard_report = QLabel("", group)
+        self.dashboard_report.setWordWrap(True)
+        self.dashboard_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        log = _IdleLogPanel(group)
+        log.run_started.connect(self._dashboard_started)
+        log.run_finished.connect(self._dashboard_finished)
+        self.dashboard_log = log
+        inside.addWidget(about)
+        inside.addLayout(row)
+        inside.addWidget(self.dashboard_lan)
+        inside.addWidget(self.dashboard_lan_warning)
+        inside.addWidget(self.dashboard_report)
+        inside.addWidget(log)
+        # Unknown until read: the switch is not offered on a guess.
+        self.dashboard_switch.setEnabled(False)
+        self.dashboard_lan.setEnabled(False)
+        self._dashboard_job = ""
+        return group
+
+    @Slot()
+    def refresh_bot_dashboard(self) -> None:
+        """Read what this install's files say about the dashboard, off the GUI thread."""
+        seam = self.services.bot_dashboard
+        if seam is None:
+            return
+        self._run(seam.state, self._dashboard_state_read, self._dashboard_state_failed)
+
+    @Slot(object)
+    def _dashboard_state_read(self, state: object) -> None:
+        problem = getattr(state, "problem", "")
+        on = bool(getattr(state, "on", False))
+        running = self.dashboard_log is not None and self.dashboard_log.running
+        self._show_dashboard_switch(on)
+        if problem:
+            self.dashboard_report.setText(f"Could not tell whether the dashboard is on: {problem}")
+            self.dashboard_switch.setEnabled(False)
+            return
+        self.dashboard_switch.setEnabled(not running)
+        # The network choice is made at the switch-on and fixed while it is on:
+        # changing it means a new container, and so a new address the world
+        # would have to be restarted to find.
+        self.dashboard_lan.setChecked(
+            bool(getattr(state, "lan", False)) if on else self.dashboard_lan.isChecked()
+        )
+        self.dashboard_lan.setEnabled(not on and not running)
+        self.open_dashboard_button.setEnabled(on)
+
+    @Slot(object)
+    def _dashboard_state_failed(self, exc: object) -> None:
+        self.dashboard_report.setText(f"Could not tell whether the dashboard is on: {exc}")
+
+    def _show_dashboard_switch(self, on: bool) -> None:
+        self.dashboard_switch.setChecked(on)
+        self.dashboard_switch.setText(DASHBOARD_SWITCH_ON if on else DASHBOARD_SWITCH_OFF)
+
+    @Slot(bool)
+    def switch_bot_dashboard(self, wanted: bool) -> bool:
+        """The switch was pressed: ask, then run the change in the group's log. False if not run.
+
+        The box goes back to where it was straight away; only the finished job
+        and the re-read after it move it. A switch that showed "On" while a
+        build was still failing would be the tab saying something untrue.
+        """
+        seam = self.services.bot_dashboard
+        log = self.dashboard_log
+        self._show_dashboard_switch(not wanted)
+        if seam is None or log is None:
+            return False
+        if log.running or self.rebuild_log.running or self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action. Wait for it to finish, then press "
+                "the switch again. Nothing was changed.",
+            )
+            return False
+        cancel = threading.Event()
+        if wanted:
+            lan = self.dashboard_lan.isChecked()
+            answer = QMessageBox.question(
+                self,
+                "Switch the bot dashboard on?",
+                dashboard_on_question(lan=lan),
+            )
+            if not said_yes(answer):
+                return False
+            self._dashboard_job = "on"
+            return log.run(
+                lambda: seam.switch_on(lan=lan, cancel=cancel),
+                title="Switching the bot dashboard on",
+                cancel=cancel,
+            )
+        answer = QMessageBox.question(self, "Switch the bot dashboard off?", DASHBOARD_OFF_QUESTION)
+        if not said_yes(answer):
+            return False
+        self._dashboard_job = "off"
+        return log.run(
+            lambda: seam.switch_off(cancel),
+            title="Switching the bot dashboard off",
+            cancel=cancel,
+        )
+
+    @Slot()
+    def _dashboard_started(self) -> None:
+        self._set_busy(True)
+        self.dashboard_switch.setEnabled(False)
+        self.dashboard_lan.setEnabled(False)
+        self.open_dashboard_button.setEnabled(False)
+
+    @Slot(bool, str)
+    def _dashboard_finished(self, ok: bool, message: str) -> None:
+        """Unlock, re-read the files, and after a switch-off offer the restart."""
+        self._set_busy(False)
+        job, self._dashboard_job = self._dashboard_job, ""
+        if not ok:
+            self.dashboard_report.setText(message)
+            self.action_failed.emit(message)
+        self.refresh_bot_dashboard()
+        seam = self.services.bot_dashboard
+        cancelled = self.dashboard_log is not None and self.dashboard_log.cancelled
+        if ok and not cancelled and job == "off" and seam is not None:
+            self._run(
+                seam.world_running, self._dashboard_offer_restart, self._dashboard_state_failed
+            )
+
+    @Slot(object)
+    def _dashboard_offer_restart(self, running: object) -> None:
+        seam = self.services.bot_dashboard
+        log = self.dashboard_log
+        if running is not True or seam is None or log is None or log.running or self._busy:
+            return
+        answer = QMessageBox.question(self, "Restart the server now?", DASHBOARD_RESTART_QUESTION)
+        if not said_yes(answer):
+            self.dashboard_report.setText(
+                "The dashboard is off. The world stops trying to reach it at its next restart."
+            )
+            return
+        cancel = threading.Event()
+        self._dashboard_job = "restart"
+        log.run(lambda: seam.restart_world(cancel), title="Restarting the server", cancel=cancel)
+
+    @Slot()
+    def open_bot_dashboard(self) -> None:
+        """Say which of the player's accounts can sign in, then open the dashboard in the browser.
+
+        The accounts are the Accounts tab's own listing (the bots and the app's
+        own account left out), read off the GUI thread. Nothing is changed:
+        granting a rank is the Accounts tab's press.
+        """
+        seam = self.services.bot_dashboard
+        if seam is None:
+            return
+        accounts = self.services.accounts
+        if accounts is None:
+            self._open_dashboard_url()
+            return
+        self._run(accounts.listing, self._dashboard_accounts_read, self._dashboard_accounts_failed)
+
+    @Slot(object)
+    def _dashboard_accounts_read(self, listing: object) -> None:
+        self.dashboard_report.setText(bot_dashboard.gm_hint(listing).text)
+        self._open_dashboard_url()
+
+    @Slot(object)
+    def _dashboard_accounts_failed(self, exc: object) -> None:
+        self.dashboard_report.setText(
+            bot_dashboard.gm_hint(useraccounts.Listing(problem=str(exc))).text
+        )
+        self._open_dashboard_url()
+
+    def _open_dashboard_url(self) -> None:
+        seam = self.services.bot_dashboard
+        if seam is not None:
+            QDesktopServices.openUrl(QUrl(seam.url))
 
     # -------------------------------------------------------- maintenance tab
 
@@ -8693,7 +8978,8 @@ class ControllerView(QWidget):
         the registration was in two files at the time — a third panel added
         later is picked up by code that already exists.
         """
-        return (self.console_log, self.rebuild_log)
+        extra = () if self.dashboard_log is None else (self.dashboard_log,)
+        return (self.console_log, self.rebuild_log, *extra)
 
     # -------------------------------------------------------- networking tab
 

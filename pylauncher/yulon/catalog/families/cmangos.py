@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import ClassVar, cast
 
 from yulon import dbsecret, docker, platform
-from yulon.catalog import composegen
+from yulon.catalog import bot_dashboard, composegen
 from yulon.catalog.catalog import CmangosData, NativeInstall, SourcePatch, SqlPlan
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
@@ -1186,7 +1186,12 @@ class CmangosInstaller(StagedInstaller):
         for path in copied:
             yield f"Copied {path.name} out of the server image."
         try:
-            changed = conf.apply_table(data.conf, etc_dir, self._secret_tokens(ctx))
+            # T127: while the bot dashboard is switched on, its three keys are laid
+            # over the table's `AiPlayerbot.Observability = 0` -- the switch is
+            # carried over, as T117 carries the bot count, rather than undone by a
+            # resume.
+            table = bot_dashboard.overlay(data.conf, self.entry, ctx.server_dir)
+            changed = conf.apply_table(table, etc_dir, self._secret_tokens(ctx))
         except InstallerError:
             # MUST stay ahead of the broad clause: every refusal `apply_table()`
             # raises is already the sentence a user reads, and naming a file it

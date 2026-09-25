@@ -3901,6 +3901,73 @@ def build_staged(
     )
 
 
+def build_image(
+    context: Path,
+    tag: str,
+    *,
+    wsl_distro: str | None = None,
+    sink: OutputSink | None = None,
+    cancel: threading.Event | None = None,
+) -> AttachedRun:
+    """`docker build -t <tag> .` in `context`, streamed; the run is returned, never raised (T127).
+
+    For an image that is NOT one of the install's compose builds: the bots
+    module's own dashboard, built from the Dockerfile it ships
+    (`tools/observability`). The install's images keep `build_staged()`, which
+    is the only builder allowed to name the compose files.
+
+    No `--progress`: BuildKit picks plain output by itself when stdout is not a
+    terminal, and the flag is refused by a daemon still on the classic builder.
+    """
+    argv = ["build", "-t", tag, "."]
+    logger.info(f"build_image(): `docker {' '.join(argv)}` in {context}")
+    return run_attached(
+        argv, context, wsl_distro=wsl_distro, sink=sink, cancel=cancel, merge_stderr=True
+    )
+
+
+def compose_up_service(
+    server_dir: Path,
+    service: str,
+    *,
+    force_recreate: bool = False,
+    wsl_distro: str | None = None,
+) -> None:
+    """Start ONE service of this install's project, and nothing it depends on (T127).
+
+    `--no-deps` for `staged_up_argv()`'s reason: the caller decides what else
+    runs. Raises `DockerCommandError` with compose's own words, which for a
+    taken port name the port.
+    """
+    argv = ["compose", "up", "-d", "--no-deps"]
+    if force_recreate:
+        argv.append("--force-recreate")
+    _run([*argv, service], cwd=server_dir, wsl_distro=wsl_distro)
+
+
+def compose_remove_service(
+    server_dir: Path, service: str, *, wsl_distro: str | None = None
+) -> None:
+    """Stop and remove ONE service's container (`compose rm --stop --force`). No volumes (T127)."""
+    _run(["compose", "rm", "--stop", "--force", service], cwd=server_dir, wsl_distro=wsl_distro)
+
+
+def container_ip(container: str, *, wsl_distro: str | None = None) -> str | None:
+    """The container's address on its compose network, or None if Docker would not say (T127).
+
+    Asked because a peer that resolved this container's NAME once keeps the
+    address it got: recreating the container can hand it a new one.
+    """
+    proc = _docker(
+        ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", container],
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        return None
+    found = proc.stdout.split()
+    return found[0] if found else None
+
+
 def images_built(refs: Sequence[str], *, wsl_distro: str | None = None) -> bool | None:
     """Do all of `refs` exist on this daemon? None = could not ask.
 
